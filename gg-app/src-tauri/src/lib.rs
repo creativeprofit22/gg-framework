@@ -172,6 +172,7 @@ enum ChatAgent {
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
 const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
+const DAEMON_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_SESSION_DISPOSAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One logical pane's session inside the shared daemon.
@@ -449,6 +450,15 @@ struct PaneStartupStatus {
     error: Option<String>,
     generation: u64,
     session_id: Option<String>,
+}
+
+type PaneStartupCompletion = tokio::sync::oneshot::Receiver<Result<(), String>>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum PaneStartupOutcome {
+    Ready { port: u16, session_id: String },
+    Failed(String),
+    Superseded,
 }
 
 fn pane_startup_status(
@@ -6287,11 +6297,8 @@ fn app_local_patched_update_start(
         }
         *running = true;
     }
-    let sidecar = port_for(&webview)
-        .zip(pane_session_for(&webview, PRIMARY_PANE_ID));
-    std::thread::spawn(move || {
-        run_local_patched_update(app, repo, summarize_decisions, sidecar)
-    });
+    let sidecar = port_for(&webview).zip(pane_session_for(&webview, PRIMARY_PANE_ID));
+    std::thread::spawn(move || run_local_patched_update(app, repo, summarize_decisions, sidecar));
     Ok(serde_json::json!({ "started": true }))
 }
 
@@ -6448,11 +6455,7 @@ struct DecisionSummaryResponse {
     summary: String,
 }
 
-fn write_decision_summary(
-    app: &tauri::AppHandle,
-    repo: &Path,
-    sidecar: Option<(u16, String)>,
-) {
+fn write_decision_summary(app: &tauri::AppHandle, repo: &Path, sidecar: Option<(u16, String)>) {
     let pending = match decisions::load_pending_decision_summary(repo) {
         Ok(Some(pending)) => pending,
         Ok(None) => return,
@@ -7379,10 +7382,21 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+async fn settle_pane_selection(
+    pane_id: &str,
+    generation: u64,
+    completion: PaneStartupCompletion,
+) -> Result<u64, String> {
+    completion.await.map_err(|_| {
+        format!("pane '{pane_id}' generation {generation} startup ended without settlement")
+    })??;
+    Ok(generation)
+}
+
 /// Re-point THIS window's agent at a chosen project: dispose its current daemon
-/// session and create a fresh one at `cwd`, optionally resuming the session file
-/// `session_path`. The command resolves only after the daemon session is ready,
-/// so a failed resume stays in the picker instead of opening an endless skeleton.
+/// session and start a fresh one at `cwd`, optionally resuming `session_path`.
+/// Returns only after that exact pane generation is ready; startup failures and
+/// concurrent replacement reject the command.
 #[tauri::command]
 async fn select_project(
     webview: WebviewWindow,
@@ -7412,7 +7426,7 @@ async fn select_project(
             let _ = daemon_delete_session(&app2, port, &id).await;
         });
     }
-    let generation = start_pane_session(
+    let (generation, completion) = start_pane_session(
         app.clone(),
         label.clone(),
         pane_id.clone(),
@@ -7437,7 +7451,7 @@ async fn select_project(
     if registered_primary_target {
         snapshot_workspace(&app);
     }
-    Ok(generation)
+    settle_pane_selection(&pane_id, generation, completion).await
 }
 
 #[tauri::command]
@@ -7464,7 +7478,7 @@ fn agent_pane_create(
             session_path.clone(),
         )?
     };
-    launch_pane_session(
+    let _ = launch_pane_session(
         app,
         label,
         pane_id,
@@ -7510,7 +7524,7 @@ fn agent_pane_restore(
         });
     }
     if created {
-        launch_pane_session(
+        let _ = launch_pane_session(
             app,
             label,
             pane_id,
@@ -9561,6 +9575,19 @@ fn parse_daemon_create_session_response(
         .ok_or_else(|| "agent daemon response did not include a session id".to_string())
 }
 
+async fn send_daemon_create_session_request(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    request.timeout(timeout).send().await.map_err(|error| {
+        if error.is_timeout() {
+            "agent daemon session startup timed out; retry selecting the project".to_string()
+        } else {
+            format!("failed to reach agent daemon: {error}")
+        }
+    })
+}
+
 /// Authenticated POST /session to the daemon for `cwd` (+ optional resume
 /// `session_path`); returns the new session id or the daemon's concrete rejection reason.
 async fn daemon_create_session(
@@ -9585,13 +9612,12 @@ async fn daemon_create_session(
         "cwd": cwd.to_string_lossy(),
         "sessionPath": session_path,
     });
-    let response = client
+    let request = client
         .post(format!("{}/session", sidecar_base(port)))
         .header("x-gg-daemon-token", auth_token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("failed to reach agent daemon: {error}"))?;
+        .json(&body);
+    let response =
+        send_daemon_create_session_request(request, DAEMON_SESSION_STARTUP_TIMEOUT).await?;
     let status = response.status();
     let value = response
         .json::<serde_json::Value>()
@@ -9640,7 +9666,7 @@ fn start_pane_session(
     chat_agent: ChatAgent,
     cwd: PathBuf,
     session_path: Option<String>,
-) -> u64 {
+) -> (u64, PaneStartupCompletion) {
     let generation = {
         let windows: State<Windows> = app.state();
         let mut registry = windows.map.lock().unwrap();
@@ -9654,7 +9680,7 @@ fn start_pane_session(
             session_path.clone(),
         )
     };
-    launch_pane_session(
+    let completion = launch_pane_session(
         app,
         label,
         pane_id,
@@ -9664,7 +9690,54 @@ fn start_pane_session(
         session_path,
         generation,
     );
-    generation
+    (generation, completion)
+}
+
+async fn orchestrate_pane_session_startup<
+    DaemonFuture,
+    BindSession,
+    RecordError,
+    DeleteSession,
+    DeleteFuture,
+>(
+    pane_id: &str,
+    generation: u64,
+    daemon_session: DaemonFuture,
+    bind_session: BindSession,
+    record_error: RecordError,
+    delete_session: DeleteSession,
+    completion_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+) -> PaneStartupOutcome
+where
+    DaemonFuture: std::future::Future<Output = Result<(u16, String), String>>,
+    BindSession: FnOnce(&str) -> bool,
+    RecordError: FnOnce(&str) -> bool,
+    DeleteSession: FnOnce(u16, String) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = ()>,
+{
+    match daemon_session.await {
+        Ok((port, session_id)) if bind_session(&session_id) => {
+            let _ = completion_tx.send(Ok(()));
+            PaneStartupOutcome::Ready { port, session_id }
+        }
+        Ok((port, session_id)) => {
+            delete_session(port, session_id).await;
+            let message =
+                format!("pane '{pane_id}' generation {generation} was superseded during startup");
+            let _ = completion_tx.send(Err(message));
+            PaneStartupOutcome::Superseded
+        }
+        Err(message) if record_error(&message) => {
+            let _ = completion_tx.send(Err(message.clone()));
+            PaneStartupOutcome::Failed(message)
+        }
+        Err(_) => {
+            let message =
+                format!("pane '{pane_id}' generation {generation} was superseded during startup");
+            let _ = completion_tx.send(Err(message));
+            PaneStartupOutcome::Superseded
+        }
+    }
 }
 
 #[expect(
@@ -9680,49 +9753,69 @@ fn launch_pane_session(
     cwd: PathBuf,
     session_path: Option<String>,
     generation: u64,
-) {
+) -> PaneStartupCompletion {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     tauri::async_runtime::spawn(async move {
-        let Some(port) = await_daemon_port(&app).await else {
-            let message = "daemon did not start in time".to_string();
-            let recorded = {
-                let windows: State<Windows> = app.state();
+        let daemon_app = app.clone();
+        let daemon_session = async move {
+            let port = await_daemon_port(&daemon_app)
+                .await
+                .ok_or_else(|| "daemon did not start in time".to_string())?;
+            let session_id = daemon_create_session(
+                &daemon_app,
+                port,
+                mode,
+                chat_agent,
+                &cwd,
+                session_path.as_deref(),
+            )
+            .await?;
+            Ok((port, session_id))
+        };
+        let bind_app = app.clone();
+        let bind_label = label.clone();
+        let bind_pane_id = pane_id.clone();
+        let error_app = app.clone();
+        let error_label = label.clone();
+        let error_pane_id = pane_id.clone();
+        let delete_app = app.clone();
+        let outcome = orchestrate_pane_session_startup(
+            &pane_id,
+            generation,
+            daemon_session,
+            move |session_id| {
+                let windows: State<Windows> = bind_app.state();
+                let mut registry = windows.map.lock().unwrap();
+                bind_pane_session(
+                    &mut registry,
+                    &bind_label,
+                    &bind_pane_id,
+                    generation,
+                    session_id.to_string(),
+                )
+            },
+            move |message| {
+                let windows: State<Windows> = error_app.state();
                 let mut registry = windows.map.lock().unwrap();
                 record_pane_startup_error(
                     &mut registry,
-                    &label,
-                    &pane_id,
+                    &error_label,
+                    &error_pane_id,
                     generation,
-                    message.clone(),
+                    message.to_string(),
                 )
-            };
-            if recorded {
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "agent-pane-error",
-                    serde_json::json!({
-                        "paneId": pane_id,
-                        "generation": generation,
-                        "error": message,
-                    }),
-                );
-            }
-            return;
-        };
-        match daemon_create_session(&app, port, mode, chat_agent, &cwd, session_path.as_deref())
-            .await
-        {
-            Ok(id) => {
-                let bound = {
-                    let windows: State<Windows> = app.state();
-                    let mut registry = windows.map.lock().unwrap();
-                    bind_pane_session(&mut registry, &label, &pane_id, generation, id.clone())
-                };
-                if !bound {
-                    let _ = daemon_delete_session(&app, port, &id).await;
-                    return;
-                }
+            },
+            move |port, session_id| async move {
+                let _ = daemon_delete_session(&delete_app, port, &session_id).await;
+            },
+            completion_tx,
+        )
+        .await;
+
+        match outcome {
+            PaneStartupOutcome::Ready { port, session_id } => {
                 log::info!(
-                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={id}"
+                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={session_id}"
                 );
                 start_event_bridge(
                     app.clone(),
@@ -9730,7 +9823,7 @@ fn launch_pane_session(
                     pane_id.clone(),
                     generation,
                     port,
-                    id.clone(),
+                    session_id,
                 );
                 let _ = app.emit_to(
                     EventTarget::webview_window(label.clone()),
@@ -9749,32 +9842,21 @@ fn launch_pane_session(
                     );
                 }
             }
-            Err(message) => {
-                let recorded = {
-                    let windows: State<Windows> = app.state();
-                    let mut registry = windows.map.lock().unwrap();
-                    record_pane_startup_error(
-                        &mut registry,
-                        &label,
-                        &pane_id,
-                        generation,
-                        message.clone(),
-                    )
-                };
-                if recorded {
-                    let _ = app.emit_to(
-                        EventTarget::webview_window(label.clone()),
-                        "agent-pane-error",
-                        serde_json::json!({
-                            "paneId": pane_id,
-                            "generation": generation,
-                            "error": message,
-                        }),
-                    );
-                }
+            PaneStartupOutcome::Failed(message) => {
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "agent-pane-error",
+                    serde_json::json!({
+                        "paneId": pane_id,
+                        "generation": generation,
+                        "error": message,
+                    }),
+                );
             }
+            PaneStartupOutcome::Superseded => {}
         }
     });
+    completion_rx
 }
 
 fn start_window_session(
@@ -9786,7 +9868,7 @@ fn start_window_session(
     session_path: Option<String>,
 ) {
     decisions::initialize_project_decisions(&cwd);
-    start_pane_session(
+    let _ = start_pane_session(
         app,
         label,
         PRIMARY_PANE_ID.to_string(),
@@ -9832,7 +9914,7 @@ fn recreate_all_window_sessions(app: tauri::AppHandle) {
         recovery_targets(&registry)
     };
     for (label, pane_id, mode, chat_agent, cwd, session_path, generation) in targets {
-        launch_pane_session(
+        let _ = launch_pane_session(
             app.clone(),
             label,
             pane_id,
@@ -13603,6 +13685,272 @@ mod tests {
     }
 
     #[test]
+    fn pane_selection_waits_for_delayed_daemon_success_and_exact_generation_bind() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let generation = add_pane(&mut initial_registry, "main", "chat", "/project");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (daemon_tx, daemon_rx) = tokio::sync::oneshot::channel();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            let startup = tauri::async_runtime::spawn(orchestrate_pane_session_startup(
+                "chat",
+                generation,
+                async move { daemon_rx.await.unwrap() },
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            ));
+            let mut selection = Box::pin(settle_pane_selection("chat", generation, completion_rx));
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut selection)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .session_id
+                    .is_none()
+            );
+
+            daemon_tx
+                .send(Ok((321, "exact-session".to_string())))
+                .unwrap();
+            assert_eq!(selection.await.unwrap(), generation);
+            assert_eq!(
+                startup.await.unwrap(),
+                PaneStartupOutcome::Ready {
+                    port: 321,
+                    session_id: "exact-session".to_string(),
+                }
+            );
+            assert_eq!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .session_id
+                    .as_deref(),
+                Some("exact-session")
+            );
+            assert!(deleted.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn pane_selection_reports_daemon_failure_after_recording_startup_error() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let generation = add_pane(&mut initial_registry, "main", "chat", "/project");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+            let outcome = orchestrate_pane_session_startup(
+                "chat",
+                generation,
+                std::future::ready(Err("resume failed".to_string())),
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            )
+            .await;
+
+            assert_eq!(
+                outcome,
+                PaneStartupOutcome::Failed("resume failed".to_string())
+            );
+            assert_eq!(
+                settle_pane_selection("chat", generation, completion_rx)
+                    .await
+                    .unwrap_err(),
+                "resume failed"
+            );
+            assert_eq!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .startup_error
+                    .as_deref(),
+                Some("resume failed")
+            );
+            assert!(deleted.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn pane_selection_supersedes_stale_generation_and_deletes_created_session() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let stale_generation = add_pane(&mut initial_registry, "main", "chat", "/old");
+            dispose_pane_target(
+                &mut initial_registry,
+                "main",
+                "chat",
+                true,
+                Some(stale_generation),
+            )
+            .unwrap();
+            let current_generation = add_pane(&mut initial_registry, "main", "chat", "/new");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+            let outcome = orchestrate_pane_session_startup(
+                "chat",
+                stale_generation,
+                std::future::ready(Ok((654, "stale-session".to_string()))),
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        stale_generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        stale_generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            )
+            .await;
+
+            assert_eq!(outcome, PaneStartupOutcome::Superseded);
+            assert_eq!(
+                settle_pane_selection("chat", stale_generation, completion_rx)
+                    .await
+                    .unwrap_err(),
+                format!("pane 'chat' generation {stale_generation} was superseded during startup")
+            );
+            assert_eq!(
+                deleted.lock().unwrap().as_slice(),
+                &[(654, "stale-session".to_string())]
+            );
+            let registry = registry.lock().unwrap();
+            let current = resolve_owned_pane(&registry, "main", "chat").unwrap();
+            assert_eq!(current.generation, current_generation);
+            assert!(current.session_id.is_none());
+            assert!(current.startup_error.is_none());
+        });
+    }
+
+    #[test]
+    fn pane_selection_rejects_cancelled_startup_orchestration() {
+        tauri::async_runtime::block_on(async {
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            let startup = orchestrate_pane_session_startup(
+                "chat",
+                42,
+                std::future::pending::<Result<(u16, String), String>>(),
+                |_| unreachable!(),
+                |_| unreachable!(),
+                |_, _| async {},
+                completion_tx,
+            );
+            drop(startup);
+
+            assert_eq!(
+                settle_pane_selection("chat", 42, completion_rx)
+                    .await
+                    .unwrap_err(),
+                "pane 'chat' generation 42 startup ended without settlement"
+            );
+        });
+    }
+
+    #[test]
+    fn pane_session_startup_times_out_when_daemon_does_not_respond() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /session HTTP/1.1"));
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"sessionId\":\"too-late\"}",
+            );
+        });
+
+        let request = reqwest::Client::new()
+            .post(format!("http://{address}/session"))
+            .header("x-gg-daemon-token", "test-token")
+            .json(&serde_json::json!({ "cwd": "/test" }));
+        let result = tauri::async_runtime::block_on(send_daemon_create_session_request(
+            request,
+            Duration::from_millis(50),
+        ));
+        server.join().unwrap();
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("agent daemon session startup timed out; retry selecting the project")
+        );
+    }
+
+    #[test]
     fn pane_disposal_success_removes_acknowledged_generation() {
         let mut registry = PaneRegistry::default();
         let generation = add_pane(&mut registry, "main", "chat", "/project");
@@ -13697,6 +14045,73 @@ mod tests {
             identities,
             HashSet::from([("main", "one"), ("main", "two"), ("peer", "one")])
         );
+    }
+
+    #[test]
+    fn replacing_secondary_preserves_primary_identity_and_recovery_target() {
+        let mut registry = PaneRegistry::default();
+        let primary_generation = add_pane(&mut registry, "main", "primary", "/a");
+        let secondary_generation = add_pane(&mut registry, "main", "secondary", "/b");
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "primary",
+            primary_generation,
+            "sid-a".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            secondary_generation,
+            "sid-b".into()
+        ));
+        let primary_before = resolve_owned_pane(&registry, "main", "primary")
+            .unwrap()
+            .clone();
+
+        let (replacement_generation, relaunched, replaced_session_id) = restore_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/c"),
+            None,
+        )
+        .unwrap();
+        assert!(relaunched);
+        assert_eq!(replaced_session_id.as_deref(), Some("sid-b"));
+        assert!(replacement_generation > secondary_generation);
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            replacement_generation,
+            "sid-c".into()
+        ));
+
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "primary").unwrap(),
+            &primary_before
+        );
+        assert!(pane_identity_is_current(
+            &registry,
+            "main",
+            "primary",
+            primary_generation,
+            "sid-a"
+        ));
+        let targets = recovery_targets(&registry);
+        let primary_target = targets.iter().find(|target| target.1 == "primary").unwrap();
+        let secondary_target = targets
+            .iter()
+            .find(|target| target.1 == "secondary")
+            .unwrap();
+        assert_eq!(primary_target.4, PathBuf::from("/a"));
+        assert_eq!(primary_target.6, primary_generation);
+        assert_eq!(secondary_target.4, PathBuf::from("/c"));
+        assert_eq!(secondary_target.6, replacement_generation);
     }
 
     #[test]

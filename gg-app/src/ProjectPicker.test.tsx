@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import {
+  createProject,
   getSettings,
   importTranscript,
   listProjects,
   listSessions,
   saveSettings,
-  selectProject,
   setProjectHidden,
   waitForReady,
   type DiscoveredProject,
@@ -19,27 +19,27 @@ import { ProjectPicker } from "./ProjectPicker";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./agent", () => ({
   arrangeAllWindows: vi.fn(),
+  createProject: vi.fn(),
   focusWindowByOffset: vi.fn(),
   getSettings: vi.fn(),
   importTranscript: vi.fn(),
   listProjects: vi.fn(),
   listSessions: vi.fn(),
   saveSettings: vi.fn(),
-  selectProject: vi.fn(),
   setProjectHidden: vi.fn(),
   waitForReady: vi.fn(),
 }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({ WindowLayoutButton: () => <button>Windows</button> }));
-vi.mock("./NewProjectModal", () => ({ NewProjectModal: () => null }));
 
 const openFolderDialogMock = vi.mocked(openFolderDialog);
+const bindProjectMock = vi.fn<(cwd: string, sessionPath?: string) => Promise<void>>();
+const createProjectMock = vi.mocked(createProject);
 const getSettingsMock = vi.mocked(getSettings);
 const importTranscriptMock = vi.mocked(importTranscript);
 const listProjectsMock = vi.mocked(listProjects);
 const listSessionsMock = vi.mocked(listSessions);
 const saveSettingsMock = vi.mocked(saveSettings);
-const selectProjectMock = vi.mocked(selectProject);
 const setProjectHiddenMock = vi.mocked(setProjectHidden);
 const waitForReadyMock = vi.mocked(waitForReady);
 
@@ -73,9 +73,15 @@ async function renderSessionList(sessions: RecentSession[]): Promise<void> {
   waitForReadyMock.mockResolvedValue();
   listProjectsMock.mockResolvedValue([PROJECT]);
   listSessionsMock.mockResolvedValue(sessions);
-  selectProjectMock.mockResolvedValue();
+  bindProjectMock.mockResolvedValue();
 
-  render(<ProjectPicker onChosen={vi.fn()} initialProjectPath={PROJECT.path} />);
+  render(
+    <ProjectPicker
+      onChosen={vi.fn()}
+      bindProject={bindProjectMock}
+      initialProjectPath={PROJECT.path}
+    />,
+  );
   await screen.findByText(sessions[0]!.preview);
 }
 
@@ -97,7 +103,7 @@ async function renderProjectList(projects: DiscoveredProject[]): Promise<void> {
   waitForReadyMock.mockResolvedValue();
   listProjectsMock.mockResolvedValue(projects);
 
-  render(<ProjectPicker onChosen={vi.fn()} />);
+  render(<ProjectPicker onChosen={vi.fn()} bindProject={bindProjectMock} />);
   await screen.findByText(projects[0]!.name);
 }
 
@@ -118,6 +124,7 @@ describe("ProjectPicker discovery", () => {
     render(
       <ProjectPicker
         onChosen={vi.fn()}
+        bindProject={bindProjectMock}
         initialProjectPath={"\\\\?\\c:\\GGCODER-PROJECTS\\my-app\\"}
       />,
     );
@@ -133,7 +140,7 @@ describe("ProjectPicker discovery", () => {
       .mockRejectedValueOnce(new Error("sidecar unavailable"))
       .mockResolvedValueOnce([PROJECT]);
 
-    render(<ProjectPicker onChosen={vi.fn()} />);
+    render(<ProjectPicker onChosen={vi.fn()} bindProject={bindProjectMock} />);
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Couldn’t load projects");
@@ -156,7 +163,7 @@ describe("ProjectPicker discovery", () => {
     openFolderDialogMock.mockResolvedValue("/Users/workspace");
     saveSettingsMock.mockResolvedValue();
 
-    render(<ProjectPicker onChosen={vi.fn()} />);
+    render(<ProjectPicker onChosen={vi.fn()} bindProject={bindProjectMock} />);
     await screen.findByText(PROJECT.name);
 
     expect(screen.getByRole("button", { name: "Open project directly" })).toBeTruthy();
@@ -165,6 +172,73 @@ describe("ProjectPicker discovery", () => {
     expect(await screen.findByText(child.name)).toBeTruthy();
     expect(saveSettingsMock).toHaveBeenCalledWith("/Users/workspace");
     expect(listProjectsMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ProjectPicker project creation", () => {
+  function renderCreationPickers(
+    bindB: (cwd: string, sessionPath?: string) => Promise<unknown>,
+    chosenB: (cwd: string) => void,
+  ) {
+    const bindA = vi.fn().mockResolvedValue(undefined);
+    const chosenA = vi.fn();
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([]);
+    createProjectMock.mockResolvedValue("/Users/dev/project-c");
+    bindProjectMock.mockResolvedValue();
+    render(
+      <>
+        <div data-testid="picker-a">
+          <ProjectPicker onChosen={chosenA} bindProject={bindA} showWindowControls={false} />
+        </div>
+        <div data-testid="picker-b">
+          <ProjectPicker onChosen={chosenB} bindProject={bindB} showWindowControls={false} />
+        </div>
+      </>,
+    );
+    return { bindA, chosenA };
+  }
+
+  async function createFromPickerB(): Promise<void> {
+    const pickerB = within(screen.getByTestId("picker-b"));
+    fireEvent.click(await pickerB.findByRole("button", { name: "+ New project" }));
+    fireEvent.change(screen.getByPlaceholderText("my-project"), {
+      target: { value: "Project C" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  }
+
+  it("binds a new project only through the initiating picker", async () => {
+    let finishBinding!: () => void;
+    const bindB = vi.fn(() => new Promise<void>((resolve) => (finishBinding = resolve)));
+    const chosenB = vi.fn();
+    const { bindA, chosenA } = renderCreationPickers(bindB, chosenB);
+
+    await createFromPickerB();
+
+    await waitFor(() => expect(bindB).toHaveBeenCalledWith("/Users/dev/project-c"));
+    expect(bindA).not.toHaveBeenCalled();
+    expect(bindProjectMock).not.toHaveBeenCalled();
+    expect(chosenA).not.toHaveBeenCalled();
+    expect(chosenB).not.toHaveBeenCalled();
+
+    finishBinding();
+    await waitFor(() => expect(chosenB).toHaveBeenCalledWith("/Users/dev/project-c"));
+  });
+
+  it("keeps the modal open when the initiating picker cannot bind", async () => {
+    const bindB = vi.fn().mockRejectedValue(new Error("binding failed"));
+    const chosenB = vi.fn();
+    const { bindA, chosenA } = renderCreationPickers(bindB, chosenB);
+
+    await createFromPickerB();
+
+    expect(await screen.findByText("binding failed")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "New project" })).toBeTruthy();
+    expect(bindA).not.toHaveBeenCalled();
+    expect(chosenA).not.toHaveBeenCalled();
+    expect(chosenB).not.toHaveBeenCalled();
   });
 });
 
@@ -204,7 +278,7 @@ describe("ProjectPicker session list", () => {
       .mockRejectedValueOnce(new Error("session scan failed"))
       .mockResolvedValueOnce([NATIVE_SESSION]);
 
-    render(<ProjectPicker onChosen={vi.fn()} />);
+    render(<ProjectPicker onChosen={vi.fn()} bindProject={bindProjectMock} />);
     fireEvent.click(await screen.findByText(PROJECT.name));
 
     const alert = await screen.findByRole("alert");
@@ -249,7 +323,7 @@ describe("ProjectPicker session list", () => {
       // Imported from the foreign transcript...
       expect(importTranscriptMock).toHaveBeenCalledWith(FOREIGN_SESSION.path, PROJECT.path);
       // ...then opened by the NEW session path, not the transcript path.
-      expect(selectProjectMock).toHaveBeenCalledWith(PROJECT.path, "/sessions/imported-1.jsonl");
+      expect(bindProjectMock).toHaveBeenCalledWith(PROJECT.path, "/sessions/imported-1.jsonl");
     });
   });
 
@@ -259,7 +333,7 @@ describe("ProjectPicker session list", () => {
     fireEvent.click(screen.getByText(NATIVE_SESSION.preview));
 
     await waitFor(() => {
-      expect(selectProjectMock).toHaveBeenCalledWith(PROJECT.path, NATIVE_SESSION.path);
+      expect(bindProjectMock).toHaveBeenCalledWith(PROJECT.path, NATIVE_SESSION.path);
     });
     expect(importTranscriptMock).not.toHaveBeenCalled();
   });
@@ -272,7 +346,7 @@ describe("ProjectPicker session list", () => {
 
     expect(await screen.findByRole("alert")).toBeDefined();
     expect(screen.getByRole("alert").textContent).toContain("Could not read transcript");
-    expect(selectProjectMock).not.toHaveBeenCalled();
+    expect(bindProjectMock).not.toHaveBeenCalled();
   });
 
   it("stays usable after a failed import", async () => {

@@ -1965,11 +1965,6 @@ export async function selectWorkspace(
   });
 }
 
-/** Re-point this window at a coding project. */
-export async function selectProject(cwd: string, sessionPath?: string): Promise<void> {
-  await selectWorkspace("code", cwd, sessionPath);
-}
-
 /** The active project/session Rust can restore into this webview. */
 export interface RestoreTarget {
   mode: WorkspaceMode;
@@ -2639,7 +2634,10 @@ interface PaneLifecycleEvent {
 
 /** Wait for one logical pane. Listeners are installed before the first status
  * read, and polling remains active until settlement so status/event races close. */
-export async function waitForPaneReady(paneId: string = "primary"): Promise<PaneStartupStatus> {
+export async function waitForPaneReady(
+  paneId: string = "primary",
+  expectedGeneration?: number,
+): Promise<PaneStartupStatus> {
   return new Promise<PaneStartupStatus>((resolve, reject) => {
     let settled = false;
     let poll: ReturnType<typeof setInterval> | undefined;
@@ -2661,10 +2659,17 @@ export async function waitForPaneReady(paneId: string = "primary"): Promise<Pane
       settled = true;
       void cleanup().then(() => reject(new Error(message)));
     };
+    const isExpectedGeneration = (generation: number): boolean => {
+      if (expectedGeneration === undefined) return true;
+      if (generation > expectedGeneration) {
+        fail(`pane '${paneId}' generation ${expectedGeneration} was superseded`);
+      }
+      return generation === expectedGeneration;
+    };
     const readStatus = async (): Promise<void> => {
       try {
         const status = await invoke<PaneStartupStatus>("agent_pane_status", { paneId });
-        if (settled) return;
+        if (settled || !isExpectedGeneration(status.generation)) return;
         if (status.error) fail(`pane '${paneId}' failed to start: ${status.error}`);
         else if (status.ready) succeed(status);
       } catch {
@@ -2683,10 +2688,10 @@ export async function waitForPaneReady(paneId: string = "primary"): Promise<Pane
 
     void Promise.all([
       install<PaneLifecycleEvent>("agent-pane-ready", (event) => {
-        if (event.paneId === paneId) void readStatus();
+        if (event.paneId === paneId && isExpectedGeneration(event.generation)) void readStatus();
       }),
       install<PaneLifecycleEvent>("agent-pane-error", (event) => {
-        if (event.paneId === paneId)
+        if (event.paneId === paneId && isExpectedGeneration(event.generation))
           fail(`pane '${paneId}' failed to start: ${event.error ?? "unknown error"}`);
       }),
       install<string>("sidecar-error", (message) => fail(`agent daemon failed: ${message}`)),
@@ -2820,13 +2825,20 @@ export const primaryPaneAgentClient: PaneAgentClient = new Proxy(
 export function createPaneAgentClient(paneId: string): PaneAgentClient {
   const call = <T>(command: string, args: Record<string, unknown> = {}): Promise<T> =>
     invoke<T>(command, { paneId, ...args });
-  const ready = (): Promise<PaneStartupStatus> => waitForPaneReady(paneId);
+  const ready = (generation?: number): Promise<PaneStartupStatus> =>
+    waitForPaneReady(paneId, generation);
   const targetArgs = (target: PaneSessionTarget) => ({
     mode: target.mode,
     chatAgent: target.chatAgent ?? "general",
     cwd: target.cwd,
     sessionPath: target.sessionPath ?? null,
   });
+  const awaitReadyGeneration = async (generation: number): Promise<number> => {
+    await ready(generation);
+    return generation;
+  };
+  const isMissingPane = (error: unknown): boolean =>
+    (error instanceof Error ? error.message : String(error)) === `pane '${paneId}' does not exist`;
   const safeArray = async <T>(
     command: string,
     key: string,
@@ -2844,21 +2856,27 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     paneId,
     status: () => call("agent_pane_status"),
     waitForReady: ready,
-    create: (target) => call("agent_pane_create", targetArgs(target)),
-    restore: (target) => call("agent_pane_restore", targetArgs(target)),
+    async create(target) {
+      return awaitReadyGeneration(await call("agent_pane_create", targetArgs(target)));
+    },
+    async restore(target) {
+      return awaitReadyGeneration(await call("agent_pane_restore", targetArgs(target)));
+    },
     dispose: (generation) => call("agent_pane_dispose", { generation }),
     async selectWorkspace(target, expectedGeneration) {
+      let status: PaneStartupStatus;
       try {
-        const status = await call<PaneStartupStatus>("agent_pane_status");
-        return call("select_project", {
-          ...targetArgs(target),
-          expectedGeneration: expectedGeneration > 0 ? expectedGeneration : status.generation,
-        });
-      } catch {
-        // A brand-new auxiliary pane has no native registry entry until its first
-        // target is chosen. Create it instead of trying to replace it.
-        return call("agent_pane_create", targetArgs(target));
+        status = await call("agent_pane_status");
+      } catch (error) {
+        if (!isMissingPane(error)) throw error;
+        const nextGeneration = await call<number>("agent_pane_create", targetArgs(target));
+        return awaitReadyGeneration(nextGeneration);
       }
+      const nextGeneration = await call<number>("select_project", {
+        ...targetArgs(target),
+        expectedGeneration: expectedGeneration > 0 ? expectedGeneration : status.generation,
+      });
+      return awaitReadyGeneration(nextGeneration);
     },
     subscribe(onEvent) {
       let activeSessionId: string | null = null;

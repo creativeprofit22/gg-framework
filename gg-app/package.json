@@ -32,6 +32,7 @@
     "test:workspace-narrow": "node scripts/workspace-narrow-regression.mjs",
     "test:workspace-shell-evidence": "vitest run scripts/workspace-shell-evidence.test.mjs --no-file-parallelism",
     "smoke:roadmap-reliability-dev": "node scripts/roadmap-reliability-dev-smoke.mjs --identity com.ggcoder.local-fork",
+    "smoke:cross-pane-project-isolation-dev": "node scripts/cross-pane-project-isolation-dev-smoke.mjs --identity com.ggcoder.local-fork",
     "smoke:packaged": "node scripts/smoke-packaged-windows.mjs",
     "smoke:installed-local-fork": "node scripts/smoke-built-local-fork.mjs",
     "tauri": "tauri"

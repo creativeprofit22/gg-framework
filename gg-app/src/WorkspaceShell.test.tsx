@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPaneProps, PaneSnapshot } from "./AgentPane";
 import { clampWorkspaceSplitRatio, mergePaneSnapshot, WorkspaceShell } from "./WorkspaceShell";
@@ -38,6 +38,7 @@ const failingRestorePanes = new Set<string>();
 const lifecycleEffectExecutions = new Map<string, number>();
 const lifecycleCallbacks = new Map<string, Array<AgentPaneProps["onLifecycleError"]>>();
 const latestPaneProps = new Map<string, AgentPaneProps>();
+const paneTargetSetters = new Map<string, (cwd: string | null) => void>();
 const MAX_LIFECYCLE_EFFECT_EXECUTIONS = 8;
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -64,7 +65,9 @@ vi.mock("./AgentPane", () => ({ AgentPane: () => null }));
 function FakePane(props: AgentPaneProps): React.ReactElement {
   const { initialTarget, onLifecycleError, onSnapshot, paneId = "primary", registerInput } = props;
   const input = useRef<HTMLInputElement>(null);
+  const [displayedTarget, setDisplayedTarget] = useState(initialTarget?.cwd ?? null);
   latestPaneProps.set(paneId, props);
+  paneTargetSetters.set(paneId, setDisplayedTarget);
   useEffect(() => {
     paneMounts.set(paneId, (paneMounts.get(paneId) ?? 0) + 1);
     return () => {
@@ -107,7 +110,7 @@ function FakePane(props: AgentPaneProps): React.ReactElement {
     <div
       data-testid={`pane-${paneId}`}
       data-focused={String(props.focused)}
-      data-target={props.initialTarget?.cwd ?? "picker"}
+      data-target={displayedTarget ?? "picker"}
     >
       <input ref={input} aria-label={`${props.paneId} input`} />
     </div>
@@ -119,6 +122,7 @@ const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...pro
 function emitPaneSnapshot(paneId: string, changes: Partial<Omit<PaneSnapshot, "paneId">>): void {
   const props = latestPaneProps.get(paneId);
   if (!props?.onSnapshot) throw new Error(`Pane ${paneId} has no captured snapshot callback`);
+  if ("cwd" in changes) paneTargetSetters.get(paneId)?.(changes.cwd ?? null);
   props.onSnapshot({
     paneId,
     mode: props.initialTarget?.mode ?? "code",
@@ -229,6 +233,7 @@ beforeEach(() => {
   lifecycleEffectExecutions.clear();
   lifecycleCallbacks.clear();
   latestPaneProps.clear();
+  paneTargetSetters.clear();
   bridge.copiedPaneRestoreTarget.mockReset().mockResolvedValue(null);
   bridge.copyPaneToNewWindow
     .mockReset()
@@ -364,6 +369,33 @@ describe("WorkspaceShell", () => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
       expect(saved.focusedPaneId).toBe("secondary");
       expect(saved.panes.secondary.sessionPath).toBe("/two.jsonl");
+    });
+  });
+
+  it("updates only the initiating pane target regardless of focus", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const secondaryPane = await waitForInitialWorkspaceReady();
+    const primaryPane = screen.getByTestId("pane-primary");
+
+    fireEvent.pointerDown(primaryPane);
+    fireEvent.pointerDown(secondaryPane);
+    act(() => {
+      emitPaneSnapshot("secondary", {
+        cwd: "/three",
+        sessionPath: null,
+        sessionTitle: "/three",
+        projectBound: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pane-primary").dataset.target).toBe("/one");
+      expect(screen.getByTestId("pane-secondary").dataset.target).toBe("/three");
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.focusedPaneId).toBe("secondary");
+      expect(saved.panes.primary).toMatchObject({ cwd: "/one", sessionPath: "/one.jsonl" });
+      expect(saved.panes.secondary).toMatchObject({ cwd: "/three", sessionPath: null });
     });
   });
 

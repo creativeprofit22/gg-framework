@@ -34,6 +34,7 @@ const target = {
 
 describe("pane agent client", () => {
   beforeEach(() => {
+    listeners.clear();
     invoke.mockReset();
     invoke.mockImplementation(async (command: string) => {
       if (command === "agent_pane_status") {
@@ -331,19 +332,150 @@ describe("pane agent client", () => {
     });
   });
 
+  it("keeps selection pending until its matching generation is ready", async () => {
+    let status = {
+      ready: true,
+      error: null,
+      generation: 1,
+      sessionId: "old" as string | null,
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_pane_status") return status;
+      if (command === "select_project") {
+        status = { ready: false, error: null, generation: 2, sessionId: null };
+        return 2;
+      }
+      return undefined;
+    });
+    const selection = createPaneAgentClient("right").selectWorkspace(target, 1);
+    let settled = false;
+    void selection.finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("select_project", expect.anything()),
+    );
+    expect(settled).toBe(false);
+    await vi.waitFor(() => expect(listeners.has("agent-pane-ready")).toBe(true));
+    listeners.get("agent-pane-ready")!({ payload: { paneId: "right", generation: 1 } });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    status = { ready: true, error: null, generation: 2, sessionId: "new" };
+    listeners.get("agent-pane-ready")!({ payload: { paneId: "right", generation: 2 } });
+
+    await expect(selection).resolves.toBe(2);
+    expect(invoke).toHaveBeenCalledWith("select_project", {
+      paneId: "right",
+      mode: "chat",
+      chatAgent: "therapist",
+      cwd: "/work",
+      sessionPath: "/s",
+      expectedGeneration: 1,
+    });
+  });
+
+  it("ignores stale generation errors while awaiting a replacement", async () => {
+    let status = { ready: true, error: null, generation: 1, sessionId: "old" as string | null };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_pane_status") return status;
+      if (command === "select_project") {
+        status = { ready: false, error: null, generation: 2, sessionId: null };
+        return 2;
+      }
+      return undefined;
+    });
+    const selection = createPaneAgentClient("right").selectWorkspace(target, 1);
+    await vi.waitFor(() => expect(listeners.has("agent-pane-error")).toBe(true));
+
+    listeners.get("agent-pane-error")!({
+      payload: { paneId: "right", generation: 1, error: "stale failure" },
+    });
+    await Promise.resolve();
+    status = { ready: true, error: null, generation: 2, sessionId: "new" };
+    listeners.get("agent-pane-ready")!({ payload: { paneId: "right", generation: 2 } });
+
+    await expect(selection).resolves.toBe(2);
+  });
+
+  it("propagates selection and matching startup errors without creating another pane", async () => {
+    invoke
+      .mockResolvedValueOnce({ ready: true, error: null, generation: 1, sessionId: "old" })
+      .mockRejectedValueOnce(new Error("pane 'right' generation is stale"));
+    const client = createPaneAgentClient("right");
+
+    await expect(client.selectWorkspace(target, 1)).rejects.toThrow(
+      "pane 'right' generation is stale",
+    );
+    expect(invoke).not.toHaveBeenCalledWith("agent_pane_create", expect.anything());
+
+    invoke.mockReset();
+    invoke
+      .mockResolvedValueOnce({ ready: true, error: null, generation: 1, sessionId: "old" })
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce({
+        ready: false,
+        error: "resume failed",
+        generation: 2,
+        sessionId: null,
+      });
+
+    await expect(client.selectWorkspace(target, 1)).rejects.toThrow(
+      "pane 'right' failed to start: resume failed",
+    );
+    expect(invoke).not.toHaveBeenCalledWith("agent_pane_create", expect.anything());
+  });
+
+  it("rejects readiness from a stale generation without creating another pane", async () => {
+    invoke
+      .mockResolvedValueOnce({ ready: true, error: null, generation: 1, sessionId: "old" })
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce({ ready: true, error: null, generation: 3, sessionId: "newer" });
+
+    await expect(createPaneAgentClient("right").selectWorkspace(target, 1)).rejects.toThrow(
+      "pane 'right' generation 2 was superseded",
+    );
+    expect(invoke).not.toHaveBeenCalledWith("agent_pane_create", expect.anything());
+  });
+
+  it("creates only when pane status proves the pane is absent", async () => {
+    invoke
+      .mockRejectedValueOnce("pane 'right' does not exist")
+      .mockResolvedValueOnce(4)
+      .mockResolvedValueOnce({ ready: true, error: null, generation: 4, sessionId: "created" });
+
+    await expect(createPaneAgentClient("right").selectWorkspace(target, 0)).resolves.toBe(4);
+    expect(invoke).toHaveBeenCalledWith("agent_pane_create", {
+      paneId: "right",
+      mode: "chat",
+      chatAgent: "therapist",
+      cwd: "/work",
+      sessionPath: "/s",
+    });
+
+    invoke.mockReset();
+    invoke.mockRejectedValueOnce(new Error("pane registry unavailable"));
+    await expect(createPaneAgentClient("right").selectWorkspace(target, 0)).rejects.toThrow(
+      "pane registry unavailable",
+    );
+    expect(invoke).not.toHaveBeenCalledWith("agent_pane_create", expect.anything());
+  });
+
   it("preserves lifecycle generations and rejects stale pane events", async () => {
     const c = createPaneAgentClient("right");
-    invoke.mockImplementation(async (command: string) =>
-      command === "agent_pane_status"
-        ? { ready: true, error: null, generation: 9, sessionId: "active" }
-        : command === "agent_pane_create"
-          ? 7
-          : command === "agent_pane_restore"
-            ? 8
-            : undefined,
-    );
+    let status = { ready: true, error: null, generation: 7, sessionId: "created" };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_pane_status") return status;
+      if (command === "agent_pane_create") return 7;
+      if (command === "agent_pane_restore") {
+        status = { ready: true, error: null, generation: 8, sessionId: "restored" };
+        return 8;
+      }
+      return undefined;
+    });
     expect(await c.create(target)).toBe(7);
     expect(await c.restore(target)).toBe(8);
+    status = { ready: true, error: null, generation: 9, sessionId: "active" };
     await c.dispose(8);
     expect(invoke).toHaveBeenCalledWith("agent_pane_dispose", { paneId: "right", generation: 8 });
 

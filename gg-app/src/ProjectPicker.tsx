@@ -6,7 +6,6 @@ import {
   listProjects,
   setProjectHidden,
   listSessions,
-  selectProject,
   importTranscript,
   getSettings,
   saveSettings,
@@ -56,7 +55,7 @@ interface Props {
   waitForCatalogReady?: () => Promise<unknown>;
   discoverProjects?: () => Promise<DiscoveredProject[]>;
   discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
-  bindProject?: (cwd: string, sessionPath?: string) => Promise<unknown>;
+  bindProject: (cwd: string, sessionPath?: string) => Promise<unknown>;
   saveProjectsRoot?: (projectsRoot: string) => Promise<unknown>;
   refreshSignal?: number;
   showWindowControls?: boolean;
@@ -75,7 +74,7 @@ export function ProjectPicker({
   waitForCatalogReady = waitForReady,
   discoverProjects = listProjects,
   discoverSessions = listSessions,
-  bindProject = selectProject,
+  bindProject,
   saveProjectsRoot = saveSettings,
   refreshSignal = 0,
   showWindowControls = true,
@@ -207,7 +206,7 @@ export function ProjectPicker({
     if (busy) return;
     setBusy(true);
     setResumeError(null);
-    // Rust now resolves this command only after the daemon session is ready.
+    // The pane client resolves only after the selected daemon generation is ready.
     // A failed resume therefore stays in the picker and shows its real cause.
     void bindProject(cwd, sessionPath)
       .then(() => onChosen(cwd))
@@ -526,7 +525,8 @@ export function ProjectPicker({
         <NewProjectModal
           projectsRoot={projectsRoot}
           onClose={() => setShowNew(false)}
-          onCreated={(cwd) => {
+          onCreated={async (cwd) => {
+            await bindProject(cwd);
             setShowNew(false);
             onChosen(cwd);
           }}

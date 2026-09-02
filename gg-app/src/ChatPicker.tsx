@@ -45,6 +45,7 @@ export function ChatPicker({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -93,9 +94,18 @@ export function ChatPicker({
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
     setBusy(true);
+    setSelectionError(null);
     void bindChat(projectsRoot, session?.path, session?.chatAgent ?? initialAgent)
       .then(() => onChosen(projectsRoot))
-      .catch(() => setBusy(false));
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setSelectionError(
+          message
+            .replace(/Run ["'`]?ggcoder login["'`]?/gi, "Use AI Providers to sign in")
+            .replace(/ggcoder login/gi, "AI Providers"),
+        );
+        setBusy(false);
+      });
   }
 
   return (
@@ -122,6 +132,11 @@ export function ChatPicker({
       </div>
 
       <div className="picker-list">
+        {selectionError && (
+          <div className="picker-error" role="alert">
+            {selectionError}
+          </div>
+        )}
         {loading && <ListSkeleton rows={5} />}
         {!loading && error && (
           <div className="picker-empty" style={{ color: theme.textMuted }}>

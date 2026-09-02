@@ -105,6 +105,32 @@ describe("ChatPicker", () => {
     expect(screen.queryByRole("tab")).toBeNull();
   });
 
+  it("shows selection failures without hiding chats and allows retrying", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([session]);
+    const bindChat = vi
+      .fn()
+      .mockRejectedValue(new Error("Startup failed. Run `ggcoder login` first."));
+    const onChosen = vi.fn();
+
+    render(<ChatPicker onChosen={onChosen} bindChat={bindChat} />);
+
+    const chat = await screen.findByRole("button", { name: /Plan my week/ });
+    fireEvent.click(chat);
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Startup failed. Use AI Providers to sign in first.",
+    );
+    expect(screen.getByText("Plan my week")).toBeDefined();
+    expect((chat as HTMLButtonElement).disabled).toBe(false);
+    expect(onChosen).not.toHaveBeenCalled();
+
+    fireEvent.click(chat);
+    await waitFor(() => expect(bindChat).toHaveBeenCalledTimes(2));
+    expect(onChosen).not.toHaveBeenCalled();
+  });
+
   it("shows a clear prerequisite error when projectsRoot is unavailable", async () => {
     getSettingsMock.mockResolvedValue(null);
 

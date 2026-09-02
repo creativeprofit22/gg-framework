@@ -230,6 +230,7 @@ describe("local-fixes updater", () => {
       "scripts/update-with-local-fixes.test.ts",
       "scripts/decisions-classifier.test.ts",
       "scripts/build-local-hotfix.test.ts",
+      "scripts/build-local-hotfix.identity.test.mjs",
       "scripts/smoke-built-local-fork.test.mjs",
       "scripts/vite-config.test.ts",
       "src/brand-static.test.ts",

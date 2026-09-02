@@ -429,30 +429,40 @@ select {
    window label, so twelve tiled windows do not all glow in the same corner.
    Defaults here keep the rule valid if the properties are ever absent.
 
-   LEGIBILITY IS THE CONSTRAINT. The wash is pinned to the edges, blurred hard,
+   LEGIBILITY IS THE CONSTRAINT. The wash is pinned to the edges, soft,
    and capped at a low alpha — it must never sit behind the transcript and
-   fight body text. The intensity below is the ceiling, not a starting point. */
+   fight body text. The intensity below is the ceiling, not a starting point.
+
+   NO `filter` HERE, EVER. This used to be `filter: blur(80px) hue-rotate()`.
+   WebKit runs a CSS filter on a non-composited element in SOFTWARE, over the
+   element's full bounds, on EVERY repaint that touches it — and this element
+   spans the whole window, so a blinking cursor re-blurred the entire window at
+   80px. A user's profile of the shared GPU process ("GG Coder Graphics and
+   Media", 7 windows, 468% CPU) was dominated by FEGaussianBlurSoftwareApplier.
+   The softness now comes from the gradients' own falloff, which is one cheap
+   shade pass. `will-change: opacity` (NOT filter — see .enh-diss-fade) lifts
+   the wash onto its own layer so the pulse and other repaints reuse it. */
 .app::before {
   content: "";
   position: absolute;
   /* Kept inside the shell: `body { overflow: hidden }` clips anything beyond
-     it, so a negative inset simply disappeared. The blur does the softening. */
+     it, so a negative inset simply disappeared. */
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  filter: blur(80px) hue-rotate(var(--glow-hue, 0deg));
+  will-change: opacity;
   opacity: var(--glow-alpha, 1);
   background:
     radial-gradient(
       var(--glow-size, 46%) calc(var(--glow-size, 46%) * 0.86) at var(--glow-x1, 100%)
         var(--glow-y1, 100%),
-      color-mix(in srgb, var(--glow-live) 38%, transparent),
-      transparent 70%
+      color-mix(in srgb, var(--glow-tint, var(--glow-live)) 34%, transparent),
+      transparent 78%
     ),
     radial-gradient(
       50% 42% at var(--glow-x2, 0%) var(--glow-y2, 0%),
-      color-mix(in srgb, var(--glow-live) 17%, transparent),
-      transparent 72%
+      color-mix(in srgb, var(--glow-tint, var(--glow-live)) 15%, transparent),
+      transparent 80%
     );
   /* Long and eased: the glow is ambient, so a state change should register
      peripherally rather than announce itself. */
@@ -462,6 +472,13 @@ select {
 }
 .app::before {
   --glow-live: var(--glow);
+}
+/* Per-window hue variation (was `hue-rotate()` in the filter chain). Relative
+   colour syntax needs Safari 16.4+; older WebKits simply skip the tint. */
+@supports (color: hsl(from red h s l)) {
+  .app::before {
+    --glow-tint: hsl(from var(--glow-live) calc(h + var(--glow-hue, 0)) s l);
+  }
 }
 
 /* Working: lifts to the brighter accent and breathes. Deliberately gentle — it

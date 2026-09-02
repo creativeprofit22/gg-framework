@@ -57,7 +57,7 @@ describe("glowVars", () => {
       "--glow-y2",
     ]);
     expect(vars["--glow-x1"]).toMatch(/^\d+%$/);
-    expect(vars["--glow-hue"]).toMatch(/^-?\d+deg$/);
+    expect(vars["--glow-hue"]).toMatch(/^-?\d+$/);
   });
 });
 

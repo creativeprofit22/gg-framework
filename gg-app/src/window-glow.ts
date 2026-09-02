@@ -83,7 +83,9 @@ export function glowVars(p: GlowPlacement): Record<string, string> {
     "--glow-x2": `${p.x2}%`,
     "--glow-y2": `${p.y2}%`,
     "--glow-size": `${p.size}%`,
-    "--glow-hue": `${p.hueShift}deg`,
+    // Unitless: consumed as `calc(h + var(--glow-hue))` inside hsl(from …),
+    // where `h` is a bare number, so an angle unit here would not add.
+    "--glow-hue": `${p.hueShift}`,
   };
 }
 

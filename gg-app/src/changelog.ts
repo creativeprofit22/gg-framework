@@ -22,6 +22,13 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.57.1",
+    date: "2026-09-03",
+    items: [
+      "Your Mac can breathe again. A user sent me a profile showing GG Coder's graphics process chewing `468%` CPU with `7` windows open, and I found the culprit: the ambient glow behind every window was being re-blurred by hand on every single repaint, cursor blink included. I rebuilt the glow so it costs almost nothing, keeps its soft look, and still shifts colour per window. Same vibe, a fraction of the power.",
+    ],
+  },
+  {
     version: "0.57.0",
     date: "2026-09-02",
     items: [

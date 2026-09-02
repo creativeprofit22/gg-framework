@@ -18,6 +18,16 @@ export const LOCAL_FORK_IDENTITY = Object.freeze({
   executableName: process.platform === "win32" ? "gg-coder-local-fork.exe" : "gg-coder-local-fork",
   installMode: "currentUser",
 });
+export const INSTALLED_SMOKE_IDENTITY = Object.freeze({
+  productName: "GG Coder Local Fork Installed Smoke",
+  identifier: "com.ggcoder.local-fork.installed-smoke",
+  mainBinaryName: "gg-coder-local-fork-installed-smoke",
+  executableName:
+    process.platform === "win32"
+      ? "gg-coder-local-fork-installed-smoke.exe"
+      : "gg-coder-local-fork-installed-smoke",
+  installMode: "currentUser",
+});
 export const LOCAL_TAURI_CONFIG = Object.freeze({
   productName: LOCAL_FORK_IDENTITY.productName,
   identifier: LOCAL_FORK_IDENTITY.identifier,
@@ -25,7 +35,23 @@ export const LOCAL_TAURI_CONFIG = Object.freeze({
   bundle: { createUpdaterArtifacts: false },
   plugins: { updater: { endpoints: [] } },
 });
+export const INSTALLED_SMOKE_TAURI_CONFIG = Object.freeze({
+  productName: INSTALLED_SMOKE_IDENTITY.productName,
+  identifier: INSTALLED_SMOKE_IDENTITY.identifier,
+  mainBinaryName: INSTALLED_SMOKE_IDENTITY.mainBinaryName,
+  bundle: {
+    createUpdaterArtifacts: false,
+    windows: {
+      nsis: {
+        installerHooks: "windows/nsis-installed-smoke-hooks.nsh",
+        installMode: "currentUser",
+      },
+    },
+  },
+  plugins: { updater: { endpoints: [] } },
+});
 export const LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION = 2;
+export const INSTALLED_SMOKE_MANIFEST_NAME = "latest-installed-smoke-installer.json";
 const RELEASE_NOTES_PATH = "gg-app/src/local-release-notes.json";
 const MAX_RELEASE_NOTES_BYTES = 32 * 1024;
 
@@ -178,24 +204,31 @@ function newestFreshFile(dir, extension, startedAt) {
   return candidates[0] ?? null;
 }
 
-function freshLocalForkWindowsInstaller(dir, startedAt) {
+function freshWindowsInstaller(dir, startedAt, identity) {
   if (!existsSync(dir)) return null;
+  const productName = identity.productName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const artifactPattern = new RegExp(`^${productName}_[^_]+_[^_]+-setup\\.exe$`);
   const candidates = readdirSync(dir)
-    .filter((name) => /^GG Coder Local Fork_[^_]+_[^_]+-setup\.exe$/.test(name))
+    .filter((name) => artifactPattern.test(name))
     .map((name) => join(dir, name))
     .filter((path) => statSync(path).mtimeMs >= startedAt);
   if (candidates.length > 1) {
+    const artifactLabel =
+      identity.productName === LOCAL_FORK_IDENTITY.productName
+        ? "Local Fork"
+        : identity.productName;
     throw new Error(
-      `Tauri produced multiple fresh Local Fork NSIS installers: ${candidates.join(", ")}`,
+      `Tauri produced multiple fresh ${artifactLabel} NSIS installers: ${candidates.join(", ")}`,
     );
   }
   return candidates[0] ?? null;
 }
 
-export function freshInstallerForPlatform(srcTauriRoot, platform, startedAt) {
+export function freshInstallerForPlatform(srcTauriRoot, platform, startedAt, identity) {
+  const targetIdentity = identity ?? LOCAL_FORK_IDENTITY;
   const bundleDir = join(srcTauriRoot, "target", "release", "bundle");
   if (platform === "win32") {
-    return freshLocalForkWindowsInstaller(join(bundleDir, "nsis"), startedAt);
+    return freshWindowsInstaller(join(bundleDir, "nsis"), startedAt, targetIdentity);
   }
   if (platform === "darwin") return newestFreshFile(join(bundleDir, "dmg"), ".dmg", startedAt);
   return newestFreshFile(join(bundleDir, "appimage"), ".AppImage", startedAt);
@@ -237,6 +270,41 @@ export function assertIsolatedIdentities(baseConfig, cargoToml, localConfig = LO
     throw new Error("Local Fork must not install per-machine.");
   }
   return LOCAL_FORK_IDENTITY;
+}
+
+export function assertInstalledSmokeIdentity(
+  localConfig,
+  smokeConfig = INSTALLED_SMOKE_TAURI_CONFIG,
+) {
+  if (
+    smokeConfig.productName !== INSTALLED_SMOKE_IDENTITY.productName ||
+    smokeConfig.identifier !== INSTALLED_SMOKE_IDENTITY.identifier ||
+    smokeConfig.mainBinaryName !== INSTALLED_SMOKE_IDENTITY.mainBinaryName
+  ) {
+    throw new Error("Installed Smoke identity drifted.");
+  }
+  for (const key of ["productName", "identifier", "mainBinaryName"]) {
+    if (smokeConfig[key] === localConfig[key]) {
+      throw new Error(`Installed Smoke ${key} collides with Local Fork.`);
+    }
+  }
+  if (smokeConfig.bundle?.createUpdaterArtifacts !== false) {
+    throw new Error("Installed Smoke updater artifacts must be disabled.");
+  }
+  if ((smokeConfig.plugins?.updater?.endpoints ?? []).length !== 0) {
+    throw new Error("Installed Smoke must not use an updater endpoint.");
+  }
+  const nsis = smokeConfig.bundle?.windows?.nsis;
+  if (
+    nsis?.installerHooks !== "windows/nsis-installed-smoke-hooks.nsh" ||
+    nsis.installerHooks === localConfig.bundle?.windows?.nsis?.installerHooks
+  ) {
+    throw new Error("Installed Smoke must use its dedicated NSIS hook.");
+  }
+  if (nsis.installMode !== INSTALLED_SMOKE_IDENTITY.installMode) {
+    throw new Error("Installed Smoke must install for the current user.");
+  }
+  return INSTALLED_SMOKE_IDENTITY;
 }
 
 export function assertIdentityDataRootWiring({ corePaths, sidecarPaths, appSidecar, rustShell }) {
@@ -297,8 +365,9 @@ export function runWithCargoTomlRestored(cargoTomlPath, build) {
   }
 }
 
-export function tauriBuildArgs(platform, configPath) {
+export function tauriBuildArgs(platform, configPathOrPaths) {
   const bundleArgs = platform === "win32" ? ["--bundles", "nsis"] : [];
+  const configPaths = Array.isArray(configPathOrPaths) ? configPathOrPaths : [configPathOrPaths];
   return [
     "--filter",
     "gg-app",
@@ -306,8 +375,7 @@ export function tauriBuildArgs(platform, configPath) {
     "build",
     ...bundleArgs,
     "--no-sign",
-    "--config",
-    configPath,
+    ...configPaths.flatMap((configPath) => ["--config", configPath]),
   ];
 }
 
@@ -319,8 +387,20 @@ function stagedNodePath() {
   );
 }
 
-function localTauriConfigPath() {
-  return join(srcTauri, "tauri.local.conf.json");
+export function localBuildConfigPaths(srcTauriRoot, installedSmoke = false) {
+  return [
+    join(srcTauriRoot, "tauri.local.conf.json"),
+    ...(installedSmoke ? [join(srcTauriRoot, "tauri.installed-smoke.conf.json")] : []),
+  ];
+}
+
+export function installedSmokeBuildRequested(args, platform) {
+  if (args.length === 0) return false;
+  if (args.length !== 1 || args[0] !== "--installed-smoke") {
+    throw new Error("Usage: build-local-hotfix.mjs [--installed-smoke]");
+  }
+  if (platform !== "win32") throw new Error("Installed Smoke packaging requires Windows.");
+  return true;
 }
 
 function fileMetadata(path) {
@@ -352,7 +432,9 @@ export function installerManifest(
   payloadPath,
   releaseMetadata,
   payloadMetadata = fileMetadata(payloadPath),
+  identity,
 ) {
+  const manifestIdentity = identity ?? LOCAL_FORK_IDENTITY;
   const installerStats = statSync(installerPath);
   return {
     schemaVersion: LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION,
@@ -362,7 +444,7 @@ export function installerManifest(
     size: installerStats.size,
     mtimeMs: installerStats.mtimeMs,
     sha256: createHash("sha256").update(readFileSync(installerPath)).digest("hex"),
-    identity: LOCAL_FORK_IDENTITY,
+    identity: manifestIdentity,
     payload: {
       name: basename(payloadPath),
       ...payloadMetadata,
@@ -370,23 +452,30 @@ export function installerManifest(
   };
 }
 
-function writeInstallerManifest(metadata) {
+function writeInstallerManifest(metadata, manifestName = "latest-installer.json") {
   const outputDir = join(repoRoot, ".gg", "local-fixes");
   mkdirSync(outputDir, { recursive: true });
-  const path = join(outputDir, "latest-installer.json");
+  const path = join(outputDir, manifestName);
   writeFileSync(path, `${JSON.stringify(metadata, null, 2)}\n`);
-  console.log(`Verified fresh Local Fork installer: ${metadata.path}`);
+  console.log(`Verified fresh ${metadata.identity.productName} installer: ${metadata.path}`);
   console.log(`Installer SHA-256: ${metadata.sha256}`);
   console.log(`Payload SHA-256: ${metadata.payload.sha256}`);
 }
 
 async function main() {
+  const installedSmoke = installedSmokeBuildRequested(process.argv.slice(2), process.platform);
+  const identity = installedSmoke ? INSTALLED_SMOKE_IDENTITY : LOCAL_FORK_IDENTITY;
+  const configPaths = localBuildConfigPaths(srcTauri, installedSmoke);
   const releaseMetadata = committedReleaseNotes(repoRoot);
   env.VITE_GG_GIT_SHA = releaseMetadata.sourceRevision;
   const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
   const cargoTomlPath = join(srcTauri, "Cargo.toml");
-  const localConfig = JSON.parse(readFileSync(localTauriConfigPath(), "utf8"));
+  const localConfig = JSON.parse(readFileSync(configPaths[0], "utf8"));
   assertIsolatedIdentities(baseConfig, readFileSync(cargoTomlPath, "utf8"), localConfig);
+  if (installedSmoke) {
+    const smokeConfig = JSON.parse(readFileSync(configPaths[1], "utf8"));
+    assertInstalledSmokeIdentity(localConfig, smokeConfig);
+  }
   assertIdentityDataRootWiring({
     corePaths: readFileSync(join(repoRoot, "packages", "gg-core", "src", "paths.ts"), "utf8"),
     sidecarPaths: readFileSync(
@@ -416,23 +505,30 @@ async function main() {
   requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
   const bundleBuildStartedAt = Date.now();
   const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>
-    run(pnpm, tauriBuildArgs(process.platform, localTauriConfigPath())),
+    run(pnpm, tauriBuildArgs(process.platform, configPaths)),
   );
   if (buildStatus !== 0) process.exit(buildStatus);
-  const installer = freshInstallerForPlatform(srcTauri, process.platform, bundleBuildStartedAt);
+  const installer = freshInstallerForPlatform(
+    srcTauri,
+    process.platform,
+    bundleBuildStartedAt,
+    identity,
+  );
   if (!installer) {
-    console.error("Tauri did not produce exactly one fresh Local Fork installer for this build.");
+    console.error(`Tauri did not produce exactly one fresh ${identity.productName} installer.`);
     process.exit(1);
   }
-  const payloadName = LOCAL_FORK_IDENTITY.executableName;
-  const payload = join(srcTauri, "target", "release", payloadName);
+  const payload = join(srcTauri, "target", "release", identity.executableName);
   if (!existsSync(payload)) {
     console.error(`Tauri did not produce the expected payload: ${payload}`);
     process.exit(1);
   }
   const payloadMetadata =
     process.platform === "win32" ? windowsNsisPayloadMetadata(payload) : fileMetadata(payload);
-  writeInstallerManifest(installerManifest(installer, payload, releaseMetadata, payloadMetadata));
+  writeInstallerManifest(
+    installerManifest(installer, payload, releaseMetadata, payloadMetadata, identity),
+    installedSmoke ? INSTALLED_SMOKE_MANIFEST_NAME : undefined,
+  );
 }
 
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

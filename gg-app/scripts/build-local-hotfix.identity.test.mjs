@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertIdentityDataRootWiring,
+  assertInstalledSmokeIdentity,
   assertIsolatedIdentities,
+  INSTALLED_SMOKE_IDENTITY,
+  INSTALLED_SMOKE_TAURI_CONFIG,
   LOCAL_FORK_IDENTITY,
   LOCAL_TAURI_CONFIG,
 } from "./build-local-hotfix.mjs";
@@ -11,6 +14,13 @@ import {
 const srcTauri = join(import.meta.dirname, "..", "src-tauri");
 const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
 const localConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.local.conf.json"), "utf8"));
+const installedSmokeConfig = JSON.parse(
+  readFileSync(join(srcTauri, "tauri.installed-smoke.conf.json"), "utf8"),
+);
+const installedSmokeHooks = readFileSync(
+  join(srcTauri, "windows", "nsis-installed-smoke-hooks.nsh"),
+  "utf8",
+);
 const cargoToml = readFileSync(join(srcTauri, "Cargo.toml"), "utf8");
 const repoRoot = join(import.meta.dirname, "..", "..");
 const identityDataSources = {
@@ -110,5 +120,60 @@ describe("Local Fork native identity", () => {
     ).toThrow(
       "production must clear inherited GG_AGENT_DIR and non-production sidecars must set it",
     );
+  });
+});
+
+describe("Installed Smoke native identity", () => {
+  it("uses distinct app, executable, uninstall, hook, and updater identities", () => {
+    expect(installedSmokeConfig).toMatchObject(INSTALLED_SMOKE_TAURI_CONFIG);
+    expect(assertInstalledSmokeIdentity(localConfig, installedSmokeConfig)).toEqual(
+      INSTALLED_SMOKE_IDENTITY,
+    );
+    expect(installedSmokeConfig.productName).not.toBe(localConfig.productName);
+    expect(installedSmokeConfig.identifier).not.toBe(localConfig.identifier);
+    expect(installedSmokeConfig.mainBinaryName).not.toBe(localConfig.mainBinaryName);
+    expect(
+      `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${installedSmokeConfig.productName}`,
+    ).not.toBe(
+      `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${localConfig.productName}`,
+    );
+    expect(installedSmokeConfig.bundle.windows.nsis.installerHooks).toBe(
+      "windows/nsis-installed-smoke-hooks.nsh",
+    );
+    expect(installedSmokeConfig.bundle.createUpdaterArtifacts).toBe(false);
+    expect(installedSmokeConfig.plugins.updater.endpoints).toEqual([]);
+    expect(installedSmokeHooks).not.toMatch(
+      /taskkill|NSIS_HOOK_PREINSTALL|NSIS_HOOK_PREUNINSTALL/i,
+    );
+  });
+
+  it.each(["productName", "identifier", "mainBinaryName"])(
+    "rejects a Local Fork collision in %s",
+    (key) => {
+      expect(() =>
+        assertInstalledSmokeIdentity(localConfig, {
+          ...installedSmokeConfig,
+          [key]: localConfig[key],
+        }),
+      ).toThrow();
+    },
+  );
+
+  it("rejects the Local Fork hook and enabled updater endpoints", () => {
+    expect(() =>
+      assertInstalledSmokeIdentity(localConfig, {
+        ...installedSmokeConfig,
+        bundle: {
+          ...installedSmokeConfig.bundle,
+          windows: { nsis: localConfig.bundle.windows.nsis },
+        },
+      }),
+    ).toThrow("dedicated NSIS hook");
+    expect(() =>
+      assertInstalledSmokeIdentity(localConfig, {
+        ...installedSmokeConfig,
+        plugins: { updater: { endpoints: ["https://updates.example.invalid"] } },
+      }),
+    ).toThrow("must not use an updater endpoint");
   });
 });

@@ -6,8 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   committedReleaseNotes,
   freshInstallerForPlatform,
+  installedSmokeBuildRequested,
   installerManifest,
+  INSTALLED_SMOKE_IDENTITY,
   LOCAL_FORK_IDENTITY,
+  localBuildConfigPaths,
   releaseNotesEnvelope,
   runWithCargoTomlRestored,
   tauriBuildArgs,
@@ -79,6 +82,22 @@ describe("local installer freshness", () => {
       "multiple fresh Local Fork NSIS installers",
     );
   });
+
+  it("selects only the dedicated Installed Smoke artifact", () => {
+    const { root, nsis } = fixture();
+    const startedAt = Date.now();
+    const production = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
+    const smoke = join(nsis, "GG Coder Local Fork Installed Smoke_1.2.3_x64-setup.exe");
+    writeFileSync(production, "production");
+    writeFileSync(smoke, "smoke");
+    const completedAt = new Date(startedAt + 1_000);
+    utimesSync(production, completedAt, completedAt);
+    utimesSync(smoke, completedAt, completedAt);
+
+    expect(freshInstallerForPlatform(root, "win32", startedAt, INSTALLED_SMOKE_IDENTITY)).toBe(
+      smoke,
+    );
+  });
 });
 
 describe("local installer manifest", () => {
@@ -135,6 +154,27 @@ describe("local installer manifest", () => {
     expect(manifest.payload.sha256).toBe(
       createHash("sha256").update("payload bytes").digest("hex"),
     );
+  });
+
+  it("records the dedicated Installed Smoke identity and payload", () => {
+    const { root, nsis } = fixture();
+    const installer = join(nsis, "GG Coder Local Fork Installed Smoke_1.2.3_x64-setup.exe");
+    const payload = join(root, "target", "release", INSTALLED_SMOKE_IDENTITY.executableName);
+    mkdirSync(join(root, "target", "release"), { recursive: true });
+    writeFileSync(installer, "smoke installer");
+    writeFileSync(payload, "smoke payload");
+
+    const manifest = installerManifest(
+      installer,
+      payload,
+      releaseNotesEnvelope(sourceRevision, validReleaseNotes),
+      undefined,
+      INSTALLED_SMOKE_IDENTITY,
+    );
+
+    expect(manifest.identity).toEqual(INSTALLED_SMOKE_IDENTITY);
+    expect(manifest.path).toBe(installer);
+    expect(manifest.payload.name).toBe(INSTALLED_SMOKE_IDENTITY.executableName);
   });
 });
 
@@ -272,6 +312,39 @@ describe("Tauri build arguments", () => {
       "--config",
       configPath,
     ]);
+  });
+
+  it("merges Local Fork before Installed Smoke without changing normal arguments", () => {
+    const normalPaths = localBuildConfigPaths("src-tauri");
+    const smokePaths = localBuildConfigPaths("src-tauri", true);
+
+    expect(normalPaths).toEqual([join("src-tauri", "tauri.local.conf.json")]);
+    expect(smokePaths).toEqual([
+      join("src-tauri", "tauri.local.conf.json"),
+      join("src-tauri", "tauri.installed-smoke.conf.json"),
+    ]);
+    expect(tauriBuildArgs("win32", smokePaths)).toEqual([
+      "--filter",
+      "gg-app",
+      "tauri",
+      "build",
+      "--bundles",
+      "nsis",
+      "--no-sign",
+      "--config",
+      smokePaths[0],
+      "--config",
+      smokePaths[1],
+    ]);
+  });
+
+  it("requires an explicit Windows-only Installed Smoke flavor", () => {
+    expect(installedSmokeBuildRequested([], "win32")).toBe(false);
+    expect(installedSmokeBuildRequested(["--installed-smoke"], "win32")).toBe(true);
+    expect(() => installedSmokeBuildRequested(["--installed-smoke"], "darwin")).toThrow(
+      "requires Windows",
+    );
+    expect(() => installedSmokeBuildRequested(["--unknown"], "win32")).toThrow("Usage");
   });
 });
 

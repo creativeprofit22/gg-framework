@@ -12,6 +12,7 @@ export default defineConfig({
     "src/phase-binding-protocol.ts",
     "src/phase-start-protocol.ts",
     "src/roadmap-workflow.ts",
+    "src/slash-command-contract.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

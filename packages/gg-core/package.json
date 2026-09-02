@@ -59,6 +59,11 @@
       "types": "./dist/roadmap-workflow.d.ts",
       "import": "./dist/roadmap-workflow.js",
       "require": "./dist/roadmap-workflow.cjs"
+    },
+    "./slash-command-contract": {
+      "types": "./dist/slash-command-contract.d.ts",
+      "import": "./dist/slash-command-contract.js",
+      "require": "./dist/slash-command-contract.cjs"
     }
   },
   "main": "./dist/index.cjs",

@@ -6,7 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
-import { isSlashCommandsResponse } from "@kenkaiiii/gg-core";
+import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import type {
   PendingPlanReview,
   PlanAcceptResult,

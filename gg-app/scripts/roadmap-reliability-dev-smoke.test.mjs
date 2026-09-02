@@ -10,6 +10,7 @@ import {
   createRoadmapReliabilityFixtureServer,
   createRoadmapReliabilityFixtureState,
   fixtureDiagnostics,
+  mutateFixturePhaseLease,
   parseRoadmapReliabilitySmokeArguments,
   previewFixtureCompletion,
   seedRoadmapReliabilityFixture,
@@ -68,6 +69,44 @@ test("isolates identity and transfers authority without arbitrary destinations",
     assert.equal(fixtureDiagnostics(state, sessionB.sessionId).consistency, "consistent");
     assert.equal(state.scheduler.attempts, 2);
     assert.equal(state.scheduler.outcome, "committed-after-retry");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("inspects and safely transfers the fixture phase lease", () => {
+  const { root, state, sessionA, sessionB } = fixture();
+  try {
+    seedRoadmapReliabilityFixture(state);
+    bindFixturePhase(state, sessionA.sessionId, bindingRequest(state, "bind-current"));
+    const inspectRequest = {
+      version: 2,
+      action: "inspect",
+      phaseId: "roadmap-reliability-phase",
+      expectedProjectKey: state.projectKey,
+      expectedRevision: state.revision,
+      planId: null,
+      operationId: "inspect-lease",
+      lease: null,
+      confirmTakeover: false,
+      takeoverReason: null,
+      predecessorProof: null,
+    };
+    const inspected = mutateFixturePhaseLease(state, sessionB.sessionId, inspectRequest);
+    assert.equal(inspected.status, "inspected");
+    assert.equal(inspected.lease.holder.sessionId, sessionA.sessionId);
+
+    const acquired = mutateFixturePhaseLease(state, sessionB.sessionId, {
+      ...inspectRequest,
+      action: "takeover",
+      operationId: "takeover-lease",
+      lease: { leaseId: inspected.lease.leaseId, fence: inspected.lease.fence },
+      confirmTakeover: true,
+      takeoverReason: "explicit desktop takeover",
+    });
+    assert.equal(acquired.status, "acquired");
+    assert.equal(acquired.lease.holder.sessionId, sessionB.sessionId);
+    assert.equal(fixtureDiagnostics(state, sessionB.sessionId).consistency, "consistent");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

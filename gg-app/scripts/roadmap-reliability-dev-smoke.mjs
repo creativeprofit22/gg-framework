@@ -109,6 +109,8 @@ export function createRoadmapReliabilityFixtureState({
     sessions: new Map(),
     nextSession: 1,
     nonces: new Map(),
+    phaseLease: null,
+    leaseRevision: 0,
     scheduler: { attempts: 0, outcome: null },
     approvals: 0,
   };
@@ -204,6 +206,13 @@ export function bindFixturePhase(state, sessionId, request) {
   phase.session = destination;
   addFreshEvidence(state, destination);
   state.revision += 1;
+  state.leaseRevision += 1;
+  state.phaseLease = fixturePhaseLease(
+    state,
+    sessionId,
+    request.operationId,
+    state.phaseLease?.fence + 1 || 1,
+  );
   phase.updatedAt = new Date().toISOString();
   return {
     status: "committed",
@@ -211,6 +220,76 @@ export function bindFixturePhase(state, sessionId, request) {
     phaseId: phase.id,
     previousSession,
     session: structuredClone(destination),
+  };
+}
+
+function fixturePhaseLease(state, sessionId, operationId, fence) {
+  const timestamp = new Date().toISOString();
+  return {
+    version: 1,
+    projectKey: state.projectKey,
+    phaseId: currentPhase(state).id,
+    planId: null,
+    leaseId: state.phaseLease?.leaseId ?? "fixture-phase-lease",
+    fence,
+    holder: {
+      daemonInstanceId: "fixture-daemon",
+      sessionId,
+      sessionPath: sessionLink(state, sessionId).sessionPath,
+      processId: process.pid,
+    },
+    runState: "idle",
+    acquiredAt: state.phaseLease?.acquiredAt ?? timestamp,
+    renewedAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    operationId,
+  };
+}
+
+export function mutateFixturePhaseLease(state, sessionId, request) {
+  const phase = currentPhase(state);
+  if (request.expectedRevision !== state.revision) {
+    return { status: "stale-revision", revision: state.revision };
+  }
+  if (request.expectedProjectKey !== state.projectKey) {
+    return { status: "project-mismatch", currentProjectKey: state.projectKey };
+  }
+  if (request.action === "inspect") {
+    return {
+      status: "inspected",
+      roadmapRevision: state.revision,
+      leaseRevision: state.leaseRevision,
+      phaseId: phase.id,
+      lease: structuredClone(state.phaseLease),
+    };
+  }
+  if (request.action !== "takeover" || !request.confirmTakeover || !state.phaseLease) {
+    return { status: "phase-lease-held", currentLease: structuredClone(state.phaseLease) };
+  }
+  if (
+    request.lease?.leaseId !== state.phaseLease.leaseId ||
+    request.lease?.fence !== state.phaseLease.fence
+  ) {
+    return { status: "phase-lease-lost", currentLease: structuredClone(state.phaseLease) };
+  }
+  const destination = sessionLink(state, sessionId);
+  state.leaseRevision += 1;
+  state.phaseLease = fixturePhaseLease(
+    state,
+    sessionId,
+    request.operationId,
+    state.phaseLease.fence + 1,
+  );
+  phase.session = destination;
+  addFreshEvidence(state, destination);
+  state.revision += 1;
+  phase.updatedAt = new Date().toISOString();
+  return {
+    status: "acquired",
+    roadmapRevision: state.revision,
+    leaseRevision: state.leaseRevision,
+    phaseId: phase.id,
+    lease: structuredClone(state.phaseLease),
   };
 }
 
@@ -486,9 +565,13 @@ export function createRoadmapReliabilityFixtureServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/notes/roadmap/phase-binding") {
-        const result = bindFixturePhase(state, sessionId, await readBody(request));
+        const body = await readBody(request);
+        const leaseRequest = body.version === 2;
+        const result = leaseRequest
+          ? mutateFixturePhaseLease(state, sessionId, body)
+          : bindFixturePhase(state, sessionId, body);
         audit({
-          action: "phase-binding",
+          action: leaseRequest ? "phase-lease" : "phase-binding",
           sessionId,
           status: result.status,
           revision: state.revision,
@@ -709,15 +792,24 @@ export function parseRoadmapReliabilitySmokeArguments(args) {
 export function validateRoadmapReliabilityAudit(entries) {
   const sessions = entries.filter((entry) => entry.action === "authenticated-session");
   const bindings = entries.filter((entry) => entry.action === "phase-binding");
+  const leases = entries.filter((entry) => entry.action === "phase-lease");
   const commits = entries.filter((entry) => entry.action === "approval-commit");
   if (sessions.length < 2) throw new Error("Fixture did not create two pane sessions");
-  if (bindings.map((entry) => entry.status).join(",") !== "committed,committed") {
-    throw new Error("Fixture did not bind then rebind exactly once");
+  if (bindings.map((entry) => entry.status).join(",") !== "committed") {
+    throw new Error("Fixture did not bind the initial phase exactly once");
+  }
+  if (leases.map((entry) => entry.status).join(",") !== "inspected,acquired") {
+    throw new Error("Fixture did not inspect then take over the phase lease exactly once");
   }
   if (commits.map((entry) => entry.status).join(",") !== "stale-revision,committed") {
     throw new Error("Fixture did not reject stale approval before one commit");
   }
-  return { sessions: sessions.slice(-2).map((entry) => entry.sessionId), bindings, commits };
+  return {
+    sessions: sessions.slice(-2).map((entry) => entry.sessionId),
+    bindings,
+    leases,
+    commits,
+  };
 }
 
 export async function runRoadmapReliabilityDevSmoke(options) {
@@ -790,8 +882,10 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       });
     });
     const listening = await Promise.race([
-      waitFor("fixture sidecar", () =>
-        readAudit(auditFile).find((entry) => entry.action === "fixture-listening"),
+      waitFor(
+        "fixture sidecar",
+        () => readAudit(auditFile).find((entry) => entry.action === "fixture-listening"),
+        { timeoutMs: 300_000 },
       ),
       unexpectedExit,
     ]);
@@ -888,9 +982,14 @@ export async function runRoadmapReliabilityDevSmoke(options) {
     await client.evaluate(
       clickByTextExpression("Overview", "document.querySelector('.notes-phase-detail')"),
     );
+    await waitFor("phase writer action", () =>
+      client.evaluate(
+        `Boolean([...document.querySelectorAll('.notes-phase-detail button')].find((button) => button.textContent?.trim() === "Inspect phase writer"))`,
+      ),
+    );
     await client.evaluate(
       clickByTextExpression(
-        "Rebind to this session",
+        "Inspect phase writer",
         "document.querySelector('.notes-phase-detail')",
       ),
     );
@@ -898,7 +997,10 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       client.evaluate("Boolean(document.querySelector('[aria-label=\"Confirm phase rebind\"]'))"),
     );
     await client.evaluate(
-      clickByTextExpression("Confirm rebind", "document.querySelector('.notes-phase-detail')"),
+      clickByTextExpression(
+        "Confirm safe takeover",
+        "document.querySelector('.notes-phase-detail')",
+      ),
     );
     await waitFor("rebind completion", async () => {
       const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");

@@ -6,10 +6,12 @@ import {
   ACTIVE_PHASE_UNTRUSTED_END,
   ACTIVE_PHASE_UNTRUSTED_START,
   ActivePhaseContextError,
+  buildActivePhaseVerificationFollowUp,
   createActivePhaseContext,
   parseActivePhaseContext,
   renderActivePhasePackage,
 } from "./phase-context.js";
+import { roadmapCriterionId } from "./core/verification-evidence.js";
 
 const NOW = "2026-07-26T00:00:00.000Z";
 
@@ -140,6 +142,22 @@ describe("active phase context", () => {
     expect(rendered.initialPrompt).toContain('send a fresh transition: "in-progress" report');
     expect(rendered.initialPrompt).not.toContain("other phase");
     expect(rendered.initialPrompt).not.toContain("historical MCP");
+  });
+
+  it("renders stable criterion IDs for explicit completion bindings", () => {
+    const active = context({ phase: { doneWhen: ["Tests pass", "Types pass"] } });
+    const followUp = buildActivePhaseVerificationFollowUp(active);
+    const packageText = renderActivePhasePackage({
+      ...active,
+      executionStage: "implementing",
+    }).systemPromptSuffix;
+
+    for (const [index, criterion] of active.phase.doneWhen.entries()) {
+      const criterionId = roadmapCriterionId(index + 1, criterion);
+      expect(followUp).toContain(`${criterionId} — ${criterion}`);
+      expect(packageText).toContain(`${criterionId} — ${criterion}`);
+    }
+    expect(followUp).toContain("verification_bindings");
   });
 
   it("renders empty optional content without importing unrelated Notes data", () => {

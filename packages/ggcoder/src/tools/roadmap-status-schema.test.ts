@@ -21,6 +21,19 @@ describe("roadmap_status provider schema", () => {
       type: "object",
       properties: {
         transition: { enum: ["pending", "in-progress", "blocked", "done"] },
+        verification_bindings: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              criterion_id: { type: "string", pattern: "^[a-f0-9]{64}$" },
+              execution_id: { type: "string", minLength: 1, maxLength: 128 },
+            },
+            required: ["criterion_id", "execution_id"],
+            additionalProperties: false,
+          },
+        },
         blocker: {
           type: "string",
           description: expect.stringContaining("concrete reason work cannot continue"),
@@ -77,7 +90,7 @@ describe("roadmap_status provider schema", () => {
     ).toBe(false);
   });
 
-  it("accepts Done only with passed verification and evidence", () => {
+  it("accepts Done only with passed verification and explicit bindings", () => {
     const tool = createRoadmapStatusTool("gg-coder", async () => ({
       result: "committed",
       phaseId: "phase-1",
@@ -87,26 +100,31 @@ describe("roadmap_status provider schema", () => {
       completionIntentId: "completion-intent-1",
       proposals: [],
     }));
+    const doneInput = {
+      update_id: "completion-intent-1",
+      phase_id: "phase-1",
+      expected_revision: 1,
+      progress: "Completed and verified.",
+      transition: "done" as const,
+      evidence: ["pnpm test exited successfully"],
+      verification: { result: "passed" as const },
+    };
 
     expect(
       tool.parameters.safeParse({
-        update_id: "completion-intent-1",
-        phase_id: "phase-1",
-        expected_revision: 1,
-        progress: "Completed and verified.",
-        transition: "done",
-        evidence: ["pnpm test exited successfully"],
-        verification: { result: "passed" },
+        ...doneInput,
+        verification_bindings: [
+          { criterion_id: "a".repeat(64), execution_id: "execution-1" },
+        ],
       }).success,
     ).toBe(true);
+    expect(tool.parameters.safeParse(doneInput).success).toBe(false);
     expect(
       tool.parameters.safeParse({
-        update_id: "completion-intent-2",
-        phase_id: "phase-1",
-        expected_revision: 1,
-        progress: "Verification failed.",
-        transition: "done",
-        evidence: ["pnpm test failed"],
+        ...doneInput,
+        verification_bindings: [
+          { criterion_id: "a".repeat(64), execution_id: "execution-1" },
+        ],
         verification: { result: "failed", reason: "Tests failed" },
       }).success,
     ).toBe(false);

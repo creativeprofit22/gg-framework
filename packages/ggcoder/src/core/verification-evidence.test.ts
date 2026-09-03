@@ -9,21 +9,44 @@ import {
   evaluateRoadmapVerificationEvidence,
   formatVerificationCommandDisplay,
   partitionVerificationMessagesForWorkspaceMutation,
+  roadmapCriterionId,
+  workspaceVerificationEvidenceMatches,
 } from "./verification-evidence.js";
 
-describe("durable verification evidence", () => {
-  const repository = {
+const TEST_ENVIRONMENT_DIGEST = "9".repeat(64);
+const TEST_WORKSPACE = {
+  version: 1 as const,
+  repository: {
     projectKey: "C:/project",
     identityHash: "1".repeat(64),
     rootCommit: "2".repeat(40),
+  },
+  headCommit: "3".repeat(40),
+  worktreeDigest: "4".repeat(64),
+  clean: true,
+};
+
+function executionFields(
+  index: number,
+  workspace: {
+    version: 1;
+    repository: { projectKey: string; identityHash: string; rootCommit: string };
+    headCommit: string;
+    worktreeDigest: string;
+    clean: boolean;
+  },
+) {
+  return {
+    executionId: `execution-${index}`,
+    observedAt: "2026-08-30T10:00:00.000Z",
+    cwd: "C:/project",
+    safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
+    workspace,
   };
-  const workspace = {
-    version: 1 as const,
-    repository,
-    headCommit: "3".repeat(40),
-    worktreeDigest: "4".repeat(64),
-    clean: true,
-  };
+}
+
+describe("durable verification evidence", () => {
+  const workspace = TEST_WORKSPACE;
 
   it("binds classifier-approved commands to exact criterion and workspace identities", () => {
     const evidence = createDurableVerificationEvidence({
@@ -33,13 +56,21 @@ describe("durable verification evidence", () => {
           criterion: "Tests pass",
           evidence: "pnpm test",
           command: "pnpm test",
+          ...executionFields(1, workspace),
         },
       ],
-      workspace,
-      observedAt: "2026-08-30T10:00:00.000Z",
     });
     expect(
-      evaluateDurableVerificationEvidence({ doneWhen: ["Tests pass"], evidence, workspace }),
+      evaluateDurableVerificationEvidence({
+        doneWhen: ["Tests pass"],
+        evidence,
+        verificationBindings: evidence.map((record) => ({
+          criterionId: record.criterionId,
+          executionId: record.executionId,
+        })),
+        workspace,
+        safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
+      }),
     ).toMatchObject({
       ready: true,
       staleCriterionIds: [],
@@ -49,14 +80,24 @@ describe("durable verification evidence", () => {
       evaluateDurableVerificationEvidence({
         doneWhen: ["Tests pass"],
         evidence,
+        verificationBindings: evidence.map((record) => ({
+          criterionId: record.criterionId,
+          executionId: record.executionId,
+        })),
         workspace: { ...workspace, worktreeDigest: "5".repeat(64) },
+        safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
       }),
     ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
     expect(
       evaluateDurableVerificationEvidence({
         doneWhen: ["Tests pass"],
         evidence,
+        verificationBindings: evidence.map((record) => ({
+          criterionId: record.criterionId,
+          executionId: record.executionId,
+        })),
         workspace,
+        safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
         classifierVersion: "roadmap-verification-v2",
       }),
     ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
@@ -76,9 +117,8 @@ describe("durable verification evidence", () => {
         criterion: `Criterion ${index + 1}`,
         evidence: command,
         command,
+        ...executionFields(index + 1, workspace),
       })),
-      workspace,
-      observedAt: "2026-08-30T10:00:00.000Z",
     });
 
     expect(evidence.map((item) => item.commandHash)).toEqual([
@@ -105,16 +145,21 @@ describe("durable verification evidence", () => {
 
     const sameDisplayEvidence = createDurableVerificationEvidence({
       coverage: [
-        { criterionIndex: 1, criterion: "First", evidence: "first", command: commands[0]! },
+        {
+          criterionIndex: 1,
+          criterion: "First",
+          evidence: "first",
+          command: commands[0]!,
+          ...executionFields(1, workspace),
+        },
         {
           criterionIndex: 2,
           criterion: "Second",
           evidence: "second",
-          command: "pnpm test -- --token=another-synthetic-value",
+          command: "pnpm test -- --token=[REDACTED]",
+          ...executionFields(2, workspace),
         },
       ],
-      workspace,
-      observedAt: "2026-08-30T10:00:00.000Z",
     });
     expect(sameDisplayEvidence[0]!.commandDisplay).toBe(sameDisplayEvidence[1]!.commandDisplay);
     expect(sameDisplayEvidence[0]!.commandHash).not.toBe(sameDisplayEvidence[1]!.commandHash);
@@ -122,7 +167,12 @@ describe("durable verification evidence", () => {
       evaluateDurableVerificationEvidence({
         doneWhen: ["First", "Second"],
         evidence: sameDisplayEvidence,
+        verificationBindings: sameDisplayEvidence.map((record) => ({
+          criterionId: record.criterionId,
+          executionId: record.executionId,
+        })),
         workspace,
+        safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
       }).ready,
     ).toBe(true);
   });
@@ -137,6 +187,7 @@ describe("classifyVerificationCommand", () => {
     "vitest run src/foo.test.ts",
     "pnpm test -- --runInBand",
     "cargo fmt --check && cargo clippy",
+    "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
     "ruff format --check .",
   ])("accepts bounded check: %s", (command) => {
     expect(classifyVerificationCommand(command)).toMatchObject({
@@ -288,13 +339,149 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       expectedRevision === undefined
         ? { currentMessages: messages, staleMessages: [] }
         : partitionVerificationMessagesForWorkspaceMutation(messages);
+    const toLedger = (items: Message[], prefix: string) =>
+      collectVerificationEvidence(items).map((item, index) => ({
+        ...item,
+        ...executionFields(index + 1, TEST_WORKSPACE),
+        executionId: `${prefix}-${index + 1}`,
+        classifierVersion: "roadmap-verification-v1",
+      }));
+    const currentLedgerEvidence = toLedger(partition.currentMessages, "current");
+    const staleLedgerEvidence = toLedger(partition.staleMessages, "stale");
+    const all = [...currentLedgerEvidence, ...staleLedgerEvidence];
+    const verificationBindings = doneWhen.map((criterion, index) => ({
+      criterionId: roadmapCriterionId(index + 1, criterion),
+      executionId:
+        all.find((item) => evidence[index]?.toLowerCase().includes(item.command.toLowerCase()))
+          ?.executionId ?? `missing-${index + 1}`,
+    }));
     return evaluateRoadmapVerificationEvidence({
       doneWhen,
       evidence,
+      verificationBindings,
       expectedRevision,
-      ...partition,
+      currentMessages: [],
+      currentLedgerEvidence,
+      staleLedgerEvidence,
     });
   };
+
+  it("binds seven criteria to exact execution identities without reading citation text", () => {
+    const doneWhen = Array.from({ length: 7 }, (_, index) => `criterion ${index + 1}`);
+    const currentLedgerEvidence = doneWhen.map((_, index) => ({
+      ...executionFields(index + 1, TEST_WORKSPACE),
+      command:
+        "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
+      status: "passed" as const,
+      reason: "bounded Cargo check",
+      classifierVersion: "roadmap-verification-v1",
+    }));
+    const verificationBindings = doneWhen.map((criterion, index) => ({
+      criterionId: roadmapCriterionId(index + 1, criterion),
+      executionId: `execution-${index + 1}`,
+    }));
+
+    expect(
+      evaluateRoadmapVerificationEvidence({
+        doneWhen,
+        evidence: ["Seven focused checks passed; wording intentionally omits commands."],
+        verificationBindings,
+        expectedRevision: 231,
+        currentMessages: [],
+        currentLedgerEvidence,
+      }),
+    ).toMatchObject({
+      ready: true,
+      criterionCoverage: verificationBindings.map((binding, index) => ({
+        criterionIndex: index + 1,
+        criterion: doneWhen[index],
+        executionId: binding.executionId,
+      })),
+    });
+  });
+
+  it("rejects reused executions and unknown criterion bindings", () => {
+    const doneWhen = ["first", "second"];
+    const execution = {
+      ...executionFields(1, TEST_WORKSPACE),
+      command: "pnpm check",
+      status: "passed" as const,
+      reason: "bounded pnpm verification script",
+      classifierVersion: "roadmap-verification-v1",
+    };
+    const firstId = roadmapCriterionId(1, doneWhen[0]!);
+
+    expect(
+      evaluateRoadmapVerificationEvidence({
+        doneWhen,
+        evidence: [],
+        verificationBindings: [
+          { criterionId: firstId, executionId: execution.executionId },
+          { criterionId: roadmapCriterionId(2, doneWhen[1]!), executionId: execution.executionId },
+        ],
+        expectedRevision: 15,
+        currentMessages: [],
+        currentLedgerEvidence: [execution],
+      }),
+    ).toMatchObject({
+      ready: false,
+      unmetEvidenceCodes: expect.arrayContaining(["duplicate-evidence"]),
+    });
+
+    expect(
+      evaluateRoadmapVerificationEvidence({
+        doneWhen,
+        evidence: [],
+        verificationBindings: [{ criterionId: "f".repeat(64), executionId: execution.executionId }],
+        expectedRevision: 15,
+        currentMessages: [],
+        currentLedgerEvidence: [execution],
+      }),
+    ).toMatchObject({ ready: false });
+  });
+
+  it("ignores unbound extra executions and permits selecting either same-command rerun", () => {
+    const criterion = "focused tests pass";
+    const criterionId = roadmapCriterionId(1, criterion);
+    const currentLedgerEvidence = [
+      {
+        ...executionFields(1, TEST_WORKSPACE),
+        executionId: "old-pass",
+        command: "pnpm check",
+        status: "passed" as const,
+        reason: "ok",
+        classifierVersion: "roadmap-verification-v1",
+      },
+      {
+        ...executionFields(2, TEST_WORKSPACE),
+        executionId: "new-pass",
+        command: "pnpm check",
+        status: "passed" as const,
+        reason: "ok",
+        classifierVersion: "roadmap-verification-v1",
+      },
+      {
+        ...executionFields(3, TEST_WORKSPACE),
+        executionId: "unbound-failure",
+        command: "vitest run unrelated.test.ts",
+        status: "failed" as const,
+        reason: "failed",
+        classifierVersion: "roadmap-verification-v1",
+      },
+    ];
+    for (const executionId of ["old-pass", "new-pass"]) {
+      expect(
+        evaluateRoadmapVerificationEvidence({
+          doneWhen: [criterion],
+          evidence: [],
+          verificationBindings: [{ criterionId, executionId }],
+          expectedRevision: 15,
+          currentMessages: [],
+          currentLedgerEvidence,
+        }),
+      ).toMatchObject({ ready: true });
+    }
+  });
 
   it("rejects unsafe shell wrappers even when the outer command exits zero", () => {
     const command = "vitest run smoke.test.ts || echo PASS";
@@ -319,11 +506,11 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       ),
     ).toEqual({
       ready: false,
-      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+      unmetEvidenceCodes: ["failed-evidence", "missing-approved-evidence"],
     });
   });
 
-  it("uses the latest execution when a previously passing command later fails", () => {
+  it("keeps an explicitly selected passing execution when a later rerun fails", () => {
     const command = "vitest run current-phase.test.ts";
     expect(
       evaluate(
@@ -333,10 +520,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         ],
         [command],
       ),
-    ).toEqual({
-      ready: false,
-      unmetEvidenceCodes: ["failed-evidence", "missing-approved-evidence"],
-    });
+    ).toMatchObject({ ready: true });
   });
 
   it("rejects an unclassified row-700-style generic smoke command", () => {
@@ -345,7 +529,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       evaluate(bashExchange("smoke", command, "Exit code: 0\nPASS criteria 1-5"), [command]),
     ).toMatchObject({
       ready: false,
-      unmetEvidenceCodes: ["unclassified-evidence", "missing-approved-evidence"],
+      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
     });
   });
 
@@ -357,7 +541,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       ...toolExchange("read", "read", { file_path: "src/example.ts" }),
     ];
 
-    expect(evaluate(messages, [command])).toEqual({
+    expect(evaluate(messages, [command])).toMatchObject({
       ready: true,
       unmetEvidenceCodes: [],
       criterionCoverage: [
@@ -435,13 +619,16 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       ),
     ).toMatchObject({
       ready: false,
-      unmetEvidenceCodes: ["duplicate-evidence", "missing-approved-evidence"],
+      unmetEvidenceCodes: ["duplicate-evidence"],
     });
     expect(
       evaluate(bashExchange("mismatch", command, "Exit code: 0"), [command], ["one", "two"]),
     ).toMatchObject({
       ready: false,
-      unmetEvidenceCodes: expect.arrayContaining(["criterion-evidence-mismatch"]),
+      unmetEvidenceCodes: expect.arrayContaining([
+        "unmatched-evidence",
+        "missing-approved-evidence",
+      ]),
     });
   });
 
@@ -457,7 +644,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         [`criterion one — ${first}`, `criterion two — ${second}`],
         ["criterion one", "criterion two"],
       ),
-    ).toEqual({
+    ).toMatchObject({
       ready: true,
       unmetEvidenceCodes: [],
       criterionCoverage: [
@@ -490,18 +677,32 @@ describe("SessionVerificationEvidenceLedger", () => {
       args: { command },
       isError: exitCode !== 0,
       details: {
-        bashDiagnostics: { executionId, command, reason: "completed", exitCode },
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode,
+        },
       },
     });
   }
 
-  it("replaces a duplicate execution ID with the latest result", () => {
+  it("keeps execution identities immutable across replay and conflicting diagnostics", () => {
     const ledger = new SessionVerificationEvidenceLedger();
-    record(ledger, "duplicate", "pnpm check");
-    record(ledger, "duplicate", "pnpm check", 1);
+    record(ledger, "immutable", "pnpm check");
+    const first = ledger.snapshot();
+    record(ledger, "immutable", "pnpm check");
+    expect(ledger.snapshot()).toEqual(first);
 
+    record(ledger, "immutable", "pnpm check", 1);
     expect(ledger.snapshot().currentEvidence).toEqual([
-      expect.objectContaining({ command: "pnpm check", status: "failed" }),
+      expect.objectContaining({
+        executionId: "immutable",
+        command: "pnpm check",
+        status: "passed",
+      }),
     ]);
   });
 
@@ -536,5 +737,59 @@ describe("SessionVerificationEvidenceLedger", () => {
       currentEvidence: [],
       staleEvidence: [expect.objectContaining({ command: "pnpm check", status: "passed" })],
     });
+  });
+
+  it.each([
+    "roadmap_status",
+    "roadmap_phase_draft",
+    "roadmap_inspect",
+    "roadmap_bind",
+    "roadmap_checkpoint",
+  ])("retains evidence across %s metadata operations", (name) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({ name, args: {}, isError: false });
+    expect(ledger.snapshot()).toMatchObject({
+      currentEvidence: [expect.objectContaining({ executionId: "accepted" })],
+      staleEvidence: [],
+    });
+  });
+});
+
+describe("workspaceVerificationEvidenceMatches", () => {
+  const workspace = {
+    version: 1 as const,
+    repository: {
+      projectKey: "C:/project",
+      identityHash: "1".repeat(64),
+      rootCommit: "2".repeat(40),
+    },
+    headCommit: "3".repeat(40),
+    worktreeDigest: "4".repeat(64),
+    clean: true,
+  };
+
+  it("ignores Notes metadata revisions but stales executable inputs and safe environment", () => {
+    expect(
+      workspaceVerificationEvidenceMatches(
+        { workspace, safeToolEnvironmentDigest: "5".repeat(64) },
+        { workspace: structuredClone(workspace), safeToolEnvironmentDigest: "5".repeat(64) },
+      ),
+    ).toBe(true);
+    expect(
+      workspaceVerificationEvidenceMatches(
+        { workspace, safeToolEnvironmentDigest: "5".repeat(64) },
+        {
+          workspace: { ...workspace, worktreeDigest: "6".repeat(64), clean: false },
+          safeToolEnvironmentDigest: "5".repeat(64),
+        },
+      ),
+    ).toBe(false);
+    expect(
+      workspaceVerificationEvidenceMatches(
+        { workspace, safeToolEnvironmentDigest: "5".repeat(64) },
+        { workspace, safeToolEnvironmentDigest: "6".repeat(64) },
+      ),
+    ).toBe(false);
   });
 });

@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
 import {
   NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
+  type NotesVerificationEvidence,
   type NotesVerificationEvidenceV1,
+  type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
 import { hasUnsafeShellSyntax, splitShellCommandSegments } from "../tools/read-only-bash.js";
+import { getSafeToolEnv } from "../tools/safe-env.js";
 
 export interface VerificationCommandClassification {
   accepted: boolean;
@@ -31,13 +34,19 @@ export type RoadmapVerificationEvidenceUnmetCode =
   | "stale-evidence"
   | "duplicate-evidence"
   | "criterion-evidence-mismatch"
-  | "unmatched-evidence";
+  | "unmatched-evidence"
+  | "missing-verification-bindings";
 
 export interface RoadmapVerificationCriterionCoverage {
   criterionIndex: number;
   criterion: string;
   evidence: string;
   command: string;
+  executionId: string;
+  observedAt: string;
+  cwd: string;
+  safeToolEnvironmentDigest: string;
+  workspace: NotesWorkspaceSnapshotV1;
 }
 
 export type RoadmapVerificationEvidenceEvaluation =
@@ -422,18 +431,20 @@ export function formatVerificationCommandDisplay(command: string): string {
 }
 export function createDurableVerificationEvidence(input: {
   coverage: readonly RoadmapVerificationCriterionCoverage[];
-  workspace: NotesWorkspaceSnapshotV1;
-  observedAt: string;
-}): NotesVerificationEvidenceV1[] {
+}): NotesVerificationEvidenceV2[] {
   return input.coverage.map((coverage) => ({
+    version: 2,
+    executionId: coverage.executionId,
     commandHash: createHash("sha256").update(coverage.command).digest("hex"),
     commandDisplay: formatVerificationCommandDisplay(coverage.command),
+    cwd: coverage.cwd,
     exitCode: 0,
     classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
     verdict: "approved",
     criterionId: roadmapCriterionId(coverage.criterionIndex, coverage.criterion),
-    observedAt: input.observedAt,
-    workspace: structuredClone(input.workspace),
+    observedAt: coverage.observedAt,
+    workspace: structuredClone(coverage.workspace),
+    safeToolEnvironmentDigest: coverage.safeToolEnvironmentDigest,
   }));
 }
 
@@ -446,42 +457,56 @@ export interface DurableVerificationEvidenceEvaluation {
 
 export function evaluateDurableVerificationEvidence(input: {
   doneWhen: readonly string[];
-  evidence: readonly NotesVerificationEvidenceV1[];
+  evidence: readonly NotesVerificationEvidence[];
+  verificationBindings: readonly RoadmapVerificationBinding[];
   workspace: NotesWorkspaceSnapshotV1;
+  safeToolEnvironmentDigest: string;
   classifierVersion?: string;
 }): DurableVerificationEvidenceEvaluation {
   const classifierVersion = input.classifierVersion ?? ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
   const staleCriterionIds: string[] = [];
   const missingCriterionIds: string[] = [];
   const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
-  const commandHashes = new Set<string>();
+  const usedExecutionIds = new Set<string>();
   for (let offset = 0; offset < input.doneWhen.length; offset += 1) {
     const criterion = input.doneWhen[offset] ?? "";
     const criterionId = roadmapCriterionId(offset + 1, criterion);
     const candidates = input.evidence.filter((item) => item.criterionId === criterionId);
-    const current = [...candidates]
-      .reverse()
-      .find(
-        (item) =>
-          item.exitCode === 0 &&
-          item.verdict === "approved" &&
-          item.classifierVersion === classifierVersion &&
-          workspaceEvidenceMatches(item.workspace, input.workspace),
-      );
-    if (!current) {
+    const binding = input.verificationBindings.find(
+      (candidate) => candidate.criterionId === criterionId,
+    );
+    const current = candidates.find(
+      (item): item is NotesVerificationEvidenceV2 =>
+        !!binding &&
+        "version" in item &&
+        item.version === 2 &&
+        item.executionId === binding.executionId &&
+        item.exitCode === 0 &&
+        item.verdict === "approved" &&
+        item.classifierVersion === classifierVersion &&
+        workspaceVerificationEvidenceMatches(
+          {
+            workspace: item.workspace,
+            safeToolEnvironmentDigest: item.safeToolEnvironmentDigest,
+          },
+          input,
+        ),
+    );
+    if (!current || usedExecutionIds.has(current.executionId)) {
       (candidates.length > 0 ? staleCriterionIds : missingCriterionIds).push(criterionId);
       continue;
     }
-    if (commandHashes.has(current.commandHash)) {
-      missingCriterionIds.push(criterionId);
-      continue;
-    }
-    commandHashes.add(current.commandHash);
+    usedExecutionIds.add(current.executionId);
     criterionCoverage.push({
       criterionIndex: offset + 1,
       criterion,
       evidence: current.commandDisplay,
       command: current.commandDisplay,
+      executionId: current.executionId,
+      observedAt: current.observedAt,
+      cwd: current.cwd,
+      safeToolEnvironmentDigest: current.safeToolEnvironmentDigest,
+      workspace: current.workspace,
     });
   }
   return {
@@ -492,18 +517,27 @@ export function evaluateDurableVerificationEvidence(input: {
   };
 }
 
-function workspaceEvidenceMatches(
-  left: NotesWorkspaceSnapshotV1,
-  right: NotesWorkspaceSnapshotV1,
+export function workspaceVerificationEvidenceMatches(
+  left: {
+    workspace: NotesWorkspaceSnapshotV1;
+    safeToolEnvironmentDigest: string;
+  },
+  right: {
+    workspace: NotesWorkspaceSnapshotV1;
+    safeToolEnvironmentDigest: string;
+  },
 ): boolean {
+  const leftWorkspace = left.workspace;
+  const rightWorkspace = right.workspace;
   return (
-    left.version === right.version &&
-    left.repository.projectKey === right.repository.projectKey &&
-    left.repository.identityHash === right.repository.identityHash &&
-    left.repository.rootCommit === right.repository.rootCommit &&
-    left.headCommit === right.headCommit &&
-    left.worktreeDigest === right.worktreeDigest &&
-    left.clean === right.clean
+    leftWorkspace.version === rightWorkspace.version &&
+    leftWorkspace.repository.projectKey === rightWorkspace.repository.projectKey &&
+    leftWorkspace.repository.identityHash === rightWorkspace.repository.identityHash &&
+    leftWorkspace.repository.rootCommit === rightWorkspace.repository.rootCommit &&
+    leftWorkspace.headCommit === rightWorkspace.headCommit &&
+    leftWorkspace.worktreeDigest === rightWorkspace.worktreeDigest &&
+    leftWorkspace.clean === rightWorkspace.clean &&
+    left.safeToolEnvironmentDigest === right.safeToolEnvironmentDigest
   );
 }
 
@@ -561,9 +595,27 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
 
 export type RoadmapShellEvidence = Omit<VerificationEvidence, "status"> & {
   status: VerificationEvidence["status"] | "unclassified";
+  executionId?: string;
+  observedAt?: string;
+  cwd?: string;
+  safeToolEnvironmentDigest?: string;
   workspace?: NotesWorkspaceSnapshotV1;
   classifierVersion?: string;
 };
+
+export function safeToolEnvironmentDigest(
+  environment: Readonly<Record<string, string>> = getSafeToolEnv(),
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.entries(environment).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      ),
+    )
+    .digest("hex");
+}
 
 function collectShellEvidence(messages: readonly Message[]): RoadmapShellEvidence[] {
   const calls = new Map<
@@ -627,6 +679,8 @@ const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "grep",
   "ls",
   "read",
+  "roadmap_bind",
+  "roadmap_checkpoint",
   "roadmap_inspect",
   "roadmap_phase_draft",
   "roadmap_status",
@@ -656,6 +710,8 @@ interface BashExecutionDiagnostics {
   command?: unknown;
   reason?: unknown;
   exitCode?: unknown;
+  cwd?: unknown;
+  startedAt?: unknown;
 }
 
 // simplification: Retain 100 executions; persist per-phase evidence if deeper history is required.
@@ -687,12 +743,16 @@ export class SessionVerificationEvidenceLedger {
     const command = typeof diagnostics?.command === "string" ? diagnostics.command.trim() : "";
     const requestedCommand =
       typeof input.args.command === "string" ? input.args.command.trim() : "";
+    const cwd = typeof diagnostics?.cwd === "string" ? diagnostics.cwd.trim() : "";
+    const startedAt = typeof diagnostics?.startedAt === "number" ? diagnostics.startedAt : NaN;
     if (
       !executionId ||
       executionId.length > SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH ||
       !command ||
       command.length > NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH ||
-      command !== requestedCommand
+      command !== requestedCommand ||
+      !cwd ||
+      !Number.isFinite(startedAt)
     ) {
       return;
     }
@@ -719,11 +779,18 @@ export class SessionVerificationEvidenceLedger {
         reason: passed ? classification.reason : "bounded check did not exit successfully",
       };
     }
+    Object.assign(evidence, {
+      executionId,
+      observedAt: new Date(startedAt).toISOString(),
+      cwd,
+      safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
+    });
     if (input.workspace) {
       evidence.workspace = structuredClone(input.workspace);
       evidence.classifierVersion = ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
     }
-    this.entries.delete(executionId);
+    const existing = this.entries.get(executionId);
+    if (existing) return;
     this.entries.set(executionId, { generation: this.generation, evidence });
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       const oldestExecutionId = this.entries.keys().next().value;
@@ -781,28 +848,16 @@ export function partitionVerificationMessagesForWorkspaceMutation(messages: read
   };
 }
 
-function normalizedEvidenceText(value: string): string {
-  return value
-    .replace(/[`'"\r\n]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+export interface RoadmapVerificationBinding {
+  criterionId: string;
+  executionId: string;
 }
 
-function referencesCommand(evidence: string, command: string): boolean {
-  const normalizedCommand = normalizedEvidenceText(command);
-  return (
-    normalizedCommand.length > 0 && normalizedEvidenceText(evidence).includes(normalizedCommand)
-  );
-}
-
-/**
- * Bind a passed Roadmap review handoff to harness-owned shell evidence.
- * Each Done When item must cite one distinct, current-workspace command verbatim.
- */
+/** Bind every Done When criterion to one immutable, harness-owned shell execution. */
 export function evaluateRoadmapVerificationEvidence(input: {
   doneWhen: readonly string[];
   evidence: readonly string[];
+  verificationBindings?: readonly RoadmapVerificationBinding[];
   expectedRevision: number | undefined;
   currentMessages: readonly Message[];
   staleMessages?: readonly Message[];
@@ -811,65 +866,83 @@ export function evaluateRoadmapVerificationEvidence(input: {
 }): RoadmapVerificationEvidenceEvaluation {
   const unmet = new Set<RoadmapVerificationEvidenceUnmetCode>();
   if (input.expectedRevision === undefined) unmet.add("missing-expected-revision");
-  if (input.evidence.length !== input.doneWhen.length) unmet.add("criterion-evidence-mismatch");
+  const bindings = input.verificationBindings ?? [];
+  if (bindings.length === 0) unmet.add("missing-verification-bindings");
+  if (bindings.length !== input.doneWhen.length) unmet.add("criterion-evidence-mismatch");
 
-  const normalizedItems = input.evidence.map(normalizedEvidenceText);
-  if (new Set(normalizedItems).size !== normalizedItems.length) unmet.add("duplicate-evidence");
+  const criterionIds = input.doneWhen.map((criterion, index) =>
+    roadmapCriterionId(index + 1, criterion),
+  );
+  const knownCriteria = new Set(criterionIds);
+  const boundCriterionIds = bindings.map((binding) => binding.criterionId);
+  const boundExecutionIds = bindings.map((binding) => binding.executionId);
+  if (
+    new Set(boundCriterionIds).size !== boundCriterionIds.length ||
+    new Set(boundExecutionIds).size !== boundExecutionIds.length
+  ) {
+    unmet.add("duplicate-evidence");
+  }
+  if (boundCriterionIds.some((criterionId) => !knownCriteria.has(criterionId))) {
+    unmet.add("criterion-evidence-mismatch");
+  }
 
-  const current = [
-    ...collectShellEvidence(input.currentMessages),
-    ...(input.currentLedgerEvidence ?? []),
-  ];
-  const stale = [
-    ...collectShellEvidence(input.staleMessages ?? []),
-    ...(input.staleLedgerEvidence ?? []),
-  ];
-  const usedCommands = new Set<string>();
+  const current = input.currentLedgerEvidence ?? [];
+  const stale = input.staleLedgerEvidence ?? [];
   const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
-  let approvedMatches = 0;
-
-  for (const [criterionOffset, item] of input.evidence.entries()) {
-    const matches = current.filter((candidate) => referencesCommand(item, candidate.command));
-    if (new Set(matches.map((candidate) => normalizedEvidenceText(candidate.command))).size > 1) {
-      unmet.add("unmatched-evidence");
+  for (const [offset, criterionId] of criterionIds.entries()) {
+    const criterion = input.doneWhen[offset] ?? "";
+    const binding = bindings.find((candidate) => candidate.criterionId === criterionId);
+    if (!binding) {
+      unmet.add("missing-approved-evidence");
       continue;
     }
-    const passed = matches.at(-1);
-    if (passed?.status === "passed") {
-      const commandKey = normalizedEvidenceText(passed.command);
-      if (usedCommands.has(commandKey)) unmet.add("duplicate-evidence");
-      else {
-        usedCommands.add(commandKey);
-        approvedMatches += 1;
-        criterionCoverage.push({
-          criterionIndex: criterionOffset + 1,
-          criterion: input.doneWhen[criterionOffset] ?? "",
-          evidence: item,
-          command: passed.command,
-        });
-      }
+    const candidate = current.find((item) => item.executionId === binding.executionId);
+    if (!candidate) {
+      unmet.add(
+        stale.some((item) => item.executionId === binding.executionId)
+          ? "stale-evidence"
+          : "unmatched-evidence",
+      );
       continue;
     }
-    if (matches.some((candidate) => candidate.status === "rejected")) {
-      unmet.add("rejected-evidence");
-      continue;
-    }
-    if (matches.some((candidate) => candidate.status === "failed")) {
-      unmet.add("failed-evidence");
-      continue;
-    }
-    if (matches.some((candidate) => candidate.status === "unclassified")) {
+    const classification = classifyVerificationCommand(candidate.command);
+    if (!classification.candidate) {
       unmet.add("unclassified-evidence");
       continue;
     }
-    if (stale.some((candidate) => referencesCommand(item, candidate.command))) {
+    if (!classification.accepted || candidate.status === "rejected") {
+      unmet.add("rejected-evidence");
+      continue;
+    }
+    if (candidate.status !== "passed") {
+      unmet.add(candidate.status === "unclassified" ? "unclassified-evidence" : "failed-evidence");
+      continue;
+    }
+    if (
+      candidate.classifierVersion !== ROADMAP_VERIFICATION_CLASSIFIER_VERSION ||
+      !candidate.executionId ||
+      !candidate.observedAt ||
+      !candidate.cwd ||
+      !candidate.safeToolEnvironmentDigest ||
+      !candidate.workspace
+    ) {
       unmet.add("stale-evidence");
       continue;
     }
-    unmet.add("unmatched-evidence");
+    criterionCoverage.push({
+      criterionIndex: offset + 1,
+      criterion,
+      evidence: input.evidence[offset] ?? candidate.command,
+      command: candidate.command,
+      executionId: candidate.executionId,
+      observedAt: candidate.observedAt,
+      cwd: candidate.cwd,
+      safeToolEnvironmentDigest: candidate.safeToolEnvironmentDigest,
+      workspace: candidate.workspace,
+    });
   }
 
-  if (approvedMatches !== input.doneWhen.length) unmet.add("missing-approved-evidence");
+  if (criterionCoverage.length !== input.doneWhen.length) unmet.add("missing-approved-evidence");
   if (unmet.size > 0) return { ready: false, unmetEvidenceCodes: [...unmet] };
   return { ready: true, unmetEvidenceCodes: [], criterionCoverage };
 }

@@ -157,6 +157,7 @@ import {
   classifyVerificationCommand,
   evaluateRoadmapVerificationEvidence as evaluateRoadmapVerificationEvidenceCore,
   partitionVerificationMessagesForWorkspaceMutation,
+  type RoadmapVerificationBinding,
   type RoadmapVerificationEvidenceEvaluation,
   type SessionVerificationEvidenceLedgerSnapshot,
 } from "./verification-evidence.js";
@@ -3799,6 +3800,7 @@ export class AgentSession {
   evaluateRoadmapVerificationEvidence(input: {
     doneWhen: readonly string[];
     evidence: readonly string[];
+    verificationBindings: readonly RoadmapVerificationBinding[];
     expectedRevision: number | undefined;
   }): RoadmapVerificationEvidenceEvaluation {
     const partition =

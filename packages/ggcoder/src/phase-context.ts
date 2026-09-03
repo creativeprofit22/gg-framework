@@ -1,4 +1,5 @@
 import { estimateTokens } from "./core/compaction/token-estimator.js";
+import { roadmapCriterionId } from "./core/verification-evidence.js";
 import {
   validateNotesReferenceProjection,
   validateNotesSessionLink,
@@ -365,15 +366,19 @@ function renderActivePhaseInitialPrompt(data: string): string {
   ].join("\n");
 }
 
-export function buildActivePhaseVerificationFollowUp(context: ActivePhaseContextV1): string {
-  const criteria = context.phase.doneWhen
-    .map((criterion, index) => `${index + 1}. ${criterion}`)
+function renderCriterionBindings(criteria: readonly string[]): string {
+  return criteria
+    .map((criterion, index) => `${roadmapCriterionId(index + 1, criterion)} — ${criterion}`)
     .join("\n");
+}
+
+export function buildActivePhaseVerificationFollowUp(context: ActivePhaseContextV1): string {
+  const criteria = renderCriterionBindings(context.phase.doneWhen);
   return [
     "Implementation is not ready to stop until the active Roadmap phase is verified.",
-    "Run the phase completion checks now. Then call roadmap_status with typed verification and exactly one evidence item per Done When criterion, in the same order:",
+    "Run one bounded check per Done When criterion, then bind each criterion ID to its bash execution ID using verification_bindings:",
     criteria,
-    'Use transition: "done" only when verification.result is "passed" and every criterion has evidence.',
+    'Use transition: "done" only when verification.result is "passed" and every criterion has one unique execution binding.',
     'If verification fails or is incomplete, report transition: "in-progress" with a concrete reason; use "blocked" only for a concrete external dependency.',
     "Done records completion intent; the owning implementation run must settle successfully before the phase becomes Done.",
   ].join("\n");
@@ -385,7 +390,8 @@ function renderPackageText(context: ActivePhaseContextV1): Omit<ActivePhasePacka
     context.executionStage === "implementing"
       ? [
           "Complete only this phase, then run its completion checks before stopping.",
-          "Use roadmap_status to request Done only with passed verification and exactly one evidence item per Done When criterion, in order.",
+          "Use roadmap_status to request Done only with passed verification and one unique execution binding per criterion.",
+          renderCriterionBindings(context.phase.doneWhen),
           "Failed or incomplete verification stays in progress, unless a concrete external dependency blocks work.",
         ]
       : [];

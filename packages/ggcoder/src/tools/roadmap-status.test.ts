@@ -23,6 +23,7 @@ describe("RoadmapStatusParams", () => {
       evidence: [],
       verification: null,
       proposed_references: [],
+      verification_bindings: [],
     });
   });
 
@@ -44,26 +45,33 @@ describe("RoadmapStatusParams", () => {
     ).toThrow();
   });
 
-  it("requires passed verification and evidence for Done", () => {
+  it("requires passed verification and explicit bindings for Done", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "done" })).toThrow();
     expect(
       RoadmapStatusParams.parse({
         ...base,
         transition: "done",
-        evidence: [" pnpm test exited successfully "],
+        evidence: [" Seven bounded checks passed. "],
+        verification_bindings: [
+          { criterion_id: ` ${"a".repeat(64)} `, execution_id: " execution-1 " },
+        ],
         verification: { result: "passed" },
       }),
     ).toMatchObject({
       transition: "done",
-      evidence: ["pnpm test exited successfully"],
+      evidence: ["Seven bounded checks passed."],
+      verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
       verification: { result: "passed" },
     });
     expect(() =>
       RoadmapStatusParams.parse({
         ...base,
         transition: "done",
-        evidence: ["pnpm test failed"],
-        verification: { result: "failed", reason: "Tests failed" },
+        verification_bindings: [
+          { criterion_id: "a".repeat(64), execution_id: "execution-1" },
+          { criterion_id: "b".repeat(64), execution_id: "execution-1" },
+        ],
+        verification: { result: "passed" },
       }),
     ).toThrow();
   });

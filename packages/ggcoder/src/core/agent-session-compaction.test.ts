@@ -10,6 +10,7 @@ import { MODELS } from "./model-registry.js";
 import { estimateConversationTokens } from "./compaction/token-estimator.js";
 import type * as McpModule from "./mcp/index.js";
 import { approvedPlanContentHash } from "./session-manager.js";
+import { roadmapCriterionId } from "./verification-evidence.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
@@ -49,6 +50,18 @@ vi.mock("./mcp/index.js", async () => {
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
 let tmpProject: string;
+
+const verificationWorkspace = () => ({
+  version: 1 as const,
+  repository: {
+    projectKey: tmpProject,
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  },
+  headCommit: "3".repeat(40),
+  worktreeDigest: "4".repeat(64),
+  clean: true,
+});
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -274,6 +287,7 @@ describe("AgentSession verification evidence compaction", () => {
             executionId: "verify-1",
             command,
             cwd: tmpProject,
+            startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
             reason: "completed",
             exitCode: 0,
           },
@@ -289,6 +303,7 @@ describe("AgentSession verification evidence compaction", () => {
       cwd: tmpProject,
       systemPrompt: "worker system prompt",
       transient: true,
+      captureVerificationWorkspace: async () => verificationWorkspace(),
     });
 
     await session.initialize();
@@ -302,13 +317,22 @@ describe("AgentSession verification evidence compaction", () => {
       session.evaluateRoadmapVerificationEvidence({
         doneWhen: ["types pass"],
         evidence: [command],
+        verificationBindings: [
+          { criterionId: roadmapCriterionId(1, "types pass"), executionId: "verify-1" },
+        ],
         expectedRevision: 1,
       }),
-    ).toEqual({
+    ).toMatchObject({
       ready: true,
       unmetEvidenceCodes: [],
       criterionCoverage: [
-        { criterionIndex: 1, criterion: "types pass", evidence: command, command },
+        {
+          criterionIndex: 1,
+          criterion: "types pass",
+          evidence: command,
+          command,
+          executionId: "verify-1",
+        },
       ],
     });
     await session.dispose();
@@ -327,6 +351,8 @@ describe("AgentSession verification evidence compaction", () => {
           bashDiagnostics: {
             executionId: "verify-reset",
             command,
+            cwd: tmpProject,
+            startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
             reason: "completed",
             exitCode: 0,
           },
@@ -342,6 +368,7 @@ describe("AgentSession verification evidence compaction", () => {
       cwd: tmpProject,
       systemPrompt: "worker system prompt",
       transient: true,
+      captureVerificationWorkspace: async () => verificationWorkspace(),
     });
 
     await session.initialize();
@@ -352,6 +379,9 @@ describe("AgentSession verification evidence compaction", () => {
       session.evaluateRoadmapVerificationEvidence({
         doneWhen: ["types pass"],
         evidence: [command],
+        verificationBindings: [
+          { criterionId: roadmapCriterionId(1, "types pass"), executionId: "verify-reset" },
+        ],
         expectedRevision: 1,
       }),
     ).toEqual({

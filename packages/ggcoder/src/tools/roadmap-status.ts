@@ -5,8 +5,6 @@ import {
   NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
   NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
   NOTES_ROADMAP_REASON_MAX_LENGTH,
-  isNotesRoadmapTransitionEvidenceSatisfied,
-  isNotesVerificationEvidenceSatisfied,
   type NotesRoadmapStatusOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
@@ -65,6 +63,19 @@ const roadmapStatusInputSchema: JsonSchema = {
       },
       required: ["result"],
       additionalProperties: false,
+    },
+    verification_bindings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          criterion_id: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          execution_id: { type: "string", minLength: 1, maxLength: 128 },
+        },
+        required: ["criterion_id", "execution_id"],
+        additionalProperties: false,
+      },
+      maxItems: 20,
     },
     proposed_references: {
       type: "array",
@@ -194,6 +205,16 @@ const Evidence = z
   )
   .max(NOTES_ROADMAP_EVIDENCE_MAX_ITEMS)
   .default([]);
+const VerificationBinding = z
+  .object({
+    criterion_id: z
+      .string()
+      .trim()
+      .regex(/^[a-f0-9]{64}$/),
+    execution_id: z.string().trim().min(1).max(128),
+  })
+  .strict();
+const VerificationBindings = z.array(VerificationBinding).max(20).default([]);
 const ProposedReferences = z
   .array(RoadmapReferenceProposalParams)
   .max(NOTES_ROADMAP_PROPOSALS_MAX_ITEMS)
@@ -220,6 +241,7 @@ const commonFields = {
   expected_revision: z.number().int().nonnegative(),
   progress: Progress,
   evidence: Evidence,
+  verification_bindings: VerificationBindings,
   verification: Verification,
   proposed_references: ProposedReferences,
 };
@@ -268,25 +290,25 @@ export const RoadmapStatusParams = z
         blocker: z.never().optional(),
         required_external_action: z.never().optional(),
         evidence: Evidence,
+        verification_bindings: VerificationBindings.refine(
+          (bindings) => bindings.length > 0,
+          "Done reports require explicit criterion-to-execution bindings; rerun legacy checks once.",
+        ),
         verification: PassedVerification,
       })
       .strict(),
   ])
   .superRefine((report, context) => {
-    if (!isNotesRoadmapTransitionEvidenceSatisfied(report.transition, report.evidence)) {
-      context.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: "Done reports require at least one evidence item",
-      });
-    }
+    const criterionIds = report.verification_bindings.map((binding) => binding.criterion_id);
+    const executionIds = report.verification_bindings.map((binding) => binding.execution_id);
     if (
-      !isNotesVerificationEvidenceSatisfied(report.verification?.result ?? null, report.evidence)
+      new Set(criterionIds).size !== criterionIds.length ||
+      new Set(executionIds).size !== executionIds.length
     ) {
       context.addIssue({
         code: "custom",
-        path: ["evidence"],
-        message: "passed verification requires at least one evidence item",
+        path: ["verification_bindings"],
+        message: "Verification bindings require unique criterion and execution IDs",
       });
     }
   });

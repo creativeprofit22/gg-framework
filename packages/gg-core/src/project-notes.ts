@@ -132,12 +132,22 @@ export interface NotesVerificationEvidenceV1 {
   state?: "current" | "needs-revalidation";
 }
 
+export interface NotesVerificationEvidenceV2 extends NotesVerificationEvidenceV1 {
+  version: 2;
+  executionId: string;
+  cwd: string;
+  safeToolEnvironmentDigest: string;
+}
+
+export type NotesVerificationEvidence = NotesVerificationEvidenceV1 | NotesVerificationEvidenceV2;
+
 export interface NotesPendingCompletionV1 {
   completionId: string;
   statusRevision: number;
   runJournal: { sessionPath: string | null; generation: number };
   planHash: string;
   workspace: NotesWorkspaceSnapshotV1;
+  safeToolEnvironmentDigest?: string;
 }
 
 export type NotesPhaseExecutionState =
@@ -152,7 +162,7 @@ export interface NotesPhaseExecutionV1 {
   state: NotesPhaseExecutionState;
   repository: NotesRepositoryIdentityV1;
   plan: NotesApprovedPlanV1 | null;
-  evidence: NotesVerificationEvidenceV1[];
+  evidence: NotesVerificationEvidence[];
   pendingCompletion: NotesPendingCompletionV1 | null;
   lastSession: NotesSessionLink | null;
   migration: {
@@ -789,12 +799,24 @@ const VERIFICATION_EVIDENCE_KEYS = [
   "workspace",
 ];
 const VERIFICATION_EVIDENCE_STATE_KEYS = [...VERIFICATION_EVIDENCE_KEYS, "state"];
+const VERIFICATION_EVIDENCE_V2_KEYS = [
+  "version",
+  "executionId",
+  "cwd",
+  "safeToolEnvironmentDigest",
+  ...VERIFICATION_EVIDENCE_KEYS,
+];
+const VERIFICATION_EVIDENCE_V2_STATE_KEYS = [...VERIFICATION_EVIDENCE_V2_KEYS, "state"];
 const PENDING_COMPLETION_KEYS = [
   "completionId",
   "statusRevision",
   "runJournal",
   "planHash",
   "workspace",
+];
+const PENDING_COMPLETION_ENVIRONMENT_KEYS = [
+  ...PENDING_COMPLETION_KEYS,
+  "safeToolEnvironmentDigest",
 ];
 const RUN_JOURNAL_KEYS = ["sessionPath", "generation"];
 const EXECUTION_MIGRATION_KEYS = ["source", "reconciledAt"];
@@ -1913,9 +1935,14 @@ function validateVerificationEvidence(
   pathPrefix: string,
   repository: NotesRepositoryIdentityV1,
 ): NotesValidationError | null {
+  const isV2 = isRecord(value) && value.version === 2;
   if (
-    !isRecordWithKeys(value, VERIFICATION_EVIDENCE_KEYS) &&
-    !isRecordWithKeys(value, VERIFICATION_EVIDENCE_STATE_KEYS)
+    (!isV2 &&
+      !isRecordWithKeys(value, VERIFICATION_EVIDENCE_KEYS) &&
+      !isRecordWithKeys(value, VERIFICATION_EVIDENCE_STATE_KEYS)) ||
+    (isV2 &&
+      !isRecordWithKeys(value, VERIFICATION_EVIDENCE_V2_KEYS) &&
+      !isRecordWithKeys(value, VERIFICATION_EVIDENCE_V2_STATE_KEYS))
   ) {
     return validationError(pathPrefix, "invalid verification evidence");
   }
@@ -1937,11 +1964,31 @@ function validateVerificationEvidence(
   if (value.verdict !== "approved" && value.verdict !== "rejected") {
     return validationError(`${pathPrefix}.verdict`, "unknown classifier verdict");
   }
-  if (!isBoundedNonEmptyString(value.criterionId, 256)) {
-    return validationError(`${pathPrefix}.criterionId`, "expected a bounded criterion ID");
+  if (
+    (isV2 && !isSha256(value.criterionId)) ||
+    (!isV2 && !isBoundedNonEmptyString(value.criterionId, 256))
+  ) {
+    return validationError(
+      `${pathPrefix}.criterionId`,
+      isV2 ? "expected a lowercase SHA-256 criterion ID" : "expected a bounded criterion ID",
+    );
   }
   if (!isTimestamp(value.observedAt)) {
     return validationError(`${pathPrefix}.observedAt`, "expected an ISO timestamp");
+  }
+  if (isV2) {
+    if (!isBoundedNonEmptyString(value.executionId, 128)) {
+      return validationError(`${pathPrefix}.executionId`, "expected a bounded execution ID");
+    }
+    if (!isBoundedNonEmptyString(value.cwd, 4_096)) {
+      return validationError(`${pathPrefix}.cwd`, "expected a bounded working directory");
+    }
+    if (!isSha256(value.safeToolEnvironmentDigest)) {
+      return validationError(
+        `${pathPrefix}.safeToolEnvironmentDigest`,
+        "expected a lowercase SHA-256 hash",
+      );
+    }
   }
   if ("state" in value && value.state !== "current" && value.state !== "needs-revalidation") {
     return validationError(`${pathPrefix}.state`, "unknown evidence state");
@@ -1955,7 +2002,10 @@ function validatePendingCompletion(
   repository: NotesRepositoryIdentityV1,
 ): NotesValidationError | null {
   if (value === null) return null;
-  if (!isRecordWithKeys(value, PENDING_COMPLETION_KEYS)) {
+  if (
+    !isRecordWithKeys(value, PENDING_COMPLETION_KEYS) &&
+    !isRecordWithKeys(value, PENDING_COMPLETION_ENVIRONMENT_KEYS)
+  ) {
     return validationError(pathPrefix, "invalid pending completion");
   }
   if (!isBoundedNonEmptyString(value.completionId, 256)) {
@@ -1978,6 +2028,12 @@ function validatePendingCompletion(
   }
   if (!isSha256(value.planHash)) {
     return validationError(`${pathPrefix}.planHash`, "expected a lowercase SHA-256 hash");
+  }
+  if ("safeToolEnvironmentDigest" in value && !isSha256(value.safeToolEnvironmentDigest)) {
+    return validationError(
+      `${pathPrefix}.safeToolEnvironmentDigest`,
+      "expected a lowercase SHA-256 hash",
+    );
   }
   return validateWorkspaceSnapshot(value.workspace, `${pathPrefix}.workspace`, repository);
 }

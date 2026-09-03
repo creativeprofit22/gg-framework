@@ -44,6 +44,7 @@ import {
   type NotesPhase,
   type NotesPhaseExecutionV1,
   type NotesPhaseStatus,
+  type NotesVerificationEvidenceV2,
   type NotesRoadmapDirectPhaseAdvancementCheckpoint,
   type NotesRoadmapImplementationCheckpoint,
   type NotesRoadmapPhaseAdvancementCheckpoint,
@@ -1239,6 +1240,62 @@ describe("project Notes contract", () => {
 });
 
 describe("durable phase execution contracts", () => {
+  it("round-trips legacy V1 and execution-backed V2 evidence without rewriting", async () => {
+    const document = await fixture();
+    const execution = durableExecution();
+    const legacyEvidence = execution.evidence[0]!;
+    const v2Evidence: NotesVerificationEvidenceV2 = {
+      version: 2,
+      executionId: "execution-231",
+      commandHash: "2".repeat(64),
+      commandDisplay: "cargo test --manifest-path gg-app/src-tauri/Cargo.toml",
+      cwd: "E:/Projects/gg-framework-fork",
+      exitCode: 0,
+      classifierVersion: "roadmap-verification-v1",
+      verdict: "approved",
+      criterionId: "3".repeat(64),
+      observedAt: NOW,
+      workspace: legacyEvidence.workspace,
+      safeToolEnvironmentDigest: "4".repeat(64),
+    };
+    execution.evidence.push(v2Evidence);
+    document.phases[0]!.execution = execution;
+
+    const result = validateNotesDocumentV3(document);
+    expect(result).toEqual({ ok: true, document });
+    expect(document.phases[0]!.execution!.evidence).toEqual([legacyEvidence, v2Evidence]);
+  });
+
+  it.each([
+    ["execution ID", (evidence: NotesVerificationEvidenceV2) => (evidence.executionId = "")],
+    [
+      "environment digest",
+      (evidence: NotesVerificationEvidenceV2) =>
+        (evidence.safeToolEnvironmentDigest = "not-a-digest"),
+    ],
+    ["command digest", (evidence: NotesVerificationEvidenceV2) => (evidence.commandHash = "BAD")],
+    ["criterion ID", (evidence: NotesVerificationEvidenceV2) => (evidence.criterionId = "BAD")],
+  ])("rejects malformed V2 %s", (_label, mutate) => {
+    const execution = durableExecution();
+    const evidence: NotesVerificationEvidenceV2 = {
+      version: 2,
+      executionId: "execution-232",
+      commandHash: "2".repeat(64),
+      commandDisplay: "pnpm check",
+      cwd: "E:/Projects/gg-framework-fork",
+      exitCode: 0,
+      classifierVersion: "roadmap-verification-v1",
+      verdict: "approved",
+      criterionId: "3".repeat(64),
+      observedAt: NOW,
+      workspace: execution.evidence[0]!.workspace,
+      safeToolEnvironmentDigest: "4".repeat(64),
+    };
+    mutate(evidence);
+    execution.evidence = [evidence];
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
+  });
+
   it("accepts additive execution while preserving legacy v3 phases", async () => {
     const legacy = await fixture();
     expect(validateNotesDocumentV3(legacy)).toEqual({ ok: true, document: legacy });

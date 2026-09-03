@@ -82,8 +82,16 @@ describe("specialist chat agents", () => {
     expect(options.sessionRootDir).toBe(path.resolve("/tmp/gg/chat-sessions/research"));
     expect(options.allowedTools).toBeUndefined();
     expect(options.additionalTools?.map((tool) => tool.name)).toContain("delegate_to_agent");
-    expect(options.systemPrompt).toContain("available read-only research tools");
+    expect(options.systemPrompt).toContain("curated Steroids corpus before the open web");
+    expect(options.systemPrompt).toContain("inspect the owning files, callers, tests");
+    expect(options.systemPrompt).toContain("automatically discover suitable repositories");
+    expect(options.systemPrompt).toContain("explicit approval before adding any repository");
+    expect(options.systemPrompt).toContain("cannot prove local deadness");
     expect(options.systemPrompt).toContain("Do not edit or create files");
+    expect(options.systemPrompt).not.toContain("kencode-search");
+    expect(options.systemPrompt).not.toContain("at least eight serious candidates");
+    expect(options.systemPrompt).not.toContain("three consecutive rounds");
+    expect(options.systemPrompt).not.toContain("roadmap JSON");
     expect(options.systemPrompt).not.toContain("Durable memory curation:");
     expect(options.systemPrompt).not.toContain("Jiwa curation:");
     expect(options.systemPrompt).not.toContain("delegate_to_agent");
@@ -100,10 +108,11 @@ describe("specialist chat agents", () => {
       "web_fetch",
       "web_search",
       "tool_search",
+      "steroids",
+      "ask_user",
       "roadmap_inspect",
-      "roadmap_phase_draft",
     ]);
-    expect(RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES).toEqual(["mcp__kencode-search__"]);
+    expect(RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES).toEqual([]);
   });
 
   it("retains memory tools and dynamic context when handoff is disabled", () => {
@@ -262,7 +271,7 @@ describe("specialist chat agents", () => {
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
 
       await switchChatAgent(agent, "research", false);
-      expect(scopedNames()).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
+      expect(scopedNames()).toEqual(["roadmap_inspect"]);
       expect(prohibitedNames()).toEqual([]);
       expect(unexpectedResearchTools()).toEqual([]);
       expect(allNames()).toEqual(expectedResearchTools);
@@ -290,9 +299,7 @@ describe("specialist chat agents", () => {
       agent.registerTool(kencodeMcp);
       expect(allNames()).not.toContain("late_future_mutating_tool");
       expect(allNames()).not.toContain("mcp__unknown-mutator__write");
-      expect(allNames()).toEqual(
-        [...expectedResearchTools, "mcp__kencode-search__searchCode"].sort(),
-      );
+      expect(allNames()).toEqual(expectedResearchTools);
 
       const staleInspectTool = internals.tools.find((tool) => tool.name === "roadmap_inspect");
       expect(staleInspectTool).toBeDefined();
@@ -327,12 +334,12 @@ describe("specialist chat agents", () => {
       ).rejects.toThrow("roadmap_inspect is unavailable under the active host policy");
 
       await switchChatAgent(agent, "research", false);
-      expect(scopedNames()).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
+      expect(scopedNames()).toEqual(["roadmap_inspect"]);
       expect(prohibitedNames()).toEqual([]);
       expect(unexpectedResearchTools()).toEqual([]);
       expect(allNames()).not.toContain("late_future_mutating_tool");
       expect(allNames()).not.toContain("mcp__unknown-mutator__write");
-      expect(allNames()).toContain("mcp__kencode-search__searchCode");
+      expect(allNames()).not.toContain("mcp__kencode-search__searchCode");
       await expect(
         staleLateMutator?.execute(
           {},

@@ -126,6 +126,8 @@ describe("app sidecar Research capability contract", () => {
         ...REMOVED_RESEARCH_TOOLS.filter((name) => name !== "delegate_to_agent").map((name) =>
           stubTool(name),
         ),
+        stubTool("steroids", "curated public code"),
+        stubTool("ask_user", "request repository approval"),
         toolSearch,
       ],
       ...createAppSidecarChatRoadmapSessionOptions(roadmapTools),
@@ -171,13 +173,16 @@ describe("app sidecar Research capability contract", () => {
       );
 
       const discovery = String(await toolSearch.execute({ query: "code" }, TOOL_CONTEXT));
-      expect(discovery).toContain("mcp__kencode-search__searchCode");
+      expect(discovery).not.toContain("mcp__kencode-search__searchCode");
       expect(discovery).not.toContain("mcp__unknown-mutator__write");
-      expect(catalog.names()).toEqual(["mcp__unknown-mutator__write"]);
+      expect(catalog.names()).toEqual([
+        "mcp__kencode-search__searchCode",
+        "mcp__unknown-mutator__write",
+      ]);
 
-      await session.prompt("Use the discovered public-code evidence tool.");
+      await session.prompt("Use the curated public-code evidence tool.");
       expect(observedProviderToolNames.at(-1)).toEqual(
-        [...PROVIDER_VISIBLE_RESEARCH_TOOL_NAMES, "mcp__kencode-search__searchCode"].sort(),
+        [...PROVIDER_VISIBLE_RESEARCH_TOOL_NAMES].sort(),
       );
       expect(
         observedProviderToolNames

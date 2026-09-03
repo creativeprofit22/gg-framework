@@ -106,6 +106,7 @@ function pendingDurablePhase() {
       runJournal: { sessionPath: session.sessionPath, generation: 7 },
       planHash: "5".repeat(64),
       workspace,
+      safeToolEnvironmentDigest: "9".repeat(64),
     },
     lastSession: session,
     migration: { source: "native", reconciledAt: NOW },
@@ -305,6 +306,7 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
       repository: repo,
       broadcastSnapshot: vi.fn(),
       captureWorkspaceSnapshot: async () => workspace,
+      captureSafeToolEnvironmentDigest: () => "9".repeat(64),
     });
 
     const outcome = await coordinator.settleDurableRun({
@@ -324,6 +326,38 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     });
     expect(repo.settlePhaseCompletion).not.toHaveBeenCalled();
     expect(repo.clearDurablePhaseCompletion).not.toHaveBeenCalled();
+  });
+
+  it("clears pending completion when the safe verification environment changed", async () => {
+    const { candidate, workspace } = pendingDurablePhase();
+    const repo = repository();
+    repo.load = vi.fn(async () => ({
+      status: "ok" as const,
+      snapshot: { ...snapshot(candidate), revision: 9 },
+      recoveredFromBackup: false,
+    }));
+    repo.clearDurablePhaseCompletion = vi.fn(async () => ({
+      status: "committed" as const,
+      snapshot: snapshot(candidate),
+      phase: candidate,
+    }));
+    const coordinator = new AppSidecarPhaseCompletionCoordinator({
+      cwd: "C:/project",
+      repository: repo,
+      broadcastSnapshot: vi.fn(),
+      captureWorkspaceSnapshot: async () => workspace,
+      captureSafeToolEnvironmentDigest: () => "8".repeat(64),
+    });
+
+    await coordinator.settleDurableRun({
+      phaseId: candidate.id,
+      expectedSession: session,
+      runGeneration: 7,
+      runOutcome: "succeeded",
+    });
+
+    expect(repo.clearDurablePhaseCompletion).toHaveBeenCalledOnce();
+    expect(repo.settleDurablePhaseCompletion).not.toHaveBeenCalled();
   });
 
   it("clears pending completion after a failed owning run", async () => {

@@ -71,6 +71,9 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
     (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
   );
   const verification = latestReport?.verification !== null ? latestReport : undefined;
+  const execution = phase.execution;
+  const evidenceNeedsRevalidation =
+    execution?.evidence.some((item) => item.state === "needs-revalidation") ?? false;
   const implementationComplete =
     implementation?.runOutcome === "succeeded" &&
     implementation.completedPlanSteps.length === implementation.planStepTotal;
@@ -91,22 +94,37 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
               : ("warning" as const),
       }
     : { label: "Missing", detail: "No evidence", tone: "neutral" as const };
-  const verificationSummary = verification?.verification
-    ? {
-        label: verificationLabel(verification.verification),
-        detail: verification.verificationReason,
-        tone:
-          verification.verification === "passed"
-            ? ("positive" as const)
-            : verification.verification === "failed"
-              ? ("negative" as const)
-              : ("warning" as const),
-      }
-    : { label: "Missing", detail: null, tone: "neutral" as const };
-  const pendingIntent =
-    verification?.transition === "done" && verification.statusOutcome === "completion-pending";
+  const verificationSummary = execution
+    ? evidenceNeedsRevalidation
+      ? {
+          label: "Revalidation required",
+          detail: "Durable verification evidence is no longer current.",
+          tone: "warning" as const,
+        }
+      : execution.evidence.length > 0
+        ? {
+            label: "Current",
+            detail: "Durable verification evidence is recorded.",
+            tone: "positive" as const,
+          }
+        : { label: "Missing", detail: null, tone: "neutral" as const }
+    : verification?.verification
+      ? {
+          label: verificationLabel(verification.verification),
+          detail: verification.verificationReason,
+          tone:
+            verification.verification === "passed"
+              ? ("positive" as const)
+              : verification.verification === "failed"
+                ? ("negative" as const)
+                : ("warning" as const),
+        }
+      : { label: "Missing", detail: null, tone: "neutral" as const };
+  const pendingIntent = execution
+    ? execution.pendingCompletion !== null
+    : verification?.transition === "done" && verification.statusOutcome === "completion-pending";
   const linkedSettlement =
-    pendingIntent && implementation?.verificationStatusUpdateId === verification.id;
+    !execution && pendingIntent && implementation?.verificationStatusUpdateId === verification?.id;
   const settlement =
     phase.status === "done"
       ? {
@@ -114,19 +132,25 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
           detail: "All automatic completion gates passed.",
           tone: "positive" as const,
         }
-      : pendingIntent && !linkedSettlement
+      : linkedSettlement
         ? {
-            label: "Pending",
-            detail: "Waiting for the owning implementation run to settle.",
+            label: "Open",
+            detail: "The current run settled without passing every completion gate.",
             tone: "warning" as const,
           }
-        : linkedSettlement
+        : pendingIntent
           ? {
-              label: "Open",
-              detail: "The current run settled without passing every completion gate.",
+              label: "Pending",
+              detail: "Waiting for the owning implementation run to settle.",
               tone: "warning" as const,
             }
-          : { label: "Not requested", detail: null, tone: "neutral" as const };
+          : evidenceNeedsRevalidation
+            ? {
+                label: "Open",
+                detail: "Verification evidence must be revalidated before completion.",
+                tone: "warning" as const,
+              }
+            : { label: "Not requested", detail: null, tone: "neutral" as const };
 
   if (phase.overrides.status !== null) {
     return {
@@ -146,6 +170,26 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
       outcome: "Done",
       blocker: null,
       tone: "positive",
+    };
+  }
+  if (execution && pendingIntent) {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      settlement,
+      outcome: "Settlement pending",
+      blocker: settlement.detail,
+      tone: "warning",
+    };
+  }
+  if (evidenceNeedsRevalidation) {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      settlement,
+      outcome: "Revalidation required",
+      blocker: "Run the affected verification again before requesting completion.",
+      tone: "warning",
     };
   }
   if (verification?.verification === "failed") {
@@ -219,14 +263,32 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
   );
   const verification = latestReport?.verification !== null ? latestReport : undefined;
-  const criterionEvidence = phase.doneWhen.map((criterion, index) => ({
-    criterion,
-    evidence: verification?.evidence[index] ?? null,
-  }));
-  const intentReady =
-    verification?.transition === "done" &&
-    verification.verification === "passed" &&
-    verification.evidence.length === phase.doneWhen.length;
+  const execution = phase.execution;
+  const evidenceNeedsRevalidation =
+    execution?.evidence.some((item) => item.state === "needs-revalidation") ?? false;
+  const criterionEvidence = execution
+    ? execution.evidence.map((item) => ({
+        criterion: item.commandDisplay,
+        evidence: item.state === "needs-revalidation" ? "Needs revalidation" : "Current",
+      }))
+    : phase.doneWhen.map((criterion, index) => ({
+        criterion,
+        evidence: verification?.evidence[index] ?? null,
+      }));
+  const intentReady = execution
+    ? execution.pendingCompletion !== null
+    : verification?.transition === "done" &&
+      verification.verification === "passed" &&
+      verification.evidence.length === phase.doneWhen.length;
+  const intentDetail = execution
+    ? intentReady
+      ? "Durable completion is pending with current verification evidence."
+      : evidenceNeedsRevalidation
+        ? "Durable verification evidence must be revalidated before completion."
+        : "No durable completion request is pending."
+    : intentReady
+      ? "Every Done When criterion has current passed evidence."
+      : "Passed verification and one evidence item per Done When criterion are required.";
 
   return (
     <section
@@ -239,11 +301,7 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
           <dt>Completion intent</dt>
           <dd>
             <strong>{intentReady ? "Ready to settle" : "Not ready"}</strong>
-            <span>
-              {intentReady
-                ? "Every Done When criterion has current passed evidence."
-                : "Passed verification and one evidence item per Done When criterion are required."}
-            </span>
+            <span>{intentDetail}</span>
             {criterionEvidence.length > 0 && (
               <ul className="notes-review-readiness-evidence">
                 {criterionEvidence.map(({ criterion, evidence }, index) => (
@@ -277,7 +335,12 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
         <div>
           <dt>Verification</dt>
           <dd>
-            {verification?.verification ? (
+            {execution ? (
+              <>
+                <strong>{overview.verification.label}</strong>
+                {overview.verification.detail && <span>{overview.verification.detail}</span>}
+              </>
+            ) : verification?.verification ? (
               <>
                 <strong>{verificationLabel(verification.verification)}</strong>
                 <span>

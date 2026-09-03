@@ -18,11 +18,28 @@ import {
   type NotesDocumentV3,
   type ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
+import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+  roadmapCriterionId,
+  safeToolEnvironmentDigest,
+  SessionVerificationEvidenceLedger,
+} from "./core/verification-evidence.js";
 import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const NOW = "2026-08-29T00:00:00.000Z";
 const roots: string[] = [];
 const session = { sessionId: "coding-session", sessionPath: "/sessions/coding.jsonl" };
+const verificationWorkspace = {
+  version: 1 as const,
+  repository: {
+    projectKey: "/project",
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  },
+  headCommit: "3".repeat(40),
+  worktreeDigest: "4".repeat(64),
+  clean: true,
+};
 
 function document(): NotesDocumentV3 {
   const phase = {
@@ -89,17 +106,21 @@ function owningSession(): AppSidecarRoadmapToolSession {
     }),
     getMessages: () => [],
     getState: () => session,
-    evaluateRoadmapVerificationEvidence: () => ({
-      ready: true,
-      unmetEvidenceCodes: [],
-      criterionCoverage: [
+    getVerificationEvidenceLedgerSnapshot: () => ({
+      currentEvidence: [
         {
-          criterionIndex: 0,
-          criterion: "Targeted tests pass",
-          evidence: "pnpm test exited successfully",
           command: "pnpm test",
+          status: "passed",
+          reason: "bounded test command",
+          executionId: "execution-1",
+          observedAt: NOW,
+          cwd: "/project",
+          safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
+          workspace: verificationWorkspace,
+          classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
         },
       ],
+      staleEvidence: [],
     }),
   };
 }
@@ -122,6 +143,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       repository,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => null,
       broadcastNotesSnapshot,
       onCompletionIntent,
@@ -135,6 +157,12 @@ describe("app-sidecar direct Roadmap completion", () => {
         transition: "done",
         progress: "Verification passed without canonical plan progress",
         evidence: ["pnpm test exited successfully"],
+        verification_bindings: [
+          {
+            criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+            execution_id: "execution-1",
+          },
+        ],
         verification: { result: "passed" },
       }),
       {} as never,
@@ -170,6 +198,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       repository,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: (snapshot) => {
         latestSnapshot = snapshot;
@@ -189,6 +218,12 @@ describe("app-sidecar direct Roadmap completion", () => {
         transition: "done",
         progress: "Implementation and verification completed",
         evidence: ["pnpm test exited successfully"],
+        verification_bindings: [
+          {
+            criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+            execution_id: "execution-1",
+          },
+        ],
         verification: { result: "passed" },
       }),
       {} as never,
@@ -301,6 +336,7 @@ describe("app-sidecar direct Roadmap completion", () => {
         repository,
         reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
         projectAutopilot: { isEnabled: () => false },
+        captureVerificationWorkspace: async () => verificationWorkspace,
         resolvePlanProgress: () => ({ total: 1, completed: [1] }),
         broadcastNotesSnapshot: () => undefined,
         onCompletionIntent: (intent) => {
@@ -315,6 +351,12 @@ describe("app-sidecar direct Roadmap completion", () => {
           transition: "done",
           progress: "Verification passed before the owning run ended",
           evidence: ["pnpm test exited successfully"],
+          verification_bindings: [
+            {
+              criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+              execution_id: "execution-1",
+            },
+          ],
           verification: { result: "passed" },
         }),
         {} as never,
@@ -370,4 +412,87 @@ describe("app-sidecar direct Roadmap completion", () => {
       );
     },
   );
+
+  it.each([
+    { name: "unchanged workspace", mutate: "none", accepted: true },
+    { name: "changed worktree", mutate: "workspace", accepted: false },
+    { name: "changed safe environment", mutate: "environment", accepted: false },
+  ] as const)("checks legacy ledger freshness against the $name", async ({ mutate, accepted }) => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-legacy-freshness-"));
+    roots.push(agentDir);
+    const cwd = "/project/legacy-freshness";
+    const repository = new ProjectNotesRepository(agentDir);
+    await repository.migrate(cwd, document());
+    const workspace = {
+      version: 1 as const,
+      repository: {
+        projectKey: cwd,
+        identityHash: "1".repeat(64),
+        rootCommit: "2".repeat(40),
+      },
+      headCommit: "3".repeat(40),
+      worktreeDigest: "4".repeat(64),
+      clean: true,
+    };
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "pnpm test" },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "execution-1",
+          command: "pnpm test",
+          cwd,
+          startedAt: Date.parse(NOW),
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+      workspace,
+    });
+    const codingSession: AppSidecarRoadmapToolSession = {
+      ...owningSession(),
+      getVerificationEvidenceLedgerSnapshot: () => ledger.snapshot(),
+    };
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
+      captureVerificationWorkspace: async () =>
+        mutate === "workspace" ? { ...workspace, worktreeDigest: "5".repeat(64) } : workspace,
+      captureSafeToolEnvironmentDigest: () =>
+        mutate === "environment" ? "6".repeat(64) : safeToolEnvironmentDigest(),
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const output = await host.createSessionTools("coding", () => codingSession)[0]!.execute(
+      RoadmapStatusParams.parse({
+        update_id: `legacy-freshness-${mutate}`,
+        phase_id: "phase-1",
+        expected_revision: 1,
+        transition: "done",
+        progress: "Verification freshness checked",
+        evidence: ["pnpm test"],
+        verification_bindings: [
+          {
+            criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+            execution_id: "execution-1",
+          },
+        ],
+        verification: { result: "passed" },
+      }),
+      {} as never,
+    );
+
+    expect(JSON.parse(String(output))).toMatchObject(
+      accepted
+        ? { result: "committed", statusOutcome: "completion-pending" }
+        : {
+            result: "verification-incomplete",
+            unmetEvidenceCodes: expect.arrayContaining(["stale-evidence"]),
+          },
+    );
+  });
 });

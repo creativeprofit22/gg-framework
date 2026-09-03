@@ -16,7 +16,10 @@ import type {
   ProjectNotesPhaseCompletionSettlementRequest,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
-import { workspaceSnapshotsEqual } from "./roadmap-phase-execution.js";
+import {
+  safeToolEnvironmentDigest,
+  workspaceVerificationEvidenceMatches,
+} from "./core/verification-evidence.js";
 
 export interface PhaseCompletionRepository {
   load?(cwd: string): Promise<ProjectNotesLoadOutcome>;
@@ -151,6 +154,7 @@ export interface PhaseCompletionCoordinatorOptions {
   repository: PhaseCompletionRepository;
   broadcastSnapshot(snapshot: ProjectNotesSnapshot): void;
   captureWorkspaceSnapshot?: () => Promise<NotesWorkspaceSnapshotV1>;
+  captureSafeToolEnvironmentDigest?: () => string;
   mutateWithLeaseFence?<T>(
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
@@ -223,9 +227,18 @@ export class AppSidecarPhaseCompletionCoordinator {
     } catch (error) {
       return { status: "storage-failure", error };
     }
+    const currentEnvironmentDigest =
+      this.options.captureSafeToolEnvironmentDigest?.() ?? safeToolEnvironmentDigest();
     if (
       input.runOutcome !== "succeeded" ||
-      !workspaceSnapshotsEqual(workspace, pending.workspace)
+      !pending.safeToolEnvironmentDigest ||
+      !workspaceVerificationEvidenceMatches(
+        {
+          workspace: pending.workspace,
+          safeToolEnvironmentDigest: pending.safeToolEnvironmentDigest,
+        },
+        { workspace, safeToolEnvironmentDigest: currentEnvironmentDigest },
+      )
     ) {
       return this.enqueue("completion-recovery", () =>
         repository.clearDurablePhaseCompletion!(this.options.cwd, {

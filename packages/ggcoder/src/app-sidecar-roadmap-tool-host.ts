@@ -1,6 +1,9 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
-import type { NotesWorkspaceSnapshotV1 } from "@kenkaiiii/gg-core/project-notes";
+import type {
+  NotesVerificationEvidenceV2,
+  NotesWorkspaceSnapshotV1,
+} from "@kenkaiiii/gg-core/project-notes";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import type { PhaseImplementationPlanProgress } from "./app-sidecar-phase-completion.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
@@ -28,6 +31,9 @@ import {
   evaluateRoadmapVerificationEvidence,
   formatVerificationCommandDisplay,
   partitionVerificationMessagesForWorkspaceMutation,
+  safeToolEnvironmentDigest,
+  workspaceVerificationEvidenceMatches,
+  type RoadmapVerificationBinding,
   type RoadmapVerificationEvidenceEvaluation,
   type SessionVerificationEvidenceLedgerSnapshot,
 } from "./core/verification-evidence.js";
@@ -53,6 +59,7 @@ export interface AppSidecarRoadmapToolSession {
   evaluateRoadmapVerificationEvidence?(input: {
     doneWhen: readonly string[];
     evidence: readonly string[];
+    verificationBindings: readonly RoadmapVerificationBinding[];
     expectedRevision: number | undefined;
   }): RoadmapVerificationEvidenceEvaluation;
 }
@@ -82,6 +89,8 @@ export interface AppSidecarRoadmapToolHostDependencies {
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
   captureWorkspaceSnapshot?: () => Promise<NotesWorkspaceSnapshotV1>;
+  captureVerificationWorkspace?: () => Promise<NotesWorkspaceSnapshotV1>;
+  captureSafeToolEnvironmentDigest?: () => string;
   getRunGeneration?: () => number;
   mutateWithLeaseFence?<T>(
     operation: () => Promise<T>,
@@ -89,6 +98,34 @@ export interface AppSidecarRoadmapToolHostDependencies {
   onCompletionIntent?(intent: AppSidecarCompletionIntent): void;
   onNonCommit?(metadata: { result: string; phaseId: string; updateId: string }): void;
   onError?(error: unknown, metadata: { phaseId: string; updateId: string }): void;
+}
+
+function partitionLedgerEvidenceForWorkspace(
+  ledger: SessionVerificationEvidenceLedgerSnapshot | undefined,
+  workspace: NotesWorkspaceSnapshotV1,
+  safeToolEnvironmentDigest: string,
+): SessionVerificationEvidenceLedgerSnapshot {
+  const allEvidence = [
+    ...(ledger?.currentEvidence ?? []),
+    ...(ledger?.staleEvidence ?? []),
+  ];
+  const currentEvidence = allEvidence.filter(
+    (item) =>
+      item.workspace &&
+      item.safeToolEnvironmentDigest &&
+      item.classifierVersion === ROADMAP_VERIFICATION_CLASSIFIER_VERSION &&
+      workspaceVerificationEvidenceMatches(
+        {
+          workspace: item.workspace,
+          safeToolEnvironmentDigest: item.safeToolEnvironmentDigest,
+        },
+        { workspace, safeToolEnvironmentDigest },
+      ),
+  );
+  return {
+    currentEvidence,
+    staleEvidence: allEvidence.filter((item) => !currentEvidence.includes(item)),
+  };
 }
 
 /** Production host for coding-session Roadmap mutation tool registration and execution. */
@@ -214,11 +251,13 @@ export class AppSidecarRoadmapToolHost {
         planHash: string;
         runGeneration: number;
         evidence: string[];
+        verificationEvidence: NotesVerificationEvidenceV2[];
+        safeToolEnvironmentDigest: string;
       }
     | { kind: "failure"; expectedRevision: number; result: RoadmapStatusToolResult }
   > {
     const { repository, captureWorkspaceSnapshot, getRunGeneration } = this.dependencies;
-    if (!repository.load || !repository.recordPhaseExecutionEvidence || !captureWorkspaceSnapshot) {
+    if (!repository.load || !captureWorkspaceSnapshot) {
       return { kind: "legacy", expectedRevision };
     }
     const loaded = await repository.load(this.dependencies.cwd);
@@ -278,35 +317,48 @@ export class AppSidecarRoadmapToolHost {
       };
     }
 
+    const currentEnvironmentDigest =
+      this.dependencies.captureSafeToolEnvironmentDigest?.() ?? safeToolEnvironmentDigest();
     const persisted = evaluateDurableVerificationEvidence({
       doneWhen: activePhase.doneWhen,
       evidence: execution.evidence,
+      verificationBindings: input.verification_bindings.map((binding) => ({
+        criterionId: binding.criterion_id,
+        executionId: binding.execution_id,
+      })),
       workspace,
+      safeToolEnvironmentDigest: currentEnvironmentDigest,
     });
-    let statusEvidence = persisted.criterionCoverage.map((item) => item.command);
+    let verificationEvidence = persisted.ready
+      ? persisted.criterionCoverage.map(
+          (coverage) =>
+            execution.evidence.find(
+              (record): record is NotesVerificationEvidenceV2 =>
+                "version" in record &&
+                record.version === 2 &&
+                record.executionId === coverage.executionId,
+            )!,
+        )
+      : [];
+    let statusEvidence = verificationEvidence.map((record) => record.commandDisplay);
     if (!persisted.ready) {
-      const ledger = owningSession.getVerificationEvidenceLedgerSnapshot?.();
-      const allLedgerEvidence = [
-        ...(ledger?.currentEvidence ?? []),
-        ...(ledger?.staleEvidence ?? []),
-      ];
-      const currentLedgerEvidence = allLedgerEvidence.filter(
-        (item) =>
-          item.workspace &&
-          item.classifierVersion === ROADMAP_VERIFICATION_CLASSIFIER_VERSION &&
-          workspaceSnapshotsMatch(item.workspace, workspace),
-      );
-      const staleLedgerEvidence = allLedgerEvidence.filter(
-        (item) => !currentLedgerEvidence.includes(item),
+      const ledgerPartition = partitionLedgerEvidenceForWorkspace(
+        owningSession.getVerificationEvidenceLedgerSnapshot?.(),
+        workspace,
+        currentEnvironmentDigest,
       );
       const transient = evaluateRoadmapVerificationEvidence({
         doneWhen: activePhase.doneWhen,
         evidence: input.evidence,
+        verificationBindings: input.verification_bindings.map((binding) => ({
+          criterionId: binding.criterion_id,
+          executionId: binding.execution_id,
+        })),
         expectedRevision,
         currentMessages: [],
         staleMessages: [],
-        currentLedgerEvidence,
-        staleLedgerEvidence,
+        currentLedgerEvidence: ledgerPartition.currentEvidence,
+        staleLedgerEvidence: ledgerPartition.staleEvidence,
       });
       if (!transient.ready) {
         return {
@@ -324,57 +376,10 @@ export class AppSidecarRoadmapToolHost {
           },
         };
       }
-      const observedAt = (this.dependencies.now ?? (() => new Date().toISOString()))();
-      const records = createDurableVerificationEvidence({
+      verificationEvidence = createDurableVerificationEvidence({
         coverage: transient.criterionCoverage,
-        workspace,
-        observedAt,
       });
-      statusEvidence = records.map((record) => record.commandDisplay);
-      for (const evidence of records) {
-        const fenced = await this.mutate(() =>
-          repository.recordPhaseExecutionEvidence!(this.dependencies.cwd, {
-            phaseId: input.phase_id,
-            expectedRevision,
-            planHash: execution.plan!.contentHash,
-            evidence,
-          }),
-        );
-        if (fenced.status !== "executed") {
-          return {
-            kind: "failure",
-            expectedRevision,
-            result: {
-              result: "phase-lease-lost",
-              phaseId: input.phase_id,
-              revision: expectedRevision,
-              message: "Roadmap evidence was not saved because this session lost its phase lease.",
-            },
-          };
-        }
-        const outcome = fenced.value;
-        if (outcome.status === "committed") {
-          expectedRevision = outcome.snapshot.revision;
-          phase = outcome.phase;
-          this.dependencies.broadcastNotesSnapshot(outcome.snapshot);
-        } else if (outcome.status === "duplicate") {
-          expectedRevision = outcome.revision;
-        } else {
-          return {
-            kind: "failure",
-            expectedRevision,
-            result: {
-              result:
-                outcome.status === "stale-revision" ? "stale-revision" : "verification-incomplete",
-              phaseId: input.phase_id,
-              ...(outcome.status === "stale-revision"
-                ? { revision: outcome.revision }
-                : { revision: expectedRevision }),
-              message: `Durable verification evidence was not saved (${outcome.status}).`,
-            },
-          };
-        }
-      }
+      statusEvidence = verificationEvidence.map((record) => record.commandDisplay);
     }
     if (!phase.execution?.plan?.steps.every((step) => step.state === "completed")) {
       return {
@@ -396,6 +401,8 @@ export class AppSidecarRoadmapToolHost {
       planHash: execution.plan.contentHash,
       runGeneration: getRunGeneration(),
       evidence: statusEvidence,
+      verificationEvidence,
+      safeToolEnvironmentDigest: currentEnvironmentDigest,
     };
   }
 
@@ -426,6 +433,8 @@ export class AppSidecarRoadmapToolHost {
         workspace: NotesWorkspaceSnapshotV1;
         planHash: string;
         runJournal: { sessionPath: string | null; generation: number };
+        safeToolEnvironmentDigest: string;
+        verificationEvidence: NotesVerificationEvidenceV2[];
       } | null = null;
       if (input.transition === "done") {
         const durable = await this.prepareDurableCompletion(
@@ -444,6 +453,8 @@ export class AppSidecarRoadmapToolHost {
               sessionPath: activePhase.session.sessionPath,
               generation: durable.runGeneration,
             },
+            safeToolEnvironmentDigest: durable.safeToolEnvironmentDigest,
+            verificationEvidence: durable.verificationEvidence,
           };
           statusEvidence = durable.evidence;
         }
@@ -451,13 +462,59 @@ export class AppSidecarRoadmapToolHost {
           const evaluationInput = {
             doneWhen: activePhase.doneWhen,
             evidence: input.evidence,
+            verificationBindings: input.verification_bindings.map((binding) => ({
+              criterionId: binding.criterion_id,
+              executionId: binding.execution_id,
+            })),
             expectedRevision,
           };
-          const messages = owningSession.getMessages();
-          const partition = partitionVerificationMessagesForWorkspaceMutation(messages);
-          const verificationEvidence =
-            owningSession.evaluateRoadmapVerificationEvidence?.(evaluationInput) ??
-            evaluateRoadmapVerificationEvidence({ ...evaluationInput, ...partition });
+          const captureWorkspace = this.dependencies.captureVerificationWorkspace;
+          if (!captureWorkspace) {
+            return {
+              result: "verification-incomplete",
+              phaseId: input.phase_id,
+              revision: expectedRevision,
+              unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
+              message:
+                "Done was not recorded because the current Git workspace could not be verified.",
+            };
+          }
+          let workspace: NotesWorkspaceSnapshotV1;
+          try {
+            workspace = await captureWorkspace();
+          } catch (error) {
+            return error instanceof RepositoryUnverifiableError
+              ? {
+                  result: "repository-unverifiable",
+                  phaseId: input.phase_id,
+                  revision: expectedRevision,
+                  message: error.message,
+                }
+              : {
+                  result: "verification-incomplete",
+                  phaseId: input.phase_id,
+                  revision: expectedRevision,
+                  unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
+                  message:
+                    "Done was not recorded because the current Git workspace could not be verified.",
+                };
+          }
+          const currentEnvironmentDigest =
+            this.dependencies.captureSafeToolEnvironmentDigest?.() ?? safeToolEnvironmentDigest();
+          const ledgerPartition = partitionLedgerEvidenceForWorkspace(
+            owningSession.getVerificationEvidenceLedgerSnapshot?.(),
+            workspace,
+            currentEnvironmentDigest,
+          );
+          const partition = partitionVerificationMessagesForWorkspaceMutation(
+            owningSession.getMessages(),
+          );
+          const verificationEvidence = evaluateRoadmapVerificationEvidence({
+            ...evaluationInput,
+            ...partition,
+            currentLedgerEvidence: ledgerPartition.currentEvidence,
+            staleLedgerEvidence: ledgerPartition.staleEvidence,
+          });
           if (!verificationEvidence.ready) {
             return {
               result: "verification-incomplete",

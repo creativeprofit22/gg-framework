@@ -1983,6 +1983,11 @@ async function createSession(
   // parsing); the daemon owns the real listen host.
   const host = "127.0.0.1";
   const sessionMutations = new AppSidecarSessionMutationCoordinator();
+  const captureVerificationWorkspace = async () => {
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
+    return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+  };
   const phaseCompletion = new AppSidecarPhaseCompletionCoordinator({
     cwd,
     repository: notesRepository,
@@ -1990,11 +1995,7 @@ async function createSession(
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     releaseCompletedPhaseLease: releaseOrDeferCompletedPhaseLease,
     captureWorkspaceSnapshot: durableRoadmapExecution
-      ? async () => {
-          const loaded = await notesRepository.load(cwd);
-          if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
-          return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
-        }
+      ? captureVerificationWorkspace
       : undefined,
     onError: (error) => captureSidecarError(error, "app-sidecar.phase-completion"),
   });
@@ -2249,12 +2250,9 @@ async function createSession(
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     captureWorkspaceSnapshot: durableRoadmapExecution
-      ? async () => {
-          const loaded = await notesRepository.load(cwd);
-          if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
-          return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
-        }
+      ? captureVerificationWorkspace
       : undefined,
+    captureVerificationWorkspace,
     getRunGeneration: () => activeRunGeneration,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     resolvePlanProgress: ({ phaseId, session: expectedSession }) =>
@@ -2286,13 +2284,7 @@ async function createSession(
       sessionId: sessionPath,
       signal: abort.signal,
       deferApprovedPlanHydration: durableRoadmapExecution,
-      captureVerificationWorkspace: durableRoadmapExecution
-        ? async () => {
-            const loaded = await notesRepository.load(cwd);
-            if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
-            return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
-          }
-        : undefined,
+      captureVerificationWorkspace,
       onEnterPlan: async (reason) => {
         deactivateApprovedPlan();
         await created.setPlanMode(true);

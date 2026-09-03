@@ -6,11 +6,26 @@ import {
   AppSidecarRoadmapToolHost,
   type AppSidecarRoadmapToolSession,
 } from "./app-sidecar-roadmap-tool-host.js";
-import type { RoadmapVerificationEvidenceEvaluation } from "./core/verification-evidence.js";
+import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+  roadmapCriterionId,
+  safeToolEnvironmentDigest,
+} from "./core/verification-evidence.js";
 import { RoadmapCheckpointParams } from "./tools/roadmap-checkpoint.js";
 import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const sessionLink = { sessionId: "phase-session", sessionPath: "/sessions/phase.jsonl" };
+const verificationWorkspace = {
+  version: 1 as const,
+  repository: {
+    projectKey: "/project",
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  },
+  headCommit: "3".repeat(40),
+  worktreeDigest: "4".repeat(64),
+  clean: true,
+};
 
 function owningSession(): AppSidecarRoadmapToolSession {
   return {
@@ -32,29 +47,36 @@ function owningSession(): AppSidecarRoadmapToolSession {
     }),
     getMessages: () => [],
     getState: () => sessionLink,
-    evaluateRoadmapVerificationEvidence: () => ({
-      ready: true,
-      unmetEvidenceCodes: [],
-      criterionCoverage: [
+    getVerificationEvidenceLedgerSnapshot: () => ({
+      currentEvidence: [
         {
-          criterionIndex: 0,
-          criterion: "Tests pass",
-          evidence: "pnpm test exited successfully",
           command: "pnpm test",
+          status: "passed",
+          reason: "bounded test command",
+          executionId: "execution-1",
+          observedAt: "2026-08-30T09:59:00.000Z",
+          cwd: "/project",
+          safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
+          workspace: verificationWorkspace,
+          classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
         },
       ],
+      staleEvidence: [],
     }),
   };
 }
 
-function doneInput(evidence = "pnpm test exited successfully") {
+function doneInput(evidence = "pnpm test exited successfully", expectedRevision = 4) {
   return RoadmapStatusParams.parse({
     update_id: "completion-intent-1",
     phase_id: "phase-1",
-    expected_revision: 4,
+    expected_revision: expectedRevision,
     transition: "done",
     progress: "Implementation and verification completed",
     evidence: [evidence],
+    verification_bindings: [
+      { criterion_id: roadmapCriterionId(1, "Tests pass"), execution_id: "execution-1" },
+    ],
     verification: { result: "passed" },
   });
 }
@@ -66,6 +88,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate: vi.fn() },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => null,
       broadcastNotesSnapshot: vi.fn(),
     });
@@ -192,6 +215,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: vi.fn(),
       onCompletionIntent,
@@ -231,6 +255,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: vi.fn(),
       mutateWithLeaseFence: async () => ({ status: "phase-lease-lost" as const }),
@@ -255,13 +280,14 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: vi.fn(),
     });
     const session = owningSession();
-    session.evaluateRoadmapVerificationEvidence = (): RoadmapVerificationEvidenceEvaluation => ({
-      ready: false,
-      unmetEvidenceCodes: ["unmatched-evidence" as const],
+    session.getVerificationEvidenceLedgerSnapshot = () => ({
+      currentEvidence: [],
+      staleEvidence: [],
     });
     const output = await host
       .createSessionTools("coding", () => session)[0]!
@@ -269,7 +295,7 @@ describe("AppSidecarRoadmapToolHost", () => {
 
     expect(JSON.parse(String(output))).toMatchObject({
       result: "verification-incomplete",
-      unmetEvidenceCodes: ["unmatched-evidence"],
+      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
     });
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
   });
@@ -316,7 +342,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
   });
 
-  it("persists command-time workspace evidence and uses the resulting revision", async () => {
+  it("keeps revision-231 evidence current through metadata revisions and writes completion atomically", async () => {
     const repositoryIdentity = {
       projectKey: "/project",
       identityHash: "1".repeat(64),
@@ -345,19 +371,14 @@ describe("AppSidecarRoadmapToolHost", () => {
       },
     } as never;
     const loadedSnapshot = {
-      revision: 4,
+      revision: 233,
       projectKey: "/project",
       document: { phases: [phase], references: [] },
     };
-    const evidenceSnapshot = { ...loadedSnapshot, revision: 5 };
-    const recordPhaseExecutionEvidence = vi.fn(async () => ({
-      status: "committed" as const,
-      snapshot: evidenceSnapshot as never,
-      phase,
-    }));
+    const recordPhaseExecutionEvidence = vi.fn();
     const recordRoadmapStatusUpdate = vi.fn(async () => ({
       status: "duplicate" as const,
-      revision: 6,
+      revision: 234,
       phaseId: "phase-1",
       phase,
       statusOutcome: "completion-pending" as const,
@@ -368,11 +389,15 @@ describe("AppSidecarRoadmapToolHost", () => {
     session.getVerificationEvidenceLedgerSnapshot = () => ({
       currentEvidence: [
         {
+          executionId: "execution-1",
           command,
           status: "passed",
           reason: "bounded test",
+          observedAt: "2026-08-30T09:59:00.000Z",
+          cwd: "/project",
           workspace,
-          classifierVersion: "roadmap-verification-v1",
+          safeToolEnvironmentDigest: "9".repeat(64),
+          classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
         },
       ],
       staleEvidence: [],
@@ -392,35 +417,33 @@ describe("AppSidecarRoadmapToolHost", () => {
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => null,
       captureWorkspaceSnapshot: async () => workspace,
+      captureSafeToolEnvironmentDigest: () => "9".repeat(64),
       getRunGeneration: () => 1,
       broadcastNotesSnapshot: vi.fn(),
       now: () => "2026-08-30T10:00:00.000Z",
     });
     const output = await host
       .createSessionTools("coding", () => session)[0]!
-      .execute(doneInput(`${command} exited successfully`), {} as never);
-    expect(JSON.parse(String(output))).toMatchObject({ result: "duplicate", revision: 6 });
-    expect(recordPhaseExecutionEvidence).toHaveBeenCalledWith(
-      "/project",
-      expect.objectContaining({
-        expectedRevision: 4,
-        planHash: "5".repeat(64),
-        evidence: expect.objectContaining({
-          commandHash: "50c7de277d4a0807ed6cfff53ccc7ae26be29b9df51b350f5189cad82115490c",
-          commandDisplay: "pnpm test -- --token=[REDACTED]",
-        }),
-      }),
-    );
+      .execute(doneInput("metadata-only revisions preserved this check", 233), {} as never);
+    expect(JSON.parse(String(output))).toMatchObject({ result: "duplicate", revision: 234 });
+    expect(recordPhaseExecutionEvidence).not.toHaveBeenCalled();
     expect(recordRoadmapStatusUpdate).toHaveBeenCalledOnce();
     expect(recordRoadmapStatusUpdate).toHaveBeenCalledWith(
       "/project",
       expect.objectContaining({
-        expectedRevision: 5,
-        durableCompletion: {
+        expectedRevision: 233,
+        durableCompletion: expect.objectContaining({
           runJournal: { sessionPath: "/sessions/phase.jsonl", generation: 1 },
           planHash: "5".repeat(64),
           workspace,
-        },
+          verificationEvidence: [
+            expect.objectContaining({
+              version: 2,
+              executionId: "execution-1",
+              commandHash: "50c7de277d4a0807ed6cfff53ccc7ae26be29b9df51b350f5189cad82115490c",
+            }),
+          ],
+        }),
       }),
     );
     expect(
@@ -440,6 +463,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
       resolvePlanProgress: () => null,
       broadcastNotesSnapshot,
       onCompletionIntent,

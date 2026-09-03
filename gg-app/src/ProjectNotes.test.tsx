@@ -152,6 +152,49 @@ function reconciliationPhase(id: string, cwd: string): NotesPhase {
   return selectedPhase;
 }
 
+function durableCompletionPhase(id: string, pending: boolean): NotesPhase {
+  const selectedPhase = reconciliationPhase(id, `/work/${id}`);
+  const execution = selectedPhase.execution!;
+  const workspace = execution.plan!.steps[0]!.workspace!;
+  execution.state = pending ? "completion-pending" : "needs-reconciliation";
+  execution.evidence = [
+    {
+      version: 2,
+      executionId: `execution-${id}`,
+      commandHash: `command-${id}`,
+      commandDisplay: "pnpm test",
+      exitCode: 0,
+      classifierVersion: "roadmap-verification-v1",
+      verdict: "approved",
+      criterionId: `criterion-${id}`,
+      observedAt: NOW,
+      workspace,
+      state: pending ? "current" : "needs-revalidation",
+      cwd: `/work/${id}`,
+      safeToolEnvironmentDigest: "environment-ui",
+    },
+  ];
+  execution.pendingCompletion = pending
+    ? {
+        completionId: `completion-${id}`,
+        statusRevision: 1,
+        runJournal: { sessionPath: selectedPhase.session!.sessionPath, generation: 1 },
+        planHash: execution.plan!.contentHash,
+        workspace,
+        safeToolEnvironmentDigest: "environment-ui",
+      }
+    : null;
+  selectedPhase.roadmapEvents = [
+    {
+      ...verificationReport("passed"),
+      transition: "done",
+      statusOutcome: "completion-pending",
+      evidence: pending ? [] : ["Legacy prose must not restore durable readiness."],
+    },
+  ];
+  return selectedPhase;
+}
+
 type PhaseSessionFixture = "unbound" | "missing-path" | "path-present";
 
 function phaseSession(fixture: PhaseSessionFixture): NotesPhase["session"] {
@@ -2039,6 +2082,44 @@ describe("ProjectNotes", () => {
     expect(gates?.textContent).toContain("Pending");
     expect(gates?.textContent).toContain("Waiting for the owning implementation run to settle.");
     expect(gates?.textContent).not.toContain("reviewer");
+  });
+
+  it("uses durable pending completion instead of legacy prose evidence", async () => {
+    const cwd = "/work/durable-completion-pending";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("durable pending completion");
+    const selected = durableCompletionPhase("durable-completion-pending", true);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    selectPhaseView("Completion");
+
+    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    expect(gates?.textContent).toContain("Ready to settle");
+    expect(gates?.textContent).toContain("Pending");
+    expect(gates?.textContent).toContain("pnpm test");
+    expect(gates?.textContent).not.toContain("Record implementation evidence next.");
+  });
+
+  it("shows cleared stale durable evidence as needing revalidation", async () => {
+    const cwd = "/work/durable-completion-stale";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("durable stale completion");
+    const selected = durableCompletionPhase("durable-completion-stale", false);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    selectPhaseView("Completion");
+
+    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    expect(gates?.textContent).toContain("Revalidation required");
+    expect(gates?.textContent).toContain("Needs revalidation");
+    expect(gates?.textContent).not.toContain("Ready to settle");
+    expect(gates?.textContent).not.toContain("Waiting for the owning implementation run to settle.");
   });
 
   it("does not reuse typed verification after a later untyped report", async () => {

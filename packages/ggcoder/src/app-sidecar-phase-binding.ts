@@ -24,6 +24,7 @@ import {
   type RoadmapPhaseLeaseMarkerV1,
 } from "./phase-context.js";
 import { publishCommittedNotesSnapshot } from "./app-sidecar-committed-notes.js";
+import { safeToolEnvironmentDigest } from "./core/verification-evidence.js";
 import type {
   ProjectNotesPhaseBindingRequest,
   ProjectNotesRepository,
@@ -433,6 +434,7 @@ async function executePhaseExecutionReconciliation(
     options.repository.reconcilePhaseExecution(state.cwd, {
       ...request,
       currentWorkspace,
+      currentSafeToolEnvironmentDigest: safeToolEnvironmentDigest(),
       cleanAncestorStepIds,
       reconciledAt: now(),
     });

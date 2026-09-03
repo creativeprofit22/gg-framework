@@ -19,9 +19,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
     "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
   source_path:
-    "Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.",
-  tauri_package:
-    "Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.",
+    "Resolve installed dependency source via opensrc; inspect returned files before assuming APIs.",
+  tauri_package: "Inspect, configure, package, or verify supported Tauri v2 JSON apps.",
   programmatic_profile: "Inspect/persist.",
   programmatic_scan: "Run one approved-profile scan and persist bounded lifecycle summary state.",
   web_search:
@@ -31,7 +30,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   task_output: "Read new output from a background process by id.",
   task_stop: "Stop a background process by id.",
   screenshot:
-    "Capture a headless-browser PNG of a URL or dev server to visually verify rendered UI; supports waits, click/type actions and viewport size.",
+    "Capture a browser PNG of a URL or local server; supports waits and interactions.",
   send_message: "Queue steering into a running child agent without starting another turn.",
   followup_task: "Start another turn in an idle child agent, preserving its context.",
   wait_agent: "Block until named child agents finish and return their output snapshots.",
@@ -50,7 +49,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
   generate_image:
-    "Generate or edit images via OpenAI's gpt-image-2. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
+    "Generate or edit images with gpt-image-2, only when explicitly requested.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };

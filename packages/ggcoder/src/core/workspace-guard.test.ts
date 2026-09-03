@@ -134,7 +134,11 @@ describe("resolveWriteGuard", () => {
     // function, so these tests only ask it for a verdict.
     async function repoWithEscapingLink(name: string): Promise<string> {
       const repo = await scratch(name);
-      await fs.symlink(os.homedir(), path.join(repo, "link"), "dir");
+      await fs.symlink(
+        os.homedir(),
+        path.join(repo, "link"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
       return repo;
     }
 
@@ -159,7 +163,11 @@ describe("resolveWriteGuard", () => {
       const repo = path.join(base, "repo");
       const real = path.join(repo, "packages", "core");
       await fs.mkdir(real, { recursive: true });
-      await fs.symlink(real, path.join(repo, "core-link"), "dir");
+      await fs.symlink(
+        real,
+        path.join(repo, "core-link"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
 
       const target = path.join(repo, "core-link", "index.ts");
       expect(resolveWriteGuard(repo, target).allowed).toBe(true);

@@ -306,7 +306,7 @@ describe("specialist chat agents", () => {
       const [researchPrefix, researchTail] = systemPrompt().split("<!-- uncached -->");
       expect(researchPrefix).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
       expect(researchTail).toContain("shared memory sentinel");
-      expect(researchTail).toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
+      expect(researchTail).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
 
       await switchChatAgent(agent, "therapist", false);
       expect(scopedNames()).toEqual([]);

@@ -188,11 +188,51 @@ describe("classifyVerificationCommand", () => {
     "pnpm test -- --runInBand",
     "cargo fmt --check && cargo clippy",
     "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
+    "go test ./...",
+    "go.exe test ./...",
+    "./.tools/go/bin/go.exe test ./internal/architecture",
+    "C:\\tools\\go\\bin\\GO.ExE vet ./...",
+    "go.exe test ./... && go vet ./...",
     "ruff format --check .",
   ])("accepts bounded check: %s", (command) => {
     expect(classifyVerificationCommand(command)).toMatchObject({
       accepted: true,
       candidate: true,
+    });
+  });
+
+  it.each([
+    ["go.exe test ./...", "go test ./..."],
+    ["./.tools/go/bin/go.exe vet ./...", "go vet ./..."],
+    ["C:\\tools\\go\\bin\\GO.ExE test ./...", "go test ./..."],
+  ])("classifies Windows Go command %s exactly like %s", (windowsCommand, unixCommand) => {
+    expect(classifyVerificationCommand(windowsCommand)).toEqual(
+      classifyVerificationCommand(unixCommand),
+    );
+  });
+
+  it("keeps unsupported Go subcommands unclassified", () => {
+    expect(classifyVerificationCommand("go.exe list ./...")).toEqual(
+      classifyVerificationCommand("go list ./..."),
+    );
+  });
+
+  it("rejects env-wrapped Windows Go commands", () => {
+    expect(classifyVerificationCommand("env CI=1 go.exe test ./...")).toMatchObject({
+      accepted: false,
+      candidate: true,
+    });
+  });
+
+  it.each([
+    "go.exe test ./... | cat",
+    "go.exe test ./... || echo ignored",
+    "go.exe test ./...; echo ignored",
+  ])("rejects Windows Go checks with unsafe control operators: %s", (command) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({
+      accepted: false,
+      candidate: true,
+      reason: expect.stringContaining("control operator"),
     });
   });
 
@@ -688,6 +728,51 @@ describe("SessionVerificationEvidenceLedger", () => {
       },
     });
   }
+
+  it("accepts a successful path-qualified Windows Go test as ready evidence", () => {
+    const command =
+      "./.tools/go/bin/go.exe test ./internal/architecture -run '^TestProjectImportDAG$' -count=1";
+    const criterion = "project imports preserve the architecture DAG";
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "windows-go-test",
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+      workspace: TEST_WORKSPACE,
+    });
+
+    const currentLedgerEvidence = ledger.snapshot().currentEvidence;
+    expect(currentLedgerEvidence).toEqual([
+      expect.objectContaining({
+        command,
+        executionId: "windows-go-test",
+        status: "passed",
+        reason: "bounded Go check",
+      }),
+    ]);
+    expect(
+      evaluateRoadmapVerificationEvidence({
+        doneWhen: [criterion],
+        evidence: [command],
+        verificationBindings: [
+          { criterionId: roadmapCriterionId(1, criterion), executionId: "windows-go-test" },
+        ],
+        expectedRevision: 15,
+        currentMessages: [],
+        currentLedgerEvidence,
+      }),
+    ).toMatchObject({ ready: true, unmetEvidenceCodes: [] });
+  });
 
   it("keeps execution identities immutable across replay and conflicting diagnostics", () => {
     const ledger = new SessionVerificationEvidenceLedger();

@@ -101,8 +101,20 @@ const SAFE_PACKAGE_SCRIPTS =
   /^(?:test(?::(?:unit|integration|e2e))?|check|typecheck|type-check|lint(?::check)?|format(?::check|-check)|prettier:check)$/i;
 const UNSAFE_PACKAGE_SCRIPTS =
   /^(?:build|clean|dev|serve|start|watch|preview|prepare|install|format|lint:fix|test:watch)(?::|$)/i;
-const VERIFIER_WORDS =
-  /(?:^|\s|\/)(?:tsc|vitest|jest|pytest|eslint|prettier|pyright|mypy|ruff|cargo|go|shellcheck)(?:\s|$)/i;
+const VERIFIER_EXECUTABLES = new Set([
+  "tsc",
+  "vitest",
+  "jest",
+  "pytest",
+  "eslint",
+  "prettier",
+  "pyright",
+  "mypy",
+  "ruff",
+  "cargo",
+  "go",
+  "shellcheck",
+]);
 
 function tokenize(segment: string): string[] {
   return segment
@@ -110,6 +122,14 @@ function tokenize(segment: string): string[] {
     .split(/\s+/)
     .map((token) => token.replace(/^["']|["']$/g, ""))
     .filter(Boolean);
+}
+
+function executableBasename(token: string | undefined): string {
+  return token?.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase() ?? "";
+}
+
+function hasVerifierExecutable(command: string): boolean {
+  return tokenize(command).some((token) => VERIFIER_EXECUTABLES.has(executableBasename(token)));
 }
 
 function lowerFlags(tokens: readonly string[]): Set<string> {
@@ -165,7 +185,7 @@ function classifyTestRunner(
 }
 
 function classifyDirect(tokens: readonly string[]): VerificationCommandClassification {
-  const executable = tokens[0]?.replace(/^.*[\\/]/, "").toLowerCase();
+  const executable = executableBasename(tokens[0]);
   if (!executable) return rejected(false, "empty command");
   if (executable === "tsc") return classifyTsc(tokens);
   if (executable === "vitest" || executable === "jest" || executable === "pytest") {
@@ -208,7 +228,7 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
       ? accepted("bounded Go check")
       : rejected(subcommand === "build" || subcommand === "clean", "not a bounded Go check");
   }
-  return rejected(VERIFIER_WORDS.test(tokens.join(" ")), "not a recognized verification command");
+  return rejected(hasVerifierExecutable(tokens.join(" ")), "not a recognized verification command");
 }
 
 function classifyPackageRunner(tokens: readonly string[]): VerificationCommandClassification {
@@ -257,7 +277,7 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
 
 function classifySegment(segment: string): VerificationCommandClassification {
   const candidate =
-    VERIFIER_WORDS.test(segment) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(segment);
+    hasVerifierExecutable(segment) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(segment);
   if (hasUnsafeShellSyntax(segment))
     return rejected(candidate, "unsafe shell syntax or redirection");
   const tokens = tokenize(segment);
@@ -270,7 +290,7 @@ function classifySegment(segment: string): VerificationCommandClassification {
 /** Fail-closed semantic classifier: every shell segment must be a bounded check. */
 export function classifyVerificationCommand(command: string): VerificationCommandClassification {
   const candidate =
-    VERIFIER_WORDS.test(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
+    hasVerifierExecutable(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
   // Only && preserves fail-closed evidence across a chain. Pipes, OR, semicolons,
   // and newlines can hide a failed check behind a later zero exit status.
   if (

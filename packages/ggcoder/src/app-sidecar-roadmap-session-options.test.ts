@@ -33,7 +33,7 @@ describe("app-sidecar Roadmap session options", () => {
     expect(options.getSystemPromptTail?.()).toBe(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
   });
 
-  it("hosts only inspect and phase draft for Research chat", () => {
+  it("hosts only read-only Roadmap inspection for Research chat", () => {
     const options = createAppSidecarChatRoadmapSessionOptions([
       tool("roadmap_inspect"),
       tool("roadmap_phase_draft"),
@@ -42,14 +42,9 @@ describe("app-sidecar Roadmap session options", () => {
     expect(Object.keys(options.additionalToolsByAgent ?? {})).toEqual(["research"]);
     expect(options.additionalToolsByAgent?.research?.map((candidate) => candidate.name)).toEqual([
       "roadmap_inspect",
-      "roadmap_phase_draft",
     ]);
     expect(options.additionalToolsByAgent?.general).toBeUndefined();
     expect(options.additionalToolsByAgent?.therapist).toBeUndefined();
-    expect(options.getSystemPromptTailForAgent?.("general")).toBe("");
-    expect(options.getSystemPromptTailForAgent?.("therapist")).toBe("");
-    expect(options.getSystemPromptTailForAgent?.("research")).toBe(
-      APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
-    );
+    expect(options).not.toHaveProperty("getSystemPromptTailForAgent");
   });
 });

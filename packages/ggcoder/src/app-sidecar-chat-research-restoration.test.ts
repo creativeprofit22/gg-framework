@@ -152,9 +152,9 @@ describe("chat Research restart restoration", () => {
     expect(livePolicy.conversation.slice(0, liveHistoryBeforeHandoff.length)).toEqual(
       liveHistoryBeforeHandoff,
     );
-    expect(livePolicy.roadmapTools).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
+    expect(livePolicy.roadmapTools).toEqual(["roadmap_inspect"]);
     expect(prohibitedResearchTools(livePolicy)).toEqual([]);
-    expect(livePolicy.systemPrompt).toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
+    expect(livePolicy.systemPrompt).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
     const persistedConversation = livePolicy.conversation;
     await live.dispose();
 
@@ -181,12 +181,9 @@ describe("chat Research restart restoration", () => {
       );
 
       const restoredResearchPolicy = policySnapshot(restarted);
-      expect(restoredResearchPolicy.roadmapTools).toEqual([
-        "roadmap_inspect",
-        "roadmap_phase_draft",
-      ]);
+      expect(restoredResearchPolicy.roadmapTools).toEqual(["roadmap_inspect"]);
       expect(prohibitedResearchTools(restoredResearchPolicy)).toEqual([]);
-      expect(restoredResearchPolicy.systemPrompt).toContain(
+      expect(restoredResearchPolicy.systemPrompt).not.toContain(
         APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
       );
 
@@ -199,9 +196,11 @@ describe("chat Research restart restoration", () => {
 
       await switchChatAgent(restarted, "research", false);
       const researchAgainPolicy = policySnapshot(restarted);
-      expect(researchAgainPolicy.roadmapTools).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
+      expect(researchAgainPolicy.roadmapTools).toEqual(["roadmap_inspect"]);
       expect(prohibitedResearchTools(researchAgainPolicy)).toEqual([]);
-      expect(researchAgainPolicy.systemPrompt).toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
+      expect(researchAgainPolicy.systemPrompt).not.toContain(
+        APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+      );
       expect(researchAgainPolicy.conversation).toEqual(persistedConversation);
     } finally {
       await restarted.dispose();

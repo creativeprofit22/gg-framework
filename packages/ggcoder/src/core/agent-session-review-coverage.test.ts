@@ -6,6 +6,7 @@ import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats, ReviewCoverageTracker } from "./ideal-review.js";
 import type { ActivePhaseContextV1 } from "../phase-context.js";
+import { roadmapCriterionId } from "./verification-evidence.js";
 
 interface ReviewInternals {
   settingsManager: { get(key: string): boolean };
@@ -293,9 +294,13 @@ describe("AgentSession Ideal review coverage gate", () => {
     };
 
     const followUp = internal.getHookFollowUpMessages()?.[0]?.content;
-    expect(followUp).toContain("Run the phase completion checks now");
-    expect(followUp).toContain("1. Focused tests pass");
-    expect(followUp).toContain("2. Package build passes");
+    expect(followUp).toContain("Run one bounded check per Done When criterion");
+    expect(followUp).toContain(
+      `${roadmapCriterionId(1, "Focused tests pass")} — Focused tests pass`,
+    );
+    expect(followUp).toContain(
+      `${roadmapCriterionId(2, "Package build passes")} — Package build passes`,
+    );
     expect(followUp).toContain('Use transition: "done" only when verification.result is "passed"');
     expect(followUp).toContain("owning implementation run must settle successfully");
     expect(internal.getHookFollowUpMessages()).toBeNull();

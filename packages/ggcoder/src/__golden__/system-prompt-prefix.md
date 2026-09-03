@@ -74,11 +74,11 @@ Prefer `edit` over `write` for changes to existing files. Use `find`/`grep` rath
 - **tasks**: Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.
 
 Available on demand (call `tool_search` to load):
-- **tauri_package**: Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.
+- **tauri_package**: Inspect, configure, package, or verify supported Tauri v2 JSON apps.
 - **programmatic_profile**: Inspect/persist.
 - **programmatic_scan**: Run one approved-profile scan and persist bounded lifecycle summary state.
-- **source_path**: Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.
-- **screenshot**: Capture a headless-browser PNG of a URL or dev server to visually verify rendered UI; supports waits, click/type actions and viewport size.
+- **source_path**: Resolve installed dependency source via opensrc; inspect returned files before assuming APIs.
+- **screenshot**: Capture a browser PNG of a URL or local server; supports waits and interactions.
 
 ## Environment
 

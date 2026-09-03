@@ -2530,11 +2530,14 @@ export class ProjectNotesRepository {
             message: "Done requires a passed verification result.",
           };
         }
-        if (request.evidence.length === 0) {
+        if (
+          request.durableCompletion === undefined &&
+          request.evidence.length !== currentPhase.doneWhen.length
+        ) {
           return {
             status: "verification-incomplete",
             revision,
-            message: "Done requires a bounded verification summary.",
+            message: "Done requires exactly one evidence item per Done When criterion.",
           };
         }
       }

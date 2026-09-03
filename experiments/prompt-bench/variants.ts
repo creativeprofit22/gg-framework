@@ -142,7 +142,7 @@ const RESEARCH_AGGRESSIVE = v(
   "research.aggressive",
   `## Research & Verification
 
-Don't assume APIs, flags, config, internals, or error wording. Verify: \`source_path\` + read/grep/find/ls for installed deps; \`web_search\` then \`web_fetch\` for docs; ReferenceSources/DiscoverRepos then SearchCode (literal text/RE2, not semantic) for public code. Run targeted checks; never report unrun or failing checks as passing.`,
+Don't assume APIs, flags, config, internals, or error wording. Verify: \`source_path\` + read/grep/find/ls for installed deps; \`web_search\` then \`web_fetch\` for docs; use \`steroids\` to \`search\` exact code anchors first and \`show\` selected files, call \`discover\` only for a real corpus gap, and require explicit approval before \`add\`. Run targeted checks; never report unrun or failing checks as passing.`,
 );
 
 // ── Code Quality ──────────────────────────────

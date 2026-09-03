@@ -122,21 +122,30 @@ describe("durable roadmap plan reconciliation", () => {
     expect(invalidated.needsRevalidation).toEqual([dirtyStep.id]);
   });
 
-  it("requires final evidence on the exact classifier and workspace", async () => {
+  it("requires final evidence on the exact classifier, workspace, and safe environment", async () => {
     const workspace = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const evidence = {
+    const legacyEvidence = {
       commandHash: "1".repeat(64),
       commandDisplay: "pnpm test",
       exitCode: 0,
       classifierVersion: "roadmap-v1",
       verdict: "approved" as const,
-      criterionId: "criterion-1",
+      criterionId: "1".repeat(64),
       observedAt: "2026-08-30T10:00:00.000Z",
       workspace,
     };
-    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v1")).toBe(true);
+    const evidence = {
+      ...legacyEvidence,
+      version: 2 as const,
+      executionId: "execution-1",
+      cwd: repository,
+      safeToolEnvironmentDigest: "2".repeat(64),
+    };
+    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v1", "2".repeat(64))).toBe(true);
+    expect(isEvidenceCurrent(legacyEvidence, workspace, "roadmap-v1", "2".repeat(64))).toBe(false);
     expect(workspaceSnapshotsEqual(workspace, workspace)).toBe(true);
-    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v2")).toBe(false);
+    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v2", "2".repeat(64))).toBe(false);
+    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v1", "3".repeat(64))).toBe(false);
   });
 
   it("rejects the exact revision-105 phase-4 plan from phase 5", () => {

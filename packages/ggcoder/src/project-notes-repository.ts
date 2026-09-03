@@ -31,6 +31,7 @@ import {
   notesSessionLinksEqual,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
+  validateNotesPhaseExecution,
   type NotesDocumentV3,
   type NotesApprovedPlanV1,
   type NotesImplementationRunOutcome,
@@ -59,7 +60,9 @@ import {
   type NotesRepositoryIdentityV1,
   type NotesSessionLink,
   type NotesValidationError,
+  type NotesVerificationEvidence,
   type NotesVerificationEvidenceV1,
+  type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
   type NotesValidationResult,
   type NotesVerificationStatus,
@@ -81,7 +84,15 @@ import {
   evaluateManualCompletionApproval,
   type PhaseCompletionEvaluation,
 } from "./project-notes-completion-policy.js";
-import { reconcilePlanSteps, workspaceSnapshotsEqual } from "./roadmap-phase-execution.js";
+import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+  roadmapCriterionId,
+} from "./core/verification-evidence.js";
+import {
+  isEvidenceCurrent,
+  reconcilePlanSteps,
+  workspaceSnapshotsEqual,
+} from "./roadmap-phase-execution.js";
 
 export interface StoredProjectNotesV1 {
   storeVersion: 1;
@@ -306,7 +317,10 @@ export interface ProjectNotesRoadmapStatusRequest {
   expectedSession?: NotesSessionLink | null;
   requireBoundPhase?: boolean;
   autopilotEnabled: boolean;
-  durableCompletion?: Omit<NotesPendingCompletionV1, "completionId" | "statusRevision">;
+  durableCompletion?: Omit<NotesPendingCompletionV1, "completionId" | "statusRevision"> & {
+    safeToolEnvironmentDigest: string;
+    verificationEvidence: NotesVerificationEvidenceV2[];
+  };
 }
 
 export interface ProjectNotesRoadmapProposalOutcome {
@@ -386,6 +400,7 @@ export interface ProjectNotesExecutionReconciliationRequiredRequest {
 
 export interface ProjectNotesExecutionReconciliationRequest extends PhaseExecutionReconciliationRequestV3 {
   currentWorkspace: NotesWorkspaceSnapshotV1;
+  currentSafeToolEnvironmentDigest: string;
   cleanAncestorStepIds: string[];
   reconciledAt: string;
 }
@@ -417,7 +432,7 @@ export interface ProjectNotesExecutionEvidenceRequest {
   phaseId: string;
   expectedRevision: number;
   planHash: string;
-  evidence: NotesVerificationEvidenceV1;
+  evidence: NotesVerificationEvidence;
 }
 
 export interface ProjectNotesPendingCompletionRequest {
@@ -1394,12 +1409,87 @@ function sameRoadmapStatusPayload(
 
 function sameDurableCompletionPayload(
   pending: NotesPendingCompletionV1 | null | undefined,
+  phase: NotesPhase,
   request: ProjectNotesRoadmapStatusRequest,
 ): boolean {
   if (!request.durableCompletion) return true;
-  if (!pending || pending.completionId !== request.updateId) return false;
+  const evidence = phase.execution?.evidence;
+  const requestedEvidence = request.durableCompletion.verificationEvidence;
+  const expectedCriterionIds = phase.doneWhen.map((criterion, index) =>
+    roadmapCriterionId(index + 1, criterion),
+  );
+  if (
+    !pending ||
+    pending.completionId !== request.updateId ||
+    !evidence ||
+    requestedEvidence.length !== expectedCriterionIds.length ||
+    requestedEvidence.some((record) => !expectedCriterionIds.includes(record.criterionId))
+  ) {
+    return false;
+  }
   const { completionId: _completionId, statusRevision: _statusRevision, ...stored } = pending;
-  return isDeepStrictEqual(stored, request.durableCompletion);
+  const { verificationEvidence, ...requestedPending } = request.durableCompletion;
+  return (
+    isDeepStrictEqual(stored, requestedPending) &&
+    verificationEvidence.every((record) =>
+      evidence.some(
+        (storedRecord) =>
+          "version" in storedRecord &&
+          storedRecord.version === 2 &&
+          storedRecord.executionId === record.executionId &&
+          isDeepStrictEqual(storedRecord, record),
+      ),
+    )
+  );
+}
+
+function validateAtomicCompletionEvidence(
+  phase: NotesPhase,
+  request: NonNullable<ProjectNotesRoadmapStatusRequest["durableCompletion"]>,
+): "operation-conflict" | string | null {
+  const execution = phase.execution;
+  if (!execution || request.verificationEvidence.length !== phase.doneWhen.length) {
+    return "Durable completion requires exactly one execution-backed record per criterion.";
+  }
+  const expectedCriterionIds = phase.doneWhen.map((criterion, index) =>
+    roadmapCriterionId(index + 1, criterion),
+  );
+  const records = request.verificationEvidence;
+  if (
+    new Set(records.map((record) => record.executionId)).size !== records.length ||
+    new Set(records.map((record) => record.criterionId)).size !== records.length ||
+    records.some((record) => !expectedCriterionIds.includes(record.criterionId))
+  ) {
+    return "Durable completion bindings must uniquely cover every current criterion.";
+  }
+  for (const record of records) {
+    if (
+      !workspaceSnapshotsEqual(record.workspace, request.workspace) ||
+      record.safeToolEnvironmentDigest !== request.safeToolEnvironmentDigest
+    ) {
+      return "Durable verification evidence is stale for the current executable inputs.";
+    }
+    const existing = execution.evidence.find(
+      (candidate) =>
+        "version" in candidate &&
+        candidate.version === 2 &&
+        candidate.executionId === record.executionId,
+    );
+    if (existing && !isDeepStrictEqual(existing, record)) return "operation-conflict";
+  }
+  const merged = [
+    ...execution.evidence,
+    ...records.filter(
+      (record) =>
+        !execution.evidence.some(
+          (candidate) =>
+            "version" in candidate &&
+            candidate.version === 2 &&
+            candidate.executionId === record.executionId,
+        ),
+    ),
+  ];
+  return validateNotesPhaseExecution({ ...execution, evidence: merged })?.message ?? null;
 }
 
 function reconciliationSummary(phase: NotesPhase): {
@@ -1989,6 +2079,7 @@ export class ProjectNotesRepository {
             repository: request.repository,
             plan: request.plan,
             workspace: request.workspace,
+            currentSafeToolEnvironmentDigest: request.currentSafeToolEnvironmentDigest,
           }),
         )
         .digest("hex");
@@ -2045,8 +2136,12 @@ export class ProjectNotesRepository {
       const nextExecution = phase.execution!;
       nextExecution.plan!.steps = reconciledSteps.steps;
       nextExecution.evidence = nextExecution.evidence.map((evidence) =>
-        evidence.state !== "needs-revalidation" &&
-        workspaceSnapshotsEqual(evidence.workspace, request.currentWorkspace)
+        isEvidenceCurrent(
+          evidence,
+          request.currentWorkspace,
+          ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+          request.currentSafeToolEnvironmentDigest,
+        )
           ? evidence
           : { ...evidence, state: "needs-revalidation" as const },
       );
@@ -2132,11 +2227,19 @@ export class ProjectNotesRepository {
         return { status: "operation-conflict", revision };
       }
       if (execution.plan.contentHash !== request.planHash) return { status: "plan-mismatch" };
-      const prior = execution.evidence.find(
-        (item) =>
+      const prior = execution.evidence.find((item) => {
+        if ("version" in request.evidence && request.evidence.version === 2) {
+          return (
+            "version" in item &&
+            item.version === 2 &&
+            item.executionId === request.evidence.executionId
+          );
+        }
+        return (
           item.commandHash === request.evidence.commandHash &&
-          item.criterionId === request.evidence.criterionId,
-      );
+          item.criterionId === request.evidence.criterionId
+        );
+      });
       if (prior) {
         return isDeepStrictEqual(prior, request.evidence)
           ? { status: "duplicate", revision }
@@ -2383,6 +2486,7 @@ export class ProjectNotesRepository {
           !sameRoadmapStatusPayload(prior, normalizedRequest) ||
           !sameDurableCompletionPayload(
             currentPhase.execution?.pendingCompletion,
+            currentPhase,
             normalizedRequest,
           )
         ) {
@@ -2427,11 +2531,11 @@ export class ProjectNotesRepository {
             message: "Done requires a passed verification result.",
           };
         }
-        if (request.evidence.length !== currentPhase.doneWhen.length) {
+        if (request.evidence.length === 0) {
           return {
             status: "verification-incomplete",
             revision,
-            message: "Done requires exactly one evidence item per Done When criterion.",
+            message: "Done requires a bounded verification summary.",
           };
         }
       }
@@ -2472,6 +2576,15 @@ export class ProjectNotesRepository {
         if (execution.pendingCompletion !== null) {
           return { status: "operation-conflict", revision };
         }
+        const evidenceError = validateAtomicCompletionEvidence(
+          currentPhase,
+          request.durableCompletion,
+        );
+        if (evidenceError) {
+          return evidenceError === "operation-conflict"
+            ? { status: "operation-conflict", revision }
+            : { status: "verification-incomplete", revision, message: evidenceError };
+        }
       }
       const timestamp = chronologicalRoadmapTimestamp(currentPhase, request.timestamp);
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);
@@ -2511,9 +2624,23 @@ export class ProjectNotesRepository {
         this.createId,
       );
       if (request.durableCompletion) {
+        const { verificationEvidence, ...pendingCompletion } = request.durableCompletion;
+        phase.execution!.evidence.push(
+          ...structuredClone(
+            verificationEvidence.filter(
+              (record) =>
+                !phase.execution!.evidence.some(
+                  (candidate) =>
+                    "version" in candidate &&
+                    candidate.version === 2 &&
+                    candidate.executionId === record.executionId,
+                ),
+            ),
+          ),
+        );
         phase.execution!.state = "completion-pending";
         phase.execution!.pendingCompletion = {
-          ...structuredClone(request.durableCompletion),
+          ...structuredClone(pendingCompletion),
           completionId: request.updateId,
           statusRevision: revision + 1,
         };

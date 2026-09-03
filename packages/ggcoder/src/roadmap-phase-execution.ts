@@ -6,10 +6,11 @@ import type {
   NotesApprovedPlanV1,
   NotesPlanStepV1,
   NotesRepositoryIdentityV1,
-  NotesVerificationEvidenceV1,
+  NotesVerificationEvidence,
   NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core";
 import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
+import { workspaceVerificationEvidenceMatches } from "./core/verification-evidence.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -207,14 +208,9 @@ export function workspaceSnapshotsEqual(
   left: NotesWorkspaceSnapshotV1,
   right: NotesWorkspaceSnapshotV1,
 ): boolean {
-  return (
-    left.version === right.version &&
-    left.repository.projectKey === right.repository.projectKey &&
-    constantTimeHexEqual(left.repository.identityHash, right.repository.identityHash) &&
-    left.repository.rootCommit === right.repository.rootCommit &&
-    left.headCommit === right.headCommit &&
-    constantTimeHexEqual(left.worktreeDigest, right.worktreeDigest) &&
-    left.clean === right.clean
+  return workspaceVerificationEvidenceMatches(
+    { workspace: left, safeToolEnvironmentDigest: "" },
+    { workspace: right, safeToolEnvironmentDigest: "" },
   );
 }
 
@@ -240,16 +236,25 @@ export function reconcilePlanSteps(
 }
 
 export function isEvidenceCurrent(
-  evidence: NotesVerificationEvidenceV1,
+  evidence: NotesVerificationEvidence,
   current: NotesWorkspaceSnapshotV1,
   classifierVersion: string,
+  currentSafeToolEnvironmentDigest: string,
 ): boolean {
   return (
+    "version" in evidence &&
+    evidence.version === 2 &&
     evidence.state !== "needs-revalidation" &&
     evidence.exitCode === 0 &&
     evidence.verdict === "approved" &&
     evidence.classifierVersion === classifierVersion &&
-    workspaceSnapshotsEqual(evidence.workspace, current)
+    workspaceVerificationEvidenceMatches(
+      {
+        workspace: evidence.workspace,
+        safeToolEnvironmentDigest: evidence.safeToolEnvironmentDigest,
+      },
+      { workspace: current, safeToolEnvironmentDigest: currentSafeToolEnvironmentDigest },
+    )
   );
 }
 

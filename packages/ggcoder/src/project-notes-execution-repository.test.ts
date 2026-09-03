@@ -5,9 +5,11 @@ import {
   canonicalProjectKey,
   type NotesDocumentV3,
   type NotesRepositoryIdentityV1,
+  type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { roadmapCriterionId } from "./core/verification-evidence.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
 
@@ -37,6 +39,7 @@ beforeEach(async () => {
     await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
   ) as NotesDocumentV3;
   Object.assign(document.phases[0]!, {
+    doneWhen: Array.from({ length: 7 }, (_, index) => `criterion ${index + 1}`),
     status: "in-progress",
     attentionReason: null,
     lifecycleEvents: [],
@@ -70,6 +73,23 @@ function approvedPlan() {
   });
 }
 
+function v2Evidence(index: number): NotesVerificationEvidenceV2 {
+  return {
+    version: 2,
+    executionId: `execution-${index}`,
+    commandHash: `${index}`.repeat(64),
+    commandDisplay: "pnpm check",
+    cwd,
+    exitCode: 0,
+    classifierVersion: "roadmap-verification-v1",
+    verdict: "approved",
+    criterionId: roadmapCriterionId(index, document.phases[0]!.doneWhen[index - 1]!),
+    observedAt: NOW,
+    workspace,
+    safeToolEnvironmentDigest: "9".repeat(64),
+  };
+}
+
 async function approve() {
   return repository.approvePhaseExecutionPlan(cwd, {
     operationId: "approve-1",
@@ -82,6 +102,117 @@ async function approve() {
 }
 
 describe("Project Notes durable phase execution", () => {
+  it("atomically commits seven V2 records and pending completion in one revision", async () => {
+    const plan = approvedPlan();
+    await approve();
+    await repository.checkpointPhaseExecutionStep(cwd, {
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      stepId: plan.steps[0]!.id,
+      completedAt: NOW,
+      workspace,
+    });
+    await repository.checkpointPhaseExecutionStep(cwd, {
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 3,
+      planHash: plan.contentHash,
+      stepId: plan.steps[1]!.id,
+      completedAt: NOW,
+      workspace,
+    });
+    const verificationEvidence = Array.from({ length: 7 }, (_, index) => v2Evidence(index + 1));
+    const request = {
+      updateId: "atomic-completion",
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 3,
+      actor: "gg-coder" as const,
+      transition: "done" as const,
+      progress: "Seven criteria verified",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["All bounded checks passed"],
+      verification: "passed" as const,
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession: document.phases[0]!.session,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+      durableCompletion: {
+        runJournal: { sessionPath: "/sessions/atomic.jsonl", generation: 1 },
+        planHash: plan.contentHash,
+        workspace,
+        safeToolEnvironmentDigest: "9".repeat(64),
+        verificationEvidence,
+      },
+    };
+
+    expect(await repository.recordRoadmapStatusUpdate(cwd, request)).toEqual({
+      status: "stale-revision",
+      revision: 4,
+    });
+    const afterConflict = await repository.load(cwd);
+    expect(afterConflict).toMatchObject({ status: "ok", snapshot: { revision: 4 } });
+    if (afterConflict.status !== "ok") throw new Error("Expected persisted Project Notes");
+    expect(afterConflict.snapshot.document.phases[0]!.execution).toMatchObject({
+      evidence: [],
+      pendingCompletion: null,
+    });
+
+    const retry = { ...request, expectedRevision: 4 };
+    expect(await repository.recordRoadmapStatusUpdate(cwd, retry)).toMatchObject({
+      status: "committed",
+      snapshot: { revision: 5 },
+      phase: {
+        execution: {
+          evidence: verificationEvidence,
+          pendingCompletion: { completionId: request.updateId, statusRevision: 5 },
+        },
+      },
+    });
+    expect(await repository.recordRoadmapStatusUpdate(cwd, retry)).toMatchObject({
+      status: "duplicate",
+      revision: 5,
+    });
+    expect(
+      await repository.recordRoadmapStatusUpdate(cwd, {
+        ...retry,
+        durableCompletion: {
+          ...retry.durableCompletion,
+          verificationEvidence: retry.durableCompletion.verificationEvidence.slice(0, 1),
+        },
+      }),
+    ).toEqual({ status: "operation-conflict", revision: 5 });
+  });
+
+  it("makes V2 execution replay idempotent and rejects conflicting identity reuse", async () => {
+    const plan = approvedPlan();
+    await approve();
+    const evidence = v2Evidence(1);
+    const request = {
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      evidence,
+    };
+    expect(await repository.recordPhaseExecutionEvidence(cwd, request)).toMatchObject({
+      status: "committed",
+      snapshot: { revision: 3 },
+    });
+    expect(await repository.recordPhaseExecutionEvidence(cwd, request)).toEqual({
+      status: "duplicate",
+      revision: 3,
+    });
+    expect(
+      await repository.recordPhaseExecutionEvidence(cwd, {
+        ...request,
+        expectedRevision: 3,
+        evidence: { ...evidence, criterionId: "8".repeat(64) },
+      }),
+    ).toEqual({ status: "operation-conflict", revision: 3 });
+  });
+
   it("persists snapshot reconciliation before execution can resume", async () => {
     await expect(approve()).resolves.toMatchObject({ status: "committed" });
     const plan = approvedPlan();
@@ -212,6 +343,8 @@ describe("Project Notes durable phase execution", () => {
         runJournal: { sessionPath: "/sessions/one.jsonl", generation: 2 },
         planHash: plan.contentHash,
         workspace,
+        safeToolEnvironmentDigest: "9".repeat(64),
+        verificationEvidence: Array.from({ length: 7 }, (_, index) => v2Evidence(index + 1)),
       },
     };
     expect(await repository.recordRoadmapStatusUpdate(cwd, completionRequest)).toMatchObject({
@@ -235,6 +368,7 @@ describe("Project Notes durable phase execution", () => {
         runJournal: completionRequest.durableCompletion.runJournal,
         planHash: plan.contentHash,
         workspace,
+        safeToolEnvironmentDigest: "9".repeat(64),
       },
     });
     expect(restartedPhase.roadmapEvents).toEqual(
@@ -472,6 +606,8 @@ describe("Project Notes durable phase execution", () => {
           runJournal: pendingCompletion.runJournal,
           planHash: plan.contentHash,
           workspace,
+          safeToolEnvironmentDigest: "9".repeat(64),
+          verificationEvidence: Array.from({ length: 7 }, (_, index) => v2Evidence(index + 1)),
         },
       }),
     ).resolves.toEqual(conflict);
@@ -590,6 +726,7 @@ describe("Project Notes durable phase execution", () => {
       plan: planExpectation,
       workspace: currentWorkspace,
       currentWorkspace,
+      currentSafeToolEnvironmentDigest: "9".repeat(64),
       cleanAncestorStepIds: [plan.steps[0]!.id],
       reconciledAt: "2026-08-30T10:04:00.000Z",
     };
@@ -666,6 +803,7 @@ describe("Project Notes durable phase execution", () => {
       plan: planExpectation,
       workspace,
       currentWorkspace: workspace,
+      currentSafeToolEnvironmentDigest: "9".repeat(64),
       cleanAncestorStepIds: [],
       reconciledAt: "2026-08-30T10:04:00.000Z",
     };

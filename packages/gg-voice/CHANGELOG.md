@@ -1,5 +1,12 @@
 # @kenkaiiii/gg-voice
 
+## 4.3.373
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.53.1
+- @kenkaiiii/gg-agent@5.53.1
+
 ## 4.3.372
 
 ### Patch Changes

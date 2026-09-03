@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.53.1
+
+### Patch Changes
+
+- Make Agent Steroids the proactive source of truth: the agent now searches the real-code corpus before planning or writing nontrivial code, fills a corpus gap via discover → ask → add (indexing allowed in plan mode), and nudges once to install Steroids when the CLI is missing.
+  - @kenkaiiii/gg-ai@5.53.1
+  - @kenkaiiii/gg-agent@5.53.1
+  - @kenkaiiii/gg-core@5.53.1
+
 ## 5.53.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 [package]
 name = "gg-app"
-version = "0.57.1"
+version = "0.57.3"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -38,7 +38,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4.45"
 unicode-normalization = "0.1.25"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# `query` became an opt-in feature in 0.13. We ask for no TLS feature of our
+# own — every request goes to the local sidecar over plain http://127.0.0.1 —
+# but tauri-plugin-updater turns on reqwest's `rustls-no-provider`, and cargo
+# unifies features across the shared 0.13 build. So OUR client is a rustls
+# client too, and building one panics unless a crypto provider is installed
+# first. See `install_rustls_provider` in lib.rs.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream"] }
+# Only to install that provider. `ring` is the same backend (and version) the
+# updater already pulls in, so this adds no crates to the build.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures-util = "0.3"
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 atomic-write-file = { version = "=0.3.0", default-features = false }

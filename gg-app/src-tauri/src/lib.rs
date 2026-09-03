@@ -10066,9 +10066,27 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Install the process-wide rustls crypto provider.
+///
+/// reqwest 0.13 is compiled with `rustls-no-provider` (tauri-plugin-updater
+/// asks for it, and cargo unifies features across the one shared build), and in
+/// that mode `ClientBuilder::build()` PANICS rather than returning an error if
+/// no provider has been installed. `unwrap_or_else` cannot catch that, so a
+/// missing provider takes the whole app down at startup.
+///
+/// The updater installs `ring` lazily, but only when it first checks for an
+/// update — far too late for the client built below. `ring` here matches what
+/// it would install, so whichever runs first the process agrees with itself.
+fn install_rustls_provider() {
+    // Fails only if a provider is already installed, which is the outcome we
+    // want anyway — so the result is deliberately ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_diagnostics();
+    install_rustls_provider();
     let daemon_token =
         generate_daemon_auth_token().expect("failed to generate per-launch daemon bearer token");
     let mut default_headers = reqwest::header::HeaderMap::new();
@@ -10569,6 +10587,23 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards the startup crash from the reqwest 0.13 bump: the shared client is
+    /// built before anything else in `run()`, and without a rustls provider that
+    /// build PANICS, so the packaged app died on launch with no error of its
+    /// own. Asserting `build()` succeeds after `install_rustls_provider` catches
+    /// a provider that stops covering the feature set reqwest is compiled with.
+    ///
+    /// It cannot see the CALL being dropped from `run()` — that ordering is only
+    /// observable by launching the app, which is the Windows packaged smoke's job.
+    #[test]
+    fn shared_http_client_builds_after_provider_install() {
+        install_rustls_provider();
+        assert!(
+            reqwest::Client::builder().build().is_ok(),
+            "shared client must build once the rustls provider is installed",
+        );
+    }
 
     #[test]
     fn identity_storage_diagnostics_use_authenticated_identity_scoped_proxy() {

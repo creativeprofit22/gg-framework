@@ -370,11 +370,20 @@ export async function smokePackagedLayout(layout, options) {
     windowsHide: false,
   });
   const appPid = child.pid;
+  let exited = null;
+  child.on?.("exit", (code, signal) => {
+    exited = { code, signal };
+  });
   try {
     await waitFor(
       "packaged app window and bundled sidecar",
       () => {
-        if (!exists(appPid)) throw new StopWaitingError("packaged app exited early");
+        if (!exists(appPid)) {
+          const how = exited
+            ? `code ${exited.code === null ? "null" : `0x${(exited.code >>> 0).toString(16)}`}, signal ${exited.signal}`
+            : "exit status unknown";
+          throw new StopWaitingError(`packaged app exited early (${how})`);
+        }
         const processes = snapshot();
         const app = processes.find(
           (entry) =>

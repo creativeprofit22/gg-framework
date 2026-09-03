@@ -10744,6 +10744,12 @@ select {
   justify-content: flex-start;
   align-items: flex-start;
   text-align: left;
+  /* `.btn` is nowrap for chips; a long label here must wrap inside the
+     transcript column rather than push the whole band past its right edge. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  max-width: 100%;
   border-radius: var(--radius-button);
   padding: 9px 12px;
   background: var(--surface-3);
@@ -10785,12 +10791,14 @@ select {
 .ask-options .ask-num {
   margin-top: 1px;
   margin-right: 2px;
+  flex-shrink: 0;
 }
 /* The badge is a separate idea from the label, so it is pushed to the far edge
    rather than trailing it with the button's own 8px gap. */
 .ask-options .badge {
   margin-top: 1px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 /* `margin-left: auto` only guarantees air while the row is short. Once the hint
    line runs long the badge is pushed back until just the button's own 8px gap
@@ -10802,6 +10810,12 @@ select {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+/* The plain label (no hint) has no flex container of its own: without
+   `min-width: 0` a long one keeps its intrinsic width and overflows the row. */
+.ask-options .btn > span:not(.ask-num):not(.badge) {
   min-width: 0;
   flex: 1 1 auto;
 }

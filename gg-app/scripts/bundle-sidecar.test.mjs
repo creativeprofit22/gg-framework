@@ -5,15 +5,17 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildAndPromoteDirectory,
   copyPackage,
+  pruneAllowlistedPackagePayloads,
   selectedOptionalDependencies,
 } from "./bundle-sidecar.mjs";
 
@@ -43,6 +45,16 @@ function createPackage(root, name, manifest = {}) {
     JSON.stringify({ name, version: "1.0.0", ...manifest }),
   );
   writeFileSync(join(directory, "payload.txt"), name);
+}
+
+function createDirectorySymlinkOrSkip(target, link) {
+  try {
+    symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+    return true;
+  } catch (error) {
+    if (["EACCES", "ENOSYS", "EPERM"].includes(error?.code)) return false;
+    throw error;
+  }
 }
 
 function createSharpFixture() {
@@ -97,6 +109,220 @@ describe("sidecar optional dependency selection", () => {
       }),
     ).toThrow("sharp has no supported Windows host selection for win32/arm64");
     expect(existsSync(destination)).toBe(false);
+  });
+});
+
+function writeFixtureFile(root, relativePath, content = relativePath) {
+  const path = join(root, ...relativePath.split("/"));
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
+}
+
+function createVersionedPackage(nodeModules, name, version, files) {
+  const root = join(nodeModules, ...name.split("/"));
+  mkdirSync(root, { recursive: true });
+  writeFixtureFile(root, "package.json", JSON.stringify({ name, version }));
+  for (const file of files) writeFixtureFile(root, file);
+  return root;
+}
+
+function createPackagePruneFixture() {
+  const root = mkdtempSync(join(tmpdir(), "gg-sidecar-prune-"));
+  temporaryDirectories.push(root);
+  const nodeModules = join(root, "node_modules");
+
+  createVersionedPackage(nodeModules, "onnxruntime-web", "1.22.0-dev.20250409-89f8206ba4", [
+    "README.md",
+    "__commit.txt",
+    "types.d.ts",
+    "dist/ort.node.min.js",
+    "dist/ort.node.min.mjs",
+    "dist/ort-wasm-simd-threaded.jsep.wasm",
+    "docs/webgl-operators.md",
+    "lib/index.ts",
+  ]);
+  createVersionedPackage(nodeModules, "@huggingface/transformers", "3.8.1", [
+    "LICENSE",
+    "dist/ort-wasm-simd-threaded.jsep.mjs",
+    "dist/ort-wasm-simd-threaded.jsep.wasm",
+    "dist/transformers.js",
+    "dist/transformers.min.js",
+    "dist/transformers.node.cjs",
+    "dist/transformers.node.min.cjs",
+    "dist/transformers.node.min.mjs",
+    "dist/transformers.node.mjs",
+    "dist/transformers.web.js",
+    "dist/transformers.web.min.js",
+  ]);
+  createVersionedPackage(nodeModules, "ogg-opus-decoder", "1.7.3", [
+    "index.js",
+    "types.d.ts",
+    "dist/ogg-opus-decoder.min.js",
+    "dist/ogg-opus-decoder.opus-ml.min.js",
+  ]);
+  createVersionedPackage(nodeModules, "@wasm-audio-decoders/opus-ml", "0.0.2", [
+    "index.js",
+    "types.d.ts",
+    "dist/opus-ml-decoder.min.js",
+  ]);
+  createVersionedPackage(nodeModules, "@mixmark-io/domino", "2.2.0", [
+    "LICENSE",
+    "test/domino.js",
+    "test/fixture/data.txt",
+    "test/html5lib-tests.json",
+    "test/index.js",
+    "test/parsing.js",
+    "test/tools/tool.js",
+    "test/w3c/test.js",
+    "test/web-platform-blocklist.json",
+    "test/web-platform-tests.js",
+    "test/xss.js",
+    ".yarn/plugins/plugin.cjs",
+    ".yarn/versions/version.yml",
+  ]);
+  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.67", [
+    "LICENSE",
+    "dist/cli.js",
+    "vendor/seccomp/arm64/apply-seccomp",
+    "vendor/seccomp/build.ts",
+    "vendor/seccomp/x64/apply-seccomp",
+    "vendor/srt-win/arm64/srt-win.exe",
+    "vendor/srt-win/build.ts",
+    "vendor/srt-win/x64/srt-win.exe",
+  ]);
+  return { nodeModules };
+}
+
+describe("allowlisted package payload pruning", () => {
+  it("retains required Windows runtime and license files while removing forbidden payloads", () => {
+    const { nodeModules } = createPackagePruneFixture();
+    const result = pruneAllowlistedPackagePayloads(nodeModules, {
+      platform: "win32",
+      arch: "x64",
+    });
+
+    expect(result.sandboxRuntime).toBe("srt-win/x64/srt-win.exe");
+    expect(
+      existsSync(
+        join(
+          nodeModules,
+          "@anthropic-ai",
+          "sandbox-runtime",
+          "vendor",
+          "srt-win",
+          "x64",
+          "srt-win.exe",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        join(
+          nodeModules,
+          "@anthropic-ai",
+          "sandbox-runtime",
+          "vendor",
+          "srt-win",
+          "arm64",
+          "srt-win.exe",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(join(nodeModules, "@anthropic-ai", "sandbox-runtime", "vendor", "seccomp")),
+    ).toBe(false);
+    expect(existsSync(join(nodeModules, "@anthropic-ai", "sandbox-runtime", "LICENSE"))).toBe(true);
+
+    expect(
+      existsSync(
+        join(nodeModules, "@huggingface", "transformers", "dist", "transformers.node.mjs"),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(join(nodeModules, "@huggingface", "transformers", "dist", "transformers.web.js")),
+    ).toBe(false);
+    expect(existsSync(join(nodeModules, "@huggingface", "transformers", "LICENSE"))).toBe(true);
+    expect(existsSync(join(nodeModules, "onnxruntime-web", "dist", "ort.node.min.mjs"))).toBe(true);
+    expect(
+      existsSync(join(nodeModules, "onnxruntime-web", "dist", "ort-wasm-simd-threaded.jsep.wasm")),
+    ).toBe(false);
+    expect(existsSync(join(nodeModules, "ogg-opus-decoder", "index.js"))).toBe(true);
+    expect(existsSync(join(nodeModules, "ogg-opus-decoder", "dist"))).toBe(false);
+    expect(existsSync(join(nodeModules, "@wasm-audio-decoders", "opus-ml", "index.js"))).toBe(true);
+    expect(existsSync(join(nodeModules, "@wasm-audio-decoders", "opus-ml", "dist"))).toBe(false);
+    expect(existsSync(join(nodeModules, "@mixmark-io", "domino", "test"))).toBe(false);
+    expect(existsSync(join(nodeModules, "@mixmark-io", "domino", ".yarn"))).toBe(false);
+    expect(existsSync(join(nodeModules, "@mixmark-io", "domino", "LICENSE"))).toBe(true);
+  });
+
+  it("aborts before pruning when a known package has an unknown layout", () => {
+    const { nodeModules } = createPackagePruneFixture();
+    const unexpected = join(
+      nodeModules,
+      "@huggingface",
+      "transformers",
+      "dist",
+      "unexpected-runtime.js",
+    );
+    writeFileSync(unexpected, "unknown");
+
+    expect(() =>
+      pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" }),
+    ).toThrow("@huggingface/transformers layout changed");
+    expect(existsSync(unexpected)).toBe(true);
+    expect(
+      existsSync(join(nodeModules, "onnxruntime-web", "dist", "ort-wasm-simd-threaded.jsep.wasm")),
+    ).toBe(true);
+  });
+
+  it("aborts before pruning when an allowlisted package version changes", () => {
+    const { nodeModules } = createPackagePruneFixture();
+    const manifest = join(nodeModules, "ogg-opus-decoder", "package.json");
+    writeFileSync(manifest, JSON.stringify({ name: "ogg-opus-decoder", version: "1.8.0" }));
+
+    expect(() =>
+      pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" }),
+    ).toThrow("ogg-opus-decoder version changed");
+    expect(existsSync(join(nodeModules, "ogg-opus-decoder", "dist"))).toBe(true);
+  });
+
+  it("rejects nested package symlinks before pruning any package", () => {
+    const { nodeModules } = createPackagePruneFixture();
+    const target = join(dirname(nodeModules), "linked-fixture");
+    const link = join(nodeModules, "@mixmark-io", "domino", "test", "fixture", "linked");
+    mkdirSync(target);
+    if (!createDirectorySymlinkOrSkip(target, link)) return;
+
+    expect(() =>
+      pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" }),
+    ).toThrow(/unexpected symbolic link.*fixture[/\\]linked/);
+    expect(
+      existsSync(join(nodeModules, "onnxruntime-web", "dist", "ort-wasm-simd-threaded.jsep.wasm")),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["win32", "arm64", "srt-win/arm64/srt-win.exe"],
+    ["linux", "x64", "seccomp/x64/apply-seccomp"],
+    ["linux", "arm64", "seccomp/arm64/apply-seccomp"],
+    ["darwin", "x64", null],
+    ["darwin", "arm64", null],
+  ])("keeps only the sandbox runtime for %s/%s", (platform, arch, expectedRuntime) => {
+    const { nodeModules } = createPackagePruneFixture();
+    const result = pruneAllowlistedPackagePayloads(nodeModules, { platform, arch });
+    const vendor = join(nodeModules, "@anthropic-ai", "sandbox-runtime", "vendor");
+    const runtimePaths = [
+      "seccomp/arm64/apply-seccomp",
+      "seccomp/x64/apply-seccomp",
+      "srt-win/arm64/srt-win.exe",
+      "srt-win/x64/srt-win.exe",
+    ];
+
+    expect(result.sandboxRuntime).toBe(expectedRuntime);
+    expect(runtimePaths.filter((path) => existsSync(join(vendor, ...path.split("/"))))).toEqual(
+      expectedRuntime ? [expectedRuntime] : [],
+    );
+    expect(existsSync(join(nodeModules, "@anthropic-ai", "sandbox-runtime", "LICENSE"))).toBe(true);
   });
 });
 

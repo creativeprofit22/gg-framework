@@ -95,6 +95,131 @@ const OPENSRC_BINARIES = new Set([
   "opensrc-linux-musl-arm64",
 ]);
 
+const PACKAGE_PAYLOAD_ALLOWLISTS = [
+  {
+    name: "onnxruntime-web",
+    version: "1.22.0-dev.20250409-89f8206ba4",
+    requiredPaths: ["package.json", "types.d.ts", "dist/ort.node.min.js", "dist/ort.node.min.mjs"],
+    operations: [
+      {
+        path: ".",
+        expectedEntries: [
+          "README.md",
+          "__commit.txt",
+          "dist",
+          "docs",
+          "lib",
+          "package.json",
+          "types.d.ts",
+        ],
+        retainFiles: [
+          "package.json",
+          "types.d.ts",
+          "dist/ort.node.min.js",
+          "dist/ort.node.min.mjs",
+        ],
+      },
+    ],
+  },
+  {
+    name: "@huggingface/transformers",
+    version: "3.8.1",
+    requiredPaths: ["package.json", "LICENSE", "dist/transformers.node.mjs"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: [
+          "ort-wasm-simd-threaded.jsep.mjs",
+          "ort-wasm-simd-threaded.jsep.wasm",
+          "transformers.js",
+          "transformers.min.js",
+          "transformers.node.cjs",
+          "transformers.node.min.cjs",
+          "transformers.node.min.mjs",
+          "transformers.node.mjs",
+          "transformers.web.js",
+          "transformers.web.min.js",
+        ],
+        retainFiles: ["transformers.node.mjs"],
+      },
+    ],
+  },
+  {
+    name: "ogg-opus-decoder",
+    version: "1.7.3",
+    requiredPaths: ["package.json", "index.js", "types.d.ts"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: ["ogg-opus-decoder.min.js", "ogg-opus-decoder.opus-ml.min.js"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@wasm-audio-decoders/opus-ml",
+    version: "0.0.2",
+    requiredPaths: ["package.json", "index.js", "types.d.ts"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: ["opus-ml-decoder.min.js"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@mixmark-io/domino",
+    version: "2.2.0",
+    requiredPaths: ["package.json", "LICENSE"],
+    operations: [
+      {
+        path: "test",
+        expectedEntries: [
+          "domino.js",
+          "fixture",
+          "html5lib-tests.json",
+          "index.js",
+          "parsing.js",
+          "tools",
+          "w3c",
+          "web-platform-blocklist.json",
+          "web-platform-tests.js",
+          "xss.js",
+        ],
+        removeDirectory: true,
+      },
+      {
+        path: ".yarn",
+        expectedEntries: ["plugins", "versions"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@anthropic-ai/sandbox-runtime",
+    version: "0.0.67",
+    requiredPaths: ["package.json", "LICENSE", "dist/cli.js"],
+    operations: [
+      {
+        path: "vendor",
+        expectedFiles: [
+          "seccomp/arm64/apply-seccomp",
+          "seccomp/build.ts",
+          "seccomp/x64/apply-seccomp",
+          "srt-win/arm64/srt-win.exe",
+          "srt-win/build.ts",
+          "srt-win/x64/srt-win.exe",
+        ],
+        retainFiles: ({ platform, arch }) => {
+          const runtime = sandboxRuntimePath(platform, arch);
+          return runtime ? [runtime] : [];
+        },
+      },
+    ],
+  },
+];
+
 function portablePath(path) {
   return path.split(sep).join("/");
 }
@@ -487,7 +612,14 @@ function pruneForeignOpenSrcBinaries(stagedOutDir) {
   return { removed, selectedName };
 }
 
-function assertPrunedLayout(stagedOutDir, before, removed, after, selectedOpenSrcBinary) {
+function assertPrunedLayout(
+  stagedOutDir,
+  before,
+  removed,
+  after,
+  selectedOpenSrcBinary,
+  packagePrune,
+) {
   const errors = [];
   const fail = (message) => errors.push(message);
   if (after.bytes !== before.bytes - removed.bytes) {
@@ -502,13 +634,12 @@ function assertPrunedLayout(stagedOutDir, before, removed, after, selectedOpenSr
   }
 
   const opensrcPrefix = "node_modules/opensrc/bin/";
-  const browserOnnxPrefix = "node_modules/onnxruntime-web/";
   for (const file of removed.entries) {
     const allowedOpenSrc =
       file.relative.startsWith(opensrcPrefix) &&
       OPENSRC_BINARIES.has(file.relative.slice(opensrcPrefix.length));
-    const allowedBrowserOnnx = file.relative.startsWith(browserOnnxPrefix);
-    if (!file.relative.endsWith(".map") && !allowedOpenSrc && !allowedBrowserOnnx) {
+    const allowedPackagePrune = packagePrune.removedPaths.has(file.relative);
+    if (!file.relative.endsWith(".map") && !allowedOpenSrc && !allowedPackagePrune) {
       fail(`unexpected removed path: ${file.relative}`);
     }
   }
@@ -549,7 +680,18 @@ function assertPrunedLayout(stagedOutDir, before, removed, after, selectedOpenSr
       ? ["node_modules/@img/colour/package.json", "node_modules/@img/sharp-win32-x64/package.json"]
       : []),
     "node_modules/playwright/package.json",
+    "node_modules/@huggingface/transformers/LICENSE",
     "node_modules/@huggingface/transformers/dist/transformers.node.mjs",
+    "node_modules/onnxruntime-web/dist/ort.node.min.js",
+    "node_modules/onnxruntime-web/dist/ort.node.min.mjs",
+    "node_modules/ogg-opus-decoder/index.js",
+    "node_modules/@wasm-audio-decoders/opus-ml/index.js",
+    "node_modules/@mixmark-io/domino/LICENSE",
+    "node_modules/@anthropic-ai/sandbox-runtime/LICENSE",
+    "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js",
+    ...(packagePrune.sandboxRuntime
+      ? [`node_modules/@anthropic-ai/sandbox-runtime/vendor/${packagePrune.sandboxRuntime}`]
+      : []),
     "node_modules/unpdf/dist/index.mjs",
     "node_modules/typescript/lib/tsserver.js",
     "node_modules/typescript-language-server/lib/cli.mjs",
@@ -633,45 +775,140 @@ function stripSourceMaps() {
   console.log(`stripped ${count} source maps (${mb(freed)})`);
 }
 
-/**
- * `onnxruntime-web` is statically imported by @huggingface/transformers but in
- * Node the exports map resolves only `dist/ort.node.min.{js,mjs}` — thin
- * wrappers around onnxruntime-node. The browser wasm binaries and webgl/webgpu
- * bundle variants (~85 MB) can never execute in a Node sidecar. Fail open: if
- * the node entries are missing (future version renamed them), keep everything
- * rather than shipping a package that cannot load.
- */
-function pruneBrowserOnnxPayloads(stagedNodeModulesOut) {
-  const KEEP = [
-    "package.json",
-    "types.d.ts",
-    join("dist", "ort.node.min.js"),
-    join("dist", "ort.node.min.mjs"),
-  ];
-  const roots = [];
-  walk(stagedNodeModulesOut, (p, entry) => {
-    if (
-      entry.isDirectory() &&
-      entry.name === "onnxruntime-web" &&
-      existsSync(join(p, "package.json"))
-    ) {
-      roots.push(p);
-    }
-  });
-  for (const root of roots) {
-    if (!KEEP.every((rel) => existsSync(join(root, rel)))) {
-      console.warn(`skip onnxruntime-web prune (node entry missing): ${root}`);
-      continue;
-    }
-    let freed = 0;
-    walk(root, (p, entry) => {
-      if (!entry.isFile()) return;
-      if (KEEP.includes(relative(root, p))) return;
-      freed += statSync(p).size;
-      rmSync(p);
-    });
-    console.log(`pruned onnxruntime-web browser payloads (${mb(freed)})`);
+function sortedDirectoryEntries(directory) {
+  return readdirSync(directory).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+function assertExpectedEntries(packageName, operationRoot, expectedEntries) {
+  const actualEntries = sortedDirectoryEntries(operationRoot);
+  const expected = [...expectedEntries].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (JSON.stringify(actualEntries) !== JSON.stringify(expected)) {
+    throw new Error(
+      `${packageName} layout changed at ${operationRoot}: expected [${expected.join(", ")}], found [${actualEntries.join(", ")}]`,
+    );
   }
+}
+
+function removeEmptyDirectories(root, preserveRoot = true) {
+  for (const name of sortedDirectoryEntries(root)) {
+    const path = join(root, name);
+    if (!lstatSync(path).isDirectory()) continue;
+    removeEmptyDirectories(path, false);
+  }
+  if (!preserveRoot && readdirSync(root).length === 0) rmSync(root, { recursive: true });
+}
+
+function sandboxRuntimePath(platform, arch) {
+  if (platform === "darwin" && ["x64", "arm64"].includes(arch)) return null;
+  if (platform === "win32" && ["x64", "arm64"].includes(arch)) {
+    return `srt-win/${arch}/srt-win.exe`;
+  }
+  if (platform === "linux" && ["x64", "arm64"].includes(arch)) {
+    return `seccomp/${arch}/apply-seccomp`;
+  }
+  throw new Error(`sandbox-runtime has no supported host layout for ${platform}/${arch}`);
+}
+
+/**
+ * Prune only immutable, lockfile-pinned package layouts that are fully described
+ * above. Every rule is validated before any package payload is removed, so a
+ * dependency update or unexpected tarball layout aborts candidate promotion.
+ */
+export function pruneAllowlistedPackagePayloads(
+  stagedNodeModulesOut,
+  { platform = process.platform, arch = process.arch } = {},
+) {
+  const plans = PACKAGE_PAYLOAD_ALLOWLISTS.map((rule) => {
+    const packageRoot = join(stagedNodeModulesOut, ...rule.name.split("/"));
+    const manifestPath = join(packageRoot, "package.json");
+    if (!existsSync(manifestPath))
+      throw new Error(`required sidecar package missing: ${rule.name}`);
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (manifest.name !== rule.name || manifest.version !== rule.version) {
+      throw new Error(
+        `${rule.name} version changed: expected ${rule.version}, found ${manifest.name ?? "unknown"}@${manifest.version ?? "unknown"}`,
+      );
+    }
+    for (const requiredPath of rule.requiredPaths) {
+      if (!existsSync(join(packageRoot, ...requiredPath.split("/")))) {
+        throw new Error(`${rule.name} required runtime path missing: ${requiredPath}`);
+      }
+    }
+
+    const operations = rule.operations.map((operation) => {
+      const operationRoot = resolve(packageRoot, operation.path);
+      if (!operationRoot.startsWith(`${packageRoot}${sep}`) && operationRoot !== packageRoot) {
+        throw new Error(`${rule.name} prune path escapes its package: ${operation.path}`);
+      }
+      if (!existsSync(operationRoot)) {
+        throw new Error(`${rule.name} expected prune path missing: ${operation.path}`);
+      }
+      if (operation.expectedEntries) {
+        assertExpectedEntries(rule.name, operationRoot, operation.expectedEntries);
+      }
+      const files = walkFiles(operationRoot);
+      if (operation.expectedFiles) {
+        const actualFiles = files.map((file) => file.relative);
+        const expectedFiles = [...operation.expectedFiles].sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        );
+        if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+          throw new Error(
+            `${rule.name} layout changed at ${operation.path}: expected [${expectedFiles.join(", ")}], found [${actualFiles.join(", ")}]`,
+          );
+        }
+      }
+      const retainFiles =
+        typeof operation.retainFiles === "function"
+          ? operation.retainFiles({ platform, arch })
+          : operation.retainFiles;
+      for (const retained of retainFiles ?? []) {
+        if (!files.some((file) => file.relative === retained)) {
+          throw new Error(
+            `${rule.name} required retained path missing: ${operation.path}/${retained}`,
+          );
+        }
+      }
+      return { ...operation, operationRoot, files, retainFiles: retainFiles ?? [] };
+    });
+    return { ...rule, packageRoot, operations };
+  });
+
+  const removedPaths = new Set();
+  let removedBytes = 0;
+  for (const plan of plans) {
+    for (const operation of plan.operations) {
+      const retained = new Set(operation.retainFiles);
+      for (const file of operation.files) {
+        if (!operation.removeDirectory && retained.has(file.relative)) continue;
+        removedBytes += file.bytes;
+        removedPaths.add(
+          `node_modules/${plan.name}/${portablePath(relative(plan.packageRoot, file.path))}`,
+        );
+        rmSync(file.path);
+      }
+      if (operation.removeDirectory || retained.size === 0) {
+        rmSync(operation.operationRoot, { recursive: true, force: true });
+        if (existsSync(operation.operationRoot)) {
+          throw new Error(`${plan.name} forbidden payload survived: ${operation.path}`);
+        }
+      } else {
+        removeEmptyDirectories(operation.operationRoot);
+        const retainedAfter = walkFiles(operation.operationRoot).map((file) => file.relative);
+        const expectedAfter = [...retained].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        if (JSON.stringify(retainedAfter) !== JSON.stringify(expectedAfter)) {
+          throw new Error(
+            `${plan.name} retained layout failed at ${operation.path}: expected [${expectedAfter.join(", ")}], found [${retainedAfter.join(", ")}]`,
+          );
+        }
+      }
+    }
+  }
+  console.log(
+    `pruned allowlisted package payloads (${removedPaths.size} files / ${mb(removedBytes)})`,
+  );
+  return { removedPaths, removedBytes, sandboxRuntime: sandboxRuntimePath(platform, arch) };
 }
 
 export async function buildAndPromoteDirectory(
@@ -783,15 +1020,22 @@ async function main() {
       }
       pruneForeignNativePayloads(stagedOutDir);
       const before = inventory(stagedOutDir);
-      pruneBrowserOnnxPayloads(stagedNodeModulesOut);
       pruneSourceMaps(stagedOutDir);
+      const packagePrune = pruneAllowlistedPackagePayloads(stagedNodeModulesOut);
       const opensrc = pruneForeignOpenSrcBinaries(stagedOutDir);
       const after = inventory(stagedOutDir);
       const retainedPaths = new Set(after.entries.map((file) => file.relative));
       const removed = inventoryFromFiles(
         before.entries.filter((file) => !retainedPaths.has(file.relative)),
       );
-      return { before, removed, after, copied, selectedOpenSrcBinary: opensrc.selectedName };
+      return {
+        before,
+        removed,
+        after,
+        copied,
+        packagePrune,
+        selectedOpenSrcBinary: opensrc.selectedName,
+      };
     },
     (stagedOutDir, staged) => {
       renderInventory(staged.before, staged.removed, staged.after);
@@ -804,6 +1048,7 @@ async function main() {
         staged.removed,
         staged.after,
         staged.selectedOpenSrcBinary,
+        staged.packagePrune,
       );
     },
   );

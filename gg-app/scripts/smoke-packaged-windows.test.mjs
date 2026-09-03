@@ -111,6 +111,38 @@ describe("packaged Windows smoke artifact discovery", () => {
     expect(result).toEqual({ appPid: 10, packagedNode: layout.node });
   });
 
+  it("reports the packaged app exit code instead of waiting for a timeout", async () => {
+    const root = temporaryDirectory();
+    const layout = {
+      executable: join(root, "app.exe"),
+      installDir: root,
+      node: join(root, "ggnode.exe"),
+      sidecar: join(root, "sidecar", "app-sidecar.mjs"),
+    };
+    let handleExit;
+
+    await expect(
+      smokePackagedLayout(layout, {
+        smokeRoot: root,
+        projectDir: join(root, "project"),
+        spawnApp: () => ({
+          pid: 10,
+          on: (event, listener) => {
+            expect(event).toBe("exit");
+            handleExit = listener;
+          },
+        }),
+        exists: () => {
+          handleExit(0xc0000005, null);
+          return false;
+        },
+        snapshot: () => [],
+        visiblePids: () => new Set(),
+        cleanupOptions: { snapshot: () => [], exists: () => false },
+      }),
+    ).rejects.toThrow("packaged app exited early (code 0xc0000005, signal null)");
+  });
+
   it("fails when the bundled Node runtime is missing beside the app", () => {
     // The exact shape of "installs fine, does nothing" that this smoke exists
     // to catch: the shell is there but has no runtime to spawn the sidecar.

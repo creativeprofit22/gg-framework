@@ -43,7 +43,10 @@ test("standalone sweep preserves its intentional fallback behavior", () => {
 });
 
 test("standalone sweep searches curated Steroids evidence before discovery", () => {
-  assert.match(command, /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/);
+  assert.match(
+    command,
+    /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/,
+  );
   assert.match(command, /Search the curated corpus first with `action: "search"`/i);
   assert.match(command, /literal imports, APIs, or recognizable implementation anchors/i);
   assert.match(command, /verify selected files with `action: "show"`/i);
@@ -57,8 +60,14 @@ test("standalone sweep gates repository additions on explicit approval", () => {
 });
 
 test("standalone sweep keeps local evidence authoritative", () => {
-  assert.match(command, /Do not use external evidence to prove deadness\. Deadness is local to this repo/i);
-  assert.match(command, /External evidence cannot establish local business behavior or prove local deadness/i);
+  assert.match(
+    command,
+    /Do not use external evidence to prove deadness\. Deadness is local to this repo/i,
+  );
+  assert.match(
+    command,
+    /External evidence cannot establish local business behavior or prove local deadness/i,
+  );
   assert.match(command, /external evidence cannot establish local business rules or behavior/i);
   assert.match(command, /Analyzer output is a lead, not a finding by itself/i);
 });

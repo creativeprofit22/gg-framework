@@ -24,7 +24,11 @@ function extractProjectSweepTemplate(bytes) {
   const contentStart = markerStart + startMarker.length;
   const contentEnd = bytes.indexOf(endMarker, contentStart);
   assert.notEqual(contentEnd, -1, "project sweep template end marker is missing");
-  assert.equal(bytes.indexOf(startMarker, contentStart), -1, "project sweep template is duplicated");
+  assert.equal(
+    bytes.indexOf(startMarker, contentStart),
+    -1,
+    "project sweep template is duplicated",
+  );
   return bytes.subarray(contentStart, contentEnd);
 }
 
@@ -33,17 +37,32 @@ const projectSweep = projectSweepBytes.toString("utf8");
 
 test("setup-sweep preserves the existing generator workflow and safety policy", () => {
   assert.match(command, /generate a local `.gg\/commands\/sweep.md` and `.gg\/sweep.config.json`/i);
-  assert.match(command, /Do \*\*not\*\* install dependencies, download ephemeral tools, or modify package files without explicit user confirmation/i);
+  assert.match(
+    command,
+    /Do \*\*not\*\* install dependencies, download ephemeral tools, or modify package files without explicit user confirmation/i,
+  );
   assert.match(command, /three independent audit lanes: Prune, Refactor, Drift/i);
   assert.match(command, /generated `\/sweep` must not edit product code directly/i);
-  assert.match(command, /Every generated task must be standalone, file-pinned, evidence-backed, and verifiable/i);
+  assert.match(
+    command,
+    /Every generated task must be standalone, file-pinned, evidence-backed, and verifiable/i,
+  );
 });
 
 test("setup-sweep documents Steroids and approval tools for its generated command", () => {
-  assert.match(command, /allowed-tools: Bash, Read, Write, Edit, Grep, Glob, LS, subagent, steroids, ask_user/);
+  assert.match(
+    command,
+    /allowed-tools: Bash, Read, Write, Edit, Grep, Glob, LS, subagent, steroids, ask_user/,
+  );
   assert.match(command, /Steroids rule: use curated public code/i);
-  assert.match(command, /never use external evidence to prove local deadness or business behavior/i);
-  assert.match(projectSweep, /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/);
+  assert.match(
+    command,
+    /never use external evidence to prove local deadness or business behavior/i,
+  );
+  assert.match(
+    projectSweep,
+    /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/,
+  );
 });
 
 test("generated sweep template bytes remain exact and independently writable", async () => {
@@ -68,20 +87,38 @@ test("generated sweep searches curated Steroids evidence before discovery", () =
   assert.match(projectSweep, /Search the curated corpus first with `action: "search"`/i);
   assert.match(projectSweep, /literal imports, APIs, or recognizable implementation anchors/i);
   assert.match(projectSweep, /verify selected files with `action: "show"`/i);
-  assert.match(projectSweep, /If Steroids reports a real corpus gap, automatically call `discover`/i);
+  assert.match(
+    projectSweep,
+    /If Steroids reports a real corpus gap, automatically call `discover`/i,
+  );
 });
 
 test("generated sweep gates repository additions on explicit approval", () => {
   assert.match(projectSweep, /use `ask_user` for approval before `add`/i);
   assert.match(projectSweep, /never call `add` or `discover` with `add: true` before approval/i);
-  assert.match(projectSweep, /After approval, add only the selected repositories, repeat `search`/i);
+  assert.match(
+    projectSweep,
+    /After approval, add only the selected repositories, repeat `search`/i,
+  );
 });
 
 test("generated sweep keeps local evidence authoritative", () => {
-  assert.match(projectSweep, /Do not use external evidence to prove deadness\. Deadness is local to this repo/i);
-  assert.match(projectSweep, /External evidence cannot establish local business behavior or prove local deadness/i);
-  assert.match(projectSweep, /external evidence cannot establish local business rules or behavior/i);
-  assert.match(projectSweep, /Do not let analyzer output become findings by itself\. Treat it as leads/i);
+  assert.match(
+    projectSweep,
+    /Do not use external evidence to prove deadness\. Deadness is local to this repo/i,
+  );
+  assert.match(
+    projectSweep,
+    /External evidence cannot establish local business behavior or prove local deadness/i,
+  );
+  assert.match(
+    projectSweep,
+    /external evidence cannot establish local business rules or behavior/i,
+  );
+  assert.match(
+    projectSweep,
+    /Do not let analyzer output become findings by itself\. Treat it as leads/i,
+  );
 });
 
 test("setup-sweep and generated sweep remove deprecated research tools", () => {

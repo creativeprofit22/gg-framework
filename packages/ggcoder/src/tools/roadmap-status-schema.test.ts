@@ -113,18 +113,14 @@ describe("roadmap_status provider schema", () => {
     expect(
       tool.parameters.safeParse({
         ...doneInput,
-        verification_bindings: [
-          { criterion_id: "a".repeat(64), execution_id: "execution-1" },
-        ],
+        verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
       }).success,
     ).toBe(true);
     expect(tool.parameters.safeParse(doneInput).success).toBe(false);
     expect(
       tool.parameters.safeParse({
         ...doneInput,
-        verification_bindings: [
-          { criterion_id: "a".repeat(64), execution_id: "execution-1" },
-        ],
+        verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
         verification: { result: "failed", reason: "Tests failed" },
       }).success,
     ).toBe(false);

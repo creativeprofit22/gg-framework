@@ -105,10 +105,7 @@ function partitionLedgerEvidenceForWorkspace(
   workspace: NotesWorkspaceSnapshotV1,
   safeToolEnvironmentDigest: string,
 ): SessionVerificationEvidenceLedgerSnapshot {
-  const allEvidence = [
-    ...(ledger?.currentEvidence ?? []),
-    ...(ledger?.staleEvidence ?? []),
-  ];
+  const allEvidence = [...(ledger?.currentEvidence ?? []), ...(ledger?.staleEvidence ?? [])];
   const currentEvidence = allEvidence.filter(
     (item) =>
       item.workspace &&
@@ -633,7 +630,6 @@ export class AppSidecarRoadmapToolHost {
     }
   }
 }
-
 
 function staleRevisionMessage(expected: number, current: number): string {
   return `Project Notes revision is stale: expected ${expected}, current ${current}. Reload the current snapshot and retry once with expected_revision=${current}.`;

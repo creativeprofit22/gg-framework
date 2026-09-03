@@ -56,7 +56,10 @@ test("trace searches and shows curated Steroids evidence", () => {
   assert.match(command, /`action: "search"`/i);
   assert.match(command, /`action: "show"`/i);
   assert.match(command, /literal routing, server-action, cache, IPC, decorator, ORM, plugin/i);
-  assert.match(command, /Whether Steroids grounding affected classification and the exact external\/framework pattern/i);
+  assert.match(
+    command,
+    /Whether Steroids grounding affected classification and the exact external\/framework pattern/i,
+  );
 });
 
 test("trace automatically discovers corpus gaps but gates repository additions", () => {
@@ -67,9 +70,18 @@ test("trace automatically discovers corpus gaps but gates repository additions",
 });
 
 test("trace keeps external evidence below local reachability authority", () => {
-  assert.match(command, /Local imports, callers, types, configuration, and runtime wiring remain authoritative/i);
-  assert.match(command, /External evidence cannot prove local reachability, local deadness, or business behavior/i);
-  assert.match(command, /Use external evidence only to avoid false positives around external conventions/i);
+  assert.match(
+    command,
+    /Local imports, callers, types, configuration, and runtime wiring remain authoritative/i,
+  );
+  assert.match(
+    command,
+    /External evidence cannot prove local reachability, local deadness, or business behavior/i,
+  );
+  assert.match(
+    command,
+    /Use external evidence only to avoid false positives around external conventions/i,
+  );
 });
 
 test("trace removes deprecated research tools", () => {

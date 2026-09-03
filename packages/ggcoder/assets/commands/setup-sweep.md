@@ -81,12 +81,12 @@ Do not spawn more than three setup scouts. Do not use setup scouts to audit prod
 
 Create a table of analyzers split into four buckets:
 
-| Bucket | Meaning |
-|---|---|
-| **Existing local** | Already in project dependencies/scripts/config; safe to run through package manager. |
-| **Native built-in** | Available through the language toolchain already implied by the project, e.g. `go list`, `cargo check`, `tsc` if TypeScript is installed. |
-| **Ephemeral optional** | Can run via `npx --yes`, `uvx`, `pipx run`, etc.; must ask before use/download. |
-| **Dev-tool recommendation** | Worth adding as a project dev dependency, but only after explicit user approval. |
+| Bucket                      | Meaning                                                                                                                                   |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Existing local**          | Already in project dependencies/scripts/config; safe to run through package manager.                                                      |
+| **Native built-in**         | Available through the language toolchain already implied by the project, e.g. `go list`, `cargo check`, `tsc` if TypeScript is installed. |
+| **Ephemeral optional**      | Can run via `npx --yes`, `uvx`, `pipx run`, etc.; must ask before use/download.                                                           |
+| **Dev-tool recommendation** | Worth adding as a project dev dependency, but only after explicit user approval.                                                          |
 
 Suggested analyzer map:
 

@@ -1391,28 +1391,28 @@ async function main(): Promise<void> {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";
 
-    // Answer preflights with a bare 204 but grant NO origins — the webview
-    // reaches the daemon through the Rust proxy, never cross-origin, so any
-    // browser page's preflight must fail here.
-    if (method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+      // Answer preflights with a bare 204 but grant NO origins — the webview
+      // reaches the daemon through the Rust proxy, never cross-origin, so any
+      // browser page's preflight must fail here.
+      if (method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
 
-    // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
-    // Host blocks DNS rebinding, where a web page's request arrives with
-    // the attacker's hostname (browsers cannot spoof Host).
-    const reqHost = req.headers.host ?? "";
-    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
-      daemonJson(res, 403, { error: "forbidden host" });
-      return;
-    }
+      // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
+      // Host blocks DNS rebinding, where a web page's request arrives with
+      // the attacker's hostname (browsers cannot spoof Host).
+      const reqHost = req.headers.host ?? "";
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
+        daemonJson(res, 403, { error: "forbidden host" });
+        return;
+      }
 
-    if (req.headers["x-gg-token"] !== authToken) {
-      daemonJson(res, 401, { error: "unauthorized" });
-      return;
-    }
+      if (req.headers["x-gg-token"] !== authToken) {
+        daemonJson(res, 401, { error: "unauthorized" });
+        return;
+      }
 
       // ── Daemon-level routes (session lifecycle) ──────────────────────────
       // Secret-free two-phase reload: reserve while Rust persists native config,
@@ -1993,9 +1993,7 @@ async function createSession(
     broadcastSnapshot: broadcastNotesSnapshot,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     releaseCompletedPhaseLease: releaseOrDeferCompletedPhaseLease,
-    captureWorkspaceSnapshot: durableRoadmapExecution
-      ? captureVerificationWorkspace
-      : undefined,
+    captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
     onError: (error) => captureSidecarError(error, "app-sidecar.phase-completion"),
   });
   const phaseImplementationPlans = new AppSidecarPhaseImplementationPlanTracker();
@@ -2248,9 +2246,7 @@ async function createSession(
     repository: notesRepository,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
-    captureWorkspaceSnapshot: durableRoadmapExecution
-      ? captureVerificationWorkspace
-      : undefined,
+    captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
     captureVerificationWorkspace,
     getRunGeneration: () => activeRunGeneration,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),

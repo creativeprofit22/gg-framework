@@ -23,7 +23,10 @@ test("contract preserves the previous audit workflow and local evidence boundary
     command,
     /Local declarations, consumers, tests, and runtime evidence are authoritative/i,
   );
-  assert.match(command, /cannot prove local deadness, reachability, correctness, or business intent/i);
+  assert.match(
+    command,
+    /cannot prove local deadness, reachability, correctness, or business intent/i,
+  );
 });
 
 test("contract uses concrete Steroids operations", () => {

@@ -9,7 +9,10 @@ import {
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { roadmapCriterionId } from "./core/verification-evidence.js";
+import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+  roadmapCriterionId,
+} from "./core/verification-evidence.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
 
@@ -81,7 +84,7 @@ function v2Evidence(index: number): NotesVerificationEvidenceV2 {
     commandDisplay: "pnpm check",
     cwd,
     exitCode: 0,
-    classifierVersion: "roadmap-verification-v1",
+    classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
     verdict: "approved",
     criterionId: roadmapCriterionId(index, document.phases[0]!.doneWhen[index - 1]!),
     observedAt: NOW,

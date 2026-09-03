@@ -89,7 +89,10 @@ test("ux-audit searches and shows curated Steroids evidence", () => {
   assert.match(command, /literal component, route, state, or layout anchors/i);
   assert.match(command, /`perRepo: 1`/i);
   assert.match(command, /`action: "show"`/i);
-  assert.match(command, /owner\/name`, file path, lines, and the immutable URL retained from `search`/i);
+  assert.match(
+    command,
+    /owner\/name`, file path, lines, and the immutable URL retained from `search`/i,
+  );
 });
 
 test("ux-audit automatically discovers corpus gaps but gates repository additions", () => {

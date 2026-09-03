@@ -2119,7 +2119,9 @@ describe("ProjectNotes", () => {
     expect(gates?.textContent).toContain("Revalidation required");
     expect(gates?.textContent).toContain("Needs revalidation");
     expect(gates?.textContent).not.toContain("Ready to settle");
-    expect(gates?.textContent).not.toContain("Waiting for the owning implementation run to settle.");
+    expect(gates?.textContent).not.toContain(
+      "Waiting for the owning implementation run to settle.",
+    );
   });
 
   it("does not reuse typed verification after a later untyped report", async () => {

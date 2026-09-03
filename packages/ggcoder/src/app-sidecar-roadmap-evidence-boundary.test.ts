@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import { AppSidecarRoadmapToolHost } from "./app-sidecar-roadmap-tool-host.js";
 import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
   collectVerificationEvidence,
   evaluateRoadmapVerificationEvidence,
   roadmapCriterionId,
@@ -61,7 +62,7 @@ function codingSession(messages: Message[]) {
     cwd: "C:/fixture",
     safeToolEnvironmentDigest: "9".repeat(64),
     workspace: WORKSPACE,
-    classifierVersion: "roadmap-verification-v1",
+    classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
   }));
   return {
     getActivePhaseContext: () => activeContext(),

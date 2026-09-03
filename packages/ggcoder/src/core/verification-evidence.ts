@@ -16,7 +16,7 @@ export interface VerificationCommandClassification {
   reason: string;
 }
 
-export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v1";
+export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v2";
 
 export interface VerificationEvidence {
   command: string;
@@ -125,7 +125,12 @@ function tokenize(segment: string): string[] {
 }
 
 function executableBasename(token: string | undefined): string {
-  return token?.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase() ?? "";
+  return (
+    token
+      ?.replace(/^.*[\\/]/, "")
+      .replace(/\.exe$/i, "")
+      .toLowerCase() ?? ""
+  );
 }
 
 function hasVerifierExecutable(command: string): boolean {
@@ -635,7 +640,6 @@ export function safeToolEnvironmentDigest(
     )
     .digest("hex");
 }
-
 
 const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "code_nav",

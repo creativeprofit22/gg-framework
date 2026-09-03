@@ -19,8 +19,14 @@ test("ship preserves release gates, Git restrictions, and verification rules", (
   assert.match(command, /git diff --name-only HEAD~1 HEAD/);
   assert.match(command, /Ask before running:[\s\S]*installs or downloads/i);
   assert.match(command, /If a command fails, read the failure and classify it/i);
-  assert.match(command, /Programmatic failures become ship blockers only after you read enough output/i);
-  assert.match(command, /Local build, test, runtime, repository, and configuration evidence remains authoritative/i);
+  assert.match(
+    command,
+    /Programmatic failures become ship blockers only after you read enough output/i,
+  );
+  assert.match(
+    command,
+    /Local build, test, runtime, repository, and configuration evidence remains authoritative/i,
+  );
 });
 
 test("ship preserves release lanes, classifications, task policy, and report format", () => {
@@ -47,8 +53,14 @@ test("ship searches and shows curated Steroids evidence", () => {
   assert.match(command, /Search the curated Steroids corpus first/i);
   assert.match(command, /`action: "search"`/i);
   assert.match(command, /`action: "show"`/i);
-  assert.match(command, /literal imports, build keys, route APIs, migration calls, middleware symbols/i);
-  assert.match(command, /Whether Steroids grounding was used and what external pattern it informed/i);
+  assert.match(
+    command,
+    /literal imports, build keys, route APIs, migration calls, middleware symbols/i,
+  );
+  assert.match(
+    command,
+    /Whether Steroids grounding was used and what external pattern it informed/i,
+  );
 });
 
 test("ship automatically discovers corpus gaps but gates repository additions", () => {
@@ -59,8 +71,14 @@ test("ship automatically discovers corpus gaps but gates repository additions", 
 });
 
 test("ship keeps external evidence below local release authority", () => {
-  assert.match(command, /External evidence cannot prove local release behavior, business rules, readiness, or safety/i);
-  assert.match(command, /Bake verified external patterns into tasks only when they inform a concrete fix/i);
+  assert.match(
+    command,
+    /External evidence cannot prove local release behavior, business rules, readiness, or safety/i,
+  );
+  assert.match(
+    command,
+    /Bake verified external patterns into tasks only when they inform a concrete fix/i,
+  );
 });
 
 test("ship removes deprecated research tools", () => {

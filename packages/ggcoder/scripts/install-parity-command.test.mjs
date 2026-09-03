@@ -17,7 +17,10 @@ test("parity preserves the previous audit workflow and local evidence boundary",
   assert.match(command, /Use safe local evidence first/i);
   assert.match(command, /Every mismatch must be confirmed by reading the actual files/i);
   assert.match(command, /Build a parity matrix/i);
-  assert.match(command, /External code cannot establish local business requirements, behavior, or feature parity/i);
+  assert.match(
+    command,
+    /External code cannot establish local business requirements, behavior, or feature parity/i,
+  );
 });
 
 test("parity searches the curated Steroids corpus with concrete operations", () => {
@@ -35,7 +38,10 @@ test("parity automatically discovers corpus gaps but gates repository additions"
 });
 
 test("parity preserves previous policy outside the semantic migration", () => {
-  assert.match(command, /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/);
+  assert.match(
+    command,
+    /allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user/,
+  );
   assert.match(command, /Do not edit project files/i);
   assert.match(command, /Do not install, download, migrate, generate, or mutate lockfiles/i);
   assert.match(command, /create one task-pane task per gap automatically/i);

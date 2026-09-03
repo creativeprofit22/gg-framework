@@ -13,11 +13,13 @@ Find where the promise doesn't match the reality. When a type says `proxy?: stri
 If `$ARGUMENTS` is provided, use it as the interface, module, or boundary to audit.
 
 If `$ARGUMENTS` is empty, infer scope from context — in this order:
+
 - **Git diff** — `git diff --name-only HEAD~1 HEAD` and `git status --short` for recently changed type/interface/CLI/API files
 - **Active plan** — most recently modified file in `.gg/plans/`
 - **Session context** — what was just discussed or implemented
 
 From that, extract:
+
 - The contract surface in scope (which interfaces, which abstract classes, which CLI surface, which documented API)
 - The implementation files that should fulfill those contracts
 
@@ -27,24 +29,25 @@ If nothing can be inferred, ask the user what to audit. Do not proceed blind.
 
 Find every place a **contract** is defined — a promise of what something accepts, returns, implements, or does:
 
-| Contract | Where it lives | What it promises | Where to verify |
-|---|---|---|---|
-| **Type / Interface → function** | `types/`, `interfaces/`, inline TS types | "Function accepts these options" | The function that destructures the options |
-| **Abstract class → subclass** | Base class with abstract methods | "Subclasses implement these" | Every concrete subclass |
-| **Public exports → consumers** | `index.ts` barrels, package public API | "These are available" | Whether anything actually imports them |
-| **CLI flags → handler** | Commander/yargs `.option()` calls, `--help` output | "This flag does something" | The action handler |
-| **Event system → emitters** | Event type defs, documented hooks | "These events fire" | Code that calls `emit`/`dispatch` |
-| **Config schema → consumer** | Config types, env definitions, JSON/YAML schemas | "These config values are supported" | Code that reads them |
-| **API docs → handler** | OpenAPI, JSDoc, README endpoints | "Endpoint returns shape X" | Actual response construction |
-| **Plugin / hook interface → host** | Plugin base type, registered hooks | "Plugins can hook here" | Whether host code fires every hook point |
-| **Error types → throw sites** | Custom error classes, error enums | "These errors can occur" | Whether they're ever thrown |
-| **Module interface → modules** | Shared `ModuleInterface` shape | "Every module has these methods" | Each module's implementation |
+| Contract                           | Where it lives                                     | What it promises                    | Where to verify                            |
+| ---------------------------------- | -------------------------------------------------- | ----------------------------------- | ------------------------------------------ |
+| **Type / Interface → function**    | `types/`, `interfaces/`, inline TS types           | "Function accepts these options"    | The function that destructures the options |
+| **Abstract class → subclass**      | Base class with abstract methods                   | "Subclasses implement these"        | Every concrete subclass                    |
+| **Public exports → consumers**     | `index.ts` barrels, package public API             | "These are available"               | Whether anything actually imports them     |
+| **CLI flags → handler**            | Commander/yargs `.option()` calls, `--help` output | "This flag does something"          | The action handler                         |
+| **Event system → emitters**        | Event type defs, documented hooks                  | "These events fire"                 | Code that calls `emit`/`dispatch`          |
+| **Config schema → consumer**       | Config types, env definitions, JSON/YAML schemas   | "These config values are supported" | Code that reads them                       |
+| **API docs → handler**             | OpenAPI, JSDoc, README endpoints                   | "Endpoint returns shape X"          | Actual response construction               |
+| **Plugin / hook interface → host** | Plugin base type, registered hooks                 | "Plugins can hook here"             | Whether host code fires every hook point   |
+| **Error types → throw sites**      | Custom error classes, error enums                  | "These errors can occur"            | Whether they're ever thrown                |
+| **Module interface → modules**     | Shared `ModuleInterface` shape                     | "Every module has these methods"    | Each module's implementation               |
 
 ## Step 3: Trace each contract
 
 For each contract in scope, list every field / method / event / flag it promises. Then for each one, find where it's read, called, or used in the implementation. Follow real imports — do not guess.
 
 **Trace deeper before calling anything ignored.** A field that looks unused might be:
+
 - Spread into a sub-call: `doThing(options)` passes everything through
 - Destructured later: `const { persona } = options` in a helper
 - Used conditionally: only read when another flag is set
@@ -52,7 +55,7 @@ For each contract in scope, list every field / method / event / flag it promises
 
 Confirm it's truly never consumed before flagging. Local declarations, consumers, tests, and runtime evidence are authoritative for whether this project keeps its contract.
 
-**Ground unfamiliar APIs with Steroids before classifying.** If a contract involves a third-party library, framework hook, decorator, or external API you're not certain about, use Steroids to look up canonical usage in real public repos *before* deciding the implementation is broken. Two reasons:
+**Ground unfamiliar APIs with Steroids before classifying.** If a contract involves a third-party library, framework hook, decorator, or external API you're not certain about, use Steroids to look up canonical usage in real public repos _before_ deciding the implementation is broken. Two reasons:
 
 1. **Avoid false positives.** What looks like an IGNORED field may be consumed through a standard pattern (decorator metadata, framework lifecycle, magic prop) the trace missed. Confirm against real-world usage.
 2. **Pre-bake the fix recipe.** Once you've seen how the API is normally wired, you can write a concrete WIRE recipe into the task in Step 7 — actual call signature, import path, surrounding pattern — instead of leaving the fix agent to re-investigate from a cold chat.
@@ -65,21 +68,23 @@ Search for the literal symbol (import line, function name, decorator) with `ster
 
 For every promise that isn't fully kept:
 
-| Gap type | Meaning |
-|---|---|
-| **IGNORED** | Field/option accepted by the contract but never read by any implementation |
-| **PARTIAL** | Read in some code paths but not others (e.g. wired in path A, ignored in path B) |
-| **STUB** | Method exists but is empty, throws "not implemented", or returns a hardcoded value |
-| **DOCUMENTED-ONLY** | Mentioned in docs / `--help` / README but no code implements it |
-| **PHANTOM** | Implementation reads or returns a field the contract doesn't define (undocumented behaviour) |
-| **FACADE** | Whole module/subclass implements the shape but every method is a stub or throws |
+| Gap type            | Meaning                                                                                      |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| **IGNORED**         | Field/option accepted by the contract but never read by any implementation                   |
+| **PARTIAL**         | Read in some code paths but not others (e.g. wired in path A, ignored in path B)             |
+| **STUB**            | Method exists but is empty, throws "not implemented", or returns a hardcoded value           |
+| **DOCUMENTED-ONLY** | Mentioned in docs / `--help` / README but no code implements it                              |
+| **PHANTOM**         | Implementation reads or returns a field the contract doesn't define (undocumented behaviour) |
+| **FACADE**          | Whole module/subclass implements the shape but every method is a stub or throws              |
 
 For each gap, record:
+
 - **WHERE**: `file:line` for the contract definition AND `file:line` for the implementation
 - **WHAT**: which promise isn't kept
 - **WHY IT MATTERS**: what actually fails or silently degrades
 
 Do NOT track:
+
 - Optional fields with intentional defaults / fallbacks (verify the default is real before skipping)
 - Deprecated fields with documented migration paths
 - Private internals — only public boundaries (exported types, CLI surface, documented APIs, abstract methods)
@@ -110,6 +115,7 @@ If you can't tell whether a gap should be wired or trimmed, mark the task as nee
 For every gap, add one task to the task pane using the `tasks` tool (action: `add`).
 
 Each task must be self-contained — a fix agent in a separate chat must execute it with no extra context. Include:
+
 - Severity label (Critical / High / Medium / Low)
 - Gap type (IGNORED / PARTIAL / STUB / DOCUMENTED-ONLY / PHANTOM / FACADE)
 - Decision (WIRE / TRIM / DOCUMENT) — or "needs decision" with both options spelled out
@@ -117,7 +123,7 @@ Each task must be self-contained — a fix agent in a separate chat must execute
 - A plain-english description of the gap
 - A concrete fix at the code level — actual field names, function names, import paths, where the new wiring goes (not pseudocode). If you grounded the contract against Steroids in Step 3, bake the canonical pattern you saw directly into the task (call signature, import path, surrounding usage). The fix agent should be able to execute, not re-investigate.
 - Any related files the fix agent should read first
-- **Fallback grounding clause**: if your Step 3 recipe is ambiguous or you couldn't verify the pattern (rare API, no public examples), tell the fix agent to search Steroids for the specific literal symbol and inspect matches with `show` *before* writing code. Otherwise omit — don't pad every task with redundant lookup instructions.
+- **Fallback grounding clause**: if your Step 3 recipe is ambiguous or you couldn't verify the pattern (rare API, no public examples), tell the fix agent to search Steroids for the specific literal symbol and inspect matches with `show` _before_ writing code. Otherwise omit — don't pad every task with redundant lookup instructions.
 
 Order: Critical → High → Medium → Low.
 

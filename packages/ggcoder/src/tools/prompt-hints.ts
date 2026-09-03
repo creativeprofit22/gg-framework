@@ -29,8 +29,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
   task_output: "Read new output from a background process by id.",
   task_stop: "Stop a background process by id.",
-  screenshot:
-    "Capture a browser PNG of a URL or local server; supports waits and interactions.",
+  screenshot: "Capture a browser PNG of a URL or local server; supports waits and interactions.",
   send_message: "Queue steering into a running child agent without starting another turn.",
   followup_task: "Start another turn in an idle child agent, preserving its context.",
   wait_agent: "Block until named child agents finish and return their output snapshots.",
@@ -48,8 +47,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
-  generate_image:
-    "Generate or edit images with gpt-image-2, only when explicitly requested.",
+  generate_image: "Generate or edit images with gpt-image-2, only when explicitly requested.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };

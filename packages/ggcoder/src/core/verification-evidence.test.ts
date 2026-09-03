@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
 import {
+  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
   SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
   collectVerificationEvidence,
@@ -88,17 +89,36 @@ describe("durable verification evidence", () => {
         safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
       }),
     ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
+    expect(evidence[0]!.classifierVersion).toBe("roadmap-verification-v2");
+  });
+
+  it("treats prior-policy durable records as stale", () => {
+    const evidence = createDurableVerificationEvidence({
+      coverage: [
+        {
+          criterionIndex: 1,
+          criterion: "Tests pass",
+          evidence: "pnpm test",
+          command: "pnpm test",
+          ...executionFields(1, workspace),
+        },
+      ],
+    });
+    const priorPolicyEvidence = evidence.map((record) => ({
+      ...record,
+      classifierVersion: "roadmap-verification-v1",
+    }));
+
     expect(
       evaluateDurableVerificationEvidence({
         doneWhen: ["Tests pass"],
-        evidence,
+        evidence: priorPolicyEvidence,
         verificationBindings: evidence.map((record) => ({
           criterionId: record.criterionId,
           executionId: record.executionId,
         })),
         workspace,
         safeToolEnvironmentDigest: TEST_ENVIRONMENT_DIGEST,
-        classifierVersion: "roadmap-verification-v2",
       }),
     ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
   });
@@ -384,7 +404,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         ...item,
         ...executionFields(index + 1, TEST_WORKSPACE),
         executionId: `${prefix}-${index + 1}`,
-        classifierVersion: "roadmap-verification-v1",
+        classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
       }));
     const currentLedgerEvidence = toLedger(partition.currentMessages, "current");
     const staleLedgerEvidence = toLedger(partition.staleMessages, "stale");
@@ -414,7 +434,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
       status: "passed" as const,
       reason: "bounded Cargo check",
-      classifierVersion: "roadmap-verification-v1",
+      classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
     }));
     const verificationBindings = doneWhen.map((criterion, index) => ({
       criterionId: roadmapCriterionId(index + 1, criterion),
@@ -440,6 +460,33 @@ describe("evaluateRoadmapVerificationEvidence", () => {
     });
   });
 
+  it("treats prior-policy ledger records as stale", () => {
+    const criterion = "Tests pass";
+    const execution = {
+      ...executionFields(1, TEST_WORKSPACE),
+      command: "pnpm check",
+      status: "passed" as const,
+      reason: "bounded pnpm verification script",
+      classifierVersion: "roadmap-verification-v1",
+    };
+
+    expect(
+      evaluateRoadmapVerificationEvidence({
+        doneWhen: [criterion],
+        evidence: [execution.command],
+        verificationBindings: [
+          { criterionId: roadmapCriterionId(1, criterion), executionId: execution.executionId },
+        ],
+        expectedRevision: 15,
+        currentMessages: [],
+        currentLedgerEvidence: [execution],
+      }),
+    ).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
+    });
+  });
+
   it("rejects reused executions and unknown criterion bindings", () => {
     const doneWhen = ["first", "second"];
     const execution = {
@@ -447,7 +494,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       command: "pnpm check",
       status: "passed" as const,
       reason: "bounded pnpm verification script",
-      classifierVersion: "roadmap-verification-v1",
+      classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
     };
     const firstId = roadmapCriterionId(1, doneWhen[0]!);
 
@@ -490,7 +537,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         command: "pnpm check",
         status: "passed" as const,
         reason: "ok",
-        classifierVersion: "roadmap-verification-v1",
+        classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
       },
       {
         ...executionFields(2, TEST_WORKSPACE),
@@ -498,7 +545,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         command: "pnpm check",
         status: "passed" as const,
         reason: "ok",
-        classifierVersion: "roadmap-verification-v1",
+        classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
       },
       {
         ...executionFields(3, TEST_WORKSPACE),
@@ -506,7 +553,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         command: "vitest run unrelated.test.ts",
         status: "failed" as const,
         reason: "failed",
-        classifierVersion: "roadmap-verification-v1",
+        classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
       },
     ];
     for (const executionId of ["old-pass", "new-pass"]) {

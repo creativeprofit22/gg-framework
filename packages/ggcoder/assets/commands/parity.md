@@ -73,19 +73,19 @@ Evidence: exact field, route, status, permission, event, cache key, or state inv
 
 Cover these dimensions where applicable:
 
-| Dimension | Frontend question | Backend question |
-|---|---|---|
-| Route/method | Calls the right URL/action/channel? | Handler exists and expects that method/channel? |
-| Request shape | Sends fields/types/defaults backend expects? | Validates/consumes those fields? |
-| Response shape | Renders all meaningful fields returned? | Returns what UI expects? |
-| Validation | UI validation mirrors server constraints? | Server rejects the same invalid states? |
-| Permissions | UI hides/disables unavailable actions? | Backend enforces the same permissions? |
-| Errors | UI handles status/errors/messages? | Backend returns actionable errors? |
-| Loading/empty | UI reflects pending/empty states? | Backend distinguishes empty vs error? |
-| Cache/state | UI invalidates/refetches/subscribes correctly? | Backend emits/updates what UI listens to? |
-| Realtime/events | UI listens to the right event/payload? | Backend emits the right event/payload? |
-| Surfacing | UI exposes useful backend capability? | Backend capability is actually reachable by users? |
-| Docs/tests | Fixtures/docs match current behavior? | Contract tests or examples match actual API? |
+| Dimension       | Frontend question                              | Backend question                                   |
+| --------------- | ---------------------------------------------- | -------------------------------------------------- |
+| Route/method    | Calls the right URL/action/channel?            | Handler exists and expects that method/channel?    |
+| Request shape   | Sends fields/types/defaults backend expects?   | Validates/consumes those fields?                   |
+| Response shape  | Renders all meaningful fields returned?        | Returns what UI expects?                           |
+| Validation      | UI validation mirrors server constraints?      | Server rejects the same invalid states?            |
+| Permissions     | UI hides/disables unavailable actions?         | Backend enforces the same permissions?             |
+| Errors          | UI handles status/errors/messages?             | Backend returns actionable errors?                 |
+| Loading/empty   | UI reflects pending/empty states?              | Backend distinguishes empty vs error?              |
+| Cache/state     | UI invalidates/refetches/subscribes correctly? | Backend emits/updates what UI listens to?          |
+| Realtime/events | UI listens to the right event/payload?         | Backend emits the right event/payload?             |
+| Surfacing       | UI exposes useful backend capability?          | Backend capability is actually reachable by users? |
+| Docs/tests      | Fixtures/docs match current behavior?          | Contract tests or examples match actual API?       |
 
 ## Step 4: Classify parity gaps
 

@@ -467,24 +467,26 @@ describe("app-sidecar direct Roadmap completion", () => {
         mutate === "environment" ? "6".repeat(64) : safeToolEnvironmentDigest(),
       broadcastNotesSnapshot: vi.fn(),
     });
-    const output = await host.createSessionTools("coding", () => codingSession)[0]!.execute(
-      RoadmapStatusParams.parse({
-        update_id: `legacy-freshness-${mutate}`,
-        phase_id: "phase-1",
-        expected_revision: 1,
-        transition: "done",
-        progress: "Verification freshness checked",
-        evidence: ["pnpm test"],
-        verification_bindings: [
-          {
-            criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
-            execution_id: "execution-1",
-          },
-        ],
-        verification: { result: "passed" },
-      }),
-      {} as never,
-    );
+    const output = await host
+      .createSessionTools("coding", () => codingSession)[0]!
+      .execute(
+        RoadmapStatusParams.parse({
+          update_id: `legacy-freshness-${mutate}`,
+          phase_id: "phase-1",
+          expected_revision: 1,
+          transition: "done",
+          progress: "Verification freshness checked",
+          evidence: ["pnpm test"],
+          verification_bindings: [
+            {
+              criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+              execution_id: "execution-1",
+            },
+          ],
+          verification: { result: "passed" },
+        }),
+        {} as never,
+      );
 
     expect(JSON.parse(String(output))).toMatchObject(
       accepted

@@ -19,7 +19,10 @@ test("flow preserves the previous audit workflow and local evidence boundary", (
   assert.match(command, /Pre-bake the fix recipe/i);
   assert.match(command, /inspect 2–3 real examples/i);
   assert.match(command, /prefer repos active in 2026 and skip stale ones/i);
-  assert.match(command, /cannot prove local deadness, reachability, correctness, or business intent/i);
+  assert.match(
+    command,
+    /cannot prove local deadness, reachability, correctness, or business intent/i,
+  );
 });
 
 test("flow searches the curated Steroids corpus with concrete operations", () => {

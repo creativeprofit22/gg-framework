@@ -14,12 +14,12 @@ Pairs with `/ux-plan`. This command produces the audit doc; `/ux-plan` turns one
 
 Every user-facing screen is one of:
 
-| Shape | When | Allowed density |
-|---|---|---|
-| **Wizard** | Creating something with >2 decisions | Sparse — one decision per step, narrow centered column |
-| **Workbench** | Acting on one subject | Medium — lead with "what should I do next?", details below |
-| **Worklist** | Finding/triaging across many rows | Medium — ≤3 visible filters, ≤8 columns, faceted overflow |
-| **Config** | Rarely-touched setup | Allowed dense |
+| Shape         | When                                 | Allowed density                                            |
+| ------------- | ------------------------------------ | ---------------------------------------------------------- |
+| **Wizard**    | Creating something with >2 decisions | Sparse — one decision per step, narrow centered column     |
+| **Workbench** | Acting on one subject                | Medium — lead with "what should I do next?", details below |
+| **Worklist**  | Finding/triaging across many rows    | Medium — ≤3 visible filters, ≤8 columns, faceted overflow  |
+| **Config**    | Rarely-touched setup                 | Allowed dense                                              |
 
 If a screen mixes two shapes, it's confusing — pick one. This lens drives most of the findings.
 
@@ -29,13 +29,13 @@ Before anything else, decide if `/ux-audit` can run on this project. Do not skip
 
 **0a. Classify the project.** Read `package.json`, framework files, and directory structure. Classify into ONE of:
 
-| Class | Signals | Audit applicable |
-|-------|---------|------------------|
-| **Web SPA / SSR** | React/Vue/Svelte/Solid/Next/Nuxt/Remix/Astro; routes | Yes |
-| **Electron** | `electron` dep; main + renderer | Yes |
-| **React Native** | `react-native`; `ios/` `android/` dirs | Yes |
-| **Server / CLI / lib** | No UI; only API/CLI/library code | **Not applicable** |
-| **Unknown** | Mixed signals or nothing matches | **Ask user** |
+| Class                  | Signals                                              | Audit applicable   |
+| ---------------------- | ---------------------------------------------------- | ------------------ |
+| **Web SPA / SSR**      | React/Vue/Svelte/Solid/Next/Nuxt/Remix/Astro; routes | Yes                |
+| **Electron**           | `electron` dep; main + renderer                      | Yes                |
+| **React Native**       | `react-native`; `ios/` `android/` dirs               | Yes                |
+| **Server / CLI / lib** | No UI; only API/CLI/library code                     | **Not applicable** |
+| **Unknown**            | Mixed signals or nothing matches                     | **Ask user**       |
 
 **0b. Bail loud if not applicable.** If the project has no UI surface, STOP and tell the user:
 
@@ -66,6 +66,7 @@ Only after 0a–0e succeed, continue to Step 1.
 If `$ARGUMENTS` is provided, use it as the area or route (e.g. "dashboard", "settings", "auth flow", `/sweep`).
 
 If `$ARGUMENTS` is empty, infer scope from context — in this order:
+
 - **Git diff** — `git diff --name-only HEAD~1 HEAD` and `git status --short` for recently changed UI files.
 - **Active plan** — most recently modified file in `.gg/plans/`.
 - **Session context** — what was just discussed or implemented.
@@ -77,14 +78,14 @@ If multiple UI surfaces exist and none are obviously in scope, ask the user. Do 
 
 Read the routing layer and build a flat list of every top-level user-facing route. Sources by framework:
 
-| Framework | Where to look |
-|---|---|
-| Next.js App Router | `app/**/page.tsx` (skip route groups in `(name)`) |
+| Framework            | Where to look                                           |
+| -------------------- | ------------------------------------------------------- |
+| Next.js App Router   | `app/**/page.tsx` (skip route groups in `(name)`)       |
 | Next.js Pages Router | `pages/**/*.tsx` (skip `_app`, `_document`, API routes) |
-| React Router | the route config / `<Routes>` tree |
-| Vue Router | `router/index.ts` or equivalent |
-| Electron | renderer entry + its router |
-| React Native | navigator config (`@react-navigation/*`) |
+| React Router         | the route config / `<Routes>` tree                      |
+| Vue Router           | `router/index.ts` or equivalent                         |
+| Electron             | renderer entry + its router                             |
+| React Native         | navigator config (`@react-navigation/*`)                |
 
 For each route, capture: path, page-component file, related filter-bar / detail subcomponents (one level deep). Skip auth/error/loading/not-found boilerplate unless they're real screens.
 
@@ -105,7 +106,7 @@ For each route in scope:
 
 Authenticated routes need a session cookie — read the project's auth conventions (see `CLAUDE.md` if present) and reuse the documented pattern. Do not invent flows.
 
-**3c. Identify the job-to-be-done.** One sentence in the user's language, not the schema's. Example: *"Get me a fresh list of athletes who might become clients."* Not: *"Create a new SweepConfig row."* If you can't phrase it without jargon, that's a finding — flag LEAKY-VOCABULARY at the screen level.
+**3c. Identify the job-to-be-done.** One sentence in the user's language, not the schema's. Example: _"Get me a fresh list of athletes who might become clients."_ Not: _"Create a new SweepConfig row."_ If you can't phrase it without jargon, that's a finding — flag LEAKY-VOCABULARY at the screen level.
 
 **3d. Classify the shape** (wizard / workbench / worklist / config). If the screen mixes two, that's a finding — WRONG-SHAPE.
 
@@ -117,42 +118,44 @@ Authenticated routes need a session cookie — read the project's auth conventio
 
 Some leaks repeat across screens and should be flagged once globally instead of N times per route. After Step 3, scan the per-screen notes for patterns:
 
-| Cross-cutting class | What to look for |
-|---|---|
-| **Vocabulary** | Same engineering noun appears in ≥2 user-facing surfaces (e.g. "sweep", "enricher", "cron", "provenance") |
-| **IA / sidebar** | Sidebar groups organised by data model instead of user job |
-| **Header pattern** | More than one heading-size / subtitle pattern coexists |
-| **CTA copy** | Same primary CTA wording appears 4+ times across empty states |
-| **Power-user data on primary surfaces** | Score breakdowns, provenance, formulaVersion, internal IDs visible to non-engineers |
-| **Mobile chrome** | Tables rendered as tables on mobile; modals with non-dismissable overlays; off-screen primary CTAs |
+| Cross-cutting class                     | What to look for                                                                                          |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **Vocabulary**                          | Same engineering noun appears in ≥2 user-facing surfaces (e.g. "sweep", "enricher", "cron", "provenance") |
+| **IA / sidebar**                        | Sidebar groups organised by data model instead of user job                                                |
+| **Header pattern**                      | More than one heading-size / subtitle pattern coexists                                                    |
+| **CTA copy**                            | Same primary CTA wording appears 4+ times across empty states                                             |
+| **Power-user data on primary surfaces** | Score breakdowns, provenance, formulaVersion, internal IDs visible to non-engineers                       |
+| **Mobile chrome**                       | Tables rendered as tables on mobile; modals with non-dismissable overlays; off-screen primary CTAs        |
 
-Each cross-cutting finding gets a `C1`, `C2`, ... ID and lives in its own section of the audit doc. They are *not* duplicated into per-screen sections.
+Each cross-cutting finding gets a `C1`, `C2`, ... ID and lives in its own section of the audit doc. They are _not_ duplicated into per-screen sections.
 
 ## Step 5: Classify with the UX finding-type table
 
 Use these finding types only:
 
-| Type | What it means |
-|---|---|
-| **LEAKY-VOCABULARY** | Engineering noun in user-facing UI ("sweep", "enricher", "cron", "provenance", "bucket") |
-| **WRONG-SHAPE** | Screen mixes two of {wizard / workbench / worklist / config} — pick one |
-| **MISSING-NEXT-ACTION** | Detail page doesn't lead with "what should the user do" |
-| **GLORIFIED-SPREADSHEET** | Worklist exposes >7 filters or >8 columns by default |
-| **CHATTY-WIZARD** | Wizard has >5 steps, or one step asks >2 questions |
-| **DEAD-END** | Flow succeeds but lands the user nowhere actionable |
-| **CONFIG-IN-PRIMARY** | Configuration concern bleeds onto a primary user surface |
-| **DOC-ONLY** | UI promises behaviour (label, button) that the code doesn't implement |
-| **MOBILE-BROKEN** | Page breaks below 390px (overflow, unreachable controls) |
-| **MOBILE-CRAMPED** | Page renders but compresses content meant for desktop (table → squished table) |
-| **COULD-BE-SIMPLER** | Subjective — works, but a calmer composition exists (opinion-laden) |
+| Type                      | What it means                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------- |
+| **LEAKY-VOCABULARY**      | Engineering noun in user-facing UI ("sweep", "enricher", "cron", "provenance", "bucket") |
+| **WRONG-SHAPE**           | Screen mixes two of {wizard / workbench / worklist / config} — pick one                  |
+| **MISSING-NEXT-ACTION**   | Detail page doesn't lead with "what should the user do"                                  |
+| **GLORIFIED-SPREADSHEET** | Worklist exposes >7 filters or >8 columns by default                                     |
+| **CHATTY-WIZARD**         | Wizard has >5 steps, or one step asks >2 questions                                       |
+| **DEAD-END**              | Flow succeeds but lands the user nowhere actionable                                      |
+| **CONFIG-IN-PRIMARY**     | Configuration concern bleeds onto a primary user surface                                 |
+| **DOC-ONLY**              | UI promises behaviour (label, button) that the code doesn't implement                    |
+| **MOBILE-BROKEN**         | Page breaks below 390px (overflow, unreachable controls)                                 |
+| **MOBILE-CRAMPED**        | Page renders but compresses content meant for desktop (table → squished table)           |
+| **COULD-BE-SIMPLER**      | Subjective — works, but a calmer composition exists (opinion-laden)                      |
 
 For each finding, record:
+
 - **WHERE**: `file:line` for the offending element (and the route it appears on).
 - **WHAT**: what's wrong, in plain English the persona would understand.
 - **WHY IT MATTERS**: what the user actually experiences.
 - **PROPOSED RULE / FIX**: concrete — actual replacement copy, component shape, file pin. Not "improve the layout".
 
 Do NOT report:
+
 - Pure code-style / refactor preferences.
 - Performance suggestions.
 - Theoretical issues that can't be triggered.
@@ -170,7 +173,7 @@ Form-factor stance modulates mobile severity: a desktop-primary B2B tool can dow
 
 ## Step 7: Ground unfamiliar patterns with Steroids
 
-Every High/Critical finding must reference an exact `file:line` in the audited project. When the proposed rebuild shape is unfamiliar (king-style wizard, Linear-style faceted filter, HubSpot-style record-with-mode), search the curated Steroids corpus first to pull at least one *concrete public-repo pattern*. Call Steroids with `action: "search"` using literal component, route, state, or layout anchors and `perRepo: 1`; diversify candidates with separate short queries rather than style or category filters. Then call `action: "show"` for at least one accepted source and relevant line range.
+Every High/Critical finding must reference an exact `file:line` in the audited project. When the proposed rebuild shape is unfamiliar (king-style wizard, Linear-style faceted filter, HubSpot-style record-with-mode), search the curated Steroids corpus first to pull at least one _concrete public-repo pattern_. Call Steroids with `action: "search"` using literal component, route, state, or layout anchors and `perRepo: 1`; diversify candidates with separate short queries rather than style or category filters. Then call `action: "show"` for at least one accepted source and relevant line range.
 
 If Steroids reports a real corpus gap, automatically call `discover` with a short topic or language query. If discovery finds repositories, use `ask_user` for approval before `add`; never call `add` or `discover` with `add: true` before approval. After approval, add only the selected repositories, repeat `search`, and confirm accepted evidence with `show`.
 
@@ -234,6 +237,7 @@ For every Critical / High / Medium finding, add one task to the task pane using 
 **For Low findings (COULD-BE-SIMPLER): do NOT auto-create tasks.** These are opinion calls. List them inline in the audit doc under "Open questions" and ask the user which to convert.
 
 Each task must be self-contained — a fix agent in a separate chat must execute it with no extra context. Include:
+
 - Severity label (Critical / High / Medium).
 - Finding type (LEAKY-VOCABULARY / WRONG-SHAPE / etc.).
 - The route / area being fixed.
@@ -242,7 +246,7 @@ Each task must be self-contained — a fix agent in a separate chat must execute
 - A concrete fix — actual replacement copy, component shape, props. Not "make it friendlier".
 - If a public reference was pulled in Step 7, the `owner/name` + file path so the fix agent can read the same pattern.
 - Any related files the fix agent should read first (shared layout, tokens, sibling screens).
-- **Fallback grounding clause**: if the recipe is ambiguous or no public reference was found, tell the fix agent to search the curated Steroids corpus for the specific pattern and confirm accepted source lines with `show` *before* writing code. On a real corpus gap, it must automatically `discover`, obtain approval before `add`, then repeat `search` and `show`. Otherwise omit — don't pad every task.
+- **Fallback grounding clause**: if the recipe is ambiguous or no public reference was found, tell the fix agent to search the curated Steroids corpus for the specific pattern and confirm accepted source lines with `show` _before_ writing code. On a real corpus gap, it must automatically `discover`, obtain approval before `add`, then repeat `search` and `show`. Otherwise omit — don't pad every task.
 
 Order: Critical → High → Medium.
 

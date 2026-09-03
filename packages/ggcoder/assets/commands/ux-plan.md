@@ -6,7 +6,7 @@ allowed-tools: tasks, Bash, Read, Write, Edit, Grep, Glob, steroids, ask_user
 
 # UX Plan
 
-Take an existing `/ux-audit` doc plus a chosen area or step number, and produce a focused implementation plan for *that one piece*. The output is a markdown plan doc in `.gg/plans/NN-<slug>.md` shaped for plan-mode execution — single flat `## Steps` list at the bottom, every change pinned to `file:line`, defensive "do not touch" list non-optional.
+Take an existing `/ux-audit` doc plus a chosen area or step number, and produce a focused implementation plan for _that one piece_. The output is a markdown plan doc in `.gg/plans/NN-<slug>.md` shaped for plan-mode execution — single flat `## Steps` list at the bottom, every change pinned to `file:line`, defensive "do not touch" list non-optional.
 
 Pairs with `/ux-audit`. `/ux-plan` does not do its own audit. If no audit doc exists, it bails — the audit-before-plan discipline is the point.
 
@@ -27,6 +27,7 @@ Do not proceed. Do not invent an audit.
 Do not proceed.
 
 **0c. Area number must resolve.** The second argument is one of:
+
 - A numbered area heading from the audit (e.g. `2` → `### 2. Find athletes (\`/sweep\`)`)
 - A step number from "Recommended rebuild order" (e.g. `step-1` or `1` if no per-area numbering exists)
 - An exact area slug (e.g. `find-athletes`)
@@ -34,11 +35,12 @@ Do not proceed.
 Parse the audit doc's per-area headings. If the requested number/slug doesn't resolve, list the valid options:
 
 > Area not found. Valid areas in this audit:
+>
 > 1. Dashboard (`/`)
 > 2. Find athletes (`/sweep`)
 > 3. Review queue (`/review`)
-> ...
-> Pick one by number or slug.
+>    ...
+>    Pick one by number or slug.
 
 Do not proceed.
 
@@ -49,6 +51,7 @@ Only after 0a–0d succeed, continue.
 ## Step 1: Read the audit context
 
 Pull the following from the audit doc — quote it where useful, don't paraphrase loosely:
+
 - **Audience paragraph** (top of audit). This is the persona the plan must serve.
 - **Form-factor stance.** Desktop-primary / mobile-first / equal — drives every "mobile note" decision in the plan.
 - **The four-shapes table.** The plan must classify its target screen against this same table.
@@ -66,6 +69,7 @@ A plan composed on a half-formed audit is worse than no plan.
 For every finding in the chosen area, locate the actual code and pin every change to `file:line`. No plan section may say "modify the form" — must say "modify `apps/web/src/app/(admin)/sweep/new/page.tsx` lines 23–31."
 
 Read at minimum:
+
 - The page component the area lives in.
 - Filter-bar / detail / step subcomponents the findings reference.
 - The shared layout / sidebar / header file (for cross-cutting findings that touch this area).
@@ -175,7 +179,7 @@ The plan doc is the contract for plan-mode execution. Section order is fixed. Em
 
 These are non-negotiable rules the plan body must follow. Violating any one is a defect:
 
-1. **Every change traces to a finding in the audit.** If the plan introduces work the audit didn't sign off on, that work is out of scope. State this rule near the top of the plan body: *"Any change not traceable to a finding in `<audit-path>` is out of scope."*
+1. **Every change traces to a finding in the audit.** If the plan introduces work the audit didn't sign off on, that work is out of scope. State this rule near the top of the plan body: _"Any change not traceable to a finding in `<audit-path>` is out of scope."_
 2. **Every change pins to `file:line`.** "Modify the form" is banned. "Modify `path/to/file.tsx` lines 23–31" is required.
 3. **The defensive "do not touch" list is non-optional.** A plan with no `### Files we DON'T touch` section is incomplete. Even a tiny plan touching one file lists the sibling files that stay byte-identical.
 4. **`## Steps` is the last section and is a single flat numbered list.** No nested sublists. No prose between steps. No sections after Steps. This matches the plan-mode output contract.
@@ -211,7 +215,7 @@ After the report, ask:
 ## Rules
 
 - **No audit doc, no plan.** Bail loud in Step 0 if the audit is missing or malformed. Do not invent an audit.
-- **One plan, one area.** This command produces a plan for *one* prioritised area. Multiple plans = multiple invocations.
+- **One plan, one area.** This command produces a plan for _one_ prioritised area. Multiple plans = multiple invocations.
 - **File pins everywhere.** No section of the plan body uses vague references. Every change is `file:line`.
 - **Defensive list non-optional.** Every plan enumerates files that must stay byte-identical.
 - **`## Steps` is the last section.** Plan-mode contract. Single flat numbered list. Nothing follows.

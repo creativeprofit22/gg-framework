@@ -26,10 +26,7 @@ export async function installSetupSweepCommand({ agentDir } = {}) {
     throw new Error(`Commands path must be a real directory: ${commandsDir}`);
   }
 
-  const temporary = path.join(
-    commandsDir,
-    `.setup-sweep.md.${process.pid}.${randomUUID()}.tmp`,
-  );
+  const temporary = path.join(commandsDir, `.setup-sweep.md.${process.pid}.${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, source, { flag: "wx", mode: 0o600 });
     await rename(temporary, target);

@@ -274,7 +274,7 @@ export class AppSidecarRoadmapToolHost {
         },
       };
     }
-    let phase = loaded.snapshot.document.phases.find(
+    const phase = loaded.snapshot.document.phases.find(
       (candidate) => candidate.id === input.phase_id,
     );
     const execution = phase?.execution;
@@ -634,20 +634,6 @@ export class AppSidecarRoadmapToolHost {
   }
 }
 
-function workspaceSnapshotsMatch(
-  left: NotesWorkspaceSnapshotV1,
-  right: NotesWorkspaceSnapshotV1,
-): boolean {
-  return (
-    left.version === right.version &&
-    left.repository.projectKey === right.repository.projectKey &&
-    left.repository.identityHash === right.repository.identityHash &&
-    left.repository.rootCommit === right.repository.rootCommit &&
-    left.headCommit === right.headCommit &&
-    left.worktreeDigest === right.worktreeDigest &&
-    left.clean === right.clean
-  );
-}
 
 function staleRevisionMessage(expected: number, current: number): string {
   return `Project Notes revision is stale: expected ${expected}, current ${current}. Reload the current snapshot and retry once with expected_revision=${current}.`;

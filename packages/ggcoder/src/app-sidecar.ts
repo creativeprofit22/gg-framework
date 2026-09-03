@@ -346,7 +346,6 @@ import {
   captureSidecarError,
   flushSidecarErrors,
   shouldCaptureToolFailure,
-  shouldCaptureUsagePollingError,
   wrapSidecarHandler,
 } from "./core/sidecar-error-reporter.js";
 
@@ -7384,7 +7383,7 @@ ${checkpoints}`;
               message: "The OAuth flow did not complete. Retry sign-in.",
             });
           }
-        } catch (err) {
+        } catch {
           broadcast("mcp_auth_error", {
             name,
             message: "The OAuth flow did not complete. Retry sign-in.",

@@ -3,7 +3,6 @@ import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
 import {
   NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
   type NotesVerificationEvidence,
-  type NotesVerificationEvidenceV1,
   type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
@@ -617,60 +616,6 @@ export function safeToolEnvironmentDigest(
     .digest("hex");
 }
 
-function collectShellEvidence(messages: readonly Message[]): RoadmapShellEvidence[] {
-  const calls = new Map<
-    string,
-    { command: string; classification: VerificationCommandClassification; background: boolean }
-  >();
-  const evidence: RoadmapShellEvidence[] = [];
-
-  for (const message of messages) {
-    if (message.role === "assistant" && Array.isArray(message.content)) {
-      for (const part of message.content as ContentPart[]) {
-        if (part.type !== "tool_call" || part.name !== "bash") continue;
-        const command = typeof part.args.command === "string" ? part.args.command.trim() : "";
-        calls.set(part.id, {
-          command,
-          classification: classifyVerificationCommand(command),
-          background: part.args.run_in_background === true || part.args.persist === true,
-        });
-      }
-    }
-    if (message.role !== "tool") continue;
-    for (const result of message.content as ToolResult[]) {
-      const call = calls.get(result.toolCallId);
-      if (!call) continue;
-      if (call.background) {
-        evidence.push({
-          command: call.command,
-          status: "rejected",
-          reason: "background or persistent commands are not bounded evidence",
-        });
-      } else if (!call.classification.candidate) {
-        evidence.push({
-          command: call.command,
-          status: "unclassified",
-          reason: call.classification.reason,
-        });
-      } else if (!call.classification.accepted) {
-        evidence.push({
-          command: call.command,
-          status: "rejected",
-          reason: call.classification.reason,
-        });
-      } else {
-        const passed =
-          !result.isError && /^Exit code:\s*0(?:\s|$)/i.test(resultText(result).trim());
-        evidence.push({
-          command: call.command,
-          status: passed ? "passed" : "failed",
-          reason: passed ? call.classification.reason : "bounded check did not exit successfully",
-        });
-      }
-    }
-  }
-  return evidence;
-}
 
 const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "code_nav",

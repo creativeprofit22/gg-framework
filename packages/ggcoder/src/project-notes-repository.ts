@@ -61,7 +61,6 @@ import {
   type NotesSessionLink,
   type NotesValidationError,
   type NotesVerificationEvidence,
-  type NotesVerificationEvidenceV1,
   type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
   type NotesValidationResult,

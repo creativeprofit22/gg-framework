@@ -29,7 +29,7 @@ pub(super) struct ReqwestRemoteValidator {
 
 impl ReqwestRemoteValidator {
     pub(super) fn new() -> Result<Self, AzureConnectionError> {
-        let client = reqwest::Client::builder()
+        let client = crate::http_client_builder()
             .timeout(VALIDATION_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()

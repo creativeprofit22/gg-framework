@@ -10066,27 +10066,30 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Install the process-wide rustls crypto provider.
+/// Install the process-wide rustls crypto provider before constructing an HTTP client.
 ///
 /// reqwest 0.13 is compiled with `rustls-no-provider` (tauri-plugin-updater
 /// asks for it, and cargo unifies features across the one shared build), and in
 /// that mode `ClientBuilder::build()` PANICS rather than returning an error if
-/// no provider has been installed. `unwrap_or_else` cannot catch that, so a
-/// missing provider takes the whole app down at startup.
+/// no provider has been installed. `unwrap_or_else` cannot catch that.
 ///
-/// The updater installs `ring` lazily, but only when it first checks for an
-/// update — far too late for the client built below. `ring` here matches what
-/// it would install, so whichever runs first the process agrees with itself.
+/// The updater installs `ring` lazily, but that may happen after another runtime
+/// path or a test constructs a client. Centralizing provider setup here keeps every
+/// client constructor safe; `ring` also matches the updater's provider.
 fn install_rustls_provider() {
     // Fails only if a provider is already installed, which is the outcome we
     // want anyway — so the result is deliberately ignored.
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+    install_rustls_provider();
+    reqwest::Client::builder()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_diagnostics();
-    install_rustls_provider();
     let daemon_token =
         generate_daemon_auth_token().expect("failed to generate per-launch daemon bearer token");
     let mut default_headers = reqwest::header::HeaderMap::new();
@@ -10095,7 +10098,7 @@ pub fn run() {
         reqwest::header::HeaderValue::from_str(&daemon_token)
             .expect("generated token must be valid header ASCII"),
     );
-    let http_client = reqwest::Client::builder()
+    let http_client = http_client_builder()
         .default_headers(default_headers)
         .build()
         .expect("failed to build authenticated loopback client");
@@ -10682,7 +10685,9 @@ mod tests {
         });
 
         let result = tauri::async_runtime::block_on(async {
-            let response = reqwest::Client::new()
+            let response = http_client_builder()
+                .build()
+                .unwrap()
                 .get(format!("http://{address}/roadmap"))
                 .send()
                 .await
@@ -10866,7 +10871,9 @@ mod tests {
     #[test]
     fn roadmap_transport_failures_reject() {
         let result = tauri::async_runtime::block_on(roadmap_typed_request(
-            reqwest::Client::new()
+            http_client_builder()
+                .build()
+                .unwrap()
                 .get("http://127.0.0.1:0/roadmap")
                 .timeout(std::time::Duration::from_secs(1)),
             RoadmapTypedResponseKind::PhaseBinding,
@@ -10982,7 +10989,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let client = reqwest::Client::new();
+        let client = http_client_builder().build().unwrap();
         let endpoint = format!("http://{address}/prompt");
         let result = tauri::async_runtime::block_on(post_sidecar_prompt(
             &client,
@@ -14026,7 +14033,9 @@ mod tests {
             );
         });
 
-        let request = reqwest::Client::new()
+        let request = http_client_builder()
+            .build()
+            .unwrap()
             .post(format!("http://{address}/session"))
             .header("x-gg-daemon-token", "test-token")
             .json(&serde_json::json!({ "cwd": "/test" }));

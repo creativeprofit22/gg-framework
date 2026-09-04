@@ -2166,6 +2166,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function pickSlashCommand(cmd: SlashCommand): void {
     if (cmd.name === "add-dir" || cmd.name === "remove-dir") {
       setInput("");
+      setMention(null);
+      setMentionedPaths([]);
+      setAttachments([]);
+      setIsFileDragOver(false);
       setSlashIndex(0);
       void pickWorkspaceDirectory(cmd.name);
       return;
@@ -2199,7 +2203,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             : "Remove project folder from workspace",
       });
       if (typeof selected !== "string") return;
-      submitText(`/${command} ${selected}`, command === "add-dir" ? "/add-dir" : "/remove-dir");
+      submitTextRef.current(
+        `/${command} ${selected}`,
+        command === "add-dir" ? "/add-dir" : "/remove-dir",
+      );
     } finally {
       requestAnimationFrame(() => inputRef.current?.focus());
     }

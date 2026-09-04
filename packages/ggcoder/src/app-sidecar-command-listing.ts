@@ -11,14 +11,14 @@ const WORKSPACE_ACTIONS: SlashCommandListing[] = [
     name: "add-dir",
     aliases: ["adddir"],
     description: "Add another project folder to this workspace",
-    input: { ...SLASH_COMMAND_INPUT_ALL },
+    input: { text: "optional", references: "none", attachments: "none" },
     source: "built-in",
   },
   {
     name: "remove-dir",
     aliases: ["removedir"],
     description: "Remove an added project folder from this workspace",
-    input: { ...SLASH_COMMAND_INPUT_ALL },
+    input: { text: "optional", references: "none", attachments: "none" },
     source: "built-in",
   },
 ];

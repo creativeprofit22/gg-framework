@@ -1013,6 +1013,85 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).toHaveBeenCalledTimes(selected === null ? 0 : 1);
   });
 
+  it.each(["add-dir", "remove-dir"])(`rejects staged inputs for typed /%s`, (name) => {
+    expect(
+      noInputSlashSubmissionError(
+        `/${name} C:\\typed`,
+        [
+          {
+            name,
+            aliases: [],
+            description: "Change workspace folders",
+            input: { text: "optional", references: "none", attachments: "none" },
+            source: "built-in",
+          },
+        ],
+        1,
+        1,
+      ),
+    ).toBe(
+      `/${name} does not accept file references, attachments. Remove them and send the command again.`,
+    );
+  });
+
+  it.each(["add-dir", "remove-dir"])(
+    `clears staged inputs before opening the /%s picker`,
+    async (name) => {
+      const pane = client(`pane-${name}-inputs`, 8);
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name,
+          aliases: [],
+          description: "Change workspace folders",
+          input: { text: "optional", references: "none", attachments: "none" },
+          source: "built-in",
+        },
+      ]);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const picker = deferred<string | null>();
+      nativeMocks.openDialog.mockReturnValueOnce(picker.promise);
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      render(
+        <AgentPane
+          client={pane}
+          target={target}
+          registerInput={(_paneId, actions) => {
+            actionsRef.current = actions;
+          }}
+        />,
+      );
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+      fireEvent.change(input, { target: { value: "@context" } });
+      await waitFor(() => expect(pane.searchFiles).toHaveBeenCalledWith("context"));
+      fireEvent.click(await screen.findByText("context.ts"));
+      expect(await screen.findByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
+      await act(async () => {
+        actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+        await Promise.resolve();
+      });
+      expect(await screen.findByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      act(() => actionsRef.current?.setNativeFileDragOver(true));
+      expect(document.querySelector(".inputwrap.dragover")).not.toBeNull();
+
+      fireEvent.change(input, { target: { value: "/" } });
+      fireEvent.click(await screen.findByText(`/${name}`));
+      await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
+
+      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      expect(document.querySelector(".inputwrap.dragover")).toBeNull();
+      expect((input as HTMLTextAreaElement).value).toBe("");
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => picker.resolve("C:\\picked"));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(`/${name} C:\\picked`));
+    },
+  );
+
   it("inserts fixed-input commands exactly and disables composer additions", async () => {
     const pane = client("pane-no-input-select", 8);
     vi.mocked(pane.listCommands).mockResolvedValue([

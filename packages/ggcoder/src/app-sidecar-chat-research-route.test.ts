@@ -317,6 +317,17 @@ describe("app-sidecar chat Research HTTP routes", () => {
     });
   });
 
+  it.each(["add-dir", "remove-dir"])(
+    `advertises /%s without reference or attachment input`,
+    async (name) => {
+      const response = await appSidecarCodeCommandsResponse(process.cwd());
+      expect(response.commands.find((command) => command.name === name)).toMatchObject({
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      });
+    },
+  );
+
   it("runs the same-session switch, marker, hint, and hidden prompt in order", async () => {
     const { baseUrl, state } = await startRouteHarness("chat");
 

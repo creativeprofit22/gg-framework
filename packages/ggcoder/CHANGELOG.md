@@ -1,5 +1,23 @@
 # @kenkaiiii/ggcoder
 
+## 5.53.3
+
+### Patch Changes
+
+- Fix a crash where a background command whose binary cannot be spawned emitted an unhandled `error` event and took the whole CLI down; the failure is now reported as a normal non-zero exit.
+  - @kenkaiiii/gg-ai@5.53.3
+  - @kenkaiiii/gg-agent@5.53.3
+  - @kenkaiiii/gg-core@5.53.3
+
+## 5.53.2
+
+### Patch Changes
+
+- Wait on background processes instead of guessing: `task_output` takes `wait_ms` and returns the moment the process exits, and a long bare `sleep` while something runs in the background is now refused and redirected there.
+  - @kenkaiiii/gg-ai@5.53.2
+  - @kenkaiiii/gg-agent@5.53.2
+  - @kenkaiiii/gg-core@5.53.2
+
 ## 5.53.1
 
 ### Patch Changes

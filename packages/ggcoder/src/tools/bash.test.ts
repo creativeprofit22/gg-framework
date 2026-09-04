@@ -367,3 +367,47 @@ describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", 
     }
   }, 40_000);
 });
+
+describe("guessed-sleep guard", () => {
+  it("redirects a bare sleep to task_output while a background process runs", async () => {
+    const processManager = new ProcessManager();
+    const tool = createBashTool(tmpHome, processManager);
+    const started = await processManager.start(BRIEF_BACKGROUND_COMMAND, tmpHome);
+
+    const result = await tool.execute(
+      { command: "sleep 30" },
+      { signal: new AbortController().signal, toolCallId: "nap-1" },
+    );
+
+    expect(String(result)).toContain("wait_ms");
+    expect(String(result)).toContain(started.id);
+    processManager.shutdownAll();
+  });
+
+  it("allows a sleep when nothing is running in the background", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+
+    const result = await tool.execute(
+      { command: "sleep 0.1" },
+      { signal: new AbortController().signal, toolCallId: "nap-2" },
+    );
+
+    expect(String(result)).not.toContain("wait_ms");
+  });
+
+  // Letting a just-started dev server settle before curling it is legitimate:
+  // no exit is ever coming, so there is nothing for wait_ms to return.
+  it("allows a brief settle sleep even while a background process runs", async () => {
+    const processManager = new ProcessManager();
+    const tool = createBashTool(tmpHome, processManager);
+    await processManager.start(BRIEF_BACKGROUND_COMMAND, tmpHome);
+
+    const result = await tool.execute(
+      { command: "sleep 1" },
+      { signal: new AbortController().signal, toolCallId: "nap-3" },
+    );
+
+    expect(String(result)).not.toContain("wait_ms");
+    processManager.shutdownAll();
+  });
+});

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type { ProcessManager } from "../core/process-manager.js";
+import { MAX_PROCESS_WAIT_MS, type ProcessManager } from "../core/process-manager.js";
 import { truncateTail } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 
@@ -10,6 +10,17 @@ const TaskOutputParams = z.object({
     .boolean()
     .optional()
     .describe("If true, read output from the beginning instead of incrementally"),
+  wait_ms: z
+    .number()
+    .int()
+    .min(1000)
+    .max(MAX_PROCESS_WAIT_MS)
+    .optional()
+    .describe(
+      `Block until the process exits, up to this many ms (max ${MAX_PROCESS_WAIT_MS}), then ` +
+        "read. Returns the moment it finishes — use this instead of sleeping for a " +
+        "guessed duration when you have nothing else to do until it is done.",
+    ),
 });
 
 export interface TaskOutputDetails {
@@ -38,10 +49,21 @@ export function createTaskOutputTool(
       "Read output from a background process. Returns new output since last read by default. " +
       "Use from_start=true to read from the beginning. Progress and exit status arrive " +
       "automatically for background processes \u2014 call this when you need the full output, " +
-      "not merely to check whether something finished.",
+      "not merely to check whether something finished. Set wait_ms to block until the " +
+      "process exits rather than sleeping for a guessed duration (wait_agent is for child " +
+      "agents, not background processes).",
     parameters: TaskOutputParams,
     executionMode: "sequential",
-    async execute({ id, from_start }) {
+    // Waiting can exceed the default per-tool ceiling but remains process-bounded.
+    timeoutMs: MAX_PROCESS_WAIT_MS + 30_000,
+    async execute({ id, from_start, wait_ms }, context) {
+      let waitNotice = "";
+      if (wait_ms !== undefined) {
+        const reason = await processManager.waitForExit(id, wait_ms, context?.signal);
+        if (reason === "timeout") {
+          waitNotice = ` — still running after waiting ${Math.round(wait_ms / 1000)}s`;
+        }
+      }
       const result = await processManager.readOutput(id, from_start);
 
       const terminalDetails = [
@@ -51,9 +73,11 @@ export function createTaskOutputTool(
           ? `completed ${new Date(result.completedAt).toISOString()}`
           : null,
       ].filter((detail): detail is string => detail !== null);
-      const status = result.isRunning
-        ? "running"
-        : `exited (${terminalDetails.length > 0 ? terminalDetails.join(", ") : "status unavailable"})`;
+      const status =
+        (result.isRunning
+          ? "running"
+          : `exited (${terminalDetails.length > 0 ? terminalDetails.join(", ") : "status unavailable"})`) +
+        waitNotice;
       const retainedLogReference = result.logFile ? ` Retained log: ${result.logFile}` : "";
       const rangeNotices = [
         result.skippedBytes > 0

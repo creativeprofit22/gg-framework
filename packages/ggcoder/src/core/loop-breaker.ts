@@ -73,11 +73,14 @@ function canonicalize(value: unknown): string {
 
 const EXPECTED_REPEAT_TOOLS = new Set(["task_output", "wait_agent", "list_agents"]);
 
-function isExpectedRepeat(name: string, args: unknown): boolean {
-  if (EXPECTED_REPEAT_TOOLS.has(name)) return true;
-  if (name !== "bash" || args === null || typeof args !== "object") return false;
-  const command = (args as { command?: unknown }).command;
-  return typeof command === "string" && /^(?:\s*sleep\s+\S+\s*;?\s*)+$/.test(command);
+/**
+ * Sleep-only bash commands used to be excused here: waiting on a background
+ * process could only be expressed as a guessed nap. `task_output` with
+ * `wait_ms` now blocks until the process actually exits, so a repeated bare
+ * sleep is once again what it looks like — a stuck loop worth breaking.
+ */
+function isExpectedRepeat(name: string): boolean {
+  return EXPECTED_REPEAT_TOOLS.has(name);
 }
 
 /**
@@ -92,7 +95,7 @@ export class ToolCallProgressTracker {
   private repeatCount = 0;
 
   record(name: string, args: unknown, result: string, isError: boolean): number {
-    if (isExpectedRepeat(name, args)) {
+    if (isExpectedRepeat(name)) {
       this.resetRepetition();
       return 0;
     }
@@ -158,7 +161,7 @@ export class CycleDetector {
   private lastResults = new Map<string, string>();
 
   record(name: string, args: unknown, result: string, _isError: boolean): CycleDetection | null {
-    if (isExpectedRepeat(name, args)) {
+    if (isExpectedRepeat(name)) {
       this.reset();
       return null;
     }

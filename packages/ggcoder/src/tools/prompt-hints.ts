@@ -27,12 +27,14 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
     "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
-  task_output: "Read new output from a background process by id.",
+  task_output: "Read new output from a background process by id; wait_ms blocks until it exits.",
   task_stop: "Stop a background process by id.",
   screenshot: "Capture a browser PNG of a URL or local server; supports waits and interactions.",
   send_message: "Queue steering into a running child agent without starting another turn.",
   followup_task: "Start another turn in an idle child agent, preserving its context.",
-  wait_agent: "Block until named child agents finish and return their output snapshots.",
+  wait_agent:
+    "Block until named child agents finish and return their snapshots; child agents " +
+    "only (background: task_output wait_ms).",
   list_agents: "List child agent IDs, states, turns and token totals.",
   interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
   tasks:

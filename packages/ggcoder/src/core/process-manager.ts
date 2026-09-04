@@ -68,6 +68,9 @@ const WAKE_INTERVAL_MS = 5_000;
 const WATCH_INTERVAL_MAX_MS = 120_000;
 const WATCH_MAX_REPORTS = 3;
 const CHECKPOINT_TAIL_CHARS = 320;
+/** Ceiling on a single blocking `waitForExit`, so one wedged process cannot
+ *  hold the agent loop indefinitely; callers re-wait if they still want to. */
+export const MAX_PROCESS_WAIT_MS = 600_000;
 /** Chars of the matched log line carried in a pattern-wake notification. */
 const WAKE_LINE_CHARS = 200;
 
@@ -757,6 +760,40 @@ export class ProcessManager {
       child.on("error", onError);
       child.on("close", onClose);
       child.once("spawn", onSpawn);
+    });
+  }
+
+  /** Wait for terminal process settlement without guessing a sleep duration. */
+  async waitForExit(
+    id: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<"exited" | "timeout" | "unknown"> {
+    const proc = this.processes.get(id);
+    if (!proc) return "unknown";
+    const child = this.children.get(id);
+    const managedCompletion = this.completions.get(id);
+    if (proc.completedAt !== null || (!child && !managedCompletion)) return "exited";
+    if (signal?.aborted) return "timeout";
+
+    const bounded = Math.min(Math.max(timeoutMs, 0), MAX_PROCESS_WAIT_MS);
+    return await new Promise((resolve) => {
+      let settled = false;
+      const settle = (outcome: "exited" | "timeout"): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child?.off("close", onClose);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(outcome);
+      };
+      const onClose = (): void => settle("exited");
+      const onAbort = (): void => settle("timeout");
+      const timer = setTimeout(() => settle("timeout"), bounded);
+      timer.unref?.();
+      if (managedCompletion) void managedCompletion.then(onClose);
+      else child!.once("close", onClose);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 

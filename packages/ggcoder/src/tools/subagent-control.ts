@@ -101,7 +101,8 @@ export function createSubAgentControlTools(
     description:
       "Block until child agents finish and return their bounded output snapshots. " +
       "Completions already arrive on their own \u2014 use this only when you need a child's " +
-      "actual output before you can continue, or to collect results before finishing.",
+      "actual output before you can continue, or to collect results before finishing. " +
+      "Child agents only: to wait on a background process, use task_output with wait_ms.",
     parameters: waitParams,
     async execute(args) {
       return json(await manager.wait(args.agent_ids, args.condition, args.timeout_ms));

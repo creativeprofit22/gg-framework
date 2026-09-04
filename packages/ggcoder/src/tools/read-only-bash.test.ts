@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isReadOnlyCommand } from "./read-only-bash.js";
+import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
 
 describe("isReadOnlyCommand", () => {
   const allowed: ReadonlyArray<[string, string]> = [
@@ -95,5 +95,23 @@ describe("isReadOnlyCommand", () => {
 
   it.each(blocked)("blocks %s", (_label, command) => {
     expect(isReadOnlyCommand(command)).toBe(false);
+  });
+});
+
+describe("sleepOnlySeconds", () => {
+  it("totals bare sleeps, including chained and unit-suffixed ones", () => {
+    expect(sleepOnlySeconds("sleep 30")).toBe(30);
+    expect(sleepOnlySeconds("  sleep 0.5  ")).toBe(0.5);
+    expect(sleepOnlySeconds("sleep 2; sleep 3")).toBe(5);
+    expect(sleepOnlySeconds("sleep 1m")).toBe(60);
+    expect(sleepOnlySeconds("sleep 2h")).toBe(7200);
+  });
+
+  it("leaves real work alone, even when it mentions sleep", () => {
+    expect(sleepOnlySeconds("sleep 5; pnpm test")).toBeNull();
+    expect(sleepOnlySeconds("pnpm build")).toBeNull();
+    expect(sleepOnlySeconds("")).toBeNull();
+    expect(sleepOnlySeconds("sleep")).toBeNull();
+    expect(sleepOnlySeconds("sleep infinity")).toBeNull();
   });
 });

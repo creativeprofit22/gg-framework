@@ -88,11 +88,12 @@ describe("ToolCallProgressTracker", () => {
     }
   });
 
-  it("does not count passive sleep commands as a stuck loop", () => {
+  // Guessed naps are no longer the only way to wait on a background process
+  // (task_output takes wait_ms), so repeating one is a real stuck loop.
+  it("counts repeated sleep commands as a stuck loop", () => {
     const tracker = new ToolCallProgressTracker();
-    for (let i = 0; i < 3; i++) {
-      expect(tracker.record("bash", { command: "sleep 30" }, "", false)).toBe(0);
-    }
+    tracker.record("bash", { command: "sleep 30" }, "", false);
+    expect(tracker.record("bash", { command: "sleep 30" }, "", false)).toBeGreaterThan(0);
   });
 });
 

@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "bash",
-      "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Commands run in a non-interactive bash shell with TERM=dumb. Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait for final status under the default 120000ms timeout. Long output is truncated (tail kept). Set run_in_background=true for long-lived or interactive commands (dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns after spawn. Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a foreground session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls.",
+      "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Commands run in a non-interactive bash shell with TERM=dumb. Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait for final status under the default 120000ms timeout. Long output is truncated (tail kept). Set run_in_background=true for long-lived or interactive commands (dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns after spawn. Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a foreground session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls. Never sleep to wait for a background process — task_output with wait_ms returns the instant it exits.",
       "schema": {
         "type": "object",
         "properties": {
@@ -50,7 +50,7 @@
         ],
         "additionalProperties": false
       },
-      "hash": "8e6cba3a5fd90c2354e579ac8a5e2a8276b31bd7a0d9b8b2b4e3cd8b9d76c0c4"
+      "hash": "1146056497008e0c4cbe5c131946fbd37ecaa423804befa3895626479c9bf3c9"
     },
     {
       "name": "code_nav",
@@ -568,7 +568,7 @@
     },
     {
       "name": "task_output",
-      "description": "Read output from a background process. Returns new output since last read by default. Use from_start=true to read from the beginning. Progress and exit status arrive automatically for background processes — call this when you need the full output, not merely to check whether something finished.",
+      "description": "Read output from a background process. Returns new output since last read by default. Use from_start=true to read from the beginning. Progress and exit status arrive automatically for background processes — call this when you need the full output, not merely to check whether something finished. Set wait_ms to block until the process exits rather than sleeping for a guessed duration (wait_agent is for child agents, not background processes).",
       "schema": {
         "type": "object",
         "properties": {
@@ -579,6 +579,12 @@
           "from_start": {
             "description": "If true, read output from the beginning instead of incrementally",
             "type": "boolean"
+          },
+          "wait_ms": {
+            "description": "Block until the process exits, up to this many ms (max 600000), then read. Returns the moment it finishes — use this instead of sleeping for a guessed duration when you have nothing else to do until it is done.",
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 600000
           }
         },
         "required": [
@@ -586,7 +592,7 @@
         ],
         "additionalProperties": false
       },
-      "hash": "ff1050f1ddf8419d44ebd47e4d368988477884dc2481cda5dcb1d3ce5f28ea89"
+      "hash": "0d00082475fa4d5b2a5bf56ed351b6d743d2146521bf2d19dcd1f3fdfb874fb4"
     },
     {
       "name": "task_send",

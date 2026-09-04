@@ -359,3 +359,26 @@ export function isReadOnlyCommand(command: string): boolean {
   if (segments.length === 0) return false;
   return segments.every(isReadOnlySegment);
 }
+
+const SLEEP_UNIT_SECONDS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+
+/**
+ * Total seconds a command sleeps when it does nothing else (`sleep 5`,
+ * `sleep 2; sleep 3`), or null when it does any real work.
+ *
+ * Used to catch a guessed wait on a background process, which now has a real
+ * answer in `task_output`'s `wait_ms`. Callers care about the duration because
+ * a brief settle before poking a dev server is legitimate, while a long nap is
+ * always a guess at a finish time.
+ */
+export function sleepOnlySeconds(command: string): number | null {
+  const segments = splitShellCommandSegments(command.trim());
+  if (segments.length === 0) return null;
+  let total = 0;
+  for (const segment of segments) {
+    const match = /^sleep\s+(\d+(?:\.\d+)?)([smhd])?$/.exec(segment.trim());
+    if (!match) return null;
+    total += Number(match[1]) * (match[2] ? SLEEP_UNIT_SECONDS[match[2]] : 1);
+  }
+  return total;
+}

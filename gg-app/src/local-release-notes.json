@@ -1,20 +1,33 @@
 {
   "schemaVersion": 1,
-  "date": "2026-08-29",
-  "label": "Roadmap completion now fails closed",
+  "date": "2026-09-04",
+  "label": "Safer launches and a verified upstream update",
   "sections": [
     {
-      "title": "Safer phase completion",
+      "title": "Safer Local Fork launches",
       "items": [
-        "A roadmap phase only finishes when the same coding session has matching plan progress.",
-        "If that progress is unavailable, the roadmap stays unchanged instead of entering a pending state."
+        "The launcher now verifies only the exact app process it started and that process's descendants.",
+        "If startup verification fails, cleanup leaves unrelated matching apps untouched."
       ]
     },
     {
-      "title": "No stale follow-up",
+      "title": "Upstream update reliability",
       "items": [
-        "A rejected completion does not arm a later completion, broadcast a false change, or start the next phase.",
-        "You get a clear message explaining that plan progress is missing, so the completion can be retried safely."
+        "The Local Fork now includes upstream 0.57.5 while preserving the local behavior selected during the merge.",
+        "Protected-update retries now retain the original merge decisions after verification fixes are applied."
+      ]
+    },
+    {
+      "title": "Clear task failures",
+      "items": [
+        "Task list, run, and delete failures now stay visible and explain what went wrong instead of silently closing or clearing the Tasks window."
+      ]
+    },
+    {
+      "title": "Stronger verification coverage",
+      "items": [
+        "Desktop task tests no longer depend on a Node-only runtime contract.",
+        "Roadmap completion tests now cover durable direct completion without weakening their checks."
       ]
     }
   ]

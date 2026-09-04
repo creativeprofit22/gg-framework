@@ -564,7 +564,7 @@ export interface ProjectTask {
   id: string;
   title: string;
   prompt: string;
-  status: "pending" | "in-progress" | "done";
+  status: "pending" | "in-progress" | "done" | "blocked";
   createdAt: string;
 }
 

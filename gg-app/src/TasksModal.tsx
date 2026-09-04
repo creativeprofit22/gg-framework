@@ -19,10 +19,12 @@ interface Props {
   onClose: () => void;
 }
 
+const UNKNOWN_STATUS_STYLE = { label: "unknown", color: theme.textMuted };
 const STATUS_STYLE: Record<ProjectTask["status"], { label: string; color: string }> = {
   pending: { label: "pending", color: theme.textMuted },
   "in-progress": { label: "running", color: theme.warning },
   done: { label: "done", color: theme.success },
+  blocked: { label: "blocked", color: theme.textMuted },
 };
 
 export function TasksModal({
@@ -46,7 +48,7 @@ export function TasksModal({
         <>
           <div className="tasks-list">
             {tasks.map((task) => {
-              const status = STATUS_STYLE[task.status];
+              const status = STATUS_STYLE[task.status] ?? UNKNOWN_STATUS_STYLE;
               const isDone = task.status === "done";
               return (
                 <div className="tasks-item" key={task.id}>

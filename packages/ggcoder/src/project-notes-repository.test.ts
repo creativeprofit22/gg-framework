@@ -1649,6 +1649,124 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
     });
   });
 
+  it("admits only revision-bound, verified, matching-session legacy Done intents", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/roadmap-legacy-completion";
+    const document = roadmapDocument();
+    document.phases[0]!.status = "in-progress";
+    await repository.migrate(cwd, document);
+    const request: ProjectNotesRoadmapStatusRequest & {
+      completionMode: "legacy-run-finalizer";
+    } = {
+      updateId: "legacy-completion",
+      phaseId: "phase-1",
+      expectedRevision: 1,
+      actor: "gg-coder",
+      transition: "done",
+      completionMode: "legacy-run-finalizer",
+      progress: "Focused verification passed",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["pnpm test passed"],
+      verification: "passed",
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession: { sessionId: "session-roadmap", sessionPath: "/sessions/roadmap.jsonl" },
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    };
+
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, { ...request, expectedRevision: undefined }),
+    ).resolves.toMatchObject({ status: "verification-incomplete", revision: 1 });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...request,
+        verification: "failed",
+        verificationReason: "The focused test failed.",
+      }),
+    ).resolves.toMatchObject({ status: "verification-incomplete", revision: 1 });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...request,
+        expectedSession: { sessionId: "other-session", sessionPath: "/sessions/other.jsonl" },
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+
+    await expect(repository.recordRoadmapStatusUpdate(cwd, request)).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "completion-pending",
+      snapshot: { revision: 2 },
+      phase: { status: "in-progress" },
+    });
+  });
+
+  it("does not let unbound or durable phases use legacy completion", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const unboundCwd = "/work/roadmap-unbound-legacy-completion";
+    const unboundDocument = roadmapDocument();
+    unboundDocument.phases[0]!.status = "in-progress";
+    unboundDocument.phases[0]!.session = null;
+    await repository.migrate(unboundCwd, unboundDocument);
+    const request: ProjectNotesRoadmapStatusRequest & {
+      completionMode: "legacy-run-finalizer";
+    } = {
+      updateId: "legacy-completion",
+      phaseId: "phase-1",
+      expectedRevision: 1,
+      actor: "gg-coder",
+      transition: "done",
+      completionMode: "legacy-run-finalizer",
+      progress: "Focused verification passed",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["pnpm test passed"],
+      verification: "passed",
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession: null,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    };
+
+    await expect(repository.recordRoadmapStatusUpdate(unboundCwd, request)).resolves.toEqual({
+      status: "phase-not-bound",
+    });
+
+    const durableCwd = "/work/roadmap-durable-cannot-downgrade";
+    const durableDocument = roadmapDocument();
+    const durablePhase = durableDocument.phases[0]!;
+    durablePhase.status = "in-progress";
+    durablePhase.execution = {
+      version: 1,
+      state: "needs-plan",
+      repository: {
+        projectKey: canonicalProjectKey(durableCwd),
+        identityHash: "1".repeat(64),
+        rootCommit: null,
+      },
+      plan: null,
+      evidence: [],
+      pendingCompletion: null,
+      lastSession: durablePhase.session,
+      migration: { source: "native", reconciledAt: null },
+    };
+    await repository.migrate(durableCwd, durableDocument);
+
+    await expect(
+      repository.recordRoadmapStatusUpdate(durableCwd, {
+        ...request,
+        expectedSession: durablePhase.session,
+      }),
+    ).resolves.toEqual({
+      status: "verification-incomplete",
+      revision: 1,
+      message: "Durable completion requires a revision-bound GG Coder Done report.",
+    });
+  });
+
   it("persists an explicit blocker, resumes automatically, and protects user resolution", async () => {
     const agentDir = await tempAgentDir();
     const repository = new ProjectNotesRepository(agentDir);

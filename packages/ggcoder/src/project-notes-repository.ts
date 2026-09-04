@@ -299,12 +299,15 @@ export type ProjectNotesRoadmapBlockerResolutionOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
+export type ProjectNotesRoadmapCompletionMode = "legacy-run-finalizer" | "durable";
+
 export interface ProjectNotesRoadmapStatusRequest {
   updateId: string;
   phaseId: string;
   expectedRevision?: number;
   actor: NotesRoadmapActor;
   transition: NotesRoadmapTransition;
+  completionMode?: ProjectNotesRoadmapCompletionMode;
   progress: string;
   blocker: string | null;
   requiredExternalAction: string | null;
@@ -2530,7 +2533,20 @@ export class ProjectNotesRepository {
             message: "Done requires a passed verification result.",
           };
         }
-        if (request.durableCompletion === undefined || request.expectedRevision === undefined) {
+        const legacyRunFinalizerCompletion =
+          request.completionMode === "legacy-run-finalizer" &&
+          currentPhase.execution === undefined &&
+          request.expectedRevision !== undefined &&
+          request.expectedSession !== undefined &&
+          request.expectedSession !== null &&
+          currentPhase.session !== null &&
+          notesSessionLinksEqual(currentPhase.session, request.expectedSession);
+        const durableCompletion =
+          request.completionMode !== "legacy-run-finalizer" &&
+          currentPhase.execution !== undefined &&
+          request.durableCompletion !== undefined &&
+          request.expectedRevision !== undefined;
+        if (!legacyRunFinalizerCompletion && !durableCompletion) {
           return {
             status: "verification-incomplete",
             revision,

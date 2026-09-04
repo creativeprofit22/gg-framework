@@ -86,6 +86,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn() },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -124,6 +125,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn(), checkpointPhaseExecutionStep },
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => null,
@@ -174,6 +176,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn(), checkpointPhaseExecutionStep },
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => null,
@@ -213,6 +216,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -236,6 +240,7 @@ describe("AppSidecarRoadmapToolHost", () => {
         updateId: "completion-intent-1",
         actor: "gg-coder",
         transition: "done",
+        completionMode: "legacy-run-finalizer",
         verification: "passed",
         expectedSession: sessionLink,
       }),
@@ -253,6 +258,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -278,6 +284,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -296,6 +303,30 @@ describe("AppSidecarRoadmapToolHost", () => {
     expect(JSON.parse(String(output))).toMatchObject({
       result: "verification-incomplete",
       unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+    });
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when durable completion preparation is unavailable", async () => {
+    const recordRoadmapStatusUpdate = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: { recordRoadmapStatusUpdate },
+      durableExecution: true,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
+      broadcastNotesSnapshot: vi.fn(),
+    });
+
+    const output = await host
+      .createSessionTools("coding", owningSession)[0]!
+      .execute(doneInput(), {} as never);
+
+    expect(JSON.parse(String(output))).toMatchObject({
+      result: "missing-plan-progress",
+      phaseId: "phase-1",
+      revision: 4,
     });
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
   });
@@ -320,6 +351,7 @@ describe("AppSidecarRoadmapToolHost", () => {
         recordPhaseExecutionEvidence: vi.fn(),
         recordRoadmapStatusUpdate,
       },
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => null,
@@ -413,6 +445,7 @@ describe("AppSidecarRoadmapToolHost", () => {
         recordPhaseExecutionEvidence,
         recordRoadmapStatusUpdate,
       },
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => null,
@@ -432,6 +465,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       "/project",
       expect.objectContaining({
         expectedRevision: 233,
+        completionMode: "durable",
         durableCompletion: expect.objectContaining({
           runJournal: { sessionPath: "/sessions/phase.jsonl", generation: 1 },
           planHash: "5".repeat(64),
@@ -461,6 +495,7 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,

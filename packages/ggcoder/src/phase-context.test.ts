@@ -158,6 +158,11 @@ describe("active phase context", () => {
       expect(packageText).toContain(`${criterionId} — ${criterion}`);
     }
     expect(followUp).toContain("verification_bindings");
+    expect(followUp).toContain(
+      'roadmap_status with transition: "done" is the only public completion-intent API',
+    );
+    expect(followUp).toContain("Settlement is host-only");
+    expect(followUp).toContain("do not call or search for another completion tool");
   });
 
   it("renders empty optional content without importing unrelated Notes data", () => {

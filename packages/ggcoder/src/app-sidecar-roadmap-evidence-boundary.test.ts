@@ -112,6 +112,7 @@ describe("Roadmap Done verification evidence boundary", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "C:/fixture",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => WORKSPACE,
@@ -147,6 +148,7 @@ describe("Roadmap Done verification evidence boundary", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "C:/fixture",
       repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => WORKSPACE,

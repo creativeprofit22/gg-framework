@@ -128,7 +128,8 @@ export function restorePhaseImplementationPlanEvidence(input: {
   if (!input.phase.session || !notesSessionLinksEqual(input.phase.session, input.expectedSession)) {
     return false;
   }
-  const checkpoint = [...input.phase.roadmapEvents]
+  const events = input.phase.roadmapEvents;
+  let checkpoint = [...events]
     .reverse()
     .find(
       (event) =>
@@ -136,7 +137,43 @@ export function restorePhaseImplementationPlanEvidence(input: {
         event.planStepTotal > 0 &&
         notesSessionLinksEqual(event.session, input.expectedSession),
     );
-  if (!checkpoint || checkpoint.type !== "implementation-checkpoint") return false;
+  if (!checkpoint) {
+    const binding = [...events].reverse().find((event) => event.type === "phase-binding");
+    if (
+      !binding ||
+      binding.type !== "phase-binding" ||
+      binding.action !== "rebind-current" ||
+      !binding.previousSession ||
+      !notesSessionLinksEqual(binding.session, input.phase.session) ||
+      !notesSessionLinksEqual(binding.session, input.expectedSession)
+    ) {
+      return false;
+    }
+    const bindingIndex = events.indexOf(binding);
+    if (
+      events
+        .slice(bindingIndex + 1)
+        .some((event) => event.type === "implementation-checkpoint")
+    ) {
+      return false;
+    }
+    checkpoint = [...events.slice(0, bindingIndex)]
+      .reverse()
+      .find((event) => event.type === "implementation-checkpoint");
+    if (
+      !checkpoint ||
+      checkpoint.type !== "implementation-checkpoint" ||
+      !notesSessionLinksEqual(checkpoint.session, binding.previousSession) ||
+      checkpoint.runOutcome !== "succeeded" ||
+      !Number.isSafeInteger(checkpoint.planStepTotal) ||
+      checkpoint.planStepTotal <= 0 ||
+      checkpoint.completedPlanSteps.length !== checkpoint.planStepTotal ||
+      !checkpoint.completedPlanSteps.every((step, index) => step === index + 1)
+    ) {
+      return false;
+    }
+  }
+  if (checkpoint.type !== "implementation-checkpoint") return false;
   return (
     input.tracker.resolve({
       phaseId: input.phase.id,

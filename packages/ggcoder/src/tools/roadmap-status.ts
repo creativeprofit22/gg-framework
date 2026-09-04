@@ -369,7 +369,7 @@ export function createRoadmapStatusTool(
   return {
     name: "roadmap_status",
     description:
-      "Report bounded Roadmap progress or a real external blocker. Done requires passed verification and one current classifier-approved command per criterion; completion waits for owning run settlement.",
+      'Report bounded Roadmap progress or a real external blocker. transition: "done" is the only public completion-intent API. Done requires passed verification and one current classifier-approved command per criterion; settlement is host-only after the owning run ends.',
     parameters: RoadmapStatusParams,
     rawInputSchema: roadmapStatusInputSchema,
     executionMode: "sequential",

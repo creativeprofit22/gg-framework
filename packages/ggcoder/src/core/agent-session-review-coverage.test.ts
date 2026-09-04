@@ -301,8 +301,10 @@ describe("AgentSession Ideal review coverage gate", () => {
     expect(followUp).toContain(
       `${roadmapCriterionId(2, "Package build passes")} — Package build passes`,
     );
-    expect(followUp).toContain('Use transition: "done" only when verification.result is "passed"');
-    expect(followUp).toContain("owning implementation run must settle successfully");
+    expect(followUp).toContain(
+      'roadmap_status with transition: "done" is the only public completion-intent API',
+    );
+    expect(followUp).toContain("Settlement is host-only");
     expect(internal.getHookFollowUpMessages()).toBeNull();
   });
 });

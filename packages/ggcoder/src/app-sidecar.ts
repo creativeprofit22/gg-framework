@@ -2245,6 +2245,7 @@ async function createSession(
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
+    durableExecution: durableRoadmapExecution,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,

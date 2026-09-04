@@ -10,7 +10,47 @@ import type { NotesPhase, ProjectNotesSnapshot } from "./project-notes-repositor
 
 const NOW = "2026-07-28T12:00:00.000Z";
 const session = { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" };
+const predecessorSession = {
+  sessionId: "session-predecessor",
+  sessionPath: "/sessions/predecessor.jsonl",
+};
+const reboundSession = { sessionId: "session-rebound", sessionPath: "/sessions/rebound.jsonl" };
 
+type RoadmapEvent = NotesPhase["roadmapEvents"][number];
+type ImplementationCheckpoint = Extract<RoadmapEvent, { type: "implementation-checkpoint" }>;
+type PhaseBinding = Extract<RoadmapEvent, { type: "phase-binding" }>;
+
+function predecessorCheckpoint(
+  overrides: Partial<ImplementationCheckpoint> = {},
+): ImplementationCheckpoint {
+  return {
+    type: "implementation-checkpoint",
+    id: "checkpoint-predecessor",
+    session: predecessorSession,
+    planStepTotal: 6,
+    completedPlanSteps: [1, 2, 3, 4, 5, 6],
+    runOutcome: "succeeded",
+    timestamp: NOW,
+    ...overrides,
+  };
+}
+
+function rebind(overrides: Partial<PhaseBinding> = {}): PhaseBinding {
+  return {
+    type: "phase-binding",
+    id: "binding-rebound",
+    action: "rebind-current",
+    actor: "coding-session",
+    previousSession: predecessorSession,
+    session: reboundSession,
+    timestamp: NOW,
+    ...overrides,
+  };
+}
+
+function reboundPhase(roadmapEvents: RoadmapEvent[]): NotesPhase {
+  return { ...phase(), session: reboundSession, roadmapEvents };
+}
 function phase(): NotesPhase {
   return {
     id: "phase-24",
@@ -160,6 +200,134 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     expect(
       tracker.resolve({ phaseId: "phase-24", session, current: { total: 0, completed: [] } }),
     ).toEqual({ total: 3, completed: [1, 2] });
+  });
+
+  it("restores a complete predecessor checkpoint after an exact explicit rebind", () => {
+    const tracker = new AppSidecarPhaseImplementationPlanTracker();
+
+    expect(
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: reboundPhase([predecessorCheckpoint(), rebind()]),
+        expectedSession: reboundSession,
+      }),
+    ).toBe(true);
+    expect(
+      tracker.resolve({
+        phaseId: "phase-24",
+        session: reboundSession,
+        current: { total: 0, completed: [] },
+      }),
+    ).toEqual({ total: 6, completed: [1, 2, 3, 4, 5, 6] });
+  });
+
+  it("keeps same-session checkpoint precedence after a rebind", () => {
+    const tracker = new AppSidecarPhaseImplementationPlanTracker();
+    const currentCheckpoint = predecessorCheckpoint({
+      id: "checkpoint-current",
+      session: reboundSession,
+      planStepTotal: 3,
+      completedPlanSteps: [1, 2],
+      runOutcome: "interrupted",
+    });
+
+    expect(
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: reboundPhase([predecessorCheckpoint(), rebind(), currentCheckpoint]),
+        expectedSession: reboundSession,
+      }),
+    ).toBe(true);
+    expect(
+      tracker.resolve({
+        phaseId: "phase-24",
+        session: reboundSession,
+        current: { total: 0, completed: [] },
+      }),
+    ).toEqual({ total: 3, completed: [1, 2] });
+  });
+
+  it.each([
+    ["has no rebind provenance", [predecessorCheckpoint()]],
+    ["uses bind-current", [predecessorCheckpoint(), rebind({ action: "bind-current" })]],
+    [
+      "targets another session",
+      [
+        predecessorCheckpoint(),
+        rebind({ session: { sessionId: "other", sessionPath: "/sessions/other.jsonl" } }),
+      ],
+    ],
+    [
+      "names another predecessor",
+      [
+        predecessorCheckpoint(),
+        rebind({
+          previousSession: { sessionId: "other", sessionPath: "/sessions/other.jsonl" },
+        }),
+      ],
+    ],
+    [
+      "records a failed run",
+      [predecessorCheckpoint({ runOutcome: "failed" }), rebind()],
+    ],
+    [
+      "records a cancelled run",
+      [predecessorCheckpoint({ runOutcome: "cancelled" }), rebind()],
+    ],
+    [
+      "records partial progress",
+      [predecessorCheckpoint({ completedPlanSteps: [1, 2, 3, 4, 5] }), rebind()],
+    ],
+    [
+      "records a zero total",
+      [predecessorCheckpoint({ planStepTotal: 0, completedPlanSteps: [] }), rebind()],
+    ],
+    [
+      "records an unsafe total",
+      [
+        predecessorCheckpoint({
+          planStepTotal: Number.MAX_SAFE_INTEGER + 1,
+          completedPlanSteps: [1],
+        }),
+        rebind(),
+      ],
+    ],
+    [
+      "has a newer incomplete predecessor checkpoint",
+      [
+        predecessorCheckpoint(),
+        predecessorCheckpoint({ id: "checkpoint-newer", completedPlanSteps: [1, 2] }),
+        rebind(),
+      ],
+    ],
+    [
+      "has a foreign checkpoint after the rebind",
+      [
+        predecessorCheckpoint(),
+        rebind(),
+        predecessorCheckpoint({
+          id: "checkpoint-foreign",
+          session: { sessionId: "foreign", sessionPath: "/sessions/foreign.jsonl" },
+        }),
+      ],
+    ],
+  ])("refuses predecessor recovery when it %s", (_reason, roadmapEvents) => {
+    const tracker = new AppSidecarPhaseImplementationPlanTracker();
+
+    expect(
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: reboundPhase(roadmapEvents),
+        expectedSession: reboundSession,
+      }),
+    ).toBe(false);
+    expect(
+      tracker.resolve({
+        phaseId: "phase-24",
+        session: reboundSession,
+        current: { total: 0, completed: [] },
+      }),
+    ).toBeNull();
   });
 
   it("hydrates durable plan progress across physical sessions", () => {

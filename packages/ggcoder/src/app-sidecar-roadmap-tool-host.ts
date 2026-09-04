@@ -12,6 +12,7 @@ import { RepositoryUnverifiableError } from "./roadmap-phase-execution.js";
 import type {
   NotesReference,
   ProjectNotesRepository,
+  ProjectNotesRoadmapCompletionMode,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 import {
@@ -73,6 +74,7 @@ export interface AppSidecarCompletionIntent {
 
 export interface AppSidecarRoadmapToolHostDependencies {
   cwd: string;
+  durableExecution: boolean;
   repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate"> &
     Partial<
       Pick<
@@ -253,12 +255,31 @@ export class AppSidecarRoadmapToolHost {
       }
     | { kind: "failure"; expectedRevision: number; result: RoadmapStatusToolResult }
   > {
+    if (!this.dependencies.durableExecution) return { kind: "legacy", expectedRevision };
     const { repository, captureWorkspaceSnapshot, getRunGeneration } = this.dependencies;
     if (!repository.load || !captureWorkspaceSnapshot) {
-      return { kind: "legacy", expectedRevision };
+      return {
+        kind: "failure",
+        expectedRevision,
+        result: {
+          result: "missing-plan-progress",
+          phaseId: input.phase_id,
+          revision: expectedRevision,
+          message: "Done was not recorded because durable completion preparation is unavailable.",
+        },
+      };
     }
     const loaded = await repository.load(this.dependencies.cwd);
-    if (loaded.status !== "ok") return { kind: "legacy", expectedRevision };
+    if (loaded.status !== "ok") {
+      return {
+        kind: "failure",
+        expectedRevision,
+        result: {
+          result: loaded.status === "missing" ? "notes-missing" : "notes-corrupt",
+          phaseId: input.phase_id,
+        },
+      };
+    }
     if (loaded.snapshot.revision !== expectedRevision) {
       return {
         kind: "failure",
@@ -275,7 +296,18 @@ export class AppSidecarRoadmapToolHost {
       (candidate) => candidate.id === input.phase_id,
     );
     const execution = phase?.execution;
-    if (!phase || !execution?.plan) return { kind: "legacy", expectedRevision };
+    if (!phase || !execution?.plan) {
+      return {
+        kind: "failure",
+        expectedRevision,
+        result: {
+          result: "missing-plan-progress",
+          phaseId: input.phase_id,
+          revision: expectedRevision,
+          message: "Done was not recorded because the durable execution plan is unavailable.",
+        },
+      };
+    }
     if (!getRunGeneration) {
       return {
         kind: "failure",
@@ -426,6 +458,12 @@ export class AppSidecarRoadmapToolHost {
       }
       let expectedRevision = input.expected_revision;
       let statusEvidence = [...input.evidence];
+      const completionMode: ProjectNotesRoadmapCompletionMode | undefined =
+        input.transition === "done"
+          ? this.dependencies.durableExecution
+            ? "durable"
+            : "legacy-run-finalizer"
+          : undefined;
       let durableCompletion: {
         workspace: NotesWorkspaceSnapshotV1;
         planHash: string;
@@ -560,6 +598,7 @@ export class AppSidecarRoadmapToolHost {
           expectedSession: activePhase.session,
           requireBoundPhase: true,
           autopilotEnabled: this.dependencies.projectAutopilot.isEnabled(cwd),
+          ...(completionMode ? { completionMode } : {}),
           ...(durableCompletion ? { durableCompletion } : {}),
         }),
       );

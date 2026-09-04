@@ -115,6 +115,9 @@ describe("createRoadmapStatusTool", () => {
       JSON.stringify({ result: "phase-not-bound", phaseId: "phase-1" }),
     );
     expect(record).toHaveBeenCalledWith({ actor: "gg-coder", input });
-    expect(tool.description).toContain("completion waits for owning run settlement");
+    expect(tool.description).toContain(
+      'transition: "done" is the only public completion-intent API',
+    );
+    expect(tool.description).toContain("settlement is host-only after the owning run ends");
   });
 });

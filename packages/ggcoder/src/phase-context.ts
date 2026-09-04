@@ -378,9 +378,9 @@ export function buildActivePhaseVerificationFollowUp(context: ActivePhaseContext
     "Implementation is not ready to stop until the active Roadmap phase is verified.",
     "Run one bounded check per Done When criterion, then bind each criterion ID to its bash execution ID using verification_bindings:",
     criteria,
-    'Use transition: "done" only when verification.result is "passed" and every criterion has one unique execution binding.',
+    'roadmap_status with transition: "done" is the only public completion-intent API; use it only when verification.result is "passed" and every criterion has one unique execution binding.',
     'If verification fails or is incomplete, report transition: "in-progress" with a concrete reason; use "blocked" only for a concrete external dependency.',
-    "Done records completion intent; the owning implementation run must settle successfully before the phase becomes Done.",
+    "Settlement is host-only after the owning implementation run ends successfully; do not call or search for another completion tool.",
   ].join("\n");
 }
 

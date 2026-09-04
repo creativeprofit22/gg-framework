@@ -157,6 +157,99 @@ afterEach(async () => {
 });
 
 describe("app-sidecar direct Roadmap completion", () => {
+  it("records legacy Done intent and settles only after the successful owning run", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-legacy-direct-phase-"));
+    roots.push(agentDir);
+    const cwd = "/project/legacy-direct-completion";
+    const repository = new ProjectNotesRepository(agentDir);
+    const legacyDocument = document();
+    delete legacyDocument.phases[0]!.execution;
+    await repository.migrate(cwd, legacyDocument);
+    const completionIntents = new AppSidecarCompletionIntentTracker();
+    const completionIntentRun = completionIntents.beginRun();
+    const onCompletionIntent = vi.fn((intent) => completionIntents.record(intent));
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      durableExecution: false,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => verificationWorkspace,
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
+      broadcastNotesSnapshot: vi.fn(),
+      onCompletionIntent,
+    });
+
+    const output = await host.createSessionTools("coding", owningSession)[0]!.execute(
+      RoadmapStatusParams.parse({
+        update_id: "legacy-completion-intent",
+        phase_id: "phase-1",
+        expected_revision: 1,
+        transition: "done",
+        progress: "Legacy verification completed",
+        evidence: ["pnpm test exited successfully"],
+        verification_bindings: [
+          {
+            criterion_id: roadmapCriterionId(1, "Targeted tests pass"),
+            execution_id: "execution-1",
+          },
+        ],
+        verification: { result: "passed" },
+      }),
+      {} as never,
+    );
+
+    expect(JSON.parse(String(output))).toMatchObject({
+      result: "committed",
+      statusOutcome: "completion-pending",
+    });
+    expect(onCompletionIntent).toHaveBeenCalledTimes(1);
+    const pendingSnapshot = await repository.load(cwd);
+    expect(pendingSnapshot.status).toBe("ok");
+    if (pendingSnapshot.status !== "ok") throw new Error("expected pending snapshot");
+    expect(pendingSnapshot.snapshot.document.phases[0]!.status).toBe("in-progress");
+    expect(pendingSnapshot.snapshot.document.phases[0]!.execution).toBeUndefined();
+
+    const coordinator = new AppSidecarPhaseCompletionCoordinator({
+      cwd,
+      repository,
+      broadcastSnapshot: vi.fn(),
+    });
+    const finalizer = completionIntents.finalizeRun(completionIntentRun);
+    const outcome = await finalizer.checkpoint({
+      coordinator,
+      tracker: new AppSidecarPhaseImplementationPlanTracker(),
+      checkpointId: "legacy-checkpoint",
+      phaseId: "phase-1",
+      expectedSession: session,
+      currentPlanProgress: { total: 1, completed: [1] },
+      runOutcome: "succeeded",
+      runGeneration: 1,
+      timestamp: "2026-08-29T00:01:00.000Z",
+    });
+    const repeatedOutcome = await finalizer.checkpoint({
+      coordinator,
+      tracker: new AppSidecarPhaseImplementationPlanTracker(),
+      checkpointId: "legacy-checkpoint-repeat",
+      phaseId: "phase-1",
+      expectedSession: session,
+      currentPlanProgress: { total: 1, completed: [1] },
+      runOutcome: "succeeded",
+      runGeneration: 1,
+      timestamp: "2026-08-29T00:01:01.000Z",
+    });
+
+    expect(outcome).toMatchObject({ status: "committed", evaluation: { gateOutcome: "done" } });
+    expect(repeatedOutcome).not.toMatchObject({
+      status: "committed",
+      evaluation: { gateOutcome: "done" },
+    });
+    const settledSnapshot = await repository.load(cwd);
+    expect(settledSnapshot.status).toBe("ok");
+    if (settledSnapshot.status !== "ok") throw new Error("expected settled snapshot");
+    expect(settledSnapshot.snapshot.document.phases[0]!.status).toBe("done");
+  });
+
   it("leaves no completion-pending state or armed intent when canonical plan progress is missing", async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-missing-plan-phase-"));
     roots.push(agentDir);
@@ -171,6 +264,7 @@ describe("app-sidecar direct Roadmap completion", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -228,6 +322,7 @@ describe("app-sidecar direct Roadmap completion", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
       captureVerificationWorkspace: async () => verificationWorkspace,
@@ -376,6 +471,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       const host = new AppSidecarRoadmapToolHost({
         cwd,
         repository,
+        durableExecution: true,
         reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
         projectAutopilot: { isEnabled: () => false },
         captureVerificationWorkspace: async () => verificationWorkspace,
@@ -507,6 +603,7 @@ describe("app-sidecar direct Roadmap completion", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
+      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),

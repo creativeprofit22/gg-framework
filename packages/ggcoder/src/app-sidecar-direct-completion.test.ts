@@ -41,7 +41,7 @@ const verificationWorkspace = {
   clean: true,
 };
 
-function document(): NotesDocumentV3 {
+function document(workspace = verificationWorkspace): NotesDocumentV3 {
   const phase = {
     id: "phase-1",
     title: "Direct Roadmap completion",
@@ -52,6 +52,33 @@ function document(): NotesDocumentV3 {
     sourcePrompt: "Implement direct completion",
     referenceIds: [],
     session,
+    execution: {
+      version: 1 as const,
+      state: "implementing" as const,
+      repository: workspace.repository,
+      plan: {
+        planId: "plan-1",
+        contentHash: "5".repeat(64),
+        snapshotPath: ".gg/plans/approved/plan-1.md",
+        approvedAt: NOW,
+        approvedRevision: 1,
+        baseCommit: workspace.headCommit,
+        steps: [
+          {
+            id: "6".repeat(64),
+            index: 1,
+            text: "Complete and verify the implementation",
+            state: "completed" as const,
+            completedAt: NOW,
+            workspace,
+          },
+        ],
+      },
+      evidence: [],
+      pendingCompletion: null,
+      lastSession: session,
+      migration: { source: "native" as const, reconciledAt: null },
+    },
     reminder: null,
     attentionReason: null,
     createdAt: NOW,
@@ -135,7 +162,10 @@ describe("app-sidecar direct Roadmap completion", () => {
     roots.push(agentDir);
     const cwd = "/project/missing-plan-completion";
     const repository = new ProjectNotesRepository(agentDir);
-    await repository.migrate(cwd, document());
+    const missingPlanDocument = document();
+    missingPlanDocument.phases[0]!.execution!.plan = null;
+    missingPlanDocument.phases[0]!.execution!.state = "needs-plan";
+    await repository.migrate(cwd, missingPlanDocument);
     const onCompletionIntent = vi.fn();
     const broadcastNotesSnapshot = vi.fn();
     const host = new AppSidecarRoadmapToolHost({
@@ -144,6 +174,8 @@ describe("app-sidecar direct Roadmap completion", () => {
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
       captureVerificationWorkspace: async () => verificationWorkspace,
+      captureWorkspaceSnapshot: async () => verificationWorkspace,
+      getRunGeneration: () => 1,
       resolvePlanProgress: () => null,
       broadcastNotesSnapshot,
       onCompletionIntent,
@@ -199,6 +231,8 @@ describe("app-sidecar direct Roadmap completion", () => {
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
       captureVerificationWorkspace: async () => verificationWorkspace,
+      captureWorkspaceSnapshot: async () => verificationWorkspace,
+      getRunGeneration: () => 1,
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: (snapshot) => {
         latestSnapshot = snapshot;
@@ -239,6 +273,8 @@ describe("app-sidecar direct Roadmap completion", () => {
       broadcastSnapshot: (snapshot) => {
         latestSnapshot = snapshot;
       },
+      captureWorkspaceSnapshot: async () => verificationWorkspace,
+      captureSafeToolEnvironmentDigest: safeToolEnvironmentDigest,
     });
     const finalizer = completionIntents.finalizeRun(completionIntentRun);
     const outcome = await finalizer.checkpoint({
@@ -249,6 +285,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       expectedSession: session,
       currentPlanProgress: { total: 1, completed: [1] },
       runOutcome: "succeeded",
+      runGeneration: 1,
       timestamp: "2026-08-29T00:01:00.000Z",
     });
     const repeatedOutcome = await finalizer.checkpoint({
@@ -259,6 +296,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       expectedSession: session,
       currentPlanProgress: { total: 1, completed: [1] },
       runOutcome: "succeeded",
+      runGeneration: 1,
       timestamp: "2026-08-29T00:01:01.000Z",
     });
 
@@ -282,11 +320,15 @@ describe("app-sidecar direct Roadmap completion", () => {
     expect(latestSnapshot!.document.phases[0]!.lifecycleEvents).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ toStatus: "review" })]),
     );
+    const implementationCheckpoint = latestSnapshot!.document.phases[0]!.roadmapEvents.find(
+      (event) => event.type === "implementation-checkpoint",
+    );
+    expect(implementationCheckpoint).toBeDefined();
     expect(latestSnapshot!.document.phases[0]!.roadmapEvents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "phase-advancement-checkpoint",
-          implementationCheckpointId: "checkpoint-current",
+          implementationCheckpointId: implementationCheckpoint!.id,
           verificationStatusUpdateId: "completion-intent-current",
           nextPhaseId: "phase-2",
         }),
@@ -337,6 +379,8 @@ describe("app-sidecar direct Roadmap completion", () => {
         reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
         projectAutopilot: { isEnabled: () => false },
         captureVerificationWorkspace: async () => verificationWorkspace,
+        captureWorkspaceSnapshot: async () => verificationWorkspace,
+        getRunGeneration: () => 1,
         resolvePlanProgress: () => ({ total: 1, completed: [1] }),
         broadcastNotesSnapshot: () => undefined,
         onCompletionIntent: (intent) => {
@@ -365,6 +409,8 @@ describe("app-sidecar direct Roadmap completion", () => {
         cwd,
         repository,
         broadcastSnapshot: () => undefined,
+        captureWorkspaceSnapshot: async () => verificationWorkspace,
+        captureSafeToolEnvironmentDigest: safeToolEnvironmentDigest,
       });
       const finalizer = completionIntents.finalizeRun(completionIntentRun);
 
@@ -376,6 +422,7 @@ describe("app-sidecar direct Roadmap completion", () => {
         expectedSession: session,
         currentPlanProgress: { total: 1, completed: [1] },
         runOutcome,
+        runGeneration: 1,
         timestamp: "2026-08-29T00:01:00.000Z",
       });
       const laterRun = completionIntents.beginRun();
@@ -387,17 +434,16 @@ describe("app-sidecar direct Roadmap completion", () => {
         expectedSession: session,
         currentPlanProgress: { total: 1, completed: [1] },
         runOutcome: "succeeded",
+        runGeneration: 1,
         timestamp: "2026-08-29T00:02:00.000Z",
       });
 
       expect(outcome).toMatchObject({
-        status: "open",
-        phase: { status: "in-progress" },
-        evaluation: {
-          targetStatus: null,
-          unmetGateCodes: expect.arrayContaining(["run-not-successful"]),
+        status: "committed",
+        phase: {
+          status: "in-progress",
+          execution: { pendingCompletion: null },
         },
-        advancementCheckpoint: null,
       });
       expect(laterOutcome).not.toMatchObject({
         status: "committed",
@@ -406,7 +452,10 @@ describe("app-sidecar direct Roadmap completion", () => {
       const snapshot = await repository.load(cwd);
       expect(snapshot.status).toBe("ok");
       if (snapshot.status !== "ok") throw new Error("expected final snapshot");
-      expect(snapshot.snapshot.document.phases[0]).toMatchObject({ status: "in-progress" });
+      expect(snapshot.snapshot.document.phases[0]).toMatchObject({
+        status: "in-progress",
+        execution: { pendingCompletion: null },
+      });
       expect(snapshot.snapshot.document.phases[0]!.roadmapEvents).not.toEqual(
         expect.arrayContaining([expect.objectContaining({ type: "phase-advancement-checkpoint" })]),
       );
@@ -422,7 +471,6 @@ describe("app-sidecar direct Roadmap completion", () => {
     roots.push(agentDir);
     const cwd = "/project/legacy-freshness";
     const repository = new ProjectNotesRepository(agentDir);
-    await repository.migrate(cwd, document());
     const workspace = {
       version: 1 as const,
       repository: {
@@ -434,6 +482,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       worktreeDigest: "4".repeat(64),
       clean: true,
     };
+    await repository.migrate(cwd, document(workspace));
     const ledger = new SessionVerificationEvidenceLedger();
     ledger.recordToolResult({
       name: "bash",
@@ -463,6 +512,9 @@ describe("app-sidecar direct Roadmap completion", () => {
       resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       captureVerificationWorkspace: async () =>
         mutate === "workspace" ? { ...workspace, worktreeDigest: "5".repeat(64) } : workspace,
+      captureWorkspaceSnapshot: async () =>
+        mutate === "workspace" ? { ...workspace, worktreeDigest: "5".repeat(64) } : workspace,
+      getRunGeneration: () => 1,
       captureSafeToolEnvironmentDigest: () =>
         mutate === "environment" ? "6".repeat(64) : safeToolEnvironmentDigest(),
       broadcastNotesSnapshot: vi.fn(),

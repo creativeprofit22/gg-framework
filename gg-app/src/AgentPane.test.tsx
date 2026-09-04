@@ -12,6 +12,8 @@ Element.prototype.scrollIntoView = vi.fn();
 
 const nativeMocks = vi.hoisted(() => ({
   onDragDropEvent: vi.fn(async () => vi.fn()),
+  openDialog: vi.fn(),
+  saveDialog: vi.fn(),
   setWindowTitle: vi.fn(),
   getDroppedPathInfo: vi.fn(async (paths: string[]) =>
     paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
@@ -41,6 +43,10 @@ const nativeMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: nativeMocks.onDragDropEvent }),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: nativeMocks.openDialog,
+  save: nativeMocks.saveDialog,
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
@@ -974,6 +980,37 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getByText("Proposed from Project Notes revision 8")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Release hardening" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
+  });
+
+  it.each([
+    ["selection", "C:\\picked"],
+    ["cancellation", null],
+  ] as const)("restores composer focus after add-dir picker %s", async (_outcome, selected) => {
+    const pane = client("pane-add-dir-focus", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "add-dir",
+        aliases: [],
+        description: "Add project folder",
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    const picker = deferred<string | null>();
+    nativeMocks.openDialog.mockReturnValueOnce(picker.promise);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    input.focus();
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("/add-dir"));
+    await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
+    expect(document.activeElement).not.toBe(input);
+
+    await act(async () => picker.resolve(selected));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(selected === null ? 0 : 1);
   });
 
   it("inserts fixed-input commands exactly and disables composer additions", async () => {

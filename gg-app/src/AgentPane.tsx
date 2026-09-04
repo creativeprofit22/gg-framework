@@ -2188,16 +2188,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function pickWorkspaceDirectory(command: "add-dir" | "remove-dir"): Promise<void> {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title:
-        command === "add-dir"
-          ? "Add project folder to workspace"
-          : "Remove project folder from workspace",
-    });
-    if (typeof selected !== "string") return;
-    submitText(`/${command} ${selected}`, command === "add-dir" ? "/add-dir" : "/remove-dir");
+    inputRef.current?.blur();
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title:
+          command === "add-dir"
+            ? "Add project folder to workspace"
+            : "Remove project folder from workspace",
+      });
+      if (typeof selected !== "string") return;
+      submitText(`/${command} ${selected}`, command === "add-dir" ? "/add-dir" : "/remove-dir");
+    } finally {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
   }
 
   // Detect an active `@`-mention token at the caret: a `@` that starts at a word

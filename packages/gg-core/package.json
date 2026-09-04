@@ -30,6 +30,11 @@
       "import": "./dist/project-notes.js",
       "require": "./dist/project-notes.cjs"
     },
+    "./project-task-contract": {
+      "types": "./dist/project-task-contract.d.ts",
+      "import": "./dist/project-task-contract.js",
+      "require": "./dist/project-task-contract.cjs"
+    },
     "./project-notes-diagnostics": {
       "types": "./dist/project-notes-diagnostics.d.ts",
       "import": "./dist/project-notes-diagnostics.js",

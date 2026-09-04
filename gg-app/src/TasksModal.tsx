@@ -1,4 +1,7 @@
-import { isManuallyRunnableTaskStatus, isRunnableTaskStatus } from "@kenkaiiii/gg-core";
+import {
+  isManuallyRunnableTaskStatus,
+  isRunnableTaskStatus,
+} from "@kenkaiiii/gg-core/project-task-contract";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import type { ProjectTask } from "./agent";

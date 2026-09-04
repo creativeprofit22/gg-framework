@@ -7,6 +7,7 @@ export default defineConfig({
     "src/paths.ts",
     "src/plan-review.ts",
     "src/project-notes.ts",
+    "src/project-task-contract.ts",
     "src/project-notes-diagnostics.ts",
     "src/manual-completion-approval-protocol.ts",
     "src/phase-binding-protocol.ts",

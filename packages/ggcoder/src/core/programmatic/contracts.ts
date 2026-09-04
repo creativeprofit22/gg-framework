@@ -18,6 +18,9 @@ const LIMITS = {
   evidenceSourceChars: 100,
   evidenceCodeChars: 100,
   evidenceMessageChars: 4_000,
+  routeArguments: 32,
+  routeArgumentValueChars: 500,
+  routeTextChars: 4_000,
   executionSummaryChars: 4_000,
 } as const;
 
@@ -29,7 +32,11 @@ const stableIdSchema = z
   .max(LIMITS.scannerIdChars)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const boundedString = (max: number) => z.string().min(1).max(max);
-const specialistCommandSchema = z.enum(["research", "setup-sweep", "setup-tauri-package"]);
+export const specialistCommandSchema = z.enum([
+  "research",
+  "setup-sweep",
+  "setup-tauri-package",
+]);
 const lifecycleStateSchema = z.enum(["discovered", "queued", "running", "completed", "dismissed"]);
 const nonnegativeSafeIntegerSchema = z
   .number()
@@ -276,16 +283,92 @@ export const opportunityTransitionV1Schema = z
     message: "lifecycle transition is not allowed",
   });
 
-export const routeEnvelopeV1Schema = z
+export const routeArgumentV1Schema = z.strictObject({
+  name: stableIdSchema,
+  value: boundedString(LIMITS.routeArgumentValueChars),
+});
+
+export const PROGRAMMATIC_MACHINE_LOCAL_WARNING =
+  "Availability may differ on another machine." as const;
+
+const commandSourceSchema = z.enum(["built-in", "global-custom"]);
+const commandPortabilitySchema = z.enum(["bundled", "machine-local"]);
+const unavailableReasonSchema = z.enum(["missing", "wrong-owner", "ambiguous", "unsupported"]);
+
+export const availableCommandV1Schema = z.discriminatedUnion("portability", [
+  z.strictObject({
+    status: z.literal("available"),
+    source: z.literal("built-in"),
+    portability: z.literal("bundled"),
+  }),
+  z.strictObject({
+    status: z.literal("available"),
+    source: z.literal("global-custom"),
+    portability: z.literal("machine-local"),
+    portabilityWarning: z.literal(PROGRAMMATIC_MACHINE_LOCAL_WARNING),
+  }),
+]);
+
+export const unavailableCommandV1Schema = z
   .strictObject({
-    version: versionSchema,
-    opportunity: discoveredOpportunityV1Schema,
-    configurationFingerprint: configurationFingerprintV1Schema,
+    status: z.literal("unavailable"),
+    reason: unavailableReasonSchema,
+    source: commandSourceSchema.optional(),
+    portability: commandPortabilitySchema.optional(),
+    portabilityWarning: z.literal(PROGRAMMATIC_MACHINE_LOCAL_WARNING).optional(),
   })
-  .refine((value) => value.opportunity.route.status === "routable", {
-    path: ["opportunity", "route"],
-    message: "only routable opportunities can form execution routes",
+  .superRefine((value, context) => {
+    const needsWarning = value.portability === "machine-local";
+    if (needsWarning !== (value.portabilityWarning !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["portabilityWarning"],
+        message: "machine-local availability requires its portability warning",
+      });
+    }
   });
+
+export const commandAvailabilityV1Schema = z.union([
+  availableCommandV1Schema,
+  unavailableCommandV1Schema,
+ ]);
+
+const routeArgumentArraySchema = z
+  .array(routeArgumentV1Schema)
+  .max(LIMITS.routeArguments)
+  .refine(
+    (values) => isStrictlyAscending(values.map(({ name }) => name)),
+    "argument names must be unique and sorted ascending",
+  );
+
+export const routeEnvelopeV1Schema = z.strictObject({
+  version: versionSchema,
+  status: z.literal("routable"),
+  opportunityId: sha256Schema,
+  configurationFingerprint: configurationFingerprintV1Schema,
+  specialistCommand: specialistCommandSchema,
+  arguments: routeArgumentArraySchema,
+  evidencePaths: repositoryPathArraySchema,
+  scopePaths: repositoryPathArraySchema,
+  successCondition: boundedString(LIMITS.routeTextChars),
+  mutates: z.boolean(),
+  reason: boundedString(LIMITS.routeTextChars),
+  availability: availableCommandV1Schema,
+});
+
+export const unroutableResolutionV1Schema = z.strictObject({
+  version: versionSchema,
+  status: z.literal("unroutable"),
+  opportunityId: sha256Schema,
+  candidateCommand: specialistCommandSchema.optional(),
+  availability: unavailableCommandV1Schema,
+  reason: boundedString(LIMITS.routeTextChars),
+});
+
+export const routeResolutionV1Schema = z.discriminatedUnion("status", [
+  routeEnvelopeV1Schema,
+  unroutableResolutionV1Schema,
+]);
 
 export const executionResultV1Schema = z.strictObject({
   version: versionSchema,
@@ -313,5 +396,12 @@ export type ProgrammaticLifecycleRecordV1 = z.infer<typeof programmaticLifecycle
 export type ProgrammaticLifecycleStateV1 = z.infer<typeof programmaticLifecycleStateV1Schema>;
 export type ProgrammaticScanSummaryV1 = z.infer<typeof programmaticScanSummaryV1Schema>;
 export type OpportunityTransitionV1 = z.infer<typeof opportunityTransitionV1Schema>;
+export type RouteArgumentV1 = z.infer<typeof routeArgumentV1Schema>;
+export type AvailableCommandV1 = z.infer<typeof availableCommandV1Schema>;
+export type UnavailableCommandV1 = z.infer<typeof unavailableCommandV1Schema>;
+export type CommandAvailabilityV1 = z.infer<typeof commandAvailabilityV1Schema>;
 export type RouteEnvelopeV1 = z.infer<typeof routeEnvelopeV1Schema>;
+export type UnroutableResolutionV1 = z.infer<typeof unroutableResolutionV1Schema>;
+export type RouteResolutionV1 = z.infer<typeof routeResolutionV1Schema>;
+export type SpecialistCommand = z.infer<typeof specialistCommandSchema>;
 export type ExecutionResultV1 = z.infer<typeof executionResultV1Schema>;

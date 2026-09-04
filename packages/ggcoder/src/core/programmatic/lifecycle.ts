@@ -24,6 +24,7 @@ import {
   type InventoryOperations,
 } from "./inventory.js";
 import { discoverProgrammaticOpportunities } from "./opportunities.js";
+import { resolveProgrammaticRoutes } from "./routes.js";
 import {
   canonicalJson,
   canonicalRepositoryRoot,
@@ -353,6 +354,14 @@ export async function runProgrammaticScan(
       );
     }
     const discovered = discoverProgrammaticOpportunities(inventory.inventory);
+    const resolvedRoutes = await resolveProgrammaticRoutes(
+      root,
+      discovered.opportunities,
+      fingerprint,
+    );
+    const resolutionByOpportunity = new Map(
+      resolvedRoutes.map((resolution) => [resolution.opportunityId, resolution]),
+    );
     const configured = new Map(
       loadedProfile.envelope.profile.scanners.map((scanner) => [
         scanner.id,
@@ -368,9 +377,10 @@ export async function runProgrammaticScan(
     unverifiedIds = discovery.opportunities
       .filter((opportunity) => {
         const specialist = configured.get(opportunity.identity.detectorId);
+        const resolution = resolutionByOpportunity.get(opportunity.identity.id);
         return (
-          opportunity.route.status !== "routable" ||
-          opportunity.route.specialistCommand !== specialist
+          resolution?.status !== "routable" ||
+          resolution.specialistCommand !== specialist
         );
       })
       .map(({ identity }) => identity.id);

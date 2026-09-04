@@ -311,6 +311,20 @@ describe("Scan summaries report new, unchanged, active, completed, dismissed, di
     expect(encoded).not.toContain("opportunities");
   });
 
+  it("marks a configured specialist mismatch unverified after current route resolution", async () => {
+    const root = await createRepository();
+    const profilePath = path.join(root, ".gg/programmatic/profile.json");
+    const envelope = JSON.parse(await readFile(profilePath, "utf8")) as {
+      profile: { scanners: Array<{ specialistCommand: string }> };
+    };
+    envelope.profile.scanners[0]!.specialistCommand = "research";
+    await writeFile(profilePath, JSON.stringify(envelope));
+
+    await expect(runProgrammaticScan(root)).resolves.toMatchObject({
+      ok: true,
+      summary: { new: 1, unverified: 1 },
+    });
+  });
   it("reports a scan-level failure without changing state", async () => {
     const root = await createRepository();
     await runProgrammaticScan(root);

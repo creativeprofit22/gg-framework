@@ -110,4 +110,21 @@ describe("loadCustomCommands", () => {
 
     await expect(loadCustomCommands(path.join(missingRoot, "project"))).resolves.toEqual([]);
   });
+  it("returns the project-owned winner when it shadows a global specialist", async () => {
+    const cwd = await temporaryDir("gg-command-project-");
+    await writeCommand(
+      path.join(mockedPaths.agentDir, "commands", "research.md"),
+      "Global research",
+      "Global body.",
+    );
+    await writeCommand(
+      path.join(cwd, ".gg", "commands", "research.md"),
+      "Project research",
+      "Project body.",
+    );
+
+    await expect(loadCustomCommands(cwd)).resolves.toEqual([
+      expect.objectContaining({ name: "research", scope: "project", prompt: "Project body." }),
+    ]);
+  });
 });

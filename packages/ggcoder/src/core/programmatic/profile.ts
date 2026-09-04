@@ -6,8 +6,8 @@ import { withFileLock } from "@kenkaiiii/gg-core";
 import type {
   ConfigurationFingerprintV1,
   InventoryEntryV1,
-  OpportunityRouteV1,
   ProgrammaticProfileV1,
+  RouteResolutionV1,
 } from "./contracts.js";
 import {
   configurationFingerprintV1Schema,
@@ -22,6 +22,7 @@ import {
   type InventorySummaryV1,
 } from "./inventory.js";
 import { discoverProgrammaticOpportunities } from "./opportunities.js";
+import { resolveProgrammaticRoutes } from "./routes.js";
 import {
   canonicalJson,
   canonicalRepositoryRoot,
@@ -34,7 +35,7 @@ import {
 export interface ProgrammaticProfileRouteV1 {
   opportunityId: string;
   detectorId: string;
-  route: OpportunityRouteV1;
+  resolution: RouteResolutionV1;
 }
 
 export interface ProgrammaticProfileProposalV1 {
@@ -103,14 +104,24 @@ async function buildProfileProposal(
 ): Promise<ProgrammaticProfileProposalV1> {
   const inventory = await buildProgrammaticInventory(repositoryRoot, { managedTemporaryPath });
   const discovery = discoverProgrammaticOpportunities(inventory.inventory);
+  const resolvedRoutes = await resolveProgrammaticRoutes(
+    repositoryRoot,
+    discovery.opportunities,
+    inventory.inventory.configurationFingerprint,
+  );
+  const routes = discovery.opportunities.map((opportunity, index) => ({
+    opportunityId: opportunity.identity.id,
+    detectorId: opportunity.identity.detectorId,
+    resolution: resolvedRoutes[index]!,
+  }));
   const scanners = new Map<string, ProgrammaticProfileV1["scanners"][number]>();
 
-  for (const opportunity of discovery.opportunities) {
-    if (opportunity.route.status !== "routable") continue;
+  for (const { detectorId, resolution } of routes) {
+    if (resolution.status !== "routable") continue;
     const scanner = {
       version: PROGRAMMATIC_CONTRACT_VERSION,
-      id: opportunity.identity.detectorId,
-      specialistCommand: opportunity.route.specialistCommand,
+      id: detectorId,
+      specialistCommand: resolution.specialistCommand,
     } as const;
     const existing = scanners.get(scanner.id);
     if (existing && existing.specialistCommand !== scanner.specialistCommand) {
@@ -128,11 +139,7 @@ async function buildProfileProposal(
     inventory: inventory.summary,
     configurationFingerprint: inventory.inventory.configurationFingerprint,
     profile,
-    routes: discovery.opportunities.map((opportunity) => ({
-      opportunityId: opportunity.identity.id,
-      detectorId: opportunity.identity.detectorId,
-      route: opportunity.route,
-    })),
+    routes,
     exclusions: [...PROGRAMMATIC_INVENTORY_EXCLUSIONS],
     configurationInputs: inventory.configurationInputs,
   };

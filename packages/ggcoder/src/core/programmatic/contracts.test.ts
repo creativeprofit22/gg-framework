@@ -102,8 +102,25 @@ const scanSummary = {
 const transition = { version: 1, opportunity, from: "discovered", to: "queued" };
 const route = {
   version: 1,
-  opportunity: discoveredOpportunity,
+  status: "routable",
+  opportunityId: opportunity.id,
   configurationFingerprint,
+  specialistCommand: "research",
+  arguments: [
+    { name: "detector-id", value: "ci-scanner" },
+    { name: "representative-case", value: "src/index.ts" },
+  ],
+  evidencePaths: ["src/index.ts"],
+  scopePaths: [".github/workflows/ci.yml", "package.json", "src/index.ts"],
+  successCondition: discoveredOpportunity.verification,
+  mutates: false,
+  reason: discoveredOpportunity.expectedOutput,
+  availability: {
+    status: "available",
+    source: "global-custom",
+    portability: "machine-local",
+    portabilityWarning: "Availability may differ on another machine.",
+  },
 };
 const executionResult = {
   version: 1,
@@ -544,11 +561,10 @@ describe("opportunity lifecycle transitions", () => {
 });
 
 describe("route and execution boundaries", () => {
-  it("rejects unroutable opportunities as execution routes", () => {
-    const unroutable = { ...discoveredOpportunity, route: { status: "unroutable" } };
-    expect(routeEnvelopeV1Schema.safeParse({ ...route, opportunity: unroutable }).success).toBe(
-      false,
-    );
+  it("rejects embedding a whole opportunity in an execution route", () => {
+    expect(
+      routeEnvelopeV1Schema.safeParse({ ...route, opportunity: discoveredOpportunity }).success,
+    ).toBe(false);
   });
 
   it.each(["succeeded", "failed", "cancelled", "blocked"])(

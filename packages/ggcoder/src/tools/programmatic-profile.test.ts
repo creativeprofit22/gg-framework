@@ -36,7 +36,7 @@ interface InspectOutput {
   exclusions: string[];
   profile: ProgrammaticProfileV1;
   profile_path: string;
-  routes: Array<{ detector_id: string; route: { status: string } }>;
+  routes: Array<{ detector_id: string; resolution: { status: string } }>;
   summary: string;
 }
 
@@ -146,7 +146,13 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     expect(result.routes).toEqual([
       expect.objectContaining({
         detector_id: "tauri-package-shape",
-        route: { status: "routable", specialistCommand: "setup-tauri-package" },
+        resolution: expect.objectContaining({
+          status: "routable",
+          specialistCommand: "setup-tauri-package",
+          arguments: [{ name: "app-root", value: "." }],
+          mutates: true,
+          availability: { status: "available", source: "built-in", portability: "bundled" },
+        }),
       }),
     ]);
     expect(result.configuration_inputs.every((entry) => !path.isAbsolute(entry.path))).toBe(true);

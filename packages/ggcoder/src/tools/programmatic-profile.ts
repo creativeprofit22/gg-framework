@@ -69,7 +69,7 @@ export function createProgrammaticProfileTool(
             routes: proposal.routes.map((route) => ({
               opportunity_id: route.opportunityId,
               detector_id: route.detectorId,
-              route: route.route,
+              resolution: route.resolution,
             })),
             summary: "Inspection completed; no files were written.",
           });

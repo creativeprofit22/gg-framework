@@ -1013,6 +1013,32 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).toHaveBeenCalledTimes(selected === null ? 0 : 1);
   });
 
+  it.each(["add-dir", "remove-dir"])(`reports failed /%s picker submissions`, async (name) => {
+    const pane = client(`pane-${name}-failure`, 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name,
+        aliases: [],
+        description: "Change workspace folders",
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("agent_prompt failed"));
+    nativeMocks.openDialog.mockResolvedValueOnce("C:\\picked");
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    input.focus();
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText(`/${name}`));
+
+    expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+    expect(await screen.findByText("agent_prompt failed")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+
   it.each(["add-dir", "remove-dir"])(`rejects staged inputs for typed /%s`, (name) => {
     expect(
       noInputSlashSubmissionError(

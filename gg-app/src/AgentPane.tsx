@@ -2280,6 +2280,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setMentionedPaths((prev) => prev.filter((x) => x !== p));
   }
 
+  function reportPromptFailure(error: unknown): void {
+    pushItem({
+      kind: "error",
+      id: nextId(),
+      headline: "Prompt wasn’t sent",
+      message: error instanceof Error ? error.message : String(error),
+      guidance: "Retry your prompt.",
+    });
+  }
+
   // Submit arbitrary text as if typed + entered. Shared by the input, the
   // top-right commit button, and the workspace directory picker. `label` shows
   // a friendly shimmer phrase in the transcript while the full `text` is still
@@ -2320,9 +2330,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setSlashIndex(0);
     }
     if (!queued) endStreamingText();
-    void sendPrompt(trimmed).then((submission) => {
-      if (!submission.queued) planResumePromptRef.current = trimmed;
-    });
+    void sendPrompt(trimmed)
+      .then((submission) => {
+        if (!submission.queued) planResumePromptRef.current = trimmed;
+      })
+      .catch(reportPromptFailure);
   }
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
@@ -2919,15 +2931,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // the message is the unedited enhanced text (the bubble shows `trimmed`).
     const sentEnhancements =
       enhancement && enhancement.plain === trimmed ? enhancement.segments : undefined;
-    const reportPromptFailure = (error: unknown) => {
-      pushItem({
-        kind: "error",
-        id: nextId(),
-        headline: "Prompt wasn’t sent",
-        message: error instanceof Error ? error.message : String(error),
-        guidance: "Retry your prompt.",
-      });
-    };
     // While a run is in flight, the message is QUEUED as steering (the sidecar
     // injects it mid-loop). Attachments queue too — they're persisted and ride
     // the same native-block path when the queue drains. Queued rows render

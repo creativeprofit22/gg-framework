@@ -185,6 +185,10 @@ function isNotesRequestBodyTooLarge(error: NotesValidationError | undefined): bo
   return error?.path === "$" && /^notes request body exceeds \d+ bytes$/.test(error.message.trim());
 }
 
+function taskErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function notesPromptActionResult(
   result: NotesPromptSaveResult,
   latestPreview?: KenPromptSavePreview,
@@ -1702,7 +1706,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       const cmds = await listCommands();
       if (cmds.length > 0) setCommands(cmds);
       // Project task list for the Tasks modal + nav button.
-      setProjectTasks(await listTasks());
+      try {
+        setProjectTasks(await listTasks());
+      } catch (error) {
+        toast(taskErrorMessage(error), "error");
+      }
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
@@ -1962,7 +1970,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {
     setShowTasks(true);
-    void listTasks().then(setProjectTasks);
+    void listTasks()
+      .then(setProjectTasks)
+      .catch((error) => toast(taskErrorMessage(error), "error"));
   }, [listTasks]);
 
   // Run a single task: the sidecar opens a fresh session and streams progress
@@ -1970,21 +1980,25 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // the transcript is visible while it runs.
   const handleRunTask = useCallback(
     (id: string) => {
-      setShowTasks(false);
-      void runTask(id);
+      void runTask(id)
+        .then(() => setShowTasks(false))
+        .catch((error) => toast(taskErrorMessage(error), "error"));
     },
     [runTask],
   );
 
   // Run every pending task sequentially (a fresh session each), in order.
   const handleRunAllTasks = useCallback(() => {
-    setShowTasks(false);
-    void runAllTasks();
+    void runAllTasks()
+      .then(() => setShowTasks(false))
+      .catch((error) => toast(taskErrorMessage(error), "error"));
   }, [runAllTasks]);
 
   const handleDeleteTask = useCallback(
     (id: string) => {
-      void deleteTask(id).then(setProjectTasks);
+      void deleteTask(id)
+        .then(setProjectTasks)
+        .catch((error) => toast(taskErrorMessage(error), "error"));
     },
     [deleteTask],
   );

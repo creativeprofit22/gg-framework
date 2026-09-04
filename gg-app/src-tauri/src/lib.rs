@@ -4180,15 +4180,15 @@ async fn agent_tasks(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
+    let response = client
         .get(format!("{}/tasks", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: run one task (`id`) or run-all (`all = true`, starting from the next
@@ -4226,16 +4226,16 @@ async fn agent_delete_task(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
+    let response = client
         .post(format!("{}/tasks/delete", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: accept the exact server-issued persisted plan checkpoint.
@@ -11592,6 +11592,27 @@ mod tests {
                 "operationId": "operation-1"
             }))
         );
+    }
+
+    #[test]
+    fn task_proxies_reject_non_success_list_and_delete_responses() {
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"task plan changed"}"#,
+                "task plan changed",
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"message":"task store unavailable"}"#,
+                "task store unavailable",
+            ),
+        ] {
+            assert_eq!(
+                parse_sidecar_json_response(status, body),
+                Err(expected.to_string())
+            );
+        }
     }
 
     #[test]

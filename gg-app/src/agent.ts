@@ -3264,16 +3264,11 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       const r = await call<{ volume: number }>("agent_radio_volume", { volume });
       return Number.isFinite(r.volume) ? r.volume : volume;
     },
-    listTasks: () => safeArray("agent_tasks", "tasks"),
+    listTasks: async () => (await call<{ tasks: ProjectTask[] }>("agent_tasks")).tasks ?? [],
     runTask: (id) => call("agent_run_tasks", { id, all: false }),
     runAllTasks: () => call("agent_run_tasks", { id: null, all: true }),
-    deleteTask: async (id) => {
-      try {
-        return (await call<{ tasks: ProjectTask[] }>("agent_delete_task", { id })).tasks ?? [];
-      } catch {
-        return [];
-      }
-    },
+    deleteTask: async (id) =>
+      (await call<{ tasks: ProjectTask[] }>("agent_delete_task", { id })).tasks ?? [],
     async killTask(id) {
       try {
         return (await call<{ message?: string }>("agent_kill_task", { id })).message ?? null;

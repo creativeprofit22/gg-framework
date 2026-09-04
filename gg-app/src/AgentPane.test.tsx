@@ -191,7 +191,7 @@ import {
 } from "./AgentPane";
 import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
-import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
+import type { AgentState, PaneAgentClient, PaneSessionTarget, ProjectTask } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
 const chatTarget: PaneSessionTarget = {
@@ -244,6 +244,13 @@ const agentState = (model: string): AgentState => ({
   mode: "code",
   running: false,
 });
+const projectTask: ProjectTask = {
+  id: "task-1",
+  title: "Keep this task visible",
+  prompt: "Preserve task state when requests fail",
+  status: "pending",
+  createdAt: "2026-09-04T00:00:00.000Z",
+};
 const KEN_PROMPT = "Implement the guarded session action\n  Preserve this indentation";
 const CONTINUATION_PROMPT = `## Objective
 Continue safely.
@@ -458,6 +465,80 @@ describe("preferredRoadmapPhaseSession", () => {
     await expect(
       resolveRoadmapPhaseResumeFromNotes(pane, "legacy-phase", compatibility),
     ).resolves.toEqual({ status: "ready", session: compatibility });
+  });
+});
+
+async function openTasksModal(pane: PaneAgentClient): Promise<void> {
+  vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+  render(<AgentPane client={pane} target={target} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Tasks (1)" }));
+  await screen.findByRole("dialog", { name: "Tasks" });
+}
+
+describe("AgentPane task request failures", () => {
+  it("keeps the current tasks visible when refreshing the list fails", async () => {
+    const pane = client("pane-task-list-failure", 1);
+    let rejectRefresh = false;
+    vi.mocked(pane.listTasks).mockImplementation(async () => {
+      if (rejectRefresh) throw new Error("task list unavailable");
+      return [projectTask];
+    });
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+    const tasksButton = await screen.findByRole("button", { name: "Tasks (1)" });
+
+    rejectRefresh = true;
+    fireEvent.click(tasksButton);
+
+    await screen.findByRole("dialog", { name: "Tasks" });
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task list unavailable", "error"),
+    );
+  });
+
+  it("keeps the modal and tasks visible when run-one is rejected", async () => {
+    const pane = client("pane-task-run-one-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.runTask).mockRejectedValue(new Error("task cannot start"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task cannot start", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it("keeps the modal and tasks visible when run-all is rejected", async () => {
+    const pane = client("pane-task-run-all-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.runAllTasks).mockRejectedValue(new Error("task batch cannot start"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run all (1)" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task batch cannot start", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it("keeps the current tasks visible when delete is rejected", async () => {
+    const pane = client("pane-task-delete-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.deleteTask).mockRejectedValue(new Error("task delete refused"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByTitle("Delete task"));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task delete refused", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
   });
 });
 

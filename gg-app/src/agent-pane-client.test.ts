@@ -136,6 +136,15 @@ describe("pane agent client", () => {
     });
   });
 
+  it("propagates task list and delete failures", async () => {
+    const c = createPaneAgentClient("right");
+    invoke.mockRejectedValueOnce(new Error("task list unavailable"));
+    await expect(c.listTasks()).rejects.toThrow("task list unavailable");
+
+    invoke.mockRejectedValueOnce(new Error("task delete refused"));
+    await expect(c.deleteTask("task-1")).rejects.toThrow("task delete refused");
+  });
+
   it("parses stale plan mutation recovery into a typed client error", async () => {
     const pendingPlanReview = {
       checkpointId: "checkpoint-2",

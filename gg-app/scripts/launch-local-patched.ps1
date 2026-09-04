@@ -291,8 +291,8 @@ function Test-InstalledPayloadCurrent([string]$Path, [object]$Manifest) {
   (Get-Sha256 -Path $Path) -eq $Manifest.PayloadSha256
 }
 
-function Get-LocalForkRootProcesses {
-  @(Get-CimInstance Win32_Process -Filter "Name = '$($script:ExpectedExecutableName)'" -ErrorAction Stop | ForEach-Object {
+function Get-ProcessTable {
+  @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
     [pscustomobject]@{
       ProcessId = [int]$_.ProcessId
       ParentProcessId = [int]$_.ParentProcessId
@@ -302,18 +302,56 @@ function Get-LocalForkRootProcesses {
   })
 }
 
-function Assert-UnambiguousLocalForkProcess([object[]]$Processes, [string]$ExpectedExecutable) {
-  if ($Processes.Count -gt 1) {
-    throw "Ambiguous Local Fork roots: expected at most one, found $($Processes.Count) (PIDs $($Processes.ProcessId -join ', '))"
-  }
-  if ($Processes.Count -eq 1) {
-    $actualPath = [string]$Processes[0].ExecutablePath
-    if (-not $actualPath.Equals($ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
-      throw "Wrong-path Local Fork root PID $($Processes[0].ProcessId): expected '$ExpectedExecutable', found '$actualPath'"
+function Get-ExactStartedProcess([object[]]$Processes, [object]$StartedProcess) {
+  if (-not $StartedProcess) { throw 'Spawned process identity is required' }
+  $rootPid = [int]$StartedProcess.Id
+  $expectedTicks = [long]$StartedProcess.CreationTicks
+  @($Processes | Where-Object {
+    [int]$_.ProcessId -eq $rootPid -and [long]$_.CreationTicks -eq $expectedTicks
+  } | Select-Object -First 1)
+}
+
+function Get-DescendantProcessTree([object[]]$Processes, [object]$StartedProcess) {
+  $startedRoot = Get-ExactStartedProcess -Processes $Processes -StartedProcess $StartedProcess
+  if (-not $startedRoot) { return @() }
+  $ownedIds = [Collections.Generic.HashSet[int]]::new()
+  $null = $ownedIds.Add([int]$startedRoot.ProcessId)
+  $pending = [Collections.Generic.Queue[object]]::new()
+  $pending.Enqueue($startedRoot)
+  while ($pending.Count -gt 0) {
+    $parent = $pending.Dequeue()
+    foreach ($candidate in @($Processes | Where-Object {
+      [int]$_.ParentProcessId -eq [int]$parent.ProcessId -and
+      [long]$_.CreationTicks -ge [long]$parent.CreationTicks
+    })) {
+      if ($ownedIds.Add([int]$candidate.ProcessId)) { $pending.Enqueue($candidate) }
     }
   }
-  if ($Processes.Count -eq 1) { return $Processes[0] }
-  $null
+  @($Processes | Where-Object { $ownedIds.Contains([int]$_.ProcessId) })
+}
+
+function Get-ProcessHandleById([int]$ProcessId) {
+  try { [Diagnostics.Process]::GetProcessById($ProcessId) } catch { $null }
+}
+
+function Stop-ExactProcess([object]$Process, [long]$CreationTicks) {
+  if (-not $Process -or $Process.HasExited) { return $false }
+  if ($Process.StartTime.ToUniversalTime().Ticks -ne $CreationTicks) { return $false }
+  $Process.Kill()
+  $true
+}
+
+function Stop-InvocationOwnedProcessTree([object]$StartedProcess) {
+  $ownedTree = @(Get-DescendantProcessTree -Processes @(Get-ProcessTable) -StartedProcess $StartedProcess |
+    Sort-Object CreationTicks -Descending)
+  foreach ($record in $ownedTree) {
+    $process = if ([int]$record.ProcessId -eq [int]$StartedProcess.Id) {
+      $StartedProcess.Handle
+    } else {
+      Get-ProcessHandleById -ProcessId ([int]$record.ProcessId)
+    }
+    $null = Stop-ExactProcess -Process $process -CreationTicks ([long]$record.CreationTicks)
+  }
 }
 
 function ConvertTo-SingleQuotedPowerShellLiteral([string]$Value) {
@@ -411,35 +449,39 @@ function Invoke-GuardedLocalForkInstaller(
 }
 
 function Start-CanonicalLocalFork([string]$ExecutablePath) {
-  Start-Process -FilePath $ExecutablePath -PassThru
+  $process = Start-Process -FilePath $ExecutablePath -PassThru
+  [pscustomobject]@{
+    Id = [int]$process.Id
+    CreationTicks = $process.StartTime.ToUniversalTime().Ticks
+    Handle = $process
+  }
 }
 
 function Confirm-LiveCanonicalRoot(
   [string]$ExpectedExecutable,
   [object]$Manifest,
-  [int]$ExpectedPid = 0,
+  [object]$StartedProcess,
   [int]$TimeoutSeconds = 15,
   [ValidateRange(1, 30000)][int]$StabilityMilliseconds = 3000
 ) {
+  if (-not $StartedProcess) { throw 'Spawned process identity is required for verification' }
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
     Start-Sleep -Milliseconds 200
-    $processes = @(Get-LocalForkRootProcesses)
-    $root = Assert-UnambiguousLocalForkProcess -Processes $processes -ExpectedExecutable $ExpectedExecutable
-    if ($root -and ($ExpectedPid -eq 0 -or $root.ProcessId -eq $ExpectedPid)) { break }
-    if ($root -and $ExpectedPid -gt 0 -and $root.ProcessId -ne $ExpectedPid) {
-      throw "Launched Local Fork PID $ExpectedPid was replaced by unexpected PID $($root.ProcessId)"
-    }
+    $ownedTree = @(Get-DescendantProcessTree -Processes @(Get-ProcessTable) -StartedProcess $StartedProcess)
+    $root = @($ownedTree | Where-Object {
+      ([string]$_.ExecutablePath).Equals($ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1)
+    if ($root) { break }
   } while ((Get-Date) -lt $deadline)
-  if (-not $root) { throw 'Verified Local Fork root did not remain live during startup' }
+  if (-not $root) { throw 'Spawned process tree did not produce the canonical Local Fork root' }
   $initialRoot = $root
   Start-Sleep -Milliseconds $StabilityMilliseconds
-  $stableProcesses = @(Get-LocalForkRootProcesses)
-  $stableRoot = Assert-UnambiguousLocalForkProcess -Processes $stableProcesses -ExpectedExecutable $ExpectedExecutable
-  if (-not $stableRoot -or $stableRoot.ProcessId -ne $initialRoot.ProcessId -or
-      $stableRoot.CreationTicks -ne $initialRoot.CreationTicks -or
+  $stableTree = @(Get-DescendantProcessTree -Processes @(Get-ProcessTable) -StartedProcess $StartedProcess)
+  $stableRoot = @($stableTree | Where-Object { [int]$_.ProcessId -eq [int]$initialRoot.ProcessId } | Select-Object -First 1)
+  if (-not $stableRoot -or $stableRoot.CreationTicks -ne $initialRoot.CreationTicks -or
       -not $stableRoot.ExecutablePath.Equals($initialRoot.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Local Fork root PID $($initialRoot.ProcessId) did not retain a stable identity during startup"
+    throw "Local Fork root PID $($initialRoot.ProcessId) did not retain a stable descended identity during startup"
   }
   $actualHash = Assert-FileMetadata $ExpectedExecutable $Manifest.PayloadSize $Manifest.PayloadSha256 `
     'Live Local Fork root executable'
@@ -451,7 +493,6 @@ function Confirm-LiveCanonicalRoot(
     Sha256 = $actualHash
   }
 }
-
 function Invoke-CanonicalLocalForkLaunch(
   [string]$ManifestPath = $script:DefaultMetadataPath,
   [string]$GuardedInstallerPath = $script:DefaultInstallerScriptPath,
@@ -473,8 +514,6 @@ function Invoke-CanonicalLocalForkLaunch(
   Write-LaunchLog "START manifest=$ManifestPath executable=$expectedFullPath sourceRevision=$validatedRevision" $LauncherLogPath
   $manifest = Read-CanonicalLocalForkManifest -Path $ManifestPath -AllowedRoot $AllowedManifestRoot `
     -ExpectedSourceRevision $validatedRevision
-  $initialProcesses = @(Get-LocalForkRootProcesses)
-  $initialRoot = Assert-UnambiguousLocalForkProcess -Processes $initialProcesses -ExpectedExecutable $expectedFullPath
   $installedCurrent = Test-InstalledPayloadCurrent -Path $expectedFullPath -Manifest $manifest
 
   if (-not $installedCurrent) {
@@ -495,15 +534,20 @@ function Invoke-CanonicalLocalForkLaunch(
     }
   }
 
-  $processes = @(Get-LocalForkRootProcesses)
-  $root = Assert-UnambiguousLocalForkProcess -Processes $processes -ExpectedExecutable $expectedFullPath
-  $expectedPid = 0
-  $disposition = if ($root) { 'existing-and-verified' } else { 'launched-and-verified' }
-  if (-not $root) {
-    $started = Start-CanonicalLocalFork -ExecutablePath $expectedFullPath
-    $expectedPid = [int]$started.Id
+  $started = Start-CanonicalLocalFork -ExecutablePath $expectedFullPath
+  try {
+    $liveRoot = Confirm-LiveCanonicalRoot -ExpectedExecutable $expectedFullPath -Manifest $manifest `
+      -StartedProcess $started
+  } catch {
+    $verificationFailure = $_.Exception.Message
+    try {
+      Stop-InvocationOwnedProcessTree -StartedProcess $started
+    } catch {
+      throw "Local Fork verification failed: $verificationFailure. Owned process cleanup failed: $($_.Exception.Message)"
+    }
+    throw "Local Fork verification failed: $verificationFailure"
   }
-  $liveRoot = Confirm-LiveCanonicalRoot -ExpectedExecutable $expectedFullPath -Manifest $manifest -ExpectedPid $expectedPid
+  $disposition = 'launched-and-verified'
   Write-LaunchLog "SUCCESS disposition=$disposition pid=$($liveRoot.ProcessId) path=$($liveRoot.ExecutablePath) sha256=$($liveRoot.Sha256)" $LauncherLogPath
   [pscustomobject]@{
     disposition = $disposition

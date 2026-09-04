@@ -92,39 +92,15 @@ function fixture({ installed = "current", malformed = false, manifestMutator } =
 
 function runScenario(
   files,
-  {
-    live = true,
-    wrongPath = false,
-    ambiguous = false,
-    installerFailure = false,
-    replaceDuringStability = false,
-    expectedSourceRevision = files.sourceRevision,
-  } = {},
+  { live = true, installerFailure = false, expectedSourceRevision = files.sourceRevision } = {},
 ) {
-  const wrongExecutable = join(files.root, "wrong", "gg-coder-local-fork.exe");
   const driver = `
 $ErrorActionPreference = 'Stop'
 $env:LOCALAPPDATA = ${psLiteral(files.localAppData)}
 . ${psLiteral(launcher)} -LibraryOnly
-$script:MockLive = ${live ? "$true" : "$false"}
-$script:MockExecutable = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\\gg-coder-local-fork.exe'))
 $script:InstallerCalls = 0
 $script:InstallerAllowedRoot = $null
 $script:StarterCalls = 0
-$script:ProcessSamples = 0
-function New-MockRoot([int]$ProcessId, [string]$Path) {
-  $replacementTicks = if (${replaceDuringStability ? "$true" : "$false"} -and $script:ProcessSamples -ge 4) { 1 } else { 0 }
-  [pscustomobject]@{ ProcessId = $ProcessId; ParentProcessId = 900; ExecutablePath = $Path; CreationTicks = 638000000000000000L + $ProcessId + $replacementTicks }
-}
-function Get-LocalForkRootProcesses {
-  $script:ProcessSamples++
-  if (${ambiguous ? "$true" : "$false"}) {
-    return @((New-MockRoot 4101 $script:MockExecutable), (New-MockRoot 4102 $script:MockExecutable))
-  }
-  if (-not $script:MockLive) { return @() }
-  $path = if (${wrongPath ? "$true" : "$false"}) { ${psLiteral(wrongExecutable)} } else { $script:MockExecutable }
-  return @((New-MockRoot 4101 $path))
-}
 function Invoke-GuardedLocalForkInstaller {
   param([string]$ScriptPath, [string]$ManifestPath, [string]$AllowedRoot, [string]$InstallerLogPath, [string]$ExpectedVersion, [string]$ExpectedSourceRevision)
   $script:InstallerCalls++
@@ -134,10 +110,8 @@ function Invoke-GuardedLocalForkInstaller {
 }
 function Start-CanonicalLocalFork([string]$ExecutablePath) {
   $script:StarterCalls++
-  $script:MockLive = $true
-  [pscustomobject]@{ Id = 4101 }
+  throw 'fixture app launch must not occur'
 }
-function Start-Sleep { param([int]$Milliseconds, [int]$Seconds) }
 try {
   $invokeParams = @{
     ManifestPath = ${psLiteral(files.manifestPath)}
@@ -154,6 +128,81 @@ try {
 } catch {
   [pscustomobject]@{ ok = $false; error = $_.Exception.Message; installerCalls = $script:InstallerCalls; installerAllowedRoot = $script:InstallerAllowedRoot; starterCalls = $script:StarterCalls } | ConvertTo-Json -Depth 6 -Compress
 }
+`;
+  const stdout = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", driver],
+    { encoding: "utf8", windowsHide: true },
+  );
+  return JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
+}
+
+function runProcessOwnershipScenario(
+  files,
+  { verificationFailure = false, cleanupAfterSuccess = true } = {},
+) {
+  const driver = `
+$ErrorActionPreference = 'Stop'
+$env:LOCALAPPDATA = ${psLiteral(files.localAppData)}
+. ${psLiteral(launcher)} -LibraryOnly
+$script:MockExecutable = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\\gg-coder-local-fork.exe'))
+$script:StarterCalls = 0
+$script:StoppedPids = @()
+$script:started = [pscustomobject]@{
+  Id = 4100
+  CreationTicks = 638000000000004100L
+  Handle = [pscustomobject]@{ Id = 4100 }
+}
+function New-MockProcess([int]$ProcessId, [int]$ParentProcessId, [string]$Path, [long]$CreationTicks) {
+  [pscustomobject]@{ ProcessId = $ProcessId; ParentProcessId = $ParentProcessId; ExecutablePath = $Path; CreationTicks = $CreationTicks }
+}
+function Get-ProcessTable {
+  @(
+    (New-MockProcess 4100 900 ${psLiteral(join(files.root, "launcher-host.exe"))} 638000000000004100L),
+    (New-MockProcess 4101 4100 $script:MockExecutable 638000000000004101L),
+    (New-MockProcess 4102 4101 ${psLiteral(join(files.root, "spawned-sidecar.exe"))} 638000000000004102L),
+    (New-MockProcess 5101 777 $script:MockExecutable 638000000000005101L),
+    (New-MockProcess 6101 4100 $script:MockExecutable 638000000000004099L)
+  )
+}
+function Get-ProcessHandleById([int]$ProcessId) { [pscustomobject]@{ Id = $ProcessId } }
+function Stop-ExactProcess([object]$Process, [long]$CreationTicks) {
+  $script:StoppedPids += [int]$Process.Id
+  $true
+}
+function Start-CanonicalLocalFork([string]$ExecutablePath) {
+  $script:StarterCalls++
+  $script:started
+}
+function Start-Sleep { param([int]$Milliseconds, [int]$Seconds) }
+${verificationFailure ? "function Confirm-LiveCanonicalRoot { throw 'fixture verification failure' }" : ""}
+$invokeParams = @{
+  ManifestPath = ${psLiteral(files.manifestPath)}
+  GuardedInstallerPath = ${psLiteral(join(import.meta.dirname, "install-local-patched.ps1"))}
+  AllowedManifestRoot = ${psLiteral(files.root)}
+  AllowedInstallerRoot = ${psLiteral(files.artifactRoot)}
+  ExpectedExecutable = ${psLiteral(files.executablePath)}
+  LauncherLogPath = ${psLiteral(files.logPath)}
+  ExpectedVersion = '0.53.9'
+  ExpectedSourceRevision = ${psLiteral(files.sourceRevision)}
+}
+try {
+  $result = Invoke-CanonicalLocalForkLaunch @invokeParams
+  $errorMessage = $null
+  if (${cleanupAfterSuccess ? "$true" : "$false"}) { Stop-InvocationOwnedProcessTree -StartedProcess $script:started }
+} catch {
+  $result = $null
+  $errorMessage = $_.Exception.Message
+}
+$records = @(Get-ProcessTable)
+$owned = @(Get-DescendantProcessTree -Processes $records -StartedProcess $script:started)
+[pscustomobject]@{
+  result = $result
+  error = $errorMessage
+  starterCalls = $script:StarterCalls
+  ownedPids = @($owned.ProcessId)
+  stoppedPids = @($script:StoppedPids)
+} | ConvertTo-Json -Depth 6 -Compress
 `;
   const stdout = execFileSync(
     "powershell.exe",
@@ -276,21 +325,28 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
     expect(stdout.trim()).toBe(files.payloadHash);
   });
 
-  it("accepts a current installed payload without reinstalling or relaunching", () => {
+  it("selects and cleans only descendants of this invocation's exact process", () => {
     const files = fixture();
-    const result = runScenario(files);
-    expect(result.ok, result.error).toBe(true);
+    const result = runProcessOwnershipScenario(files);
     expect(result).toMatchObject({
-      ok: true,
-      installerCalls: 0,
-      starterCalls: 0,
+      starterCalls: 1,
+      ownedPids: [4100, 4101, 4102],
+      stoppedPids: [4102, 4101, 4100],
       result: {
-        disposition: "existing-and-verified",
-        sourceRevision: files.sourceRevision,
+        disposition: "launched-and-verified",
         executableSha256: files.payloadHash,
         pid: 4101,
       },
     });
+    expect(result.ownedPids).not.toContain(5101);
+    expect(result.ownedPids).not.toContain(6101);
+  });
+
+  it("does not adopt a current unrelated installed process", () => {
+    const files = fixture();
+    const result = runProcessOwnershipScenario(files);
+    expect(result.starterCalls).toBe(1);
+    expect(result.result.disposition).toBe("launched-and-verified");
   });
 
   it.each(["stale", "missing"])(
@@ -457,25 +513,25 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
     expect(result.error).toContain("does not match the expected source revision");
   });
 
-  it("fails closed when the named root process has the wrong executable path", () => {
+  it("excludes unrelated matching paths while retaining spawned descendants", () => {
     const files = fixture();
-    const result = runScenario(files, { wrongPath: true });
-    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
-    expect(result.error).toContain("Wrong-path Local Fork root");
+    const result = runProcessOwnershipScenario(files);
+    expect(result.ownedPids).toEqual([4100, 4101, 4102]);
+    expect(result.stoppedPids).toEqual([4102, 4101, 4100]);
+    expect(result.stoppedPids).not.toContain(5101);
+    expect(result.stoppedPids).not.toContain(6101);
   });
 
-  it("fails closed on ambiguous root processes", () => {
+  it("cleans only the invocation-owned tree after verification failure", () => {
     const files = fixture();
-    const result = runScenario(files, { ambiguous: true });
-    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
-    expect(result.error).toContain("Ambiguous Local Fork roots");
-  });
-
-  it("fails closed when the root identity changes during startup stability", () => {
-    const files = fixture();
-    const result = runScenario(files, { replaceDuringStability: true });
-    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
-    expect(result.error).toContain("stable identity");
+    const result = runProcessOwnershipScenario(files, {
+      verificationFailure: true,
+      cleanupAfterSuccess: false,
+    });
+    expect(result.error).toContain("fixture verification failure");
+    expect(result.stoppedPids).toEqual([4102, 4101, 4100]);
+    expect(result.stoppedPids).not.toContain(5101);
+    expect(result.stoppedPids).not.toContain(6101);
   });
 
   it("fails closed when the guarded installer fails", () => {

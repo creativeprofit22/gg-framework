@@ -148,7 +148,12 @@ function verificationFacts(repoRoot, mergeOid) {
     if (!existsSync(path) || statSync(path).size > MAX_MANIFEST_BYTES) continue;
     try {
       const manifest = JSON.parse(readFileSync(path, "utf8"));
-      if (manifest?.mergedHead === mergeOid && manifest?.verified === true) matches.push(manifest);
+      if (
+        manifest?.verified === true &&
+        (manifest?.mergedHead === mergeOid || manifest?.decisionMerge === mergeOid)
+      ) {
+        matches.push(manifest);
+      }
     } catch {
       // Ignore malformed recovery manifests; they are not verification evidence.
     }

@@ -387,6 +387,24 @@ function commitList(range) {
     : [];
 }
 
+function decisionMergeForVerifiedHead({ mergeCreated, mergedHead, sourceOid }) {
+  if (mergeCreated) return mergedHead;
+  if (!sourceOid) return null;
+  const output = capture("git", [
+    "rev-list",
+    "--first-parent",
+    "--merges",
+    mergedHead,
+  ]).stdout.trim();
+  for (const merge of output ? output.split(/\r?\n/) : []) {
+    const parents = capture("git", ["rev-list", "--parents", "-n", "1", merge])
+      .stdout.trim()
+      .split(" ");
+    if (parents.length === 3 && parents[2] === sourceOid) return merge;
+  }
+  return null;
+}
+
 export function normalPushArgs(branch) {
   return ["push", DEFAULT_PUSH_REMOTE, `HEAD:refs/heads/${branch}`];
 }
@@ -527,6 +545,7 @@ async function main() {
     mergeBase: null,
     localCommits: [],
     mergedHead: null,
+    decisionMerge: null,
     installer: null,
     dirtyFilePaths: [...dirtyFileBytes.keys()],
     dirtyWorkApplied: false,
@@ -628,6 +647,11 @@ async function main() {
         mergeCreated = true;
       }
       manifest.mergedHead = capture("git", ["rev-parse", "HEAD"]).stdout.trim();
+      manifest.decisionMerge = decisionMergeForVerifiedHead({
+        mergeCreated,
+        mergedHead: manifest.mergedHead,
+        sourceOid: manifest.sourceOid,
+      });
       manifest.phase = "merged";
       writeJson(manifestPath, manifest);
     }
@@ -716,8 +740,8 @@ async function main() {
     manifest.verified = true;
     manifest.phase = "verified";
     writeJson(manifestPath, manifest);
-    if (mergeCreated) {
-      const decisions = generateDecisionRecord(repoRoot, manifest.mergedHead);
+    if (manifest.decisionMerge) {
+      const decisions = generateDecisionRecord(repoRoot, manifest.decisionMerge);
       if (decisions.decisions.length > 0) {
         decisions.schemaVersion = 3;
         decisions.summary = {

@@ -119,6 +119,8 @@ enum DecisionSummarySource {
 struct BackupManifest {
     verified: bool,
     merged_head: String,
+    #[serde(default)]
+    decision_merge: Option<String>,
     timestamp: String,
 }
 
@@ -380,7 +382,11 @@ pub fn initialize_project_decisions(repo_root: &Path) {
 fn correlated(manifest: &BackupManifest, record: &DecisionRecord) -> bool {
     manifest.verified
         && valid_record(record)
-        && manifest.merged_head == record.evidence.merge
+        && manifest
+            .decision_merge
+            .as_deref()
+            .unwrap_or(&manifest.merged_head)
+            == record.evidence.merge
         && manifest.timestamp == record.verification.recorded_at
 }
 
@@ -471,7 +477,8 @@ pub fn load_pending_decision_summary(
     repo_root: &Path,
 ) -> Result<Option<PendingDecisionSummary>, String> {
     let backups = repo_root.join(".gg/local-fixes/backups");
-    let entries = fs::read_dir(&backups).map_err(|_| "summary backup root unavailable".to_string())?;
+    let entries =
+        fs::read_dir(&backups).map_err(|_| "summary backup root unavailable".to_string())?;
     let mut candidates = Vec::new();
     for entry in entries.flatten().take(MAX_RECORDS) {
         if entry.file_type().is_ok_and(|kind| kind.is_dir())
@@ -557,8 +564,8 @@ pub fn complete_pending_decision_summary(
         let decisions_path = pending.backup_dir.join("decisions.json");
         let manifest = read_json::<BackupManifest>(&pending.backup_dir.join("manifest.json"))
             .ok_or("summary manifest unavailable")?;
-        let mut record = read_json::<DecisionRecord>(&decisions_path)
-            .ok_or("summary record unavailable")?;
+        let mut record =
+            read_json::<DecisionRecord>(&decisions_path).ok_or("summary record unavailable")?;
         if !correlated(&manifest, &record)
             || record.evidence != pending.evidence
             || record.verification.recorded_at != pending.recorded_at
@@ -578,7 +585,8 @@ pub fn complete_pending_decision_summary(
         record.summary = Some(replacement);
         atomic_write_record(&decisions_path, &record)
     })();
-    let cleanup = fs::remove_file(context_path).map_err(|_| "summary context cleanup failed".to_string());
+    let cleanup =
+        fs::remove_file(context_path).map_err(|_| "summary context cleanup failed".to_string());
     result.and(cleanup)
 }
 
@@ -590,7 +598,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "gg-decisions-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
@@ -638,7 +649,11 @@ mod tests {
     fn write_backup(root: &Path, name: &str, record: serde_json::Value, verified: bool) -> PathBuf {
         let dir = root.join(".gg/local-fixes/backups").join(name);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("decisions.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(
+            dir.join("decisions.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
         fs::write(
             dir.join("manifest.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -650,6 +665,36 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[test]
+    fn verified_remediation_manifest_correlates_to_its_decision_merge() {
+        let root = root();
+        let record = fixture("remediated", "2026-09-03", 'a', 3);
+        let directory = root.join(BACKUPS_PATH).join("remediated");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("decisions.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verified": true,
+                "mergedHead": "e".repeat(40),
+                "decisionMerge": record["evidence"]["merge"],
+                "timestamp": record["verification"]["recordedAt"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let records = load_verified_decisions(&root);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "remediated");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn legacy_manifest() -> serde_json::Value {
@@ -1156,8 +1201,18 @@ mod tests {
         let root = root();
         write_backup(&root, "older", fixture("same", "2026-08-20", 'a', 2), true);
         write_backup(&root, "newer", fixture("same", "2026-08-24", 'e', 3), true);
-        write_backup(&root, "second", fixture("other", "2026-08-22", 'f', 2), true);
-        write_backup(&root, "unverified", fixture("hidden", "2026-08-25", '1', 3), false);
+        write_backup(
+            &root,
+            "second",
+            fixture("other", "2026-08-22", 'f', 2),
+            true,
+        );
+        write_backup(
+            &root,
+            "unverified",
+            fixture("hidden", "2026-08-25", '1', 3),
+            false,
+        );
         let mut malformed = fixture("bad", "2026-08-26", '2', 3);
         malformed["summary"]["text"] = serde_json::json!("short");
         write_backup(&root, "malformed", malformed, true);
@@ -1183,13 +1238,19 @@ mod tests {
 
         complete_pending_decision_summary(
             pending,
-            Some("Your update now includes the latest improvements while preserving local behavior."),
+            Some(
+                "Your update now includes the latest improvements while preserving local behavior.",
+            ),
         )
         .unwrap();
 
-        let stored: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
         assert_eq!(stored["summary"]["source"], "agent");
-        assert_eq!(stored["summary"]["text"], "Your update now includes the latest improvements while preserving local behavior.");
+        assert_eq!(
+            stored["summary"]["text"],
+            "Your update now includes the latest improvements while preserving local behavior."
+        );
         assert!(!dir.join("decision-summary-context.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1200,12 +1261,19 @@ mod tests {
         let record = fixture("same", "2026-08-24", 'a', 3);
         let dir = write_backup(&root, "update", record.clone(), true);
         write_context(&dir, &record);
-        let mut context: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("decision-summary-context.json")).unwrap()).unwrap();
+        let mut context: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("decision-summary-context.json")).unwrap())
+                .unwrap();
         context["evidence"]["merge"] = serde_json::json!("f".repeat(40));
-        fs::write(dir.join("decision-summary-context.json"), serde_json::to_vec(&context).unwrap()).unwrap();
+        fs::write(
+            dir.join("decision-summary-context.json"),
+            serde_json::to_vec(&context).unwrap(),
+        )
+        .unwrap();
 
         assert!(load_pending_decision_summary(&root).is_err());
-        let stored: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
         assert_eq!(stored["summary"]["source"], "fallback");
         assert!(!dir.join("decision-summary-context.json").exists());
         fs::remove_dir_all(root).unwrap();
@@ -1221,7 +1289,8 @@ mod tests {
 
         complete_pending_decision_summary(pending, None).unwrap();
 
-        let stored: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("decisions.json")).unwrap()).unwrap();
         assert_eq!(stored["summary"]["source"], "fallback");
         assert!(!dir.join("decision-summary-context.json").exists());
         fs::remove_dir_all(root).unwrap();

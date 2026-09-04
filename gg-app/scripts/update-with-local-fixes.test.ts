@@ -511,6 +511,42 @@ describe("local-fixes updater", () => {
     );
   }, 30_000);
 
+  it("records merge decisions when verification succeeds after remediation", () => {
+    const fixture = createUpdateFixture(false, true);
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    if (process.platform === "win32") {
+      write(join(bin, "pnpm.cmd"), "@echo off\r\nexit /b 7\r\n");
+    } else {
+      const fakePnpm = join(bin, "pnpm");
+      write(fakePnpm, "#!/bin/sh\nexit 7\n");
+      chmodSync(fakePnpm, 0o755);
+    }
+    const failed = runUpdater(fixture.repo, ["--no-install", "--no-build"], {
+      PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+    });
+    expect(failed.status).toBe(1);
+    const decisionMerge = git(fixture.repo, "rev-parse", "HEAD");
+    write(join(fixture.repo, "remediation.txt"), "verified remediation\n");
+    git(fixture.repo, "add", "remediation.txt");
+    git(fixture.repo, "commit", "-m", "remediate verification");
+    git(fixture.repo, "push", "origin", "custom/local-customizations");
+
+    const retry = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+
+    expect(retry.status, retry.stderr).toBe(0);
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    const syncDir = join(backupRoot, readdirSync(backupRoot).sort().at(-1)!);
+    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
+    const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
+    expect(manifest).toMatchObject({
+      verified: true,
+      decisionMerge,
+    });
+    expect(decisions.evidence.merge).toBe(decisionMerge);
+    expect(decisions.verification.workflowVerified).toBe(true);
+  }, 30_000);
+
   it("rejects push when checks or build are disabled", () => {
     const result = runUpdater(repoRoot, ["--dry-run", "--push", "--no-build"]);
     expect(result.status).toBe(1);

@@ -2530,14 +2530,11 @@ export class ProjectNotesRepository {
             message: "Done requires a passed verification result.",
           };
         }
-        if (
-          request.durableCompletion === undefined &&
-          request.evidence.length !== currentPhase.doneWhen.length
-        ) {
+        if (request.durableCompletion === undefined || request.expectedRevision === undefined) {
           return {
             status: "verification-incomplete",
             revision,
-            message: "Done requires exactly one evidence item per Done When criterion.",
+            message: "Durable completion requires a revision-bound GG Coder Done report.",
           };
         }
       }

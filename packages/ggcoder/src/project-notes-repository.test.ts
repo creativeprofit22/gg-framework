@@ -1553,7 +1553,7 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
     if (outcome.status === "committed") expect(outcome.phase.status).not.toBe("done");
   });
 
-  it("gates GG Coder Done intent on complete passed evidence and preserves retries", async () => {
+  it("requires durable GG Coder Done evidence without persisting rejected retries", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
     const cwd = "/work/roadmap-verification-gate";
     const document = roadmapDocument();
@@ -1617,7 +1617,7 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
     ).resolves.toEqual({
       status: "verification-incomplete",
       revision: 2,
-      message: "Done requires exactly one evidence item per Done When criterion.",
+      message: "Durable completion requires a revision-bound GG Coder Done report.",
     });
     await expect(
       repository.recordRoadmapStatusUpdate(cwd, {
@@ -1632,27 +1632,21 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       message: "Done requires a passed verification result.",
     });
 
-    const passed = await repository.recordRoadmapStatusUpdate(cwd, passingRequest);
-    expect(passed).toMatchObject({
-      status: "committed",
-      phase: { status: "in-progress" },
-      statusOutcome: "completion-pending",
-      snapshot: { revision: 3 },
+    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toEqual({
+      status: "verification-incomplete",
+      revision: 2,
+      message: "Durable completion requires a revision-bound GG Coder Done report.",
     });
-    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toMatchObject({
-      status: "duplicate",
-      revision: 3,
-      phase: { status: "in-progress" },
-      statusOutcome: "completion-pending",
+
+    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toEqual({
+      status: "verification-incomplete",
+      revision: 2,
+      message: "Durable completion requires a revision-bound GG Coder Done report.",
     });
-    await expect(
-      repository.recordRoadmapStatusUpdate(cwd, {
-        ...passingRequest,
-        updateId: "verification-stale-session",
-        expectedRevision: 3,
-        expectedSession: { sessionId: "stale", sessionPath: "/sessions/stale.jsonl" },
-      }),
-    ).resolves.toEqual({ status: "stale-session" });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2 },
+    });
   });
 
   it("persists an explicit blocker, resumes automatically, and protects user resolution", async () => {

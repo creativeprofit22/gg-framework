@@ -12,6 +12,7 @@ import type {
   PlanAcceptResult,
   PlanMutationFailure,
   PlanRevisionResult,
+  ProjectTask as SharedProjectTask,
   SlashCommandListing,
   SlashCommandsResponse,
 } from "@kenkaiiii/gg-core";
@@ -560,15 +561,9 @@ export interface AgentState {
 }
 
 /** A project task from the ~/.gg-tasks store (the agent's `tasks` tool). */
-export interface ProjectTask {
-  id: string;
-  title: string;
-  prompt: string;
-  status: "pending" | "in-progress" | "done" | "blocked";
-  createdAt: string;
-}
+export type ProjectTask = SharedProjectTask;
 
-/** List this project's tasks (pending / in-progress / done). */
+/** List this project's tasks, including statuses from newer sidecars. */
 export async function listTasks(): Promise<ProjectTask[]> {
   try {
     const res = await invoke<{ tasks: ProjectTask[] }>("agent_tasks", { paneId: "primary" });

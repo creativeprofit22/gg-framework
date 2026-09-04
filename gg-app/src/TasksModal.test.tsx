@@ -14,7 +14,7 @@ function taskWithStatus(status: string): ProjectTask {
     prompt: "Complete the validation work",
     status,
     createdAt: "2026-09-04T00:00:00.000Z",
-  } as ProjectTask;
+  };
 }
 
 describe("TasksModal", () => {
@@ -54,7 +54,7 @@ describe("TasksModal", () => {
     expect(screen.getByText("unknown").style.color).toBe(expected.style.color);
   });
 
-  it("preserves known statuses, run actions, close controls, and dialog semantics", () => {
+  it("runs pending and blocked tasks automatically without selecting unsafe statuses", () => {
     const onRun = vi.fn();
     const onRunAll = vi.fn();
     const onClose = vi.fn();
@@ -62,8 +62,10 @@ describe("TasksModal", () => {
       <TasksModal
         tasks={[
           { ...taskWithStatus("pending"), id: "pending" },
+          { ...taskWithStatus("blocked"), id: "blocked" },
           { ...taskWithStatus("in-progress"), id: "running" },
           { ...taskWithStatus("done"), id: "done" },
+          { ...taskWithStatus("paused-by-policy"), id: "unknown" },
         ]}
         running={false}
         onRun={onRun}
@@ -76,10 +78,14 @@ describe("TasksModal", () => {
     const dialog = screen.getByRole("dialog", { name: "Tasks" });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(screen.getByText("pending")).toBeTruthy();
+    expect(screen.getByText("blocked")).toBeTruthy();
     expect(screen.getByText("running")).toBeTruthy();
     expect(screen.getByText("done")).toBeTruthy();
+    expect(screen.getByText("unknown")).toBeTruthy();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Run" })[0]!);
+    const runButtons = screen.getAllByRole("button", { name: "Run" });
+    expect(runButtons).toHaveLength(3);
+    fireEvent.click(runButtons[0]!);
     expect(onRun).toHaveBeenCalledWith("pending");
     fireEvent.click(screen.getByRole("button", { name: "Run all (2)" }));
     expect(onRunAll).toHaveBeenCalledOnce();

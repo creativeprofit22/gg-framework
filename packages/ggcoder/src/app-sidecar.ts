@@ -114,6 +114,7 @@ import {
   discoverLocalModels,
   findProbedModel,
   formatLocalModelId,
+  isManuallyRunnableTaskStatus,
   parseLocalModelId,
   probeEndpoint,
   toModelInfo as localModelInfo,
@@ -181,7 +182,7 @@ import {
   loadTasksSync,
   saveTasksSync,
   pruneDoneTasksSync,
-  getNextPendingTask,
+  getNextRunnableTask,
   markTaskInProgress,
 } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
@@ -4394,12 +4395,12 @@ ${checkpoints}`;
   // ── Task runner (project task list → sessions) ──────────────
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
   // completion hint instructing the agent to mark the task done via the tasks
-  // tool. Run-all advances to the next pending task after each run finishes.
+  // tool. Run-all advances to the next runnable task after each run finishes.
   let taskRunAll = false;
 
   async function runTaskById(taskId: string): Promise<boolean> {
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
-    if (!task) return false;
+    if (!task || !isManuallyRunnableTaskStatus(task.status)) return false;
     // Fresh session per task so one task's context never bleeds into the next.
     await session.newSession();
     deactivateApprovedPlan();
@@ -4426,11 +4427,11 @@ ${checkpoints}`;
 
   async function runTasks(startId: string | null, all: boolean): Promise<void> {
     taskRunAll = all;
-    let currentId: string | null = startId ?? getNextPendingTask(cwd)?.id ?? null;
+    let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
     while (currentId) {
       const ran = await runTaskById(currentId);
       if (!ran || !taskRunAll) break;
-      const next = getNextPendingTask(cwd);
+      const next = getNextRunnableTask(cwd);
       currentId = next ? next.id : null;
       // Brief pause between tasks (mirrors the CLI cadence).
       if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));

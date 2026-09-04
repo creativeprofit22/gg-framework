@@ -93,7 +93,7 @@ import {
   splitAssistantStreamingText,
   estimateRenderedRows,
 } from "./utils/assistant-stream-split.js";
-import { getNextPendingTask, markTaskInProgress } from "../core/tasks-store.js";
+import { getNextRunnableTask, markTaskInProgress } from "../core/tasks-store.js";
 import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
@@ -1688,17 +1688,17 @@ export function App(props: AppProps) {
             });
           }
 
-          // Run-all: auto-start next pending task after a short delay.
+          // Run-all: auto-start the next runnable task after a short delay.
           if (runAllTasksRef.current) {
             setTimeout(() => {
               const cwd = cwdRef.current;
-              const next = getNextPendingTask(cwd);
+              const next = getNextRunnableTask(cwd);
               if (next) {
                 markTaskInProgress(cwd, next.id);
                 startTaskRef.current(next.title, next.prompt, next.id);
               } else {
                 setRunAllTasks(false);
-                log("INFO", "tasks", "Run-all complete — no more pending tasks");
+                log("INFO", "tasks", "Run-all complete — no more runnable tasks");
               }
             }, 500);
           }

@@ -3,21 +3,17 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { isRunnableTaskStatus, type ProjectTask } from "@kenkaiiii/gg-core";
 
 const TASKS_BASE = join(homedir(), ".gg-tasks", "projects");
 
-export interface TaskRecord {
-  id: string;
-  title: string;
-  prompt: string;
+export interface TaskRecord extends ProjectTask {
   /** @deprecated Old field — migrated to title+prompt on load. */
   text?: string;
   details?: string;
-  status: "pending" | "in-progress" | "done";
-  createdAt: string;
 }
 
-export interface PendingTaskInfo {
+export interface RunnableTaskInfo {
   id: string;
   title: string;
   prompt: string;
@@ -88,13 +84,13 @@ export function getTaskCount(cwd: string): number {
   return loadTasksSync(cwd).filter((task) => task.status !== "done").length;
 }
 
-export function getNextPendingTask(cwd: string): PendingTaskInfo | null {
-  const pending = loadTasksSync(cwd).find((task) => task.status === "pending");
-  if (!pending) return null;
+export function getNextRunnableTask(cwd: string): RunnableTaskInfo | null {
+  const runnable = loadTasksSync(cwd).find((task) => isRunnableTaskStatus(task.status));
+  if (!runnable) return null;
   return {
-    id: pending.id,
-    title: pending.title,
-    prompt: pending.prompt || pending.text || pending.title,
+    id: runnable.id,
+    title: runnable.title,
+    prompt: runnable.prompt || runnable.text || runnable.title,
   };
 }
 

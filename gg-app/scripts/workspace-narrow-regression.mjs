@@ -74,7 +74,7 @@ try {
   await waitForServer();
   const result = await runWorkspaceNarrowVisualFixture({ screenshot: false, url });
   console.log(
-    `320px workspace regression passed: pane ${result.shell.pane.clientWidth}/${result.shell.pane.scrollWidth}, header ${result.shell.header.clientWidth}/${result.shell.header.scrollWidth}`,
+    `Workspace regression passed: ${result.reachabilityEvidence.length} desktop/narrow control checks (normal, browser 200%, CSS stress 200%); deliberately clipped control rejected: ${result.clippedControlRejected}. Native WebView zoom remains unverified.`,
   );
 } finally {
   await stopServer();

@@ -3169,7 +3169,8 @@ select {
 .transcript-frame {
   position: relative;
   flex: 1 1 auto;
-  min-height: 0;
+  /* Keep prompt actions reachable when wrapped chrome exhausts a zoomed pane. */
+  min-height: 120px;
   display: flex;
   flex-direction: column;
   /* Clips the overlay's 1px bleed below (see `.ken-power-overlay`) so it never
@@ -3910,6 +3911,8 @@ select {
   padding: 6px 10px;
   color: var(--text-secondary);
   font: 600 12px/1.15 var(--sans);
+  word-break: normal;
+  overflow-wrap: normal;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-button);
@@ -4128,6 +4131,7 @@ select {
 }
 .markdown .ken-prompt-local-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 6px;
   min-width: 0;
@@ -7697,6 +7701,14 @@ select {
   height: 100%;
   min-width: 0;
   min-height: 0;
+}
+/* Keep pane chrome outside the scrolling body, including on focus/scrollIntoView. */
+.workspace-pane-body {
+  padding-top: 35px;
+}
+/* At high zoom, scroll the pane rather than hiding its header, transcript or footer. */
+.workspace-pane-body > .agent-pane {
+  overflow-y: auto;
 }
 .pane-drag-active {
   cursor: grabbing;

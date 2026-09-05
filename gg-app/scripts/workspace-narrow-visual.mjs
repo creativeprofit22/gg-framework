@@ -74,6 +74,203 @@ async function elementMetrics(page, selectors) {
   }, selectors);
 }
 
+// Geometry alone misses overlays, opacity and clipping that never changes document width.
+async function assertControlReachable(control, label) {
+  await control.scrollIntoViewIfNeeded({ timeout: 3_000 });
+  // Center the target instead of leaving it fractionally outside an edge after
+  // Chromium rounds nested scroll offsets. The containment gate remains exact.
+  await control.evaluate((element) =>
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }),
+  );
+  await control.focus();
+  const problems = await control.evaluate((element) => {
+    const failures = [];
+    const rect = element.getBoundingClientRect();
+    if (document.activeElement !== element) failures.push("not focused");
+    if (element.matches(":disabled")) failures.push("disabled");
+    if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))
+      failures.push("not visible");
+    if (rect.width <= 0 || rect.height <= 0) failures.push("empty rectangle");
+    if (rect.left < 0 || rect.top < 0 || rect.right > innerWidth || rect.bottom > innerHeight)
+      failures.push(
+        `viewport clipping: ${JSON.stringify(rect.toJSON())}, ${innerWidth}×${innerHeight}`,
+      );
+    for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      const bounds = ancestor.getBoundingClientRect();
+      const scaleX = ancestor.offsetWidth ? bounds.width / ancestor.offsetWidth : 1;
+      const scaleY = ancestor.offsetHeight ? bounds.height / ancestor.offsetHeight : 1;
+      const left = bounds.left + ancestor.clientLeft * scaleX;
+      const top = bounds.top + ancestor.clientTop * scaleY;
+      const right = left + ancestor.clientWidth * scaleX;
+      const bottom = top + ancestor.clientHeight * scaleY;
+      // Subpixel clientWidth rounding may differ by less than one rendered pixel.
+      if (
+        (style.overflowX !== "visible" && (rect.left < left - 1 || rect.right > right + 1)) ||
+        (style.overflowY !== "visible" && (rect.top < top - 1 || rect.bottom > bottom + 1))
+      )
+        failures.push(
+          `ancestor clipping: ${ancestor.tagName}.${ancestor.className} (${left},${top})..(${right},${bottom}), scrollHeight=${ancestor.scrollHeight}`,
+        );
+    }
+    // Sample inside rounded button corners; rectangular containment is checked above.
+    for (const x of [0.2, 0.5, 0.8].map((fraction) => rect.left + rect.width * fraction)) {
+      for (const y of [0.2, 0.5, 0.8].map((fraction) => rect.top + rect.height * fraction)) {
+        if (!element.contains(document.elementFromPoint(x, y)))
+          failures.push(`occluded at ${x},${y}`);
+      }
+    }
+    return failures;
+  });
+  assert.ok(problems.length === 0, `${label}: ${problems.join("; ")}`);
+}
+
+async function assertClippedControlRejected(page) {
+  await page.evaluate(() => {
+    const container = document.createElement("div");
+    container.id = "fixture-clipped-control";
+    container.style.cssText =
+      "position:fixed;left:10px;top:10px;width:20px;height:40px;overflow:clip;z-index:999999";
+    container.innerHTML = '<button style="width:100px;height:30px">Clipped Copy</button>';
+    document.body.append(container);
+  });
+  try {
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+      true,
+    );
+    await assert.rejects(
+      assertControlReachable(
+        page.locator("#fixture-clipped-control button"),
+        "deliberately clipped Copy",
+      ),
+      /ancestor clipping: DIV/,
+    );
+  } finally {
+    await page.locator("#fixture-clipped-control").evaluate((element) => element.remove());
+  }
+}
+
+async function verifyPromptControls(page, width, mode, screenshot, outputDir, screenshots) {
+  const failures = [];
+  const verify = async (label, action) => {
+    try {
+      await action();
+    } catch (error) {
+      failures.push(`${label}: ${error.message}`);
+    }
+  };
+  await verify(`${mode} document width`, async () => {
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+      true,
+    );
+  });
+  for (const control of await page
+    .locator(".chat-head button, .workspace-pane-actions button")
+    .all()) {
+    if (await control.isVisible()) {
+      await verify(`${mode} header ${await control.getAttribute("title")}`, () =>
+        assertControlReachable(control, `${mode} header control`),
+      );
+    }
+  }
+  for (let index = 0; index < promptBodies.length; index++) {
+    const block = page.locator(".ken-prompt-block").nth(index);
+    for (const control of await block.locator(".ken-prompt-actions button").all()) {
+      await verify(`${mode} prompt ${index} readable action`, async () => {
+        await assertControlReachable(control, `${mode} prompt action`);
+        const fragmented = await control.evaluate((element) => {
+          const words = [];
+          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            for (const match of node.textContent.matchAll(/\S+/g)) {
+              const range = document.createRange();
+              range.setStart(node, match.index);
+              range.setEnd(node, match.index + match[0].length);
+              if (range.getClientRects().length > 1) words.push(match[0]);
+            }
+          }
+          return words;
+        });
+        assert.deepEqual(fragmented, [], "action label words must not fragment across lines");
+      });
+    }
+    const save = block.getByRole("button", { name: "Save to Notes", exact: true });
+    await verify(`Save ${index}`, async () => {
+      await assertControlReachable(save, `${mode} Save ${index}`);
+      await page.keyboard.press(index === 0 ? "Enter" : "Space");
+      await page.waitForFunction(
+        (id) => document.getElementById(id) !== null,
+        await save.getAttribute("aria-controls"),
+      );
+      assert.equal(await save.getAttribute("aria-expanded"), "true");
+      const back = block.getByRole("button", { name: "Back", exact: true });
+      await assertControlReachable(back, `${mode} Save Back ${index}`);
+      await page.keyboard.press("Enter");
+      await block.locator(".ken-prompt-action-panel").waitFor({ state: "detached" });
+    });
+    await verify(`Copy ${index}`, async () => {
+      const copy = block.locator(".ken-prompt-copy");
+      await assertControlReachable(save, `${mode} Save→Copy ${index}`);
+      await page.keyboard.press("Tab");
+      assert.equal(
+        await copy.evaluate(
+          (element) => document.activeElement === element && element.matches(":focus-visible"),
+        ),
+        true,
+      );
+      await assertControlReachable(copy, `${mode} Copy ${index}`);
+      await page.evaluate(() => {
+        window.__copiedSource = null;
+      });
+      await armDelayedCopy(page);
+      await page.keyboard.press(index === 0 ? "Space" : "Enter");
+      await page.waitForFunction(() => typeof window.__releaseCopy === "function");
+      assert.equal(
+        await copiedStatus(block).count(),
+        0,
+        "pending copy must clear this block's success",
+      );
+      assert.equal(await page.evaluate(() => window.__copiedSource), null);
+      await page.evaluate(() => window.__releaseCopy());
+      await copiedStatus(block).waitFor();
+      await page.waitForFunction((body) => window.__copiedSource === body, promptBodies[index]);
+      assert.equal(
+        (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
+        promptBodies[index],
+      );
+    });
+    if (screenshot) {
+      const output = resolve(outputDir, `prompt-${mode}-${width}-${index}.png`);
+      await page.screenshot({ path: output });
+      screenshots.push(output);
+    }
+  }
+  await verify("Fast", async () => {
+    const fast = page.locator(".astra-fast-toggle");
+    for (const key of ["Space", "Enter"]) {
+      await assertControlReachable(fast, `${mode} Fast`);
+      const previous = await fast.getAttribute("aria-checked");
+      await page.keyboard.press(key);
+      await page.waitForFunction((before) => {
+        const button = document.querySelector(".astra-fast-toggle");
+        return !button.disabled && button.getAttribute("aria-checked") !== before;
+      }, previous);
+    }
+  });
+  if (screenshot) {
+    const output = resolve(outputDir, `prompt-${mode}-fast-${width}.png`);
+    await page.screenshot({ path: output });
+    screenshots.push(output);
+  }
+  return { width, mode, failures };
+}
+
 async function applyAstraScenario(page, scenario) {
   const { accountId, contextTokens, contextWindow, openAICodexContextProfile, openAICodexFast } =
     scenario.state;
@@ -105,13 +302,54 @@ export async function runWorkspaceNarrowVisualFixture({
   const fixtureUrl = requireVisualFixtureUrl(url);
   if (screenshot) await mkdir(outputDir, { recursive: true });
   // Headless Chromium creates no visible OS window; the native app is never launched.
-  const browser = await chromium.launch({ headless: true });
+  // Full Chromium supports headless MV3 extensions. Empty userDataDir creates a
+  // disposable profile; context.close removes it. No production browser/app data.
+  // https://playwright.dev/docs/chrome-extensions
+  const extensionDir = resolve(here, "fixtures/browser-zoom");
+  const context = await chromium.launchPersistentContext("", {
+    channel: "chromium",
+    headless: true,
+    viewport: { width: 320, height: 700 },
+    args: [`--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`],
+  });
   try {
-    // newContext is an isolated, non-persistent profile with no production app data.
-    const context = await browser.newContext({
-      viewport: { width: 320, height: 700 },
-      deviceScaleFactor: 2,
-    });
+    const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"));
+    const setBrowserZoom = async (page, factor) => {
+      const baseline = await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+        dpr: devicePixelRatio,
+      }));
+      const actual = await worker.evaluate(
+        async ({ url, factor }) => {
+          const tabs = (await chrome.tabs.query({})).filter((tab) => tab.url === url);
+          if (tabs.length !== 1) throw new Error("Expected exactly one fixture tab");
+          const id = tabs[0].id;
+          // Automatic mode is browser-managed page zoom, not pinch or CSS zoom.
+          await chrome.tabs.setZoomSettings(id, { mode: "automatic", scope: "per-tab" });
+          await chrome.tabs.setZoom(id, factor);
+          return chrome.tabs.getZoom(id);
+        },
+        { url: page.url(), factor },
+      );
+      assert.equal(actual, factor);
+      const ratio = factor === 2 ? 2 : 0.5;
+      await page.waitForFunction(
+        ({ width, height, dpr, ratio }) =>
+          Math.abs(innerWidth - width / ratio) <= 1 &&
+          Math.abs(innerHeight - height / ratio) <= 1 &&
+          Math.abs(devicePixelRatio - dpr * ratio) < 0.01,
+        { ...baseline, ratio },
+      );
+      return {
+        factor: actual,
+        ...(await page.evaluate(() => ({
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+        }))),
+      };
+    };
     await context.addInitScript(initScript, {
       responses: {
         ...responses,
@@ -200,6 +438,8 @@ export async function runWorkspaceNarrowVisualFixture({
 
     const copyEvidence = [];
     const accessibilityEvidence = [];
+    const reachabilityEvidence = [];
+    await assertClippedControlRejected(page);
     await page.evaluate(() => {
       const invoke = window.__TAURI_INTERNALS__.invoke;
       window.__TAURI_INTERNALS__.invoke = (command, args) => {
@@ -402,21 +642,29 @@ export async function runWorkspaceNarrowVisualFixture({
         screenshots.push(output);
       }
       await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+      reachabilityEvidence.push(
+        await verifyPromptControls(page, width, "normal", screenshot, outputDir, screenshots),
+      );
+      const zoom = await setBrowserZoom(page, 2);
+      reachabilityEvidence.push({
+        ...(await verifyPromptControls(
+          page,
+          width,
+          "browser-zoom-200",
+          screenshot,
+          outputDir,
+          screenshots,
+        )),
+        zoom,
+      });
+      await setBrowserZoom(page, 1);
+      // CSS zoom is a separate stress test, NOT browser/WebView page zoom.
       await page.evaluate(() => {
         document.documentElement.style.zoom = "2";
       });
-      await copies.last().scrollIntoViewIfNeeded();
-      assert.equal(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
-        ),
-        true,
+      reachabilityEvidence.push(
+        await verifyPromptControls(page, width, "css-zoom-200", screenshot, outputDir, screenshots),
       );
-      if (screenshot) {
-        const output = resolve(outputDir, `prompt-zoom-200-${width}.png`);
-        await page.screenshot({ path: output });
-        screenshots.push(output);
-      }
       await page.evaluate(() => {
         document.documentElement.style.zoom = "";
       });
@@ -445,11 +693,23 @@ export async function runWorkspaceNarrowVisualFixture({
       await page.screenshot({ path: notesScreenshot });
       screenshots.push(notesScreenshot);
     }
-    await context.close();
-
-    return { shell, scenarioShells, notes, copyEvidence, accessibilityEvidence, screenshots };
+    assert.deepEqual(
+      reachabilityEvidence.flatMap((entry) => entry.failures),
+      [],
+      JSON.stringify(reachabilityEvidence, null, 2),
+    );
+    return {
+      shell,
+      scenarioShells,
+      notes,
+      copyEvidence,
+      accessibilityEvidence,
+      reachabilityEvidence,
+      clippedControlRejected: true,
+      screenshots,
+    };
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
 

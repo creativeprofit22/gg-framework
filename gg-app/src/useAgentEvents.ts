@@ -911,15 +911,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             tokensRef.current += usage.outputTokens;
             setTokens(tokensRef.current);
           }
-          // Context-window usage (footer meter). Mirrors ggcoder: Anthropic has
-          // separate input/output limits so only the input side counts; every
-          // other provider shares one window, so add the output too.
-          if (usage) {
-            const inputContext =
-              (usage.inputTokens ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-            const isAnthropic = stateRef.current?.provider === "anthropic";
-            setContextTokens(inputContext + (isAnthropic ? 0 : (usage.outputTokens ?? 0)));
-          }
           break;
         }
         case "agent_done": {

@@ -612,6 +612,7 @@ describe("AgentPane lifecycle", () => {
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "stable",
+      contextTokens: 136_000,
       contextWindow: 272_000,
     });
     const mounted = render(
@@ -623,6 +624,7 @@ describe("AgentPane lifecycle", () => {
     expect(
       screen.getByRole("switch", { name: "Fast · 2.5× credits" }).getAttribute("aria-checked"),
     ).toBe("false");
+    expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
 
     mounted.unmount();
     const apiKeyPane = client("astra-api-key", 1);
@@ -647,6 +649,7 @@ describe("AgentPane lifecycle", () => {
       accountId: "left-account",
       openAICodexContextProfile: "stable",
       openAICodexFast: false,
+      contextTokens: 136_000,
       contextWindow: 272_000,
     });
     vi.mocked(right.getState).mockResolvedValue({
@@ -655,6 +658,7 @@ describe("AgentPane lifecycle", () => {
       accountId: "right-account",
       openAICodexContextProfile: "experimental",
       openAICodexFast: true,
+      contextTokens: 300_000,
       contextWindow: 872_000,
     });
 
@@ -676,6 +680,8 @@ describe("AgentPane lifecycle", () => {
       "false",
       "true",
     ]);
+    expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
+    expect(screen.getByText("300,000 / 872K · 34%")).toBeDefined();
   });
 
   it("disables the context profile selector while running", async () => {

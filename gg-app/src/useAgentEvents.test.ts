@@ -238,6 +238,30 @@ describe("useAgentEvents", () => {
     expect(getState()?.openAICodexFast).toBe(true);
   });
 
+  it("keeps authoritative context usage when turn_end reports token usage", () => {
+    const { hook, getContextTokens } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: "account-live",
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(ev("turn_end", { usage: { inputTokens: 999_999 } })),
+    );
+    expect(getContextTokens()).toBe(136_000);
+  });
+
   describe("queued pill lifecycle", () => {
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();

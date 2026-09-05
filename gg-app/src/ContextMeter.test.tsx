@@ -11,23 +11,25 @@ function cssColor(color: string): string {
 }
 
 describe("ContextMeter", () => {
-  it("renders Azure context usage of 12,806 in a 1,050,000-token window as 1%", () => {
-    const pct = getContextPercent(12_806, 1_050_000);
-
-    render(<ContextMeter pct={pct} />);
-
-    const meter = screen.getByText("1%");
-    expect(meter.getAttribute("title")).toBe("Context used: 1%");
-    expect((meter as HTMLElement).style.color).toBe(cssColor(theme.success));
+  it.each([
+    { used: 0, window: 272_000, label: "0 / 272K · 0%" },
+    { used: 136_000, window: 272_000, label: "136,000 / 272K · 50%" },
+    { used: 300_000, window: 872_000, label: "300,000 / 872K · 34%" },
+  ])("renders exact active context accounting: $label", ({ used, window, label }) => {
+    render(<ContextMeter used={used} window={window} />);
+    const meter = screen.getByRole("meter", { name: `Context used: ${label}` });
+    expect(meter.textContent).toBe(label);
   });
 
-  it("scales the footer label and pressure color for higher context usage", () => {
-    const pct = getContextPercent(766_500, 1_050_000);
-
-    render(<ContextMeter pct={pct} />);
-
-    const meter = screen.getByText("73%");
-    expect(meter.getAttribute("title")).toBe("Context used: 73%");
-    expect((meter as HTMLElement).style.color).toBe(cssColor(theme.warning));
+  it("retains the over-window percentage while clamping the visual bar", () => {
+    render(<ContextMeter used={300_000} window={272_000} />);
+    const meter = screen.getByRole("meter", {
+      name: "Context used: 300,000 / 272K · 110%",
+    });
+    expect(meter.textContent).toBe("300,000 / 272K · 110%");
+    expect(meter.getAttribute("aria-valuenow")).toBe("100");
+    expect((meter.querySelector(".ctx-meter-fill") as HTMLElement).style.width).toBe("100%");
+    expect(meter.style.color).toBe(cssColor(theme.error));
+    expect(getContextPercent(300_000, 272_000)).toBe(100);
   });
 });

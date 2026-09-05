@@ -5947,11 +5947,28 @@ select {
   cursor: default;
 }
 
-/* ── Footer: context percentage ── */
-.ctx-meter-pct {
+/* ── Footer: authoritative context usage ── */
+.ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-family: var(--mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-meter-bar {
+  width: 28px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+.ctx-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
 }
 
 /* ── Footer: background tasks indicator + popover ── */

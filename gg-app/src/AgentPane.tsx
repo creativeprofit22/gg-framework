@@ -1706,6 +1706,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (st) {
         setState(st);
         setRunning(st.running);
+        setContextTokens(st.contextTokens);
         replacePlanReview(st.pendingPlanReview ?? null);
         setStatus(st.runState === "cancelling" ? "cancelling..." : "ready");
       }
@@ -2144,13 +2145,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const showContextProfileSelector =
     state?.provider === "openai" && state.model === "gpt-6-astra" && Boolean(state.accountId);
-
-  // Context-window usage percentage for the footer meter. 0 (hidden) until we
-  // have both a window size and a real token reading from a completed turn.
-  const contextPct =
-    state?.contextWindow && contextTokens > 0
-      ? Math.min(100, Math.round((contextTokens / state.contextWindow) * 100))
-      : 0;
 
   // Workflow commands matching the current `/prefix` (only while the input is a
   // single `/token` with no space yet). Empty when not in slash mode.
@@ -4158,9 +4152,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   <FooterSep />
                 </>
               )}
-              {contextPct > 0 && (
+              {state && state.contextWindow > 0 && (
                 <>
-                  <ContextMeter pct={contextPct} />
+                  <ContextMeter used={contextTokens} window={state.contextWindow} />
                   <FooterSep />
                 </>
               )}

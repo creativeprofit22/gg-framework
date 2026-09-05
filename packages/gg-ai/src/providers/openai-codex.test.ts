@@ -621,6 +621,34 @@ describe("streamOpenAICodex", () => {
     expect(maxBody.reasoning.effort).toBe("max");
   });
 
+  it.each([
+    [
+      "Unsupported value: 'none' is not supported with the 'gpt-6-astra' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.",
+      undefined,
+    ],
+    [
+      "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
+      "This model is not available through your ChatGPT account. " +
+        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.",
+    ],
+  ])(
+    "only gives account-access guidance for an actual entitlement error: %s",
+    async (message, hint) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ error: { message } }), { status: 400 })),
+      );
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "Review this work" }],
+        apiKey: "test-token",
+        accountId: "acct",
+      });
+      await expect(result.response).rejects.toMatchObject({ message, hint, statusCode: 400 });
+    },
+  );
+
   it("surfaces JSON detail fields from Codex HTTP errors", async () => {
     vi.stubGlobal(
       "fetch",

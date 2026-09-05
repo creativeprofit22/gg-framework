@@ -461,6 +461,9 @@ function providerGuidance(
   if (statusCode === 401 || lower.includes("unauthorized") || lower.includes("invalid api key")) {
     return `Authentication failed with ${name}. Re-authenticate to refresh your credentials.`;
   }
+  if (lower.includes("requires a newer version")) {
+    return `${name} needs a newer GG Coder to serve this model. Update GG Coder to the latest version and retry, or switch to another ${name} model via the model selector.`;
+  }
   if (lower.includes("overloaded") || lower.includes("engine_overloaded")) {
     return `${name}'s servers are overloaded right now. Retry in a moment — not a GG Coder issue.`;
   }

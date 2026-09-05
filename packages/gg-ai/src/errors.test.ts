@@ -186,6 +186,20 @@ describe("formatErrorForDisplay", () => {
     );
   });
 
+  it("tells the user to update GG Coder when OpenAI rejects the client version", () => {
+    const out = formatErrorForDisplay(
+      new ProviderError(
+        "openai",
+        "The 'gpt-6-astra' model requires a newer version of Codex.",
+        { statusCode: 400 },
+      ),
+    );
+    expect(out).toContain(
+      "→ OpenAI needs a newer GG Coder to serve this model. Update GG Coder to the latest version and retry, or switch to another OpenAI model via the model selector.",
+    );
+    expect(out).not.toContain("status.openai.com");
+  });
+
   it("renders an OpenAI 500 server_error pointing at the status page", () => {
     const out = formatErrorForDisplay(
       new ProviderError("openai", "server_error: something broke", { statusCode: 500 }),

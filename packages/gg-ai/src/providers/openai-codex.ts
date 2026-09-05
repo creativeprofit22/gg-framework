@@ -227,14 +227,20 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     if (usageLimit) throw usageLimit;
 
     let hint: string | undefined;
-    if (response.status === 400 && text.includes("not supported")) {
-      if (options.model === "gpt-5.5-pro") {
-        hint = "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
-      } else {
-        hint =
-          "This model is not available through Codex for the authenticated account. " +
-          "Switch to a model listed for OpenAI Codex via the model selector, or check your Codex usage limits.";
-      }
+    if (
+      response.status === 400 &&
+      options.model === "gpt-5.5-pro" &&
+      text.includes("not supported")
+    ) {
+      hint = "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
+    } else if (
+      response.status === 400 &&
+      message ===
+        `The '${options.model}' model is not supported when using Codex with a ChatGPT account.`
+    ) {
+      hint =
+        "This model is not available through your ChatGPT account. " +
+        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.";
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in the current OpenAI Codex catalog for this account. " +

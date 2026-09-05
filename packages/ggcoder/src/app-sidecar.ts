@@ -346,6 +346,7 @@ import {
 } from "./app-sidecar-session-mutation.js";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
+import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -5897,22 +5898,18 @@ ${checkpoints}`;
     if (method === "POST" && url === "/enhance") {
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
-        let text: string;
+        let body: unknown;
         try {
-          text = (JSON.parse(raw) as { text?: string }).text ?? "";
+          body = JSON.parse(raw) as unknown;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (!text.trim()) {
-          json(res, 400, { error: "empty prompt" });
-          return;
-        }
-        // An independent read-only LLM call — touches no session state, so it's
-        // allowed even while a run is in flight.
+        // Enhancement is read-only, but validate its untrusted body before the
+        // model call so malformed or oversized prompts cannot reach the provider.
         try {
-          const result = await session.enhancePrompt(text);
-          json(res, 200, result);
+          const result = await runEnhancePromptRequest(body, (text) => session.enhancePrompt(text));
+          json(res, result.status, result.body);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           log("ERROR", "app-sidecar", "enhance failed", { message });

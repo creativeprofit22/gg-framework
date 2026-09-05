@@ -368,6 +368,8 @@ export interface SessionHeader {
   model: string;
   /** OAuth context sizing; absent legacy headers restore the stable profile. */
   openAICodexContextProfile?: OpenAICodexContextProfile;
+  /** Opt-in priority billing for eligible OpenAI Codex sessions; absent means off. */
+  openAICodexFast?: boolean;
   leafId: string | null;
 }
 
@@ -717,6 +719,7 @@ export class SessionManager {
       sourceFingerprint?: string;
       retainedMessageCount?: number;
       openAICodexContextProfile?: OpenAICodexContextProfile;
+      openAICodexFast?: boolean;
     },
   ): Promise<{
     id: string;
@@ -754,6 +757,7 @@ export class SessionManager {
       ...(options?.openAICodexContextProfile
         ? { openAICodexContextProfile: options.openAICodexContextProfile }
         : {}),
+      ...(options?.openAICodexFast ? { openAICodexFast: true } : {}),
       leafId: null,
     };
 
@@ -905,6 +909,7 @@ export class SessionManager {
                 ...(profile === "stable" || profile === "experimental"
                   ? { openAICodexContextProfile: profile }
                   : { openAICodexContextProfile: undefined }),
+                openAICodexFast: v2.openAICodexFast === true,
               };
             } else {
               const v1 = parsed as SessionHeaderV1;
@@ -1697,21 +1702,46 @@ export class SessionManager {
     sessionPath: string,
     profile: OpenAICodexContextProfile,
   ): Promise<void> {
+    await this.updateRequiredSessionHeader(
+      sessionPath,
+      "updateOpenAICodexContextProfile",
+      "Failed to persist the context profile.",
+      (header) => {
+        header.openAICodexContextProfile = profile;
+      },
+    );
+  }
+
+  async updateOpenAICodexFast(sessionPath: string, enabled: boolean): Promise<void> {
+    await this.updateRequiredSessionHeader(
+      sessionPath,
+      "updateOpenAICodexFast",
+      "Failed to persist the Fast setting.",
+      (header) => {
+        header.openAICodexFast = enabled;
+      },
+    );
+  }
+
+  private async updateRequiredSessionHeader(
+    sessionPath: string,
+    operation: string,
+    message: string,
+    update: (header: SessionHeader) => void,
+  ): Promise<void> {
     try {
       await this.withSessionMutationLock(sessionPath, (writablePath) =>
-        this.updateOpenAICodexContextProfileUnlocked(writablePath, profile),
+        this.updateSessionHeaderUnlocked(writablePath, update),
       );
     } catch (error) {
-      this.handlePersistError(error, "updateOpenAICodexContextProfile", true);
-      throw new RequiredSessionPersistenceError("Failed to persist the context profile.", {
-        cause: error,
-      });
+      this.handlePersistError(error, operation, true);
+      throw new RequiredSessionPersistenceError(message, { cause: error });
     }
   }
 
-  private async updateOpenAICodexContextProfileUnlocked(
+  private async updateSessionHeaderUnlocked(
     writablePath: string,
-    profile: OpenAICodexContextProfile,
+    update: (header: SessionHeader) => void,
   ): Promise<void> {
     const content = await fs.readFile(writablePath, "utf-8");
     const firstNewline = content.indexOf("\n");
@@ -1728,7 +1758,7 @@ export class SessionManager {
             generation: 0,
             leafId: null,
           };
-    header.openAICodexContextProfile = profile;
+    update(header);
     await atomicWriteSessionFile(
       writablePath,
       `${JSON.stringify(header)}${content.slice(firstNewline)}`,

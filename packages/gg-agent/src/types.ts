@@ -307,7 +307,8 @@ export interface AgentOptions {
    * here keeps a long run alive across rotations.
    *
    * Falls back to `apiKey`/`accountId`/`projectId` when omitted or when the
-   * resolver throws (the provider call then surfaces the real auth error).
+   * resolver throws. Returning an own `accountId: undefined` explicitly clears
+   * captured OAuth identity after credentials switch to an API key.
    */
   resolveCredentials?: () => Promise<{
     apiKey: string;
@@ -329,6 +330,8 @@ export interface AgentOptions {
   defaultHeaders?: StreamOptions["defaultHeaders"];
   /** OpenAI service tier for latency-sensitive first-party API requests. */
   serviceTier?: StreamOptions["serviceTier"];
+  /** Suppress `serviceTier` whenever live per-turn OAuth identity is absent. */
+  serviceTierRequiresAccountId?: boolean;
   /** Whether the target model supports image input. When false, image blocks
    *  in messages/tool_results are downgraded to text placeholders. Default: true. */
   supportsImages?: boolean;

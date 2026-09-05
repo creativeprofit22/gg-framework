@@ -221,6 +221,7 @@ export interface AppProps {
   accountId?: string;
   projectId?: string;
   openAICodexContextProfile?: OpenAICodexContextProfile;
+  openAICodexFast?: boolean;
   cwd: string;
   version: string;
   showTokenUsage?: boolean;
@@ -714,6 +715,7 @@ export function App(props: AppProps) {
   const activeBaseUrl =
     currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
   const openAICodexContextProfile = props.openAICodexContextProfile ?? "stable";
+  const openAICodexFast = props.openAICodexFast ?? false;
   const contextWindowOptions = useMemo(
     () => ({
       provider: currentProvider,
@@ -854,6 +856,7 @@ export function App(props: AppProps) {
     currentProvider,
     currentModel,
     openAICodexContextProfile,
+    openAICodexFast,
     sessionStore,
     onCompactedSession: rebindSubagentsAfterCompaction,
   });

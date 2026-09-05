@@ -43,6 +43,7 @@ export async function createCompactedSessionCheckpoint(
     sourceFingerprint?: string;
     retainedMessageCount?: number;
     openAICodexContextProfile?: OpenAICodexContextProfile;
+    openAICodexFast?: boolean;
     preview?: string;
     title?: string;
   },
@@ -54,6 +55,7 @@ export async function createCompactedSessionCheckpoint(
     sourceFingerprint: options.sourceFingerprint,
     retainedMessageCount: options.retainedMessageCount,
     openAICodexContextProfile: options.openAICodexContextProfile,
+    openAICodexFast: options.openAICodexFast,
     preview: options.preview ?? options.title,
   });
   await appendMessagesToSession(sessionManager, session.path, options.messages, 0);

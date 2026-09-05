@@ -98,6 +98,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     await session.switchOpenAICodexContextProfile("stable");
     expect(session.getState().openAICodexContextProfile).toBe("stable");
     await session.switchOpenAICodexContextProfile("experimental");
+    await session.switchOpenAICodexFast(true);
 
     await session.prompt("x".repeat(1_100_000));
     expect(agentLoopMock.mock.calls[1]?.[1]).toMatchObject({ maxTokens: 128_000 });
@@ -126,6 +127,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       (await fs.readFile(checkpointPath, "utf-8")).split("\n")[0]!,
     );
     expect(checkpointHeader.openAICodexContextProfile).toBe("experimental");
+    expect(checkpointHeader.openAICodexFast).toBe(true);
     const { getAgentSessionContextWindow } = await import("../app-sidecar-context.js");
     expect(getAgentSessionContextWindow(session.getState())).toBe(872_000);
     await session.dispose();
@@ -145,6 +147,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       size: 872_000,
       openAICodexContextProfile: "experimental",
     });
+    expect(resumed.getState().openAICodexFast).toBe(true);
     expect(getAgentSessionContextWindow(resumed.getState())).toBe(872_000);
 
     await resumed.switchOpenAICodexContextProfile("stable");
@@ -155,7 +158,152 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     await resumed.dispose();
   });
 
-  it("defaults legacy headers without a profile to stable", async () => {
+  it("hydrates OAuth identity and applies Fast only to Astra OAuth", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "openai",
+      model: "gpt-6-astra",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      mcpEnabled: false,
+      projectCustomization: false,
+      selfCorrectionHooks: false,
+    });
+    await session.initialize();
+
+    expect(session.getState()).toMatchObject({
+      accountId: "chatgpt-account",
+      openAICodexFast: false,
+    });
+    await session.switchOpenAICodexFast(true);
+    await session.prompt("fast turn");
+    expect(agentLoopMock.mock.calls[0]?.[1]).toMatchObject({ serviceTier: "fast" });
+
+    await session.switchModel("openai", "gpt-5.6-sol");
+    expect(session.getState().openAICodexFast).toBe(true);
+    await session.prompt("unsupported turn");
+    expect(agentLoopMock.mock.calls[1]?.[1]?.serviceTier).toBeUndefined();
+
+    await session.switchModel("openai", "gpt-6-astra");
+    await session.prompt("fast again");
+    expect(agentLoopMock.mock.calls[2]?.[1]).toMatchObject({ serviceTier: "fast" });
+    await session.dispose();
+  });
+
+  it("refreshes shared OpenAI identity without refreshing an expired token", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "openai",
+      model: "gpt-6-astra",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      mcpEnabled: false,
+      projectCustomization: false,
+      selfCorrectionHooks: false,
+    });
+    await session.initialize();
+    expect(session.getState().accountId).toBe("chatgpt-account");
+
+    const authPath = path.join(tmpHome, ".gg", "auth.json");
+    const storedAuth = JSON.parse(await fs.readFile(authPath, "utf-8")) as {
+      openai: { expiresAt: number; accountId: string };
+    };
+    await writeJson(authPath, {});
+    await session.refreshStoredAuthState();
+    expect(session.getState().accountId).toBeUndefined();
+
+    storedAuth.openai.expiresAt = 0;
+    storedAuth.openai.accountId = "new-account";
+    await writeJson(authPath, storedAuth);
+    await session.refreshStoredAuthState();
+    expect(session.getState().accountId).toBe("new-account");
+    await session.dispose();
+  });
+
+  it("clears live OAuth identity when shared credentials switch to an API key", async () => {
+    const authPath = path.join(tmpHome, ".gg", "auth.json");
+    agentLoopMock.mockImplementationOnce(async function* (
+      messages: Message[],
+      options: GgAgentModule.AgentOptions,
+    ) {
+      expect(options).toMatchObject({
+        serviceTier: "fast",
+        serviceTierRequiresAccountId: true,
+      });
+      const resolveCredentials = options.resolveCredentials;
+      if (!resolveCredentials) throw new Error("missing credential resolver");
+      await expect(resolveCredentials()).resolves.toMatchObject({
+        accountId: "chatgpt-account",
+      });
+
+      await writeJson(authPath, {
+        openai: {
+          accessToken: ["test", "api", "key"].join("-"),
+          refreshToken: "",
+          expiresAt: Date.now() + 3_600_000,
+        },
+      });
+      const live = await resolveCredentials();
+      expect(Object.prototype.hasOwnProperty.call(live, "accountId")).toBe(true);
+      expect(live.accountId).toBeUndefined();
+
+      messages.push({ role: "assistant", content: "done" });
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "openai",
+      model: "gpt-6-astra",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      mcpEnabled: false,
+      projectCustomization: false,
+      selfCorrectionHooks: false,
+    });
+    await session.initialize();
+    await session.switchOpenAICodexFast(true);
+    await session.prompt("credential transition");
+
+    expect(session.getState().accountId).toBeUndefined();
+    await session.dispose();
+  });
+
+  it("omits Fast for a restored API-key session", async () => {
+    const [{ AgentSession }, { SessionManager }] = await Promise.all([
+      import("./agent-session.js"),
+      import("./session-manager.js"),
+    ]);
+    await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
+      openai: {
+        accessToken: ["test", "api", "key"].join("-"),
+        refreshToken: "",
+        expiresAt: Date.now() + 3_600_000,
+      },
+    });
+    const manager = new SessionManager(path.join(tmpHome, ".gg", "sessions"));
+    const stored = await manager.create(tmpProject, "openai", "gpt-6-astra", {
+      openAICodexFast: true,
+    });
+    const session = new AgentSession({
+      provider: "openai",
+      model: "gpt-6-astra",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      sessionId: stored.path,
+      mcpEnabled: false,
+      projectCustomization: false,
+      selfCorrectionHooks: false,
+    });
+    await session.initialize();
+
+    expect(session.getState()).toMatchObject({ accountId: undefined, openAICodexFast: true });
+    await session.prompt("api-key turn");
+    expect(agentLoopMock.mock.calls[0]?.[1]?.serviceTier).toBeUndefined();
+    await session.dispose();
+  });
+
+  it("defaults legacy headers without a profile to stable and Fast off", async () => {
     const [{ AgentSession }, { SessionManager }] = await Promise.all([
       import("./agent-session.js"),
       import("./session-manager.js"),
@@ -186,6 +334,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       size: 272_000,
       openAICodexContextProfile: "stable",
     });
+    expect(resumed.getState().openAICodexFast).toBe(false);
     const { getAgentSessionContextWindow } = await import("../app-sidecar-context.js");
     expect(getAgentSessionContextWindow(resumed.getState())).toBe(272_000);
     await resumed.dispose();

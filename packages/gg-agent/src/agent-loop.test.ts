@@ -2628,6 +2628,79 @@ describe("agentLoop — per-turn credential resolution", () => {
     expect(mockStream.mock.calls[1]?.[0].apiKey).toBe("token-b");
   });
 
+  it("clears OAuth identity and its gated tier when credentials switch to an API key", async () => {
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 10,
+          outputTokens: 5,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    const credentials = [
+      { apiKey: ["oauth", "token"].join("-"), accountId: "oauth-account" },
+      { apiKey: ["api", "key"].join("-"), accountId: undefined },
+    ];
+    let calls = 0;
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "gpt-6-astra",
+      apiKey: ["captured", "token"].join("-"),
+      accountId: "oauth-account",
+      serviceTier: "fast",
+      serviceTierRequiresAccountId: true,
+      resolveCredentials: async () => credentials[calls++]!,
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(mockStream.mock.calls[0]?.[0]).toMatchObject({
+      apiKey: ["oauth", "token"].join("-"),
+      accountId: "oauth-account",
+      serviceTier: "fast",
+    });
+    expect(mockStream.mock.calls[1]?.[0]).toMatchObject({
+      apiKey: ["api", "key"].join("-"),
+    });
+    expect(mockStream.mock.calls[1]?.[0].accountId).toBeUndefined();
+    expect(mockStream.mock.calls[1]?.[0].serviceTier).toBeUndefined();
+  });
+
+  it("falls back only when account identity is omitted", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "gpt-6-astra",
+      apiKey: ["captured", "token"].join("-"),
+      accountId: "captured-account",
+      resolveCredentials: async () => ({ apiKey: ["fresh", "token"].join("-") }),
+    });
+
+    expect(mockStream.mock.calls[0]?.[0].accountId).toBe("captured-account");
+  });
+
+  it("preserves ungated Fast for public OpenAI API callers", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "gpt-6-astra",
+      apiKey: ["public", "key"].join("-"),
+      serviceTier: "fast",
+    });
+
+    expect(mockStream.mock.calls[0]?.[0].serviceTier).toBe("fast");
+  });
+
   it("falls back to the captured key when the resolver fails", async () => {
     // A transient failure reading auth.json must not abort a live run — let the
     // provider report the real auth error instead.

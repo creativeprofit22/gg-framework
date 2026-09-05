@@ -28,6 +28,7 @@ interface UseSessionPersistenceOptions {
   currentProvider: Provider;
   currentModel: string;
   openAICodexContextProfile: OpenAICodexContextProfile;
+  openAICodexFast: boolean;
   sessionStore?: PersistenceSessionStore;
   onCompactedSession?: (sessionId: string) => Promise<void>;
 }
@@ -58,6 +59,7 @@ export function useSessionPersistence({
   currentProvider,
   currentModel,
   openAICodexContextProfile,
+  openAICodexFast,
   sessionStore,
   onCompactedSession,
 }: UseSessionPersistenceOptions): SessionPersistence {
@@ -80,6 +82,7 @@ export function useSessionPersistence({
         model: currentModel,
         messages: compactedMessages,
         openAICodexContextProfile,
+        openAICodexFast,
         preview: findUserSessionPrompt(messagesRef.current),
       });
       sessionPathRef.current = session.path;
@@ -100,6 +103,7 @@ export function useSessionPersistence({
       currentModel,
       currentProvider,
       openAICodexContextProfile,
+      openAICodexFast,
       sessionStore,
       onCompactedSession,
       sessionManagerRef,

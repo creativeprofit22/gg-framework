@@ -44,6 +44,7 @@ export interface RenderAppConfig {
   provider: Provider;
   model: string;
   openAICodexContextProfile?: OpenAICodexContextProfile;
+  openAICodexFast?: boolean;
   tools: AgentTool[];
   webSearch?: boolean;
   messages: Message[];
@@ -572,6 +573,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             provider: runtimeState.provider,
             model: runtimeState.model,
             openAICodexContextProfile: config.openAICodexContextProfile ?? "stable",
+            openAICodexFast: config.openAICodexFast ?? false,
             tools: config.tools,
             webSearch: config.webSearch,
             messages: sessionStore.messages,

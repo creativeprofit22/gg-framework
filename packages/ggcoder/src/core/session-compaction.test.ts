@@ -50,6 +50,7 @@ describe("session compaction persistence", () => {
       sourceFingerprint: "f".repeat(64),
       retainedMessageCount: 1,
       openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
       title: "Stable project title",
     });
 
@@ -65,6 +66,7 @@ describe("session compaction persistence", () => {
     expect(loaded.header.sourceFingerprint).toBe("f".repeat(64));
     expect(loaded.header.retainedMessageCount).toBe(1);
     expect(loaded.header.openAICodexContextProfile).toBe("experimental");
+    expect(loaded.header.openAICodexFast).toBe(true);
     expect(loaded.header.preview).toBe("Stable project title");
     expect(loaded.entries.find((entry) => entry.type === "label")?.label).toBe(
       "Stable project title",
@@ -74,6 +76,32 @@ describe("session compaction persistence", () => {
     const file = await readFile(checkpoint.path, "utf-8");
     expect(file).not.toContain("system prompt");
     expect(file).toContain("[Previous conversation summary]");
+  });
+
+  it("retains resumed Fast state through headless compaction and defaults legacy state off", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const messages = [message("system", "system prompt"), message("user", "summary")];
+
+    const compactResumedSession = async (sourcePath: string) => {
+      const resumed = await manager.load(sourcePath);
+      const checkpoint = await createCompactedSessionCheckpoint(manager, {
+        cwd: resumed.header.cwd,
+        provider: resumed.header.provider,
+        model: resumed.header.model,
+        messages,
+        openAICodexFast: resumed.header.openAICodexFast ?? false,
+      });
+      return manager.load(checkpoint.path);
+    };
+
+    const fastSource = await manager.create("/repo", "openai", "gpt-6-astra", {
+      openAICodexFast: true,
+    });
+    const legacySource = await manager.create("/repo", "openai", "gpt-6-astra");
+
+    expect((await compactResumedSession(fastSource.path)).header.openAICodexFast).toBe(true);
+    expect((await compactResumedSession(legacySource.path)).header.openAICodexFast).toBe(false);
   });
 
   it("fingerprints provenance as part of the non-system compaction source", () => {

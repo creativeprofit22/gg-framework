@@ -63,10 +63,11 @@ describe("SessionManager context profiles", () => {
     const manager = new SessionManager(sessionsDir);
     const session = await manager.create("/repo", "openai", "gpt-6-astra", {
       openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
     });
-    expect((await manager.load(session.path)).header.openAICodexContextProfile).toBe(
-      "experimental",
-    );
+    const restored = (await manager.load(session.path)).header;
+    expect(restored.openAICodexContextProfile).toBe("experimental");
+    expect(restored.openAICodexFast).toBe(true);
 
     const legacyPath = path.join(sessionsDir, "legacy.jsonl");
     await writeFile(
@@ -82,10 +83,26 @@ describe("SessionManager context profiles", () => {
       })}\n`,
       "utf-8",
     );
-    expect(
-      (await manager.load(legacyPath, { resolveCanonical: false })).header
-        .openAICodexContextProfile,
-    ).toBeUndefined();
+    const legacy = (await manager.load(legacyPath, { resolveCanonical: false })).header;
+    expect(legacy.openAICodexContextProfile).toBeUndefined();
+    expect(legacy.openAICodexFast).toBeUndefined();
+  });
+
+  it("preserves concurrent profile, Fast, and message writes", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const session = await manager.create("/repo", "openai", "gpt-6-astra");
+
+    await Promise.all([
+      manager.updateOpenAICodexContextProfile(session.path, "experimental"),
+      manager.updateOpenAICodexFast(session.path, true),
+      manager.appendEntry(session.path, entry("parallel-append")),
+    ]);
+
+    const loaded = await manager.load(session.path);
+    expect(loaded.header.openAICodexContextProfile).toBe("experimental");
+    expect(loaded.header.openAICodexFast).toBe(true);
+    expect(loaded.entries.map((item) => item.id)).toContain("parallel-append");
   });
 
   it("preserves an append racing a context profile rewrite", async () => {

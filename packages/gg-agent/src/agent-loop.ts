@@ -822,7 +822,9 @@ export async function* agentLoop(
           try {
             const fresh = await options.resolveCredentials();
             liveApiKey = fresh.apiKey;
-            if (fresh.accountId !== undefined) liveAccountId = fresh.accountId;
+            if (Object.prototype.hasOwnProperty.call(fresh, "accountId")) {
+              liveAccountId = fresh.accountId;
+            }
             if (fresh.projectId !== undefined) liveProjectId = fresh.projectId;
           } catch (credErr) {
             diag("credential_refresh_failed", {
@@ -851,7 +853,10 @@ export async function* agentLoop(
           projectId: liveProjectId,
           cacheRetention: options.cacheRetention,
           promptCacheKey: options.promptCacheKey,
-          serviceTier: options.serviceTier,
+          serviceTier:
+            options.serviceTierRequiresAccountId && !liveAccountId
+              ? undefined
+              : options.serviceTier,
           supportsImages: options.supportsImages,
           supportsVideo: options.supportsVideo,
           compaction: options.compaction,

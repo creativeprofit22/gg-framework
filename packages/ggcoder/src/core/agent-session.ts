@@ -413,6 +413,7 @@ export interface AgentSessionState {
    *  OAuth) without re-resolving credentials. */
   accountId?: string;
   openAICodexContextProfile: OpenAICodexContextProfile;
+  openAICodexFast: boolean;
 }
 
 // ── Agent Session ──────────────────────────────────────────
@@ -572,6 +573,7 @@ export class AgentSession {
   private provider: Provider;
   private model: string;
   private openAICodexContextProfile: OpenAICodexContextProfile = "stable";
+  private openAICodexFast = false;
   private cwd: string;
   /** accountId from the most recently resolved credentials — cached so sync
    *  callers (e.g. the app-sidecar's context-window footer stat) can reflect
@@ -691,6 +693,7 @@ export class AgentSession {
 
     this.authStorage = new AuthStorage(paths.authFile);
     await this.authStorage.load();
+    await this.refreshStoredAuthState();
 
     // Session manager. Agent-specific roots keep chat and coder histories isolated.
     this.sessionManager = new SessionManager(this.opts.sessionRootDir ?? paths.sessionsDir);
@@ -2334,6 +2337,13 @@ export class AgentSession {
       lastResolvedAccessToken = apiKey;
       const modelInfo = getModel(this.model);
       const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
+      const serviceTier =
+        this.openAICodexFast &&
+        this.provider === "openai" &&
+        this.model === "gpt-6-astra" &&
+        accountId
+          ? ("fast" as const)
+          : undefined;
       const generator = agentLoop(loopMessages, {
         provider: this.provider,
         model: resolveTransportModel(this.provider, this.model),
@@ -2343,6 +2353,8 @@ export class AgentSession {
         maxTurns: this.opts.maxTurns,
         maxTurnExtensions: this.opts.maxTurnExtensions,
         thinking: this.thinkingLevel,
+        serviceTier,
+        ...(serviceTier ? { serviceTierRequiresAccountId: true } : {}),
         apiKey,
         // Per-turn credential resolution. A run can span many minutes; if any
         // process sharing auth.json refreshes this grant meanwhile, the token
@@ -2357,7 +2369,7 @@ export class AgentSession {
           lastResolvedAccessToken = live.accessToken;
           return {
             apiKey: live.accessToken,
-            ...(live.accountId !== undefined ? { accountId: live.accountId } : {}),
+            accountId: live.accountId,
             ...(live.projectId !== undefined ? { projectId: live.projectId } : {}),
           };
         },
@@ -2658,6 +2670,14 @@ export class AgentSession {
     this.openAICodexContextProfile = profile;
   }
 
+  async switchOpenAICodexFast(enabled: boolean): Promise<void> {
+    if (enabled === this.openAICodexFast) return;
+    if (!this.opts.transient && this.sessionPath) {
+      await this.sessionManager.updateOpenAICodexFast(this.sessionPath, enabled);
+    }
+    this.openAICodexFast = enabled;
+  }
+
   async switchModel(provider: string, model: string): Promise<void> {
     const prevProvider = this.provider;
     const prevModel = this.model;
@@ -2672,6 +2692,7 @@ export class AgentSession {
     // the live selection after an in-session model switch.
     this.opts.provider = this.provider;
     this.opts.model = this.model;
+    await this.refreshStoredAuthState();
     setEstimatorModel(model);
     // maxTokens must follow the active model — it was frozen at the boot
     // model's `maxOutputTokens` in the constructor, so without this a session
@@ -2808,6 +2829,7 @@ export class AgentSession {
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
+    this.openAICodexFast = loaded.header.openAICodexFast ?? false;
     this.currentLeafId = loaded.header.leafId;
     this.setSessionPath(loaded.path);
     this.kenTurns = this.sessionManager.getKenTurns(loaded.entries, loaded.header.leafId);
@@ -2852,6 +2874,7 @@ export class AgentSession {
               .filter((message) => getHistoryMessageVisibility(message) !== "hidden").length,
       preview: this.sessionPreview || undefined,
       openAICodexContextProfile: this.openAICodexContextProfile,
+      openAICodexFast: this.openAICodexFast,
     });
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
@@ -3176,6 +3199,7 @@ export class AgentSession {
       planMode: this.planModeRef.current,
       accountId: this.lastAccountId,
       openAICodexContextProfile: this.openAICodexContextProfile,
+      openAICodexFast: this.openAICodexFast,
     };
   }
 
@@ -4386,6 +4410,14 @@ export class AgentSession {
     return getAuthStorageKeys(this.provider, this.model);
   }
 
+  /** Re-read shared credentials without refreshing tokens or making network calls. */
+  async refreshStoredAuthState(): Promise<void> {
+    this.lastAccountId =
+      this.provider === "openai"
+        ? (await this.authStorage.getCredentials("openai"))?.accountId
+        : undefined;
+  }
+
   private getPromptCacheKey(): string | undefined {
     if (this.opts.promptCacheKey) return this.opts.promptCacheKey;
     if (!this.sessionId) return undefined;
@@ -4503,6 +4535,7 @@ export class AgentSession {
       parentSessionId: continuingConversation ? this.sessionId : undefined,
       preview: this.sessionPreview || undefined,
       openAICodexContextProfile: this.openAICodexContextProfile,
+      openAICodexFast: this.openAICodexFast,
     });
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
@@ -4528,6 +4561,7 @@ export class AgentSession {
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
+    this.openAICodexFast = loaded.header.openAICodexFast ?? false;
     const legacyLabel = [...loaded.entries]
       .reverse()
       .find((entry) => entry.type === "label")

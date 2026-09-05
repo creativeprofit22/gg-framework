@@ -18,10 +18,12 @@ afterEach(async () => {
 function Harness({
   manager,
   cwd,
+  openAICodexFast,
   onPersisted,
 }: {
   manager: SessionManager;
   cwd: string;
+  openAICodexFast: boolean;
   onPersisted: (path: string) => void;
 }) {
   const sessionManagerRef = useRef<SessionManager | null>(manager);
@@ -46,6 +48,7 @@ function Harness({
     currentProvider: "openai",
     currentModel: "gpt-6-astra",
     openAICodexContextProfile: "experimental",
+    openAICodexFast,
   });
 
   useEffect(() => {
@@ -61,20 +64,29 @@ function Harness({
 }
 
 describe("useSessionPersistence", () => {
-  it("retains the experimental Codex profile in compacted checkpoints", async () => {
+  it("retains Fast when a resumed session is compacted through the TUI", async () => {
     const sessionsDir = await mkdtemp(path.join(tmpdir(), "gg-session-persistence-"));
     tempDirs.push(sessionsDir);
     const manager = new SessionManager(sessionsDir);
+    const source = await manager.create("/repo", "openai", "gpt-6-astra", {
+      openAICodexFast: true,
+    });
+    const resumed = await manager.load(source.path);
     let checkpointPath: string | undefined;
     const mounted = render(
-      <Harness manager={manager} cwd="/repo" onPersisted={(value) => (checkpointPath = value)} />,
+      <Harness
+        manager={manager}
+        cwd="/repo"
+        openAICodexFast={resumed.header.openAICodexFast ?? false}
+        onPersisted={(value) => (checkpointPath = value)}
+      />,
       { patchConsole: false },
     );
 
     await vi.waitFor(() => expect(checkpointPath).toBeDefined());
     mounted.unmount();
-    expect((await manager.load(checkpointPath!)).header.openAICodexContextProfile).toBe(
-      "experimental",
-    );
+    const checkpoint = await manager.load(checkpointPath!);
+    expect(checkpoint.header.openAICodexContextProfile).toBe("experimental");
+    expect(checkpoint.header.openAICodexFast).toBe(true);
   });
 });

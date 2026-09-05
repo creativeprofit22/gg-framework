@@ -812,6 +812,7 @@ async function runInkTUI(opts: {
   let initialHistory: CompletedItem[] | undefined;
   let turnMetrics: TurnMetricPayload[] = [];
   let openAICodexContextProfile: OpenAICodexContextProfile = "stable";
+  let openAICodexFast = false;
 
   // IDs and physical paths both resolve to the newest checkpoint in their
   // logical conversation before any restored messages are read.
@@ -825,6 +826,7 @@ async function runInkTUI(opts: {
     try {
       let loaded = await sessionManager.load(resumePath);
       openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
+      openAICodexFast = loaded.header.openAICodexFast ?? false;
       let loadedMessages = sessionManager.getMessages(loaded.entries);
       turnMetrics = sessionManager.getTurnMetrics(loaded.entries);
 
@@ -938,6 +940,7 @@ async function runInkTUI(opts: {
                     parentSessionId: loaded.header.id,
                     sourceFingerprint: fingerprint,
                     openAICodexContextProfile,
+                    openAICodexFast,
                     preview: loaded.header.preview ?? findUserSessionPrompt(messages),
                     title: [...loaded.entries]
                       .reverse()
@@ -1045,6 +1048,7 @@ async function runInkTUI(opts: {
     provider,
     model,
     openAICodexContextProfile,
+    openAICodexFast,
     tools,
     webSearch: true,
     messages,

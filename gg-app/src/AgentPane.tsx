@@ -624,6 +624,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     cycleThinking,
     listModels,
     switchModel,
+    setOpenAICodexContextProfile,
     switchKenModel,
     listCommands,
     listHistory,
@@ -2050,6 +2051,35 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       );
     });
   }
+
+  function onSelectContextProfile(profile: string): void {
+    if (
+      running ||
+      (profile !== "stable" && profile !== "experimental") ||
+      profile === state?.openAICodexContextProfile
+    ) {
+      return;
+    }
+    void setOpenAICodexContextProfile(profile)
+      .then((selection) => {
+        setState((current) =>
+          current
+            ? {
+                ...current,
+                openAICodexContextProfile: selection.openAICodexContextProfile,
+                contextWindow: selection.contextWindow,
+              }
+            : current,
+        );
+      })
+      .catch((error) => toast(taskErrorMessage(error), "error"));
+  }
+
+  const showContextProfileSelector =
+    state?.provider === "openai" &&
+    state.model === "gpt-6-astra" &&
+    Boolean(state.accountId) &&
+    state.openAICodexContextProfile !== undefined;
 
   // Context-window usage percentage for the footer meter. 0 (hidden) until we
   // have both a window size and a real token reading from a completed turn.
@@ -4028,6 +4058,29 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               </span>
             )}
             <span className="footer-right footer-reveal">
+              {showContextProfileSelector && (
+                <>
+                  <label
+                    className="model-picker"
+                    title="OpenAI Codex context window: stable 272K or experimental 872K"
+                  >
+                    <span className="model-select-text" style={{ color: theme.secondary }}>
+                      Context {state.openAICodexContextProfile}
+                    </span>
+                    <select
+                      aria-label="OpenAI Codex context profile"
+                      className="model-select"
+                      value={state.openAICodexContextProfile}
+                      disabled={running}
+                      onChange={(event) => onSelectContextProfile(event.target.value)}
+                    >
+                      <option value="stable">Stable · 272K</option>
+                      <option value="experimental">Experimental · 872K</option>
+                    </select>
+                  </label>
+                  <FooterSep />
+                </>
+              )}
               {contextPct > 0 && (
                 <>
                   <ContextMeter pct={contextPct} />

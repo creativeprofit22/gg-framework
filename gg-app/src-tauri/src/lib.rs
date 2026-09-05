@@ -4493,6 +4493,28 @@ async fn agent_switch_model(
         .map_err(|e| e.to_string())
 }
 
+/// Proxy: select GPT-6 Astra's OpenAI Codex context profile.
+#[tauri::command]
+async fn agent_set_context_profile(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    profile: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/context-profile", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "profile": profile }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+    parse_sidecar_json_response(status, &body)
+}
+
 /// Proxy: pin Ken (mentor + autopilot) to a model, or clear the pin so he
 /// follows GG Coder's model again. `model: None` clears. Returns
 /// `{ kenProvider, kenModel, kenModelOverride }`.
@@ -10216,6 +10238,7 @@ pub fn run() {
             agent_cycle_thinking,
             agent_models,
             agent_switch_model,
+            agent_set_context_profile,
             agent_switch_ken_model,
             agent_enhance_prompt,
             agent_commands,

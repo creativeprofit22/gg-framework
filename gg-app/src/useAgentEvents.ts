@@ -1100,6 +1100,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "context_profile_change": {
+          const profile = d.openAICodexContextProfile;
+          const contextWindow = d.contextWindow;
+          if (
+            (profile === "stable" || profile === "experimental") &&
+            typeof contextWindow === "number" &&
+            Number.isSafeInteger(contextWindow) &&
+            contextWindow > 0
+          ) {
+            setState((s) => (s ? { ...s, openAICodexContextProfile: profile, contextWindow } : s));
+          }
+          break;
+        }
         case "model_change":
         case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));

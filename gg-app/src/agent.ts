@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type {
   PendingPlanReview,
   PlanAcceptResult,
@@ -113,6 +114,11 @@ export interface SubAgentStatePayload {
 export interface SidecarEvent {
   type: string;
   data: unknown;
+}
+
+export interface ContextProfileChangeEvent extends SidecarEvent {
+  type: "context_profile_change";
+  data: ContextProfileSelection;
 }
 
 export interface ToolCallStartPayload {
@@ -510,6 +516,9 @@ function requirePlanRevisionResult(value: unknown): PlanRevisionResult {
 export interface AgentState {
   provider: string;
   model: string;
+  /** Present when OpenAI requests use the Codex OAuth transport. */
+  accountId?: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
   cwd: string;
   sessionId?: string;
   sessionPath?: string | null;
@@ -668,6 +677,11 @@ export interface RecentSession {
 export interface SwitchModelResult extends ThinkingState {
   provider: string;
   model: string;
+}
+
+export interface ContextProfileSelection {
+  openAICodexContextProfile: OpenAICodexContextProfile;
+  contextWindow: number;
 }
 
 /** Result of pinning/clearing Ken's model — his effective model afterward. */
@@ -1754,6 +1768,33 @@ export function isSwitchModelError(
   return "error" in result;
 }
 
+function requireContextProfileSelection(value: unknown): ContextProfileSelection {
+  if (
+    !isRecord(value) ||
+    (value.openAICodexContextProfile !== "stable" &&
+      value.openAICodexContextProfile !== "experimental") ||
+    typeof value.contextWindow !== "number" ||
+    !Number.isSafeInteger(value.contextWindow) ||
+    value.contextWindow <= 0
+  ) {
+    throw new Error("invalid context profile response");
+  }
+  return {
+    openAICodexContextProfile: value.openAICodexContextProfile,
+    contextWindow: value.contextWindow,
+  };
+}
+
+export async function setOpenAICodexContextProfile(
+  profile: OpenAICodexContextProfile,
+): Promise<ContextProfileSelection> {
+  const response = await invoke<unknown>("agent_set_context_profile", {
+    paneId: "primary",
+    profile,
+  });
+  return requireContextProfileSelection(response);
+}
+
 /** Pin Ken (mentor + autopilot) to a model, or pass null to clear the pin so
  *  he follows GG Coder's model again. Returns his effective model. */
 export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult | null> {
@@ -2821,6 +2862,9 @@ export interface PaneAgentClient extends NotesClient {
   listCommands(): Promise<SlashCommand[]>;
   listModels(): Promise<ModelOption[]>;
   switchModel(model: string): Promise<SwitchModelResult | { error: string }>;
+  setOpenAICodexContextProfile(
+    profile: OpenAICodexContextProfile,
+  ): Promise<ContextProfileSelection>;
   switchKenModel(model: string | null): Promise<SwitchKenModelResult | null>;
   getSettings(): Promise<AppSettings | null>;
   saveSettings(projectsRoot: string): Promise<void>;
@@ -3301,6 +3345,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
       }
+    },
+    async setOpenAICodexContextProfile(profile) {
+      const response = await call<unknown>("agent_set_context_profile", { profile });
+      return requireContextProfileSelection(response);
     },
     async switchKenModel(model) {
       try {

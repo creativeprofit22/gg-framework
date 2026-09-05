@@ -202,6 +202,28 @@ describe("pane agent client", () => {
     });
   });
 
+  it("routes and validates pane-scoped context profile changes", async () => {
+    invoke.mockResolvedValueOnce({
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    const client = createPaneAgentClient("right");
+
+    await expect(client.setOpenAICodexContextProfile("experimental")).resolves.toEqual({
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_set_context_profile", {
+      paneId: "right",
+      profile: "experimental",
+    });
+
+    invoke.mockResolvedValueOnce({ openAICodexContextProfile: "preview", contextWindow: 1 });
+    await expect(client.setOpenAICodexContextProfile("stable")).rejects.toThrow(
+      "invalid context profile response",
+    );
+  });
+
   it("validates and routes Roadmap draft decisions through pane-scoped commands", async () => {
     const draft = {
       id: "draft-1",

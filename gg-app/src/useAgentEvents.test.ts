@@ -151,6 +151,24 @@ describe("useAgentEvents", () => {
     expect(getItems()).toEqual([]);
   });
 
+  it("applies validated context profile change events", () => {
+    const { hook, getState } = setup();
+
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("context_profile_change", {
+          openAICodexContextProfile: "experimental",
+          contextWindow: 872_000,
+        }),
+      ),
+    );
+
+    expect(getState()).toMatchObject({
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+  });
+
   describe("queued pill lifecycle", () => {
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();

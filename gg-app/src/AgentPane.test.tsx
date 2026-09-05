@@ -347,6 +347,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     killTask: vi.fn(),
     cycleThinking: vi.fn(),
     switchModel: vi.fn(),
+    setOpenAICodexContextProfile: vi.fn(),
     switchKenModel: vi.fn(),
     getSettings: vi.fn(),
     saveSettings: vi.fn(),
@@ -584,6 +585,103 @@ describe("AgentPane lifecycle", () => {
     });
     expect(failedRow.textContent).toContain("Failed");
     expect(failedRow.textContent).toContain("fixture-is-error");
+  });
+
+  it("shows context profiles only for GPT-6 Astra using Codex OAuth", async () => {
+    const oauthPane = client("astra-oauth", 1);
+    vi.mocked(oauthPane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+    });
+    const mounted = render(
+      <AgentPane client={oauthPane} target={target} workspaceOwnsSessionLifecycle />,
+    );
+    expect(
+      await screen.findByRole("combobox", { name: "OpenAI Codex context profile" }),
+    ).toBeDefined();
+
+    mounted.unmount();
+    const apiKeyPane = client("astra-api-key", 1);
+    vi.mocked(apiKeyPane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      openAICodexContextProfile: "stable",
+      contextWindow: 1_050_000,
+    });
+    render(<AgentPane client={apiKeyPane} target={target} workspaceOwnsSessionLifecycle />);
+    await screen.findAllByText("gpt-6-astra");
+    expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
+  });
+
+  it("disables the context profile selector while running", async () => {
+    const pane = client("astra-running", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+      running: true,
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    expect(
+      (await screen.findByRole("combobox", {
+        name: "OpenAI Codex context profile",
+      })) as HTMLSelectElement,
+    ).toMatchObject({ disabled: true });
+  });
+
+  it("updates the context profile only after the backend accepts it", async () => {
+    const pane = client("astra-switch", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+    });
+    vi.mocked(pane.setOpenAICodexContextProfile).mockResolvedValue({
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    fireEvent.change(selector, { target: { value: "experimental" } });
+    await waitFor(() =>
+      expect(pane.setOpenAICodexContextProfile).toHaveBeenCalledWith("experimental"),
+    );
+    await waitFor(() => expect((selector as HTMLSelectElement).value).toBe("experimental"));
+  });
+
+  it("displays a refused context-profile change without mutating the selector", async () => {
+    const pane = client("astra-refusal", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    vi.mocked(pane.setOpenAICodexContextProfile).mockRejectedValue(
+      new Error("Compact or start a new session first."),
+    );
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    fireEvent.change(selector, { target: { value: "stable" } });
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        "Compact or start a new session first.",
+        "error",
+      ),
+    );
+    expect((selector as HTMLSelectElement).value).toBe("experimental");
   });
 
   it("wires the restored home UI through the pane-scoped catalog client", async () => {

@@ -224,6 +224,22 @@ describe("pane agent client", () => {
     );
   });
 
+  it("routes and validates pane-scoped Fast changes", async () => {
+    invoke.mockResolvedValueOnce({ openAICodexFast: true });
+    const client = createPaneAgentClient("right");
+
+    await expect(client.setOpenAICodexFast(true)).resolves.toEqual({ openAICodexFast: true });
+    expect(invoke).toHaveBeenCalledWith("agent_set_openai_codex_fast", {
+      paneId: "right",
+      enabled: true,
+    });
+
+    invoke.mockResolvedValueOnce({ openAICodexFast: "yes" });
+    await expect(client.setOpenAICodexFast(false)).rejects.toThrow(
+      "invalid OpenAI Codex Fast response",
+    );
+  });
+
   it("validates and routes Roadmap draft decisions through pane-scoped commands", async () => {
     const draft = {
       id: "draft-1",

@@ -3754,6 +3754,25 @@ fn parse_sidecar_json_response(
     serde_json::from_str(body).map_err(|error| error.to_string())
 }
 
+async fn post_session_json(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    route: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .post(format!("{base_url}{route}"))
+        .header("x-gg-session", session_id)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+    parse_sidecar_json_response(status, &body)
+}
+
 /// Plan mutations return recovery state in expected 400/409 JSON bodies.
 /// Preserve those bodies instead of collapsing them to one message.
 fn parse_plan_mutation_response(
@@ -4503,16 +4522,34 @@ async fn agent_set_context_profile(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let response = client
-        .post(format!("{}/context-profile", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "profile": profile }))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    let body = response.text().await.map_err(|error| error.to_string())?;
-    parse_sidecar_json_response(status, &body)
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/context-profile",
+        &serde_json::json!({ "profile": profile }),
+    )
+    .await
+}
+
+/// Proxy: opt into GPT-6 Astra's priority service tier.
+#[tauri::command]
+async fn agent_set_openai_codex_fast(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/openai-codex-fast",
+        &serde_json::json!({ "enabled": enabled }),
+    )
+    .await
 }
 
 /// Proxy: pin Ken (mentor + autopilot) to a model, or clear the pin so he
@@ -10239,6 +10276,7 @@ pub fn run() {
             agent_models,
             agent_switch_model,
             agent_set_context_profile,
+            agent_set_openai_codex_fast,
             agent_switch_ken_model,
             agent_enhance_prompt,
             agent_commands,
@@ -10982,6 +11020,97 @@ mod tests {
             Ok(false)
         );
     }
+    fn openai_fast_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &str,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = response_body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let request_lower = request.to_ascii_lowercase();
+            assert!(request.starts_with("POST /openai-codex-fast HTTP/1.1"));
+            assert!(request_lower.contains("x-gg-session: pane-session"));
+            assert!(request_lower.contains("x-gg-token: daemon-token"));
+            assert!(request.contains(r#"{"enabled":true}"#));
+
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
+        let client = http_client_builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let result = tauri::async_runtime::block_on(post_session_json(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            "/openai-codex-fast",
+            &serde_json::json!({ "enabled": true }),
+        ));
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn agent_set_openai_codex_fast_posts_authenticated_pane_request() {
+        assert_eq!(
+            openai_fast_proxy_result(reqwest::StatusCode::OK, r#"{"openAICodexFast":true}"#,),
+            Ok(serde_json::json!({ "openAICodexFast": true }))
+        );
+    }
+
+    #[test]
+    fn agent_set_openai_codex_fast_propagates_sidecar_conflict() {
+        assert_eq!(
+            openai_fast_proxy_result(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"Cannot change Fast while the agent is running."}"#,
+            ),
+            Err("Cannot change Fast while the agent is running.".to_string())
+        );
+    }
+
     fn prompt_proxy_result(
         status: reqwest::StatusCode,
         body: &str,

@@ -5909,6 +5909,16 @@ select {
   gap: 16px;
   min-width: 0;
 }
+.astra-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.astra-fast-toggle.active {
+  color: var(--primary);
+  font-weight: 600;
+}
 
 /* Thinking level: borderless colored text (mirrors TUI footer), color graded
    by tier. No badge, no icon — just the label changing hue. */
@@ -7850,7 +7860,46 @@ select {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 28%, transparent);
 }
 
-@container (max-width: 420px) {
+@container (max-width: 520px) {
+  .footer {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .footer-custom-build {
+    display: none;
+  }
+
+  .footer-right {
+    flex: 1 1 100%;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px 12px;
+    overflow: visible;
+  }
+
+  .footer-right > .footer-sep {
+    display: none;
+  }
+
+  .astra-control-group {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+
+  .astra-control-group .model-picker,
+  .astra-fast-toggle {
+    min-height: 28px;
+    align-items: center;
+  }
+
+  .astra-fast-toggle {
+    padding: 4px 0;
+  }
+
   .pane-drop-zone-left,
   .pane-drop-zone-right {
     width: max(25%, min(44px, 50%));

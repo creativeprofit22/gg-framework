@@ -191,7 +191,13 @@ import {
 } from "./AgentPane";
 import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
-import type { AgentState, PaneAgentClient, PaneSessionTarget, ProjectTask } from "./agent";
+import type {
+  AgentState,
+  PaneAgentClient,
+  PaneSessionTarget,
+  ProjectTask,
+  SidecarEvent,
+} from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
 const chatTarget: PaneSessionTarget = {
@@ -238,6 +244,11 @@ const roadmapDraft: RoadmapPhaseDraft = {
   status: "pending",
 };
 const agentState = (model: string): AgentState => ({
+  accountId: null,
+  openAICodexContextProfile: "stable",
+  openAICodexFast: false,
+  contextTokens: 0,
+  contextWindow: 200_000,
   provider: "azure",
   model,
   cwd: "/work",
@@ -258,12 +269,18 @@ Continue safely.
 ## Ken’s next instruction
 ${KEN_PROMPT}`;
 
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
     resolve = settle;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function client(paneId: string, generation: number): PaneAgentClient {
@@ -348,6 +365,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     cycleThinking: vi.fn(),
     switchModel: vi.fn(),
     setOpenAICodexContextProfile: vi.fn(),
+    setOpenAICodexFast: vi.fn(),
     switchKenModel: vi.fn(),
     getSettings: vi.fn(),
     saveSettings: vi.fn(),
@@ -602,6 +620,9 @@ describe("AgentPane lifecycle", () => {
     expect(
       await screen.findByRole("combobox", { name: "OpenAI Codex context profile" }),
     ).toBeDefined();
+    expect(
+      screen.getByRole("switch", { name: "Fast · 2.5× credits" }).getAttribute("aria-checked"),
+    ).toBe("false");
 
     mounted.unmount();
     const apiKeyPane = client("astra-api-key", 1);
@@ -614,6 +635,47 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={apiKeyPane} target={target} workspaceOwnsSessionLifecycle />);
     await screen.findAllByText("gpt-6-astra");
     expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Fast · 2.5× credits" })).toBeNull();
+  });
+
+  it("keeps Astra controls independent across panes", async () => {
+    const left = client("astra-left", 1);
+    const right = client("astra-right", 1);
+    vi.mocked(left.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "left-account",
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextWindow: 272_000,
+    });
+    vi.mocked(right.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "right-account",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
+      contextWindow: 872_000,
+    });
+
+    render(
+      <>
+        <AgentPane client={left} target={target} workspaceOwnsSessionLifecycle />
+        <AgentPane client={right} target={target} workspaceOwnsSessionLifecycle />
+      </>,
+    );
+    const selectors = await screen.findAllByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    const fastSwitches = screen.getAllByRole("switch", { name: "Fast · 2.5× credits" });
+    expect(selectors.map((selector) => (selector as HTMLSelectElement).value)).toEqual([
+      "stable",
+      "experimental",
+    ]);
+    expect(fastSwitches.map((button) => button.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "true",
+    ]);
   });
 
   it("disables the context profile selector while running", async () => {
@@ -634,7 +696,7 @@ describe("AgentPane lifecycle", () => {
     ).toMatchObject({ disabled: true });
   });
 
-  it("updates the context profile only after the backend accepts it", async () => {
+  it("optimistically updates and settles a busy context profile", async () => {
     const pane = client("astra-switch", 1);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
@@ -643,19 +705,90 @@ describe("AgentPane lifecycle", () => {
       openAICodexContextProfile: "stable",
       contextWindow: 272_000,
     });
-    vi.mocked(pane.setOpenAICodexContextProfile).mockResolvedValue({
-      openAICodexContextProfile: "experimental",
-      contextWindow: 872_000,
-    });
+    const mutation = deferred<{
+      openAICodexContextProfile: "experimental";
+      contextWindow: number;
+    }>();
+    vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
+    const fast = screen.getByRole("switch", { name: "Fast · 2.5× credits" });
     fireEvent.change(selector, { target: { value: "experimental" } });
+    expect((selector as HTMLSelectElement).value).toBe("experimental");
+    expect(selector).toMatchObject({ disabled: true });
+    expect(fast).toMatchObject({ disabled: true });
     await waitFor(() =>
       expect(pane.setOpenAICodexContextProfile).toHaveBeenCalledWith("experimental"),
     );
-    await waitFor(() => expect((selector as HTMLSelectElement).value).toBe("experimental"));
+    mutation.resolve({ openAICodexContextProfile: "experimental", contextWindow: 872_000 });
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+  });
+
+  it("optimistically settles and rolls back Fast mutations", async () => {
+    const pane = client("astra-fast", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextWindow: 272_000,
+    });
+    const mutation = deferred<{ openAICodexFast: boolean }>();
+    vi.mocked(pane.setOpenAICodexFast).mockReturnValueOnce(mutation.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const fast = await screen.findByRole("switch", { name: "Fast · 2.5× credits" });
+    const selector = screen.getByRole("combobox", { name: "OpenAI Codex context profile" });
+
+    fireEvent.click(fast);
+    expect(fast.getAttribute("aria-checked")).toBe("true");
+    expect(selector).toMatchObject({ disabled: true });
+    mutation.resolve({ openAICodexFast: true });
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+
+    vi.mocked(pane.setOpenAICodexFast).mockRejectedValueOnce(new Error("Fast unavailable"));
+    fireEvent.click(fast);
+    await waitFor(() => expect(fast.getAttribute("aria-checked")).toBe("true"));
+    expect(nativeMocks.toast).toHaveBeenCalledWith("Fast unavailable", "error");
+  });
+
+  it("preserves newer authoritative state when a profile mutation fails", async () => {
+    const pane = client("astra-stale", 1);
+    let emit: ((event: SidecarEvent) => void) | undefined;
+    vi.mocked(pane.subscribe).mockImplementation((handler) => {
+      emit = handler;
+      return vi.fn();
+    });
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: false,
+      contextWindow: 872_000,
+    });
+    const mutation = deferred<{
+      openAICodexContextProfile: "stable" | "experimental";
+      contextWindow: number;
+    }>();
+    vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    fireEvent.change(selector, { target: { value: "stable" } });
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() =>
+      emit?.({
+        type: "context_profile_change",
+        data: { openAICodexContextProfile: "stable", contextWindow: 272_000 },
+      }),
+    );
+    mutation.reject(new Error("stale refusal"));
+
+    await waitFor(() => expect((selector as HTMLSelectElement).value).toBe("stable"));
   });
 
   it("displays a refused context-profile change without mutating the selector", async () => {

@@ -625,6 +625,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     listModels,
     switchModel,
     setOpenAICodexContextProfile,
+    setOpenAICodexFast,
     switchKenModel,
     listCommands,
     listHistory,
@@ -892,6 +893,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // running context-window usage (input-side tokens of the latest turn).
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [contextTokens, setContextTokens] = useState(0);
+  const [astraControlsBusy, setAstraControlsBusy] = useState(false);
+  const astraMutationBusyRef = useRef(false);
+  const astraAuthoritativeRevisionRef = useRef(0);
   // Project task list (the agent's `tasks` tool store) + the Tasks modal.
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
@@ -1641,6 +1645,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const onRoadmapPhaseDraftChange = useCallback((draft: RoadmapPhaseDraft | null) => {
     dispatchRoadmapDraft({ type: "event", draft });
   }, []);
+  const onAstraStateChange = useCallback(() => {
+    astraAuthoritativeRevisionRef.current += 1;
+  }, []);
 
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
@@ -1674,6 +1681,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setAttachments,
     setCommands,
     setModels,
+    onAstraStateChange,
     onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef,
@@ -2055,15 +2063,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function onSelectContextProfile(profile: string): void {
     if (
       running ||
+      astraMutationBusyRef.current ||
+      !state ||
       (profile !== "stable" && profile !== "experimental") ||
-      profile === state?.openAICodexContextProfile
+      profile === state.openAICodexContextProfile
     ) {
       return;
     }
+    const previousProfile = state.openAICodexContextProfile;
+    const previousWindow = state.contextWindow;
+    const authoritativeRevision = astraAuthoritativeRevisionRef.current;
+    astraMutationBusyRef.current = true;
+    setAstraControlsBusy(true);
+    setState((current) => (current ? { ...current, openAICodexContextProfile: profile } : current));
     void setOpenAICodexContextProfile(profile)
       .then((selection) => {
+        if (astraAuthoritativeRevisionRef.current !== authoritativeRevision) return;
         setState((current) =>
-          current
+          current?.openAICodexContextProfile === profile
             ? {
                 ...current,
                 openAICodexContextProfile: selection.openAICodexContextProfile,
@@ -2072,14 +2089,61 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             : current,
         );
       })
-      .catch((error) => toast(taskErrorMessage(error), "error"));
+      .catch((error) => {
+        if (astraAuthoritativeRevisionRef.current === authoritativeRevision) {
+          setState((current) =>
+            current?.openAICodexContextProfile === profile
+              ? {
+                  ...current,
+                  openAICodexContextProfile: previousProfile,
+                  contextWindow: previousWindow,
+                }
+              : current,
+          );
+        }
+        toast(taskErrorMessage(error), "error");
+      })
+      .finally(() => {
+        astraMutationBusyRef.current = false;
+        if (mountedRef.current) setAstraControlsBusy(false);
+      });
+  }
+
+  function onToggleOpenAICodexFast(): void {
+    if (running || astraMutationBusyRef.current || !state) return;
+    const previous = state.openAICodexFast;
+    const requested = !previous;
+    const authoritativeRevision = astraAuthoritativeRevisionRef.current;
+    astraMutationBusyRef.current = true;
+    setAstraControlsBusy(true);
+    setState((current) => (current ? { ...current, openAICodexFast: requested } : current));
+    void setOpenAICodexFast(requested)
+      .then((selection) => {
+        if (astraAuthoritativeRevisionRef.current !== authoritativeRevision) return;
+        setState((current) =>
+          current?.openAICodexFast === requested
+            ? { ...current, openAICodexFast: selection.openAICodexFast }
+            : current,
+        );
+      })
+      .catch((error) => {
+        if (astraAuthoritativeRevisionRef.current === authoritativeRevision) {
+          setState((current) =>
+            current?.openAICodexFast === requested
+              ? { ...current, openAICodexFast: previous }
+              : current,
+          );
+        }
+        toast(taskErrorMessage(error), "error");
+      })
+      .finally(() => {
+        astraMutationBusyRef.current = false;
+        if (mountedRef.current) setAstraControlsBusy(false);
+      });
   }
 
   const showContextProfileSelector =
-    state?.provider === "openai" &&
-    state.model === "gpt-6-astra" &&
-    Boolean(state.accountId) &&
-    state.openAICodexContextProfile !== undefined;
+    state?.provider === "openai" && state.model === "gpt-6-astra" && Boolean(state.accountId);
 
   // Context-window usage percentage for the footer meter. 0 (hidden) until we
   // have both a window size and a real token reading from a completed turn.
@@ -4060,24 +4124,37 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             <span className="footer-right footer-reveal">
               {showContextProfileSelector && (
                 <>
-                  <label
-                    className="model-picker"
-                    title="OpenAI Codex context window: stable 272K or experimental 872K"
-                  >
-                    <span className="model-select-text" style={{ color: theme.secondary }}>
-                      Context {state.openAICodexContextProfile}
-                    </span>
-                    <select
-                      aria-label="OpenAI Codex context profile"
-                      className="model-select"
-                      value={state.openAICodexContextProfile}
-                      disabled={running}
-                      onChange={(event) => onSelectContextProfile(event.target.value)}
+                  <span className="astra-control-group" aria-busy={astraControlsBusy}>
+                    <label
+                      className="model-picker"
+                      title="OpenAI Codex context window: stable 272K or experimental 872K"
                     >
-                      <option value="stable">Stable · 272K</option>
-                      <option value="experimental">Experimental · 872K</option>
-                    </select>
-                  </label>
+                      <span className="model-select-text" style={{ color: theme.secondary }}>
+                        Context {state.openAICodexContextProfile}
+                      </span>
+                      <select
+                        aria-label="OpenAI Codex context profile"
+                        className="model-select"
+                        value={state.openAICodexContextProfile}
+                        disabled={running || astraControlsBusy}
+                        onChange={(event) => onSelectContextProfile(event.target.value)}
+                      >
+                        <option value="stable">Stable · 272K</option>
+                        <option value="experimental">Experimental · 872K</option>
+                      </select>
+                    </label>
+                    <button
+                      aria-label="Fast · 2.5× credits"
+                      aria-checked={state.openAICodexFast}
+                      className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
+                      disabled={running || astraControlsBusy}
+                      onClick={onToggleOpenAICodexFast}
+                      role="switch"
+                      type="button"
+                    >
+                      Fast · 2.5× credits
+                    </button>
+                  </span>
                   <FooterSep />
                 </>
               )}

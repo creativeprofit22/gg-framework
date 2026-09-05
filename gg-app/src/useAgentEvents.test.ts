@@ -214,6 +214,30 @@ describe("useAgentEvents", () => {
     expect(getContextTokens()).toBe(300_000);
   });
 
+  it("applies pane-scoped Fast changes", () => {
+    const { hook, getState } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: "account-live",
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 0,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(ev("fast_change", { openAICodexFast: true })),
+    );
+    expect(getState()?.openAICodexFast).toBe(true);
+  });
+
   describe("queued pill lifecycle", () => {
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();

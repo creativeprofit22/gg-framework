@@ -181,6 +181,7 @@ export interface AgentEventsDeps {
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
   setModels: Dispatch<SetStateAction<ModelOption[]>>;
+  onAstraStateChange?: () => void;
   onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
 
   stateRef: MutableRefObject<AgentState | null>;
@@ -231,6 +232,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setAttachments,
     setCommands,
     setModels,
+    onAstraStateChange,
     onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef,
@@ -607,9 +609,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       switch (e.type) {
         case "ready": {
           const readyState = d as unknown as AgentState;
+          onAstraStateChange?.();
           setState(readyState);
-          setContextTokens(readyState.contextTokens);
           setRunning(readyState.running);
+          setContextTokens(readyState.contextTokens);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
           // Reconnect snapshots are authoritative for the durable gate. Older
@@ -1110,10 +1113,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             Number.isSafeInteger(contextWindow) &&
             contextWindow > 0
           ) {
+            onAstraStateChange?.();
             setState((s) => (s ? { ...s, openAICodexContextProfile: profile, contextWindow } : s));
           }
           break;
         }
+        case "fast_change":
+          if (typeof d.openAICodexFast === "boolean") {
+            onAstraStateChange?.();
+            setState((s) => (s ? { ...s, openAICodexFast: d.openAICodexFast as boolean } : s));
+          }
+          break;
         case "model_change":
         case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));
@@ -1397,6 +1407,15 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         case "extras":
           // Context window / git status refresh (model switch, run end).
+          if (
+            d.accountId !== undefined ||
+            d.openAICodexContextProfile !== undefined ||
+            d.openAICodexFast !== undefined ||
+            d.contextTokens !== undefined ||
+            d.contextWindow !== undefined
+          ) {
+            onAstraStateChange?.();
+          }
           setState((s) =>
             s
               ? {
@@ -1447,6 +1466,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       handleKenEvent,
       handleAutopilotEvent,
       onRoadmapPhaseDraftChange,
+      onAstraStateChange,
       appendAssistant,
       pushItem,
       finalizeThinking,

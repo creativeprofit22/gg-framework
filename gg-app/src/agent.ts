@@ -680,6 +680,10 @@ export interface ContextProfileSelection {
   contextWindow: number;
 }
 
+export interface OpenAICodexFastSelection {
+  openAICodexFast: boolean;
+}
+
 /** Result of pinning/clearing Ken's model — his effective model afterward. */
 export interface SwitchKenModelResult {
   kenProvider: string;
@@ -1791,6 +1795,21 @@ export async function setOpenAICodexContextProfile(
   return requireContextProfileSelection(response);
 }
 
+function requireOpenAICodexFastSelection(value: unknown): OpenAICodexFastSelection {
+  if (!isRecord(value) || typeof value.openAICodexFast !== "boolean") {
+    throw new Error("invalid OpenAI Codex Fast response");
+  }
+  return { openAICodexFast: value.openAICodexFast };
+}
+
+export async function setOpenAICodexFast(enabled: boolean): Promise<OpenAICodexFastSelection> {
+  const response = await invoke<unknown>("agent_set_openai_codex_fast", {
+    paneId: "primary",
+    enabled,
+  });
+  return requireOpenAICodexFastSelection(response);
+}
+
 /** Pin Ken (mentor + autopilot) to a model, or pass null to clear the pin so
  *  he follows GG Coder's model again. Returns his effective model. */
 export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult | null> {
@@ -2861,6 +2880,7 @@ export interface PaneAgentClient extends NotesClient {
   setOpenAICodexContextProfile(
     profile: OpenAICodexContextProfile,
   ): Promise<ContextProfileSelection>;
+  setOpenAICodexFast(enabled: boolean): Promise<OpenAICodexFastSelection>;
   switchKenModel(model: string | null): Promise<SwitchKenModelResult | null>;
   getSettings(): Promise<AppSettings | null>;
   saveSettings(projectsRoot: string): Promise<void>;
@@ -3345,6 +3365,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async setOpenAICodexContextProfile(profile) {
       const response = await call<unknown>("agent_set_context_profile", { profile });
       return requireContextProfileSelection(response);
+    },
+    async setOpenAICodexFast(enabled) {
+      const response = await call<unknown>("agent_set_openai_codex_fast", { enabled });
+      return requireOpenAICodexFastSelection(response);
     },
     async switchKenModel(model) {
       try {

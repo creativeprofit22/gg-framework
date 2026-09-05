@@ -172,6 +172,22 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   const [failedAction, setFailedAction] = useState<KenPromptAction | null>(null);
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
+  const [copyStatus, setCopyStatus] = useState<"idle" | "pending" | "success" | "error">("idle");
+  const copyLockRef = useRef(false);
+  const copyPrompt = async () => {
+    if (copyLockRef.current) return;
+    copyLockRef.current = true;
+    setCopyStatus("pending");
+    try {
+      await navigator.clipboard.writeText(body.replace(/\n$/, ""));
+      setCopyStatus("success");
+    } catch {
+      setCopyStatus("error");
+    } finally {
+      copyLockRef.current = false;
+    }
+  };
+  const copyLabel = copyStatus === "pending" ? "Copying prompt…" : "Copy prompt";
   const prompt = useMemo(() => normalizeKenPrompt(body), [body]);
 
   const focusAction = useCallback(
@@ -359,19 +375,45 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
               <Plus size={14} aria-hidden="true" />
               New session
             </button>
-            <button
-              ref={saveButtonRef}
-              type="button"
-              className="ken-prompt-action"
-              aria-expanded={saveDraft !== null}
-              aria-controls={`${panelId}-save`}
-              onClick={() => void prepareSave()}
-              disabled={disabled}
-            >
-              <FilePlus2 size={14} aria-hidden="true" />
-              Save to Notes
-            </button>
+            <div className="ken-prompt-local-actions">
+              <button
+                ref={saveButtonRef}
+                type="button"
+                className="ken-prompt-action"
+                aria-expanded={saveDraft !== null}
+                aria-controls={`${panelId}-save`}
+                onClick={() => void prepareSave()}
+                disabled={disabled}
+              >
+                <FilePlus2 size={14} aria-hidden="true" />
+                Save to Notes
+              </button>
+              <button
+                type="button"
+                className="ken-prompt-action ken-prompt-copy"
+                aria-label={copyLabel}
+                title={copyLabel}
+                disabled={copyStatus === "pending"}
+                onClick={() => void copyPrompt()}
+              >
+                {copyStatus === "success" ? (
+                  <Check size={14} aria-hidden="true" />
+                ) : (
+                  <Copy size={14} aria-hidden="true" />
+                )}
+              </button>
+            </div>
           </div>
+          {copyStatus === "success" && (
+            <p className="ken-prompt-success" role="status">
+              Prompt copied.
+            </p>
+          )}
+          {copyStatus === "error" && (
+            <div className="ken-prompt-error" role="alert">
+              Could not copy prompt. Try Copy again or select the prompt text manually.
+            </div>
+          )}
 
           {saveDraft && (
             <div

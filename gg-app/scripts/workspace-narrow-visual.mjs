@@ -14,6 +14,10 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "../..");
 const defaultOutputDir = resolve(projectRoot, ".gg/screenshots");
+const promptBodies = [
+  "  Implement café 日本語\n\n    Preserve indentation",
+  "Second independent prompt\n" + "Full source content. ".repeat(80),
+];
 const appUrl = requireVisualFixtureUrl(process.env.GG_SHOT_URL ?? "http://localhost:1420");
 
 function assertContained(metrics, containerName, childName) {
@@ -92,6 +96,13 @@ export async function runWorkspaceNarrowVisualFixture({
       responses: {
         ...responses,
         agent_state: astraVisualScenarios[0].state,
+        agent_history: {
+          history: promptBodies.map((text) => ({
+            role: "assistant",
+            ken: true,
+            text: `\`\`\`prompt\n${text}\n\`\`\``,
+          })),
+        },
         agent_sessions: { sessions: [] },
         agent_pane_restore: 1,
         agent_pane_status: { paneId: "primary", generation: 1, ready: true },
@@ -138,7 +149,7 @@ export async function runWorkspaceNarrowVisualFixture({
         footerControls: ".footer-right",
         astraControls: ".astra-control-group",
         contextSelector: 'select[aria-label="OpenAI Codex context profile"]',
-        fastSwitch: '[role="switch"][aria-label="Fast · 2.5× credits"]',
+        fastSwitch: '.astra-fast-toggle[role="switch"]',
         contextMeter: ".ctx-meter",
       });
       assert.equal(metrics.viewport.clientWidth, 320);
@@ -167,6 +178,207 @@ export async function runWorkspaceNarrowVisualFixture({
       }
     }
 
+    const copyEvidence = [];
+    const accessibilityEvidence = [];
+    await page.evaluate(() => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (command === "agent_set_openai_codex_fast")
+          return Promise.resolve({ openAICodexFast: args.enabled });
+        return invoke(command, args);
+      };
+    });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(() => {
+      const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = (text) => {
+        window.__copiedSource = text;
+        return write(text);
+      };
+    });
+    for (const width of [1440, 320]) {
+      await page.setViewportSize({ width, height: width === 320 ? 700 : 900 });
+      for (const scenario of astraVisualScenarios
+        .filter((entry) => entry.controls === "enabled")
+        .slice(0, 2)) {
+        await applyAstraScenario(page, scenario);
+        await assertAstraVisualState(page, scenario);
+        await page.locator(".astra-fast-toggle").hover();
+        if (screenshot) {
+          const output = resolve(outputDir, `prompt-fast-${scenario.name}-${width}.png`);
+          await page.screenshot({ path: output });
+          screenshots.push(output);
+        }
+      }
+      const fast = page.locator(".astra-fast-toggle");
+      await fast.focus();
+      await page.keyboard.press("Space");
+      await page.waitForFunction(
+        () =>
+          document.querySelector(".astra-fast-toggle")?.getAttribute("aria-checked") === "false" &&
+          !document.querySelector(".astra-fast-toggle")?.disabled,
+      );
+      // Disabling the switch while its mutation settles drops native focus.
+      await fast.focus();
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(
+        () => document.querySelector(".astra-fast-toggle")?.getAttribute("aria-checked") === "true",
+      );
+      await fast.hover();
+      assert.equal(
+        await fast.getAttribute("title"),
+        "Fast mode is on. Uses 2.5× credits. Click to turn off.",
+      );
+      const copies = page.getByRole("button", { name: "Copy prompt", exact: true });
+      assert.equal(await copies.count(), 2);
+      for (let index = 0; index < 2; index++) {
+        const copy = copies.nth(index);
+        await copy.scrollIntoViewIfNeeded();
+        const geometry = await copy.evaluate((button) => {
+          const save = button.previousElementSibling;
+          const a = save.getBoundingClientRect();
+          const b = button.getBoundingClientRect();
+          return {
+            sameRow: a.top === b.top,
+            gap: b.left - a.right,
+            width: b.width,
+            height: b.height,
+          };
+        });
+        assert.ok(geometry.sameRow && geometry.gap === 6);
+        assert.ok(geometry.width >= 30 && geometry.height >= 30);
+        await copy.evaluate((button) => button.previousElementSibling.focus());
+        await page.keyboard.press("Tab");
+        assert.equal(await copy.evaluate((button) => button === document.activeElement), true);
+        assert.equal(await copy.evaluate((button) => button.matches(":focus-visible")), true);
+        if (screenshot) {
+          const output = resolve(outputDir, `prompt-focus-${width}-${index}.png`);
+          await page.screenshot({ path: output });
+          screenshots.push(output);
+        }
+        await page.keyboard.press(index === 0 ? "Enter" : "Space");
+        await page.waitForFunction(
+          () => document.querySelectorAll(".ken-prompt-success").length > 0,
+        );
+        assert.equal(
+          // Windows clipboard round-trips LF as CRLF; verify exact API input separately.
+          (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
+          promptBodies[index],
+        );
+        assert.equal(await page.evaluate(() => window.__copiedSource), promptBodies[index]);
+        copyEvidence.push({ viewportWidth: width, index, ...geometry });
+      }
+      if (screenshot) {
+        const output = resolve(outputDir, `prompt-copy-success-${width}.png`);
+        await page.screenshot({ path: output });
+        screenshots.push(output);
+      }
+      await page.evaluate(() => {
+        window.__fixtureClipboard = navigator.clipboard;
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: () => Promise.reject(new Error("Fixture denied")) },
+        });
+      });
+      await copies.last().click();
+      await page.getByRole("alert").filter({ hasText: "Could not copy prompt" }).waitFor();
+      const contrast = await page.evaluate(() => {
+        const rgb = (value) =>
+          value
+            .match(/[\d.]+/g)
+            .slice(0, 3)
+            .map(Number);
+        const luminance = (color) =>
+          rgb(color)
+            .map((value) => {
+              const channel = value / 255;
+              return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+            })
+            .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+        return [
+          ".ken-prompt-copy",
+          ".ken-prompt-error",
+          ".ken-prompt-success",
+          ".astra-fast-toggle",
+        ].map((selector) => {
+          const element = document.querySelector(selector);
+          const foreground = getComputedStyle(element).color;
+          let ancestor = element;
+          while (
+            ancestor.parentElement &&
+            getComputedStyle(ancestor).backgroundColor === "rgba(0, 0, 0, 0)"
+          )
+            ancestor = ancestor.parentElement;
+          const background = getComputedStyle(ancestor).backgroundColor;
+          const a = luminance(foreground);
+          const b = luminance(background);
+          return {
+            selector,
+            foreground,
+            background,
+            ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
+          };
+        });
+      });
+      for (const sample of contrast)
+        assert.ok(
+          sample.ratio >= (sample.selector === ".ken-prompt-copy" ? 3 : 4.5),
+          JSON.stringify(sample),
+        );
+      accessibilityEvidence.push({ width, contrast });
+      if (screenshot) {
+        const output = resolve(outputDir, `prompt-copy-failure-${width}.png`);
+        await page.screenshot({ path: output });
+        screenshots.push(output);
+      }
+      await page.evaluate(() =>
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: window.__fixtureClipboard,
+        }),
+      );
+      await copies.last().click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: "Could not copy prompt" })
+        .waitFor({ state: "detached" });
+      await page.locator(".ken-prompt-body").last().click();
+      assert.equal(
+        await copies.last().evaluate((button) => button.matches(":focus-visible")),
+        false,
+      );
+      await page.emulateMedia({ reducedMotion: "reduce", forcedColors: "active" });
+      await copies.last().scrollIntoViewIfNeeded();
+      assert.equal(
+        await copies.last().evaluate((button) => getComputedStyle(button).transitionDuration),
+        "0s",
+      );
+      if (screenshot) {
+        const output = resolve(outputDir, `prompt-forced-colors-${width}.png`);
+        await page.screenshot({ path: output });
+        screenshots.push(output);
+      }
+      await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+      await page.evaluate(() => {
+        document.documentElement.style.zoom = "2";
+      });
+      await copies.last().scrollIntoViewIfNeeded();
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        ),
+        true,
+      );
+      if (screenshot) {
+        const output = resolve(outputDir, `prompt-zoom-200-${width}.png`);
+        await page.screenshot({ path: output });
+        screenshots.push(output);
+      }
+      await page.evaluate(() => {
+        document.documentElement.style.zoom = "";
+      });
+    }
+    await page.setViewportSize({ width: 320, height: 700 });
     const shell = scenarioShells[astraVisualScenarios[0].name];
     await page.click('.picker-head-actions button[aria-label*="notes" i]');
     await page.waitForSelector(".notes-tabs-scroll");
@@ -192,7 +404,7 @@ export async function runWorkspaceNarrowVisualFixture({
     }
     await context.close();
 
-    return { shell, scenarioShells, notes, screenshots };
+    return { shell, scenarioShells, notes, copyEvidence, accessibilityEvidence, screenshots };
   } finally {
     await browser.close();
   }

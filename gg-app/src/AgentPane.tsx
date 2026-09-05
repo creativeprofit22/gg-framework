@@ -4139,7 +4139,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       </select>
                     </label>
                     <button
-                      aria-label="Fast · 2.5× credits"
+                      aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
+                      title={
+                        state.openAICodexFast
+                          ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
+                          : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
+                      }
                       aria-checked={state.openAICodexFast}
                       className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
                       disabled={running || autopilotReviewing || astraControlsBusy}
@@ -4147,7 +4152,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       role="switch"
                       type="button"
                     >
-                      Fast · 2.5× credits
+                      Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
                     </button>
                   </span>
                   <FooterSep />

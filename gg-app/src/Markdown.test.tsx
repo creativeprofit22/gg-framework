@@ -12,7 +12,19 @@ import type {
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./agent", () => ({ openProjectPath: vi.fn() }));
 
-afterEach(() => cleanup());
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+afterEach(() => {
+  cleanup();
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else Reflect.deleteProperty(navigator, "clipboard");
+});
+
+function mockClipboard(writeText?: (text: string) => Promise<void>) {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: writeText ? { writeText } : undefined,
+  });
+}
 
 function promptMarkdown(prompt = "  Implement the exact prompt\r\n  Keep indentation  "): string {
   return `\`\`\`prompt\n${prompt}\n\`\`\``;
@@ -39,6 +51,73 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("Ken prompt actions", () => {
+  it("copies each complete source body independently and waits for clipboard success", async () => {
+    const pending = deferred<void>();
+    const write = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(undefined);
+    mockClipboard(write);
+    const dispatch = vi.fn();
+    const first = "  Keep indentation\n\n  Unicode 日本語 café\n" + "Long content ".repeat(400);
+    const second = "Second prompt\n    Different body";
+    render(
+      <KenPromptActionProvider value={{ dispatch, blockedReason: () => "Blocked" }}>
+        <Markdown>{`Surrounding prose\n\n${promptMarkdown(first)}\n\n${promptMarkdown(second)}`}</Markdown>
+      </KenPromptActionProvider>,
+    );
+    const copies = screen.getAllByRole("button", { name: "Copy prompt" });
+    expect(copies).toHaveLength(2);
+    for (const copy of copies) {
+      expect(copy.textContent).toBe("");
+      expect(copy.title).toBe("Copy prompt");
+      expect(copy.previousElementSibling?.textContent).toBe("Save to Notes");
+    }
+    fireEvent.click(copies[0]);
+    expect(write).toHaveBeenCalledWith(first);
+    expect(screen.queryByText("Prompt copied.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copying prompt…" })).toMatchObject({
+      disabled: true,
+      title: "Copying prompt…",
+    });
+    fireEvent.click(copies[0]);
+    expect(write).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve());
+    expect(screen.getByRole("status").textContent).toBe("Prompt copied.");
+    fireEvent.click(copies[1]);
+    await waitFor(() => expect(screen.getAllByText("Prompt copied.")).toHaveLength(2));
+    expect(write).toHaveBeenLastCalledWith(second);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["rejection", "missing", "throw"])(
+    "reports clipboard %s independently and retries through Copy",
+    async (failure) => {
+      mockClipboard(
+        failure === "missing"
+          ? undefined
+          : () => {
+              if (failure === "throw") throw new Error("denied");
+              return Promise.reject(new Error("denied"));
+            },
+      );
+      const dispatch = vi.fn(
+        async () =>
+          ({ status: "failed", action: "send-fresh", message: "Destination failed." }) as const,
+      );
+      renderPrompt(dispatch);
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      await screen.findByText("Destination failed.");
+      fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+      await screen.findByText(
+        "Could not copy prompt. Try Copy again or select the prompt text manually.",
+      );
+      expect(screen.getAllByRole("alert")).toHaveLength(2);
+      expect(screen.queryByText("Prompt copied.")).toBeNull();
+      mockClipboard(vi.fn().mockResolvedValue(undefined));
+      fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+      await screen.findByText("Prompt copied.");
+      expect(screen.getByRole("alert").textContent).toContain("Destination failed.");
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    },
+  );
   it("withholds controls until the prompt fence is complete", () => {
     const dispatch = vi.fn(async () => ({ status: "sent", session: "current" }) as const);
     const dispatcher: KenPromptActionDispatcher = { dispatch };
@@ -49,6 +128,7 @@ describe("Ken prompt actions", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy prompt" })).toBeNull();
 
     rerender(
       <KenPromptActionProvider value={dispatcher}>
@@ -97,7 +177,9 @@ describe("Ken prompt actions", () => {
       "Continue here",
       "New session",
       "Save to Notes",
+      "",
     ]);
+    expect(actions[3]?.getAttribute("aria-label")).toBe("Copy prompt");
     expect(actions[0]?.classList.contains("ken-prompt-send")).toBe(true);
     expect(actions[1]?.classList.contains("ken-prompt-action")).toBe(true);
     expect(actions[2]?.classList.contains("ken-prompt-action")).toBe(true);

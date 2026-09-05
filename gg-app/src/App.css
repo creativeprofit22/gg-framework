@@ -4126,6 +4126,22 @@ select {
     padding-inline-start: 0;
   }
 }
+.markdown .ken-prompt-local-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+.markdown .ken-prompt-local-actions .ken-prompt-action {
+  width: auto;
+  min-width: 30px;
+}
+.markdown .ken-prompt-local-actions .ken-prompt-copy {
+  flex: 0 0 30px;
+  width: 30px;
+  padding-inline: 0;
+  justify-content: center;
+}
 @media (prefers-reduced-motion: reduce) {
   .markdown .ken-prompt-send,
   .markdown .ken-prompt-action,

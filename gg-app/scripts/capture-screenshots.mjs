@@ -179,7 +179,15 @@ export async function assertAstraVisualState(page, scenario) {
   }
   await controls.waitFor();
   const contextSelector = controls.locator('select[aria-label="OpenAI Codex context profile"]');
-  const fastSwitch = controls.locator('[role="switch"][aria-label="Fast · 2.5× credits"]');
+  const fastLabel = `Fast ${scenario.state.openAICodexFast ? "on" : "off"} · 2.5× credits`;
+  const fastSwitch = controls.getByRole("switch", { name: fastLabel, exact: true });
+  assert.equal(await fastSwitch.textContent(), fastLabel);
+  assert.equal(
+    await fastSwitch.getAttribute("title"),
+    scenario.state.openAICodexFast
+      ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
+      : "Fast mode is off. Turn on to use Fast mode at 2.5× credits.",
+  );
   assert.equal(await contextSelector.inputValue(), scenario.state.openAICodexContextProfile);
   assert.equal(
     await fastSwitch.getAttribute("aria-checked"),

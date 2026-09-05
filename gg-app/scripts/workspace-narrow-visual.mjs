@@ -3,12 +3,18 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { initScript, responses } from "./capture-screenshots.mjs";
+import {
+  astraVisualScenarios,
+  assertAstraVisualState,
+  initScript,
+  requireVisualFixtureUrl,
+  responses,
+} from "./capture-screenshots.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "../..");
 const defaultOutputDir = resolve(projectRoot, ".gg/screenshots");
-const appUrl = process.env.GG_SHOT_URL ?? "http://localhost:1420";
+const appUrl = requireVisualFixtureUrl(process.env.GG_SHOT_URL ?? "http://localhost:1420");
 
 function assertContained(metrics, containerName, childName) {
   const container = metrics[containerName];
@@ -44,14 +50,40 @@ async function elementMetrics(page, selectors) {
   }, selectors);
 }
 
+async function applyAstraScenario(page, scenario) {
+  const { accountId, contextTokens, contextWindow, openAICodexContextProfile, openAICodexFast } =
+    scenario.state;
+  await page.evaluate(
+    ({ extras, running }) => {
+      window.__ggEmit?.("run_end", {});
+      window.__ggEmit?.("extras", extras);
+      if (running) window.__ggEmit?.("run_start", {});
+    },
+    {
+      extras: {
+        accountId,
+        contextTokens,
+        contextWindow,
+        openAICodexContextProfile,
+        openAICodexFast,
+      },
+      running: scenario.controls === "disabled",
+    },
+  );
+  await page.waitForTimeout(150);
+}
+
 export async function runWorkspaceNarrowVisualFixture({
   outputDir = defaultOutputDir,
   screenshot = true,
   url = appUrl,
 } = {}) {
+  const fixtureUrl = requireVisualFixtureUrl(url);
   if (screenshot) await mkdir(outputDir, { recursive: true });
-  const browser = await chromium.launch();
+  // Headless Chromium creates no visible OS window; the native app is never launched.
+  const browser = await chromium.launch({ headless: true });
   try {
+    // newContext is an isolated, non-persistent profile with no production app data.
     const context = await browser.newContext({
       viewport: { width: 320, height: 700 },
       deviceScaleFactor: 2,
@@ -59,6 +91,8 @@ export async function runWorkspaceNarrowVisualFixture({
     await context.addInitScript(initScript, {
       responses: {
         ...responses,
+        agent_state: astraVisualScenarios[0].state,
+        agent_sessions: { sessions: [] },
         agent_pane_restore: 1,
         agent_pane_status: { paneId: "primary", generation: 1, ready: true },
       },
@@ -83,31 +117,57 @@ export async function runWorkspaceNarrowVisualFixture({
       );
     });
     const page = await context.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(".chat-head-nav");
     await page.waitForTimeout(1_000);
 
-    const shell = await elementMetrics(page, {
-      viewport: "html",
-      workspace: ".workspace-grid",
-      pane: ".workspace-pane-slot",
-      agentPane: ".agent-pane",
-      header: ".chat-head",
-      headerNav: ".chat-head-nav",
-      headerActions: ".chat-head-nav .picker-head-actions",
-    });
-    assert.equal(shell.viewport.clientWidth, 320);
-    assert.equal(shell.viewport.scrollWidth, 320);
-    assert.equal(shell.workspace.clientWidth, 320);
-    assertContained(shell, "workspace", "pane");
-    assertContained(shell, "pane", "agentPane");
-    assertContained(shell, "pane", "header");
-    assertContained(shell, "header", "headerNav");
-    assertContained(shell, "headerNav", "headerActions");
+    const scenarioShells = {};
+    const screenshots = [];
+    for (const [index, scenario] of astraVisualScenarios.entries()) {
+      await applyAstraScenario(page, scenario);
+      await assertAstraVisualState(page, scenario);
+      const metrics = await elementMetrics(page, {
+        viewport: "html",
+        workspace: ".workspace-grid",
+        pane: ".workspace-pane-slot",
+        agentPane: ".agent-pane",
+        header: ".chat-head",
+        headerNav: ".chat-head-nav",
+        headerActions: ".chat-head-nav .picker-head-actions",
+        footer: ".footer",
+        footerControls: ".footer-right",
+        astraControls: ".astra-control-group",
+        contextSelector: 'select[aria-label="OpenAI Codex context profile"]',
+        fastSwitch: '[role="switch"][aria-label="Fast · 2.5× credits"]',
+        contextMeter: ".ctx-meter",
+      });
+      assert.equal(metrics.viewport.clientWidth, 320);
+      assert.equal(metrics.viewport.scrollWidth, 320);
+      assert.equal(metrics.workspace.clientWidth, 320);
+      assertContained(metrics, "workspace", "pane");
+      assertContained(metrics, "pane", "agentPane");
+      assertContained(metrics, "pane", "header");
+      assertContained(metrics, "header", "headerNav");
+      assertContained(metrics, "headerNav", "headerActions");
+      assertContained(metrics, "pane", "footer");
+      assertContained(metrics, "footer", "footerControls");
+      assertContained(metrics, "footerControls", "contextMeter");
+      if (scenario.controls !== "hidden") {
+        assertContained(metrics, "footerControls", "astraControls");
+        assertContained(metrics, "astraControls", "contextSelector");
+        assertContained(metrics, "astraControls", "fastSwitch");
+      }
+      scenarioShells[scenario.name] = metrics;
 
-    const shellScreenshot = resolve(outputDir, "workspace-shell-320.png");
-    if (screenshot) await page.screenshot({ path: shellScreenshot });
+      if (screenshot) {
+        const name = index === 0 ? "workspace-shell-320.png" : `workspace-${scenario.name}-320.png`;
+        const output = resolve(outputDir, name);
+        await page.screenshot({ path: output });
+        screenshots.push(output);
+      }
+    }
 
+    const shell = scenarioShells[astraVisualScenarios[0].name];
     await page.click('.picker-head-actions button[aria-label*="notes" i]');
     await page.waitForSelector(".notes-tabs-scroll");
     await page.waitForTimeout(300);
@@ -125,15 +185,14 @@ export async function runWorkspaceNarrowVisualFixture({
       `Notes tabs should scroll locally: clientWidth=${notes.tabsViewport.clientWidth}, scrollWidth=${notes.tabsViewport.scrollWidth}`,
     );
 
-    const notesScreenshot = resolve(outputDir, "workspace-notes-tabs-320.png");
-    if (screenshot) await page.screenshot({ path: notesScreenshot });
+    if (screenshot) {
+      const notesScreenshot = resolve(outputDir, "workspace-notes-tabs-320.png");
+      await page.screenshot({ path: notesScreenshot });
+      screenshots.push(notesScreenshot);
+    }
     await context.close();
 
-    return {
-      shell,
-      notes,
-      screenshots: screenshot ? [shellScreenshot, notesScreenshot] : [],
-    };
+    return { shell, scenarioShells, notes, screenshots };
   } finally {
     await browser.close();
   }

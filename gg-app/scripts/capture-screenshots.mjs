@@ -13,6 +13,7 @@
  *
  * Output: docs/screenshots/*.png (referenced by the root README).
  */
+import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -22,7 +23,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const outDir = resolve(here, "../../docs/screenshots");
 // Individual quadrants for the 4-up composite. Intermediate, not committed.
 const tileDir = resolve(outDir, ".tiles");
-const url = process.env.GG_SHOT_URL ?? "http://localhost:1420";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+export function requireVisualFixtureUrl(value) {
+  const parsed = new URL(value);
+  if (!["http:", "https:"].includes(parsed.protocol) || !LOOPBACK_HOSTS.has(parsed.hostname)) {
+    throw new Error(`Visual fixtures require a loopback URL, received ${value}`);
+  }
+  return parsed.href;
+}
+
+const url = requireVisualFixtureUrl(process.env.GG_SHOT_URL ?? "http://localhost:1420");
 const viewport = { width: 1440, height: 900 };
 
 // ── Demo data ────────────────────────────────────────────────────────────────
@@ -54,6 +65,7 @@ const state = {
   thinkingLevel: "medium",
   supportedThinkingLevels: ["low", "medium", "high"],
   planMode: false,
+  contextTokens: 48_210,
   contextWindow: 200000,
   gitBranch: "main",
   isGitRepo: true,
@@ -68,6 +80,114 @@ const state = {
   kenModelOverride: false,
   tasks: [],
 };
+
+const astraState = {
+  ...state,
+  provider: "openai",
+  model: "gpt-6-astra",
+  accountId: "fixture-account",
+  thinkingLevel: "low",
+  supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+};
+
+export const astraVisualScenarios = [
+  {
+    name: "astra-stable-fast-off",
+    state: {
+      ...astraState,
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 136_000,
+      contextWindow: 272_000,
+    },
+    controls: "enabled",
+  },
+  {
+    name: "astra-experimental-fast-on",
+    state: {
+      ...astraState,
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
+      contextTokens: 741_200,
+      contextWindow: 872_000,
+    },
+    controls: "enabled",
+  },
+  {
+    name: "astra-running-disabled",
+    state: {
+      ...astraState,
+      running: true,
+      runState: "running",
+      openAICodexContextProfile: "stable",
+      openAICodexFast: true,
+      contextTokens: 68_000,
+      contextWindow: 272_000,
+    },
+    controls: "disabled",
+  },
+  {
+    name: "astra-oauth-disconnected",
+    state: {
+      ...astraState,
+      accountId: null,
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 108_800,
+      contextWindow: 272_000,
+    },
+    controls: "hidden",
+  },
+  {
+    name: "astra-over-window",
+    state: {
+      ...astraState,
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 300_000,
+      contextWindow: 272_000,
+    },
+    controls: "enabled",
+  },
+];
+
+export async function assertAstraVisualState(page, scenario) {
+  const identity = page.locator(".footer-custom-build");
+  assert.equal(await identity.count(), 1);
+  assert.match((await identity.textContent()) ?? "", /^◆ Supah Coder Local Fork · [0-9a-f]{7}$/i);
+
+  const meter = page.locator('.ctx-meter[role="meter"]');
+  const calculatedPercent = Math.round(
+    (scenario.state.contextTokens / scenario.state.contextWindow) * 100,
+  );
+  const windowLabel = scenario.state.contextWindow === 872_000 ? "872K" : "272K";
+  const meterLabel = `Context used: ${scenario.state.contextTokens.toLocaleString("en-US")} / ${windowLabel} · ${calculatedPercent}%`;
+  await meter.waitFor();
+  await page.waitForFunction(
+    (expected) =>
+      document.querySelector('.ctx-meter[role="meter"]')?.getAttribute("aria-label") === expected,
+    meterLabel,
+  );
+  assert.equal(await meter.getAttribute("aria-label"), meterLabel);
+  assert.equal(Number(await meter.getAttribute("aria-valuenow")), Math.min(100, calculatedPercent));
+
+  const controls = page.locator(".astra-control-group");
+  if (scenario.controls === "hidden") {
+    await page.waitForFunction(() => !document.querySelector(".astra-control-group"));
+    assert.equal(await controls.count(), 0);
+    return;
+  }
+  await controls.waitFor();
+  const contextSelector = controls.locator('select[aria-label="OpenAI Codex context profile"]');
+  const fastSwitch = controls.locator('[role="switch"][aria-label="Fast · 2.5× credits"]');
+  assert.equal(await contextSelector.inputValue(), scenario.state.openAICodexContextProfile);
+  assert.equal(
+    await fastSwitch.getAttribute("aria-checked"),
+    String(scenario.state.openAICodexFast),
+  );
+  assert.equal(await contextSelector.isDisabled(), scenario.controls === "disabled");
+  assert.equal(await fastSwitch.isDisabled(), scenario.controls === "disabled");
+}
 
 const authProviders = [
   ["anthropic", "Anthropic", "Claude models", true],
@@ -472,6 +592,18 @@ const shots = [
     actions: [{ click: "text=Login to AI Providers" }, { click: "text=Local models" }],
     settle: 1200,
   },
+  ...astraVisualScenarios.map((scenario, index) => ({
+    name: `${String(index + 7).padStart(2, "0")}-${scenario.name}`,
+    actions: INTO_SESSION,
+    responses: {
+      agent_state: scenario.state,
+      agent_sessions: { sessions: [] },
+      agent_pane_restore: 1,
+      agent_pane_status: { paneId: "primary", generation: 1, ready: true },
+    },
+    settle: 700,
+    verify: (page) => assertAstraVisualState(page, scenario),
+  })),
   // NOTE: no model-picker shot. On macOS `ModelSelect` renders a native <select>
   // popup, which is an OS-level window Chromium cannot capture.
 ];
@@ -713,7 +845,8 @@ async function captureWindowGrid(browser) {
 
 async function main() {
   await mkdir(outDir, { recursive: true });
-  const browser = await chromium.launch();
+  // Headless Chromium creates no visible OS window; the native app is never launched.
+  const browser = await chromium.launch({ headless: true });
   const results = [await captureWindowGrid(browser)];
   for (const shot of shots) {
     const context = await browser.newContext({
@@ -740,6 +873,7 @@ async function main() {
     }
     if (shot.play) await shot.play(page);
     await page.waitForTimeout(shot.settle ?? 1000);
+    if (shot.verify) await shot.verify(page);
     // Opening a modal from a tile scrolls its container; reset so the screen
     // behind the modal is framed from the top rather than mid-scroll.
     if (!shot.play) {

@@ -1,3 +1,8 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
   configurationFingerprintV1Schema,
@@ -582,5 +587,358 @@ describe("route and execution boundaries", () => {
     expect(
       executionResultV1Schema.safeParse({ ...executionResult, status: "unknown" }).success,
     ).toBe(false);
+  });
+});
+
+describe("Phase 1 structural bloat audit", () => {
+  const root = fileURLToPath(new URL("../../../../../", import.meta.url));
+  const subject = "packages/ggcoder/src/core/programmatic/contracts.ts";
+  const git = (args: string[]) =>
+    execFileSync("git", ["--no-pager", ...args], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024,
+      shell: false,
+    });
+  const read = (name: string) => {
+    const absolute = realpathSync(path.resolve(root, name));
+    const relative = path.relative(realpathSync(root), absolute);
+    if (relative.startsWith("..") || path.isAbsolute(relative))
+      throw new Error("Outside workspace");
+    if (statSync(absolute).size > 2 * 1024 * 1024) throw new Error("Audit source exceeds 2 MiB");
+    return readFileSync(absolute, "utf8");
+  };
+  const parse = (name: string, text: string) =>
+    ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true);
+  const isAuditGroup = (node: ts.Node) =>
+    ts.isExpressionStatement(node) &&
+    ts.isCallExpression(node.expression) &&
+    node.expression.arguments.some(
+      (argument) =>
+        ts.isStringLiteral(argument) && argument.text === "Phase 1 structural bloat audit",
+    );
+  const referencedOutsideAudit = (
+    source: ts.SourceFile,
+    binding: ts.Node,
+    checker: ts.TypeChecker,
+  ) => {
+    const symbol = checker.getSymbolAtLocation(binding);
+    if (!symbol) return false;
+    let referenced = false;
+    const visit = (node: ts.Node) => {
+      if (ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === symbol)
+        referenced = true;
+      ts.forEachChild(node, visit);
+    };
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement) && !isAuditGroup(statement)) visit(statement);
+    }
+    return referenced;
+  };
+  const inferredSchema = (node: ts.TypeAliasDeclaration) => {
+    const type = node.type;
+    return ts.isTypeReferenceNode(type) &&
+      ts.isQualifiedName(type.typeName) &&
+      type.typeName.left.getText() === "z" &&
+      type.typeName.right.text === "infer" &&
+      type.typeArguments?.length === 1 &&
+      ts.isTypeQueryNode(type.typeArguments[0]!)
+      ? type.typeArguments[0]!.exprName.getText()
+      : undefined;
+  };
+  const surfaceIssues = (source: ts.SourceFile) =>
+    source.statements.flatMap((node): string[] => {
+      if (ts.isImportDeclaration(node)) {
+        return ts.isStringLiteral(node.moduleSpecifier) &&
+          ["node:path", "zod"].includes(node.moduleSpecifier.text)
+          ? []
+          : ["disallowed import"];
+      }
+      if (ts.isTypeAliasDeclaration(node)) return inferredSchema(node) ? [] : [node.name.text];
+      if (ts.isVariableStatement(node)) {
+        if (!(node.declarationList.flags & ts.NodeFlags.Const)) return ["mutable binding"];
+        return node.declarationList.declarations.flatMap((declaration) =>
+          declaration.initializer &&
+          ts.isArrowFunction(declaration.initializer) &&
+          !["boundedString", "boundedStringArray"].includes(declaration.name.getText(source))
+            ? ["unreviewed helper"]
+            : [],
+        );
+      }
+      if (ts.isFunctionDeclaration(node)) {
+        return node.name && ["isStrictlyAscending"].includes(node.name.text)
+          ? []
+          : ["unreviewed helper"];
+      }
+      return [ts.SyntaxKind[node.kind]];
+    });
+  const duplicateDeclarations = (source: ts.SourceFile, canonicalNames: Set<string>) =>
+    source.statements
+      .filter((node) => ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+      .filter((node) => canonicalNames.has(node.name.text))
+      .map((node) => node.name.text);
+  const variants = (names: string[]) =>
+    names.filter((name) =>
+      /(?:^|\/)contracts(?:[._ -](?:fix(?:ed)?|v\d+|copy|backup|old)|\s*\(\d+\))/i.test(name),
+    );
+  const unused = (
+    names: string[],
+    used: Set<string>,
+    fixtures: Set<string>,
+    retained: Set<string>,
+  ) => names.filter((name) => !used.has(name) && !(fixtures.has(name) && retained.has(name)));
+
+  it("detects unused exports, competing declarations, variants, and disallowed imports in memory", () => {
+    expect(
+      unused(
+        ["Live", "Dead", "Required"],
+        new Set(["Live"]),
+        new Set(["Required"]),
+        new Set(["Required"]),
+      ),
+    ).toEqual(["Dead"]);
+    expect(unused(["Required"], new Set(), new Set(), new Set(["Required"]))).toEqual(["Required"]);
+    expect(
+      duplicateDeclarations(
+        parse("consumer.ts", "interface InventoryV1 { entries: string[] }"),
+        new Set(["InventoryV1"]),
+      ),
+    ).toEqual(["InventoryV1"]);
+    expect(
+      variants([
+        "contracts.ts",
+        "contracts.test.ts",
+        "contracts_fix.ts",
+        "contracts.v2.ts",
+        "contracts copy.ts",
+        "contracts (1).ts",
+        "routes.ts",
+      ]),
+    ).toEqual(["contracts_fix.ts", "contracts.v2.ts", "contracts copy.ts", "contracts (1).ts"]);
+    expect(
+      surfaceIssues(
+        parse("contracts.ts", 'import fs from "node:fs"; export interface InventoryV1 {}'),
+      ),
+    ).toEqual(["disallowed import", "InterfaceDeclaration"]);
+    expect(
+      surfaceIssues(
+        parse(
+          "contracts.ts",
+          'import { z } from "zod"; export type InventoryV1 = { entries: string[] };',
+        ),
+      ),
+    ).toEqual(["InventoryV1"]);
+    expect(surfaceIssues(parse("contracts.ts", "const execute = () => 1;"))).toEqual([
+      "unreviewed helper",
+    ]);
+  });
+
+  it("resolves consumers, checks canonical schema types, and reports lookalikes for manual comparison", () => {
+    const config = ts.readConfigFile(
+      path.join(root, "packages/ggcoder/tsconfig.json"),
+      ts.sys.readFile,
+    );
+    expect(config.error).toBeUndefined();
+    const parsed = ts.parseJsonConfigFileContent(
+      config.config,
+      ts.sys,
+      path.join(root, "packages/ggcoder"),
+    );
+    expect(parsed.errors).toEqual([]);
+    const options = { ...parsed.options, noEmit: true };
+    const resolutionCache = ts.createModuleResolutionCache(
+      root,
+      (name) => (ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase()),
+      options,
+    );
+    const sourceNames = git([
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--",
+      "packages",
+      "gg-app/src",
+    ])
+      .split("\0")
+      .filter((name) => /\/src\/.*\.(?:ts|tsx)$/.test(name) && !name.includes("/node_modules/"));
+    expect(variants(sourceNames)).toEqual([]);
+    const absoluteSubject = path.resolve(root, subject);
+    const consumers = [...new Set(sourceNames)].filter((name) => {
+      if (name === subject) return false;
+      return ts.preProcessFile(read(name)).importedFiles.some(({ fileName }) => {
+        const resolved = ts.resolveModuleName(
+          fileName,
+          path.resolve(root, name),
+          options,
+          ts.sys,
+          resolutionCache,
+        ).resolvedModule;
+        return resolved && path.resolve(resolved.resolvedFileName) === absoluteSubject;
+      });
+    });
+    const program = ts.createProgram(
+      [absoluteSubject, ...consumers.map((name) => path.resolve(root, name))],
+      options,
+    );
+    const source = program.getSourceFile(absoluteSubject)!;
+    const checker = program.getTypeChecker();
+    // Only contract semantics and consumer syntax are in scope, not consumer dependency typechecking.
+    const diagnostics = [
+      ...program.getOptionsDiagnostics(),
+      ...program.getGlobalDiagnostics(),
+      ...program.getSemanticDiagnostics(source),
+      ...[subject, ...consumers].flatMap((name) =>
+        program.getSyntacticDiagnostics(program.getSourceFile(path.resolve(root, name))!),
+      ),
+    ];
+    expect(
+      diagnostics.map((item) => ts.flattenDiagnosticMessageText(item.messageText, "\n")),
+    ).toEqual([]);
+    expect(surfaceIssues(source)).toEqual([]);
+    const exports = checker.getExportsOfModule(checker.getSymbolAtLocation(source)!);
+    const canonicalNames = new Set(exports.map((symbol) => symbol.name));
+    for (const node of source.statements.filter(ts.isTypeAliasDeclaration)) {
+      const schema = inferredSchema(node);
+      expect(
+        source.statements.some(
+          (statement) =>
+            ts.isVariableStatement(statement) &&
+            statement.declarationList.declarations.some(
+              (declaration) => declaration.name.getText(source) === schema,
+            ),
+        ),
+        node.name.text,
+      ).toBe(true);
+    }
+    const used = new Set<string>();
+    const fixtureUses = new Set<string>();
+    const lookalikes: string[] = [];
+    for (const name of consumers) {
+      // Inspect current fixtures with symbol identity; audit-only references do not count.
+      const consumer = program.getSourceFile(path.resolve(root, name))!;
+      const destination = /\.(?:test|spec)\.tsx?$/.test(name) ? fixtureUses : used;
+      for (const node of consumer.statements) {
+        if (
+          (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+          node.moduleSpecifier &&
+          ts.isStringLiteral(node.moduleSpecifier)
+        ) {
+          const resolved = ts.resolveModuleName(
+            node.moduleSpecifier.text,
+            path.resolve(root, name),
+            options,
+            ts.sys,
+            resolutionCache,
+          ).resolvedModule;
+          if (!resolved || path.resolve(resolved.resolvedFileName) !== absoluteSubject) continue;
+          const bindings = ts.isImportDeclaration(node)
+            ? node.importClause?.namedBindings
+            : node.exportClause;
+          // Fail closed on a new barrel/namespace shape until its actual uses are reviewed.
+          expect(
+            bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)),
+            name,
+          ).toBe(true);
+          if (bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))) {
+            for (const binding of bindings.elements) {
+              const exportedName = (binding.propertyName ?? binding.name).text;
+              expect(canonicalNames.has(exportedName), `${name}: ${exportedName}`).toBe(true);
+              const symbol = checker.getSymbolAtLocation(binding.name);
+              expect(symbol, `${name}: ${exportedName}`).toBeDefined();
+              if (symbol && symbol.flags & ts.SymbolFlags.Alias)
+                expect(exports).toContain(checker.getAliasedSymbol(symbol));
+              if (
+                ts.isExportDeclaration(node) ||
+                referencedOutsideAudit(consumer, binding.name, checker)
+              )
+                destination.add(exportedName);
+            }
+          }
+        }
+      }
+      expect(duplicateDeclarations(consumer, canonicalNames), name).toEqual([]);
+      if (destination === used) {
+        for (const node of consumer.statements) {
+          if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+            lookalikes.push(
+              `${name}:${consumer.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${node.getText(consumer)}`,
+            );
+        }
+      }
+    }
+    // Exact public-schema requirements justify fixture-only surfaces, not speculative type aliases.
+    const requiredFixtures = {
+      repositoryRelativePathSchema: "normalized inventory/evidence/route path boundary",
+      scannerProfileV1Schema: "versioned scanner ID and specialist allowlist",
+      inventoryEntryV1Schema: "inventory path and content fingerprint",
+      evidenceLocationV1Schema: "bounded located evidence",
+      evidenceItemV1Schema: "evidence basis, severity and bounded message",
+      evidenceV1Schema: "versioned bounded evidence collection",
+      opportunityIdentityV1Schema: "stable opportunity identity",
+      routableOpportunityRouteV1Schema: "later discovery routable branch",
+      opportunityRouteV1Schema: "later discovery routable/unroutable union",
+      opportunityLifecycleV1Schema: "versioned lifecycle state",
+      programmaticLifecycleRecordV1Schema: "later lifecycle identity consistency",
+      opportunityTransitionV1Schema: "allowed lifecycle transitions",
+      routeEnvelopeV1Schema: "versioned bounded specialist route envelope",
+      executionResultV1Schema: "versioned execution outcome and evidence",
+    };
+    expect(
+      unused([...canonicalNames], used, fixtureUses, new Set(Object.keys(requiredFixtures))),
+    ).toEqual([]);
+    console.info(
+      "Fixture-only contract requirements:",
+      Object.entries(requiredFixtures).filter(([name]) => !used.has(name)),
+    );
+    // These bounded syntax/usage checks do not prove semantic uniqueness or overall design quality.
+    console.info("Consumer declarations requiring manual semantic comparison:", lookalikes);
+    const manifest = JSON.parse(read("packages/ggcoder/package.json")) as {
+      exports: Record<string, unknown>;
+    };
+    expect(Object.keys(manifest.exports).some((name) => name.includes("programmatic"))).toBe(false);
+    expect(
+      ts
+        .preProcessFile(read("packages/ggcoder/src/index.ts"))
+        .importedFiles.filter(({ fileName }) => fileName.includes("programmatic")),
+    ).toEqual([]);
+  }, 60_000);
+
+  it("counts real fixture references, not unused imports, shadowed names, or audit self-references", () => {
+    const fileName = path.resolve(root, "consumer.test.ts");
+    for (const [body, expected] of [
+      ["it('valid fixture', () => schema.parse({}));", true],
+      ["type Fixture = typeof schema;", true],
+      ["", false],
+      ["it('shadow', () => { const schema = { parse() {} }; schema.parse(); });", false],
+      ["describe('Phase 1 structural bloat audit', () => schema.parse({}));", false],
+      ["it('unrelated text', () => 'schema');", false],
+    ] as const) {
+      const source = parse(
+        fileName,
+        `import { exampleSchema as schema } from './contracts.js';\n${body}`,
+      );
+      const options = { noLib: true, noResolve: true };
+      const host = ts.createCompilerHost(options);
+      host.getSourceFile = (name) => (path.resolve(name) === fileName ? source : undefined);
+      const checker = ts.createProgram([fileName], options, host).getTypeChecker();
+      const declaration = source.statements.find(ts.isImportDeclaration)!;
+      const bindings = declaration.importClause!.namedBindings!;
+      expect(ts.isNamedImports(bindings)).toBe(true);
+      if (!ts.isNamedImports(bindings)) throw new Error("Expected named fixture import");
+      const referenced = referencedOutsideAudit(source, bindings.elements[0]!.name, checker);
+      expect(referenced, body).toBe(expected);
+      expect(
+        unused(
+          ["exampleSchema"],
+          new Set(),
+          new Set(referenced ? ["exampleSchema"] : []),
+          new Set(["exampleSchema"]),
+        ),
+        body,
+      ).toEqual(expected ? [] : ["exampleSchema"]);
+    }
   });
 });

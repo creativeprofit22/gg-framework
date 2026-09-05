@@ -181,7 +181,7 @@ export const routableOpportunityRouteV1Schema = z.strictObject({
   specialistCommand: specialistCommandSchema,
 });
 
-export const unroutableOpportunityRouteV1Schema = z.strictObject({
+const unroutableOpportunityRouteV1Schema = z.strictObject({
   status: z.literal("unroutable"),
 });
 
@@ -283,7 +283,7 @@ export const opportunityTransitionV1Schema = z
     message: "lifecycle transition is not allowed",
   });
 
-export const routeArgumentV1Schema = z.strictObject({
+const routeArgumentV1Schema = z.strictObject({
   name: stableIdSchema,
   value: boundedString(LIMITS.routeArgumentValueChars),
 });
@@ -295,7 +295,7 @@ const commandSourceSchema = z.enum(["built-in", "global-custom"]);
 const commandPortabilitySchema = z.enum(["bundled", "machine-local"]);
 const unavailableReasonSchema = z.enum(["missing", "wrong-owner", "ambiguous", "unsupported"]);
 
-export const availableCommandV1Schema = z.discriminatedUnion("portability", [
+const availableCommandV1Schema = z.discriminatedUnion("portability", [
   z.strictObject({
     status: z.literal("available"),
     source: z.literal("built-in"),
@@ -309,7 +309,7 @@ export const availableCommandV1Schema = z.discriminatedUnion("portability", [
   }),
 ]);
 
-export const unavailableCommandV1Schema = z
+const unavailableCommandV1Schema = z
   .strictObject({
     status: z.literal("unavailable"),
     reason: unavailableReasonSchema,
@@ -327,11 +327,6 @@ export const unavailableCommandV1Schema = z
       });
     }
   });
-
-export const commandAvailabilityV1Schema = z.union([
-  availableCommandV1Schema,
-  unavailableCommandV1Schema,
- ]);
 
 const routeArgumentArraySchema = z
   .array(routeArgumentV1Schema)
@@ -356,7 +351,7 @@ export const routeEnvelopeV1Schema = z.strictObject({
   availability: availableCommandV1Schema,
 });
 
-export const unroutableResolutionV1Schema = z.strictObject({
+const unroutableResolutionV1Schema = z.strictObject({
   version: versionSchema,
   status: z.literal("unroutable"),
   opportunityId: sha256Schema,
@@ -379,29 +374,18 @@ export const executionResultV1Schema = z.strictObject({
 });
 
 export type ConfigurationFingerprintV1 = z.infer<typeof configurationFingerprintV1Schema>;
-export type ScannerProfileV1 = z.infer<typeof scannerProfileV1Schema>;
 export type ProgrammaticProfileV1 = z.infer<typeof programmaticProfileV1Schema>;
 export type ProgrammaticProfileEnvelopeV1 = z.infer<typeof programmaticProfileEnvelopeV1Schema>;
 export type InventoryEntryV1 = z.infer<typeof inventoryEntryV1Schema>;
 export type InventoryV1 = z.infer<typeof inventoryV1Schema>;
-export type EvidenceLocationV1 = z.infer<typeof evidenceLocationV1Schema>;
-export type EvidenceItemV1 = z.infer<typeof evidenceItemV1Schema>;
-export type EvidenceV1 = z.infer<typeof evidenceV1Schema>;
 export type OpportunityIdentityV1 = z.infer<typeof opportunityIdentityV1Schema>;
-export type OpportunityRouteV1 = z.infer<typeof opportunityRouteV1Schema>;
 export type DiscoveredOpportunityV1 = z.infer<typeof discoveredOpportunityV1Schema>;
 export type OpportunityDiscoveryResultV1 = z.infer<typeof opportunityDiscoveryResultV1Schema>;
-export type OpportunityLifecycleV1 = z.infer<typeof opportunityLifecycleV1Schema>;
 export type ProgrammaticLifecycleRecordV1 = z.infer<typeof programmaticLifecycleRecordV1Schema>;
 export type ProgrammaticLifecycleStateV1 = z.infer<typeof programmaticLifecycleStateV1Schema>;
 export type ProgrammaticScanSummaryV1 = z.infer<typeof programmaticScanSummaryV1Schema>;
-export type OpportunityTransitionV1 = z.infer<typeof opportunityTransitionV1Schema>;
 export type RouteArgumentV1 = z.infer<typeof routeArgumentV1Schema>;
 export type AvailableCommandV1 = z.infer<typeof availableCommandV1Schema>;
 export type UnavailableCommandV1 = z.infer<typeof unavailableCommandV1Schema>;
-export type CommandAvailabilityV1 = z.infer<typeof commandAvailabilityV1Schema>;
-export type RouteEnvelopeV1 = z.infer<typeof routeEnvelopeV1Schema>;
-export type UnroutableResolutionV1 = z.infer<typeof unroutableResolutionV1Schema>;
 export type RouteResolutionV1 = z.infer<typeof routeResolutionV1Schema>;
 export type SpecialistCommand = z.infer<typeof specialistCommandSchema>;
-export type ExecutionResultV1 = z.infer<typeof executionResultV1Schema>;

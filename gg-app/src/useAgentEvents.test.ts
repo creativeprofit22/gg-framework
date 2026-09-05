@@ -174,7 +174,7 @@ describe("useAgentEvents", () => {
     });
   });
 
-  it("applies ready and extras as authoritative Astra state", () => {
+  it("applies live connect and disconnect extras as authoritative Astra state", () => {
     const { hook, getState, getContextTokens } = setup();
 
     act(() =>
@@ -212,6 +212,25 @@ describe("useAgentEvents", () => {
       contextWindow: 872_000,
     });
     expect(getContextTokens()).toBe(300_000);
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", {
+          accountId: null,
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+        }),
+      );
+    });
+    expect(getState()).toMatchObject({
+      accountId: null,
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 136_000,
+      contextWindow: 272_000,
+    });
+    expect(getContextTokens()).toBe(136_000);
   });
 
   it("applies pane-scoped Fast changes", () => {

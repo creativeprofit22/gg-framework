@@ -651,7 +651,15 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
 function parseMarkdownIntoBlocks(markdown: string): string[] {
   try {
     const tokens = marked.lexer(markdown);
-    return tokens.map((token) => token.raw);
+    return tokens.flatMap((token) => {
+      const end = promptClosingFenceEnd(token.raw);
+      // marked rejects trailing tabs that the renderer accepts on closing fences.
+      // Split there so later prompts cannot inherit this prompt's ready state.
+      if (end !== null && token.raw.slice(end).trim()) {
+        return [token.raw.slice(0, end), ...parseMarkdownIntoBlocks(token.raw.slice(end))];
+      }
+      return [token.raw];
+    });
   } catch {
     return [markdown];
   }
@@ -660,17 +668,24 @@ function parseMarkdownIntoBlocks(markdown: string): string[] {
 /**
  * Whether a marked block's raw text is a COMPLETE ```prompt fence (closing ```
  * present), as opposed to one still being streamed. marked auto-closes an open
- * fence into a code token at EOF, so a closed block's raw ends with ``` while a
- * still-streaming one ends with the body. This is what reveals Ken's "Send to GG
- * Coder" button the instant the prompt finishes, not when his whole reply ends.
+ * fence into a code token at EOF, so require a standalone closing line with at
+ * least as many backticks as the opener. This reveals the prompt actions when
+ * this prompt finishes, not when Ken's whole reply ends.
  */
 function isPromptBlockComplete(raw: string): boolean {
-  const t = raw.trim();
-  if (!/^`{3,}[ \t]*prompt\b/i.test(t)) return false;
-  const firstNewline = t.indexOf("\n");
-  if (firstNewline === -1) return false; // only the opening line so far
-  const body = t.slice(firstNewline + 1).trimEnd();
-  return /`{3,}\s*$/.test(body);
+  return promptClosingFenceEnd(raw) !== null;
+}
+
+function promptClosingFenceEnd(raw: string): number | null {
+  const opening = /^ {0,3}(`{3,})[ \t]*prompt\b[^\n]*\n/i.exec(raw);
+  if (!opening) return null;
+  const body = raw.slice(opening[0].length);
+  for (const closing of body.matchAll(/(?:^|\n) {0,3}(`{3,})[ \t]*(?=\n|$)/g)) {
+    if (closing[1].length >= opening[1].length) {
+      return opening[0].length + closing.index + closing[0].length;
+    }
+  }
+  return null;
 }
 
 const ANIMATED_PLUGINS = [rehypeHighlight, rehypeAnimateWords];
@@ -686,7 +701,7 @@ const MemoizedMarkdownBlock = memo(
     promptReady: boolean;
     animate: boolean;
   }): React.ReactElement {
-    const normalized = content.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, "");
+    const normalized = content.replace(/^\n+|\n+$/g, "");
     return (
       <PromptReadyContext.Provider value={promptReady}>
         <ReactMarkdown

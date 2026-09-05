@@ -87,6 +87,24 @@ describe("Ken prompt actions", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("preserves literal backslash-n text and real newlines when rendering and copying a Ken prompt", async () => {
+    const body = '  Keep literal \\n text and "\\n" unchanged\n\n    Real newline: 日本語 café';
+    const write = vi.fn().mockResolvedValue(undefined);
+    mockClipboard(write);
+    const dispatch = vi.fn();
+    const { container } = render(
+      <KenPromptActionProvider value={{ dispatch }}>
+        <Markdown>{promptMarkdown(body)}</Markdown>
+      </KenPromptActionProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await screen.findByText("Prompt copied.");
+    expect.soft(container.querySelector(".ken-prompt-body")?.textContent).toBe(body);
+    expect(write).toHaveBeenCalledExactlyOnceWith(body);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it.each(["rejection", "missing", "throw"])(
     "reports clipboard %s independently and retries through Copy",
     async (failure) => {
@@ -139,6 +157,78 @@ describe("Ken prompt actions", () => {
     expect(screen.getByRole("button", { name: "New session" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save to Notes" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "More actions" })).toBeNull();
+  });
+
+  it.each([
+    ["inline backticks", "```prompt\nStill streaming ```", "Still streaming ```", "```"],
+    ["shorter fence", "````prompt\nStill streaming\n```", "Still streaming\n```", "````"],
+    ["indented fence", "```prompt\nStill streaming\n    ```", "Still streaming\n    ```", "```"],
+    ["trailing text", "```prompt\nStill streaming\n``` more", "Still streaming\n``` more", "```"],
+  ])(
+    "withholds every action for %s until an explicit closing fence arrives",
+    async (_, partial, body, closing) => {
+      const write = vi.fn().mockResolvedValue(undefined);
+      mockClipboard(write);
+      const dispatch = vi.fn(async () => ({ status: "sent", session: "current" }) as const);
+      const dispatcher: KenPromptActionDispatcher = { dispatch };
+      const { rerender } = render(
+        <KenPromptActionProvider value={dispatcher}>
+          <Markdown>{partial}</Markdown>
+        </KenPromptActionProvider>,
+      );
+      const actions = ["Continue here", "New session", "Save to Notes", "Copy prompt"];
+      for (const name of actions) expect(screen.queryByRole("button", { name })).toBeNull();
+      expect(write).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+
+      rerender(
+        <KenPromptActionProvider value={dispatcher}>
+          <Markdown>{`${partial}\n${closing}`}</Markdown>
+        </KenPromptActionProvider>,
+      );
+      for (const name of actions) expect(screen.getByRole("button", { name })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+      await screen.findByText("Prompt copied.");
+      expect(write).toHaveBeenCalledExactlyOnceWith(body);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["matching longer fence", "````prompt", "````"],
+    ["longer closing fence", "```prompt", "`````"],
+    ["allowed indentation and whitespace", "   ```prompt", "   ``` \t"],
+  ])("keeps actions ready after a %s while later text streams", async (_, opening, closing) => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    mockClipboard(write);
+    const dispatch = vi.fn(async () => ({ status: "sent", session: "current" }) as const);
+    const dispatcher: KenPromptActionDispatcher = { dispatch };
+    const complete = `${opening}\nComplete 日本語\n${closing}\n\n`;
+    const { rerender } = render(
+      <KenPromptActionProvider value={dispatcher}>
+        <Markdown>{`${complete}Ongoing prose`}</Markdown>
+      </KenPromptActionProvider>,
+    );
+    for (const tail of [
+      "Ongoing prose continues",
+      "Ongoing prose continues\n\n```prompt\nStill streaming ```",
+    ]) {
+      for (const name of ["Continue here", "New session", "Save to Notes", "Copy prompt"]) {
+        expect(screen.getAllByRole("button", { name })).toHaveLength(1);
+      }
+      rerender(
+        <KenPromptActionProvider value={dispatcher}>
+          <Markdown>{complete + tail}</Markdown>
+        </KenPromptActionProvider>,
+      );
+    }
+    for (const name of ["Continue here", "New session", "Save to Notes", "Copy prompt"]) {
+      expect(screen.getAllByRole("button", { name })).toHaveLength(1);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await screen.findByText("Prompt copied.");
+    expect(write).toHaveBeenCalledExactlyOnceWith("Complete 日本語");
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("continues with the one normalized prompt while leaving unrelated actions available", async () => {

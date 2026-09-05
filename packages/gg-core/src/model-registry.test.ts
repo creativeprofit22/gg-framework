@@ -116,8 +116,36 @@ describe("getFastModel", () => {
 });
 
 describe("model registry context windows", () => {
+  it("registers Astra as the OpenAI default and retires only GPT-5.5", () => {
+    expect(getDefaultModel("openai")).toMatchObject({
+      id: "gpt-6-astra",
+      contextWindow: 1_050_000,
+      codexContextWindow: 272_000,
+      maxOutputTokens: 128_000,
+      supportsImages: true,
+    });
+    expect(getModel("gpt-5.5")).toBeUndefined();
+    expect(getModelsForProvider("openai").map((model) => model.id)).not.toContain("gpt-5.5");
+  });
+
+  it("preserves every GPT-5.6 model's stable limits", () => {
+    expect(
+      getModelsForProvider("openai")
+        .filter((model) => model.id.startsWith("gpt-5.6-"))
+        .map(({ id, codexContextWindow, maxOutputTokens }) => ({
+          id,
+          codexContextWindow,
+          maxOutputTokens,
+        })),
+    ).toEqual([
+      { id: "gpt-5.6-sol", codexContextWindow: 272_000, maxOutputTokens: 128_000 },
+      { id: "gpt-5.6-terra", codexContextWindow: 272_000, maxOutputTokens: 128_000 },
+      { id: "gpt-5.6-luna", codexContextWindow: 272_000, maxOutputTokens: 128_000 },
+    ]);
+  });
+
   it.each([
-    ["gpt-5.5", 1_050_000],
+    ["gpt-6-astra", 1_050_000],
     ["gpt-5.6-sol", 1_050_000],
     ["gpt-5.6-terra", 1_050_000],
     ["gpt-5.6-luna", 1_050_000],
@@ -126,11 +154,11 @@ describe("model registry context windows", () => {
   });
 
   it.each([
-    ["gpt-5.5", 272_000],
+    ["gpt-6-astra", 272_000],
     ["gpt-5.6-sol", 272_000],
     ["gpt-5.6-terra", 272_000],
     ["gpt-5.6-luna", 272_000],
-  ] as const)("uses the %s Codex product window for OpenAI OAuth", (model, limit) => {
+  ] as const)("uses the %s stable Codex product window for OpenAI OAuth", (model, limit) => {
     const options = { provider: "openai" as const, accountId: "acct_123" };
     expect(usesOpenAICodexTransport(options)).toBe(true);
     expect(getContextWindow(model, options)).toBe(limit);

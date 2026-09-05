@@ -949,7 +949,6 @@ async function runInkTUI(opts: {
     webSearch: true,
     messages,
     version: CLI_VERSION,
-    maxTokens: 16384,
     thinking: opts.thinkingLevel,
     apiKey: creds.accessToken,
     accountId: creds.accountId,

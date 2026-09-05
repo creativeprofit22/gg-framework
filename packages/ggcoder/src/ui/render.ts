@@ -45,7 +45,7 @@ export interface RenderAppConfig {
   tools: AgentTool[];
   webSearch?: boolean;
   messages: Message[];
-  maxTokens: number;
+  maxTokens?: number;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;

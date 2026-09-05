@@ -53,7 +53,12 @@ import type { ProcessManager } from "../core/process-manager.js";
 import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
+import {
+  getAuthStorageKeys,
+  getModel,
+  getVideoByteLimit,
+  resolveModelMaxTokens,
+} from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -207,7 +212,7 @@ export interface AppProps {
   tools: AgentTool[];
   webSearch?: boolean;
   messages: Message[];
-  maxTokens: number;
+  maxTokens?: number;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;
@@ -959,7 +964,7 @@ export function App(props: AppProps) {
       model: currentModel,
       tools: currentTools,
       webSearch: props.webSearch,
-      maxTokens: props.maxTokens,
+      maxTokens: resolveModelMaxTokens(currentModel, props.maxTokens),
       supportsImages: getModel(currentModel)?.supportsImages ?? true,
       supportsVideo: getModel(currentModel)?.supportsVideo ?? false,
       thinking: thinkingLevel,

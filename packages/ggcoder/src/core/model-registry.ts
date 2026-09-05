@@ -1,7 +1,7 @@
 // Provider-coupled defaults live in @kenkaiiii/gg-core. This app shim adds the
 // environment-defined Azure deployment without changing the shared registry.
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { MODELS, type ModelInfo } from "@kenkaiiii/gg-core/models";
+import { getModel, MODELS, type ModelInfo } from "@kenkaiiii/gg-core/models";
 import {
   AZURE_OPENAI_PROVIDER,
   resolveAzureOpenAIConfig,
@@ -74,5 +74,11 @@ export function registerConfiguredAzureModel(
 }
 
 registerConfiguredAzureModel();
+
+export function resolveModelMaxTokens(modelId: string, maxTokens?: number): number {
+  const modelMaxTokens = getModel(modelId)?.maxOutputTokens;
+  if (maxTokens) return modelMaxTokens ? Math.min(maxTokens, modelMaxTokens) : maxTokens;
+  return modelMaxTokens ?? 16_384;
+}
 
 export * from "@kenkaiiii/gg-core/models";

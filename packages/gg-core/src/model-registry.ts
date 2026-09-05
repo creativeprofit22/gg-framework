@@ -146,7 +146,20 @@ export const MODELS: ModelInfo[] = [
     costTier: "low",
     maxThinkingLevel: "high",
   },
-  // ── OpenAI (Codex) ─────────────────────────────────────
+  // ── OpenAI (Codex) ──────────────────────────────────────
+  {
+    id: "gpt-6-astra",
+    name: "GPT-6 Astra",
+    provider: "openai",
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "high",
+    maxThinkingLevel: "max",
+  },
   // GPT-5.6 family — three agentic coding tiers launched July 2026. The public
   // Responses API advertises a 1.05M context window; OpenAI's Codex product
   // catalog advertises 272K on the ChatGPT OAuth route (corrected from the
@@ -199,19 +212,6 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: false,
     costTier: "low",
     maxThinkingLevel: "max",
-  },
-  {
-    id: "gpt-5.5",
-    name: "GPT-5.5",
-    provider: "openai",
-    contextWindow: 1_050_000,
-    codexContextWindow: 272_000,
-    maxOutputTokens: 128_000,
-    supportsThinking: true,
-    supportsImages: true,
-    supportsVideo: false,
-    costTier: "high",
-    maxThinkingLevel: "xhigh",
   },
   // ── Sakana (Fugu) ──────────────────────────────────────
   // Sakana Fugu is a multi-agent system surfaced as a standard LLM via the
@@ -650,7 +650,7 @@ export function getVideoByteLimit(modelId: string): number | undefined {
 
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
-  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.6-sol")!;
+  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-6-astra")!;
   if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.3")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k3")!;
@@ -745,6 +745,7 @@ export function getDefaultThinkingLevel(
   options?: { baseUrl?: string },
 ): ThinkingLevel {
   const model = getModel(modelId);
+  if (model?.id === "gpt-6-astra") return "low";
   if (model?.id === "kimi-k3" && isKimiCodingEndpoint(options?.baseUrl)) return "high";
   return model?.maxThinkingLevel ?? "high";
 }

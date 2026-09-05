@@ -93,7 +93,7 @@ async function encodeCodexRequest(body: Record<string, unknown>): Promise<Encode
 }
 
 function usesResponsesLite(model: string): boolean {
-  return model.startsWith("gpt-5.6-");
+  return model === "gpt-6-astra" || model.startsWith("gpt-5.6-");
 }
 
 function outputTextKey(itemId: string | undefined, contentIndex: number | undefined): string {
@@ -153,7 +153,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
   body.reasoning = {
     // `ultra` is a client orchestration preset, not a Codex API effort.
-    effort: options.thinking === "ultra" ? "max" : (options.thinking ?? "none"),
+    effort:
+      options.thinking === "ultra"
+        ? "max"
+        : (options.thinking ?? (options.model === "gpt-6-astra" ? "low" : "none")),
     summary: "auto",
     ...(responsesLite ? { context: "all_turns" } : {}),
   };
@@ -222,7 +225,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     let hint: string | undefined;
     if (response.status === 400 && text.includes("not supported")) {
       if (options.model === "gpt-5.5-pro") {
-        hint = "Use gpt-5.5 instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
+        hint = "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
       } else {
         hint =
           "This model is not available through Codex for the authenticated account. " +
@@ -231,7 +234,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in the current OpenAI Codex catalog for this account. " +
-        "Switch to gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-5.5 via the model selector.";
+        "Switch to gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna via the model selector.";
     }
 
     throw new ProviderError("openai", message, {

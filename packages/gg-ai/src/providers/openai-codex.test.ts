@@ -547,6 +547,47 @@ describe("streamOpenAICodex", () => {
     });
   });
 
+  it("uses Responses-Lite and preserves Astra's default low and explicit max efforts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+
+    const fetchMock = vi.mocked(fetch);
+    for (const thinking of [undefined, "max"] as const) {
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "test-" + "key",
+        accountId: "acct",
+        thinking,
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+    }
+
+    const [defaultBody, maxBody] = fetchMock.mock.calls.map(([, init]) =>
+      JSON.parse(init?.body as string),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+    });
+    expect(defaultBody).toMatchObject({
+      parallel_tool_calls: false,
+      reasoning: { effort: "low", context: "all_turns" },
+    });
+    expect(maxBody.reasoning.effort).toBe("max");
+  });
+
   it("surfaces JSON detail fields from Codex HTTP errors", async () => {
     vi.stubGlobal(
       "fetch",
@@ -571,6 +612,48 @@ describe("streamOpenAICodex", () => {
       message: "Unsupported parameter: max_output_tokens",
       statusCode: 400,
       requestId: "req_123",
+    });
+  });
+
+  it("recommends Astra and GPT-5.6 models for unavailable Codex selections", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "model not supported" } }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "model does not exist" } }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const unavailablePro = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-5.5-pro",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "key",
+      accountId: "acct",
+    });
+    await expect(unavailablePro.response).rejects.toMatchObject({
+      hint: "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.",
+    });
+
+    const missingModel = streamOpenAICodex({
+      provider: "openai",
+      model: "removed-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "key",
+      accountId: "acct",
+    });
+    await expect(missingModel.response).rejects.toMatchObject({
+      hint:
+        "This model is not in the current OpenAI Codex catalog for this account. " +
+        "Switch to gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna via the model selector.",
     });
   });
 

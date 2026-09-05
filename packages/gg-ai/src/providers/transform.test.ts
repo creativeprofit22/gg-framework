@@ -674,7 +674,9 @@ describe("toAnthropicThinking", () => {
 });
 
 describe("toOpenAIReasoningEffort", () => {
-  it("clamps client-only max and ultra levels to OpenAI's xhigh effort", () => {
+  it("preserves Astra max while retaining existing model mappings", () => {
+    expect(toOpenAIReasoningEffort("max", "gpt-6-astra")).toBe("max");
+    expect(toOpenAIReasoningEffort("max", "gpt-5.6-sol")).toBe("xhigh");
     expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
     expect(toOpenAIReasoningEffort("ultra", "gpt-5.6-sol")).toBe("xhigh");
   });

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { clearRuntimeModels, registerRuntimeModels } from "./model-registry.js";
+import {
+  clearRuntimeModels,
+  getDefaultThinkingLevel,
+  registerRuntimeModels,
+} from "./model-registry.js";
 import {
   getNextThinkingLevel,
   getSupportedThinkingLevels,
@@ -8,12 +12,21 @@ import {
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
 
 describe("thinking-level helpers", () => {
-  it("cycles OpenAI GPT models through supported reasoning efforts", () => {
-    expect(getSupportedThinkingLevels("openai", "gpt-5.5")).toEqual(["medium", "high", "xhigh"]);
-    expect(getNextThinkingLevel("openai", "gpt-5.5", undefined)).toBe("medium");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "medium")).toBe("high");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "xhigh")).toBeUndefined();
+  it("cycles Astra through its exact reasoning ladder from the low default", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getDefaultThinkingLevel("gpt-6-astra")).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "low")).toBe("medium");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "medium")).toBe("high");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBeUndefined();
   });
 
   it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {

@@ -988,7 +988,8 @@ export function toGlmReasoningEffort(
 export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
   model: string,
-): "low" | "medium" | "high" | "xhigh" {
+): "low" | "medium" | "high" | "xhigh" | "max" {
+  if (model === "gpt-6-astra" && level === "max") return "max";
   const effort = level === "max" || level === "ultra" ? "xhigh" : level;
   // Sakana Fugu models reject any effort other than "high"/"xhigh", so floor a
   // lower manual selection up to "high" rather than letting the API 400.

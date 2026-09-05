@@ -2,6 +2,13 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
+const OPENAI_ASTRA_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -151,9 +158,12 @@ export function getSupportedThinkingLevels(
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
   const identity = resolvedModelIdentity(model);
-  const levels = identity.startsWith("gpt-5.6-")
-    ? OPENAI_GPT_56_THINKING_LEVELS
-    : OPENAI_GPT_THINKING_LEVELS;
+  const levels =
+    identity === "gpt-6-astra"
+      ? OPENAI_ASTRA_THINKING_LEVELS
+      : identity.startsWith("gpt-5.6-")
+        ? OPENAI_GPT_56_THINKING_LEVELS
+        : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);
   if (maxIndex === -1) return ["medium"];
   return levels.slice(0, maxIndex + 1);

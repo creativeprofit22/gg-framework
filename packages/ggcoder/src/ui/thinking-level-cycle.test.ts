@@ -6,18 +6,26 @@ import {
 } from "./thinking-level.js";
 
 describe("getNextThinkingLevel", () => {
-  it("cycles OpenAI GPT models through medium, high, xhigh, then off", () => {
-    expect(getNextThinkingLevel("openai", "gpt-5.5", undefined)).toBe("medium");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "medium")).toBe("high");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "xhigh")).toBeUndefined();
+  it("cycles Astra through low, medium, high, xhigh, max, then off", () => {
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "low")).toBe("medium");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "medium")).toBe("high");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBeUndefined();
   });
 
-  it("recognizes every OpenAI GPT cycle level as supported", () => {
-    expect(getSupportedThinkingLevels("openai", "gpt-5.5")).toEqual(["medium", "high", "xhigh"]);
-    expect(isThinkingLevelSupported("openai", "gpt-5.5", "medium")).toBe(true);
-    expect(isThinkingLevelSupported("openai", "gpt-5.5", "high")).toBe(true);
-    expect(isThinkingLevelSupported("openai", "gpt-5.5", "xhigh")).toBe(true);
+  it("recognizes every Astra cycle level as supported", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "low")).toBe(true);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "high")).toBe(true);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "max")).toBe(true);
   });
 
   it("cycles Anthropic adaptive models through low, medium, high, xhigh, max, then off", () => {

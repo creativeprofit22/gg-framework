@@ -6174,7 +6174,7 @@ ${checkpoints}`;
         const result = await runContextProfileRequest({
           body,
           state: session.getState(),
-          running,
+          running: running || runClaim.active || autopilotActive || runLifecycle.running,
           activeUsage: session.getContextUsage().used,
           mutations: sessionMutations,
           switchProfile: (nextProfile) => session.switchOpenAICodexContextProfile(nextProfile),
@@ -6201,7 +6201,7 @@ ${checkpoints}`;
         const result = await runOpenAICodexFastRequest({
           body,
           state: session.getState(),
-          running,
+          running: running || runClaim.active || autopilotActive || runLifecycle.running,
           mutations: sessionMutations,
           switchFast: (enabled) => session.switchOpenAICodexFast(enabled),
         });

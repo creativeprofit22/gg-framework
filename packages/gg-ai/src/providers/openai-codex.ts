@@ -31,7 +31,7 @@ import {
 } from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
-const CODEX_CLIENT_VERSION = "0.144.1";
+const CODEX_CLIENT_VERSION = "0.153.4";
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
 // hit the backend's finite Envoy retry buffer.
@@ -156,11 +156,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     body.temperature = options.temperature;
   }
   body.reasoning = {
+    // GPT-5.6/6 require at least low; older models still support thinking off.
+    // Apply the floor here for every caller, including one-off prompt rewrites.
     // `ultra` is a client orchestration preset, not a Codex API effort.
     effort:
-      options.thinking === "ultra"
-        ? "max"
-        : (options.thinking ?? (options.model === "gpt-6-astra" ? "low" : "none")),
+      options.thinking === "ultra" ? "max" : (options.thinking ?? (responsesLite ? "low" : "none")),
     summary: "auto",
     ...(responsesLite ? { context: "all_turns" } : {}),
   };

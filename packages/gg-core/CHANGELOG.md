@@ -1,5 +1,39 @@
 # @kenkaiiii/gg-core
 
+## 5.55.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Update GPT-6 Astra's Codex client identity and remove GPT-5.5 from general model selection while retaining its private image-orchestration role.
+
+### Patch Changes
+
+- Updated dependencies [7ade77f]
+  - @kenkaiiii/gg-ai@5.55.0
+
+## 5.54.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra with Local Fork context-profile support and a `low` through `max` reasoning ladder.
+
+### Patch Changes
+
+- Updated dependencies [7ad7339]
+  - @kenkaiiii/gg-ai@5.54.0
+
 ## 5.53.3
 
 ### Patch Changes

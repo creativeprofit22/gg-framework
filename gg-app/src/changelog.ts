@@ -22,6 +22,30 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.59.1",
+    date: "2026-09-05",
+    items: [
+      "The `Prompt Enhancer` is back on `GPT-6 Astra` and the whole `GPT-5.6` family. OpenAI's newest models refuse to run with thinking fully off, which was bouncing the enhancer and blanking the screen. I gave them a proper reasoning floor, and if anything ever fails again your draft stays put with a clear message instead of a white window.",
+      "`Autopilot` on the new OpenAI models works again too, same fix. And the misleading warning that your ChatGPT account could not use a model is gone: I only show it when OpenAI actually says so.",
+    ],
+  },
+  {
+    version: "0.59.0",
+    date: "2026-09-05",
+    items: [
+      "`GPT-6 Astra` actually runs now. OpenAI quietly gates Astra behind a newer client handshake, so the first build got bounced with a cryptic error. I upgraded the handshake, and Astra answers on your ChatGPT login with reasoning from `low` through `max`. I also retired `GPT-5.5` from the picker so your OpenAI list is just the current lineup.",
+      "Error messages finally talk to you like an app, not a terminal. Every provider hint now tells you to use the model selector or update GG Coder, never to upgrade some CLI you have never seen. The `AI Providers` sign-in page lists the real models for every provider too, Astra and Fable 5.1 included.",
+      "Two chats compacting at the same moment on Windows could trip over each other. I fixed the lock so they take turns cleanly, and a real permission problem now surfaces instead of hanging forever.",
+    ],
+  },
+  {
+    version: "0.58.0",
+    date: "2026-09-05",
+    items: [
+      "`GPT-6 Astra` is here, the day OpenAI shipped it. Pick it from the model selector with your ChatGPT login for OpenAI's most capable model yet, with a stable `272K` memory or an explicit experimental `872K` profile and reasoning from low through `max`. I wired it into the same caching and streaming path as the 5.6 family, so it feels instant from the first message. Astra is still rolling out on OpenAI's side, so if your account is not in yet, GG Coder tells you plainly and points you at what works today.",
+    ],
+  },
+  {
     version: "0.57.5",
     date: "2026-09-04",
     items: [

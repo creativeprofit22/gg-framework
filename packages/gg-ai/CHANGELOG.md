@@ -1,5 +1,23 @@
 # @kenkaiiii/gg-ai
 
+## 5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Fix GPT-6 Astra on the ChatGPT OAuth route. OpenAI gates Astra on the Codex client version (`minimal_client_version: 0.153.0`); GG Coder now advertises `0.153.4`. Future client-version rejections now tell users to update or switch models.
+
+  Remove GPT-5.5 from general model selection and stale defaults while retaining its private image-orchestration role and historical compatibility labels.
+
+## 5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra (`gpt-6-astra`, released 2026-09-03) to the model registry — 1.05M context on the public Responses API, stable 272K or experimental 872K on ChatGPT OAuth, 128K output, text and image input, and the `low` through `max` reasoning ladder. Public Responses requests use `prompt_cache_options`; OAuth uses Responses-Lite.
+
 ## 5.53.3
 
 ## 5.53.2

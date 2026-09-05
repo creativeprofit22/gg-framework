@@ -1,5 +1,49 @@
 # @kenkaiiii/ggcoder
 
+## 5.55.1
+
+### Patch Changes
+
+- Fix Codex requests for GPT-5.6/GPT-6 models by defaulting omitted reasoning effort to `low` on Responses-Lite. Restrict account-access guidance to OpenAI's exact entitlement error, and validate prompt-enhancement input at the sidecar boundary before model invocation.
+  - @kenkaiiii/gg-ai@5.55.1
+  - @kenkaiiii/gg-agent@5.55.1
+  - @kenkaiiii/gg-core@5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Fix GPT-6 Astra on ChatGPT OAuth by advertising Codex client `0.153.4`. Remove GPT-5.5 from general selection and stale defaults while retaining its private image-orchestration role and historical compatibility labels.
+
+### Patch Changes
+
+- Updated dependencies [7ade77f]
+  - @kenkaiiii/gg-ai@5.55.0
+  - @kenkaiiii/gg-core@5.55.0
+  - @kenkaiiii/gg-agent@5.55.0
+
+## 5.54.1
+
+### Patch Changes
+
+- 5aa507b: Fix a Windows race in the cross-process compaction lock. Treat pending-delete `EPERM`/`EBUSY`/`EACCES` as contention only while the lock still exists, without hiding genuine permission errors.
+  - @kenkaiiii/gg-ai@5.54.1
+  - @kenkaiiii/gg-agent@5.54.1
+  - @kenkaiiii/gg-core@5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra (`gpt-6-astra`, released 2026-09-03) with public 1.05M context, stable 272K or experimental 872K OAuth context, 128K output, image input, and the `low` through `max` reasoning ladder. Astra remains the OpenAI OAuth default.
+
+### Patch Changes
+
+- Updated dependencies [7ad7339]
+  - @kenkaiiii/gg-ai@5.54.0
+  - @kenkaiiii/gg-core@5.54.0
+  - @kenkaiiii/gg-agent@5.54.0
+
 ## 5.53.3
 
 ### Patch Changes

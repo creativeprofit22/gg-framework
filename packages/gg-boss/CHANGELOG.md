@@ -1,5 +1,21 @@
 # @kenkaiiii/gg-boss
 
+## 5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Update GPT-6 Astra's Codex client identity and remove GPT-5.5 from general model presentation while retaining historical compatibility labels.
+
+## 5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra presentation support, including its short model name.
+
 ## 5.53.3
 
 ## 5.53.2

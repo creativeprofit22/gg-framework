@@ -1964,6 +1964,7 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
 
     fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
 

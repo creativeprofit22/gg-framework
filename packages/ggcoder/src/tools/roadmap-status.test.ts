@@ -27,6 +27,64 @@ describe("RoadmapStatusParams", () => {
     });
   });
 
+  it.each([{ evidence: undefined }, { evidence: [] }])(
+    "rejects non-Done passed verification with missing evidence %j",
+    ({ evidence }) => {
+      for (const transition of ["pending", "in-progress", "blocked"] as const) {
+        const result = RoadmapStatusParams.safeParse({
+          ...base,
+          transition,
+          evidence,
+          verification: { result: "passed" },
+          ...(transition === "blocked"
+            ? { blocker: "Access denied", required_external_action: "Grant access" }
+            : {}),
+        });
+        expect(result.success).toBe(false);
+        if (!result.success)
+          expect(result.error.issues).toEqual(
+            expect.arrayContaining([expect.objectContaining({ path: ["evidence"] })]),
+          );
+      }
+    },
+  );
+
+  it("accepts evidenced progress and Done without prose evidence", () => {
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        evidence: ["Check passed"],
+        verification: { result: "passed" },
+      }).evidence,
+    ).toEqual(["Check passed"]);
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "done",
+        verification: { result: "passed" },
+        verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
+      }).evidence,
+    ).toEqual([]);
+  });
+
+  it.each(["failed", "exception-requested"])("preserves %s reason requirements", (result) => {
+    expect(
+      RoadmapStatusParams.safeParse({
+        ...base,
+        transition: "in-progress",
+        verification: { result },
+      }).success,
+    ).toBe(false);
+    expect(
+      RoadmapStatusParams.safeParse({
+        ...base,
+        transition: "in-progress",
+        verification: { result, reason: "Check unavailable" },
+      }).success,
+    ).toBe(true);
+  });
+
   it("requires separate reason and external action only for blocked reports", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "blocked" })).toThrow();
     expect(

@@ -1553,6 +1553,44 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
     if (outcome.status === "committed") expect(outcome.phase.status).not.toBe("done");
   });
 
+  it("rejects passed progress with missing evidence without writing and accepts a corrected retry", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/roadmap-missing-evidence";
+    await repository.migrate(cwd, roadmapDocument());
+    const path = repository.paths(cwd).primary;
+    const before = await fs.readFile(path, "utf8");
+    const request = {
+      updateId: "missing-evidence",
+      phaseId: "phase-1",
+      expectedRevision: 1,
+      actor: "gg-coder" as const,
+      transition: "in-progress" as const,
+      progress: "Bounded check passed",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: [],
+      verification: "passed" as const,
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession: { sessionId: "session-roadmap", sessionPath: "/sessions/roadmap.jsonl" },
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    };
+    await expect(repository.recordRoadmapStatusUpdate(cwd, request)).resolves.toMatchObject({
+      status: "verification-incomplete",
+      revision: 1,
+    });
+    expect(await fs.readFile(path, "utf8")).toBe(before);
+    const unchanged = await readEnvelope(path);
+    expect(unchanged.revision).toBe(1);
+    expect(unchanged.document.phases[0]!.roadmapEvents).toHaveLength(0);
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, { ...request, evidence: ["Bounded check passed"] }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 2 } });
+    expect((await readEnvelope(path)).document.phases[0]!.roadmapEvents).toHaveLength(1);
+  });
+
   it("requires durable GG Coder Done evidence without persisting rejected retries", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
     const cwd = "/work/roadmap-verification-gate";

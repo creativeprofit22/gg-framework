@@ -572,7 +572,8 @@ export class AppSidecarRoadmapToolHost {
               result: "missing-plan-progress",
               phaseId: input.phase_id,
               revision: expectedRevision,
-              message: "Done was not recorded because canonical plan progress is unavailable.",
+              message:
+                "Done was not recorded because canonical approved-plan/checkpoint progress is unavailable for the bound session. Rebinding or status prose does not create canonical progress. Resume the original approved-plan session or obtain approval for a new recovery plan.",
             };
           }
         }

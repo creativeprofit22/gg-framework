@@ -23,6 +23,7 @@ import {
   isNotesPhaseStatus,
   isNotesReminderDeliveryChannel,
   isNotesReminderPermission,
+  isNotesVerificationEvidenceSatisfied,
   isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
@@ -2600,6 +2601,13 @@ export class ProjectNotesRepository {
             ? { status: "operation-conflict", revision }
             : { status: "verification-incomplete", revision, message: evidenceError };
         }
+      }
+      if (!isNotesVerificationEvidenceSatisfied(request.verification, request.evidence)) {
+        return {
+          status: "verification-incomplete",
+          revision,
+          message: "Passed verification requires nonempty evidence.",
+        };
       }
       const timestamp = chronologicalRoadmapTimestamp(currentPhase, request.timestamp);
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);

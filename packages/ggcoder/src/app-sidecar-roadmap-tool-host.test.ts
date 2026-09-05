@@ -225,7 +225,8 @@ describe("AppSidecarRoadmapToolHost", () => {
       onCompletionIntent,
     });
     const tool = host.createSessionTools("coding", owningSession)[0]!;
-    const output = await tool.execute(doneInput(), {} as never);
+    const { evidence: _evidence, ...withoutEvidence } = doneInput();
+    const output = await tool.execute(RoadmapStatusParams.parse(withoutEvidence), {} as never);
 
     expect(JSON.parse(String(output))).toMatchObject({
       result: "duplicate",
@@ -241,6 +242,7 @@ describe("AppSidecarRoadmapToolHost", () => {
         actor: "gg-coder",
         transition: "done",
         completionMode: "legacy-run-finalizer",
+        evidence: ["pnpm test"],
         verification: "passed",
         expectedSession: sessionLink,
       }),
@@ -488,6 +490,36 @@ describe("AppSidecarRoadmapToolHost", () => {
     ).not.toContain("synthetic-token-4f93a8");
   });
 
+  it("rejects invalid passed progress at the public tool boundary before persistence", () => {
+    const recordRoadmapStatusUpdate = vi.fn();
+    const onCompletionIntent = vi.fn();
+    const broadcastNotesSnapshot = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => null,
+      broadcastNotesSnapshot,
+      onCompletionIntent,
+    });
+    const tool = host.createSessionTools("coding", owningSession)[0]!;
+    expect(() =>
+      tool.parameters.parse({
+        update_id: "progress-1",
+        phase_id: "phase-1",
+        expected_revision: 4,
+        transition: "in-progress",
+        progress: "Check passed",
+        verification: { result: "passed" },
+      }),
+    ).toThrow("Non-Done passed verification requires nonempty evidence");
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+    expect(onCompletionIntent).not.toHaveBeenCalled();
+  });
+
   it("rejects Done without canonical plan progress before recording completion-pending", async () => {
     const recordRoadmapStatusUpdate = vi.fn();
     const broadcastNotesSnapshot = vi.fn();
@@ -512,7 +544,8 @@ describe("AppSidecarRoadmapToolHost", () => {
       result: "missing-plan-progress",
       phaseId: "phase-1",
       revision: 4,
-      message: "Done was not recorded because canonical plan progress is unavailable.",
+      message:
+        "Done was not recorded because canonical approved-plan/checkpoint progress is unavailable for the bound session. Rebinding or status prose does not create canonical progress. Resume the original approved-plan session or obtain approval for a new recovery plan.",
     });
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
     expect(broadcastNotesSnapshot).not.toHaveBeenCalled();

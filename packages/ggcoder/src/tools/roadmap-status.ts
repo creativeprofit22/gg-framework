@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
+  isNotesVerificationEvidenceSatisfied,
   NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
   NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
   NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
@@ -299,6 +300,16 @@ export const RoadmapStatusParams = z
       .strict(),
   ])
   .superRefine((report, context) => {
+    if (
+      report.transition !== "done" &&
+      !isNotesVerificationEvidenceSatisfied(report.verification?.result, report.evidence)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: "Non-Done passed verification requires nonempty evidence.",
+      });
+    }
     const criterionIds = report.verification_bindings.map((binding) => binding.criterion_id);
     const executionIds = report.verification_bindings.map((binding) => binding.execution_id);
     if (
@@ -369,7 +380,7 @@ export function createRoadmapStatusTool(
   return {
     name: "roadmap_status",
     description:
-      'Report bounded Roadmap progress or a real external blocker. transition: "done" is the only public completion-intent API. Done requires passed verification and one current classifier-approved command per criterion; settlement is host-only after the owning run ends.',
+      'Report bounded Roadmap progress or a real external blocker. Non-Done passed verification requires nonempty evidence. transition: "done" is the only public completion-intent API. Done requires passed verification and one current classifier-approved command per criterion; settlement is host-only after the owning run ends.',
     parameters: RoadmapStatusParams,
     rawInputSchema: roadmapStatusInputSchema,
     executionMode: "sequential",

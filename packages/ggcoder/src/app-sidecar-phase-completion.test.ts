@@ -202,6 +202,33 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     ).toEqual({ total: 3, completed: [1, 2] });
   });
 
+  it("does not inherit an original checkpoint across multiple explicit rebinds", () => {
+    const tracker = new AppSidecarPhaseImplementationPlanTracker();
+    const intermediate = {
+      sessionId: "session-intermediate",
+      sessionPath: "/sessions/intermediate.jsonl",
+    };
+    const candidate = reboundPhase([
+      predecessorCheckpoint(),
+      rebind({ id: "binding-first", session: intermediate }),
+      rebind({ id: "binding-second", previousSession: intermediate }),
+    ]);
+    expect(
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: candidate,
+        expectedSession: reboundSession,
+      }),
+    ).toBe(false);
+    expect(
+      tracker.resolve({
+        phaseId: "phase-24",
+        session: reboundSession,
+        current: { total: 0, completed: [] },
+      }),
+    ).toBeNull();
+  });
+
   it("restores a complete predecessor checkpoint after an exact explicit rebind", () => {
     const tracker = new AppSidecarPhaseImplementationPlanTracker();
 
@@ -266,14 +293,8 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
         }),
       ],
     ],
-    [
-      "records a failed run",
-      [predecessorCheckpoint({ runOutcome: "failed" }), rebind()],
-    ],
-    [
-      "records a cancelled run",
-      [predecessorCheckpoint({ runOutcome: "cancelled" }), rebind()],
-    ],
+    ["records a failed run", [predecessorCheckpoint({ runOutcome: "failed" }), rebind()]],
+    ["records a cancelled run", [predecessorCheckpoint({ runOutcome: "cancelled" }), rebind()]],
     [
       "records partial progress",
       [predecessorCheckpoint({ completedPlanSteps: [1, 2, 3, 4, 5] }), rebind()],

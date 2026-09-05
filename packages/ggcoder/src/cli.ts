@@ -118,8 +118,30 @@ import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
 
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
+import {
+  resolveInteractiveCliModel,
+  resolveRpcModel,
+  resolveSavedCliModel,
+} from "./core/cli-model-resolution.js";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const PROVIDERS = new Set<Provider>([
+  "anthropic",
+  "xiaomi",
+  "openai",
+  "azure",
+  "gemini",
+  "glm",
+  "moonshot",
+  "minimax",
+  "deepseek",
+  "openrouter",
+  "sakana",
+  "xai",
+  "palsu",
+  "huggingface",
+  "local",
+]);
 
 export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
@@ -127,6 +149,87 @@ export function parseThinkingLevel(value: string | undefined): ThinkingLevel | u
   throw new Error(
     `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, max, or ultra.`,
   );
+}
+
+function parseProvider(value: string | undefined): Provider | undefined {
+  if (value === undefined) return undefined;
+  if (PROVIDERS.has(value as Provider)) return value as Provider;
+  throw new Error(`Invalid --provider value "${value}".`);
+}
+
+function parseMaxTurns(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(parsed)) {
+    throw new Error(`Invalid --max-turns value "${value}". Expected a positive integer.`);
+  }
+  return parsed;
+}
+
+type CliMode = "interactive" | "json" | "rpc";
+
+interface CliModeFlagValues {
+  json?: boolean;
+  rpc?: boolean;
+  provider?: string;
+  model?: string;
+  thinking?: string;
+  "max-turns"?: string;
+  "system-prompt"?: string;
+  "agent-prompt"?: string;
+  "agent-context"?: string;
+  resume?: string;
+}
+
+export function resolveInteractiveProvider(
+  explicitProvider: Provider | undefined,
+  savedProvider: Provider | undefined,
+): Provider {
+  return explicitProvider ?? savedProvider ?? "anthropic";
+}
+
+export function routeCliModeFlags(values: CliModeFlagValues): {
+  mode: CliMode;
+  provider?: Provider;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  maxTurns?: number;
+  systemPrompt?: string;
+  agentPrompt?: string;
+  agentContext?: "project" | "none";
+  resumeSessionPath?: string;
+} {
+  if (values.json && values.rpc) {
+    throw new Error("--json and --rpc cannot be used together.");
+  }
+
+  const mode: CliMode = values.json ? "json" : values.rpc ? "rpc" : "interactive";
+  if (mode !== "json" && values["agent-prompt"] !== undefined) {
+    throw new Error("--agent-prompt is only supported with --json.");
+  }
+  if (mode !== "json" && values["agent-context"] !== undefined) {
+    throw new Error("--agent-context is only supported with --json.");
+  }
+  if (mode !== "interactive" && values.resume !== undefined) {
+    throw new Error("--resume is only supported in interactive mode.");
+  }
+
+  const agentContext = values["agent-context"];
+  if (agentContext !== undefined && agentContext !== "project" && agentContext !== "none") {
+    throw new Error(`Invalid --agent-context value "${agentContext}". Expected project or none.`);
+  }
+
+  return {
+    mode,
+    provider: parseProvider(values.provider),
+    model: values.model,
+    thinkingLevel: parseThinkingLevel(values.thinking),
+    maxTurns: parseMaxTurns(values["max-turns"]),
+    systemPrompt: values["system-prompt"],
+    agentPrompt: values["agent-prompt"],
+    agentContext,
+    resumeSessionPath: values.resume,
+  };
 }
 
 function printHelp(): void {
@@ -181,13 +284,13 @@ function printHelp(): void {
       "--provider <name>",
       "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter, sakana, xai)",
     ],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-5.5)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-6-astra)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Replace the system prompt entirely"],
-    ["--agent-prompt <text>", "Sub-agent body composed with tools/context/environment"],
-    ["--agent-context <mode>", "Project files in the composed prompt (project|none)"],
-    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh, max)"],
-    ["--resume <id>", "Resume a session by id"],
+    ["--agent-prompt <text>", "Sub-agent body composed with tools/context/environment (JSON only)"],
+    ["--agent-context <mode>", "Project files in composed prompt: project|none (JSON only)"],
+    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh, max, ultra)"],
+    ["--resume <id>", "Resume a session by id (interactive only)"],
     ["--json", "JSON output mode (for sub-agents)"],
     ["--rpc", "JSON-RPC mode (for IDE integrations)"],
   ];
@@ -318,24 +421,18 @@ function main(): void {
     process.exit(0);
   }
 
+  const cliOptions = routeCliModeFlags(values);
+
   // JSON mode — used by sub-agents
-  if (values.json) {
+  if (cliOptions.mode === "json") {
     const message = positionals[0] ?? "";
-    const jsonProvider = (values.provider ?? "anthropic") as Provider;
-    const jsonModel = values.model ?? "claude-opus-5";
-    const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
-    const systemPrompt = values["system-prompt"];
-    // An agent definition's body: composed with the Tools/context/Environment
-    // scaffolding rather than replacing it, so a delegated child still knows
-    // which tools it has and where it is running.
-    const agentPrompt = values["agent-prompt"];
-    const agentContext = values["agent-context"] === "none" ? "none" : undefined;
+    const jsonProvider = cliOptions.provider ?? "anthropic";
+    const jsonModel = resolveRpcModel(jsonProvider, cliOptions.model);
+    // An agent definition's body is composed with the Tools/context/Environment
+    // scaffolding, so a delegated child still knows its capabilities and cwd.
     const promptCacheKey = values["prompt-cache-key"];
-    const thinkingLevel = parseThinkingLevel(values.thinking);
     // Optional tool allow-list forwarded by the subagent spawner from an agent
     // definition's `tools:` frontmatter. Comma-separated; empty → full toolset.
-    // An all-empty value collapses to undefined (full toolset) rather than an
-    // empty array, which AgentSession would treat as "block every tool".
     const parsedTools = values.tools
       ? values.tools
           .split(",")
@@ -343,9 +440,7 @@ function main(): void {
           .filter(Boolean)
       : [];
     const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
-    // MCP servers the agent definition asked for (`mcp__<server>__<tool>` in its
-    // `tools:` list). Without this an allow-listed child connects no MCP at all,
-    // so a research agent silently loses live code search.
+    // MCP servers requested through `mcp__<server>__<tool>` entries.
     const parsedMcpServers = values["mcp-servers"]
       ? values["mcp-servers"]
           .split(",")
@@ -353,20 +448,19 @@ function main(): void {
           .filter(Boolean)
       : [];
     const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
-    const cwd = process.cwd();
     runJsonMode({
       message,
       provider: jsonProvider,
       model: jsonModel,
-      cwd,
-      systemPrompt,
-      agentPrompt,
-      agentContext,
-      maxTurns,
+      cwd: process.cwd(),
+      systemPrompt: cliOptions.systemPrompt,
+      agentPrompt: cliOptions.agentPrompt,
+      agentContext: cliOptions.agentContext,
+      maxTurns: cliOptions.maxTurns,
       allowedTools,
       allowedMcpServers,
       promptCacheKey,
-      thinkingLevel,
+      thinkingLevel: cliOptions.thinkingLevel,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -375,16 +469,15 @@ function main(): void {
   }
 
   // RPC mode — headless JSON-over-stdio for IDE integrations
-  if (values.rpc) {
-    const rpcProvider = (values.provider ?? "anthropic") as Provider;
-    const rpcModel = values.model ?? "claude-opus-5";
-    const systemPrompt = values["system-prompt"];
-    const cwd = process.cwd();
+  if (cliOptions.mode === "rpc") {
+    const rpcProvider = cliOptions.provider ?? "anthropic";
     runRpcMode({
       provider: rpcProvider,
-      model: rpcModel,
-      cwd,
-      systemPrompt,
+      model: resolveRpcModel(rpcProvider, cliOptions.model),
+      cwd: process.cwd(),
+      systemPrompt: cliOptions.systemPrompt,
+      thinkingLevel: cliOptions.thinkingLevel,
+      maxTurns: cliOptions.maxTurns,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -392,51 +485,37 @@ function main(): void {
     return;
   }
 
-  // Load saved settings for model/provider persistence
+  // Explicit startup flags override persisted interactive settings.
   const saved = loadSavedSettings();
   const savedTheme = saved.theme;
-
-  const provider: Provider = saved.provider ?? "anthropic";
-
-  function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-5.5";
-    if (p === "gemini") return "gemini-3.1-flash-lite";
-    if (p === "glm") return "glm-5.3";
-    if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
-    if (p === "deepseek") return "deepseek-v4-pro";
-    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
-    if (p === "openrouter") return "qwen/qwen3.6-plus";
-    if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.6";
-    return "claude-opus-5";
-  }
-
-  const model: string = saved.model ?? getHardcodedDefault(provider);
+  const provider = resolveInteractiveProvider(cliOptions.provider, saved.provider);
+  const model = resolveInteractiveCliModel(provider, cliOptions.model, saved.model);
   // No saved level → follow the active credential's endpoint (Kimi K3 OAuth
-  // starts at its declared default, high). Sync read: main() is not async.
-  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
-    ? (saved.thinkingLevel ??
-      getDefaultThinkingLevel(model, {
-        baseUrl: readStoredBaseUrlSync(getAppPaths().authFile, provider),
-      }))
-    : undefined;
-
-  // Interactive mode (Ink TUI)
-  const cwd = process.cwd();
-  const continueRecent = subcommand === "continue";
+  // starts at its declared default, high). Explicit --thinking always wins.
+  const thinkingLevel: ThinkingLevel | undefined =
+    cliOptions.thinkingLevel ??
+    (saved.thinkingEnabled
+      ? (saved.thinkingLevel ??
+        getDefaultThinkingLevel(model, {
+          baseUrl: readStoredBaseUrlSync(getAppPaths().authFile, provider),
+        }))
+      : undefined);
 
   runInkTUI({
     provider,
     model,
-    cwd,
+    cwd: process.cwd(),
     thinkingLevel,
+    maxTurns: cliOptions.maxTurns,
+    systemPrompt: cliOptions.systemPrompt,
+    providerWasExplicit: cliOptions.provider !== undefined,
+    modelWasExplicit: cliOptions.model !== undefined,
     idealReviewEnabled: saved.idealReviewEnabled,
     lspDiagnostics: saved.lspDiagnostics,
     allowOutsideWorkspaceWrites: saved.allowOutsideWorkspaceWrites,
     subagentMaxPerModel: saved.subagentMaxPerModel,
-    continueRecent,
-    resumeSessionPath: values.resume,
+    continueRecent: subcommand === "continue",
+    resumeSessionPath: cliOptions.resumeSessionPath,
     theme: savedTheme,
   }).catch((err) => {
     log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
@@ -453,6 +532,10 @@ async function runInkTUI(opts: {
   model: string;
   cwd: string;
   thinkingLevel?: ThinkingLevel;
+  maxTurns?: number;
+  systemPrompt?: string;
+  providerWasExplicit?: boolean;
+  modelWasExplicit?: boolean;
   continueRecent?: boolean;
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
@@ -489,7 +572,7 @@ async function runInkTUI(opts: {
     provider: preferredProvider,
     model: preferredModel,
     loggedInProviders,
-  } = await resolveActiveProvider(authStorage, opts.provider, opts.model);
+  } = await resolveActiveProvider(authStorage, opts.provider, opts.model, opts.providerWasExplicit);
 
   // Preload every logged-in provider's credentials for the model switcher.
   // Resolve each one BEFORE picking the active provider, so a dead OAuth
@@ -555,12 +638,18 @@ async function runInkTUI(opts: {
   let provider = preferredProvider;
   let model = preferredModel;
   if (!modelResolves(provider, model)) {
+    if (opts.modelWasExplicit) {
+      throw new Error(`No usable credentials are available for model "${model}".`);
+    }
     // Same provider, different model first — e.g. Xiaomi Credits-only users
     // land on mimo-v2.5-pro-ultraspeed instead of bouncing to another provider.
     const sameProviderModel = resolvableModelFor(provider);
     if (sameProviderModel) {
       model = sameProviderModel;
     } else {
+      if (opts.providerWasExplicit) {
+        throw new Error(`No usable credentials are available for provider "${provider}".`);
+      }
       const fallback = loggedInProviders.find((p) => resolvableModelFor(p));
       if (!fallback) {
         throw new Error(
@@ -687,21 +776,23 @@ async function runInkTUI(opts: {
   };
 
   const toolNames = tools.map((tool) => tool.name);
-  const systemPrompt = applyAsyncSubagentPolicy(
-    await buildSystemPrompt(
-      cwd,
-      skills,
-      planModeRef.current,
-      undefined,
-      toolNames,
-      undefined,
+  const systemPrompt =
+    opts.systemPrompt ??
+    applyAsyncSubagentPolicy(
+      await buildSystemPrompt(
+        cwd,
+        skills,
+        planModeRef.current,
+        undefined,
+        toolNames,
+        undefined,
+        provider,
+      ),
       provider,
-    ),
-    provider,
-    model,
-    opts.thinkingLevel,
-    toolNames,
-  );
+      model,
+      opts.thinkingLevel,
+      toolNames,
+    );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
   process.on("exit", () => {
@@ -959,6 +1050,7 @@ async function runInkTUI(opts: {
     messages,
     version: CLI_VERSION,
     thinking: opts.thinkingLevel,
+    maxTurns: opts.maxTurns,
     apiKey: creds.accessToken,
     accountId: creds.accountId,
     projectId: creds.projectId,
@@ -1017,21 +1109,7 @@ async function runSessions(): Promise<void> {
   const saved2 = loadSavedSettings(paths.settingsFile);
 
   const provider: Provider = saved2.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.5";
-    if (p === "gemini") return "gemini-3.1-flash-lite";
-    if (p === "glm") return "glm-5.3";
-    if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
-    if (p === "deepseek") return "deepseek-v4-pro";
-    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
-    if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.6";
-    return "claude-opus-5";
-  }
-
-  const model = saved2.model ?? getDefault(provider);
+  const model = resolveSavedCliModel(provider, saved2.model);
   const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
     ? (saved2.thinkingLevel ??
       getDefaultThinkingLevel(model, {
@@ -1483,6 +1561,7 @@ async function resolveActiveProvider(
   authStorage: AuthStorage,
   preferred: Provider,
   savedModel: string | undefined,
+  providerWasExplicit = false,
 ): Promise<{ provider: Provider; model: string; loggedInProviders: Provider[] }> {
   const allProviders: Provider[] = [
     "anthropic",
@@ -1515,6 +1594,12 @@ async function resolveActiveProvider(
         savedModelInfo?.provider === preferred ? savedModelInfo.id : getDefaultModel(preferred).id,
       loggedInProviders,
     };
+  }
+
+  if (providerWasExplicit) {
+    throw new Error(
+      `Not logged in to ${preferred}. Run "ggcoder login" to authenticate.`,
+    );
   }
 
   // Preferred provider isn't authenticated — fall back to the first one

@@ -48,6 +48,7 @@ export interface RenderAppConfig {
   webSearch?: boolean;
   messages: Message[];
   maxTokens?: number;
+  maxTurns?: number;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;
@@ -575,6 +576,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             webSearch: config.webSearch,
             messages: sessionStore.messages,
             maxTokens: config.maxTokens,
+            maxTurns: config.maxTurns,
             thinking: runtimeState.thinking,
             apiKey: config.apiKey,
             baseUrl: config.baseUrl,

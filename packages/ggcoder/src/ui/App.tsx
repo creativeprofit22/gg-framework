@@ -214,6 +214,7 @@ export interface AppProps {
   webSearch?: boolean;
   messages: Message[];
   maxTokens?: number;
+  maxTurns?: number;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;
@@ -973,6 +974,7 @@ export function App(props: AppProps) {
       tools: currentTools,
       webSearch: props.webSearch,
       maxTokens: resolveModelMaxTokens(currentModel, props.maxTokens),
+      maxTurns: props.maxTurns,
       supportsImages: getModel(currentModel)?.supportsImages ?? true,
       supportsVideo: getModel(currentModel)?.supportsVideo ?? false,
       thinking: thinkingLevel,

@@ -144,6 +144,7 @@ export interface AgentLoopOptions {
   tools: AgentTool[];
   webSearch?: boolean;
   maxTokens: number;
+  maxTurns?: number;
   /** Whether the active model supports native image input. */
   supportsImages?: boolean;
   /** Whether the active model supports native video input. */
@@ -670,6 +671,7 @@ export function useAgentLoop(
             tools: options.tools,
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
+            maxTurns: options.maxTurns,
             supportsImages: options.supportsImages,
             supportsVideo: options.supportsVideo,
             thinking: options.thinking,

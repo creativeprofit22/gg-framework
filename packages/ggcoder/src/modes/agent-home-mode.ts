@@ -337,6 +337,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         const contextWindow = getContextWindow(sessionState.model, {
           provider: sessionState.provider,
           accountId: sessionState.accountId,
+          openAICodexContextProfile: sessionState.openAICodexContextProfile,
         });
         const contextTokens = estimateConversationTokens(state.session.getMessages());
         const pctRaw = (contextTokens / contextWindow) * 100;

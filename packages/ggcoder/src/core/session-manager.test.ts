@@ -57,6 +57,86 @@ function entry(id: string): SessionEntry {
   };
 }
 
+describe("SessionManager context profiles", () => {
+  it("round-trips an optional profile and keeps legacy headers compatible", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const session = await manager.create("/repo", "openai", "gpt-6-astra", {
+      openAICodexContextProfile: "experimental",
+    });
+    expect((await manager.load(session.path)).header.openAICodexContextProfile).toBe(
+      "experimental",
+    );
+
+    const legacyPath = path.join(sessionsDir, "legacy.jsonl");
+    await writeFile(
+      legacyPath,
+      `${JSON.stringify({
+        type: "session",
+        version: 1,
+        id: "legacy",
+        timestamp: "2026-09-04T00:00:00.000Z",
+        cwd: "/repo",
+        provider: "openai",
+        model: "gpt-6-astra",
+      })}\n`,
+      "utf-8",
+    );
+    expect(
+      (await manager.load(legacyPath, { resolveCanonical: false })).header
+        .openAICodexContextProfile,
+    ).toBeUndefined();
+  });
+
+  it("preserves an append racing a context profile rewrite", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const session = await manager.create("/repo", "openai", "gpt-6-astra");
+    const realReadFile = fs.readFile.bind(fs);
+    const sessionPath = path.resolve(session.path);
+    const lockPath = `${sessionPath}.lock`;
+    let sessionReads = 0;
+    let markProfileRead!: () => void;
+    let releaseProfileRead!: () => void;
+    let markAppendWaiting!: () => void;
+    const profileRead = new Promise<void>((resolve) => {
+      markProfileRead = resolve;
+    });
+    const profileReadRelease = new Promise<void>((resolve) => {
+      releaseProfileRead = resolve;
+    });
+    const appendWaiting = new Promise<void>((resolve) => {
+      markAppendWaiting = resolve;
+    });
+    vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      const content = await realReadFile(...args);
+      const readPath = path.resolve(String(args[0]));
+      if (readPath === sessionPath && ++sessionReads === 2) {
+        markProfileRead();
+        await profileReadRelease;
+      } else if (readPath === lockPath) {
+        markAppendWaiting();
+      }
+      return content;
+    });
+
+    const profileUpdate = manager.updateOpenAICodexContextProfile(session.path, "experimental");
+    await profileRead;
+    const append = manager.appendEntry(session.path, entry("concurrent-append"));
+    const appendState = await Promise.race([
+      append.then(() => "appended" as const),
+      appendWaiting.then(() => "waiting" as const),
+    ]);
+    releaseProfileRead();
+    await Promise.all([profileUpdate, append]);
+
+    expect(appendState).toBe("waiting");
+    const loaded = await manager.load(session.path);
+    expect(loaded.header.openAICodexContextProfile).toBe("experimental");
+    expect(loaded.entries.map((item) => item.id)).toContain("concurrent-append");
+  });
+});
+
 describe("SessionManager redaction boundary", () => {
   it("persists sanitized clones for message and custom success/failure entries", async () => {
     const dir = await makeTempDir();

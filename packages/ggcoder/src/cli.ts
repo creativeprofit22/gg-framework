@@ -98,6 +98,7 @@ import {
   getDefaultThinkingLevel,
   getModel,
   getModelsForProvider,
+  type OpenAICodexContextProfile,
 } from "./core/model-registry.js";
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
@@ -719,6 +720,7 @@ async function runInkTUI(opts: {
   let sessionId: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
   let turnMetrics: TurnMetricPayload[] = [];
+  let openAICodexContextProfile: OpenAICodexContextProfile = "stable";
 
   // IDs and physical paths both resolve to the newest checkpoint in their
   // logical conversation before any restored messages are read.
@@ -731,6 +733,7 @@ async function runInkTUI(opts: {
   if (resumePath) {
     try {
       let loaded = await sessionManager.load(resumePath);
+      openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
       let loadedMessages = sessionManager.getMessages(loaded.entries);
       turnMetrics = sessionManager.getTurnMetrics(loaded.entries);
 
@@ -744,7 +747,11 @@ async function runInkTUI(opts: {
         });
 
         // Auto-compact on load using the same configurable trigger as AgentSession.
-        const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
+        const contextWindow = getContextWindow(model, {
+          provider,
+          accountId: creds.accountId,
+          openAICodexContextProfile,
+        });
         const policy = resolveCompactionPolicy({
           provider,
           model,
@@ -839,6 +846,7 @@ async function runInkTUI(opts: {
                     generation: (loaded.header.generation ?? 0) + 1,
                     parentSessionId: loaded.header.id,
                     sourceFingerprint: fingerprint,
+                    openAICodexContextProfile,
                     preview: loaded.header.preview ?? findUserSessionPrompt(messages),
                     title: [...loaded.entries]
                       .reverse()
@@ -945,6 +953,7 @@ async function runInkTUI(opts: {
   await renderApp({
     provider,
     model,
+    openAICodexContextProfile,
     tools,
     webSearch: true,
     messages,

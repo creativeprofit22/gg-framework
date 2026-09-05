@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { render } from "ink";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message, Provider, Usage } from "@kenkaiiii/gg-ai";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type * as CompactorModule from "../../core/compaction/compactor.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import type { CompletedItem } from "../app-items.js";
@@ -36,10 +37,18 @@ const pendingMessage: Message = {
 
 function Harness({
   provider,
+  model = "test-model",
+  codexOAuth = false,
+  codexProfile,
+  providerUsage = usage,
   reuseRecordedUsage = false,
   onTransformed,
 }: {
   provider: Provider;
+  model?: string;
+  codexOAuth?: boolean;
+  codexProfile?: OpenAICodexContextProfile;
+  providerUsage?: Usage;
   reuseRecordedUsage?: boolean;
   onTransformed: (messages: Message[]) => void;
 }) {
@@ -63,11 +72,15 @@ function Harness({
   const [, setLiveItems] = useState<CompletedItem[]>([]);
   const startedRef = useRef(false);
   const { transformContext, recordProviderUsage } = useContextCompaction({
-    currentModel: "test-model",
+    currentModel: model,
     currentProvider: provider,
-    contextWindowOptions: { provider },
+    contextWindowOptions: {
+      provider,
+      accountId: codexOAuth ? "chatgpt-account" : undefined,
+      openAICodexContextProfile: codexProfile,
+    },
     activeApiKey: "test-key",
-    activeAccountId: undefined,
+    activeAccountId: codexOAuth ? "chatgpt-account" : undefined,
     activeProjectId: undefined,
     activeBaseUrl: undefined,
     setLiveItems,
@@ -82,15 +95,15 @@ function Harness({
     if (startedRef.current) return;
     startedRef.current = true;
     if (reuseRecordedUsage) {
-      recordProviderUsage(usage, messagesRef.current.slice(0, -1));
+      recordProviderUsage(providerUsage, messagesRef.current.slice(0, -1));
       void transformContext(messagesRef.current, { pendingMessages: [] }).then(onTransformed);
       return;
     }
     void transformContext(messagesRef.current, {
-      usage,
+      usage: providerUsage,
       pendingMessages: [pendingMessage],
     }).then(onTransformed);
-  }, [onTransformed, recordProviderUsage, reuseRecordedUsage, transformContext]);
+  }, [onTransformed, providerUsage, recordProviderUsage, reuseRecordedUsage, transformContext]);
 
   return null;
 }
@@ -132,6 +145,42 @@ describe("useContextCompaction", () => {
       ]);
     },
   );
+
+  it("uses the restored Codex profile for compaction sizing and defaults legacy sessions stable", async () => {
+    const highUsage: Usage = { ...usage, inputTokens: 300_000 };
+    let transformed: Message[] | undefined;
+    const experimental = render(
+      <Harness
+        provider="openai"
+        model="gpt-6-astra"
+        codexOAuth
+        codexProfile="experimental"
+        providerUsage={highUsage}
+        onTransformed={(messages) => (transformed = messages)}
+      />,
+      { patchConsole: false },
+    );
+
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    experimental.unmount();
+    expect(compactMock).not.toHaveBeenCalled();
+
+    transformed = undefined;
+    const legacy = render(
+      <Harness
+        provider="openai"
+        model="gpt-6-astra"
+        codexOAuth
+        providerUsage={highUsage}
+        onTransformed={(messages) => (transformed = messages)}
+      />,
+      { patchConsole: false },
+    );
+
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    legacy.unmount();
+    expect(compactMock).toHaveBeenCalledTimes(1);
+  });
 
   it("calibrates the token estimator from the anchored provider usage", async () => {
     // Model switch resets any calibration left over from previous tests.

@@ -276,6 +276,7 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
       const contextWindow = getContextWindow(modelId, {
         provider: sessionState.provider,
         accountId: sessionState.accountId,
+        openAICodexContextProfile: sessionState.openAICodexContextProfile,
       });
       const contextTokens = estimateConversationTokens(session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
@@ -486,6 +487,7 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
       const contextWindow = getContextWindow(sessionState.model, {
         provider: sessionState.provider,
         accountId: sessionState.accountId,
+        openAICodexContextProfile: sessionState.openAICodexContextProfile,
       });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const statusPctRaw = (contextTokens / contextWindow) * 100;

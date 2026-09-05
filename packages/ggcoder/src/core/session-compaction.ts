@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import { getHistoryMessageVisibility } from "./session-history.js";
 import type { SessionManager, MessageEntry, LabelEntry } from "./session-manager.js";
 
@@ -41,6 +42,7 @@ export async function createCompactedSessionCheckpoint(
     parentSessionId?: string;
     sourceFingerprint?: string;
     retainedMessageCount?: number;
+    openAICodexContextProfile?: OpenAICodexContextProfile;
     preview?: string;
     title?: string;
   },
@@ -51,6 +53,7 @@ export async function createCompactedSessionCheckpoint(
     parentSessionId: options.parentSessionId,
     sourceFingerprint: options.sourceFingerprint,
     retainedMessageCount: options.retainedMessageCount,
+    openAICodexContextProfile: options.openAICodexContextProfile,
     preview: options.preview ?? options.title,
   });
   await appendMessagesToSession(sessionManager, session.path, options.messages, 0);

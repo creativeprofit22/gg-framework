@@ -1,5 +1,6 @@
 import { useCallback, type MutableRefObject } from "react";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import {
   appendMessagesToSession as appendSessionMessages,
   createCompactedSessionCheckpoint,
@@ -26,6 +27,7 @@ interface UseSessionPersistenceOptions {
   cwdRef: MutableRefObject<string>;
   currentProvider: Provider;
   currentModel: string;
+  openAICodexContextProfile: OpenAICodexContextProfile;
   sessionStore?: PersistenceSessionStore;
   onCompactedSession?: (sessionId: string) => Promise<void>;
 }
@@ -55,6 +57,7 @@ export function useSessionPersistence({
   cwdRef,
   currentProvider,
   currentModel,
+  openAICodexContextProfile,
   sessionStore,
   onCompactedSession,
 }: UseSessionPersistenceOptions): SessionPersistence {
@@ -76,6 +79,7 @@ export function useSessionPersistence({
         provider: currentProvider,
         model: currentModel,
         messages: compactedMessages,
+        openAICodexContextProfile,
         preview: findUserSessionPrompt(messagesRef.current),
       });
       sessionPathRef.current = session.path;
@@ -95,6 +99,7 @@ export function useSessionPersistence({
     [
       currentModel,
       currentProvider,
+      openAICodexContextProfile,
       sessionStore,
       onCompactedSession,
       sessionManagerRef,

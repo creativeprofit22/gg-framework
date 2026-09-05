@@ -58,6 +58,7 @@ import {
   getModel,
   getVideoByteLimit,
   resolveModelMaxTokens,
+  type OpenAICodexContextProfile,
 } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
@@ -218,6 +219,7 @@ export interface AppProps {
   baseUrl?: string;
   accountId?: string;
   projectId?: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
   cwd: string;
   version: string;
   showTokenUsage?: boolean;
@@ -710,9 +712,14 @@ export function App(props: AppProps) {
   const activeProjectId = currentCreds ? currentCreds.projectId : props.projectId;
   const activeBaseUrl =
     currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
+  const openAICodexContextProfile = props.openAICodexContextProfile ?? "stable";
   const contextWindowOptions = useMemo(
-    () => ({ provider: currentProvider, accountId: activeAccountId }),
-    [currentProvider, activeAccountId],
+    () => ({
+      provider: currentProvider,
+      accountId: activeAccountId,
+      openAICodexContextProfile,
+    }),
+    [currentProvider, activeAccountId, openAICodexContextProfile],
   );
 
   // Load git branch — re-runs whenever the displayed cwd changes.
@@ -845,6 +852,7 @@ export function App(props: AppProps) {
     cwdRef,
     currentProvider,
     currentModel,
+    openAICodexContextProfile,
     sessionStore,
     onCompactedSession: rebindSubagentsAfterCompaction,
   });

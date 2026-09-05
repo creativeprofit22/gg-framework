@@ -2271,6 +2271,7 @@ export class AgentSession {
       const contextWindow = getContextWindow(this.model, {
         provider: this.provider,
         accountId: creds.accountId,
+        openAICodexContextProfile: this.openAICodexContextProfile,
       });
       const policy = resolveCompactionPolicy({
         provider: this.provider,
@@ -2450,6 +2451,7 @@ export class AgentSession {
             const contextWindow = getContextWindow(this.model, {
               provider: this.provider,
               accountId,
+              openAICodexContextProfile: this.openAICodexContextProfile,
             });
             const policy = resolveCompactionPolicy({
               provider: this.provider,
@@ -2650,6 +2652,9 @@ export class AgentSession {
   async switchOpenAICodexContextProfile(profile: OpenAICodexContextProfile): Promise<void> {
     if (profile === this.openAICodexContextProfile) return;
     assertOpenAICodexContextProfileFitsUsage(this.model, profile, this.getContextUsage().used);
+    if (!this.opts.transient && this.sessionPath) {
+      await this.sessionManager.updateOpenAICodexContextProfile(this.sessionPath, profile);
+    }
     this.openAICodexContextProfile = profile;
   }
 
@@ -2802,6 +2807,7 @@ export class AgentSession {
     this.sessionId = loaded.header.id;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.checkpointGeneration = loaded.header.generation ?? 0;
+    this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
     this.currentLeafId = loaded.header.leafId;
     this.setSessionPath(loaded.path);
     this.kenTurns = this.sessionManager.getKenTurns(loaded.entries, loaded.header.leafId);
@@ -2845,6 +2851,7 @@ export class AgentSession {
               .slice(-result.retainedCount)
               .filter((message) => getHistoryMessageVisibility(message) !== "hidden").length,
       preview: this.sessionPreview || undefined,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     });
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
@@ -2886,6 +2893,7 @@ export class AgentSession {
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
       accountId: creds.accountId,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     });
     const policy = resolveCompactionPolicy({
       provider: this.provider,
@@ -4494,6 +4502,7 @@ export class AgentSession {
       generation: continuingConversation ? this.checkpointGeneration + 1 : 0,
       parentSessionId: continuingConversation ? this.sessionId : undefined,
       preview: this.sessionPreview || undefined,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     });
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
@@ -4518,6 +4527,7 @@ export class AgentSession {
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
+    this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
     const legacyLabel = [...loaded.entries]
       .reverse()
       .find((entry) => entry.type === "label")
@@ -4587,6 +4597,7 @@ export class AgentSession {
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
       accountId: creds.accountId,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     });
     this.sessionId = loaded.header.id;
     this.setSessionPath(loaded.path);

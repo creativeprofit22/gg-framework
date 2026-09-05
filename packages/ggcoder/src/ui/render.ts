@@ -4,6 +4,7 @@ import { log } from "@kenkaiiii/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type { ProcessManager } from "../core/process-manager.js";
 import type { SubAgentManager } from "../core/subagent-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
@@ -42,6 +43,7 @@ type PatchedInkInstance = InkInstance & {
 export interface RenderAppConfig {
   provider: Provider;
   model: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
   tools: AgentTool[];
   webSearch?: boolean;
   messages: Message[];
@@ -568,6 +570,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
           React.createElement(App, {
             provider: runtimeState.provider,
             model: runtimeState.model,
+            openAICodexContextProfile: config.openAICodexContextProfile ?? "stable",
             tools: config.tools,
             webSearch: config.webSearch,
             messages: sessionStore.messages,

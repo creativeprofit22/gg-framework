@@ -49,6 +49,7 @@ describe("session compaction persistence", () => {
       parentSessionId: "parent-checkpoint",
       sourceFingerprint: "f".repeat(64),
       retainedMessageCount: 1,
+      openAICodexContextProfile: "experimental",
       title: "Stable project title",
     });
 
@@ -63,6 +64,7 @@ describe("session compaction persistence", () => {
     expect(loaded.header.parentSessionId).toBe("parent-checkpoint");
     expect(loaded.header.sourceFingerprint).toBe("f".repeat(64));
     expect(loaded.header.retainedMessageCount).toBe(1);
+    expect(loaded.header.openAICodexContextProfile).toBe("experimental");
     expect(loaded.header.preview).toBe("Stable project title");
     expect(loaded.entries.find((entry) => entry.type === "label")?.label).toBe(
       "Stable project title",

@@ -10,6 +10,8 @@ import {
   type Usage,
 } from "@kenkaiiii/gg-ai";
 import { indeterminateOutcomeText, type AgentTurnTiming } from "@kenkaiiii/gg-agent";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
+import { withFileLock } from "./file-lock.js";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
@@ -28,6 +30,7 @@ import {
 import {
   archiveColdSession,
   archiveSessionPath,
+  atomicWriteSessionFile,
   cleanupOldSessionTemps,
   COLD_SESSION_AGE_DAYS,
   emptyStorageNormalizationMetrics,
@@ -363,6 +366,8 @@ export interface SessionHeader {
   cwd: string;
   provider: Provider;
   model: string;
+  /** OAuth context sizing; absent legacy headers restore the stable profile. */
+  openAICodexContextProfile?: OpenAICodexContextProfile;
   leafId: string | null;
 }
 
@@ -711,6 +716,7 @@ export class SessionManager {
       parentSessionId?: string;
       sourceFingerprint?: string;
       retainedMessageCount?: number;
+      openAICodexContextProfile?: OpenAICodexContextProfile;
     },
   ): Promise<{
     id: string;
@@ -745,6 +751,9 @@ export class SessionManager {
       cwd,
       provider,
       model,
+      ...(options?.openAICodexContextProfile
+        ? { openAICodexContextProfile: options.openAICodexContextProfile }
+        : {}),
       leafId: null,
     };
 
@@ -889,7 +898,14 @@ export class SessionManager {
           const parsed = JSON.parse(line) as SessionLine;
           if (parsed.type === "session") {
             if ((parsed as SessionHeader).version === 2) {
-              header = parsed as SessionHeader;
+              const v2 = parsed as SessionHeader;
+              const profile = v2.openAICodexContextProfile;
+              header = {
+                ...v2,
+                ...(profile === "stable" || profile === "experimental"
+                  ? { openAICodexContextProfile: profile }
+                  : { openAICodexContextProfile: undefined }),
+              };
             } else {
               const v1 = parsed as SessionHeaderV1;
               header = {
@@ -1410,15 +1426,24 @@ export class SessionManager {
     return metrics;
   }
 
-  private async appendEntryUnsafe(
+  private async withSessionMutationLock<T>(
     sessionPath: string,
+    mutation: (writablePath: string) => Promise<T>,
+  ): Promise<T> {
+    return withFileLock(plainSessionPath(path.resolve(sessionPath)), async () => {
+      const writablePath = await thawSessionArchive(sessionPath);
+      return mutation(writablePath);
+    });
+  }
+
+  private async appendEntryUnlocked(
+    writablePath: string,
     entry: SessionEntry,
     durable = false,
   ): Promise<boolean> {
     // Persist a sanitized, bounded clone. The live conversation remains
     // untouched so the current turn keeps full tool output and media.
     const safeEntry = redactValue(entry, { secrets: environmentSecrets(process.env) });
-    const writablePath = await thawSessionArchive(sessionPath);
     const normalized = await normalizeSessionEntryForStorage(safeEntry, writablePath);
     if (normalized === null) return false;
     await this.sealTornTail(writablePath);
@@ -1439,7 +1464,9 @@ export class SessionManager {
 
   async appendEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     try {
-      await this.appendEntryUnsafe(sessionPath, entry);
+      await this.withSessionMutationLock(sessionPath, (writablePath) =>
+        this.appendEntryUnlocked(writablePath, entry),
+      );
     } catch (error) {
       this.handlePersistError(error, "appendEntry");
     }
@@ -1458,7 +1485,9 @@ export class SessionManager {
       throw new Error("This entry kind may not use required session persistence.");
     }
     try {
-      const appended = await this.appendEntryUnsafe(sessionPath, entry, true);
+      const appended = await this.withSessionMutationLock(sessionPath, (writablePath) =>
+        this.appendEntryUnlocked(writablePath, entry, true),
+      );
       if (!appended) throw new Error(`Required ${entry.kind} metadata was omitted.`);
     } catch (error) {
       this.handlePersistError(error, "appendRequiredEntry", true);
@@ -1474,16 +1503,17 @@ export class SessionManager {
   /** Append a required prompt and advance the message DAG leaf, failing loudly on either write. */
   async appendRequiredMessage(sessionPath: string, entry: MessageEntry): Promise<void> {
     try {
-      const writablePath = await thawSessionArchive(sessionPath);
-      const appended = await this.appendEntryUnsafe(writablePath, entry, true);
-      if (!appended) throw new Error("Required prompt message was omitted.");
-      await this.updateLeafUnsafe(writablePath, entry.id);
-      const file = await fs.open(writablePath, "r");
-      try {
-        await syncRequiredPromptForDurability(() => file.sync());
-      } finally {
-        await file.close();
-      }
+      await this.withSessionMutationLock(sessionPath, async (writablePath) => {
+        const appended = await this.appendEntryUnlocked(writablePath, entry, true);
+        if (!appended) throw new Error("Required prompt message was omitted.");
+        await this.updateLeafUnlocked(writablePath, entry.id);
+        const file = await fs.open(writablePath, "r");
+        try {
+          await syncRequiredPromptForDurability(() => file.sync());
+        } finally {
+          await file.close();
+        }
+      });
     } catch (error) {
       this.handlePersistError(error, "appendRequiredMessage", true);
       throw new RequiredSessionPersistenceError("Failed to persist required prompt message.", {
@@ -1663,16 +1693,59 @@ export class SessionManager {
     return this.getRunJournal(entries).filter((run) => run.outcome === undefined);
   }
 
+  async updateOpenAICodexContextProfile(
+    sessionPath: string,
+    profile: OpenAICodexContextProfile,
+  ): Promise<void> {
+    try {
+      await this.withSessionMutationLock(sessionPath, (writablePath) =>
+        this.updateOpenAICodexContextProfileUnlocked(writablePath, profile),
+      );
+    } catch (error) {
+      this.handlePersistError(error, "updateOpenAICodexContextProfile", true);
+      throw new RequiredSessionPersistenceError("Failed to persist the context profile.", {
+        cause: error,
+      });
+    }
+  }
+
+  private async updateOpenAICodexContextProfileUnlocked(
+    writablePath: string,
+    profile: OpenAICodexContextProfile,
+  ): Promise<void> {
+    const content = await fs.readFile(writablePath, "utf-8");
+    const firstNewline = content.indexOf("\n");
+    if (firstNewline === -1) throw new Error("Invalid session file: no header line.");
+    const parsed = JSON.parse(content.slice(0, firstNewline)) as SessionLine;
+    if (parsed.type !== "session") throw new Error("Invalid session file: no header found.");
+    const header: SessionHeader =
+      parsed.version === 2
+        ? parsed
+        : {
+            ...parsed,
+            version: 2,
+            conversationId: parsed.id,
+            generation: 0,
+            leafId: null,
+          };
+    header.openAICodexContextProfile = profile;
+    await atomicWriteSessionFile(
+      writablePath,
+      `${JSON.stringify(header)}${content.slice(firstNewline)}`,
+    );
+  }
+
   async updateLeaf(sessionPath: string, leafId: string): Promise<void> {
     try {
-      const writablePath = await thawSessionArchive(sessionPath);
-      await this.updateLeafUnsafe(writablePath, leafId);
+      await this.withSessionMutationLock(sessionPath, (writablePath) =>
+        this.updateLeafUnlocked(writablePath, leafId),
+      );
     } catch (error) {
       this.handlePersistError(error, "updateLeaf");
     }
   }
 
-  private async updateLeafUnsafe(sessionPath: string, leafId: string): Promise<void> {
+  private async updateLeafUnlocked(sessionPath: string, leafId: string): Promise<void> {
     // Read only the first line (the header) instead of loading the entire file.
     // For large session files (100MB+), this avoids a full file read+write.
     const fd = await fs.open(sessionPath, "r+");

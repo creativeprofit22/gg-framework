@@ -262,7 +262,7 @@ async function replaceFile(tempPath: string, filePath: string): Promise<void> {
   }
 }
 
-async function atomicWrite(filePath: string, content: string): Promise<void> {
+export async function atomicWriteSessionFile(filePath: string, content: string): Promise<void> {
   const tempPath = temporarySiblingPath(filePath);
   try {
     await fs.writeFile(tempPath, content, { encoding: "utf8", flag: "wx" });
@@ -284,7 +284,7 @@ async function writeRedirect(filePath: string, targetPath: string): Promise<void
     version: SESSION_REDIRECT_VERSION,
     target,
   };
-  await atomicWrite(filePath, `${JSON.stringify(redirect)}\n`);
+  await atomicWriteSessionFile(filePath, `${JSON.stringify(redirect)}\n`);
 }
 
 async function verifyPlainSession(filePath: string): Promise<void> {

@@ -360,6 +360,58 @@ describe("SessionManager compaction coordination", () => {
     expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
   });
 
+  function errno(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(`${code}: mkdir`), { code });
+  }
+
+  it("treats a Windows pending-delete EPERM on an existing lock dir as contention", async () => {
+    const home = await makeTempDir();
+    const manager = new SessionManager(home);
+    const realMkdir = fs.mkdir;
+    let lockAttempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        lockAttempts += 1;
+        if (lockAttempts === 1) {
+          await realMkdir(target, { recursive: true });
+          throw errno("EPERM");
+        }
+        await rm(String(target), { recursive: true, force: true });
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      await expect(
+        manager.withCompactionLease("conversation", undefined, async () => "acquired"),
+      ).resolves.toBe("acquired");
+      expect(lockAttempts).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("rethrows a genuine EACCES when no lock dir exists instead of waiting forever", async () => {
+    const home = await makeTempDir();
+    const manager = new SessionManager(home);
+    const realMkdir = fs.mkdir;
+    let attempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        attempts += 1;
+        throw errno("EACCES");
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      await expect(
+        manager.withCompactionLease("conversation", undefined, async () => "never"),
+      ).rejects.toMatchObject({ code: "EACCES" });
+      expect(attempts).toBeLessThanOrEqual(5);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("recovers a dead-owner lease and ignores coordination storage during discovery", async () => {
     const sessionsDir = await makeTempDir();
     const manager = new SessionManager(sessionsDir);

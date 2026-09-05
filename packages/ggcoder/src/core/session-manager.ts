@@ -579,6 +579,11 @@ export class SessionManager {
     const lockPath = path.join(root, `${this.coordinationKey(conversationId)}.lock`);
     const token = crypto.randomUUID();
 
+    // Windows can report EPERM/EBUSY/EACCES on `mkdir` while the previous
+    // holder's `rm` has the lock dir in pending-delete. A few immediate retries
+    // distinguish that race from a genuine permission error on the root.
+    let vanishedRetries = 0;
+
     while (true) {
       try {
         await fs.mkdir(lockPath);
@@ -590,9 +595,17 @@ export class SessionManager {
         await fs.writeFile(path.join(lockPath, "owner.json"), JSON.stringify(owner), "utf-8");
         break;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const owner = await this.leaseOwner(lockPath);
+        // EEXIST is normal contention. Windows permission-like errors only count
+        // as contention while the pending-delete lock directory still exists.
+        const code = (error as NodeJS.ErrnoException).code;
+        const contentionCode = code === "EPERM" || code === "EBUSY" || code === "EACCES";
+        if (code !== "EEXIST" && !contentionCode) throw error;
         const stat = await fs.stat(lockPath).catch(() => null);
+        if (contentionCode && stat === null) {
+          if (++vanishedRetries > 3) throw error;
+          continue;
+        }
+        const owner = await this.leaseOwner(lockPath);
         const corruptAndOld =
           !owner && stat !== null && Date.now() - stat.mtimeMs > CORRUPT_LEASE_STALE_MS;
         const deadOwner = owner !== null && !this.processIsAlive(owner.pid);

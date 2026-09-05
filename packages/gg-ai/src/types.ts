@@ -313,8 +313,8 @@ export interface StreamOptions {
   cacheRetention?: CacheRetention;
   /** Stable per-session cache routing key for providers that support it (OpenAI, Moonshot, Gemini Code Assist). */
   promptCacheKey?: string;
-  /** OpenAI service tier for latency-sensitive requests. Only sent to first-party OpenAI API calls. */
-  serviceTier?: "auto" | "default" | "flex" | "priority";
+  /** OpenAI service tier for latency-sensitive requests. */
+  serviceTier?: "auto" | "default" | "flex" | "priority" | "fast";
   /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
   accountId?: string;
   /** Stable conversation identity for Codex transport headers. This is distinct from

@@ -278,22 +278,26 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const params: OpenAI.ChatCompletionCreateParams = {
     model: options.model,
     messages,
-    stream: useStreaming,
+    ...(useStreaming
+      ? { stream: true, stream_options: { include_usage: true } }
+      : { stream: false }),
     ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
     ...(effectiveTemp != null && !options.thinking && !hasFixedKimiSampling
       ? { temperature: effectiveTemp }
       : {}),
     ...(options.topP != null && !hasFixedKimiSampling ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
-    ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
-      ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
-      : {}),
     ...(options.tools?.length ? { tools: toOpenAITools(options.tools) } : {}),
     ...(options.toolChoice && options.tools?.length
       ? { tool_choice: toOpenAIToolChoice(options.toolChoice) }
       : {}),
-    ...(useStreaming ? { stream_options: { include_usage: true } } : {}),
   };
+
+  if (options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal) {
+    Object.assign(params, {
+      reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model),
+    });
+  }
 
   // Native web search is disabled for OpenAI-compatible providers — ggcoder
   // provides its own web_search/web_fetch tools which handle results properly.
@@ -327,7 +331,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   if (options.provider === "openai" && options.serviceTier) {
-    (params as unknown as Record<string, unknown>).service_tier = options.serviceTier;
+    Object.assign(params, { service_tier: options.serviceTier });
   }
 
   if (isKimiK3) {

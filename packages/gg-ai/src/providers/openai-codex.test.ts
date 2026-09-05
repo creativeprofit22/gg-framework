@@ -17,6 +17,40 @@ describe("streamOpenAICodex", () => {
     vi.unstubAllGlobals();
   });
 
+  it("maps Fast to OAuth priority and omits the disabled tier", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 10, output_tokens: 5 } },
+          },
+        ]),
+      ),
+    );
+
+    const fetchMock = vi.mocked(fetch);
+    for (const serviceTier of ["fast", undefined] as const) {
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "test-" + "key",
+        accountId: "acct",
+        serviceTier,
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+    }
+
+    const fastBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    const defaultBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    expect(fastBody.service_tier).toBe("priority");
+    expect(defaultBody).not.toHaveProperty("service_tier");
+  });
+
   it("preserves streamed function call arguments", async () => {
     vi.stubGlobal(
       "fetch",

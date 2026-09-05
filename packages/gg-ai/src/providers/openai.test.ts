@@ -270,6 +270,25 @@ describe("streamOpenAI request shaping", () => {
     createMock.mockReset();
   });
 
+  it("sends the Fast service tier only when explicitly selected", async () => {
+    for (const serviceTier of ["fast", undefined] as const) {
+      createMock.mockResolvedValueOnce(createStreamingResult(""));
+      const result = streamOpenAI({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "test-" + "key",
+        serviceTier,
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+    }
+
+    expect(createMock.mock.calls[0]?.[0]).toMatchObject({ service_tier: "fast" });
+    expect(createMock.mock.calls[1]?.[0]).not.toHaveProperty("service_tier");
+  });
+
   it.each<[Provider, Record<string, unknown>]>([
     ["openai", { reasoning_effort: "high", prompt_cache_key: "ggcoder", thinking: undefined }],
     // GLM takes BOTH: the toggle turns reasoning on, reasoning_effort picks

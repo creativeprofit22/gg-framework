@@ -80,6 +80,11 @@ describe("model registry invariants", () => {
           `${model.id} maxOutputTokens <= codexContextWindow`,
         ).toBeLessThanOrEqual(model.codexContextWindow);
       }
+      if (model.codexExperimentalContextWindow !== undefined) {
+        expect(model.provider, `${model.id} experimental Codex provider`).toBe("openai");
+        expect(model.codexExperimentalContextWindow).toBeGreaterThan(model.codexContextWindow ?? 0);
+        expect(model.codexExperimentalContextWindow).toBeLessThanOrEqual(model.contextWindow);
+      }
     }
   });
 
@@ -121,6 +126,7 @@ describe("model registry context windows", () => {
       id: "gpt-6-astra",
       contextWindow: 1_050_000,
       codexContextWindow: 272_000,
+      codexExperimentalContextWindow: 872_000,
       maxOutputTokens: 128_000,
       supportsImages: true,
     });
@@ -163,6 +169,23 @@ describe("model registry context windows", () => {
     expect(usesOpenAICodexTransport(options)).toBe(true);
     expect(getContextWindow(model, options)).toBe(limit);
     expect(getToolResultCharLimit(model, options)).toBe(40_000);
+  });
+
+  it("uses Astra's experimental window only through explicit OAuth opt-in", () => {
+    const experimental = {
+      provider: "openai" as const,
+      accountId: "acct_123",
+      openAICodexContextProfile: "experimental" as const,
+    };
+    expect(getContextWindow("gpt-6-astra", experimental)).toBe(872_000);
+    expect(getContextWindow("gpt-5.6-sol", experimental)).toBe(272_000);
+    expect(
+      getContextWindow("gpt-6-astra", {
+        provider: "openai",
+        openAICodexContextProfile: "experimental",
+      }),
+    ).toBe(1_050_000);
+    expect(getModel("gpt-6-astra")?.maxOutputTokens).toBe(128_000);
   });
 
   it("caps custom OpenAI model IDs on Codex transport", () => {

@@ -28,6 +28,7 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
+import { getAgentSessionContextWindow } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
 import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
 import { collectPersistedMcpToolFailures } from "./app-sidecar-tool-failures.js";
@@ -157,7 +158,6 @@ import {
 import {
   getModel,
   getDefaultThinkingLevel,
-  getContextWindow,
   getAllModels,
   clearRuntimeModels,
   registerRuntimeModels,
@@ -343,6 +343,7 @@ import {
   AppSidecarSessionMutationCoordinator,
   runAppSidecarNewSessionMutation,
 } from "./app-sidecar-session-mutation.js";
+import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -2745,8 +2746,7 @@ async function createSession(
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
   function currentContextWindow(): number {
-    const st = session.getState();
-    return getContextWindow(st.model, { provider: st.provider, accountId: st.accountId });
+    return getAgentSessionContextWindow(session.getState());
   }
   // Shared shape merged into /state + the SSE `ready` frame so the footer can
   // render context %, branch, and tasks immediately on connect.
@@ -6141,6 +6141,33 @@ ${checkpoints}`;
         // the footer's context meter rescales immediately.
         broadcast("extras", footerExtras());
         json(res, 200, { provider: target.provider, model: target.id, ...payload });
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/context-profile") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const result = await runContextProfileRequest({
+          body,
+          state: session.getState(),
+          running,
+          activeUsage: session.getContextUsage().used,
+          mutations: sessionMutations,
+          switchProfile: (nextProfile) => session.switchOpenAICodexContextProfile(nextProfile),
+        });
+        if (result.status === 200) {
+          broadcast("context_profile_change", result.body);
+          broadcast("extras", footerExtras());
+        }
+        json(res, result.status, result.body);
       });
       return;
     }

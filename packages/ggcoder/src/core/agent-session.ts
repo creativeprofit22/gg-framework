@@ -66,6 +66,7 @@ import {
 } from "./session-history.js";
 import { sourceFingerprint as computeSourceFingerprint } from "./session-compaction.js";
 import {
+  assertOpenAICodexContextProfileFitsUsage,
   getAuthStorageKeys,
   getContextWindow,
   getModel,
@@ -73,6 +74,7 @@ import {
   getToolResultCharLimit,
   MODELS,
   resolveTransportModel,
+  type OpenAICodexContextProfile,
 } from "./model-registry.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
@@ -357,10 +359,12 @@ export function resolveSessionToolResultCharLimit(
   model: string,
   provider: Provider,
   accountId?: string,
+  openAICodexContextProfile?: OpenAICodexContextProfile,
 ): number {
+  const contextOptions = { provider, accountId, openAICodexContextProfile };
   return (
-    getToolResultCharLimit(model, { provider, accountId }) ??
-    Math.floor(getContextWindow(model, { provider, accountId }) * 3.5 * 0.3)
+    getToolResultCharLimit(model, contextOptions) ??
+    Math.floor(getContextWindow(model, contextOptions) * 3.5 * 0.3)
   );
 }
 
@@ -376,8 +380,10 @@ export function resolveSessionTurnToolResultCharLimit(
   model: string,
   provider: Provider,
   accountId?: string,
+  openAICodexContextProfile?: OpenAICodexContextProfile,
 ): number {
-  const contextChars = getContextWindow(model, { provider, accountId }) * 3.5;
+  const contextChars =
+    getContextWindow(model, { provider, accountId, openAICodexContextProfile }) * 3.5;
   return Math.max(100_000, Math.min(Math.floor(contextChars * 0.15), 240_000));
 }
 
@@ -406,6 +412,7 @@ export interface AgentSessionState {
    *  callers compute the transport-specific context window (e.g. OpenAI Codex
    *  OAuth) without re-resolving credentials. */
   accountId?: string;
+  openAICodexContextProfile: OpenAICodexContextProfile;
 }
 
 // ── Agent Session ──────────────────────────────────────────
@@ -564,6 +571,7 @@ export class AgentSession {
   private readonly mcpCatalogCache = new McpCatalogCache();
   private provider: Provider;
   private model: string;
+  private openAICodexContextProfile: OpenAICodexContextProfile = "stable";
   private cwd: string;
   /** accountId from the most recently resolved credentials — cached so sync
    *  callers (e.g. the app-sidecar's context-window footer stat) can reflect
@@ -2372,12 +2380,18 @@ export class AgentSession {
         userAgent,
         // Codex caps each tool output at 10K tokens. Other transports retain the
         // generic 30%-of-context allowance used before this provider policy.
-        maxToolResultChars: resolveSessionToolResultCharLimit(this.model, this.provider, accountId),
+        maxToolResultChars: resolveSessionToolResultCharLimit(
+          this.model,
+          this.provider,
+          accountId,
+          this.openAICodexContextProfile,
+        ),
         // Aggregate per-turn budget across parallel tool results (fan-out guard).
         maxTurnToolResultChars: resolveSessionTurnToolResultCharLimit(
           this.model,
           this.provider,
           accountId,
+          this.openAICodexContextProfile,
         ),
         // Self-correction hooks (same as the TUI): loop-break + re-grounding are
         // polled mid-loop; the ideal review is polled when the agent would stop.
@@ -2631,6 +2645,12 @@ export class AgentSession {
       await this.persistMessage(this.messages[i]);
     }
     this.lastPersistedIndex = this.messages.length;
+  }
+
+  async switchOpenAICodexContextProfile(profile: OpenAICodexContextProfile): Promise<void> {
+    if (profile === this.openAICodexContextProfile) return;
+    assertOpenAICodexContextProfileFitsUsage(this.model, profile, this.getContextUsage().used);
+    this.openAICodexContextProfile = profile;
   }
 
   async switchModel(provider: string, model: string): Promise<void> {
@@ -3147,6 +3167,7 @@ export class AgentSession {
       messageCount: this.messages.length,
       planMode: this.planModeRef.current,
       accountId: this.lastAccountId,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     };
   }
 
@@ -3162,10 +3183,16 @@ export class AgentSession {
    * `costUsd` is present only when EVERY recorded turn has an authoritative
    * price; a partial sum would read as a full session cost and understate it.
    */
-  getContextUsage(): { used: number; size: number; costUsd?: number } {
+  getContextUsage(): {
+    used: number;
+    size: number;
+    openAICodexContextProfile: OpenAICodexContextProfile;
+    costUsd?: number;
+  } {
     const size = getContextWindow(this.model, {
       provider: this.provider,
       accountId: this.lastAccountId,
+      openAICodexContextProfile: this.openAICodexContextProfile,
     });
 
     let used: number;
@@ -3186,7 +3213,8 @@ export class AgentSession {
         ? this.turnMetrics.reduce((sum, m) => sum + (m.cost.status === "known" ? m.cost.usd : 0), 0)
         : undefined;
 
-    return costUsd === undefined ? { used, size } : { used, size, costUsd };
+    const usage = { used, size, openAICodexContextProfile: this.openAICodexContextProfile };
+    return costUsd === undefined ? usage : { ...usage, costUsd };
   }
 
   getPlanMode(): boolean {

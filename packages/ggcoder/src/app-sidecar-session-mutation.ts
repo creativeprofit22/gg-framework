@@ -5,6 +5,7 @@ export type SessionMutationKind =
   | "task-run"
   | "phase-start"
   | "prompt-start"
+  | "context-profile"
   | "manual-plan-accept"
   | "autopilot-plan-accept"
   | "plan-revise";

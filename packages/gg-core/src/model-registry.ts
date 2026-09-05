@@ -15,6 +15,8 @@ export interface ModelInfo {
    * route through `/codex/responses`; API-key requests do not.
    */
   codexContextWindow?: number;
+  /** Explicit opt-in Codex window; never replaces the stable default. */
+  codexExperimentalContextWindow?: number;
   maxOutputTokens: number;
   supportsThinking: boolean;
   supportsImages: boolean;
@@ -153,6 +155,7 @@ export const MODELS: ModelInfo[] = [
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
+    codexExperimentalContextWindow: 872_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
@@ -690,9 +693,12 @@ const PLACEHOLDER_LOCAL_MODEL: ModelInfo = {
   maxThinkingLevel: "high",
 };
 
+export type OpenAICodexContextProfile = "stable" | "experimental";
+
 export interface ContextWindowOptions {
   provider?: Provider;
   accountId?: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
 }
 
 export function usesOpenAICodexTransport(options?: ContextWindowOptions): boolean {
@@ -716,10 +722,32 @@ export function getToolResultCharLimit(
 export function getContextWindow(modelId: string, options?: ContextWindowOptions): number {
   const model = getModel(modelId);
   if (!model) return 200_000;
-  if (usesOpenAICodexTransport(options) && model.codexContextWindow) {
-    return model.codexContextWindow;
+  if (usesOpenAICodexTransport(options)) {
+    if (
+      options?.openAICodexContextProfile === "experimental" &&
+      model.codexExperimentalContextWindow
+    ) {
+      return model.codexExperimentalContextWindow;
+    }
+    if (model.codexContextWindow) return model.codexContextWindow;
   }
   return model.contextWindow;
+}
+
+export function assertOpenAICodexContextProfileFitsUsage(
+  modelId: string,
+  profile: OpenAICodexContextProfile,
+  activeUsage: number,
+): void {
+  const contextWindow = getContextWindow(modelId, {
+    provider: "openai",
+    accountId: "codex-context-profile",
+    openAICodexContextProfile: profile,
+  });
+  if (activeUsage <= contextWindow) return;
+  throw new Error(
+    `Cannot switch to the ${profile} context profile: active usage (${activeUsage} tokens) exceeds its ${contextWindow}-token limit. Compact or start a new session first.`,
+  );
 }
 
 /**

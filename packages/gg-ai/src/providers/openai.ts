@@ -311,10 +311,14 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const paramsAny = params as unknown as Record<string, unknown>;
     paramsAny.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder");
 
-    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options.
+    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options, and
+    // GPT-6 keeps it ("GPT-5.6 and later" per the prompt-caching guide).
     // Its only supported TTL is 30m; implicit mode preserves automatic latest-
     // message breakpoints while enabling the newer reliable key+prefix matching.
-    if (options.provider === "openai" && options.model.startsWith("gpt-5.6")) {
+    if (
+      options.provider === "openai" &&
+      (options.model.startsWith("gpt-5.6") || options.model === "gpt-6-astra")
+    ) {
       paramsAny.prompt_cache_options = { mode: "implicit", ttl: "30m" };
     } else if (!isKimiK3 && (options.cacheRetention ?? "short") === "long") {
       // K3 caching is automatic and its request schema does not expose a TTL.

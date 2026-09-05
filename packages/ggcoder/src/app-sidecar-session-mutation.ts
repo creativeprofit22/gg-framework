@@ -6,6 +6,7 @@ export type SessionMutationKind =
   | "phase-start"
   | "prompt-start"
   | "context-profile"
+  | "openai-codex-fast"
   | "manual-plan-accept"
   | "autopilot-plan-accept"
   | "plan-revise";

@@ -5,7 +5,7 @@ import {
 } from "@kenkaiiii/gg-core/models";
 import type { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 
-interface ContextProfileSessionState {
+export interface OpenAICodexAstraSessionState {
   provider: string;
   model: string;
   accountId?: string;
@@ -28,7 +28,7 @@ export function parseContextProfileBody(body: unknown): OpenAICodexContextProfil
 
 interface ContextProfileMutationOptions {
   profile: OpenAICodexContextProfile;
-  state: ContextProfileSessionState;
+  state: OpenAICodexAstraSessionState;
   running: boolean;
   activeUsage: number;
   mutations: AppSidecarSessionMutationCoordinator;
@@ -46,11 +46,15 @@ export async function runContextProfileRequest(
   return runContextProfileMutation({ ...mutationOptions, profile });
 }
 
+export function isOpenAICodexAstraSession(state: OpenAICodexAstraSessionState): boolean {
+  return state.provider === "openai" && state.model === "gpt-6-astra" && !!state.accountId;
+}
+
 export async function runContextProfileMutation(
   options: ContextProfileMutationOptions,
 ): Promise<ContextProfileMutationResult> {
   const { profile, state, running, activeUsage, mutations, switchProfile } = options;
-  if (state.provider !== "openai" || state.model !== "gpt-6-astra" || !state.accountId) {
+  if (!isOpenAICodexAstraSession(state)) {
     return {
       status: 409,
       body: {

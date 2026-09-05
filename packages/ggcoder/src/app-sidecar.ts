@@ -345,6 +345,7 @@ import {
   runAppSidecarNewSessionMutation,
 } from "./app-sidecar-session-mutation.js";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
+import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -1125,6 +1126,12 @@ async function main(): Promise<void> {
   const broadcastAll = (type: string, data: unknown): void => {
     for (const context of sessions.values()) context.broadcast(type, data);
   };
+  const refreshOpenAIAuthSessions = async (): Promise<void> => {
+    const contexts = [...sessions.values()].filter(
+      (context) => context.session.getState().provider === "openai",
+    );
+    await Promise.all(contexts.map((context) => context.refreshOpenAIAuthState()));
+  };
 
   const oauthInFlightProviders = new Set<string>();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
@@ -1489,6 +1496,7 @@ async function main(): Promise<void> {
                 memoryStore,
                 jiwaStore,
                 broadcastAll,
+                refreshOpenAIAuthSessions,
                 oauthInFlightProviders,
                 reloadCoordinator,
                 notes,
@@ -1898,6 +1906,7 @@ interface SessionContext {
   session: AgentSession;
   clients: Set<SseClient>;
   broadcast: (type: string, data: unknown) => void;
+  refreshOpenAIAuthState: () => Promise<void>;
   broadcastNotesChange: (snapshot: ProjectNotesSnapshot) => void;
   getActivePhaseContext: () => ReturnType<AgentSession["getActivePhaseContext"]>;
   cancelActiveOperation: () => Promise<ActiveOperationCancellationResult>;
@@ -1929,6 +1938,7 @@ async function createSession(
     jiwaStore: JiwaStore;
     /** Fan one frame out to EVERY window, not just this session's. */
     broadcastAll: (type: string, data: unknown) => void;
+    refreshOpenAIAuthSessions: () => Promise<void>;
     /** Providers with an OAuth flow in progress in some window. */
     oauthInFlightProviders: Set<string>;
     reloadCoordinator: AppSidecarReloadCoordinator;
@@ -1961,6 +1971,7 @@ async function createSession(
     memoryStore,
     jiwaStore,
     broadcastAll,
+    refreshOpenAIAuthSessions,
     oauthInFlightProviders,
     reloadCoordinator,
     notes,
@@ -2770,6 +2781,11 @@ async function createSession(
       // Roots added with /add-dir — the header shows a badge when non-empty.
       additionalRoots: session.getAdditionalRoots(),
     };
+  }
+
+  async function refreshOpenAIAuthState(): Promise<void> {
+    await session.refreshStoredAuthState();
+    broadcast("extras", footerExtras());
   }
 
   void scanLocalModels(false)
@@ -6172,6 +6188,32 @@ ${checkpoints}`;
       return;
     }
 
+    if (method === "POST" && url === "/openai-codex-fast") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const result = await runOpenAICodexFastRequest({
+          body,
+          state: session.getState(),
+          running,
+          mutations: sessionMutations,
+          switchFast: (enabled) => session.switchOpenAICodexFast(enabled),
+        });
+        if (result.status === 200) {
+          broadcast("fast_change", result.body);
+          broadcast("extras", footerExtras());
+        }
+        json(res, result.status, result.body);
+      });
+      return;
+    }
+
     // Set or clear Ken's model pin. Body: { model: "<id>" } to pin, or
     // { model: null } / "" to clear (Ken resumes following GG Coder). Applies
     // to BOTH Ken sessions (chat + autopilot reviewer); a switch landing while
@@ -6701,6 +6743,7 @@ ${checkpoints}`;
           ...(baseUrl ? { baseUrl } : {}),
         };
         await auth.setCredentials(storageKey, creds);
+        if (provider === "openai") await refreshOpenAIAuthSessions();
         // auth.json is shared by every window, so this is a global change:
         // close their login modals and refresh their provider lists too.
         broadcastAll("auth_done", { provider });
@@ -6766,6 +6809,7 @@ ${checkpoints}`;
               throw new Error(`OAuth not implemented for ${provider}`);
             }
             await auth.setCredentials(storageKey, creds);
+            if (provider === "openai") await refreshOpenAIAuthSessions();
             // Terminal outcome of a GLOBAL change: every window's login modal
             // should close and its provider list refresh, not just the one
             // that started the flow.
@@ -6923,7 +6967,10 @@ ${checkpoints}`;
           // too so "disconnect" fully removes both the Token Plan and Credits keys.
           if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
         }
+        if (provider === "openai") await refreshOpenAIAuthSessions();
         broadcast("auth_done", { provider });
+        broadcastAll("auth_change", { provider });
+        broadcastAll("models_change", {});
         json(res, 200, { ok: true });
       });
       return;
@@ -7467,6 +7514,7 @@ ${checkpoints}`;
     session,
     clients,
     broadcast,
+    refreshOpenAIAuthState,
     broadcastNotesChange,
     getActivePhaseContext: () => session.getActivePhaseContext(),
     cancelActiveOperation,

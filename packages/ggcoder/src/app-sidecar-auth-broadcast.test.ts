@@ -113,10 +113,13 @@ function request(
   });
 }
 
-/** Open a window's SSE stream and collect the event types it receives. */
-function openEventStream(session: string): Promise<{ types: string[] }> {
+/** Open a window's SSE stream and collect the events it receives. */
+function openEventStream(
+  session: string,
+): Promise<{ types: string[]; events: { type: string; data: Record<string, unknown> }[] }> {
   return new Promise((resolve, reject) => {
     const types: string[] = [];
+    const events: { type: string; data: Record<string, unknown> }[] = [];
     const req = http.request(
       {
         host: "127.0.0.1",
@@ -137,7 +140,12 @@ function openEventStream(session: string): Promise<{ types: string[] }> {
             for (const line of frame.split("\n")) {
               if (!line.startsWith("data: ")) continue;
               try {
-                types.push((JSON.parse(line.slice(6)) as { type: string }).type);
+                const event = JSON.parse(line.slice(6)) as {
+                  type: string;
+                  data: Record<string, unknown>;
+                };
+                types.push(event.type);
+                events.push(event);
               } catch {
                 // Non-JSON keepalives are not events.
               }
@@ -145,7 +153,7 @@ function openEventStream(session: string): Promise<{ types: string[] }> {
             split = buf.indexOf("\n\n");
           }
         });
-        resolve({ types });
+        resolve({ types, events });
       },
     );
     req.on("error", reject);
@@ -160,6 +168,33 @@ async function createSession(): Promise<string> {
   });
   expect(res.status).toBe(200);
   return res.json.sessionId as string;
+}
+
+async function writeOpenAIOAuth(): Promise<void> {
+  await fs.writeFile(
+    path.join(tmpHome, ".gg", "auth.json"),
+    JSON.stringify({
+      openai: {
+        ["access" + "Token"]: "oauth-access",
+        ["refresh" + "Token"]: "oauth-refresh",
+        expiresAt: Date.now() + 3_600_000,
+        accountId: "account-live",
+      },
+    }),
+  );
+}
+
+async function writeOpenAIApiKey(): Promise<void> {
+  await fs.writeFile(
+    path.join(tmpHome, ".gg", "auth.json"),
+    JSON.stringify({
+      openai: {
+        ["access" + "Token"]: "api-key",
+        ["refresh" + "Token"]: "",
+        expiresAt: Date.now() + 3_600_000,
+      },
+    }),
+  );
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
@@ -286,6 +321,77 @@ describe("connecting a provider", () => {
     await waitFor(() => streamB.types.includes("auth_done"));
     await waitFor(() => streamA.types.includes("auth_change"));
     await waitFor(() => streamB.types.includes("auth_change"));
+  }, 90_000);
+});
+
+describe("OpenAI auth-state fan-out", () => {
+  it("updates every live pane and guards mutations after logout", async () => {
+    await writeOpenAIOAuth();
+    const windowA = await createSession();
+    const windowB = await createSession();
+    for (const session of [windowA, windowB]) {
+      const switched = await request("POST", "/model", {
+        session,
+        body: { model: "gpt-6-astra" },
+      });
+      expect(switched.status).toBe(200);
+    }
+    const streamA = await openEventStream(windowA);
+    const streamB = await openEventStream(windowB);
+    await waitFor(() =>
+      [streamA, streamB].every((stream) =>
+        stream.events.some(
+          (event) => event.type === "ready" && event.data.accountId === "account-live",
+        ),
+      ),
+    );
+
+    const logout = await request("POST", "/auth/logout", {
+      session: windowA,
+      body: { provider: "openai" },
+    });
+    expect(logout.status).toBe(200);
+    await waitFor(() =>
+      [streamA, streamB].every(
+        (stream) =>
+          stream.types.includes("auth_change") &&
+          stream.types.includes("models_change") &&
+          stream.events.some((event) => event.type === "extras" && event.data.accountId === null),
+      ),
+    );
+
+    for (const [url, body] of [
+      ["/context-profile", { profile: "experimental" }],
+      ["/openai-codex-fast", { enabled: true }],
+    ] as const) {
+      const result = await request("POST", url, { session: windowB, body });
+      expect(result.status).toBe(409);
+    }
+  }, 90_000);
+
+  it("keeps Astra controls unavailable for stored API-key auth", async () => {
+    await writeOpenAIApiKey();
+    const windowA = await createSession();
+    const windowB = await createSession();
+    for (const session of [windowA, windowB]) {
+      const switched = await request("POST", "/model", {
+        session,
+        body: { model: "gpt-6-astra" },
+      });
+      expect(switched.status).toBe(200);
+      const stream = await openEventStream(session);
+      await waitFor(() =>
+        stream.events.some((event) => event.type === "ready" && event.data.accountId === null),
+      );
+    }
+
+    for (const [url, body] of [
+      ["/context-profile", { profile: "experimental" }],
+      ["/openai-codex-fast", { enabled: true }],
+    ] as const) {
+      const result = await request("POST", url, { session: windowB, body });
+      expect(result.status).toBe(409);
+    }
   }, 90_000);
 });
 

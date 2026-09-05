@@ -295,6 +295,10 @@ export function createPhase25FixtureServer({
         json(response, 200, sessionState(state, sessionId));
         return;
       }
+      if (request.method === "GET" && url.pathname === "/serve") {
+        json(response, 200, { running: false, configured: false });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/notes") {
         if (!notesReadyAudited) {
           notesReadyAudited = true;

@@ -349,6 +349,8 @@ export const responses = {
 
 export function initScript(payload) {
   const { responses, appVersion } = payload;
+  const paneId = "primary";
+  const sessionId = responses.agent_state?.sessionId;
   const callbacks = new Map();
   // event name → set of callback ids registered through `plugin:event|listen`.
   const eventHandlers = new Map();
@@ -385,6 +387,14 @@ export function initScript(payload) {
         return Promise.resolve(null);
       }
       if (cmd.startsWith("plugin:updater|")) return Promise.reject(new Error("no updates"));
+      if (cmd === "agent_pane_status" && !(cmd in responses)) {
+        return Promise.resolve({
+          paneId: args?.paneId ?? paneId,
+          generation: 1,
+          ready: true,
+          sessionId,
+        });
+      }
       return Promise.resolve(cmd in responses ? responses[cmd] : null);
     },
   };
@@ -395,7 +405,11 @@ export function initScript(payload) {
     const ids = eventHandlers.get("agent-event");
     if (!ids) return 0;
     for (const id of ids) {
-      callbacks.get(id)?.({ event: "agent-event", id, payload: { type, data: data ?? {} } });
+      callbacks.get(id)?.({
+        event: "agent-event",
+        id,
+        payload: { paneId, sessionId, type, data: data ?? {} },
+      });
     }
     return ids.size;
   };

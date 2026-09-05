@@ -151,6 +151,12 @@ describe("Phase 25 isolated dev fixture", () => {
         body: JSON.stringify({ cwd: fixtureFiles.paths.project }),
       }).then((response) => response.json());
       const headers = { "x-gg-session": created.sessionId, "content-type": "application/json" };
+      expect(await fetch(`${base}/serve`, { headers }).then((response) => response.json())).toEqual(
+        {
+          running: false,
+          configured: false,
+        },
+      );
       await fetch(`${base}/notes`, { headers });
       writeFileSync(fixtureFiles.descriptor.armFile, "focused-only\n");
       await waitFor(() => fixture.state.armed);

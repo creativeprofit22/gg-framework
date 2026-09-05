@@ -20,6 +20,26 @@ const promptBodies = [
 ];
 const appUrl = requireVisualFixtureUrl(process.env.GG_SHOT_URL ?? "http://localhost:1420");
 
+function copiedStatus(block) {
+  return block.getByRole("status").filter({ hasText: /^Prompt copied\.$/ });
+}
+
+async function armDelayedCopy(page) {
+  await page.evaluate(() => {
+    window.__delayNextCopy = true;
+  });
+}
+
+async function verifyPendingCopyAndRelease(page, blocks, block) {
+  await page.waitForFunction(() => typeof window.__releaseCopy === "function");
+  await block.getByRole("button", { name: "Copying prompt…", exact: true }).waitFor();
+  // The previous block remains successful while this write is explicitly held.
+  assert.equal(await copiedStatus(blocks.first()).count(), 1);
+  assert.equal(await copiedStatus(block).count(), 0);
+  assert.equal(await block.locator(".ken-prompt-copy").isDisabled(), true);
+  await page.evaluate(() => window.__releaseCopy());
+}
+
 function assertContained(metrics, containerName, childName) {
   const container = metrics[containerName];
   const child = metrics[childName];
@@ -191,9 +211,16 @@ export async function runWorkspaceNarrowVisualFixture({
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.evaluate(() => {
       const write = navigator.clipboard.writeText.bind(navigator.clipboard);
-      navigator.clipboard.writeText = (text) => {
+      navigator.clipboard.writeText = async (text) => {
+        if (window.__delayNextCopy) {
+          window.__delayNextCopy = false;
+          await new Promise((resolveCopy) => {
+            window.__releaseCopy = resolveCopy;
+          });
+          window.__releaseCopy = null;
+        }
+        await write(text);
         window.__copiedSource = text;
-        return write(text);
       };
     });
     for (const width of [1440, 320]) {
@@ -229,10 +256,12 @@ export async function runWorkspaceNarrowVisualFixture({
         await fast.getAttribute("title"),
         "Fast mode is on. Uses 2.5× credits. Click to turn off.",
       );
-      const copies = page.getByRole("button", { name: "Copy prompt", exact: true });
+      const blocks = page.locator(".ken-prompt-block");
+      const copies = blocks.locator(".ken-prompt-copy");
       assert.equal(await copies.count(), 2);
       for (let index = 0; index < 2; index++) {
-        const copy = copies.nth(index);
+        const block = blocks.nth(index);
+        const copy = block.getByRole("button", { name: "Copy prompt", exact: true });
         await copy.scrollIntoViewIfNeeded();
         const geometry = await copy.evaluate((button) => {
           const save = button.previousElementSibling;
@@ -256,17 +285,23 @@ export async function runWorkspaceNarrowVisualFixture({
           await page.screenshot({ path: output });
           screenshots.push(output);
         }
+        if (index === 1) await armDelayedCopy(page);
         await page.keyboard.press(index === 0 ? "Enter" : "Space");
-        await page.waitForFunction(
-          () => document.querySelectorAll(".ken-prompt-success").length > 0,
-        );
+        if (index === 1) await verifyPendingCopyAndRelease(page, blocks, block);
+        await copiedStatus(block).waitFor();
         assert.equal(
           // Windows clipboard round-trips LF as CRLF; verify exact API input separately.
           (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
           promptBodies[index],
         );
         assert.equal(await page.evaluate(() => window.__copiedSource), promptBodies[index]);
-        copyEvidence.push({ viewportWidth: width, index, ...geometry });
+        copyEvidence.push({
+          viewportWidth: width,
+          index,
+          ...geometry,
+          success: await copiedStatus(block).innerText(),
+          delayedWrite: index === 1,
+        });
       }
       if (screenshot) {
         const output = resolve(outputDir, `prompt-copy-success-${width}.png`);
@@ -337,7 +372,15 @@ export async function runWorkspaceNarrowVisualFixture({
           value: window.__fixtureClipboard,
         }),
       );
+      await armDelayedCopy(page);
       await copies.last().click();
+      await verifyPendingCopyAndRelease(page, blocks, blocks.last());
+      await copiedStatus(blocks.last()).waitFor();
+      assert.equal(
+        (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
+        promptBodies[1],
+      );
+      assert.equal(await page.evaluate(() => window.__copiedSource), promptBodies[1]);
       await page
         .getByRole("alert")
         .filter({ hasText: "Could not copy prompt" })

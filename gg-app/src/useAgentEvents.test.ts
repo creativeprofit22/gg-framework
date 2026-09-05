@@ -251,9 +251,7 @@ describe("useAgentEvents", () => {
         }),
       ),
     );
-    act(() =>
-      hook.result.current.handleEvent(ev("fast_change", { openAICodexFast: true })),
-    );
+    act(() => hook.result.current.handleEvent(ev("fast_change", { openAICodexFast: true })));
     expect(getState()?.openAICodexFast).toBe(true);
   });
 
@@ -275,9 +273,7 @@ describe("useAgentEvents", () => {
         }),
       ),
     );
-    act(() =>
-      hook.result.current.handleEvent(ev("turn_end", { usage: { inputTokens: 999_999 } })),
-    );
+    act(() => hook.result.current.handleEvent(ev("turn_end", { usage: { inputTokens: 999_999 } })));
     expect(getContextTokens()).toBe(136_000);
   });
 

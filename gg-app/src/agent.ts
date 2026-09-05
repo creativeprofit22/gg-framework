@@ -9,6 +9,7 @@ import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type {
+  DesktopContextSnapshot,
   PendingPlanReview,
   PlanAcceptResult,
   PlanMutationFailure,
@@ -513,12 +514,9 @@ function requirePlanRevisionResult(value: unknown): PlanRevisionResult {
   return { ok: true, operationId: value.operationId };
 }
 
-export interface AgentState {
+export interface AgentState extends DesktopContextSnapshot {
   provider: string;
   model: string;
-  /** Present when OpenAI requests use the Codex OAuth transport. */
-  accountId?: string;
-  openAICodexContextProfile?: OpenAICodexContextProfile;
   cwd: string;
   sessionId?: string;
   sessionPath?: string | null;
@@ -533,8 +531,6 @@ export interface AgentState {
   supportedThinkingLevels?: string[];
   /** True while the agent is in read-only plan mode. */
   planMode?: boolean;
-  /** Token budget for the active model — denominator for the context meter. */
-  contextWindow?: number;
   /** Current git branch of the project cwd, or null when not a repo. */
   gitBranch?: string | null;
   /** True when the project cwd is inside a git work tree. */

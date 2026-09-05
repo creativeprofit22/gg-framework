@@ -608,6 +608,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "ready": {
           const readyState = d as unknown as AgentState;
           setState(readyState);
+          setContextTokens(readyState.contextTokens);
           setRunning(readyState.running);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
@@ -1400,6 +1401,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             s
               ? {
                   ...s,
+                  accountId:
+                    typeof d.accountId === "string" || d.accountId === null
+                      ? (d.accountId as string | null)
+                      : s.accountId,
+                  openAICodexContextProfile:
+                    d.openAICodexContextProfile === "stable" ||
+                    d.openAICodexContextProfile === "experimental"
+                      ? d.openAICodexContextProfile
+                      : s.openAICodexContextProfile,
+                  openAICodexFast:
+                    typeof d.openAICodexFast === "boolean" ? d.openAICodexFast : s.openAICodexFast,
+                  contextTokens:
+                    typeof d.contextTokens === "number" ? d.contextTokens : s.contextTokens,
                   contextWindow: (d.contextWindow as number | undefined) ?? s.contextWindow,
                   gitBranch: (d.gitBranch as string | null | undefined) ?? s.gitBranch,
                   isGitRepo: (d.isGitRepo as boolean | undefined) ?? s.isGitRepo,
@@ -1421,6 +1435,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 }
               : s,
           );
+          if (typeof d.contextTokens === "number") setContextTokens(d.contextTokens);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           break;
 

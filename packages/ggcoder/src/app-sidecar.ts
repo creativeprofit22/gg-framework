@@ -28,7 +28,8 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
-import { getAgentSessionContextWindow } from "./app-sidecar-context.js";
+import type { DesktopContextSnapshot } from "@kenkaiiii/gg-core";
+import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
 import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
 import { collectPersistedMcpToolFailures } from "./app-sidecar-tool-failures.js";
@@ -2745,13 +2746,9 @@ async function createSession(
   const gitHubSlug: string | null = initialGitHubSlug;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
-  function currentContextWindow(): number {
-    return getAgentSessionContextWindow(session.getState());
-  }
   // Shared shape merged into /state + the SSE `ready` frame so the footer can
   // render context %, branch, and tasks immediately on connect.
-  function footerExtras(): {
-    contextWindow: number;
+  function footerExtras(): DesktopContextSnapshot & {
     gitBranch: string | null;
     isGitRepo: boolean;
     gitDirtyFileCount: number;
@@ -2762,7 +2759,7 @@ async function createSession(
     additionalRoots: string[];
   } {
     return {
-      contextWindow: currentContextWindow(),
+      ...getAgentSessionContextSnapshot(session),
       gitBranch,
       isGitRepo: gitIsRepo,
       gitDirtyFileCount,
@@ -3243,7 +3240,10 @@ async function createSession(
     target.eventBus.on("subagent_state", (data) => broadcast("subagent_state", data));
     target.eventBus.on("mcp_server_state", (data) => broadcast("mcp_server_state", data));
     target.eventBus.on("compaction_start", (data) => broadcast("compaction_start", data));
-    target.eventBus.on("compaction_end", (data) => broadcast("compaction_end", data));
+    target.eventBus.on("compaction_end", (data) => {
+      broadcast("compaction_end", data);
+      broadcast("extras", footerExtras());
+    });
   }
   bindSessionEvents(session);
 
@@ -6458,6 +6458,7 @@ ${checkpoints}`;
             operationId: mutation.operationId,
             kind: mutation.kind,
           });
+          broadcast("extras", footerExtras());
         },
       }).then((result) => {
         if (result.status === 500) {

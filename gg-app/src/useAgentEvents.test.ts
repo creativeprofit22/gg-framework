@@ -57,6 +57,10 @@ function setup(
   ) as unknown as AgentEventsDeps["setLiveToolFeed"];
   const setRunning = vi.fn() as unknown as AgentEventsDeps["setRunning"];
   const setTokens = vi.fn() as unknown as AgentEventsDeps["setTokens"];
+  let contextTokens = initialState.contextTokens ?? 0;
+  const setContextTokens = ((update: number | ((previous: number) => number)) => {
+    contextTokens = typeof update === "function" ? update(contextTokens) : update;
+  }) as AgentEventsDeps["setContextTokens"];
 
   // Real reducer-style state holder so functional setState updates (used by
   // model_change / ken_model_change spreads) apply against a base state.
@@ -93,7 +97,7 @@ function setup(
     setRunning,
     setLiveToolFeed,
     setTokens,
-    setContextTokens: noop as unknown as AgentEventsDeps["setContextTokens"],
+    setContextTokens,
     setDoneStatus: noop as unknown as AgentEventsDeps["setDoneStatus"],
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
@@ -132,6 +136,7 @@ function setup(
     getPlanReview: () => planReview,
     getState: () => agentState,
     getModels: () => models,
+    getContextTokens: () => contextTokens,
     setRunning,
     setTokens,
   };
@@ -167,6 +172,46 @@ describe("useAgentEvents", () => {
       openAICodexContextProfile: "experimental",
       contextWindow: 872_000,
     });
+  });
+
+  it("applies ready and extras as authoritative Astra state", () => {
+    const { hook, getState, getContextTokens } = setup();
+
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: null,
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("extras", {
+          accountId: "account-live",
+          openAICodexContextProfile: "experimental",
+          openAICodexFast: true,
+          contextTokens: 300_000,
+          contextWindow: 872_000,
+        }),
+      ),
+    );
+    expect(getState()).toMatchObject({
+      accountId: "account-live",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
+      contextTokens: 300_000,
+      contextWindow: 872_000,
+    });
+    expect(getContextTokens()).toBe(300_000);
   });
 
   describe("queued pill lifecycle", () => {

@@ -2064,6 +2064,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function onSelectContextProfile(profile: string): void {
     if (
       running ||
+      autopilotReviewing ||
       astraMutationBusyRef.current ||
       !state ||
       (profile !== "stable" && profile !== "experimental") ||
@@ -2111,7 +2112,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   function onToggleOpenAICodexFast(): void {
-    if (running || astraMutationBusyRef.current || !state) return;
+    if (running || autopilotReviewing || astraMutationBusyRef.current || !state) return;
     const previous = state.openAICodexFast;
     const requested = !previous;
     const authoritativeRevision = astraAuthoritativeRevisionRef.current;
@@ -4130,7 +4131,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         aria-label="OpenAI Codex context profile"
                         className="model-select"
                         value={state.openAICodexContextProfile}
-                        disabled={running || astraControlsBusy}
+                        disabled={running || autopilotReviewing || astraControlsBusy}
                         onChange={(event) => onSelectContextProfile(event.target.value)}
                       >
                         <option value="stable">Stable · 272K</option>
@@ -4141,7 +4142,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       aria-label="Fast · 2.5× credits"
                       aria-checked={state.openAICodexFast}
                       className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
-                      disabled={running || astraControlsBusy}
+                      disabled={running || autopilotReviewing || astraControlsBusy}
                       onClick={onToggleOpenAICodexFast}
                       role="switch"
                       type="button"

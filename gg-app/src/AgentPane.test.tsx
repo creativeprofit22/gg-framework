@@ -702,6 +702,35 @@ describe("AgentPane lifecycle", () => {
     ).toMatchObject({ disabled: true });
   });
 
+  it("disables Astra controls while Autopilot owns the session", async () => {
+    const pane = client("astra-autopilot", 1);
+    let emit: ((event: SidecarEvent) => void) | undefined;
+    vi.mocked(pane.subscribe).mockImplementation((handler) => {
+      emit = handler;
+      return vi.fn();
+    });
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    const fast = screen.getByRole("switch", { name: "Fast · 2.5× credits" });
+
+    act(() => emit?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() => expect(selector).toMatchObject({ disabled: true }));
+    expect(fast).toMatchObject({ disabled: true });
+
+    act(() => emit?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+    expect(fast).toMatchObject({ disabled: false });
+  });
+
   it("optimistically updates and settles a busy context profile", async () => {
     const pane = client("astra-switch", 1);
     vi.mocked(pane.getState).mockResolvedValue({

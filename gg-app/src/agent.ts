@@ -1242,7 +1242,10 @@ export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPe
 /** Ask Ken Kai. Fires the read-only mentor run; reply arrives via `ken_*`
  *  SSE events. Lazily boots Ken's session on first use. */
 export async function sendKenPrompt(text: string, target: KenTarget): Promise<void> {
-  const capturedTarget = { conversationId: target.conversationId, activationEpoch: target.activationEpoch };
+  const capturedTarget = {
+    conversationId: target.conversationId,
+    activationEpoch: target.activationEpoch,
+  };
   await logInfo(`ken prompt: ${text.slice(0, 80)}`);
   try {
     await waitForReady();
@@ -2009,8 +2012,10 @@ function requireSwitchKenModelResult(value: unknown): SwitchKenModelResult {
   }
   if (
     !isRecord(value) ||
-    typeof value.kenProvider !== "string" || !value.kenProvider.trim() ||
-    typeof value.kenModel !== "string" || !value.kenModel.trim() ||
+    typeof value.kenProvider !== "string" ||
+    !value.kenProvider.trim() ||
+    typeof value.kenModel !== "string" ||
+    !value.kenModel.trim() ||
     typeof value.kenModelOverride !== "boolean"
   ) {
     throw new Error("invalid Ken model response");
@@ -3438,7 +3443,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     retryCancelledRoadmapStatus: () =>
       call<PhaseCancellationPersistenceResult>("agent_cancel_roadmap_status_retry"),
     sendKenPrompt: async (text, target) => {
-      const capturedTarget = { conversationId: target.conversationId, activationEpoch: target.activationEpoch };
+      const capturedTarget = {
+        conversationId: target.conversationId,
+        activationEpoch: target.activationEpoch,
+      };
       await ready();
       await call("agent_ken_prompt", { text, target: capturedTarget });
     },

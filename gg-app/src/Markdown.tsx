@@ -212,7 +212,8 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
 
   const runAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult | null> => {
-      if (!dispatcher || (!prompt && action.type !== "send-fresh") || actionLockRef.current) return null;
+      if (!dispatcher || (!prompt && action.type !== "send-fresh") || actionLockRef.current)
+        return null;
       actionLockRef.current = true;
       setPending(action.type);
       setFailedAction(null);
@@ -694,7 +695,10 @@ function promptSourceFence(raw: string): { body: string; end: number } | null {
   const body = raw.slice(opening[0].length);
   for (const closing of body.matchAll(/(?:^|\r\n|\r|\n) {0,3}(`{3,})[ \t]*(?=\r|\n|$)/g)) {
     if (closing[1].length >= opening[1].length) {
-      return { body: body.slice(0, closing.index), end: opening[0].length + closing.index + closing[0].length };
+      return {
+        body: body.slice(0, closing.index),
+        end: opening[0].length + closing.index + closing[0].length,
+      };
     }
   }
   return null;

@@ -1,4 +1,7 @@
-import { CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS, continuationInstructionError } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
+  continuationInstructionError,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import {
   createElement,
   memo,
@@ -1997,7 +2000,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // session is in hand — one fade-in, no staggered reflow.
       setHydrated(true);
     }
-  }, [getState, listCommands, listHistory, listModels, listTasks, replacePlanReview, waitForReady, captureKenHydration, clearKenStream]);
+  }, [
+    getState,
+    listCommands,
+    listHistory,
+    listModels,
+    listTasks,
+    replacePlanReview,
+    waitForReady,
+    captureKenHydration,
+    clearKenStream,
+  ]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
@@ -2160,7 +2173,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function onSelectKenModel(modelId: string | null): void {
     if (state && modelId !== null && state.kenModelOverride && modelId === state.kenModel) return;
     if (state && modelId === null && !state.kenModelOverride) return;
-    void switchKenModel(modelId).then((res) => {
+    void switchKenModel(modelId)
+      .then((res) => {
         setState((s) =>
           s
             ? {
@@ -2171,9 +2185,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               }
             : s,
         );
-    }).catch((error: unknown) => {
-      toast(error instanceof Error ? error.message : String(error), "error");
-    });
+      })
+      .catch((error: unknown) => {
+        toast(error instanceof Error ? error.message : String(error), "error");
+      });
   }
 
   function onSelectModel(modelId: string): void {
@@ -2820,7 +2835,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       const prompt = action.prompt;
       if (action.type === "send-fresh") {
         const message = continuationInstructionError(prompt);
-        if (message) return { status: "failed", action: action.type, message, recoverPrompt: prompt };
+        if (message)
+          return { status: "failed", action: action.type, message, recoverPrompt: prompt };
       }
       if (!prompt) {
         return { status: "failed", action: action.type, message: "This prompt is empty." };
@@ -2941,7 +2957,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             };
           } catch (error) {
             const reason = taskErrorMessage(error);
-            const sizeAdvice = /\b413\b|next instruction is too long|request body too large/i.test(reason)
+            const sizeAdvice = /\b413\b|next instruction is too long|request body too large/i.test(
+              reason,
+            )
               ? ` Shorten the continuation instruction and try again (current length: ${prompt.length} UTF-16 units; maximum: ${CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS}). Nothing has been truncated.`
               : "";
             const message = `Couldn’t prepare the continuation handoff. ${reason}${sizeAdvice} No reset or submission was requested.`;

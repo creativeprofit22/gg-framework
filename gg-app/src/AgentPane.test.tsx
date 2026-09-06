@@ -64,25 +64,31 @@ vi.mock("./useKenMentor", async (importOriginal) => {
   const captureKenHydration = () => vi.fn();
   const clearKenStream = vi.fn();
   return {
-  useKenMentor: (opts: Parameters<typeof MentorModule.useKenMentor>[0]) => {
-    const real = actual.useKenMentor(opts);
-    return nativeMocks.realMentor ? real : ({
-    kenRunning: nativeMocks.kenRunning,
-    kenTokens: 0,
-    kenRunStartTs: null,
-    kenIsThinking: false,
-    kenThinkingStartTs: null,
-    kenThinkingAccumMs: 0,
-    handleKenEvent: vi.fn(),
-    hydrateKen: vi.fn(),
-    captureKenHydration,
-    clearKenStream,
-    captureKenTarget: () => ({ conversationId: "conversation", activationEpoch: "epoch" }),
-    captureKenRun: () => ({ conversationId: "conversation", activationEpoch: "epoch", runId: "run" }),
-    captureKenOperation: () => () => true,
-  });
-  },
-};
+    useKenMentor: (opts: Parameters<typeof MentorModule.useKenMentor>[0]) => {
+      const real = actual.useKenMentor(opts);
+      return nativeMocks.realMentor
+        ? real
+        : {
+            kenRunning: nativeMocks.kenRunning,
+            kenTokens: 0,
+            kenRunStartTs: null,
+            kenIsThinking: false,
+            kenThinkingStartTs: null,
+            kenThinkingAccumMs: 0,
+            handleKenEvent: vi.fn(),
+            hydrateKen: vi.fn(),
+            captureKenHydration,
+            clearKenStream,
+            captureKenTarget: () => ({ conversationId: "conversation", activationEpoch: "epoch" }),
+            captureKenRun: () => ({
+              conversationId: "conversation",
+              activationEpoch: "epoch",
+              runId: "run",
+            }),
+            captureKenOperation: () => () => true,
+          };
+    },
+  };
 });
 vi.mock("./useProgress", () => ({
   useProgress: () => ({ snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false }),
@@ -90,66 +96,71 @@ vi.mock("./useProgress", () => ({
 vi.mock("./useAgentEvents", async (importOriginal) => {
   const actual = await importOriginal<typeof EventsModule>();
   return {
-  HOOK_PRESENTATION: actual.HOOK_PRESENTATION,
-  useAgentEvents: (deps: Parameters<typeof EventsModule.useAgentEvents>[0]) => {
-    const real = actual.useAgentEvents(deps);
-    const { planReviewPathRef, setPlanReview } = deps;
-    nativeMocks.onSessionReset = deps.onSessionReset ?? null;
-    nativeMocks.kenStateRef = deps.stateRef;
-    const replacePlanReview = useCallback(
-      (review: AgentModule.PendingPlanReview | null) => {
-        planReviewPathRef.current = review?.planPath ?? null;
-        setPlanReview(review);
-      },
-      [planReviewPathRef, setPlanReview],
-    );
-    return nativeMocks.realMentor ? real : {
-      handleEvent: (event: AgentModule.SidecarEvent) => {
-        if (event.type === "continuation_accepted") {
-          deps.onContinuationAccepted?.(event.data);
-          return true;
-        }
-        if (event.type === "ken_text") {
-          deps.setItems((current) => [
-            ...current,
-            { kind: "ken", id: 99999, text: String((event.data as { text: string }).text) },
-          ]);
-          return true;
-        }
-        if (event.type === "roadmap_phase_draft_change") {
-          deps.onRoadmapPhaseDraftChange?.(
-            event.data as AgentModule.RoadmapPhaseDraftChangeEvent["data"],
-          );
-          return true;
-        }
-        if (event.type === "plan_exit") {
-          const data = event.data as Record<string, unknown>;
-          deps.planReviewPathRef.current = typeof data.planPath === "string" ? data.planPath : null;
-          deps.setPlanReview({
-            checkpointId:
-              typeof data.checkpointId === "string" ? data.checkpointId : "checkpoint-1",
-            generation: typeof data.generation === "number" ? data.generation : 1,
-            planPath: deps.planReviewPathRef.current ?? "",
-            content: String(data.content ?? ""),
-            contentHash: "",
-            state: "pending-review",
-            reviewStatus: "unreviewed",
-            feedback: null,
-          });
-          return true;
-        }
-        if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
-        const data = event.data as Record<string, unknown>;
-        if (deps.shouldApplySessionReset && !deps.shouldApplySessionReset(data)) return;
-        deps.setItems([]);
-        deps.onSessionReset?.(typeof data.operationId === "string" ? data.operationId : undefined);
-      },
-      pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
-      endStreamingText: vi.fn(),
-      replacePlanReview,
-    };
-  },
-};
+    HOOK_PRESENTATION: actual.HOOK_PRESENTATION,
+    useAgentEvents: (deps: Parameters<typeof EventsModule.useAgentEvents>[0]) => {
+      const real = actual.useAgentEvents(deps);
+      const { planReviewPathRef, setPlanReview } = deps;
+      nativeMocks.onSessionReset = deps.onSessionReset ?? null;
+      nativeMocks.kenStateRef = deps.stateRef;
+      const replacePlanReview = useCallback(
+        (review: AgentModule.PendingPlanReview | null) => {
+          planReviewPathRef.current = review?.planPath ?? null;
+          setPlanReview(review);
+        },
+        [planReviewPathRef, setPlanReview],
+      );
+      return nativeMocks.realMentor
+        ? real
+        : {
+            handleEvent: (event: AgentModule.SidecarEvent) => {
+              if (event.type === "continuation_accepted") {
+                deps.onContinuationAccepted?.(event.data);
+                return true;
+              }
+              if (event.type === "ken_text") {
+                deps.setItems((current) => [
+                  ...current,
+                  { kind: "ken", id: 99999, text: String((event.data as { text: string }).text) },
+                ]);
+                return true;
+              }
+              if (event.type === "roadmap_phase_draft_change") {
+                deps.onRoadmapPhaseDraftChange?.(
+                  event.data as AgentModule.RoadmapPhaseDraftChangeEvent["data"],
+                );
+                return true;
+              }
+              if (event.type === "plan_exit") {
+                const data = event.data as Record<string, unknown>;
+                deps.planReviewPathRef.current =
+                  typeof data.planPath === "string" ? data.planPath : null;
+                deps.setPlanReview({
+                  checkpointId:
+                    typeof data.checkpointId === "string" ? data.checkpointId : "checkpoint-1",
+                  generation: typeof data.generation === "number" ? data.generation : 1,
+                  planPath: deps.planReviewPathRef.current ?? "",
+                  content: String(data.content ?? ""),
+                  contentHash: "",
+                  state: "pending-review",
+                  reviewStatus: "unreviewed",
+                  feedback: null,
+                });
+                return true;
+              }
+              if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
+              const data = event.data as Record<string, unknown>;
+              if (deps.shouldApplySessionReset && !deps.shouldApplySessionReset(data)) return;
+              deps.setItems([]);
+              deps.onSessionReset?.(
+                typeof data.operationId === "string" ? data.operationId : undefined,
+              );
+            },
+            pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
+            endStreamingText: vi.fn(),
+            replacePlanReview,
+          };
+    },
+  };
 });
 vi.mock("./HomeScreen", () => ({
   HomeScreen: (props: {
@@ -317,7 +328,9 @@ function liveEvents(pane: PaneAgentClient) {
   const listeners = new Set<(event: AgentModule.SidecarEvent) => void>();
   vi.mocked(pane.subscribe).mockImplementation((receive) => {
     listeners.add(receive);
-    return () => { listeners.delete(receive); };
+    return () => {
+      listeners.delete(receive);
+    };
   });
   return (type: string, data: object) => {
     for (const receive of listeners) receive({ type, data } as AgentModule.SidecarEvent);
@@ -779,27 +792,29 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getByText("300,000 / 872K · 34%")).toBeDefined();
   });
 
-  it.each(["cannot switch Ken's model while running", "unknown model: missing", "invalid Ken model response"])(
-    "preserves all Ken fields and displays rejected selection: %s", async (message) => {
-      const pane = client("ken-selection", 1);
-      const prior = { kenProvider: "anthropic", kenModel: "claude-prior", kenModelOverride: true };
-      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("gpt"), ...prior });
-      vi.mocked(pane.listModels).mockResolvedValue([
-        { id: "claude-prior", provider: "anthropic", name: "Prior" },
-        { id: "missing", provider: "openai", name: "Missing" },
-      ]);
-      vi.mocked(pane.switchKenModel).mockRejectedValue(message);
-      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
-      const picker = await screen.findByTitle(/is pinned to a separate model/);
-      fireEvent.click(picker);
-      fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));
-      await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(message, "error"));
-      expect(pane.switchKenModel).toHaveBeenCalledExactlyOnceWith("missing");
-      expect(nativeMocks.kenStateRef?.current).toMatchObject(prior);
-      expect(picker.textContent).toContain("Prior");
-      expect(picker.title).toContain("pinned");
-    },
-  );
+  it.each([
+    "cannot switch Ken's model while running",
+    "unknown model: missing",
+    "invalid Ken model response",
+  ])("preserves all Ken fields and displays rejected selection: %s", async (message) => {
+    const pane = client("ken-selection", 1);
+    const prior = { kenProvider: "anthropic", kenModel: "claude-prior", kenModelOverride: true };
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("gpt"), ...prior });
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "claude-prior", provider: "anthropic", name: "Prior" },
+      { id: "missing", provider: "openai", name: "Missing" },
+    ]);
+    vi.mocked(pane.switchKenModel).mockRejectedValue(message);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const picker = await screen.findByTitle(/is pinned to a separate model/);
+    fireEvent.click(picker);
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));
+    await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(message, "error"));
+    expect(pane.switchKenModel).toHaveBeenCalledExactlyOnceWith("missing");
+    expect(nativeMocks.kenStateRef?.current).toMatchObject(prior);
+    expect(picker.textContent).toContain("Prior");
+    expect(picker.title).toContain("pinned");
+  });
 
   it("disables the context profile selector while running", async () => {
     const pane = client("astra-running", 1);
@@ -1711,12 +1726,17 @@ describe("AgentPane lifecycle", () => {
         contentHash: "hash",
         state: "pending-review",
         reviewStatus: "ready",
-        feedback: null,
+        feedback: "Corpus unavailable. Review this limitation before approval.",
       },
     });
     render(<AgentPane client={pane} target={target} />);
 
     expect(await screen.findByText(/Your approval is still required/i)).toBeTruthy();
+    expect(
+      screen.getByText("Corpus unavailable. Review this limitation before approval."),
+    ).toBeTruthy();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+    expect(pane.revisePlan).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-restart", 5));
   });
@@ -2088,7 +2108,12 @@ describe("AgentPane lifecycle", () => {
       await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
       fireEvent.change(input, { target: { value: prompt } });
       fireEvent.keyDown(input, { key: "Enter" });
-      await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("question", { conversationId: "conversation", activationEpoch: "epoch" }));
+      await waitFor(() =>
+        expect(pane.sendKenPrompt).toHaveBeenCalledWith("question", {
+          conversationId: "conversation",
+          activationEpoch: "epoch",
+        }),
+      );
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
@@ -2103,7 +2128,16 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.getState).toHaveBeenCalled());
     const ken = { conversationId: "new", activationEpoch: "new", runId: "new-run" };
     act(() => emit("session_reset", { kenState: { ...ken, activeRunId: null } }));
-    await act(async () => pending.resolve({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" } } as AgentModule.AgentState));
+    await act(async () =>
+      pending.resolve({
+        running: false,
+        provider: "anthropic",
+        model: "test",
+        cwd: "/work",
+        mode: "code",
+        kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" },
+      } as AgentModule.AgentState),
+    );
     expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
     act(() => {
       emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
@@ -2114,58 +2148,115 @@ describe("AgentPane lifecycle", () => {
     expect(pane.cancelKen).toHaveBeenCalledWith(ken);
   });
 
-  it.each([false, true])("scopes real mentor cancel rejection across a newer run (replacement=%s)", async (replace) => {
-    nativeMocks.realMentor = true;
-    const pane = client("pane-real-ken", 1);
-    const emit = liveEvents(pane);
-    const identity = { conversationId: "conversation", activationEpoch: "epoch", runId: "old-run" };
-    vi.mocked(pane.getState).mockResolvedValue({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState: { conversationId: identity.conversationId, activationEpoch: identity.activationEpoch, activeRunId: identity.runId } } as AgentModule.AgentState);
-    const pending = deferred<void>();
-    vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
-    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
-    const cancel = await screen.findByRole("button", { name: "esc to cancel" });
-    fireEvent.click(cancel);
-    expect(pane.cancelKen).toHaveBeenCalledWith(identity);
-    act(() => emit("extras", { kenState: { ...identity, activeRunId: replace ? "new-run" : identity.runId } }));
-    await act(async () => { pending.reject(new Error("cancel rejected for captured run")); });
-    expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
-    expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
-    if (replace) {
-      act(() => emit("ken_run_end", { ken: identity }));
+  it.each([false, true])(
+    "scopes real mentor cancel rejection across a newer run (replacement=%s)",
+    async (replace) => {
+      nativeMocks.realMentor = true;
+      const pane = client("pane-real-ken", 1);
+      const emit = liveEvents(pane);
+      const identity = {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+        runId: "old-run",
+      };
+      vi.mocked(pane.getState).mockResolvedValue({
+        running: false,
+        provider: "anthropic",
+        model: "test",
+        cwd: "/work",
+        mode: "code",
+        kenState: {
+          conversationId: identity.conversationId,
+          activationEpoch: identity.activationEpoch,
+          activeRunId: identity.runId,
+        },
+      } as AgentModule.AgentState);
+      const pending = deferred<void>();
+      vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      const cancel = await screen.findByRole("button", { name: "esc to cancel" });
+      fireEvent.click(cancel);
+      expect(pane.cancelKen).toHaveBeenCalledWith(identity);
+      act(() =>
+        emit("extras", {
+          kenState: { ...identity, activeRunId: replace ? "new-run" : identity.runId },
+        }),
+      );
+      await act(async () => {
+        pending.reject(new Error("cancel rejected for captured run"));
+      });
+      expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
       expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
-    }
-  });
+      if (replace) {
+        act(() => emit("ken_run_end", { ken: identity }));
+        expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+      }
+    },
+  );
 
-  it.each(["same", "new-conversation", "rewind", "epoch-return"].flatMap((change) =>
-    ["quick", "composer", "edited-composer"].map((source) => ({ change, source })),
-  ))("scopes delayed mentor transport rejection ($change, $source)", async ({ change, source }) => {
+  it.each(
+    ["same", "new-conversation", "rewind", "epoch-return"].flatMap((change) =>
+      ["quick", "composer", "edited-composer"].map((source) => ({ change, source })),
+    ),
+  )("scopes delayed mentor transport rejection ($change, $source)", async ({ change, source }) => {
     nativeMocks.realMentor = true;
     const pane = client("pane-real-ken-send", 1);
     const emit = liveEvents(pane);
-    const kenState = { conversationId: "conversation", activationEpoch: "epoch", activeRunId: null };
-    vi.mocked(pane.getState).mockResolvedValue({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState } as AgentModule.AgentState);
+    const kenState = {
+      conversationId: "conversation",
+      activationEpoch: "epoch",
+      activeRunId: null,
+    };
+    vi.mocked(pane.getState).mockResolvedValue({
+      running: false,
+      provider: "anthropic",
+      model: "test",
+      cwd: "/work",
+      mode: "code",
+      kenState,
+    } as AgentModule.AgentState);
     const pending = deferred<void>();
     vi.mocked(pane.sendKenPrompt).mockReturnValue(pending.promise);
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     const quick = await screen.findByRole("button", { name: "Ken, next?" });
     await waitFor(() => expect((quick as HTMLButtonElement).disabled).toBe(false));
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.change(input, { target: { value: source === "quick" ? "Keep this draft" : "@Ken next?" } });
+    fireEvent.change(input, {
+      target: { value: source === "quick" ? "Keep this draft" : "@Ken next?" },
+    });
     if (source === "quick") fireEvent.click(quick);
     else fireEvent.keyDown(input, { key: "Enter" });
-    expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" });
+    expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+      conversationId: "conversation",
+      activationEpoch: "epoch",
+    });
     if (source === "edited-composer") fireEvent.change(input, { target: { value: "New draft" } });
     act(() => {
       if (change === "same") emit("extras", { kenState });
       else {
-        emit("session_reset", { kenState: { ...kenState, conversationId: change === "new-conversation" ? "NEW" : kenState.conversationId, activationEpoch: "reset" } });
+        emit("session_reset", {
+          kenState: {
+            ...kenState,
+            conversationId: change === "new-conversation" ? "NEW" : kenState.conversationId,
+            activationEpoch: "reset",
+          },
+        });
         if (change === "epoch-return") emit("session_reset", { kenState });
       }
     });
-    await act(async () => { pending.reject(new Error("send rejected for captured target")); });
+    await act(async () => {
+      pending.reject(new Error("send rejected for captured target"));
+    });
     const current = change === "same";
     expect(screen.queryByText(/send rejected for captured target/) !== null).toBe(current);
-    if (current) expect(input.value).toBe(source === "quick" ? "Keep this draft" : source === "edited-composer" ? "New draft" : "@Ken next?");
+    if (current)
+      expect(input.value).toBe(
+        source === "quick"
+          ? "Keep this draft"
+          : source === "edited-composer"
+            ? "New draft"
+            : "@Ken next?",
+      );
     else expect(input.value).not.toBe("@Ken next?");
     expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
   });
@@ -2191,7 +2282,12 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
 
-    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" }));
+    await waitFor(() =>
+      expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+      }),
+    );
     expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe("@Ken next?");
@@ -2222,7 +2318,12 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
 
-    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" }));
+    await waitFor(() =>
+      expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+      }),
+    );
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
   });
@@ -2321,39 +2422,45 @@ describe("AgentPane lifecycle", () => {
     ["oversized", "x".repeat(8001), "8001"],
     ["whitespace-only", " \r\n\t ", "nonblank"],
     ["emoji oversized", "🙂".repeat(4000) + "x", "8001"],
-  ])("blocks %s fresh instructions before confirmation or mutation", async (_name, prompt, error) => {
-    const pane = client("pane-invalid-instruction", 1);
-    await renderKenPromptPane(pane, false, prompt);
-    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.change(input, { target: { value: "unsent draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
-    expect((await screen.findByRole("alert")).textContent).toContain(error);
-    expect(screen.getByRole("alert").textContent).toContain("8000");
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(input.value).toBe("unsent draft");
-    expect(input.disabled).toBe(false);
-    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
-    expect(pane.commitContinuation).not.toHaveBeenCalled();
-    expect(pane.newSession).not.toHaveBeenCalled();
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-  });
-
-  it.each([["8000 units", "x".repeat(8000)], ["CRLF and emoji", "  🙂\r\n\tKeep outer whitespace  \r\n"]])(
-    "prepares a valid raw instruction unchanged: %s", async (_name, prompt) => {
-      const pane = client("pane-valid-instruction", 1);
-      vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => emitContinuation(pane, request));
+  ])(
+    "blocks %s fresh instructions before confirmation or mutation",
+    async (_name, prompt, error) => {
+      const pane = client("pane-invalid-instruction", 1);
       await renderKenPromptPane(pane, false, prompt);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: "unsent draft" } });
       fireEvent.click(screen.getByRole("button", { name: "New session" }));
-      expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(prompt);
+      expect((await screen.findByRole("alert")).textContent).toContain(error);
+      expect(screen.getByRole("alert").textContent).toContain("8000");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(input.value).toBe("unsent draft");
+      expect(input.disabled).toBe(false);
       expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      expect(pane.prepareContinuationHandoff).toHaveBeenCalledExactlyOnceWith(prompt);
-      expect(pane.commitContinuation).toHaveBeenCalledOnce();
+      expect(pane.commitContinuation).not.toHaveBeenCalled();
       expect(pane.newSession).not.toHaveBeenCalled();
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["8000 units", "x".repeat(8000)],
+    ["CRLF and emoji", "  🙂\r\n\tKeep outer whitespace  \r\n"],
+  ])("prepares a valid raw instruction unchanged: %s", async (_name, prompt) => {
+    const pane = client("pane-valid-instruction", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) =>
+      emitContinuation(pane, request),
+    );
+    await renderKenPromptPane(pane, false, prompt);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(prompt);
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledExactlyOnceWith(prompt);
+    expect(pane.commitContinuation).toHaveBeenCalledOnce();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
 
   it("opens a side-effect-free non-Astra confirmation and cancels without changing the composer", async () => {
     const pane = client("pane-confirm-cancel", 1);
@@ -2551,42 +2658,47 @@ describe("AgentPane lifecycle", () => {
     },
   );
 
-  it.each(["provider failure", "malformed synthesis", "next instruction is too long", "HTTP 413: Request body too large", "Session is busy. Retry preparation when idle."])(
-    "fails closed before commit on %s",
-    async (message) => {
-      const pane = client("pane-prepare-failure", 1);
-      vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(
-        message.startsWith("HTTP") ? message : new Error(message),
-      );
-      await renderKenPromptPane(pane);
-      fireEvent.click(screen.getByRole("button", { name: "New session" }));
-      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-      expect((await screen.findByRole("alert")).textContent).toContain(
-        "No reset or submission was requested",
-      );
-      expect(screen.getByRole("alert").textContent).toContain(message);
-      expect(screen.getByRole("dialog").textContent).toContain(message);
-      if (message.includes("413") || message === "next instruction is too long") {
-        for (const surface of [screen.getByRole("alert"), screen.getByRole("dialog")]) {
-          expect(surface.textContent).toContain("Shorten the continuation instruction");
-          expect(surface.textContent).toContain(`current length: ${KEN_PROMPT.length}`);
-          expect(surface.textContent).toContain("maximum: 8000");
-          expect(surface.textContent).toContain("Nothing has been truncated");
-        }
+  it.each([
+    "provider failure",
+    "malformed synthesis",
+    "next instruction is too long",
+    "HTTP 413: Request body too large",
+    "Session is busy. Retry preparation when idle.",
+  ])("fails closed before commit on %s", async (message) => {
+    const pane = client("pane-prepare-failure", 1);
+    vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(
+      message.startsWith("HTTP") ? message : new Error(message),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "No reset or submission was requested",
+    );
+    expect(screen.getByRole("alert").textContent).toContain(message);
+    expect(screen.getByRole("dialog").textContent).toContain(message);
+    if (message.includes("413") || message === "next instruction is too long") {
+      for (const surface of [screen.getByRole("alert"), screen.getByRole("dialog")]) {
+        expect(surface.textContent).toContain("Shorten the continuation instruction");
+        expect(surface.textContent).toContain(`current length: ${KEN_PROMPT.length}`);
+        expect(surface.textContent).toContain("maximum: 8000");
+        expect(surface.textContent).toContain("Nothing has been truncated");
       }
-      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
-      expect(pane.commitContinuation).not.toHaveBeenCalled();
-      expect(pane.newSession).not.toHaveBeenCalled();
-      expect(pane.sendPrompt).not.toHaveBeenCalled();
-      fireEvent.click(within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0]);
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      fireEvent.click(screen.getByRole("button", { name: "New session" }));
-      expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
-    },
-  );
+    }
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect(pane.commitContinuation).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0],
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+  });
 
   it("ignores wrong-operation and wrong-destination resets and late duplicate resets around acceptance", async () => {
     const pane = client("pane-reset-identity", 1);

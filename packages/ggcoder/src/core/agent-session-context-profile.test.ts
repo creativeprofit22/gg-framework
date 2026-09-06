@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
+import type { AgentEvent } from "@kenkaiiii/gg-agent";
+import type { VerificationGate } from "./verification-gate.js";
+import type { SessionVerificationEvidenceLedger } from "./verification-evidence.js";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as CompactorModule from "./compaction/compactor.js";
 import type * as ModelRegistryModule from "./model-registry.js";
@@ -104,6 +107,88 @@ const lockedEligibility = {
   canChange: false,
   reason: "Context mode is fixed after this session starts. Start a new session to change it.",
 };
+
+describe("continuation verification ownership", () => {
+  it.each([false, true])("newSession(false) preserves evidence only when reset fails (%s)", async (fails) => {
+    const session = await createSession();
+    const internal = session as unknown as {
+      verificationGate: VerificationGate;
+      verificationEvidenceLedger: SessionVerificationEvidenceLedger;
+      createNewSession(): Promise<void>;
+    };
+    try {
+      await session.prompt("Lock the source context profile.");
+      const identity = session.getConversationIdentity();
+      internal.verificationGate.recordMutation("src/source.ts");
+      internal.verificationGate.recordVerification(undefined, "npm test");
+      internal.verificationGate.recordFailedVerification("npm lint");
+      internal.verificationEvidenceLedger.recordToolResult({
+        name: "bash", args: { command: "npm test" }, isError: false,
+        details: { bashDiagnostics: {
+          executionId: "source-check", command: "npm test", cwd: tmpProject,
+          startedAt: Date.now(), reason: "completed", exitCode: 0,
+        } },
+      });
+      const gate = internal.verificationGate.snapshot();
+      const ledger = internal.verificationEvidenceLedger.snapshot();
+      expect(ledger.currentEvidence).toHaveLength(1);
+      expect(session.getVerificationProblem()).toContain("failed");
+      if (fails) {
+        vi.spyOn(internal, "createNewSession").mockRejectedValueOnce(new Error("destination unavailable"));
+        await expect(session.newSession(false)).rejects.toThrow("destination unavailable");
+        expect(session.getConversationIdentity()).toEqual(identity);
+        expect(internal.verificationGate.snapshot()).toEqual(gate);
+        expect(internal.verificationEvidenceLedger.snapshot()).toEqual(ledger);
+        expect(session.getVerificationProblem()).toContain("failed");
+      } else {
+        await session.newSession(false);
+        expect(session.getConversationIdentity()).not.toEqual(identity);
+        expect(internal.verificationGate.snapshot()).toMatchObject({
+          seq: 0, mutation: 0, verified: 0, files: [], failedChecks: [], unknown: false,
+        });
+        expect(internal.verificationEvidenceLedger.snapshot()).toEqual({
+          currentEvidence: [], staleEvidence: [],
+        });
+        expect(session.getVerificationProblem()).toBeNull();
+      }
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("does not admit a delayed source tool result into the fresh checkpoint", async () => {
+    const session = await createSession();
+    const internal = session as unknown as {
+      trackHookEvent(event: AgentEvent): Promise<void>;
+      verificationGate: VerificationGate;
+      verificationEvidenceLedger: SessionVerificationEvidenceLedger;
+    };
+    try {
+      await internal.trackHookEvent({
+        type: "tool_call_start", toolCallId: "source-call", name: "bash",
+        args: { command: "npm test" },
+      } as AgentEvent);
+      await session.newSession(false);
+      internal.verificationGate.recordMutation("src/destination.ts");
+      const gate = internal.verificationGate.snapshot();
+      await internal.trackHookEvent({
+        type: "tool_call_end", toolCallId: "source-call", result: "Exit code: 0\n",
+        isError: false, durationMs: 1,
+        details: { bashDiagnostics: {
+          executionId: "source-check", command: "npm test", cwd: tmpProject,
+          startedAt: Date.now(), reason: "completed", exitCode: 0,
+        } },
+      } as AgentEvent);
+      expect(internal.verificationGate.snapshot()).toEqual(gate);
+      expect(session.getVerificationProblem()).toContain("Unverified");
+      expect(internal.verificationEvidenceLedger.snapshot()).toEqual({
+        currentEvidence: [], staleEvidence: [],
+      });
+    } finally {
+      await session.dispose();
+    }
+  });
+});
 
 describe("real continuation renderer, registry and durable core acceptance", () => {
   it.each(["stable", "experimental"] as const)("persists %s before exact acceptance, gates competitors and replays a lost acknowledgement", async (profile) => {

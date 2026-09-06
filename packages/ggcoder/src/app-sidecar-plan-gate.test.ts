@@ -102,6 +102,36 @@ describe("approved plan snapshot durability", () => {
 });
 
 describe("AppSidecarPlanGate", () => {
+  it("persists readiness limitations without approval and replaces them with revision feedback", async () => {
+    const submitted = checkpoint();
+    const persisted: PersistedPlanReviewCheckpoint[] = [];
+    const persist = async (value: PersistedPlanReviewCheckpoint) => {
+      persisted.push(structuredClone(value));
+    };
+    const gate = new AppSidecarPlanGate([marker(submitted)], persist);
+    const reason = "Corpus comparison unavailable; external usage remains unverified.";
+    await expect(gate.markReady(submitted.checkpointId, submitted.generation, reason))
+      .resolves.toMatchObject({ status: "committed" });
+    expect(persisted.at(-1)).toMatchObject({
+      checkpointId: submitted.checkpointId, generation: submitted.generation,
+      state: "pending-review", reviewStatus: "ready", feedback: reason,
+    });
+    const restored = new AppSidecarPlanGate(
+      [marker(submitted), ...persisted.map(marker)], persist,
+    );
+    expect(restored.current()).toMatchObject({ state: "pending-review", feedback: reason });
+    expect(restored.pending()).toMatchObject({ reviewStatus: "ready", feedback: reason });
+    await expect(restored.requestRevision(
+      submitted.checkpointId, submitted.generation, "ken-autopilot", "Add the missing verification step.",
+    )).resolves.toMatchObject({ status: "committed" });
+    expect(persisted.at(-1)).toMatchObject({
+      state: "revision-requested", feedback: "Add the missing verification step.",
+    });
+    expect(restored.pending()).toMatchObject({
+      state: "revision-requested", feedback: "Add the missing verification step.",
+    });
+  });
+
   it("reduces persisted transitions and restores the exact immutable snapshot", () => {
     const submitted = checkpoint();
     const ready = checkpoint({ reviewStatus: "ready", actor: "ken-autopilot" });

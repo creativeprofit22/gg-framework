@@ -503,7 +503,12 @@ describe("VerificationGate tamper disclosure (bench 18 replay)", () => {
     gate.recordMutation("src/parser.ts", "return fixed;");
 
     expect(gate.isTamperOwed()).toBe(false);
-    expect(String(gate.followUp()![0]!.content)).toContain("Run the project's verification");
+    const reminder = String(gate.followUp()![0]!.content);
+    expect(reminder).toContain("code changed again after the earlier verification");
+    expect(reminder).toContain("Re-run the affected checks against these changes");
+    expect(reminder).toContain("- src/parser.ts");
+    expect(reminder).not.toContain("- src/parser.test.ts");
+    expect(reminder).toContain("Do not describe the change as tested or working without having run it");
     expect(gate.followUp()).toBeNull();
   });
 

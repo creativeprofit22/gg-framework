@@ -24,66 +24,97 @@ import {
   requireContinuationHandoffResponse,
 } from "./agent";
 
-it.each(["primary", "auxiliary"])("captures %s mentor cancellation identity before readiness and propagates HTTP rejection", async (paneId) => {
-  let release!: (value: unknown) => void;
-  const ready = new Promise((resolve) => { release = resolve; });
-  invoke.mockImplementation(async (command) => {
-    if (command === "agent_pane_status") return ready;
-    if (command === "agent_ken_cancel") throw new Error("stale cancellation rejected");
-    return {};
-  });
-  const ken = { conversationId: "conversation", activationEpoch: "epoch", runId: "captured" };
-  const pending = paneId === "primary" ? cancelKen(ken) : createPaneAgentClient(paneId).cancelKen(ken);
-  const rejected = expect(pending).rejects.toThrow("stale cancellation rejected");
-  ken.runId = "later";
-  release({ generation: 1, ready: true });
-  await rejected;
-  expect(invoke).toHaveBeenCalledWith("agent_ken_cancel", { paneId, ken: { ...ken, runId: "captured" } });
-  invoke.mockReset();
-});
+it.each(["primary", "auxiliary"])(
+  "captures %s mentor cancellation identity before readiness and propagates HTTP rejection",
+  async (paneId) => {
+    let release!: (value: unknown) => void;
+    const ready = new Promise((resolve) => {
+      release = resolve;
+    });
+    invoke.mockImplementation(async (command) => {
+      if (command === "agent_pane_status") return ready;
+      if (command === "agent_ken_cancel") throw new Error("stale cancellation rejected");
+      return {};
+    });
+    const ken = { conversationId: "conversation", activationEpoch: "epoch", runId: "captured" };
+    const pending =
+      paneId === "primary" ? cancelKen(ken) : createPaneAgentClient(paneId).cancelKen(ken);
+    const rejected = expect(pending).rejects.toThrow("stale cancellation rejected");
+    ken.runId = "later";
+    release({ generation: 1, ready: true });
+    await rejected;
+    expect(invoke).toHaveBeenCalledWith("agent_ken_cancel", {
+      paneId,
+      ken: { ...ken, runId: "captured" },
+    });
+    invoke.mockReset();
+  },
+);
 
-it.each(["primary", "auxiliary"])("preserves authoritative active mentor run in %s initial state", async (paneId) => {
-  const kenState = { conversationId: "conversation", activationEpoch: "epoch", activeRunId: "run" };
-  invoke.mockResolvedValueOnce({ kenState });
-  const state = await (paneId === "primary" ? getState() : createPaneAgentClient(paneId).getState());
-  expect(state.kenState).toEqual(kenState);
-});
+it.each(["primary", "auxiliary"])(
+  "preserves authoritative active mentor run in %s initial state",
+  async (paneId) => {
+    const kenState = {
+      conversationId: "conversation",
+      activationEpoch: "epoch",
+      activeRunId: "run",
+    };
+    invoke.mockResolvedValueOnce({ kenState });
+    const state = await (paneId === "primary"
+      ? getState()
+      : createPaneAgentClient(paneId).getState());
+    expect(state.kenState).toEqual(kenState);
+  },
+);
 
-it.each(["primary", "auxiliary"])("copies %s Ken prompt target before delayed readiness", async (paneId) => {
-  let release!: (value: unknown) => void;
-  const ready = new Promise((resolve) => { release = resolve; });
-  invoke.mockImplementation(async (command) => command === "agent_pane_status" ? ready : {});
-  const target = { conversationId: "OLD", activationEpoch: "old-epoch" };
-  const pending = paneId === "primary" ? sendKenPrompt("question", target) : createPaneAgentClient(paneId).sendKenPrompt("question", target);
-  target.conversationId = "NEW";
-  target.activationEpoch = "new-epoch";
-  release({ generation: 1, ready: true });
-  await pending;
-  expect(invoke).toHaveBeenCalledWith("agent_ken_prompt", {
-    paneId, text: "question", target: { conversationId: "OLD", activationEpoch: "old-epoch" },
-  });
-  invoke.mockReset();
-});
+it.each(["primary", "auxiliary"])(
+  "copies %s Ken prompt target before delayed readiness",
+  async (paneId) => {
+    let release!: (value: unknown) => void;
+    const ready = new Promise((resolve) => {
+      release = resolve;
+    });
+    invoke.mockImplementation(async (command) => (command === "agent_pane_status" ? ready : {}));
+    const target = { conversationId: "OLD", activationEpoch: "old-epoch" };
+    const pending =
+      paneId === "primary"
+        ? sendKenPrompt("question", target)
+        : createPaneAgentClient(paneId).sendKenPrompt("question", target);
+    target.conversationId = "NEW";
+    target.activationEpoch = "new-epoch";
+    release({ generation: 1, ready: true });
+    await pending;
+    expect(invoke).toHaveBeenCalledWith("agent_ken_prompt", {
+      paneId,
+      text: "question",
+      target: { conversationId: "OLD", activationEpoch: "old-epoch" },
+    });
+    invoke.mockReset();
+  },
+);
 
 describe("Ken model selection", () => {
   beforeEach(() => invoke.mockReset());
 
   it.each(["cannot switch Ken's model while running", "unknown model: missing"])(
-    "rejects native HTTP errors: %s", async (message) => {
+    "rejects native HTTP errors: %s",
+    async (message) => {
       invoke.mockRejectedValueOnce(message);
       await expect(switchKenModel("missing")).rejects.toEqual(message);
       expect(invoke).toHaveBeenCalledTimes(1);
     },
   );
 
-  it.each([null, {}, { error: "unknown model: missing" },
+  it.each([
+    null,
+    {},
+    { error: "unknown model: missing" },
     { kenProvider: "openai", kenModel: "gpt", kenModelOverride: "true" },
-    { kenProvider: "", kenModel: "gpt", kenModelOverride: true }])(
-    "rejects malformed success bodies: %j", async (body) => {
-      invoke.mockResolvedValueOnce(body);
-      await expect(switchKenModel("gpt")).rejects.toThrow();
-    },
-  );
+    { kenProvider: "", kenModel: "gpt", kenModelOverride: true },
+  ])("rejects malformed success bodies: %j", async (body) => {
+    invoke.mockResolvedValueOnce(body);
+    await expect(switchKenModel("gpt")).rejects.toThrow();
+  });
 
   it.each(["gpt", null])("accepts pin/clear %s", async (model) => {
     const result = { kenProvider: "openai", kenModel: "gpt", kenModelOverride: model !== null };
@@ -179,9 +210,12 @@ it("sends only the server-owned prepared ID, operation ID and selected profile t
 });
 
 it.each(["x".repeat(8001), "🙂".repeat(4000) + "x", " \r\n\t "])(
-  "rejects invalid raw instruction before IPC (%#. case)", async (instruction) => {
+  "rejects invalid raw instruction before IPC (%#. case)",
+  async (instruction) => {
     const callsBefore = invoke.mock.calls.length;
-    await expect(createPaneAgentClient("pane-boundary").prepareContinuationHandoff(instruction)).rejects.toThrow(/8000/);
+    await expect(
+      createPaneAgentClient("pane-boundary").prepareContinuationHandoff(instruction),
+    ).rejects.toThrow(/8000/);
     expect(invoke.mock.calls).toHaveLength(callsBefore);
   },
 );
@@ -191,14 +225,19 @@ it.each([
   { error: "continuation_failed", message: "Session is busy. Retry preparation when idle." },
 ])("preserves native preparation error body %j", async (body) => {
   invoke.mockResolvedValueOnce(body);
-  await expect(createPaneAgentClient("pane-error").prepareContinuationHandoff("Keep raw text")).rejects.toThrow(body.message ?? body.error);
+  await expect(
+    createPaneAgentClient("pane-error").prepareContinuationHandoff("Keep raw text"),
+  ).rejects.toThrow(body.message ?? body.error);
 });
 
 it.each(["stable", "experimental"] as const)(
   "preserves the real rendered envelope over prepare IPC and commits only authority in %s mode",
   async (profile) => {
     const instruction =
-      "  Keep café 日本語 🙂\\n literal and C:\\work\\file.ts\n\tindented line\r\n```ts\nconst value = `raw`;\n```\n  ".padEnd(8000, " ");
+      "  Keep café 日本語 🙂\\n literal and C:\\work\\file.ts\n\tindented line\r\n```ts\nconst value = `raw`;\n```\n  ".padEnd(
+        8000,
+        " ",
+      );
     const prompt = renderContinuationPrompt(
       {
         currentObjective: "Continue exact-text work",

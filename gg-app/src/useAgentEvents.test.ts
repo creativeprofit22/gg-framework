@@ -171,9 +171,16 @@ describe("useAgentEvents", () => {
     deps.hydrateKen = (value, replace) => mentor.result.current.hydrateKen(value, replace);
     deps.shouldApplySessionReset = () => false;
     hook.rerender();
-    const reset = ev("session_reset", { operationId: "reset", kenState: { conversationId: "new", activationEpoch: "new", activeRunId: null } });
+    const reset = ev("session_reset", {
+      operationId: "reset",
+      kenState: { conversationId: "new", activationEpoch: "new", activeRunId: null },
+    });
     act(() => hook.result.current.handleEvent(reset));
-    expect(mentor.result.current.captureKenRun()).toEqual({ conversationId: "old", activationEpoch: "old", runId: "run" });
+    expect(mentor.result.current.captureKenRun()).toEqual({
+      conversationId: "old",
+      activationEpoch: "old",
+      runId: "run",
+    });
     deps.shouldApplySessionReset = () => true;
     hook.rerender();
     act(() => hook.result.current.handleEvent(reset));
@@ -1111,12 +1118,18 @@ describe("useAgentEvents", () => {
   });
   it("delegates ken_ events to handleKenEvent and does not handle them locally", () => {
     const handleKenEvent = vi.fn(() => true);
-    const { hook, getItems, setRunning } = setup(handleKenEvent);
+    const { hook, getItems, setRunning, deps } = setup(handleKenEvent, { running: true });
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
     act(() => {
       hook.result.current.handleEvent(ev("ken_text_delta", { text: "from ken" }));
       hook.result.current.handleEvent(ev("ken_run_start"));
+      hook.result.current.handleEvent(ev("ken_run_end", { unverified: true }));
     });
-    expect(handleKenEvent).toHaveBeenCalledTimes(2);
+    expect(handleKenEvent).toHaveBeenCalledTimes(3);
+    expect(deps.setDoneStatus).not.toHaveBeenCalled();
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
     // Nothing handled locally: no assistant item, run state untouched.
     expect(getItems()).toHaveLength(0);
     expect(setRunning).not.toHaveBeenCalled();
@@ -1372,8 +1385,8 @@ describe("useAgentEvents", () => {
     });
   });
 
-  it("ignores delayed ready events for an older plan generation", () => {
-    const { hook, getPlanReview } = setup();
+  it("ignores delayed readiness warnings for an older plan identity", () => {
+    const { hook, getPlanReview, getItems } = setup();
     act(() => {
       hook.result.current.handleEvent(
         ev("plan_exit", {
@@ -1392,10 +1405,18 @@ describe("useAgentEvents", () => {
         }),
       );
       hook.result.current.handleEvent(
-        ev("autopilot_plan_ready", { checkpointId: "checkpoint-new", generation: 1 }),
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-new",
+          generation: 1,
+          reason: "Stale generation warning",
+        }),
       );
       hook.result.current.handleEvent(
-        ev("autopilot_plan_ready", { checkpointId: "checkpoint-old", generation: 2 }),
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-old",
+          generation: 2,
+          reason: "Stale checkpoint warning",
+        }),
       );
     });
 
@@ -1404,8 +1425,55 @@ describe("useAgentEvents", () => {
       generation: 2,
       reviewStatus: "unreviewed",
       state: "pending-review",
+      feedback: null,
     });
+    expect(getItems()).toEqual([]);
   });
+
+  it.each(["revision", "reset"] as const)(
+    "does not project a delayed readiness warning after %s",
+    (transition) => {
+      const { hook, getPlanReview, getItems, deps } = setup();
+      const identity = { checkpointId: "checkpoint-1", generation: 1 };
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("plan_exit", {
+            ...identity,
+            planPath: "/tmp/plan.md",
+            content: "# Plan",
+          }),
+        );
+        hook.result.current.handleEvent(
+          transition === "revision"
+            ? ev("plan_revision_requested", { ...identity, feedback: "Human revision request" })
+            : ev("session_reset"),
+        );
+      });
+      const gateBefore = getPlanReview();
+      const itemsBefore = [...getItems()];
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("autopilot_plan_ready", {
+            ...identity,
+            reason: "Delayed corpus warning",
+          }),
+        ),
+      );
+      expect(getPlanReview()).toEqual(gateBefore);
+      expect(getItems()).toEqual(itemsBefore);
+      expect(deps.pendingPlanTotalRef.current).toBeNull();
+      if (transition === "revision") {
+        expect(getPlanReview()).toMatchObject({
+          ...identity,
+          state: "revision-requested",
+          feedback: "Human revision request",
+          reviewStatus: "unreviewed",
+        });
+      } else {
+        expect(getPlanReview()).toBeNull();
+      }
+    },
+  );
 
   it("ignores delayed revision events for an older plan generation", () => {
     const { hook, getPlanReview } = setup();

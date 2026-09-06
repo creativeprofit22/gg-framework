@@ -40,15 +40,28 @@ describe("pane agent client", () => {
       if (command === "agent_pane_status") {
         return { ready: true, error: null, generation: 1, sessionId: "session" };
       }
-      if (command === "agent_switch_ken_model") return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
+      if (command === "agent_switch_ken_model")
+        return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
       if (command === "agent_prompt") return { queued: false, count: 0 };
+      if (command === "agent_enhance_prompt") {
+        return {
+          enhanced: "Enhanced prompt",
+          segments: [{ kind: "text", text: "Enhanced prompt" }],
+        };
+      }
       if (command === "agent_mcp_list") return { servers: [] };
       if (command === "agent_continuation_handoff") {
         return {
-          version: 1, prompt: "## Objective\nContinue",
-          preparedId: "prepared-pane", expiresAt: Date.now() + 60_000,
-          source: { conversationId: "source-pane", sessionId: "source-session",
-            leafId: "source-leaf", fingerprint: "source-fingerprint" },
+          version: 1,
+          prompt: "## Objective\nContinue",
+          preparedId: "prepared-pane",
+          expiresAt: Date.now() + 60_000,
+          source: {
+            conversationId: "source-pane",
+            sessionId: "source-session",
+            leafId: "source-leaf",
+            fingerprint: "source-fingerprint",
+          },
         };
       }
       if (command === "agent_new_session") return { operationId: "new-session-op" };
@@ -63,27 +76,68 @@ describe("pane agent client", () => {
   });
 
   it.each(["cannot switch Ken's model while running", "unknown model: missing"])(
-    "rejects Ken HTTP errors: %s", async (message) => {
+    "rejects Ken HTTP errors: %s",
+    async (message) => {
       invoke.mockRejectedValueOnce(message);
-      await expect(createPaneAgentClient("right").switchKenModel("missing")).rejects.toEqual(message);
+      await expect(createPaneAgentClient("right").switchKenModel("missing")).rejects.toEqual(
+        message,
+      );
       expect(invoke).toHaveBeenCalledTimes(1);
     },
   );
 
-  it.each([null, {}, { error: "unknown model: missing" },
+  it.each([
+    null,
+    {},
+    { error: "unknown model: missing" },
     { kenProvider: "openai", kenModel: "gpt", kenModelOverride: "true" },
-    { kenProvider: "openai", kenModel: " ", kenModelOverride: false }])(
-    "rejects malformed Ken success bodies: %j", async (body) => {
-      invoke.mockResolvedValueOnce(body);
-      await expect(createPaneAgentClient("right").switchKenModel("gpt")).rejects.toThrow();
-    },
-  );
+    { kenProvider: "openai", kenModel: " ", kenModelOverride: false },
+  ])("rejects malformed Ken success bodies: %j", async (body) => {
+    invoke.mockResolvedValueOnce(body);
+    await expect(createPaneAgentClient("right").switchKenModel("gpt")).rejects.toThrow();
+  });
 
   it.each(["gpt", null])("accepts Ken pin/clear %s", async (model) => {
     const result = { kenProvider: "openai", kenModel: "gpt", kenModelOverride: model !== null };
     invoke.mockResolvedValueOnce(result);
     await expect(createPaneAgentClient("right").switchKenModel(model)).resolves.toEqual(result);
     expect(invoke).toHaveBeenCalledWith("agent_switch_ken_model", { paneId: "right", model });
+  });
+
+  it.each([
+    null,
+    { error: "Enhancement failed" },
+    {},
+    { enhanced: " ", segments: [] },
+    { enhanced: "Rewrite", segments: [null] },
+    { enhanced: "Rewrite", segments: [{ kind: "term", text: "Rewrite" }] },
+    { enhanced: "Rewrite", segments: [{ kind: "text", text: "Different text" }] },
+  ])("rejects malformed pane enhancement responses: %j", async (response) => {
+    invoke.mockResolvedValueOnce({ ready: true, generation: 1, sessionId: "right-session" });
+    invoke.mockResolvedValueOnce(response);
+    await expect(createPaneAgentClient("right").enhancePrompt("Keep my draft")).rejects.toThrow(
+      "Invalid prompt enhancement response",
+    );
+    expect(invoke).toHaveBeenCalledWith("agent_enhance_prompt", {
+      paneId: "right",
+      text: "Keep my draft",
+    });
+  });
+
+  it("routes enhancement readiness and exact results through the owning pane", async () => {
+    const result = {
+      enhanced: "  Rewrite\nexactly  ",
+      segments: [{ kind: "text", text: "  Rewrite\nexactly  " }],
+    };
+    invoke.mockResolvedValueOnce({ ready: true, generation: 1, sessionId: "right-session" });
+    invoke.mockResolvedValueOnce(result);
+    await expect(createPaneAgentClient("right").enhancePrompt("  My draft\n  ")).resolves.toEqual(
+      result,
+    );
+    expect(invoke.mock.calls).toEqual([
+      ["agent_pane_status", { paneId: "right" }],
+      ["agent_enhance_prompt", { paneId: "right", text: "  My draft\n  " }],
+    ]);
   });
 
   it("routes the current IPC surface with the complete pane argument matrix", async () => {
@@ -101,7 +155,11 @@ describe("pane agent client", () => {
     await c.cancel();
     const kenTarget = { conversationId: "conversation", activationEpoch: "epoch" };
     await c.sendKenPrompt("k", kenTarget);
-    expect(invoke).toHaveBeenCalledWith("agent_ken_prompt", { paneId: "right", text: "k", target: kenTarget });
+    expect(invoke).toHaveBeenCalledWith("agent_ken_prompt", {
+      paneId: "right",
+      text: "k",
+      target: kenTarget,
+    });
     const ken = { conversationId: "conversation", activationEpoch: "epoch", runId: "run" };
     await c.cancelKen(ken);
     expect(invoke).toHaveBeenCalledWith("agent_ken_cancel", { paneId: "right", ken });
@@ -389,7 +447,9 @@ describe("pane agent client", () => {
     ["8001 units", "x".repeat(8001), "8001"],
     ["whitespace", " \r\n\t", "nonblank"],
   ])("rejects %s before prepare IPC", async (_name, instruction, message) => {
-    await expect(createPaneAgentClient("right").prepareContinuationHandoff(instruction)).rejects.toThrow(message);
+    await expect(
+      createPaneAgentClient("right").prepareContinuationHandoff(instruction),
+    ).rejects.toThrow(message);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -400,13 +460,17 @@ describe("pane agent client", () => {
     { error: "Provider credentials expired. Sign in again." },
   ])("retains a server preparation error body: %j", async (body) => {
     invoke.mockResolvedValueOnce(body);
-    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toThrow(body.message ?? body.error);
+    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toThrow(
+      body.message ?? body.error,
+    );
   });
 
   it("retains native HTTP 413 rejection text", async () => {
     const message = "HTTP 413: Request body exceeds the transport limit.";
     invoke.mockRejectedValueOnce(message);
-    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toBe(message);
+    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toBe(
+      message,
+    );
   });
 
   it("rejects malformed continuation-handoff responses", async () => {

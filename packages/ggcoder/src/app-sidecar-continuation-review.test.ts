@@ -82,6 +82,7 @@ function fixture(kind = "eligible") {
     review: async () => driveAutopilotCycle({
       maxRounds: 2, isCancelled: () => cancelled, isPlanMode: () => kind === "plan-mode",
       planPending: () => kind === "pending-plan", resetReviewer, review, reviewPlan: review,
+      verificationProblem: () => null,
       markPlanReady: async () => ({ checkpointId: "plan", generation: 1 }),
       requestPlanRevision: async () => false, runPrompt: async () => { throw new Error("unexpected injection"); },
       onInjected: vi.fn(), emit: vi.fn(),

@@ -106,7 +106,11 @@ describe("Ken prompt actions", () => {
   });
 
   it("dispatches exact selected source for a fresh session without trimming whitespace", async () => {
-    const bodies = ['  Keep literal \\n and café 日本語\n\n    Trailing spaces  \n', "  CRLF 🙂\r\n\tkeep outer whitespace  \r\n", "Second independent block"];
+    const bodies = [
+      "  Keep literal \\n and café 日本語\n\n    Trailing spaces  \n",
+      "  CRLF 🙂\r\n\tkeep outer whitespace  \r\n",
+      "Second independent block",
+    ];
     const dispatch = vi.fn(async () => ({ status: "cancelled" }) as const);
     render(
       <KenPromptActionProvider value={{ dispatch }}>

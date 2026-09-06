@@ -1231,7 +1231,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             typeof d.reason === "string"
               ? d.reason.trim()
               : current.reviewStatus === "ready"
-                ? current.feedback?.trim() ?? ""
+                ? (current.feedback?.trim() ?? "")
                 : "";
           // For a ready pending gate, feedback carries the persisted evidence
           // limitation, not a human revision request. Revision state is separate.
@@ -1564,7 +1564,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setAttachments,
       setCommands,
       setModels,
-        planDoneRef,
+      planDoneRef,
       planTotalRef,
       planReviewPathRef,
       pendingPlanTotalRef,

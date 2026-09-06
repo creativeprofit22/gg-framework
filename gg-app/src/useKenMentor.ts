@@ -81,50 +81,74 @@ export function useKenMentor(opts: {
     setKenThinkingStartTs(null);
     setKenThinkingAccumMs(0);
   }, []);
-  const hydrateKen = useCallback((value: unknown, replaceHistory = false) => {
-    authorityVersion.current++;
-    const v = value as Partial<KenState> | null | undefined;
-    const valid = v && typeof v.conversationId === "string" && v.conversationId.length > 0 &&
-      typeof v.activationEpoch === "string" && v.activationEpoch.length > 0 &&
-      (v.activeRunId === null || (typeof v.activeRunId === "string" && v.activeRunId.length > 0));
-    const next = valid ? { ...v } as KenState : null;
-    const prev = authority.current;
-    const targetChanged = prev?.conversationId !== next?.conversationId || prev?.activationEpoch !== next?.activationEpoch;
-    if (targetChanged || replaceHistory) operationVersion.current++;
-    if (targetChanged) closedRuns.current.clear();
-    if (next?.activeRunId && closedRuns.current.has(next.activeRunId)) next.activeRunId = null;
-    if (replaceHistory || prev?.conversationId !== next?.conversationId ||
-      prev?.activationEpoch !== next?.activationEpoch || prev?.activeRunId !== next?.activeRunId) {
-      if (!targetChanged && prev?.activeRunId && prev.activeRunId !== next?.activeRunId) closedRuns.current.add(prev.activeRunId);
-      clearStream();
-    }
-    authority.current = next;
-    setKenRunning(!!next?.activeRunId);
-  }, [clearStream]);
+  const hydrateKen = useCallback(
+    (value: unknown, replaceHistory = false) => {
+      authorityVersion.current++;
+      const v = value as Partial<KenState> | null | undefined;
+      const valid =
+        v &&
+        typeof v.conversationId === "string" &&
+        v.conversationId.length > 0 &&
+        typeof v.activationEpoch === "string" &&
+        v.activationEpoch.length > 0 &&
+        (v.activeRunId === null || (typeof v.activeRunId === "string" && v.activeRunId.length > 0));
+      const next = valid ? ({ ...v } as KenState) : null;
+      const prev = authority.current;
+      const targetChanged =
+        prev?.conversationId !== next?.conversationId ||
+        prev?.activationEpoch !== next?.activationEpoch;
+      if (targetChanged || replaceHistory) operationVersion.current++;
+      if (targetChanged) closedRuns.current.clear();
+      if (next?.activeRunId && closedRuns.current.has(next.activeRunId)) next.activeRunId = null;
+      if (
+        replaceHistory ||
+        prev?.conversationId !== next?.conversationId ||
+        prev?.activationEpoch !== next?.activationEpoch ||
+        prev?.activeRunId !== next?.activeRunId
+      ) {
+        if (!targetChanged && prev?.activeRunId && prev.activeRunId !== next?.activeRunId)
+          closedRuns.current.add(prev.activeRunId);
+        clearStream();
+      }
+      authority.current = next;
+      setKenRunning(!!next?.activeRunId);
+    },
+    [clearStream],
+  );
   const clearKenStream = useCallback(() => {
     clearStream();
     setKenRunning(!!authority.current?.activeRunId);
   }, [clearStream]);
   const captureKenHydration = useCallback(() => {
     const version = authorityVersion.current;
-    return (value: unknown) => { if (version === authorityVersion.current) hydrateKen(value); };
+    return (value: unknown) => {
+      if (version === authorityVersion.current) hydrateKen(value);
+    };
   }, [hydrateKen]);
   const captureKenOperation = useCallback(() => {
     const owner = ++operationVersion.current;
     const captured = authority.current;
-    return () => owner === operationVersion.current &&
+    return () =>
+      owner === operationVersion.current &&
       captured?.conversationId === authority.current?.conversationId &&
       captured?.activationEpoch === authority.current?.activationEpoch &&
       captured?.activeRunId === authority.current?.activeRunId;
   }, []);
   const captureKenTarget = useCallback((): KenTarget | null => {
     const current = authority.current;
-    return current ? { conversationId: current.conversationId, activationEpoch: current.activationEpoch } : null;
+    return current
+      ? { conversationId: current.conversationId, activationEpoch: current.activationEpoch }
+      : null;
   }, []);
   const captureKenRun = useCallback((): KenRunIdentity | null => {
     const current = authority.current;
-    return current?.activeRunId ? { conversationId: current.conversationId,
-      activationEpoch: current.activationEpoch, runId: current.activeRunId } : null;
+    return current?.activeRunId
+      ? {
+          conversationId: current.conversationId,
+          activationEpoch: current.activationEpoch,
+          runId: current.activeRunId,
+        }
+      : null;
   }, []);
 
   // Ken's streaming bubble. Ken's replies are short, so a direct setItems per
@@ -183,8 +207,14 @@ export function useKenMentor(opts: {
       if (!e.type.startsWith("ken_") || e.type === "ken_model_change") return false;
       const identity = d.ken as Partial<KenRunIdentity> | undefined;
       const current = authority.current;
-      if (!current?.activeRunId || !identity || identity.conversationId !== current.conversationId ||
-        identity.activationEpoch !== current.activationEpoch || identity.runId !== current.activeRunId) return true;
+      if (
+        !current?.activeRunId ||
+        !identity ||
+        identity.conversationId !== current.conversationId ||
+        identity.activationEpoch !== current.activationEpoch ||
+        identity.runId !== current.activeRunId
+      )
+        return true;
       switch (e.type) {
         // ── Ken Kai (mentor agent) ──────────────────────────────
         // Separate event family so Ken's reply renders in its own magenta

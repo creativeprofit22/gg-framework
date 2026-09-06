@@ -25,7 +25,9 @@ describe("PlanReviewModal durable human gate", () => {
     expect(onFeedback).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
-    expect((screen.getByRole("button", { name: "Send feedback" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Send feedback" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(onAccept).toHaveBeenCalledTimes(1);

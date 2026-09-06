@@ -86,9 +86,10 @@ describe("model id round-trip", () => {
 });
 
 describe("probeEndpoint — Ollama", () => {
-  it("reads capabilities and the architecture-prefixed context length", async () => {
+  it("reads capabilities but uses the running allocation, not the architecture maximum", async () => {
     const endpoint = await endpointFor("ollama", {
       "/v1/models": { data: [{ id: "qwen3-coder:30b" }, { id: "nomic-embed-text" }] },
+      "/api/ps": { models: [{ name: "qwen3-coder:30b", context_length: 4096 }] },
       "/api/show": {
         capabilities: ["completion", "tools", "vision", "thinking"],
         model_info: { "general.architecture": "qwen3", "qwen3.context_length": 262144 },
@@ -102,13 +103,39 @@ describe("probeEndpoint — Ollama", () => {
     expect(probe.models).toHaveLength(1);
     expect(probe.models[0]).toMatchObject({
       rawId: "qwen3-coder:30b",
-      contextWindow: 262144,
+      contextWindow: 4096,
       contextWindowKnown: true,
       supportsTools: true,
       supportsImages: true,
       supportsThinking: true,
     });
   });
+
+  it.each([
+    undefined,
+    null,
+    {},
+    { models: [] },
+    { models: [{ name: "model", context_length: -1 }] },
+  ])(
+    "does not report the training maximum when running context is unavailable: %j",
+    async (running) => {
+      const endpoint = await endpointFor("ollama", {
+        "/v1/models": { data: [{ id: "model" }] },
+        "/api/ps": running,
+        "/api/show": {
+          capabilities: ["completion"],
+          model_info: { "qwen.context_length": 262144 },
+        },
+      });
+      const probe = await probeEndpoint(endpoint, { timeoutMs: 2000 });
+      expect(probe.models[0]).toMatchObject({
+        contextWindow: FALLBACK_CONTEXT_WINDOW,
+        contextWindowKnown: false,
+      });
+      expect(FALLBACK_CONTEXT_WINDOW).toBeLessThanOrEqual(4096);
+    },
+  );
 
   it("drops embedding models whose id carries no hint (real: all-minilm)", async () => {
     const endpoint = await endpointFor("ollama", {
@@ -153,6 +180,44 @@ describe("probeEndpoint — Ollama", () => {
 });
 
 describe("probeEndpoint — LM Studio", () => {
+  it("prefers v1 loaded instances and matches custom instance ids", async () => {
+    const endpoint = await endpointFor("lmstudio", {
+      "/v1/models": { data: [{ id: "custom-instance" }, { id: "qwen-vl" }, { id: "unloaded" }] },
+      "/api/v1/models": {
+        models: [
+          {
+            key: "qwen-vl",
+            type: "llm",
+            max_context_length: 262144,
+            capabilities: { vision: true },
+            loaded_instances: [
+              { id: "custom-instance", config: { context_length: 8192 } },
+              { id: "second-instance", config: { context_length: 4096 } },
+            ],
+          },
+          { key: "unloaded", type: "llm", max_context_length: 262144, loaded_instances: [] },
+        ],
+      },
+    });
+    const probe = await probeEndpoint(endpoint, { timeoutMs: 2000 });
+    expect(probe.models[0]).toMatchObject({
+      contextWindow: 8192,
+      contextWindowKnown: true,
+      supportsImages: true,
+      loaded: true,
+    });
+    expect(probe.models[1]).toMatchObject({
+      contextWindow: 4096,
+      contextWindowKnown: true,
+      loaded: true,
+    });
+    expect(probe.models[2]).toMatchObject({
+      contextWindow: FALLBACK_CONTEXT_WINDOW,
+      contextWindowKnown: false,
+      loaded: false,
+    });
+  });
+
   it("uses /api/v0/models for context + type and drops embeddings", async () => {
     const endpoint = await endpointFor("lmstudio", {
       "/v1/models": {
@@ -160,7 +225,13 @@ describe("probeEndpoint — LM Studio", () => {
       },
       "/api/v0/models": {
         data: [
-          { id: "qwen3-vl-8b", type: "vlm", state: "loaded", max_context_length: 32768 },
+          {
+            id: "qwen3-vl-8b",
+            type: "vlm",
+            state: "loaded",
+            max_context_length: 32768,
+            loaded_context_length: 4096,
+          },
           { id: "text-model", type: "llm", state: "not-loaded", max_context_length: 8192 },
           { id: "some-embeddings-model", type: "embeddings", state: "loaded" },
         ],
@@ -172,11 +243,16 @@ describe("probeEndpoint — LM Studio", () => {
     expect(probe.models.map((m) => m.rawId)).toEqual(["qwen3-vl-8b", "text-model"]);
     expect(probe.models[0]).toMatchObject({
       supportsImages: true,
-      contextWindow: 32768,
+      contextWindow: 4096,
       contextWindowKnown: true,
       loaded: true,
     });
-    expect(probe.models[1]).toMatchObject({ supportsImages: false, loaded: false });
+    expect(probe.models[1]).toMatchObject({
+      supportsImages: false,
+      loaded: false,
+      contextWindow: FALLBACK_CONTEXT_WINDOW,
+      contextWindowKnown: false,
+    });
   });
 });
 

@@ -68,6 +68,24 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
+ * Recursively delete keys whose value is `null`. Strict tool schemas make
+ * providers emit explicit nulls for optional fields; Zod `.optional()` only
+ * accepts an absent key, not `null`. Used as a fallback re-parse so genuine
+ * nulls (`.nullable()` fields, MCP passthrough) are never touched.
+ */
+function stripNullArguments(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNullArguments);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry !== null) out[key] = stripNullArguments(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
  * Detect context window overflow errors from LLM providers.
  *
  * Patterns drawn from observed errors across Anthropic, OpenAI, OpenAI Codex,
@@ -1855,7 +1873,24 @@ async function executeSingleToolCall(
     isError = true;
   } else {
     try {
-      const parsed = tool.parameters.parse(toolCall.args);
+      // Strict ("structured outputs") schemas list every property as required
+      // with nullable optionals, so providers emit explicit `null` for fields
+      // the model meant to omit — Zod's `.optional()` accepts an absent key but
+      // rejects `null`. Parse verbatim first so legitimate nulls survive
+      // (`.nullable()` fields, MCP rawInputSchema passthrough); only when that
+      // fails, retry once with nulls stripped, keeping the original error if
+      // both attempts fail.
+      let parsed: unknown;
+      try {
+        parsed = tool.parameters.parse(toolCall.args);
+      } catch (originalError) {
+        if (tool.rawInputSchema) throw originalError;
+        try {
+          parsed = tool.parameters.parse(stripNullArguments(toolCall.args));
+        } catch {
+          throw originalError;
+        }
+      }
       // Per-tool timeout: combine the caller's signal with a 5-minute default
       // so no single tool can block the agent loop indefinitely.
       // When the caller has no signal, AbortSignal.timeout is used alone.

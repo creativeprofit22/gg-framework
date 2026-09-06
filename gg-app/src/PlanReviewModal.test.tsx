@@ -7,17 +7,26 @@ import { PlanReviewModal } from "./PlanReviewModal";
 describe("PlanReviewModal durable human gate", () => {
   it("keeps explicit human approval visible after Ken is ready", () => {
     const onAccept = vi.fn();
+    const onFeedback = vi.fn();
     render(
       <PlanReviewModal
         content={"# Plan\n\n## Steps\n\n1. Verify restart recovery"}
         kenReady
+        readinessReason="Corpus unavailable."
         onAccept={onAccept}
-        onFeedback={vi.fn()}
+        onFeedback={onFeedback}
       />,
     );
 
     expect(screen.getByText(/Your approval is still required/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Corpus unavailable.");
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(onFeedback).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "Send feedback" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(onAccept).toHaveBeenCalledTimes(1);
   });
@@ -27,6 +36,8 @@ describe("PlanReviewModal durable human gate", () => {
     render(
       <PlanReviewModal
         content={"# Plan"}
+        kenReady
+        readinessReason="Corpus unavailable."
         revisionPending
         onAccept={vi.fn()}
         onFeedback={vi.fn()}
@@ -35,6 +46,8 @@ describe("PlanReviewModal durable human gate", () => {
     );
 
     expect(screen.getByText(/Waiting for the revised plan snapshot/i)).toBeTruthy();
+    expect(screen.queryByText("Corpus unavailable.")).toBeNull();
+    expect(onRetryRevision).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Feedback" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));

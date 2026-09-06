@@ -22,6 +22,40 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.61.1",
+    date: "2026-09-06",
+    items: [
+      "Your `CI` chip now tells the whole story at a glance. While jobs run it shimmers with quiet suspense, then settles to calm `green` on a pass or honest `red` the moment something breaks. No more guessing.",
+      "Agents on `OpenAI` got sharper hands. I made every tool call ship in a strictly validated shape, so fewer calls bounce back with malformed arguments. That means fewer retries and less waiting for you.",
+    ],
+  },
+  {
+    version: "0.61.0",
+    date: "2026-09-06",
+    items: [
+      "Stop hopping between tabs to see if your build passed. I brought live `CI` counts into your title bar: green clears after `10 seconds`, red stays until you dismiss it, and one click opens `GitHub Actions`.",
+      "Passing tests should count, not cause a scare. I fixed checks that start with `git status` and stopped unfinished verification from masquerading as an app crash. You get `Unverified` when more checking is needed, not a bogus bug report.",
+    ],
+  },
+  {
+    version: "0.60.1",
+    date: "2026-09-06",
+    items: [
+      "A green light should mean something. I tightened `Autopilot` so failed or unfinished checks stay `Unverified`, even after you reopen a chat.",
+      "No more vanishing caveats. I kept `Steroids` review warnings in your chat history, so you can see when a review lacked a real-code cross-check.",
+    ],
+  },
+  {
+    version: "0.60.0",
+    date: "2026-09-05",
+    items: [
+      "More models for you to try. I added `Gemini 3.8 Flash`, `Gemini 3.5 Flash Lite`, and experimental `DeepSeek V4 Flash Vision` to the picker. The new Gemini options still depend on Google enabling access for your account, so your working default stays put.",
+      "Show `Qwen3.6-Plus` what you mean. I unlocked image and video input through `OpenRouter`, so you can bring screenshots and clips into the conversation instead of describing everything by hand.",
+      "Your thinking controls now do what they promise. I lined up `DeepSeek` with its real reasoning levels and unlocked `max` for `Fugu Ultra`, so you can choose how hard they work on your problem.",
+      "Long local chats have a better safety net. I made GG Coder respect the memory you actually gave `Ollama` or `LM Studio`, not the model's advertised maximum, so it can summarize before your loaded model runs out of room.",
+    ],
+  },
+  {
     version: "0.59.1",
     date: "2026-09-05",
     items: [

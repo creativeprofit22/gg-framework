@@ -6,8 +6,8 @@
  * provider in gg-ai's stream.ts); the only per-server difference is where the
  * *capabilities* come from, because `GET /v1/models` reports nothing useful:
  *
- *   - Ollama    → `POST /api/show`      → `capabilities[]` + `model_info["<arch>.context_length"]`
- *   - LM Studio → `GET /api/v0/models`  → `type`, `state`, `max_context_length`
+ *   - Ollama    → `/api/show` + `/api/ps` → capabilities + running context
+ *   - LM Studio → `/api/v1/models` (v0 fallback) → capabilities + loaded context
  *   - llama.cpp → `GET /props`          → `default_generation_settings.n_ctx`
  *   - vLLM/other → nothing; `max_model_len` sometimes rides the model object.
  *
@@ -74,7 +74,8 @@ export const DEFAULT_LOCAL_ENDPOINTS: readonly LocalEndpoint[] = [
  * conservative: over-guessing means the provider 400s mid-run at a point
  * auto-compaction already sailed past, while under-guessing only compacts early.
  */
-export const FALLBACK_CONTEXT_WINDOW = 8192;
+// Matches Ollama's smallest documented default; still a guess, not an allocation.
+export const FALLBACK_CONTEXT_WINDOW = 4096;
 
 /** Placeholder token for endpoints with no key — these servers ignore it. */
 export const LOCAL_API_KEY_PLACEHOLDER = "local";
@@ -201,7 +202,18 @@ interface OpenAIModelList {
 
 interface OllamaShowResponse {
   capabilities?: string[];
-  model_info?: Record<string, unknown>;
+}
+interface OllamaRunningModels {
+  models?: { name?: string; model?: string; context_length?: number }[];
+}
+
+interface LmStudioV1ModelList {
+  models?: {
+    key?: string;
+    type?: string;
+    capabilities?: { vision?: boolean };
+    loaded_instances?: { id?: string; config?: { context_length?: number } }[];
+  }[];
 }
 
 interface LmStudioModelEntry {
@@ -277,7 +289,7 @@ function genericModel(
   endpoint: LocalEndpoint,
   entry: OpenAIModelListEntry & { id: string },
 ): LocalModel {
-  const declared = typeof entry.max_model_len === "number" ? entry.max_model_len : undefined;
+  const declared = contextLength(entry.max_model_len);
   return {
     rawId: entry.id,
     endpointId: endpoint.id,
@@ -295,19 +307,27 @@ async function enrichOllama(
   options: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<LocalModel[]> {
   const showUrl = `${endpointRoot(endpoint.baseUrl)}/api/show`;
+  const running = await fetchJson<OllamaRunningModels>(
+    `${endpointRoot(endpoint.baseUrl)}/api/ps`,
+    endpoint,
+    options,
+  );
+  const runningModels = Array.isArray(running?.models) ? running.models : [];
   const enriched = await mapLimited(entries, ENRICH_CONCURRENCY, async (entry) => {
     const show = await fetchJson<OllamaShowResponse>(showUrl, endpoint, {
       ...options,
       method: "POST",
       body: { model: entry.id },
     });
-    if (!show) return genericModel(endpoint, entry);
-    const caps = show.capabilities ?? [];
+    const caps = Array.isArray(show?.capabilities) ? show.capabilities : [];
     // Capabilities are authoritative for "is this a chat model at all". Names
     // like `all-minilm` carry no hint, so filtering on the id alone leaves
     // embedding models in the picker as dead, tool-less rows.
     if (caps.includes("embedding") && !caps.includes("completion")) return undefined;
-    const ctx = ollamaContextLength(show.model_info);
+    const ctx = contextLength(
+      runningModels.find((model) => model?.name === entry.id || model?.model === entry.id)
+        ?.context_length,
+    );
     return {
       rawId: entry.id,
       endpointId: endpoint.id,
@@ -315,7 +335,7 @@ async function enrichOllama(
       contextWindowKnown: ctx !== undefined,
       // Ollama reports capabilities honestly, so trust it here rather than
       // using the optimistic generic default.
-      supportsTools: caps.includes("tools"),
+      supportsTools: show ? caps.includes("tools") : true,
       supportsImages: caps.includes("vision"),
       supportsThinking: caps.includes("thinking"),
     };
@@ -323,13 +343,9 @@ async function enrichOllama(
   return enriched.filter((model): model is LocalModel => model !== undefined);
 }
 
-/** `model_info` keys are architecture-prefixed, e.g. `qwen3.context_length`. */
-function ollamaContextLength(info: Record<string, unknown> | undefined): number | undefined {
-  if (!info) return undefined;
-  for (const [key, value] of Object.entries(info)) {
-    if (key.endsWith(".context_length") && typeof value === "number" && value > 0) return value;
-  }
-  return undefined;
+/** Never let malformed server metadata become a request or compaction budget. */
+function contextLength(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 async function enrichLmStudio(
@@ -337,25 +353,56 @@ async function enrichLmStudio(
   entries: (OpenAIModelListEntry & { id: string })[],
   options: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<LocalModel[]> {
-  const detail = await fetchJson<LmStudioModelList>(
-    `${endpointRoot(endpoint.baseUrl)}/api/v0/models`,
-    endpoint,
-    options,
-  );
-  if (!detail?.data) return entries.map((entry) => genericModel(endpoint, entry));
-  const byId = new Map(detail.data.filter((m) => m.id).map((m) => [m.id!, m]));
+  const root = endpointRoot(endpoint.baseUrl);
+  const detail = await fetchJson<LmStudioV1ModelList>(`${root}/api/v1/models`, endpoint, options);
+  const byId = new Map<string, LmStudioModelEntry>();
+  if (Array.isArray(detail?.models)) {
+    for (const model of detail.models) {
+      if (typeof model?.key !== "string") continue;
+      const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
+      const contexts = instances.map((instance) => contextLength(instance?.config?.context_length));
+      // A model key may route to any loaded instance; use the smallest allocation.
+      const ctx =
+        contexts.length && contexts.every((value) => value !== undefined)
+          ? contexts.reduce((min, value) => Math.min(min, value))
+          : undefined;
+      const info: LmStudioModelEntry = {
+        id: model.key,
+        type: model.type === "llm" && model.capabilities?.vision === true ? "vlm" : model.type,
+        state: instances.length ? "loaded" : "not-loaded",
+        loaded_context_length: ctx,
+      };
+      byId.set(model.key, info);
+      for (const instance of instances) {
+        if (typeof instance?.id === "string" && instance.id !== model.key) {
+          byId.set(instance.id, {
+            ...info,
+            id: instance.id,
+            loaded_context_length: contextLength(instance.config?.context_length),
+          });
+        }
+      }
+    }
+  } else {
+    const legacy = await fetchJson<LmStudioModelList>(`${root}/api/v0/models`, endpoint, options);
+    if (Array.isArray(legacy?.data)) {
+      for (const model of legacy.data) {
+        if (typeof model?.id === "string") byId.set(model.id, model);
+      }
+    }
+  }
   const models: LocalModel[] = [];
   for (const entry of entries) {
     const info = byId.get(entry.id);
     // `type` is authoritative here: embeddings models are listed by
     // /v1/models too and would otherwise show up as selectable chat models.
     if (info && info.type !== "llm" && info.type !== "vlm") continue;
-    const ctx = info?.max_context_length;
+    const ctx = info?.state === "loaded" ? contextLength(info.loaded_context_length) : undefined;
     models.push({
       rawId: entry.id,
       endpointId: endpoint.id,
-      contextWindow: typeof ctx === "number" && ctx > 0 ? ctx : FALLBACK_CONTEXT_WINDOW,
-      contextWindowKnown: typeof ctx === "number" && ctx > 0,
+      contextWindow: ctx ?? FALLBACK_CONTEXT_WINDOW,
+      contextWindowKnown: ctx !== undefined,
       // LM Studio doesn't report tool support; it gates per-model at request time.
       supportsTools: true,
       supportsImages: info?.type === "vlm",
@@ -376,8 +423,8 @@ async function enrichLlamaCpp(
     endpoint,
     options,
   );
-  const nCtx = props?.default_generation_settings?.n_ctx;
-  const known = typeof nCtx === "number" && nCtx > 0;
+  const nCtx = contextLength(props?.default_generation_settings?.n_ctx);
+  const known = nCtx !== undefined;
   return entries.map((entry) => ({
     ...genericModel(endpoint, entry),
     contextWindow: known ? nCtx : FALLBACK_CONTEXT_WINDOW,

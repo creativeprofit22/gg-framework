@@ -14,6 +14,25 @@ import {
 /** These fixtures use virtual paths, so every expected file "exists". */
 const allFilesExist = () => true;
 
+describe("Ideal review implementation comparison", () => {
+  it("benchmarks substantial work and preserves approval and honest fallback rules", () => {
+    const { content } = buildIdealReviewMessage(["120 changed lines"]);
+    expect(content).toContain("For substantial implementations, use Steroids");
+    expect(content).toContain(
+      "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
+    );
+    expect(content).toContain("Reuse samples already examined");
+    expect(content).toContain("they do not replace tests or prove correctness");
+    expect(content).toContain("Empty corpus or no hits: discover suitable repos");
+    expect(content).toContain("propose them via ask_user, add only on approval");
+    expect(content).toContain(
+      "unavailable, discovery finds nothing suitable, or the user declines",
+    );
+    expect(content).toContain("not cross-checked against real-world implementations");
+    expect(content).toContain("or a required cross-check could not be completed");
+  });
+});
+
 describe("ReviewCoverageTracker", () => {
   it("counts only successful read callbacks after review starts", () => {
     const tracker = new ReviewCoverageTracker("/project", allFilesExist);
@@ -227,11 +246,14 @@ describe("buildIdealReviewMessage", () => {
     expect(message.content).toContain("120 changed lines");
   });
 
-  it("defers builds/typechecks/tests to commit time instead of running them now", () => {
+  it("reuses unchanged checks but requires affected checks and rereads after fixes", () => {
     const message = buildIdealReviewMessage([]);
 
-    expect(message.content).toContain("do NOT run builds, typechecks, linters, or test suites now");
-    expect(message.content).toContain("/commit");
+    expect(message.content).toContain("reuse completed checks while code is unchanged");
+    expect(message.content).toContain("rerun the affected checks and reread those changes");
+    expect(message.content).toContain("earlier results do not verify later edits");
+    expect(message.content).toContain("Do not claim coverage without corresponding assertions");
+    expect(message.content).not.toContain("do NOT run builds");
   });
 
   it("calls out drifted files and their stale tests", () => {

@@ -105,7 +105,7 @@ function setup(
     setLiveToolFeed,
     setTokens,
     setContextTokens,
-    setDoneStatus: noop as unknown as AgentEventsDeps["setDoneStatus"],
+    setDoneStatus: vi.fn<AgentEventsDeps["setDoneStatus"]>(),
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
@@ -150,6 +150,17 @@ function setup(
 }
 
 describe("useAgentEvents", () => {
+  it("shows Unverified instead of completion and does not finish an approved plan", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_start", {})));
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
+    act(() => hook.result.current.handleEvent(ev("run_end", { unverified: true })));
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Unverified /));
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
   beforeEach(() => vi.clearAllMocks());
 
   it("correlates resets before applying real mentor authority", () => {
@@ -661,6 +672,25 @@ describe("useAgentEvents", () => {
     });
   });
 
+  it("merges CI updates, preserves them in partial frames, and clears them on null", () => {
+    const { hook, getState } = setup();
+    const ci: NonNullable<AgentState["gitHubCI"]> = {
+      key: "repo:sha:1.1",
+      url: "https://github.com/owner/repo/actions/runs/1",
+      active: true,
+      total: 6,
+      completed: 4,
+      failed: 0,
+      conclusion: null,
+    };
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: ci })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 1 })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: null })));
+    expect(getState()?.gitHubCI).toBeNull();
+  });
+
   it("text_delta streams assistant text into a single item", () => {
     const { hook, getItems } = setup();
     act(() => {
@@ -780,6 +810,55 @@ describe("useAgentEvents", () => {
       expect.objectContaining({ kind: "hook", hook: "ideal" }),
       expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
     ]);
+  });
+
+  it("distinguishes a post-edit recheck while deduplicating repeated recheck notices", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+    });
+    expect(getItems()).toHaveLength(2);
+    expect(getItems()[1]).toMatchObject({ hook: "verification", verificationReason: "recheck" });
+  });
+
+  it("retains a readiness evidence limitation without approving the pending plan", () => {
+    const { hook, getItems, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          content: "Plan content",
+          planPath: ".gg/plan.md",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          reason: "Corpus unavailable.",
+        }),
+      );
+    });
+    expect(getItems()).toContainEqual(
+      expect.objectContaining({
+        kind: "info",
+        text: "Plan ready for your approval.\n\nCorpus unavailable.",
+      }),
+    );
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      state: "pending-review",
+      reviewStatus: "ready",
+      feedback: "Corpus unavailable.",
+    });
   });
 
   it("still shows a second notice when a DIFFERENT hook follows", () => {

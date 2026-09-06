@@ -169,6 +169,7 @@ import {
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
 import { getGitHubOpenCounts, getGitHubRepoSlug } from "./utils/github.js";
+import { startGitHubCIPoll, type GitHubCI } from "./utils/github-ci.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
   clampThinkingLevel,
@@ -2766,6 +2767,7 @@ async function createSession(
   const gitHubSlug: string | null = initialGitHubSlug;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
+  let gitHubCI: GitHubCI | null = null;
   // Shared shape merged into /state + the SSE `ready` frame so the footer can
   // render context %, branch, and tasks immediately on connect.
   function footerExtras(): DesktopContextSnapshot & {
@@ -2775,6 +2777,7 @@ async function createSession(
     gitHubIssues: number | null;
     gitHubPRs: number | null;
     gitHubRepoUrl: string | null;
+    gitHubCI: GitHubCI | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
     additionalRoots: string[];
     kenState: KenState | null;
@@ -2787,6 +2790,7 @@ async function createSession(
       gitDirtyFileCount,
       gitHubIssues,
       gitHubPRs,
+      gitHubCI,
       gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
       // Roots added with /add-dir — the header shows a badge when non-empty.
@@ -3748,8 +3752,15 @@ async function createSession(
     } finally {
       const completionIntentFinalizer = roadmapCompletionIntents.finalizeRun(completionIntentRun);
       const cancelled = runLifecycle.isCancellationRequested(generation);
+      const verificationProblem = cancelled ? null : session.getVerificationProblem();
+      if (runSucceeded && verificationProblem && ownsGeneration) {
+        // Expected control outcome: run_end and the journal already carry Unverified.
+        // Do not format it as a crash or persist a misleading error marker.
+        log("WARN", "app-sidecar", "verification incomplete", { message: verificationProblem });
+      }
       if (
         runSucceeded &&
+        !verificationProblem &&
         !cancelled &&
         cancelGeneration === cancelGenAtStart &&
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
@@ -3767,9 +3778,14 @@ async function createSession(
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
+      void ciPoll.refresh();
       // Settle and fsync the owning run journal before consuming durable completion intent.
       if (ownsGeneration) {
-        finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
+        finishOwnedGeneration(
+          generation,
+          false,
+          verificationProblem ? "unverified" : runSucceeded ? "completed" : "failed",
+        );
         await runJournalPersistence;
         if (!(await settleDeferredPhaseLeaseRelease())) {
           await renewCurrentPhaseLease(`run:${generation}:idle`);
@@ -3793,7 +3809,7 @@ async function createSession(
           currentPlanProgress: durableRoadmapExecution
             ? { total: 0, completed: [] }
             : planProgressPayload(),
-          runOutcome: cancelled ? "cancelled" : runSucceeded ? "succeeded" : "failed",
+          runOutcome: cancelled ? "cancelled" : runSucceeded && !verificationProblem ? "succeeded" : "failed",
           runGeneration: generation,
           timestamp: new Date().toISOString(),
         });
@@ -3816,7 +3832,13 @@ async function createSession(
       }
       // Once every canonical step is complete, remove the approved plan from
       // future system prompts and clear the widget before run_end paints idle.
-      if (runSucceeded && !cancelled && approvedPlanPath !== null && terminalPlanComplete) {
+      if (
+        runSucceeded &&
+        !cancelled &&
+        !verificationProblem &&
+        approvedPlanPath !== null &&
+        terminalPlanComplete
+      ) {
         try {
           await session.completeApprovedPlanConsumption();
           deactivateApprovedPlan({ retainImplementationEvidence: true });
@@ -3835,6 +3857,7 @@ async function createSession(
         if (cancelled) cancelledRunEndGenerations.add(generation);
         broadcast("run_end", {
           ...(cancelled ? { cancelled: true } : {}),
+          ...(verificationProblem ? { unverified: true } : {}),
           runState: runLifecycle.state,
         });
       }
@@ -4281,7 +4304,7 @@ ${checkpoints}`;
   // every exit path is unit-tested; this only wires the real dependencies.
 
   async function runAutopilotCycle(originalRequest: string): Promise<void> {
-    if (!autopilot || autopilotCancelled) return;
+    if (!autopilot || autopilotCancelled || session.getVerificationProblem()) return;
     const generation = runLifecycle.begin(abortOwnedWork).generation;
     pendingCancelDrain = null;
     autopilotActive = true;
@@ -4291,6 +4314,10 @@ ${checkpoints}`;
       await driveAutopilotCycle({
         maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
+        verificationProblem: () => session.getVerificationProblem(),
+        // An injected run entering plan mode WITHOUT submitting (enter_plan,
+        // no exit_plan) halts the cycle — Ken never prompts into a read-only
+        // plan-mode session. A submitted plan takes the planPending branch.
         isPlanMode: () => session.getPlanMode(),
         planPending: () => planGate.pending()?.state === "pending-review",
         reviewPlan: async () => {
@@ -4300,10 +4327,10 @@ ${checkpoints}`;
             : null;
           return runAutopilotPlanReview(originalRequest);
         },
-        markPlanReady: async () => {
+        markPlanReady: async (reason) => {
           const identity = planReviewIdentity;
           if (!identity) return null;
-          const result = await planGate.markReady(identity.checkpointId, identity.generation);
+          const result = await planGate.markReady(identity.checkpointId, identity.generation, reason);
           return result.status === "committed" ? identity : null;
         },
         requestPlanRevision: async (feedback) => {
@@ -4364,9 +4391,10 @@ ${checkpoints}`;
               version: 1,
               phase: "done",
               afterMessageCount: session.getPersistedTranscriptCount(),
+              ...event.data,
             });
             broadcast(event.type, { ...event.data, copySeed: seed });
-            void session.persistAutopilotMarker("done");
+            void session.persistAutopilotMarker("done", event.data);
             return;
           }
           broadcast(event.type, event.data);
@@ -4381,7 +4409,11 @@ ${checkpoints}`;
     } finally {
       autopilotActive = false;
       session.setIdealReviewSuppressed(autopilot);
-      finishOwnedGeneration(generation, true);
+      finishOwnedGeneration(
+        generation,
+        true,
+        session.getVerificationProblem() ? "unverified" : "completed",
+      );
       queueMicrotask(() => {
         void runStrandedQueue();
       });
@@ -4645,6 +4677,10 @@ ${checkpoints}`;
     gitHubPoll.unref?.();
   };
   scheduleGitHubPoll(2000);
+  const ciPoll = startGitHubCIPoll(cwd, (next) => {
+    gitHubCI = next;
+    broadcast("extras", footerExtras());
+  });
 
   const continuationHandoffService = new AppSidecarContinuationHandoffService({
     createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
@@ -7530,6 +7566,7 @@ ${checkpoints}`;
     gitHubPollStopped = true;
     if (gitHubPoll) clearTimeout(gitHubPoll);
     if (phaseLeaseHeartbeat) clearInterval(phaseLeaseHeartbeat);
+    ciPoll.stop();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();

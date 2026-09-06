@@ -186,11 +186,11 @@ describe("formatErrorForDisplay", () => {
     );
   });
 
-  it("tells the user to update GG Coder when OpenAI rejects the client version", () => {
+  it("tells the user to update GG Coder when the ChatGPT backend rejects the client version", () => {
     const out = formatErrorForDisplay(
       new ProviderError(
         "openai",
-        "The 'gpt-6-astra' model requires a newer version of Codex.",
+        "The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.",
         { statusCode: 400 },
       ),
     );
@@ -259,7 +259,7 @@ describe("formatErrorForDisplay", () => {
       [
         "GG Coder hit an unexpected error.",
         "  Cannot read property 'foo' of undefined",
-        "  → This looks like a GG Coder bug — please report it to the developer (see /help).",
+        "  → This looks like a GG Coder bug — please report it to the developer.",
       ].join("\n"),
     );
   });

@@ -344,17 +344,28 @@ describe("model registry context windows", () => {
       name: "Gemini 3.1 Flash Lite",
       provider: "gemini",
     });
-    // 3.7 Flash joins as the newest flagship flash but stays non-default and
-    // non-first: it rides Code Assist ahead of gemini-cli (issue #28802) and is
-    // account-gated there, while flash-lite works on every account and must
-    // remain what getFastModel picks as the low-tier sibling.
+    // New public GA releases are opt-in: retain the working OAuth default/fast model.
     expect(getModelsForProvider("gemini").map((model) => model.id)).toEqual([
       "gemini-3.1-flash-lite",
+      "gemini-3.8-flash",
+      "gemini-3.5-flash-lite",
       "gemini-3.7-flash",
       "gemini-3-flash",
       "gemini-3.1-pro-preview",
     ]);
     expect(getFastModel("gemini", "gemini-3.1-flash-lite").id).toBe("gemini-3.1-flash-lite");
+    for (const id of ["gemini-3.8-flash", "gemini-3.5-flash-lite"]) {
+      expect(getModel(id)).toMatchObject({
+        contextWindow: 1_048_576,
+        maxOutputTokens: 65_536,
+        supportsImages: true,
+        supportsVideo: true,
+        maxThinkingLevel: "high",
+      });
+      expect(getFastModel("gemini", id).id).toBe("gemini-3.1-flash-lite");
+      // Summaries intentionally stay on the selected Gemini model.
+      expect(getSummaryModel("gemini", id).id).toBe(id);
+    }
     expect(getContextWindow("gemini-3.7-flash", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3.1-flash-lite", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3-flash", { provider: "gemini" })).toBe(1_048_576);
@@ -364,11 +375,36 @@ describe("model registry context windows", () => {
     expect(getDefaultModel("deepseek")).toMatchObject({
       id: "deepseek-v4-pro",
       contextWindow: 1_048_576,
-      maxOutputTokens: 393_216,
+      maxOutputTokens: 384_000,
       supportsImages: false,
-      // ~$0.43/$0.87 per MTok on DeepSeek's API — mid band, not the preview's top.
       costTier: "medium",
-      maxThinkingLevel: "xhigh",
+      maxThinkingLevel: "max",
+    });
+  });
+
+  it("adds experimental DeepSeek vision without replacing stable summaries", () => {
+    expect(getModel("deepseek-v4-flash-vision-exp")).toMatchObject({
+      supportsImages: true,
+      supportsVideo: false,
+      contextWindow: 1_048_576,
+      maxOutputTokens: 384_000,
+      maxThinkingLevel: "max",
+    });
+    expect(getSummaryModel("deepseek", "deepseek-v4-flash-vision-exp").id).toBe(
+      "deepseek-v4-flash",
+    );
+    expect(
+      getModelsForProvider("deepseek").every((model) => model.maxOutputTokens === 384_000),
+    ).toBe(true);
+  });
+
+  it("enables Qwen image/video input with bounded inline video payloads", () => {
+    expect(getModel("qwen/qwen3.6-plus")).toMatchObject({
+      supportsImages: true,
+      supportsVideo: true,
+      maxVideoBytes: 20 * 1024 * 1024,
+      contextWindow: 1_000_000,
+      maxOutputTokens: 65_536,
     });
   });
 

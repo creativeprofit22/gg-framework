@@ -373,9 +373,11 @@ describe("SessionManager compaction coordination", () => {
       if (String(target).endsWith(".lock")) {
         lockAttempts += 1;
         if (lockAttempts === 1) {
+          // Lock dir is present but mid-delete: mkdir fails EPERM while stat still resolves.
           await realMkdir(target, { recursive: true });
           throw errno("EPERM");
         }
+        // The releasing holder finished its delete before we polled again.
         await rm(String(target), { recursive: true, force: true });
       }
       return realMkdir(target, options);

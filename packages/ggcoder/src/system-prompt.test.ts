@@ -405,6 +405,15 @@ describe("buildSystemPrompt", () => {
     const normal = await buildSystemPrompt(cwd, undefined, false, undefined, ["steroids"]);
     expect(normal).toContain("source of truth for HOW to build");
     expect(normal).toContain("before your first `edit`/`write`, and without being asked");
+    expect(normal).toContain("HARD RULE for nontrivial work");
+    expect(normal).toContain("Benchmark comparable implementations");
+    expect(normal).toContain(
+      "During Ideal review, reuse samples to compare finished code; research gaps",
+    );
+    expect(normal).toContain(
+      "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
+    );
+    expect(normal).toContain("they do not replace tests or prove correctness");
     expect(normal).toContain("NOT permission to write from memory");
     expect(normal).toContain("propose the found repos via `ask_user`, `add` on approval");
 

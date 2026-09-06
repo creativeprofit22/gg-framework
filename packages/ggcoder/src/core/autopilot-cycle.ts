@@ -17,7 +17,7 @@
  * plan) still halts as HUMAN — Ken must never prompt into a read-only
  * plan-mode session.
  */
-import type { AutopilotVerdict } from "./autopilot-verdict.js";
+import { CORPUS_UNVERIFIED_REASON, type AutopilotVerdict } from "./autopilot-verdict.js";
 
 /** Reason shown in the Ken bubble when the build session is still INSIDE plan
  *  mode (enter_plan without exit_plan) when the cycle checks in — there is no
@@ -77,17 +77,19 @@ export interface AutopilotPlanReviewIdentity {
 
 /** SSE frame types the cycle can emit (matched by the webview). */
 export type AutopilotCycleEmit =
-  | { type: "autopilot_done"; data: Record<string, never> }
+  | { type: "autopilot_done"; data: { reason?: string } }
   | { type: "autopilot_ignored"; data: Record<string, never> }
   | { type: "autopilot_human"; data: { reason: string } }
   | { type: "autopilot_capped"; data: { rounds: number } }
-  | { type: "autopilot_plan_ready"; data: AutopilotPlanReviewIdentity };
+  | { type: "autopilot_plan_ready"; data: AutopilotPlanReviewIdentity & { reason?: string } };
 
 export interface AutopilotCycleDeps {
   /** Hard cap on review→prompt rounds per user turn (loop safety). */
   maxRounds: number;
   /** True once /cancel fires — checked between every step. */
   isCancelled: () => boolean;
+  /** Host evidence, independent of Ken's verdict and reminder budgets. */
+  verificationProblem: () => string | null;
   /** Live plan-mode state of the BUILD session. */
   isPlanMode: () => boolean;
   /** True while a submitted plan (exit_plan) awaits a verdict. */
@@ -102,7 +104,7 @@ export interface AutopilotCycleDeps {
    *  when the review went stale because a human acted mid-review. */
   reviewPlan: () => Promise<AutopilotVerdict | null>;
   /** Persist Ken's all-clear as readiness and return the committed identity. */
-  markPlanReady: () => Promise<AutopilotPlanReviewIdentity | null>;
+  markPlanReady: (reason?: string) => Promise<AutopilotPlanReviewIdentity | null>;
   /** Compare-and-swap the reviewed generation into revision-requested. */
   requestPlanRevision: (feedback: string) => Promise<boolean>;
   /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
@@ -127,14 +129,20 @@ export interface AutopilotCycleDeps {
  *  - rounds exhausted          → autopilot_capped
  */
 export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<void> {
-  if (deps.isCancelled()) return;
+  const stopIfUnverified = () => {
+    const reason = deps.verificationProblem();
+    if (!reason) return false;
+    deps.emit({ type: "autopilot_human", data: { reason } });
+    return true;
+  };
+  if (deps.isCancelled() || stopIfUnverified()) return;
   await deps.resetReviewer();
   let remediationRounds = 0;
   for (;;) {
-    if (deps.isCancelled()) return;
+    if (deps.isCancelled() || stopIfUnverified()) return;
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
-      if (!verdict || deps.isCancelled()) return;
+      if (!verdict || deps.isCancelled() || stopIfUnverified()) return;
       if (verdict.kind === "human") {
         deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
         return;
@@ -154,9 +162,15 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       }
       // ALL_CLEAR and IGNORE mean Ken found no objection. Persist readiness,
       // keep the human gate pending, and stop without implementation.
-      const readyIdentity = await deps.markPlanReady();
-      if (!readyIdentity) return;
-      deps.emit({ type: "autopilot_plan_ready", data: readyIdentity });
+      const reason = verdict.kind === "all_clear" && verdict.evidenceLimitation
+        ? CORPUS_UNVERIFIED_REASON
+        : undefined;
+      const readyIdentity = await deps.markPlanReady(reason);
+      if (!readyIdentity || deps.isCancelled() || stopIfUnverified()) return;
+      deps.emit({
+        type: "autopilot_plan_ready",
+        data: { ...readyIdentity, ...(reason ? { reason } : {}) },
+      });
       return;
     }
     // The gate blocks a still-in-plan-mode turn up front, so hitting this
@@ -167,9 +181,12 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       return;
     }
     const verdict = await deps.review();
-    if (!verdict || deps.isCancelled()) return;
+    if (!verdict || deps.isCancelled() || stopIfUnverified()) return;
     if (verdict.kind === "all_clear") {
-      deps.emit({ type: "autopilot_done", data: {} });
+      deps.emit({
+        type: "autopilot_done",
+        data: verdict.evidenceLimitation ? { reason: CORPUS_UNVERIFIED_REASON } : {},
+      });
       return;
     }
     if (verdict.kind === "ignore") {

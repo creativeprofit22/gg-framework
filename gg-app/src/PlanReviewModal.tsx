@@ -11,6 +11,8 @@ interface Props {
   kenReviewing?: boolean;
   /** Ken found no issue, but only the human may approve. */
   kenReady?: boolean;
+  /** Persisted readiness limitation; never pre-fills or submits revision input. */
+  readinessReason?: string | null;
   /** A typed revision request is durable and awaits a replacement generation. */
   revisionPending?: boolean;
   /** The revision provider run is currently active, so retry must wait. */
@@ -31,6 +33,7 @@ export function PlanReviewModal({
   content,
   kenReviewing = false,
   kenReady = false,
+  readinessReason = null,
   revisionPending = false,
   revisionRunning = false,
   busy = false,
@@ -79,6 +82,12 @@ export function PlanReviewModal({
               ? `${MENTOR_DISPLAY_NAME} finished reviewing. Your approval is still required.`
               : `${MENTOR_DISPLAY_NAME} is reviewing this plan… you can still decide now.`}
         </div>
+      )}
+
+      {kenReady && !revisionPending && readinessReason?.trim() && (
+        <p className="plan-review-ken" role="status" style={{ color: theme.warning }}>
+          {readinessReason}
+        </p>
       )}
 
       <div className="plan-review-actions">

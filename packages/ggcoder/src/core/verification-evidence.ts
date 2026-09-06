@@ -193,6 +193,22 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
   const executable = executableBasename(tokens[0]);
   if (!executable) return rejected(false, "empty command");
   if (executable === "tsc") return classifyTsc(tokens);
+  if ((executable === "node" || executable === "node.exe") && tokens.includes("--test")) {
+    // simplification: require --test first; supporting preceding Node options
+    // needs option-arity parsing so script arguments cannot masquerade as flags.
+    if (tokens[1] !== "--test") return rejected(true, "--test must lead Node arguments");
+    if (tokens.some((token) => ["-e", "--eval", "-p", "--print"].includes(token))) {
+      return rejected(true, "inline evaluation is not verification");
+    }
+    return classifyTestRunner("node", tokens);
+  }
+  if (
+    /^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable) &&
+    tokens[1] === "-m" &&
+    ["pytest", "unittest"].includes(tokens[2])
+  ) {
+    return classifyTestRunner(tokens[2], tokens.slice(2));
+  }
   if (executable === "vitest" || executable === "jest" || executable === "pytest") {
     return classifyTestRunner(executable, tokens);
   }
@@ -268,6 +284,8 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
     return rejected(true, "mutating, artifact-producing, or long-running package script");
   }
   if (!SAFE_PACKAGE_SCRIPTS.test(script)) {
+    // pnpm permits omitting exec for installed binaries, e.g. pnpm vitest run.
+    if (runner === "pnpm" && action !== "run") return classifyDirect(tokens.slice(index));
     return rejected(false, "package script is not a recognized verification check");
   }
 
@@ -292,7 +310,7 @@ function classifySegment(segment: string): VerificationCommandClassification {
   return classifyDirect(tokens);
 }
 
-/** Fail-closed semantic classifier: every shell segment must be a bounded check. */
+/** Fail-closed classifier: bounded checks with narrowly allowed non-check preludes. */
 export function classifyVerificationCommand(command: string): VerificationCommandClassification {
   const candidate =
     hasVerifierExecutable(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
@@ -308,7 +326,26 @@ export function classifyVerificationCommand(command: string): VerificationComman
   }
   const segments = splitShellCommandSegments(command);
   if (segments.length === 0) return rejected(false, "empty command");
-  const results = segments.map(classifySegment);
+  const results = segments.map((segment, index) => {
+    const tokens = tokenize(segment);
+    // A leading directory change is not itself evidence. && ensures it must
+    // succeed, and a real bounded check must still follow it.
+    if (
+      index < segments.length - 1 &&
+      tokens[0] === "cd" &&
+      tokens.length === 2 &&
+      !hasUnsafeShellSyntax(segment)
+    )
+      return accepted("working-directory prelude");
+    // Status is not evidence itself; a real check must follow through &&.
+    // simplification: only basic status flags; expand with vetted flags, not arbitrary Git commands.
+    if (
+      index < segments.length - 1 &&
+      /^git\s+status(?:\s+(?:--short|-s|--branch|-b|--porcelain(?:=[12])?))*$/.test(segment.trim())
+    )
+      return accepted("git status prelude");
+    return classifySegment(segment);
+  });
   const firstRejected = results.find((result) => !result.accepted);
   if (firstRejected) {
     return rejected(

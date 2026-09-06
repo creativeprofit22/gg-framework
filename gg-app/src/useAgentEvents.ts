@@ -206,7 +206,7 @@ export interface AgentEvents {
   /** Flush buffered assistant text + end the streaming section (used by App too). */
   endStreamingText: () => void;
   /** Replace the durable approval gate and every private fallback mirror atomically. */
-  replacePlanReview: (review: PendingPlanReview | null) => void;
+  replacePlanReview: Dispatch<SetStateAction<PendingPlanReview | null>>;
 }
 
 export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
@@ -231,7 +231,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setThinkingAccumMs,
     setPlanTotal,
     setPlanDone,
-    setPlanReview,
+    setPlanReview: publishPlanReview,
     setQueuedCount,
     setQueuedMessages,
     setAttachments,
@@ -298,14 +298,25 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
-  const replacePlanReview = useCallback(
-    (review: PendingPlanReview | null) => {
+  // Keep event ownership synchronous: a ready frame can follow plan_exit before
+  // React renders. All gate replacements (including IPC recovery) use this path.
+  const currentPlanReviewRef = useRef<PendingPlanReview | null>(null);
+  const readinessNoticeRef = useRef<string | null>(null);
+  const setPlanReview = useCallback(
+    (update: SetStateAction<PendingPlanReview | null>) => {
+      const current = currentPlanReviewRef.current;
+      const review = typeof update === "function" ? update(current) : update;
+      if (!review || !current || !isMatchingPlanReview(current, review)) {
+        readinessNoticeRef.current = null;
+      }
+      currentPlanReviewRef.current = review;
       planReviewPathRef.current = review?.planPath ?? null;
       planReviewContentRef.current = review?.content ?? null;
-      setPlanReview(review);
+      publishPlanReview(review);
     },
-    [planReviewPathRef, setPlanReview],
+    [planReviewPathRef, publishPlanReview],
   );
+  const replacePlanReview = setPlanReview;
   // Hold candidate final text while any pre-final review hook is armed.
   const armedHooksRef = useRef<Set<PreFinalHookKind>>(new Set());
   const heldTextRef = useRef<string>("");
@@ -423,7 +434,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         if (opts?.skipIfSameAsLast) {
           const last = prev[prev.length - 1];
           if (last && last.kind === item.kind && last.kind === "hook" && item.kind === "hook") {
-            if (last.hook === item.hook) return prev;
+            if (last.hook === item.hook && last.verificationReason === item.verificationReason)
+              return prev;
           }
         }
         return [...prev, item];
@@ -1078,7 +1090,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = pickDoneVerb(toolsUsedRef.current);
+            const verb = d.unverified === true ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);
@@ -1090,13 +1102,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
                 planDoneRef.current.has(step),
               );
-            if (completedPlan) {
+            if (completedPlan && d.unverified !== true) {
               planTotalRef.current = 0;
               planDoneRef.current = new Set();
               setPlanTotal(0);
               setPlanDone(new Set());
             }
-            playSound("done");
+            if (d.unverified !== true) playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
@@ -1206,12 +1218,34 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
         case "autopilot_plan_ready": {
           const identity = planReviewEventIdentity(d);
-          if (!identity) break;
-          setPlanReview((current) =>
-            current && isMatchingPlanReview(current, identity)
-              ? { ...current, reviewStatus: "ready" }
-              : current,
-          );
+          const current = currentPlanReviewRef.current;
+          if (
+            !identity ||
+            !current ||
+            !isMatchingPlanReview(current, identity) ||
+            current.state !== "pending-review"
+          ) {
+            break;
+          }
+          const reason =
+            typeof d.reason === "string"
+              ? d.reason.trim()
+              : current.reviewStatus === "ready"
+                ? current.feedback?.trim() ?? ""
+                : "";
+          // For a ready pending gate, feedback carries the persisted evidence
+          // limitation, not a human revision request. Revision state is separate.
+          setPlanReview({ ...current, reviewStatus: "ready", feedback: reason || null });
+          // Readiness is not approval. Surface evidence limitations only for the
+          // current gate, outside React updaters, without consuming human authority.
+          if (reason && readinessNoticeRef.current !== reason) {
+            readinessNoticeRef.current = reason;
+            pushItem({
+              kind: "info",
+              id: nextId(),
+              text: `Plan ready for your approval.\n\n${reason}`,
+            });
+          }
           break;
         }
         case "plan_revision_requested": {
@@ -1350,7 +1384,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             // draft it supersedes is discarded. The DISCARD must happen every
             // time; the notice is the same sentence, so stacking identical
             // copies just tells the user the same thing four times.
-            pushItem({ kind: "hook", id: nextId(), hook: kind }, { skipIfSameAsLast: true });
+            pushItem(
+              {
+                kind: "hook",
+                id: nextId(),
+                hook: kind,
+                ...(kind === "verification" && d.verificationReason === "recheck"
+                  ? { verificationReason: "recheck" as const }
+                  : {}),
+              },
+              { skipIfSameAsLast: true },
+            );
           }
           break;
         }
@@ -1462,6 +1506,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                     d.gitHubRepoUrl !== undefined
                       ? (d.gitHubRepoUrl as string | null)
                       : s.gitHubRepoUrl,
+                  gitHubCI:
+                    d.gitHubCI !== undefined
+                      ? (d.gitHubCI as AgentState["gitHubCI"])
+                      : (d.gitHubRepoUrl !== undefined && d.gitHubRepoUrl !== s.gitHubRepoUrl) ||
+                          (d.gitBranch !== undefined && d.gitBranch !== s.gitBranch)
+                        ? null
+                        : s.gitHubCI,
                   additionalRoots: (d.additionalRoots as string[] | undefined) ?? s.additionalRoots,
                 }
               : s,

@@ -8,7 +8,11 @@ import {
   type AutopilotCycleDeps,
   type AutopilotCycleEmit,
 } from "./autopilot-cycle.js";
-import type { AutopilotVerdict } from "./autopilot-verdict.js";
+import {
+  CORPUS_UNVERIFIED_REASON,
+  parseAutopilotVerdict,
+  type AutopilotVerdict,
+} from "./autopilot-verdict.js";
 
 /** Build a full deps object with sane defaults; tests override what they probe.
  *  `verdicts` feeds the WORK review queue; `planVerdicts` feeds the PLAN review
@@ -35,6 +39,7 @@ function makeDeps(
   const deps = {
     maxRounds: 3,
     isCancelled: () => false,
+    verificationProblem: () => null,
     isPlanMode: () => false,
     planPending: () => false,
     resetReviewer: vi.fn(async () => {}),
@@ -79,6 +84,50 @@ function pendingFlag(initial = true): { get: () => boolean; set: (v: boolean) =>
   return { get: () => value, set: (v) => (value = v) };
 }
 
+describe("host verification control", () => {
+  it("blocks unverified work before spending a reviewer call", async () => {
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => "Unverified: current checks are missing.",
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.review).not.toHaveBeenCalled();
+    expect(deps.resetReviewer).not.toHaveBeenCalled();
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
+    ]);
+  });
+
+  it("rejects ALL_CLEAR if verification becomes stale during the review", async () => {
+    let problem: string | null = null;
+    const deps = makeDeps([], {
+      verificationProblem: () => problem,
+      review: vi.fn(async (): Promise<AutopilotVerdict> => {
+        problem = "Unverified: code changed during review.";
+        return { kind: "all_clear", evidenceLimitation: "corpus_unverified" };
+      }),
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([{ type: "autopilot_human", data: { reason: problem } }]);
+    expect(deps.ran).toEqual([]);
+  });
+
+  it("never approves a plan over outstanding verification", async () => {
+    const pending = pendingFlag();
+    const deps = makeDeps(
+      [],
+      {
+        planPending: pending.get,
+        verificationProblem: () => "Unverified: a check failed.",
+      },
+      [{ kind: "all_clear" }],
+    );
+    await driveAutopilotCycle(deps);
+    expect(deps.reviewPlan).not.toHaveBeenCalled();
+    expect(deps.counters.ready).toBe(0);
+    expect(deps.ran).toEqual([]);
+  });
+});
+
 describe("frameAutopilotInjection", () => {
   it("prepends the autopilot preamble and preserves the body verbatim", () => {
     const framed = frameAutopilotInjection("Add a test for the login flow.");
@@ -99,6 +148,44 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
     expect(deps.ran).toEqual([]);
     expect(deps.resetReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a parsed evidence limitation in the terminal event without another run", async () => {
+    const verdict = parseAutopilotVerdict(
+      '{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}',
+    );
+    const deps = makeDeps([verdict]);
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_done", data: { reason: CORPUS_UNVERIFIED_REASON } },
+    ]);
+    expect(deps.ran).toEqual([]);
+    expect(deps.review).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not approve unsupported verification exceptions", async () => {
+    const deps = makeDeps([
+      parseAutopilotVerdict('{"verdict":"ALL_CLEAR","evidenceLimitation":"verification_failed"}'),
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted[0]?.type).toBe("autopilot_human");
+    expect(deps.ran).toEqual([]);
+  });
+
+  it("passes a plan's limitation to readiness without authorizing implementation", async () => {
+    const pending = pendingFlag();
+    const identity = { checkpointId: "checkpoint-1", generation: 1 };
+    const markPlanReady = vi.fn(async () => identity);
+    const deps = makeDeps([], { planPending: pending.get, markPlanReady }, [
+      { kind: "all_clear", evidenceLimitation: "corpus_unverified" },
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(markPlanReady).toHaveBeenCalledWith(CORPUS_UNVERIFIED_REASON);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_plan_ready", data: { ...identity, reason: CORPUS_UNVERIFIED_REASON } },
+    ]);
+    expect(deps.ran).toEqual([]);
+    expect(pending.get()).toBe(true);
   });
 
   it("IGNORE → autopilot_ignored, no injected run", async () => {

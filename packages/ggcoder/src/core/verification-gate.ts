@@ -4,18 +4,17 @@
  *
  * When a run mutated code files and no test / typecheck / lint / build command
  * completed after the last mutation, the pre-stop hook injects a follow-up
- * demanding the project's verification be run. Exactly one such follow-up per
- * run: a gate that keeps prompting after the model has decided it is done buys
- * nothing but extra full-length final answers, so the demand carries its own
- * fallback ("say which changes went unverified") and the gate then goes silent.
+ * demanding the project's verification be run. One initial demand plus at most
+ * one post-verification recheck, only when new edits invalidate a completed
+ * check. Unchanged work never repeats the demand. If the bounded budget runs
+ * out, the demand requires disclosure of what remains unverified.
  * Prompt-only "verify before finishing" instructions can be ignored; this gate
  * is harness-owned bookkeeping on what actually executed.
  *
- * Simplification: verification is recognised by a conservative runner-shape
- * classifier (package-manager/runner + test/lint/check keyword) applied to each
- * segment of a compound command. Both error directions are safe — a missed
- * recognition leaves the gate silent (today's behavior), a false positive merely
- * skips one continuation.
+ * The broad runner-shape classifier below identifies verification attempts.
+ * Authoritative success uses the stricter verification-evidence classifier
+ * plus host-observed exit status and the revision captured at command start.
+ * Missing or rejected evidence cannot clear outstanding verification.
  *
  * Second gate — TAMPER DISCLOSURE. A passing check only proves something if the
  * check itself was not the thing that changed. Editing a test, a test runner's
@@ -32,8 +31,22 @@
  * confirm the fix stands without it.
  */
 import type { Message } from "@kenkaiiii/gg-ai";
+import { createHash } from "node:crypto";
+import { z } from "zod";
 
-/** Follow-ups per run. After this the gate is silent for the rest of the run. */
+export const VERIFICATION_STATE_KIND = "verification_state";
+const verificationStateSchema = z.object({
+  version: z.literal(1),
+  seq: z.number().int().nonnegative().safe(),
+  mutation: z.number().int().nonnegative().safe(),
+  verified: z.number().int().nonnegative().safe(),
+  files: z.array(z.string()).max(10_000),
+  failedChecks: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(10_000),
+  unknown: z.boolean(),
+});
+const checkKey = (command: string) => createHash("sha256").update(command.trim()).digest("hex");
+
+/** Initial demands per run; at most one separate post-verification recheck is allowed. */
 export const MAX_VERIFICATION_INJECTIONS = 1;
 
 /** Tamper-disclosure demands per run. Same reasoning as above: one is enough. */
@@ -378,33 +391,45 @@ export function buildTamperDisclosureMessage(suspects: readonly SuspectMutation[
   };
 }
 
-export function buildVerificationFollowUpMessage(files: readonly string[]): Message {
+export function buildVerificationFollowUpMessage(
+  files: readonly string[],
+  recheck = false,
+): Message {
   return {
     role: "user",
     provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
     content:
-      "Verification gate: you changed code in this run, but no test, typecheck, lint or build " +
-      "command has completed since the last edit:\n" +
+      (recheck
+        ? "Verification gate: code changed again after the earlier verification:\n"
+        : "Verification gate: current successful verification is missing for this run:\n") +
       files.map((filePath) => `- ${filePath}`).join("\n") +
-      "\nRun the project's verification now (its test command, or the closest equivalent) and " +
-      "address any failures. Do not describe the change as tested or working without having run it. " +
-      "This is the only time you will be asked: if you cannot run it, say plainly in your final " +
+      (recheck
+        ? "\nRe-run the affected checks against these changes and address any failures. "
+        : "\nRun the project's verification now (its test command, or the closest equivalent) and " +
+          "address any failures. ") +
+      "Do not describe the change as tested or working without having run it. " +
+      "There is no repeated reminder for unchanged code: if you cannot run it, say plainly in your final " +
       "response which of these changes went unverified and why, so the user can check them.",
   };
 }
 
 /**
  * Bookkeeping for "code was edited, nothing proved it since". Callers record
- * successful edit/write mutations on code files and completed foreground
- * verification commands, in occurrence order; the gate is owed whenever the
- * newest recorded event is a mutation.
+ * successful edit/write mutations on code files and host-observed check results.
+ * Approval requires current successful evidence and no unresolved failures;
+ * exhausting the reminder budget never clears the underlying problem.
  */
 export class VerificationGate {
   private seq = 0;
   private lastMutationSeq = 0;
   private lastVerificationSeq = 0;
   private injections = 0;
+  private recheckInjections = 0;
+  private lastDemandedMutationSeq = 0;
   private tamperInjections = 0;
+  private failedChecks = new Set<string>();
+  private passedChecks = new Map<string, number>();
+  private unknownVerification = false;
   /** Code files mutated since the last verification — the gate's file list. */
   private mutatedFiles = new Set<string>();
   /**
@@ -422,6 +447,7 @@ export class VerificationGate {
    */
   recordMutation(filePath: string, addedText?: string): void {
     this.lastMutationSeq = ++this.seq;
+    this.passedChecks.clear();
     this.mutatedFiles.add(filePath);
 
     const reasons: string[] = [];
@@ -434,13 +460,101 @@ export class VerificationGate {
     this.suspects.set(filePath, merged);
   }
 
-  recordVerification(): void {
+  get revision(): number {
+    return this.lastMutationSeq;
+  }
+
+  recordVerification(revision = this.revision, command = "verification"): void {
+    // A check that started before a later edit cannot verify that edit.
+    if (revision !== this.revision) return;
+    const key = checkKey(command);
+    this.passedChecks.set(key, revision);
+    // Eviction may require an extra check; it can never create an approval.
+    if (this.passedChecks.size > 256) {
+      const oldest = this.passedChecks.keys().next().value;
+      if (oldest !== undefined) this.passedChecks.delete(oldest);
+    }
+    this.failedChecks.delete(key);
+    if (this.failedChecks.size > 0) return;
     this.lastVerificationSeq = ++this.seq;
+    this.unknownVerification = false;
     this.mutatedFiles.clear();
   }
 
+  recordFailedVerification(command: string, revision = this.revision): void {
+    const key = checkKey(command);
+    // A failure remains outstanding unless this SAME check already passed on
+    // a newer revision. An unrelated successful lint/build cannot erase it.
+    if ((this.passedChecks.get(key) ?? -1) > revision) return;
+    // simplification: exact command identity; an alias cannot clear another
+    // check's failure. Upgrade to runner-aware identities if aliases are needed.
+    this.failedChecks.add(key);
+  }
+
+  requireFreshVerification(invalidateRevision = false): void {
+    this.unknownVerification = true;
+    if (invalidateRevision) {
+      this.lastMutationSeq = ++this.seq;
+      this.passedChecks.clear();
+    }
+  }
+
+  verificationProblem(): string | null {
+    if (!this.isOwed()) return null;
+    if (this.failedChecks.size > 0) {
+      return "Unverified: a check failed or did not confirm success. Rerun that check successfully before approval.";
+    }
+    return "Unverified: no successful check covers the current changes. Run the project's verification before approval.";
+  }
+
+  snapshot() {
+    return {
+      version: 1 as const,
+      seq: this.seq,
+      mutation: this.lastMutationSeq,
+      verified: this.lastVerificationSeq,
+      files: [...this.mutatedFiles],
+      failedChecks: [...this.failedChecks],
+      unknown: this.unknownVerification,
+    };
+  }
+
+  restore(value: unknown): void {
+    this.reset();
+    const parsed = verificationStateSchema.safeParse(value);
+    if (
+      !parsed.success ||
+      parsed.data.mutation > parsed.data.seq ||
+      parsed.data.verified > parsed.data.seq
+    ) {
+      this.requireFreshVerification();
+      return;
+    }
+    const state = parsed.data;
+    this.seq = state.seq;
+    this.lastMutationSeq = state.mutation;
+    this.lastVerificationSeq = state.verified;
+    this.mutatedFiles = new Set(state.files);
+    this.failedChecks = new Set(state.failedChecks);
+    // Files may have changed while the session was closed. A saved success is
+    // not live evidence: require one fresh check after resuming edited work.
+    this.unknownVerification = state.unknown || state.mutation > 0;
+  }
+
+  beginRun(): void {
+    this.injections = 0;
+    this.recheckInjections = 0;
+    this.lastDemandedMutationSeq = 0;
+    this.tamperInjections = 0;
+    this.suspects.clear();
+  }
+
   isOwed(): boolean {
-    return this.lastMutationSeq > this.lastVerificationSeq;
+    return (
+      this.unknownVerification ||
+      this.failedChecks.size > 0 ||
+      this.lastMutationSeq > this.lastVerificationSeq
+    );
   }
 
   /**
@@ -465,26 +579,47 @@ export class VerificationGate {
    * rather than painted and then superseded.
    */
   willInject(): boolean {
-    return (
-      (this.isOwed() && this.injections < MAX_VERIFICATION_INJECTIONS) ||
-      (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS)
-    );
+    return this.pendingReason() !== null;
+  }
+
+  pendingReason(): "initial" | "recheck" | "tamper" | null {
+    if (this.isOwed()) {
+      if (this.injections < MAX_VERIFICATION_INJECTIONS) {
+        return this.lastVerificationSeq > 0 && this.lastMutationSeq > this.lastVerificationSeq
+          ? "recheck"
+          : "initial";
+      }
+      // One extra pass only after the demanded check completed AND code changed
+      // again. Ignoring a prompt or editing without checking cannot re-arm it.
+      if (
+        this.recheckInjections === 0 &&
+        this.lastVerificationSeq > this.lastDemandedMutationSeq &&
+        this.lastMutationSeq > this.lastVerificationSeq
+      )
+        return "recheck";
+    }
+    if (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS) return "tamper";
+    return null;
   }
 
   /**
    * The blocking message for the pre-stop hook, or null when nothing is owed
-   * or the single injection is spent. Still-owed on a later stop is deliberately
-   * silent: the demand already told the model to disclose what went unverified,
-   * and one more injection only costs the user another restated final answer.
+   * or its bounded budget is spent. A later edit after the demanded check gets
+   * one additional pass; unchanged/unverified work never repeats a reminder.
    */
   followUp(): Message[] | null {
     // "Nothing proved this" outranks "the proof may be rigged": with no check
     // run at all there is not yet a false green to disclose.
-    if (this.isOwed() && this.injections < MAX_VERIFICATION_INJECTIONS) {
-      this.injections += 1;
-      return [buildVerificationFollowUpMessage([...this.mutatedFiles].sort())];
+    const reason = this.pendingReason();
+    if (reason === "initial" || reason === "recheck") {
+      if (this.injections < MAX_VERIFICATION_INJECTIONS) this.injections += 1;
+      if (reason === "recheck") this.recheckInjections += 1;
+      this.lastDemandedMutationSeq = this.lastMutationSeq;
+      return [
+        buildVerificationFollowUpMessage([...this.mutatedFiles].sort(), reason === "recheck"),
+      ];
     }
-    if (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS) {
+    if (reason === "tamper") {
       this.tamperInjections += 1;
       return [buildTamperDisclosureMessage(this.tamperSuspects())];
     }
@@ -496,8 +631,13 @@ export class VerificationGate {
     this.lastMutationSeq = 0;
     this.lastVerificationSeq = 0;
     this.injections = 0;
+    this.recheckInjections = 0;
+    this.lastDemandedMutationSeq = 0;
     this.tamperInjections = 0;
     this.mutatedFiles.clear();
     this.suspects.clear();
+    this.failedChecks.clear();
+    this.passedChecks.clear();
+    this.unknownVerification = false;
   }
 }

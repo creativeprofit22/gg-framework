@@ -303,7 +303,7 @@ function parseApprovedPlanConsumption(value: unknown): ApprovedPlanConsumptionRe
   return payload as ApprovedPlanConsumptionRecord;
 }
 
-export type RunOutcome = "completed" | "failed" | "aborted";
+export type RunOutcome = "completed" | "failed" | "aborted" | "unverified";
 
 export interface RunStartedPayload {
   version: 1;
@@ -581,7 +581,8 @@ export class SessionManager {
 
     // Windows can report EPERM/EBUSY/EACCES on `mkdir` while the previous
     // holder's `rm` has the lock dir in pending-delete. A few immediate retries
-    // distinguish that race from a genuine permission error on the root.
+    // cover the case where the dir vanishes between mkdir and stat; a genuine
+    // permission error on the root never produces a lock dir and gives up here.
     let vanishedRetries = 0;
 
     while (true) {
@@ -595,8 +596,10 @@ export class SessionManager {
         await fs.writeFile(path.join(lockPath, "owner.json"), JSON.stringify(owner), "utf-8");
         break;
       } catch (error) {
-        // EEXIST is normal contention. Windows permission-like errors only count
-        // as contention while the pending-delete lock directory still exists.
+        // EEXIST is the normal "someone holds it" signal. EPERM/EBUSY/EACCES
+        // only count as contention when the lock dir is actually there
+        // (pending-delete); otherwise it is a real permission fault and must
+        // surface rather than spin in waitForLease forever.
         const code = (error as NodeJS.ErrnoException).code;
         const contentionCode = code === "EPERM" || code === "EBUSY" || code === "EACCES";
         if (code !== "EEXIST" && !contentionCode) throw error;

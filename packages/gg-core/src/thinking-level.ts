@@ -2,13 +2,8 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
-const OPENAI_ASTRA_THINKING_LEVELS: readonly ThinkingLevel[] = [
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
+// GPT-5.6 and GPT-6 share the six-rung Codex ladder (low → ultra); older GPT
+// models only expose medium/high/xhigh.
 const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -17,10 +12,9 @@ const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "max",
   "ultra",
 ];
-// Sakana Fugu accepts exactly two reasoning efforts — "high" and "xhigh" — and
-// rejects anything else. Expose both so users can pick the lighter tier instead
-// of being forced into all-or-nothing xhigh.
-const SAKANA_THINKING_LEVELS: readonly ThinkingLevel[] = ["high", "xhigh"];
+// Plain Fugu stops at xhigh; Ultra v1.1 adds max. Slice by the model ceiling.
+const SAKANA_THINKING_LEVELS: readonly ThinkingLevel[] = ["high", "xhigh", "max"];
+const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"];
 // Grok reasoning models take reasoning_effort low/medium/high (server default
 // high; reasoning can't be fully disabled — "off" just omits the param). Grok
 // 4.6 adds an `xhigh` top rung (docs: low/medium/high default/xhigh); 4.5
@@ -148,6 +142,7 @@ export function getSupportedThinkingLevels(
   }
 
   if (isMoonshotK3Model(provider, model)) return MOONSHOT_K3_THINKING_LEVELS;
+  if (provider === "deepseek") return DEEPSEEK_THINKING_LEVELS;
 
   if (isGlmModel(provider)) {
     const maxIndex = GLM_THINKING_LEVELS.indexOf(maxLevel);
@@ -159,11 +154,9 @@ export function getSupportedThinkingLevels(
 
   const identity = resolvedModelIdentity(model);
   const levels =
-    identity === "gpt-6-astra"
-      ? OPENAI_ASTRA_THINKING_LEVELS
-      : identity.startsWith("gpt-5.6-")
-        ? OPENAI_GPT_56_THINKING_LEVELS
-        : OPENAI_GPT_THINKING_LEVELS;
+    identity.startsWith("gpt-5.6-") || identity.startsWith("gpt-6-")
+      ? OPENAI_GPT_56_THINKING_LEVELS
+      : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);
   if (maxIndex === -1) return ["medium"];
   return levels.slice(0, maxIndex + 1);
@@ -190,6 +183,7 @@ export function getNextThinkingLevel(
     isXaiModel(provider) ||
     isMoonshotK3Model(provider, model) ||
     isGlmModel(provider) ||
+    provider === "deepseek" ||
     // Local servers take a real effort level, not just on/off: Ollama accepts
     // low/medium/high on `reasoning_effort` (verified against 0.32) and the
     // other OpenAI-compatible servers use the same three. A model that can't

@@ -2811,3 +2811,125 @@ describe("invalid tool argument attempt counter", () => {
     expect(events.some((e) => e.type === "retry")).toBe(false);
   });
 });
+
+/**
+ * Providers with strict ("structured outputs") tool schemas must list every
+ * property as required and mark optionals nullable, so the model emits
+ * explicit `null` for fields it would otherwise omit. Zod's `.optional()`
+ * accepts an absent key but rejects `null` — without stripping, every strict
+ * tool call with an omitted optional would burn an invalid-args retry.
+ */
+describe("null arguments from strict sampling", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  const params = z.object({
+    path: z.string(),
+    offset: z.number().optional(),
+    edits: z.array(z.object({ old_text: z.string(), anchor: z.string().optional() })).optional(),
+  });
+
+  function callWith(args: Record<string, unknown>) {
+    return {
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "tool_call" as const, id: "t1", name: "ed", args }],
+        },
+        stopReason: "tool_use" as const,
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } as unknown as ReturnType<typeof stream>;
+  }
+
+  it("strips nulls so optionals validate, including nested ones", async () => {
+    const received: unknown[] = [];
+    const tool: AgentTool<typeof params> = {
+      name: "ed",
+      description: "edit",
+      parameters: params,
+      async execute(args) {
+        received.push(args);
+        return "ok";
+      },
+    };
+    mockStream
+      .mockReturnValueOnce(
+        callWith({
+          path: "a.ts",
+          offset: null,
+          edits: [{ old_text: "x", anchor: null }],
+        }),
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const { events } = await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [tool],
+    });
+
+    expect(received).toEqual([{ path: "a.ts", edits: [{ old_text: "x" }] }]);
+    const end = events.find((e) => e.type === "tool_call_end") as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(end?.isError).toBeFalsy();
+    expect(end?.invalidArgAttempt).toBeUndefined();
+  });
+
+  it("keeps nulls for MCP-style passthrough tools (rawInputSchema)", async () => {
+    const passthrough = z.record(z.string(), z.unknown());
+    const received: unknown[] = [];
+    const tool: AgentTool<typeof passthrough> = {
+      name: "ed",
+      description: "mcp",
+      parameters: passthrough,
+      rawInputSchema: { type: "object", properties: { cursor: { type: "string" } } },
+      async execute(args) {
+        received.push(args);
+        return "ok";
+      },
+    };
+    mockStream
+      .mockReturnValueOnce(callWith({ cursor: null }))
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [tool],
+    });
+
+    expect(received).toEqual([{ cursor: null }]);
+  });
+
+  it("keeps a null that validates: required nullable fields are never stripped", async () => {
+    const nullableParams = z.object({ cursor: z.string().nullable() });
+    const received: unknown[] = [];
+    const tool: AgentTool<typeof nullableParams> = {
+      name: "ed",
+      description: "nullable",
+      parameters: nullableParams,
+      async execute(args) {
+        received.push(args);
+        return "ok";
+      },
+    };
+    mockStream
+      .mockReturnValueOnce(callWith({ cursor: null }))
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [tool],
+    });
+
+    expect(received).toEqual([{ cursor: null }]);
+  });
+});

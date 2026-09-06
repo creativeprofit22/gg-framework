@@ -1,6 +1,7 @@
 import { GGAIError } from "../errors.js";
 import type { ContentPart, ImageContent, Message, Tool, ToolChoice } from "../types.js";
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
+import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { readSseStream } from "../utils/sse.js";
 import { toolResultText } from "./transform.js";
 
@@ -252,11 +253,23 @@ export function serializeResponsesTools(
   tools: Tool[],
   options: { strict: boolean | null },
 ): unknown[] {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: resolveToolSchema(tool),
-    strict: options.strict,
-  }));
+  return tools.map((tool) => {
+    let parameters = resolveToolSchema(tool);
+    let strict = options.strict;
+    if (strict === true) {
+      try {
+        parameters = makeStrictToolSchema(parameters);
+      } catch (error) {
+        if (!(error instanceof UnsupportedStrictSchemaError)) throw error;
+        strict = null;
+      }
+    }
+    return {
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters,
+      strict,
+    };
+  });
 }

@@ -95,6 +95,116 @@ describe("isCodeFilePath", () => {
 });
 
 describe("VerificationGate", () => {
+  it("keeps an authoritative problem after all reminder budgets are exhausted", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.followUp();
+    gate.recordVerification();
+    gate.recordMutation("a.ts");
+    gate.followUp();
+    expect(gate.followUp()).toBeNull();
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.beginRun();
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.recordVerification();
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("rejects a successful check started before the latest mutation", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    const revision = gate.revision;
+    gate.recordMutation("a.ts");
+    gate.recordVerification(revision, "pnpm test");
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.recordVerification(gate.revision, "pnpm test");
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("does not let a passing lint command erase a failed test", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordFailedVerification("pnpm test");
+    gate.recordVerification(gate.revision, "pnpm lint");
+    expect(gate.verificationProblem()).toContain("failed");
+    gate.recordVerification(gate.revision, "pnpm test");
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("keeps a late failure outstanding despite an unrelated current success", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    const oldRevision = gate.revision;
+    gate.recordMutation("a.ts");
+    gate.recordVerification(gate.revision, "pnpm lint");
+    gate.recordFailedVerification("pnpm test", oldRevision);
+    expect(gate.verificationProblem()).toContain("failed");
+    gate.recordVerification(gate.revision, "pnpm test");
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("ignores an old failure only after that same check passed on newer code", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    const oldRevision = gate.revision;
+    gate.recordMutation("a.ts");
+    gate.recordVerification(gate.revision, "pnpm test");
+    gate.recordFailedVerification("pnpm test", oldRevision);
+    expect(gate.verificationProblem()).toBeNull();
+    gate.recordFailedVerification("pnpm test", gate.revision);
+    expect(gate.verificationProblem()).toContain("failed");
+  });
+
+  it("invalidates an earlier check when a potentially mutating check starts", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    const oldRevision = gate.revision;
+    gate.requireFreshVerification(true);
+    gate.recordVerification(oldRevision, "pnpm test");
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.recordVerification(gate.revision, "pnpm test");
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("requires fresh evidence on resume and never persists raw check commands", () => {
+    const original = new VerificationGate();
+    original.recordMutation("a.ts");
+    original.recordFailedVerification("pnpm test");
+    const saved = original.snapshot();
+    expect(JSON.stringify(saved)).not.toContain("pnpm test");
+    const restored = new VerificationGate();
+    restored.restore(saved);
+    expect(restored.verificationProblem()).toContain("failed");
+    restored.recordVerification(restored.revision, "pnpm test");
+    expect(restored.verificationProblem()).toBeNull();
+    const checked = restored.snapshot();
+    restored.restore(checked);
+    expect(restored.verificationProblem()).toContain("Unverified");
+    restored.recordVerification();
+    expect(restored.verificationProblem()).toBeNull();
+  });
+
+  it.each([
+    null,
+    {},
+    { version: 2 },
+    {
+      version: 1,
+      seq: 1,
+      mutation: 100,
+      verified: 0,
+      files: [],
+      failedChecks: [],
+      unknown: false,
+    },
+  ])("fails closed on an invalid saved verification state", (saved) => {
+    const gate = new VerificationGate();
+    gate.restore(saved);
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.recordVerification();
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
   it("is silent with no mutations", () => {
     const gate = new VerificationGate();
     gate.recordVerification();
@@ -143,6 +253,55 @@ describe("VerificationGate", () => {
     expect(gate.followUp()).toBeNull();
     gate.recordMutation("a.ts");
     expect(String(gate.followUp()![0]!.content)).toContain("Run the project's verification");
+  });
+
+  it("re-arms once after verification followed by new edits, listing only those edits", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.followUp();
+    gate.recordVerification();
+    expect(gate.willInject()).toBe(false);
+    gate.recordMutation("b.ts");
+    expect(gate.pendingReason()).toBe("recheck");
+    expect(gate.willInject()).toBe(true);
+    const demand = String(gate.followUp()![0]!.content);
+    expect(demand).toContain("Re-run the affected checks");
+    expect(demand).toContain("b.ts");
+    expect(demand).not.toContain("a.ts");
+    expect(gate.followUp()).toBeNull();
+    gate.recordVerification();
+    gate.recordMutation("c.ts");
+    expect(gate.isOwed()).toBe(true);
+    expect(gate.willInject()).toBe(false);
+    expect(gate.followUp()).toBeNull();
+    gate.reset();
+    gate.recordMutation("d.ts");
+    expect(gate.pendingReason()).toBe("initial");
+  });
+
+  it("does not spend a recheck on ignored verification, even with more edits", () => {
+    const gate = new VerificationGate();
+    gate.recordVerification();
+    gate.recordMutation("a.ts");
+    gate.followUp();
+    gate.recordMutation("b.ts");
+    expect(gate.isOwed()).toBe(true);
+    expect(gate.willInject()).toBe(false);
+    expect(gate.followUp()).toBeNull();
+  });
+
+  it("keeps test-change disclosure independent of the recheck budget", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.test.ts");
+    gate.followUp();
+    gate.recordVerification();
+    gate.recordMutation("b.ts");
+    expect(gate.pendingReason()).toBe("recheck");
+    gate.followUp();
+    gate.recordVerification();
+    expect(gate.pendingReason()).toBe("tamper");
+    expect(String(gate.followUp()![0]!.content)).toContain("does not prove the code works");
+    expect(gate.followUp()).toBeNull();
   });
 
   it("a later mutation re-arms an already-satisfied gate after a fresh budget reset", () => {

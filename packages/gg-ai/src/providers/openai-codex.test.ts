@@ -539,6 +539,36 @@ describe("streamOpenAICodex", () => {
     });
   });
 
+  it.each([
+    ["gpt-5.5", "none"],
+    ["gpt-5.6-luna", "low"],
+    ["gpt-5.6-sol", "low"],
+    ["gpt-6-astra", "low"],
+    ["gpt-5.6-terra", "low"],
+  ])("uses a supported default effort for %s without explicit thinking", async (model, effort) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model,
+      messages: [{ role: "user", content: "Rewrite this prompt" }],
+      apiKey: "test-key",
+      accountId: "acct",
+    });
+    await result;
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string);
+    expect(body.reasoning.effort).toBe(effort);
+  });
+
   it("uses the official Codex Responses-Lite identity and request shape for GPT-5.6", async () => {
     vi.stubGlobal(
       "fetch",
@@ -676,7 +706,7 @@ describe("streamOpenAICodex", () => {
     });
   });
 
-  it("recommends Astra and GPT-5.6 models for unavailable Codex selections", async () => {
+  it("preserves generic rejections and recommends current models for missing selections", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -701,7 +731,9 @@ describe("streamOpenAICodex", () => {
       accountId: "acct",
     });
     await expect(unavailablePro.response).rejects.toMatchObject({
-      hint: "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.",
+      message: "model not supported",
+      statusCode: 400,
+      hint: undefined,
     });
 
     const missingModel = streamOpenAICodex({
@@ -713,8 +745,8 @@ describe("streamOpenAICodex", () => {
     });
     await expect(missingModel.response).rejects.toMatchObject({
       hint:
-        "This model is not in the current OpenAI Codex catalog for this account. " +
-        "Switch to gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna via the model selector.",
+        "This model is not in OpenAI's current catalog for your ChatGPT account. " +
+        "Switch to GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, or GPT-5.6 Luna via the model selector.",
     });
   });
 
@@ -1436,5 +1468,59 @@ describe("streamOpenAICodex", () => {
         ],
       },
     });
+  });
+});
+
+describe("toCodexTools strict sampling", () => {
+  it("marks strictifiable tools strict:true and falls back to strict:null otherwise", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const raw = {
+      type: "object",
+      properties: { mode: { oneOf: [{ type: "string" }, { type: "number" }] } },
+      required: ["mode"],
+    };
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "k",
+      accountId: "acct",
+      tools: [
+        {
+          name: "read",
+          description: "read",
+          parameters: z.object({ path: z.string(), offset: z.number().optional() }),
+        },
+        {
+          name: "mcp_tool",
+          description: "mcp",
+          parameters: z.record(z.string(), z.unknown()),
+          rawInputSchema: raw,
+        },
+      ],
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    expect(body.tools[0]).toMatchObject({ name: "read", strict: true });
+    expect(body.tools[0].parameters).toMatchObject({
+      required: ["path", "offset"],
+      additionalProperties: false,
+    });
+    expect(body.tools[1]).toMatchObject({ name: "mcp_tool", strict: null });
+    expect(body.tools[1].parameters).toEqual(raw);
   });
 });

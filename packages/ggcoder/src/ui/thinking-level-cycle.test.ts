@@ -6,13 +6,14 @@ import {
 } from "./thinking-level.js";
 
 describe("getNextThinkingLevel", () => {
-  it("cycles Astra through low, medium, high, xhigh, max, then off", () => {
+  it("cycles GPT-6 Astra through low, medium, high, xhigh, max, ultra, then off", () => {
     expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
     expect(getNextThinkingLevel("openai", "gpt-6-astra", "low")).toBe("medium");
     expect(getNextThinkingLevel("openai", "gpt-6-astra", "medium")).toBe("high");
     expect(getNextThinkingLevel("openai", "gpt-6-astra", "high")).toBe("xhigh");
     expect(getNextThinkingLevel("openai", "gpt-6-astra", "xhigh")).toBe("max");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBeUndefined();
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "ultra")).toBeUndefined();
   });
 
   it("recognizes every Astra cycle level as supported", () => {
@@ -22,10 +23,14 @@ describe("getNextThinkingLevel", () => {
       "high",
       "xhigh",
       "max",
+      "ultra",
     ]);
     expect(isThinkingLevelSupported("openai", "gpt-6-astra", "low")).toBe(true);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "medium")).toBe(true);
     expect(isThinkingLevelSupported("openai", "gpt-6-astra", "high")).toBe(true);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "xhigh")).toBe(true);
     expect(isThinkingLevelSupported("openai", "gpt-6-astra", "max")).toBe(true);
+    expect(isThinkingLevelSupported("openai", "gpt-6-astra", "ultra")).toBe(true);
   });
 
   it("cycles Anthropic adaptive models through low, medium, high, xhigh, max, then off", () => {

@@ -88,7 +88,8 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "gemini",
     label: "Gemini",
-    description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
+    description:
+      "Gemini 3.8 Flash, 3.5 Flash Lite, 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
     methods: ["oauth"],
   },
   {
@@ -170,7 +171,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "deepseek",
     label: "DeepSeek",
-    description: "DeepSeek V4 Pro, V4 Flash",
+    description: "DeepSeek V4 Pro, V4 Flash, V4 Flash Vision (Experimental)",
     methods: ["apikey"],
     apiKeyLabel: "DeepSeek",
   },

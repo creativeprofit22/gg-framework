@@ -1,5 +1,47 @@
 # @kenkaiiii/ggcoder
 
+## 5.57.1
+
+### Patch Changes
+
+- OpenAI tool calls now use strict (structured outputs) sampling so malformed arguments are guaranteed away at the provider, with a null-argument fallback re-parse for schemas strict mode rewrites.
+  - @kenkaiiii/gg-ai@5.57.1
+  - @kenkaiiii/gg-agent@5.57.1
+  - @kenkaiiii/gg-core@5.57.1
+
+## 5.57.0
+
+### Minor Changes
+
+- Add current-commit GitHub Actions progress to the desktop title bar, with live job counts, brief success feedback, and dismissible failures. Recognize successful checks after a git status prelude and show incomplete verification as Unverified instead of an unexpected crash.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.57.0
+- @kenkaiiii/gg-agent@5.57.0
+- @kenkaiiii/gg-core@5.57.0
+
+## 5.56.1
+
+### Patch Changes
+
+- Block completion and Autopilot approval when verification is missing, failed, stale, or running; preserve unresolved checks across resumed sessions, bound post-edit rechecks, and retain structured corpus-review warnings.
+  - @kenkaiiii/gg-ai@5.56.1
+  - @kenkaiiii/gg-agent@5.56.1
+  - @kenkaiiii/gg-core@5.56.1
+
+## 5.56.0
+
+### Minor Changes
+
+- Add opt-in Gemini 3.8 Flash, Gemini 3.5 Flash Lite, and experimental DeepSeek V4 Flash Vision; enable Qwen image/video input, align provider reasoning and output limits, and respect loaded local context and summary output budgets.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.56.0
+- @kenkaiiii/gg-agent@5.56.0
+- @kenkaiiii/gg-core@5.56.0
+
 ## 5.55.1
 
 ### Patch Changes

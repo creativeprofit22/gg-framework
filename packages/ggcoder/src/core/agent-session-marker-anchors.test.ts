@@ -12,6 +12,7 @@ import {
   normalizeKenTurnsForHistory,
 } from "./session-history.js";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { CORPUS_UNVERIFIED_REASON } from "./autopilot-verdict.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
 const compactMock = vi.hoisted(() => vi.fn());
@@ -125,7 +126,7 @@ describe("AgentSession transcript marker anchors", () => {
     // Markers recorded while the session is settled: anchor = 2.
     await session.persistAppMarker("error", { headline: "mid error" });
     await session.persistKenTurn("question", "reply");
-    await session.persistAutopilotMarker("done");
+    await session.persistAutopilotMarker("done", { reason: CORPUS_UNVERIFIED_REASON });
 
     // Failed second run: the loop appends partial messages in place, then
     // throws — they stay in memory but are NEVER persisted. The user message
@@ -173,6 +174,9 @@ describe("AgentSession transcript marker anchors", () => {
 
     const restoredCount = resumed.getMessages().filter((m) => m.role !== "system").length;
     expect(restoredCount).toBe(3);
+    expect(
+      normalizeAutopilotMarkersForHistory(resumed.getAutopilotMarkers(), restoredCount),
+    ).toContainEqual(expect.objectContaining({ phase: "done", reason: CORPUS_UNVERIFIED_REASON }));
 
     const replayed = normalizeAppMarkersForHistory(resumed.getAppMarkers(), restoredCount).filter(
       (m) => m.kind === "error",

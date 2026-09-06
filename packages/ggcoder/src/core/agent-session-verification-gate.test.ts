@@ -107,6 +107,7 @@ async function simulateToolCall(
   name: string,
   args: Record<string, unknown>,
   isError = false,
+  result = "",
   details?: unknown,
 ): Promise<void> {
   const toolCallId = `call-${++callSeq}`;
@@ -119,7 +120,7 @@ async function simulateToolCall(
   await internal.trackHookEvent({
     type: "tool_call_end",
     toolCallId,
-    result: "",
+    result,
     isError,
     durationMs: 1,
     details,
@@ -144,9 +145,14 @@ describe("AgentSession verification gate", () => {
     const internal = await makeSession();
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" }, false, {
-      bashDiagnostics: { reason: "completed", exitCode: 0 },
-    });
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command: "pnpm vitest run" },
+      false,
+      "Exit code: 0\n",
+      { bashDiagnostics: { reason: "completed", exitCode: 0 } },
+    );
 
     expect(internal.verificationGate.isOwed()).toBe(false);
     expect(internal.getHookFollowUpMessages()).toBeNull();
@@ -156,7 +162,7 @@ describe("AgentSession verification gate", () => {
     const internal = await makeSession();
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" }, false, {
+    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" }, false, "", {
       bashDiagnostics: { reason: "nonZeroExit", exitCode: 1 },
     });
 
@@ -197,16 +203,18 @@ describe("AgentSession verification gate", () => {
     managers.push(manager);
     internal.processManager = manager;
 
-    const started = await manager.start("npm test", tmpProject);
-    expect(await waitForExit(manager, started.id)).not.toBe(0);
-
+    await fs.writeFile(
+      path.join(tmpProject, "verification.test.mjs"),
+      "import assert from 'node:assert/strict'; assert.equal(1 + 1, 3);\n",
+    );
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    await simulateToolCall(internal, "bash", {
-      command: "npm test",
-      run_in_background: true,
-    });
+    const command = "node --test verification.test.mjs";
+    const started = await manager.start(command, tmpProject);
+    await simulateToolCall(
+      internal, "bash", { command, run_in_background: true }, false, `ID: ${started.id}\n`,
+    );
     expect(internal.verificationGate.isOwed()).toBe(true);
-
+    expect(await waitForExit(manager, started.id)).not.toBe(0);
     await simulateToolCall(internal, "task_output", { id: started.id });
     expect(internal.verificationGate.isOwed()).toBe(true);
   }, 60_000);
@@ -217,14 +225,17 @@ describe("AgentSession verification gate", () => {
     managers.push(manager);
     internal.processManager = manager;
     await fs.writeFile(
-      path.join(tmpProject, "package.json"),
-      JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }),
+      path.join(tmpProject, "verification.test.mjs"),
+      "import assert from 'node:assert/strict'; assert.equal(1 + 1, 2);\n",
     );
-
-    const started = await manager.start("npm test", tmpProject);
-    expect(await waitForExit(manager, started.id)).toBe(0);
-
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    const command = "node --test verification.test.mjs";
+    const started = await manager.start(command, tmpProject);
+    await simulateToolCall(
+      internal, "bash", { command, run_in_background: true }, false, `ID: ${started.id}\n`,
+    );
+    expect(internal.verificationGate.isOwed()).toBe(true);
+    expect(await waitForExit(manager, started.id)).toBe(0);
     await simulateToolCall(internal, "task_output", { id: started.id });
     expect(internal.verificationGate.isOwed()).toBe(false);
   }, 60_000);

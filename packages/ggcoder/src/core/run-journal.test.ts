@@ -58,6 +58,14 @@ describe("RunLifecycle journalling", () => {
     expect(calls).toEqual([`start:${lease.generation}`, `finish:${lease.generation}:completed`]);
   });
 
+  it("records an unverified run without labelling it completed", () => {
+    const { writer, calls } = recordingJournal();
+    const lifecycle = new RunLifecycle(undefined, writer);
+    const lease = lifecycle.begin(vi.fn());
+    lifecycle.settle(lease.generation, "unverified");
+    expect(calls).toEqual([`start:${lease.generation}`, `finish:${lease.generation}:unverified`]);
+  });
+
   it("records a failed run as failed", () => {
     const { writer, calls } = recordingJournal();
     const lifecycle = new RunLifecycle(undefined, writer);
@@ -93,6 +101,12 @@ describe("RunLifecycle journalling", () => {
 
 describe("run journal reconstruction", () => {
   const manager = new SessionManager(path.join(os.tmpdir(), "gg-run-journal-unused"));
+
+  it("restores the distinct unverified outcome as closed, not completed or interrupted", () => {
+    const entries = [startedEntry(1, 0), finishedEntry(1, "unverified")];
+    expect(manager.getRunJournal(entries)[0]?.outcome).toBe("unverified");
+    expect(manager.getUnfinishedRuns(entries)).toEqual([]);
+  });
 
   it("pairs each start with its own generation's finish", () => {
     const entries = [

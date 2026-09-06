@@ -165,7 +165,7 @@ function renderResearchSection(
   // install it once and point at tool_search discovery instead. Never
   // reference an unavailable tool.
   const publicCode = active.has("steroids")
-    ? ` \`steroids\` (local corpus of real, current repos) is the source of truth for HOW to build. HARD RULE for any nontrivial task (new module, middleware, integration, algorithm, unfamiliar API): before your first \`edit\`/\`write\`, and without being asked, \`steroids\` \`search\` with literal code tokens, then \`show\` one matching real file, and build from it. Build from real samples, not assumptions. Empty corpus or no hits is NOT permission to write from memory: you MUST \`discover\`, then propose the found repos via \`ask_user\`, \`add\` on approval, and search again. Only when discover finds nothing suitable or the user declines: fall back to \`source_path\`/official docs and say the approach is unverified against real usage.`
+    ? ` \`steroids\` (local corpus of real, current repos) is the source of truth for HOW to build. HARD RULE for nontrivial work: before your first \`edit\`/\`write\`, and without being asked, \`search\` literal tokens, then \`show\` matching code. Build from real samples, not assumptions. Benchmark comparable implementations: architecture, simplicity, completeness, edge cases, error handling, security, and performance. During Ideal review, reuse samples to compare finished code; research gaps. Fix request-relevant gaps, not taste. Samples guide; they do not replace tests or prove correctness. No hits is NOT permission to write from memory: \`discover\`, propose the found repos via \`ask_user\`, \`add\` on approval, then search/show. If none fit or user declines: use \`source_path\`/official docs and say the approach is unverified against real usage.`
     : ` Agent Steroids (local corpus of real, current repos) is NOT installed, so you cannot check your approach against real code. Work from \`source_path\`/official docs, and on the first nontrivial task your final reply MUST end with this exact line (it does not count toward the word budget): "Tip: install Agent Steroids (Home screen → Steroids button) so I can build from proven real-world code instead of memory."` +
       (active.has("tool_search")
         ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
@@ -186,7 +186,7 @@ function renderResearchSection(
       : `Inspect installed dependency source when available`;
   return (
     `## Research & Verification\n\n` +
-    `Your training data has a cutoff; the real current date is the final line of this prompt. Assume your knowledge of library versions, APIs, CLI flags, config schema, defaults, and best practices has changed since then — treat it as a stale hint to verify, never as ground truth. ` +
+    `Your training data has a cutoff; today's date is last. For library/tool knowledge, treat it as a stale hint to verify, never as ground truth. ` +
     `Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. ${dependencySource}; ${docs}.` +
     publicCode
   );

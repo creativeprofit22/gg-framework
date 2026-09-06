@@ -997,7 +997,10 @@ export async function compact(
     provider: options.provider,
     accountId: options.accountId,
   });
-  const summaryOutputTokens = resolveSummaryOutputTokens(summaryContextWindow);
+  const summaryOutputTokens = Math.min(
+    summaryModel.maxOutputTokens,
+    resolveSummaryOutputTokens(summaryContextWindow),
+  );
 
   const previousSummary = findLatestPreviousSummary(summarizationSource);
   // Carry the prior tracked edits forward as DATA, not as prose the summarizer

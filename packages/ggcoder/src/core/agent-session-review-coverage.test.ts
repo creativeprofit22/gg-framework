@@ -7,12 +7,14 @@ import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats, ReviewCoverageTracker } from "./ideal-review.js";
 import type { ActivePhaseContextV1 } from "../phase-context.js";
 import { roadmapCriterionId } from "./verification-evidence.js";
+import type { VerificationGate } from "./verification-gate.js";
 
 interface ReviewInternals {
   settingsManager: { get(key: string): boolean };
   hookStats: IdealReviewStats;
   hookFileEditCounts: Map<string, number>;
   reviewCoverage: ReviewCoverageTracker;
+  verificationGate: VerificationGate;
   subAgentManager?: { completionGateMessage(): string | undefined };
   activePhaseContext?: ActivePhaseContextV1;
   getHookFollowUpMessages(): Message[] | null;
@@ -84,6 +86,103 @@ describe("AgentSession Ideal review coverage gate", () => {
     internal.reviewCoverage.recordRead(path.join(cwd, "src/b.ts"));
     expect(internal.getHookFollowUpMessages()).toBeNull();
     expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("orders verification before Ideal and finishes without repeating satisfied gates", () => {
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    const notices: string[] = [];
+    internal.eventBus.on("hook", ({ kind }) => notices.push(kind));
+    internal.verificationGate.recordMutation("src/a.ts");
+
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain(
+      "Run the project's verification",
+    );
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    internal.reviewCoverage.recordRead("src/a.ts");
+
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(notices).toEqual(["verification", "ideal"]);
+  });
+
+  it("invalidates review reads and earlier verification when a reviewed file changes", () => {
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    internal.verificationGate.recordMutation("src/a.ts");
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    internal.reviewCoverage.recordRead("src/a.ts");
+
+    internal.reviewCoverage.recordChanged("src/a.ts");
+    internal.verificationGate.recordMutation("src/a.ts");
+    expect(internal.reviewCoverage.evidence().missing).toEqual(["src/a.ts"]);
+    expect(internal.verificationGate.isOwed()).toBe(true);
+    // Voluntary initial checks still get a distinctly labelled post-edit pass.
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain(
+      "Re-run the affected checks",
+    );
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("coverage is incomplete");
+    internal.reviewCoverage.recordRead("src/a.ts");
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("requires rereading only the changed file, not the whole reviewed set", () => {
+    const cwd = makeWorkspace(["src/a.ts", "src/b.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts", "src/b.ts"]);
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    internal.reviewCoverage.recordRead("src/a.ts");
+    internal.reviewCoverage.recordRead("src/b.ts");
+    internal.reviewCoverage.recordChanged(path.join(cwd, "src/a.ts"));
+
+    expect(internal.reviewCoverage.evidence()).toEqual({
+      expected: ["src/a.ts", "src/b.ts"],
+      covered: ["src/b.ts"],
+      missing: ["src/a.ts"],
+    });
+    const followUp = internal.getHookFollowUpMessages()?.[0]?.content;
+    expect(followUp).toContain("- src/a.ts");
+    expect(followUp).not.toContain("- src/b.ts");
+    internal.reviewCoverage.recordRead("src/a.ts");
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("re-arms verification once when Ideal changes code after the first check", () => {
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    internal.verificationGate.recordMutation("src/a.ts");
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain(
+      "Run the project's verification",
+    );
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    internal.reviewCoverage.recordRead("src/a.ts");
+    internal.reviewCoverage.recordChanged("src/a.ts");
+    internal.verificationGate.recordMutation("src/a.ts");
+    internal.reviewCoverage.recordRead("src/a.ts");
+
+    expect(internal.verificationGate.isOwed()).toBe(true);
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Re-run");
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("retains verification while suppressing Ideal for the independent reviewer", () => {
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    const notices: string[] = [];
+    internal.eventBus.on("hook", ({ kind }) => notices.push(kind));
+    internal.setIdealReviewSuppressed(true);
+    internal.verificationGate.recordMutation("src/a.ts");
+
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain(
+      "Run the project's verification",
+    );
+    internal.verificationGate.recordVerification();
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(notices).toEqual(["verification"]);
   });
 
   it("stops gating a changed file the run deleted before review", () => {

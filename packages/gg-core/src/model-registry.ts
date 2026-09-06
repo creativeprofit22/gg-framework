@@ -37,9 +37,8 @@ export interface ModelInfo {
   /**
    * The top reasoning tier this model genuinely uses. Used when thinking is
    * enabled to pick the strongest setting per model:
-   *   - OpenAI GPT-5.6-era (Sol/Terra/Luna): `max` (the 5.6 ladder adds `max`
-   *     and `ultra`; gg-ai caps at `max` — `ultra` needs a ThinkingLevel bump)
-   *   - OpenAI GPT-5.5-era: `xhigh`
+   *   - OpenAI GPT-6 Astra: `ultra` (Codex orchestration preset above `max`)
+   *   - OpenAI GPT-5.6-era (Sol/Terra/Luna): `max`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
    *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5 and Sonnet 5: `max`
    *     (the Fable / Mythos line uses always-on adaptive thinking, low→max)
@@ -148,8 +147,18 @@ export const MODELS: ModelInfo[] = [
     costTier: "low",
     maxThinkingLevel: "high",
   },
-  // ── OpenAI (Codex) ──────────────────────────────────────
+  // ── OpenAI (Codex) ─────────────────────────────────────
   {
+    // GPT-6 Astra — "Our most capable model for complex, demanding work."
+    // (Codex catalog priority 1, listed for every ChatGPT plan, requires a
+    // Codex client >= 0.153.0 — see CODEX_CLIENT_VERSION). Same split as 5.6:
+    // 1.05M on the public Responses API, 272K on the ChatGPT OAuth route
+    // (openai/codex models.json, `gpt-6-astra`). Reasoning ladder low → medium
+    // → high → xhigh → max → ultra; `ultra` is the Codex orchestration preset
+    // (multi_agent v2) and is Codex-only — the public API tops out at `max`.
+    // Note: through a plain API key OpenAI requires the Responses API for tool
+    // calling on Astra, so the Chat Completions path is text-only; the OAuth
+    // Codex route is the supported way to use it as an agent.
     id: "gpt-6-astra",
     name: "GPT-6 Astra",
     provider: "openai",
@@ -161,7 +170,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: false,
     costTier: "high",
-    maxThinkingLevel: "max",
+    maxThinkingLevel: "ultra",
   },
   // GPT-5.6 family — three agentic coding tiers launched July 2026. The public
   // Responses API advertises a 1.05M context window; OpenAI's Codex product
@@ -219,8 +228,8 @@ export const MODELS: ModelInfo[] = [
   // ── Sakana (Fugu) ──────────────────────────────────────
   // Sakana Fugu is a multi-agent system surfaced as a standard LLM via the
   // OpenAI-compatible Sakana API (https://api.sakana.ai/v1). Both models take
-  // text + image input and only accept "high"/"xhigh" reasoning effort, so the
-  // top tier is `xhigh`. `fugu` routes across all providers; `fugu-ultra` is
+  // text + image input. Plain Fugu stops at xhigh; Ultra v1.1 also supports max.
+  // `fugu` routes across all providers; `fugu-ultra` is
   // the heavier tier (may need larger client timeouts on complex tasks).
   {
     id: "fugu",
@@ -244,7 +253,8 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: false,
     costTier: "high",
-    maxThinkingLevel: "xhigh",
+    // The rolling alias now serves v1.1, which adds a distinct max effort.
+    maxThinkingLevel: "max",
   },
   // ── xAI (Grok) ─────────────────────────────────────────
   // Grok 4.6 (released 2026-08-12) is xAI's flagship for coding, agentic tasks,
@@ -298,6 +308,34 @@ export const MODELS: ModelInfo[] = [
     costTier: "low",
     maxThinkingLevel: "high",
   },
+  // Keep 3.1 Flash Lite first for the working OAuth default and fast-model routing.
+  // New GA models are opt-in; Code Assist access varies by account.
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
+  {
+    id: "gemini-3.5-flash-lite",
+    name: "Gemini 3.5 Flash Lite",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
   {
     // Gemini 3.7 Flash (released 2026-08-13) — Google's most capable Flash for
     // coding, agents, and multi-step execution; GA-stable on the Gemini API as
@@ -305,7 +343,7 @@ export const MODELS: ModelInfo[] = [
     // Sent over our Code Assist (OAuth) transport ahead of gemini-cli — upstream
     // hasn't listed 3.7 yet (google-gemini/gemini-cli#28802, still open) — so
     // free/personal accounts 404 (entitlement-gated) while Code Assist
-    // Standard/Enterprise accounts get it. Listed SECOND, after flash-lite:
+    // Standard/Enterprise accounts get it. Kept after the working flash-lite:
     // getFastModel picks the first low-tier entry, and flash-lite is the one
     // that works on every account.
     id: "gemini-3.7-flash",
@@ -497,21 +535,19 @@ export const MODELS: ModelInfo[] = [
   {
     // `deepseek-v4-pro` now serves DeepSeek-V4-Pro-0813 (released 2026-08-13,
     // first STABLE V4 Pro — supersedes the April preview; calling name
-    // unchanged, same 1.6T/49B MoE). 1M context, 384K (393,216) max output,
-    // text-only, reasoning ladder low/high plus Think Max — mapped from our
-    // `xhigh`. ~$0.43/$0.87 per MTok on DeepSeek's own API, so a mid-tier
-    // price band rather than the preview's top band.
+    // unchanged, same 1.6T/49B MoE). 1M context, text-only, low/high/max effort.
+    // Docs abbreviate output as 384K; use the same conservative 384,000-token
+    // application cap across V4 models rather than mixing decimal/binary units.
     id: "deepseek-v4-pro",
     name: "DeepSeek V4 Pro",
     provider: "deepseek",
     contextWindow: 1_048_576,
-    maxOutputTokens: 393_216,
+    maxOutputTokens: 384_000,
     supportsThinking: true,
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
-    // DeepSeek V4 maps `xhigh` → its internal `max` tier.
-    maxThinkingLevel: "xhigh",
+    maxThinkingLevel: "max",
   },
   {
     id: "deepseek-v4-flash",
@@ -523,7 +559,20 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     supportsVideo: false,
     costTier: "low",
-    maxThinkingLevel: "xhigh",
+    maxThinkingLevel: "max",
+  },
+  // Opt-in experimental vision sibling; never replaces the stable summary model.
+  {
+    id: "deepseek-v4-flash-vision-exp",
+    name: "DeepSeek V4 Flash Vision (Experimental)",
+    provider: "deepseek",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 384_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "low",
+    maxThinkingLevel: "max",
   },
   // ── OpenRouter ─────────────────────────────────────────
   {
@@ -533,8 +582,10 @@ export const MODELS: ModelInfo[] = [
     contextWindow: 1_000_000,
     maxOutputTokens: 65_536,
     supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
+    supportsImages: true,
+    supportsVideo: true,
+    // Practical inline-payload cap, not an asserted provider maximum.
+    maxVideoBytes: 20 * 1024 * 1024,
     costTier: "medium",
     maxThinkingLevel: "high",
   },

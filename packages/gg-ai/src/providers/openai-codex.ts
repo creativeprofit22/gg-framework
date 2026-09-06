@@ -31,6 +31,10 @@ import {
 } from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
+// Advertised Codex client version. The ChatGPT backend gates models on the
+// catalog's `minimal_client_version` (GPT-6 Astra needs >= 0.153.0) and
+// rejects older clients with "requires a newer version of Codex". Track the
+// latest openai/codex `rust-v*` release when adding a model.
 const CODEX_CLIENT_VERSION = "0.153.4";
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
@@ -93,7 +97,7 @@ async function encodeCodexRequest(body: Record<string, unknown>): Promise<Encode
 }
 
 function usesResponsesLite(model: string): boolean {
-  return model === "gpt-6-astra" || model.startsWith("gpt-5.6-");
+  return model.startsWith("gpt-5.6-") || model.startsWith("gpt-6-");
 }
 
 function outputTextKey(itemId: string | undefined, contentIndex: number | undefined): string {
@@ -140,7 +144,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   if (options.tools?.length) {
-    body.tools = serializeResponsesTools(options.tools, { strict: null });
+    body.tools = serializeResponsesTools(options.tools, { strict: true });
   }
   // Always set a prompt_cache_key. OpenAI uses this key to route requests
   // with the same prefix to the same cache shard — without it, the codex
@@ -229,12 +233,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     let hint: string | undefined;
     if (
       response.status === 400 &&
-      options.model === "gpt-5.5-pro" &&
-      text.includes("not supported")
-    ) {
-      hint = "Use gpt-6-astra instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
-    } else if (
-      response.status === 400 &&
       message ===
         `The '${options.model}' model is not supported when using Codex with a ChatGPT account.`
     ) {
@@ -243,8 +241,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.";
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
-        "This model is not in the current OpenAI Codex catalog for this account. " +
-        "Switch to gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna via the model selector.";
+        "This model is not in OpenAI's current catalog for your ChatGPT account. " +
+        "Switch to GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, or GPT-5.6 Luna via the model selector.";
     }
 
     throw new ProviderError("openai", message, {

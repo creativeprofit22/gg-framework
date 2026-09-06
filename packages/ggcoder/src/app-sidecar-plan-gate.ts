@@ -263,12 +263,13 @@ export class AppSidecarPlanGate {
     });
   }
 
-  markReady(checkpointId: string, generation: number): Promise<PlanGateTransitionResult> {
+  markReady(checkpointId: string, generation: number, reason?: string): Promise<PlanGateTransitionResult> {
     return this.transition(checkpointId, generation, ["pending-review"], (checkpoint) => ({
       ...checkpoint,
       reviewStatus: "ready",
       actor: "ken-autopilot",
       timestamp: this.now(),
+      feedback: reason ?? null,
     }));
   }
 

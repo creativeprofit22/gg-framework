@@ -9,15 +9,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { useFakeHome } from "../test-support/fake-home.js";
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import type { AgentSession } from "./agent-session.js";
+import type { ProcessManager } from "./process-manager.js";
 
 interface FlowInternals {
+  sessionPath: string;
+  processManager: ProcessManager;
   getHookFollowUpMessages(): Message[] | null;
+  getVerificationProblem(): string | null;
   trackHookEvent(event: AgentEvent): Promise<void>;
   eventBus: {
     on(event: string, handler: (data: Record<string, unknown>) => void): () => void;
@@ -56,13 +61,17 @@ afterEach(async () => {
 });
 
 /** Records the client-visible event stream in emission order. */
-async function makeSession(): Promise<{ internal: FlowInternals; events: string[] }> {
+async function makeSession(
+  transient = true,
+  sessionId?: string,
+): Promise<{ internal: FlowInternals; events: string[] }> {
   const { AgentSession: Session } = await import("./agent-session.js");
   session = new Session({
     provider: "anthropic",
     model: "claude-test",
     cwd: tmpProject,
-    transient: true,
+    transient,
+    sessionId,
     systemPrompt: "test",
   });
   await session.initialize();
@@ -79,6 +88,7 @@ async function simulateToolCall(
   internal: FlowInternals,
   name: string,
   args: Record<string, unknown>,
+  result = name === "bash" ? "Exit code: 0\n" : "",
 ): Promise<void> {
   const toolCallId = `call-${Math.random().toString(36).slice(2)}`;
   await internal.trackHookEvent({
@@ -87,14 +97,18 @@ async function simulateToolCall(
     name,
     args,
   } as unknown as AgentEvent);
+  const exitMatch = /^Exit code:\s*(-?\d+)(?:\s|$)/.exec(result);
+  const exitCode = exitMatch ? Number(exitMatch[1]) : undefined;
   await internal.trackHookEvent({
     type: "tool_call_end",
     toolCallId,
-    result: "",
+    result,
     isError: false,
     durationMs: 1,
     details:
-      name === "bash" ? { bashDiagnostics: { reason: "completed", exitCode: 0 } } : undefined,
+      name === "bash" && exitCode !== undefined
+        ? { bashDiagnostics: { reason: exitCode === 0 ? "completed" : "nonZeroExit", exitCode } }
+        : undefined,
   } as unknown as AgentEvent);
 }
 
@@ -138,6 +152,148 @@ describe("verification gate flow", () => {
     // Disarmed by the verification, so no draft is ever held back.
     expect(events).toEqual(["hook_armed:verification:true", "hook_armed:verification:false"]);
     expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("does not treat a nonzero bash exit as passing merely because the tool returned normally", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test" }, "Exit code: 1\nfailed");
+    expect(internal.getVerificationProblem()).toContain("failed");
+    await simulateToolCall(internal, "bash", { command: "pnpm lint" });
+    expect(internal.getVerificationProblem()).toContain("failed");
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
+  it("does not accept claimed success or a shell command that can mask failure", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test" }, "All tests passed!");
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    await simulateToolCall(internal, "bash", { command: "pnpm test || true" });
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    await simulateToolCall(internal, "bash", { command: "node script.js --test" });
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+  });
+
+  it("invalidates an earlier check when a later check can rewrite files", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    await internal.trackHookEvent({
+      type: "tool_call_start",
+      toolCallId: "before-fix",
+      name: "bash",
+      args: { command: "pnpm test" },
+    } as unknown as AgentEvent);
+    await simulateToolCall(internal, "bash", { command: "pnpm eslint --fix src/foo.ts" });
+    await internal.trackHookEvent({
+      type: "tool_call_end",
+      toolCallId: "before-fix",
+      result: "Exit code: 0\n",
+      isError: false,
+      durationMs: 1,
+    } as unknown as AgentEvent);
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
+  it("does not let a check finishing after an intervening edit verify that edit", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    await internal.trackHookEvent({
+      type: "tool_call_start",
+      toolCallId: "stale",
+      name: "bash",
+      args: { command: "pnpm test" },
+    } as unknown as AgentEvent);
+    await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    await internal.trackHookEvent({
+      type: "tool_call_end",
+      toolCallId: "stale",
+      result: "Exit code: 0\n",
+      isError: false,
+      durationMs: 1,
+    } as unknown as AgentEvent);
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
+  it("uses real background exit codes and never reuses old output after another edit", async () => {
+    const { internal } = await makeSession();
+    await fs.writeFile(path.join(tmpProject, "subject.mjs"), "export const value = 0;\n");
+    await fs.writeFile(
+      path.join(tmpProject, "verification.test.mjs"),
+      "import assert from 'node:assert/strict'; import {value} from './subject.mjs'; assert.equal(value, 1);\n",
+    );
+    await simulateToolCall(internal, "edit", { file_path: "subject.mjs" });
+    const command = "node --test verification.test.mjs";
+    const check = async () => {
+      const started = await internal.processManager.start(command, tmpProject);
+      await simulateToolCall(
+        internal,
+        "bash",
+        { command, run_in_background: true },
+        `ID: ${started.id}\n`,
+      );
+      expect(internal.getVerificationProblem()).toContain("Unverified");
+      expect(await internal.processManager.waitForExit(started.id, 5000)).toBe("exited");
+      await simulateToolCall(internal, "task_output", { id: started.id });
+      return started.id;
+    };
+    await check();
+    expect(internal.getVerificationProblem()).toContain("failed");
+    await fs.writeFile(path.join(tmpProject, "subject.mjs"), "export const value = 1;\n");
+    await simulateToolCall(internal, "edit", { file_path: "subject.mjs" });
+    const passedId = await check();
+    expect(internal.getVerificationProblem()).toBeNull();
+    await fs.writeFile(path.join(tmpProject, "subject.mjs"), "export const value = 2;\n");
+    await simulateToolCall(internal, "edit", { file_path: "subject.mjs" });
+    await simulateToolCall(internal, "task_output", { id: passedId });
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+  });
+
+  it("recognizes a real background npm test after a git status prelude", async () => {
+    const { internal } = await makeSession();
+    execFileSync("git", ["init", "--quiet"], { cwd: tmpProject });
+    await fs.writeFile(
+      path.join(tmpProject, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test verification.test.mjs" } }),
+    );
+    await fs.writeFile(
+      path.join(tmpProject, "verification.test.mjs"),
+      "import assert from 'node:assert/strict'; assert.equal(1 + 1, 2);\n",
+    );
+    await simulateToolCall(internal, "edit", { file_path: "verification.test.mjs" });
+    const command = "git status --short && npm run test";
+    const started = await internal.processManager.start(command, tmpProject);
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command, run_in_background: true },
+      `ID: ${started.id}\n`,
+    );
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    // The npm chain (npm.cmd → node → npm → script) cold-starts far slower on a
+    // loaded Windows CI runner than the 5s cap used for direct `node --test`
+    // runs — waitForExit still returns the instant the process exits, this only
+    // raises the hang ceiling so a slow spawn is not misread as a hang.
+    expect(await internal.processManager.waitForExit(started.id, 30_000)).toBe("exited");
+    await simulateToolCall(internal, "task_output", { id: started.id });
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
+  it("persists unresolved verification and requires fresh evidence after resuming", async () => {
+    const { internal } = await makeSession(false);
+    await simulateToolCall(internal, "edit", { file_path: "subject.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test" }, "Exit code: 1\n");
+    const saved = internal.sessionPath;
+    await session!.dispose();
+    const resumed = await makeSession(false, saved);
+    expect(resumed.internal.getVerificationProblem()).toContain("failed");
+    await simulateToolCall(resumed.internal, "bash", { command: "pnpm test" });
+    expect(resumed.internal.getVerificationProblem()).toBeNull();
   });
 
   it("has notice copy for every hook kind the session can emit", async () => {

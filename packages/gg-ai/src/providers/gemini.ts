@@ -39,6 +39,8 @@ const CODE_ASSIST_SUPPORTED_MODELS = new Set([
   "gemini-3-flash",
   "gemini-3.1-flash-lite",
   "gemini-3.7-flash",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
   "gemini-2.5-pro",
   "gemini-2.5-flash",
   "gemma-4-31b-it",
@@ -177,25 +179,37 @@ function formatUnsupportedModelMessage(model: string): string {
 // these is an entitlement problem, not a wrong model string — free/personal
 // OAuth accounts routinely can't call them. Explain that instead of echoing the
 // bare "Requested entity was not found" body, which reads like an app bug.
+// New public GA ids are opt-in; their Code Assist availability is unverified.
 const ACCOUNT_GATED_MODELS = new Set([
   "gemini-3-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro-preview",
   "gemini-3.1-pro-preview-customtools",
   "gemini-3.7-flash",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
 ]);
 
 // The user-facing account-gated message is split so the error UI (gg-app + TUI)
 // can render it as `message` (what happened — an entitlement gap, not a bug)
 // plus `hint` (the actionable next step, shown on the dedicated guidance line).
 function accountGatedMessage(model: string): string {
+  if (model === "gemini-3.8-flash" || model === "gemini-3.5-flash-lite") {
+    return (
+      `${model} is not available through Code Assist for this account. ` +
+      "Public Gemini API availability does not guarantee Code Assist OAuth access."
+    );
+  }
   return (
     `Your Google account isn't entitled to "${model}" over Gemini Code Assist OAuth, ` +
     `so the API reports it as not found. This is an account-access limit, not a ggcoder bug.`
   );
 }
 
-function accountGatedHint(): string {
+function accountGatedHint(model: string): string {
+  if (model === "gemini-3.8-flash" || model === "gemini-3.5-flash-lite") {
+    return "Use /model to select Gemini 3.1 Flash Lite, or retry once Google enables this model through Code Assist for your account.";
+  }
   return (
     `Newer Gemini models (3.7 Flash, 3.5 Flash, 3.1 Pro Preview) are available only to Code Assist ` +
     `Standard/Enterprise accounts with preview/GA access enabled by a cloud admin — ` +
@@ -627,7 +641,7 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
       throw new ProviderError("gemini", message, {
         statusCode: response.status,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
-        ...(accountGated ? { hint: accountGatedHint() } : {}),
+        ...(accountGated ? { hint: accountGatedHint(options.model) } : {}),
       });
     }
 

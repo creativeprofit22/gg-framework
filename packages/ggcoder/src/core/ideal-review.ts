@@ -53,7 +53,9 @@ export class ReviewCoverageTracker {
 
   /** Successful mutations are retained before and during review. */
   recordChanged(filePath: string): void {
-    this.expected.add(this.normalize(filePath));
+    const normalized = this.normalize(filePath);
+    this.expected.add(normalized);
+    this.covered.delete(normalized);
   }
 
   /** Start the evidence window; reads observed before this call never count. */
@@ -156,10 +158,21 @@ export function withReviewCoverageRequirements(
 export const IDEAL_REVIEW_PROMPT =
   "Ideal? Review the actual work against the user's request before the final response. " +
   "Is it simple, focused, correct, and aligned? Did you over-edit, leave TODOs, miss an obvious " +
-  "case the request called for, or introduce risk? Judge this by reading the code you changed \u2014 " +
-  "do NOT run builds, typechecks, linters, or test suites now; that happens at commit time via " +
-  "/commit. If anything is wrong, fix it now. If everything is good, respond with the final " +
-  "answer only; do not mention this ideal review unless it changed the work.";
+  "case the request called for, or introduce risk? For substantial implementations, use Steroids " +
+  "when available to compare the finished work against comparable real-world code for architecture, " +
+  "simplicity, completeness, edge cases, error handling, security, and performance. Reuse samples " +
+  "already examined; search and read further where evidence is missing. Fix concrete gaps relevant " +
+  "to the user's request and project constraints, not differences in taste. Examples inform judgment; " +
+  "they do not replace tests or prove correctness. Empty corpus or no hits: discover suitable repos, " +
+  "propose them via ask_user, add only on approval, then search and read again. If Steroids is " +
+  "unavailable, discovery finds nothing suitable, or the user declines, use installed source and " +
+  "official docs and state that the work was not cross-checked against real-world implementations. " +
+  "Judge this by reading the code you changed \u2014 " +
+  "reuse completed checks while code is unchanged. If anything is wrong, fix it now; rerun the affected " +
+  "checks and reread those changes before finishing; earlier results do not verify later edits. " +
+  "Do not claim coverage without corresponding assertions. If everything is good, respond with the final " +
+  "answer only; do not mention this ideal review unless it changed the work or a required " +
+  "cross-check could not be completed.";
 
 const RISKY_TOOL_NAMES = new Set(["bash", "write", "edit"]);
 

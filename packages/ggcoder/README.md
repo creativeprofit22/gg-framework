@@ -69,8 +69,8 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 | Provider          | Models                                                             | Auth             |
 | ----------------- | ------------------------------------------------------------------ | ---------------- |
-| **Anthropic**     | Claude Opus 5, Sonnet 5, Haiku 4.5                                 | OAuth            |
-| **OpenAI**        | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex                       | OAuth            |
+| **Anthropic**     | Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5                      | OAuth            |
+| **OpenAI**        | GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna              | OAuth            |
 | **Moonshot**      | Kimi K3, Kimi K2.7 Code                                            | OAuth or API key |
 | **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash (image)                                     | API key          |
 | **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |

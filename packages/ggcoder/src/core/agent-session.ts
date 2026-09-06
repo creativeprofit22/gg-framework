@@ -153,6 +153,7 @@ import {
   extractAddedLines,
   isCheckOwnFile,
   isCodeFilePath,
+  VERIFICATION_STATE_KIND,
   isVerificationCommand,
 } from "./verification-gate.js";
 import {
@@ -485,7 +486,11 @@ export class AgentSession {
   private hookCycleDetector = new CycleDetector();
   private hookCyclicPattern: CycleDetection | null = null;
   private hookFileEditCounts = new Map<string, number>();
-  private hookToolCalls = new Map<string, { name: string; args: Record<string, unknown> }>();
+  private hookToolCalls = new Map<
+    string,
+    { name: string; args: Record<string, unknown>; revision: number }
+  >();
+  private backgroundVerification = new Map<string, { revision: number; command: string }>();
   private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
   private activePhaseVerificationInjected = false;
@@ -1635,7 +1640,15 @@ export class AgentSession {
     this.regroundingInjected = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
-    this.verificationGate.reset();
+    this.verificationGate.beginRun();
+    const processes = new Set(this.processManager?.list().map((p) => p.id) ?? []);
+    for (const [id, started] of this.backgroundVerification) {
+      if (!processes.has(id)) {
+        // Losing the process is not observing its success.
+        this.verificationGate.recordFailedVerification(started.command, started.revision);
+        this.backgroundVerification.delete(id);
+      }
+    }
     this.compactionOccurred = false;
     this.originalRequest = originalRequest;
   }
@@ -1670,11 +1683,30 @@ export class AgentSession {
         this.hookText += event.text;
         break;
       case "tool_call_start":
-        this.hookToolCalls.set(event.toolCallId, { name: event.name, args: event.args ?? {} });
+        this.hookToolCalls.set(event.toolCallId, {
+          name: event.name,
+          args: event.args ?? {},
+          revision: this.verificationGate.revision,
+        });
+        if (
+          event.name === "bash" &&
+          typeof event.args?.command === "string" &&
+          (isVerificationCommand(event.args.command) ||
+            classifyVerificationCommand(event.args.command).candidate)
+        ) {
+          // A rejected check may rewrite files (--fix, build scripts, shell
+          // wrappers). Earlier in-flight checks cannot validate those changes.
+          this.verificationGate.requireFreshVerification(
+            !classifyVerificationCommand(event.args.command).accepted,
+          );
+          await this.persistVerificationState();
+        }
         break;
       case "tool_call_end": {
         const call = this.hookToolCalls.get(event.toolCallId);
-        const name = call?.name ?? "";
+        // A reset/restore retires calls owned by the source checkpoint.
+        if (!call) break;
+        const name = call.name;
         const args = call?.args;
         if (call) {
           const command = typeof call.args.command === "string" ? call.args.command : "";
@@ -1684,6 +1716,7 @@ export class AgentSession {
             this.opts.captureVerificationWorkspace
               ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
               : undefined;
+          if (this.hookToolCalls.get(event.toolCallId) !== call) break;
           this.verificationEvidenceLedger.recordToolResult({
             ...call,
             isError: event.isError,
@@ -1715,8 +1748,9 @@ export class AgentSession {
           const removed = (diff.match(/^-[^-]/gm) ?? []).length;
           this.hookStats.changedLines += added + removed;
         }
-        // Verification-gate bookkeeping: successful code mutations and completed
-        // foreground verification commands, in occurrence order.
+        // Only host-observed successful mutations and trustworthy check results
+        // affect approval. The model's text is never evidence.
+        let verificationChanged = false;
         if (!event.isError && args) {
           if (name === "edit" || name === "write") {
             const filePath = String((args as { file_path?: unknown }).file_path ?? "");
@@ -1731,35 +1765,53 @@ export class AgentSession {
                       (event.details as { diff?: string } | undefined)?.diff ?? event.result,
                     );
               this.verificationGate.recordMutation(filePath, addedText);
-            }
-          }
-          const bashDiagnostics = (
-            event.details as
-              | { bashDiagnostics?: { reason?: unknown; exitCode?: unknown } }
-              | undefined
-          )?.bashDiagnostics;
-          if (
-            name === "bash" &&
-            !(args as { run_in_background?: unknown }).run_in_background &&
-            bashDiagnostics?.reason === "completed" &&
-            bashDiagnostics.exitCode === 0 &&
-            isVerificationCommand(String((args as { command?: unknown }).command ?? ""))
-          ) {
-            this.verificationGate.recordVerification();
-          }
-          // Reading the final output of an EXITED background verification run
-          // counts: the process gate forces this read anyway, so without it the
-          // gate would demand a redundant foreground re-run of tests the agent
-          // already watched finish.
-          if (name === "task_output") {
-            const proc = this.processManager
-              ?.list()
-              .find((p) => p.id === (args as { id?: unknown }).id);
-            if (proc?.exitCode === 0 && isVerificationCommand(proc.command)) {
-              this.verificationGate.recordVerification();
+              verificationChanged = true;
             }
           }
         }
+        if (args && name === "bash") {
+          const command = typeof args.command === "string" ? args.command : "";
+          const diagnostics = (event.details as {
+            bashDiagnostics?: { reason?: unknown; exitCode?: unknown };
+          } | undefined)?.bashDiagnostics;
+          if (classifyVerificationCommand(command).accepted) {
+            if (args.run_in_background === true && !event.isError && args.persist !== true) {
+              const id = /^ID:\s*(\S+)/m.exec(event.result)?.[1];
+              if (id) this.backgroundVerification.set(id, { revision: call.revision, command });
+              else this.verificationGate.recordFailedVerification(command, call.revision);
+              verificationChanged = true;
+            } else {
+              if (
+                !event.isError &&
+                args.persist !== true &&
+                (diagnostics !== undefined
+                  ? diagnostics.reason === "completed" && diagnostics.exitCode === 0
+                  : /^Exit code:\s*0(?:\s|$)/i.test(event.result.trim()))
+              ) {
+                this.verificationGate.recordVerification(call.revision, command);
+              } else {
+                this.verificationGate.recordFailedVerification(command, call.revision);
+              }
+              verificationChanged = true;
+            }
+          }
+        }
+        if (!event.isError && args && name === "task_output" && typeof args.id === "string") {
+          const started = this.backgroundVerification.get(args.id);
+          const proc = this.processManager?.list().find((p) => p.id === args.id);
+          if (started && proc && proc.exitCode !== null) {
+            if (proc.exitCode === 0) {
+              this.verificationGate.recordVerification(started.revision, started.command);
+            } else {
+              this.verificationGate.recordFailedVerification(started.command, started.revision);
+            }
+            this.backgroundVerification.delete(args.id);
+            verificationChanged = true;
+          }
+        }
+        if (verificationChanged) await this.persistVerificationState();
+        if (this.hookToolCalls.get(event.toolCallId) !== call) break;
+        this.hookToolCalls.delete(event.toolCallId);
         // Tool results are what push the run over the review gate, and they all
         // land before the model writes its candidate final answer — so this is
         // the point where arming still beats the draft's first token.
@@ -2117,10 +2169,17 @@ export class AgentSession {
       this.settingsManager.get("verificationGateEnabled") &&
       (!this.opts.allowedTools || this.opts.allowedTools.includes("bash"))
     ) {
+      const verificationReason = this.verificationGate.pendingReason();
       const verificationFollowUp = this.verificationGate.followUp();
       if (verificationFollowUp) {
         log("INFO", "verification-gate", "Injecting verification follow-up", {});
-        this.eventBus.emit("hook", { kind: "verification" });
+        // Announce, THEN disarm: clients release held text on disarm, so the
+        // reverse order paints the draft and immediately deletes it — the exact
+        // flash arming exists to prevent.
+        this.eventBus.emit("hook", {
+          kind: "verification",
+          ...(verificationReason === "recheck" ? { verificationReason } : {}),
+        });
         this.refreshHookArming();
         return verificationFollowUp;
       }
@@ -2931,6 +2990,7 @@ export class AgentSession {
     await this.rePersistAutopilotMarkers();
     await this.rePersistApprovedPlanConsumption();
     await this.rePersistAppMarkers();
+    await this.persistVerificationState();
     await this.persistAppMarker("compaction", {
       originalCount: result.originalCount,
       newCount: result.newCount,
@@ -3166,8 +3226,12 @@ export class AgentSession {
         if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], "Session reset failed; source restored but destination cleanup failed.", { cause: error });
         throw error;
       }
-      // Commit: only successful reset clears verification and emits session_start.
+      // Commit: only successful reset retires source-checkpoint evidence.
+      // Preserve conversation/phase identity when requested, never its approval.
       this.verificationEvidenceLedger.clear();
+      this.verificationGate.reset();
+      this.backgroundVerification.clear();
+      this.hookToolCalls.clear();
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
     } finally { finish?.(); }
   }
@@ -4317,6 +4381,31 @@ export class AgentSession {
    * instead of dropping the marker or falling back to a raw verdict string.
    * No-op persistence for transient sessions (kept in memory only).
    */
+  getVerificationProblem(): string | null {
+    return (
+      this.verificationGate.verificationProblem() ??
+      (this.backgroundVerification.size > 0
+        ? "Unverified: a background check is still running or its result has not been confirmed."
+        : null)
+    );
+  }
+
+  private async persistVerificationState(): Promise<void> {
+    if (!this.sessionPath) return;
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: VERIFICATION_STATE_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: {
+        ...this.verificationGate.snapshot(),
+        unknown: this.getVerificationProblem() !== null,
+      },
+    };
+    await this.sessionManager.appendEntry(this.sessionPath, entry);
+  }
+
   async persistAutopilotMarker(
     phase: AutopilotMarkerPayload["phase"],
     extra?: { reason?: string; body?: string },
@@ -4742,6 +4831,31 @@ export class AgentSession {
     );
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
+    this.hookToolCalls.clear();
+    this.backgroundVerification.clear();
+    const savedVerification = [...loaded.entries]
+      .reverse()
+      .find((entry) => entry.type === "custom" && entry.kind === VERIFICATION_STATE_KIND);
+    if (savedVerification?.type === "custom") {
+      this.verificationGate.restore(savedVerification.data);
+    } else {
+      this.verificationGate.reset();
+      // Legacy sessions have no host checkpoint. Tool-authored code history is
+      // not proof of today's files; require fresh evidence before approval.
+      if (
+        loadedMessages.some(
+          (message) =>
+            message.role === "assistant" &&
+            Array.isArray(message.content) &&
+            message.content.some(
+              (part) =>
+                part.type === "tool_call" && (part.name === "edit" || part.name === "write"),
+            ),
+        )
+      ) {
+        this.verificationGate.requireFreshVerification();
+      }
+    }
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";

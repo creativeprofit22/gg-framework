@@ -76,6 +76,7 @@ export function useAutopilot(opts: {
           // wording is the SAME line a resumed session shows.
           pushMarker("done", {
             copySeed: typeof d.copySeed === "string" ? d.copySeed : undefined,
+            reason: typeof d.reason === "string" ? d.reason : undefined,
           });
           return true;
         case "autopilot_ignored":

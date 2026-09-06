@@ -377,7 +377,7 @@ export type Item =
     }
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
   // rendered like the TUI: a shimmering tone-colored one-liner.
-  | { kind: "hook"; id: number; hook: HookKind }
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" }
   // Images produced by a tool (screenshot / read of an image file).
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
@@ -3507,8 +3507,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setPlanGateBusy(true);
     try {
       await revisePlanIPC(planReview.checkpointId, planReview.generation, feedback);
-      setPlanReview((current) =>
-        current ? { ...current, state: "revision-requested", feedback } : current,
+      replacePlanReview((current) =>
+        current &&
+        current.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation
+          ? { ...current, state: "revision-requested", feedback }
+          : current,
       );
       pushItem({ kind: "info", id: nextId(), text: "✎ Feedback sent. Revising the plan." });
     } catch (error) {
@@ -3570,7 +3574,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setContextTokens(0);
     setTokens(0);
     setDoneStatus(null);
-    setPlanReview(null);
+    replacePlanReview(null);
     planTotalRef.current = 0;
     planDoneRef.current = new Set();
     setPlanTotal(0);
@@ -3864,6 +3868,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         gitHubIssues={state?.gitHubIssues}
         gitHubPRs={state?.gitHubPRs}
         gitHubRepoUrl={state?.gitHubRepoUrl}
+        gitHubCI={state?.gitHubCI}
         additionalRoots={state?.additionalRoots}
         navHidden={navHidden}
         onToggleNav={toggleNav}
@@ -4063,6 +4068,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   content={planReview.content}
                   kenReviewing={autopilotReviewing}
                   kenReady={planReview.reviewStatus === "ready"}
+                  readinessReason={
+                    planReview.state === "pending-review" && planReview.reviewStatus === "ready"
+                      ? planReview.feedback
+                      : null
+                  }
                   revisionPending={planReview.state === "revision-requested"}
                   revisionRunning={running}
                   busy={planGateBusy}
@@ -4916,10 +4926,17 @@ const TranscriptRow = memo(function TranscriptRow({
         prompted: item.body?.trim()
           ? `Sending ${PRODUCT_DISPLAY_NAME} back in:\n\n${item.body.trim()}`
           : `Sending ${PRODUCT_DISPLAY_NAME} back in for another pass.`,
-        done: allClearCopy(item.copySeed, item.id),
+        done: [allClearCopy(item.copySeed, item.id), item.reason?.trim()]
+          .filter(Boolean)
+          .join("\n\n"),
         human: item.reason?.trim() ? item.reason.trim() : "Need you to weigh in on this one.",
         capped: "Paused autopilot after 3 rounds. Take a look before I keep going.",
-        plan_approved: "Plan looks solid. Approved it — implementation is underway.",
+        plan_approved: [
+          "Plan looks solid. Approved it — implementation is underway.",
+          item.reason?.trim(),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       };
       return (
         <div className="assistant-msg ken-msg">
@@ -4966,7 +4983,11 @@ const TranscriptRow = memo(function TranscriptRow({
     case "hook": {
       // Mirrors the TUI IdealHookMessage: assistant-style dot + a shimmering
       // tone-colored one-liner so the self-correction is obvious.
-      const { text, color } = HOOK_PRESENTATION[item.hook];
+      const { text: defaultText, color } = HOOK_PRESENTATION[item.hook];
+      const text =
+        item.verificationReason === "recheck"
+          ? "Hook engaged. Re-checking the changes made after verification."
+          : defaultText;
       return (
         <div className="assistant-msg">
           <span className="assistant-dot" style={{ color }}>

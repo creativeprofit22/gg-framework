@@ -294,7 +294,7 @@ describe("provider-neutral Responses parsing", () => {
           required: ["path"],
           additionalProperties: false,
         },
-        strict: null,
+        strict: true,
       },
     ]);
   });

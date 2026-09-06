@@ -205,6 +205,16 @@ describe("classifyVerificationCommand", () => {
     "pnpm --filter @kenkaiiii/gg-ai check",
     "pnpm -w typecheck",
     "vitest run src/foo.test.ts",
+    "pnpm vitest run src/foo.test.ts",
+    "pnpm --filter web vitest run",
+    "node --test verification.test.mjs",
+    "node --test --import tsx verification.test.ts",
+    "node.exe --test verification.test.mjs",
+    "python -m unittest",
+    "cd packages/app && npm test",
+    "git status --short && npm run test",
+    "git status && npm test",
+    "cd packages/app && git status --porcelain && npm test",
     "pnpm test -- --runInBand",
     "cargo fmt --check && cargo clippy",
     "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
@@ -257,6 +267,11 @@ describe("classifyVerificationCommand", () => {
   });
 
   it.each([
+    ["node script.js --test", "must lead"],
+    ["node.exe script.js --test", "must lead"],
+    ["node -- script.js --test", "must lead"],
+    ["node --require --test script.js", "must lead"],
+    ["pnpm exec node script.js --test", "must lead"],
     ["tsc --init", "mutating"],
     ["tsc --build", "mutating"],
     ["tsc --noEmit --incremental", "mutating"],
@@ -265,6 +280,9 @@ describe("classifyVerificationCommand", () => {
     ["pnpm build", "artifact-producing"],
     ["tsc --watch --noEmit", "long-running"],
     ["vitest --watch", "long-running"],
+    ["pnpm vitest --watch", "long-running"],
+    ["pnpm eslint --fix src", "mutating"],
+    ["pnpm vitest run --listTests", "does not execute"],
     ["pnpm dev", "long-running"],
     ["tsc", "--noEmit"],
     ["tsc --noEmit --noCheck", "does not prove"],
@@ -285,6 +303,20 @@ describe("classifyVerificationCommand", () => {
       candidate: true,
       reason: expect.stringContaining(reason),
     });
+  });
+
+  it.each([
+    "git status --short && git status",
+    "git status --short && npm test || true",
+    "git status --short; npm test",
+    "git status --short | npm test",
+    "git status --short > status.txt && npm test",
+    "git -c core.fsmonitor=helper status --short && npm test",
+    "git reset --hard && npm test",
+    "git status --help && npm test",
+    "git status --short && echo done",
+  ])("does not let a status prelude bypass verification: %s", (command) => {
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
   });
 
   it("rejects unknown commands without mislabeling ordinary shell work as verification", () => {

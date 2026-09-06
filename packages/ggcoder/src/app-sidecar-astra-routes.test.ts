@@ -11,6 +11,7 @@ const eligibleState = {
   provider: "openai",
   model: "gpt-6-astra",
   accountId: "account-1",
+  openAICodexContextProfileEligibility: { canChange: true as const },
 };
 
 function routeBlock(source: string, marker: string): string {

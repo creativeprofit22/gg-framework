@@ -8,6 +8,13 @@ import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 
 const WORKSPACE_ACTIONS: SlashCommandListing[] = [
   {
+    name: "programmatic-run",
+    aliases: [],
+    description: "Approve and run one selected opportunity in an isolated session",
+    input: { text: "optional", references: "none", attachments: "none" },
+    source: "built-in",
+  },
+  {
     name: "add-dir",
     aliases: ["adddir"],
     description: "Add another project folder to this workspace",

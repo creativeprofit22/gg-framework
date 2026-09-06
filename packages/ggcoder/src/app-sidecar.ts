@@ -180,6 +180,8 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
+import { handleAppSidecarProgrammaticExecution } from "./app-sidecar-programmatic-execution.js";
+import { executeProgrammaticOpportunity } from "./core/programmatic/execution.js";
 import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
@@ -2193,6 +2195,7 @@ async function createSession(
     onTimeout: (prompt) => log("WARN", "app-sidecar", "ask_user timed out", { id: prompt.id }),
   });
   const askUserTool = createAskUserTool(asks.park);
+  let programmaticExecutionActive = false;
 
   // The session file path to resume (passed by the daemon's POST /session);
   // empty/unset starts a fresh session.
@@ -5766,6 +5769,37 @@ ${checkpoints}`;
             mutations: sessionMutations,
             conflict: (body) => json(res, 409, body),
             perform: async (onAccepted) => {
+              if (programmaticExecutionActive) {
+                json(res, 409, { error: "programmatic_execution_busy", message: "Finish or cancel the isolated opportunity first; messages are not forwarded to it." });
+                return;
+              }
+              const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
+                text, attachmentCount: attachments.length,
+                busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+                automated: meta?.kenSent === true, codeMode: mode !== "chat",
+                claimStart: () => {
+                  if (runClaim.active) return false;
+                  asks.cancelAll({ action: "cancel", superseded: true });
+                  claimedStart = runClaim.claim();
+                  return claimedStart;
+                },
+                respond: (status, body) => json(res, status, body),
+                runAgent,
+                execute: async (selection) => {
+                  programmaticExecutionActive = true;
+                  try {
+                    const active = session.getState();
+                    const result = await executeProgrammaticOpportunity({
+                      ...selection, cwd, provider: active.provider, model: active.model,
+                      signal: abort.signal,
+                      ask: asks.park, cancelQuestions: () => asks.cancelAll(),
+                      progress: (text) => broadcast("text_delta", { text }),
+                    });
+                    broadcast("text_delta", { text: `\n${result.status === "rejected" ? result.reason : result.summary}\n` });
+                  } finally { programmaticExecutionActive = false; }
+                },
+              });
+              if (handledProgrammatic) return;
               // A typed prompt supersedes any question parked on the user: they
               // answered with a message of their own. Release the blocked tool call
               // before routing or steering this prompt.

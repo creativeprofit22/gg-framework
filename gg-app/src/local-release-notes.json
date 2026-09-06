@@ -1,33 +1,32 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-04",
-  "label": "Safer launches and a verified upstream update",
+  "date": "2026-09-06",
+  "label": "Upstream 0.61.1, still your Local Fork",
   "sections": [
     {
-      "title": "Safer Local Fork launches",
+      "title": "Upstream improvements",
       "items": [
-        "The launcher now verifies only the exact app process it started and that process's descendants.",
-        "If startup verification fails, cleanup leaves unrelated matching apps untouched."
+        "Your `OpenAI` agents now get clearer instructions for every tool call, including which details are required. That helps avoid malformed requests and wasted retries, while other providers keep the settings that work for them.",
+        "See how your build is doing without leaving your workspace. The live `CI` chip now shows running, passing, or failing checks in your title bar. Click it to open `GitHub Actions` when you need the details."
       ]
     },
     {
-      "title": "Upstream update reliability",
+      "title": "Your approval",
       "items": [
-        "The Local Fork now includes upstream 0.57.5 while preserving the local behavior selected during the merge.",
-        "Protected-update retries now retain the original merge decisions after verification fixes are applied."
+        "`Ken` can finish reviewing a plan without starting the build for you. The plan stays ready while you decide whether to revise it or move ahead, so a reviewer’s approval never replaces your own."
       ]
     },
     {
-      "title": "Clear task failures",
+      "title": "Session choices",
       "items": [
-        "Task list, run, and delete failures now stay visible and explain what went wrong instead of silently closing or clearing the Tasks window."
+        "Your `Codex` context choice now stays with the session. Pick `Stable` or `Experimental` before the conversation starts; follow-ups and resumed chats keep that choice, while Ken’s reviews run separately from your working chat."
       ]
     },
     {
-      "title": "Stronger verification coverage",
+      "title": "Everyday reliability",
       "items": [
-        "Desktop task tests no longer depend on a Node-only runtime contract.",
-        "Roadmap completion tests now cover durable direct completion without weakening their checks."
+        "A failed launch check shouldn’t close your other apps. Cleanup now stops only the app it started. If an update needs another try, the earlier record of which local changes were kept stays available too.",
+        "Can’t load, run, or delete a task? `Tasks` now keeps the window open and explains the failure instead of silently closing or clearing your list. You can see what happened before deciding what to try next."
       ]
     }
   ]

@@ -155,11 +155,11 @@ describe("What's New feeds", () => {
   it.each([
     [
       "3fdc4d572e7fa6746e6c77fe3a61413f31f648aa",
-      "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
+      "Less installer busywork. Set up packaging once for a supported desktop app, then let GG Coder prepare and check repeat builds for you.",
     ],
     [
       "366a927e2573ace9f0af6ddcbb7fa3d9b36e0a92",
-      "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
+      "A missing review shouldn’t leave you stuck. `Roadmap` now retries a missing or outdated final review once. Still blocked? The recovery message keeps the details and points you to the next step.",
     ],
   ])("keeps the Local Fork note for commit %s", (_commit, note) => {
     expect(LOCAL_CHANGELOG.flatMap(({ items }) => items)).toContain(note);

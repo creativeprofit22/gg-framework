@@ -127,7 +127,7 @@ function ReleaseFeed({ entries }: { entries: WhatsNewEntry[] }): React.ReactElem
 }
 
 const HISTORICAL_DECISION_COPY =
-  "Your update kept your Local Fork’s projects, workspace, Roadmap, session recovery, sign-ins, and connected tools working as before. It also added safer file handling, clearer results when a tool’s outcome is uncertain, better recovery after interruptions, steadier conversations while typing, and simpler settings. This protected your setup while bringing in the latest reliability improvements. You can keep working normally and safely continue your existing projects and sessions.";
+  "New reliability fixes, same Local Fork. Your workspace, Roadmap, and session recovery stay in place while upstream improvements come in. No need to trade away your setup.";
 
 function decisionEntries(records: VerifiedDecisionRecord[]): WhatsNewEntry[] {
   return records.map((record) => ({

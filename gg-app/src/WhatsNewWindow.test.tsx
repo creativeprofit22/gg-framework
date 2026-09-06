@@ -139,9 +139,15 @@ describe("WhatsNewWindow", () => {
     expect(localTab.getAttribute("aria-controls")).toBe(localPanel.id);
     expect(localPanel.getAttribute("aria-labelledby")).toBe(localTab.id);
     expect(within(localPanel).getByText(localReleaseNotes.label)).toBeTruthy();
-    for (const item of localReleaseNotes.sections.flatMap(({ items }) => items)) {
-      expect(within(localPanel).getByText(item)).toBeTruthy();
-    }
+    expect(
+      within(localPanel.querySelector(".latest")!)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(
+      localReleaseNotes.sections.flatMap(({ items }) =>
+        items.map((item) => item.replace(/`/g, "")),
+      ),
+    );
     expect(upstreamPanel.hidden).toBe(true);
     fireEvent.click(upstreamTab);
     expect(localPanel.hidden).toBe(true);
@@ -248,7 +254,7 @@ describe("WhatsNewWindow", () => {
     );
     fireEvent.click(screen.getByRole("tab", { name: "Decisions" }));
     const summary = await screen.findByText(
-      "Your update kept your Local Fork’s projects, workspace, Roadmap, session recovery, sign-ins, and connected tools working as before. It also added safer file handling, clearer results when a tool’s outcome is uncertain, better recovery after interruptions, steadier conversations while typing, and simpler settings. This protected your setup while bringing in the latest reliability improvements. You can keep working normally and safely continue your existing projects and sessions.",
+      "New reliability fixes, same Local Fork. Your workspace, Roadmap, and session recovery stay in place while upstream improvements come in. No need to trade away your setup.",
     );
     const panel = summary.closest<HTMLElement>("[role='tabpanel']")!;
     expect(within(panel).getAllByRole("listitem")).toHaveLength(1);

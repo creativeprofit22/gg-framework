@@ -63,8 +63,8 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "August 28 update",
     date: "2026-08-28",
     items: [
-      "Roadmap work now starts automatically only when exactly one eligible phase is available. Ambiguous choices stay manual, and manual Ken still requires an explicit Start.",
-      "Streaming replies now reveal smoothly and stay pinned while preserving the Local Fork’s multi-pane workspace.",
+      "One clear next step? `Roadmap` can get moving on its own. If there’s a choice to make, it waits for you—and manual `Ken` still waits for `Start`.",
+      "Follow the answer as it arrives. Replies now unfold smoothly and stay pinned, without taking over the rest of your multi-pane workspace.",
     ],
   },
   {
@@ -72,8 +72,8 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "August 26 update",
     date: "2026-08-26",
     items: [
-      "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
-      "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
+      "Less installer busywork. Set up packaging once for a supported desktop app, then let GG Coder prepare and check repeat builds for you.",
+      "A missing review shouldn’t leave you stuck. `Roadmap` now retries a missing or outdated final review once. Still blocked? The recovery message keeps the details and points you to the next step.",
     ],
   },
   {
@@ -81,13 +81,13 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "Local Fork",
     date: "2026-08-25",
     items: [
-      "Added optional verified update summaries and a Decisions tab in What’s New.",
-      "Prompt submission failures now appear in the conversation instead of failing silently.",
-      "Roadmap cards now expand in place, run primary actions directly, and preserve verification evidence.",
-      "Roadmap completion now requires the expected final review and successful fresh verification.",
-      "Local Fork updates now verify the installer, close gracefully, install automatically, and relaunch your existing profile.",
-      "Sidecar builds now promote atomically and preserve the previous working bundle after validation failures.",
-      "Local Fork builds no longer show the automatic-update footer banner.",
+      "See what changed—and why. The new `Decisions` tab explains which local choices survived an update and which upstream improvements came along.",
+      "Sent a prompt and got nothing back? Submission errors now show up right in the conversation, instead of leaving you wondering whether anything happened.",
+      "Less clicking around your `Roadmap`. Expand a card where it sits, take the next action, and keep the check results right there with the work.",
+      "`Done` should mean done. Roadmap work now needs its final review and fresh passing checks before it can cross the finish line. An earlier green result isn’t enough if the work changed afterward.",
+      "Update, then get back to it. Local Fork checks the installer, closes cleanly, and reopens with your existing profile after installation.",
+      "A failed runtime update no longer takes the working version with it. The new build is checked before it replaces the old one; if those checks fail, the previous version stays available instead.",
+      "One less nag in the footer. Local Fork builds no longer show the automatic-update banner meant for the official app.",
     ],
   },
   {
@@ -95,8 +95,8 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "August 23 update",
     date: "2026-08-23",
     items: [
-      "Local updates now guard the entire handoff from upstream merge to patched installer. Dirty work is restored byte-for-byte, recovery state stays available, and a failed check stops before anything can be shipped.",
-      "The Windows updater no longer leaves the app waiting forever. Every protected update reports a clear completed or failed outcome, with a safe retry path when something needs attention.",
+      "Your unfinished work comes with you. Local updates save it before bringing in upstream changes and restore it afterward. Recovery details stay available, and a failed check stops the update from claiming it’s ready.",
+      "No more wondering whether a Windows update finished. You now get a clear result and a way to retry when something needs attention.",
     ],
   },
   {
@@ -104,8 +104,8 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "August 22 update",
     date: "2026-08-22",
     items: [
-      "Approved plans now stay attached to the work they govern. Roadmap phases carry their completion checks through execution, then stop for a real final review before they can be marked done.",
-      "Project MCP servers now work through their full desktop lifecycle, so local tools can start, report status, and shut down cleanly without leaving stale processes behind.",
+      "The plan shouldn’t get lost once work starts. `Roadmap` now keeps your approved plan and its completion checks attached throughout the run. The final review checks the result against that plan before calling the work done.",
+      "Connect your project tools and keep going. They can now start, report status, and shut down from the desktop app—no restart needed.",
     ],
   },
 ];

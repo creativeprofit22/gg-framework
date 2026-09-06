@@ -18,6 +18,7 @@ import {
   type VideoContent,
 } from "@kenkaiiii/gg-ai";
 import { EventBus, type McpToolEventIdentity } from "./event-bus.js";
+import { parseContinuationReviewRecord, type ContinuationReviewRecord } from "./continuation-review-context.js";
 import {
   SlashCommandRegistry,
   createBuiltinCommands,
@@ -400,11 +401,14 @@ function hasUnresolvedToolCalls(message: Message): boolean {
 
 // ── State ──────────────────────────────────────────────────
 
+import type { ContinuationSourceRevision, OpenAICodexContextProfileEligibility } from "@kenkaiiii/gg-core/desktop-session-ux";
+
 export interface AgentSessionState {
   provider: Provider;
   model: string;
   cwd: string;
   sessionId: string;
+  conversationId: string;
   sessionPath: string;
   messageCount: number;
   planMode: boolean;
@@ -413,6 +417,7 @@ export interface AgentSessionState {
    *  OAuth) without re-resolving credentials. */
   accountId?: string;
   openAICodexContextProfile: OpenAICodexContextProfile;
+  openAICodexContextProfileEligibility: OpenAICodexContextProfileEligibility;
   openAICodexFast: boolean;
 }
 
@@ -573,6 +578,9 @@ export class AgentSession {
   private provider: Provider;
   private model: string;
   private openAICodexContextProfile: OpenAICodexContextProfile = "stable";
+  // Monotonic within a conversation: compaction/rewind can remove all messages.
+  // Restore derives this from durable history and lineage, not a new header flag.
+  private contextProfileLocked = false;
   private openAICodexFast = false;
   private cwd: string;
   /** accountId from the most recently resolved credentials — cached so sync
@@ -1440,17 +1448,20 @@ export class AgentSession {
       kind: "prompt",
       visibility: "transcript",
     },
-    options: { disableTools?: boolean } = {},
+    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void> } = {},
   ): Promise<void> {
+    if (!content.trim()) return;
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
     if (slash?.kind === "template") {
       await this.ensureActivePhaseSessionMetadata();
       // Prompt templates remain human-originated: the user invoked the command.
       const userMessage: Message = { role: "user", content: slash.fullPrompt, provenance };
+      this.contextProfileLocked = true;
       this.messages.push(userMessage);
-      await this.persistMessage(userMessage);
+      await this.persistMessage(userMessage, !!options.onAccepted);
       this.lastPersistedIndex = this.messages.length;
+      await options.onAccepted?.();
       await this.runLoop(options);
       return;
     }
@@ -1467,9 +1478,12 @@ export class AgentSession {
     await this.ensureActivePhaseSessionMetadata();
     // Push user message
     const userMessage: Message = { role: "user", content, provenance };
+    this.contextProfileLocked = true;
     this.messages.push(userMessage);
-    await this.persistMessage(userMessage);
+    // Daemon startup must not release its lease on a best-effort append failure.
+    await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
+    await options.onAccepted?.();
 
     await this.runLoop(options);
   }
@@ -1481,9 +1495,13 @@ export class AgentSession {
    * agent can open them with its tools. Attachment turns skip normal slash
    * expansion, but fixed-input prompt commands still fail closed here.
    */
-  async promptWithAttachments(text: string, attachments: SessionAttachment[]): Promise<void> {
+  async promptWithAttachments(
+    text: string,
+    attachments: SessionAttachment[],
+    options: { onAccepted?: () => void | Promise<void> } = {},
+  ): Promise<void> {
     if (attachments.length === 0) {
-      await this.prompt(text);
+      await this.prompt(text, undefined, options);
       return;
     }
     const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
@@ -1500,9 +1518,11 @@ export class AgentSession {
       content: parts,
       provenance: { source: "human", kind: "prompt", visibility: "transcript" },
     };
+    this.contextProfileLocked = true;
     this.messages.push(userMessage);
-    await this.persistMessage(userMessage);
+    await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
+    await options.onAccepted?.();
     await this.runLoop();
   }
 
@@ -2661,8 +2681,24 @@ export class AgentSession {
     this.lastPersistedIndex = this.messages.length;
   }
 
+  getOpenAICodexContextProfileEligibility(): OpenAICodexContextProfileEligibility {
+    if (
+      this.contextProfileLocked ||
+      this.messages.some((message) => message.role !== "system") ||
+      this.kenTurns.length > 0
+    ) {
+      return {
+        canChange: false,
+        reason: "Context mode is fixed after this session starts. Start a new session to change it.",
+      };
+    }
+    return { canChange: true };
+  }
+
   async switchOpenAICodexContextProfile(profile: OpenAICodexContextProfile): Promise<void> {
     if (profile === this.openAICodexContextProfile) return;
+    const eligibility = this.getOpenAICodexContextProfileEligibility();
+    if (!eligibility.canChange) throw new Error(eligibility.reason);
     assertOpenAICodexContextProfileFitsUsage(this.model, profile, this.getContextUsage().used);
     if (!this.opts.transient && this.sessionPath) {
       await this.sessionManager.updateOpenAICodexContextProfile(this.sessionPath, profile);
@@ -2822,6 +2858,8 @@ export class AgentSession {
   private async adoptCompactionCheckpoint(
     loaded: Awaited<ReturnType<SessionManager["load"]>>,
   ): Promise<void> {
+    // Adoption always continues a conversation, even an empty historical checkpoint.
+    this.contextProfileLocked = true;
     const systemMessage = this.messages[0];
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.messages = [systemMessage, ...loadedMessages];
@@ -2860,6 +2898,7 @@ export class AgentSession {
     sourceFingerprint: string,
     result: CompactionResult,
   ): Promise<void> {
+    this.contextProfileLocked = true;
     const parentSessionId = this.sessionId || undefined;
     const session = await this.sessionManager.create(this.cwd, this.provider, this.model, {
       conversationId: this.conversationId || undefined,
@@ -2907,6 +2946,7 @@ export class AgentSession {
     },
     mode: "manual" | "automatic" | "forced" = "manual",
   ): Promise<void> {
+    this.contextProfileLocked = !this.getOpenAICodexContextProfileEligibility().canChange;
     this.lastCompactionCompacted = false;
     const creds =
       existingCredentials ??
@@ -3068,8 +3108,75 @@ export class AgentSession {
     });
   }
 
+  private beforeConversationTransition?: (
+    kind: "reset" | "restore" | "history" | "checkpoint",
+  ) => () => void;
+
+  /** Host-owned synchronous fence, entered before any transition await. The
+   * returned finalizer also runs on failure so the host can rebind authority. */
+  setBeforeConversationTransition(hook: NonNullable<AgentSession["beforeConversationTransition"]>): void {
+    this.beforeConversationTransition = hook;
+  }
+
   async newSession(preserveConversation = false): Promise<void> {
-    this.verificationEvidenceLedger.clear();
+    const finish = this.beforeConversationTransition?.(preserveConversation ? "checkpoint" : "reset");
+    // Reset replaces these values rather than mutating their source containers.
+    // Keep authority until every required destination write has succeeded. This
+    // snapshot deliberately excludes provider signals, workers and run ownership.
+    const sourcePath = this.sessionPath;
+    const sourcePlanMode = this.planModeRef.current;
+    const source = {
+      sessionId: this.sessionId, conversationId: this.conversationId,
+      checkpointGeneration: this.checkpointGeneration, sessionPreview: this.sessionPreview,
+      activePhaseContext: this.activePhaseContext, approvedPlanPath: this.approvedPlanPath,
+      approvedPlanConsumption: this.approvedPlanConsumption,
+      contextProfileLocked: this.contextProfileLocked,
+      kenTurns: this.kenTurns, autopilotMarkers: this.autopilotMarkers,
+      appMarkers: this.appMarkers, turnMetrics: this.turnMetrics,
+      messages: this.messages, currentLeafId: this.currentLeafId,
+      baseSystemPrompt: this.baseSystemPrompt, renderedEnvironment: this.renderedEnvironment,
+      lastPersistedIndex: this.lastPersistedIndex,
+    };
+    let parentResetAttempted = false;
+    try {
+      try {
+        await this.resetSession(preserveConversation);
+        if (!this.opts.transient && this.subAgentManager) {
+          parentResetAttempted = true;
+          await this.subAgentManager.resetParentSession(this.sessionId);
+        }
+      } catch (error) {
+        const failedDestination = this.sessionPath !== sourcePath ? this.sessionPath : undefined;
+        Object.assign(this, source);
+        this.planModeRef.current = sourcePlanMode;
+        this.setSessionPath(sourcePath);
+        const rollbackErrors: unknown[] = [];
+        if (failedDestination) {
+          // create() only returns after its header append; active-path ownership
+          // is changed by AgentSession, not SessionManager. Remove a failed newer
+          // checkpoint so a subsequent canonical resume cannot select it.
+          try { await fs.rm(failedDestination, { force: true }); }
+          catch (cleanupError) { rollbackErrors.push(cleanupError); }
+        }
+        if (parentResetAttempted) {
+          // Rebind the resource manager, but never restore its retired workers.
+          try { await this.subAgentManager?.resetParentSession(source.sessionId); }
+          catch (rebindError) { rollbackErrors.push(rebindError); }
+        }
+        if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], "Session reset failed; source restored but destination cleanup failed.", { cause: error });
+        throw error;
+      }
+      // Commit: only successful reset clears verification and emits session_start.
+      this.verificationEvidenceLedger.clear();
+      this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    } finally { finish?.(); }
+  }
+
+  private async resetSession(preserveConversation: boolean): Promise<void> {
+    const continuationReview = preserveConversation ? this.getContinuationReviewRecord() : undefined;
+    // Stay fail-closed while preparing. The caller restores source eligibility
+    // on failure; a successful checkpoint never establishes fresh eligibility.
+    this.contextProfileLocked = true;
     // Approved-plan execution is a clean checkpoint of the same conversation;
     // explicit new sessions reset the conversation identity and phase binding.
     if (!preserveConversation) {
@@ -3113,26 +3220,35 @@ export class AgentSession {
       this.lastPersistedIndex = this.messages.length;
     } else {
       await this.createNewSession();
-      await this.subAgentManager?.resetParentSession(this.sessionId);
+      if (continuationReview) {
+        await this.persistRequiredAppMarker("user_hint", { kenSent: true, continuationReview });
+      }
       await this.rePersistActivePhaseContext();
       await this.rePersistRoadmapPhaseLeaseMarker();
     }
-    this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    this.contextProfileLocked = preserveConversation;
   }
 
   async loadSession(sessionPath: string): Promise<void> {
-    await this.loadExistingSession(sessionPath);
-    this.verificationEvidenceLedger.clear();
-    if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
-    this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    const finish = this.beforeConversationTransition?.("restore");
+    try {
+      await this.loadExistingSession(sessionPath);
+      this.verificationEvidenceLedger.clear();
+      if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
+      this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    } finally { finish?.(); }
   }
 
   /** Restore one physical checkpoint without resolving to its conversation tip. */
-  async loadSessionCheckpoint(sessionPath: string): Promise<void> {
-    await this.loadExistingSession(sessionPath, false);
-    this.verificationEvidenceLedger.clear();
-    if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
-    this.eventBus.emit("session_start", { sessionId: this.sessionId });
+  async loadSessionCheckpoint(sessionPath: string, expectedConversationId?: string): Promise<void> {
+    const retain = Boolean(expectedConversationId && expectedConversationId === this.conversationId);
+    const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
+    try {
+      await this.loadExistingSession(sessionPath, false, expectedConversationId);
+      this.verificationEvidenceLedger.clear();
+      if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
+      this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    } finally { finish?.(); }
   }
 
   /**
@@ -3143,6 +3259,12 @@ export class AgentSession {
    * @param stepsBack Number of messages to rewind (default: 2 — backs up past last assistant + tool)
    */
   async branch(stepsBack = 2): Promise<{ branchedFrom: number; messagesKept: number }> {
+    const finish = this.beforeConversationTransition?.("history");
+    try { return await this.branchSession(stepsBack); }
+    finally { finish?.(); }
+  }
+
+  private async branchSession(stepsBack: number): Promise<{ branchedFrom: number; messagesKept: number }> {
     // Load the full session to access the DAG
     const loaded = await this.sessionManager.load(this.sessionPath);
     this.setSessionPath(loaded.path);
@@ -3161,6 +3283,8 @@ export class AgentSession {
     this.currentLeafId = newLeafEntry.id;
     await this.sessionManager.updateLeaf(this.sessionPath, newLeafEntry.id);
 
+    // Rewinding does not undo accepted conversation history.
+    this.contextProfileLocked = !this.getOpenAICodexContextProfileEligibility().canChange;
     // Rebuild messages from the new branch
     const branchMessages = this.sessionManager.getMessages(loaded.entries, this.currentLeafId);
     const systemMsg = this.messages[0];
@@ -3188,17 +3312,39 @@ export class AgentSession {
     return this.sessionManager.listBranches(loaded.entries);
   }
 
+  /** Cheap server identity; never derive conversation identity from a path. */
+  getConversationIdentity(): { conversationId: string; sessionId: string; leafId: string | null } {
+    return { conversationId: this.conversationId, sessionId: this.sessionId, leafId: this.currentLeafId };
+  }
+
+  /** Only preparation/commit need the full revision, not state/extras polling. */
+  getContinuationSourceRevision(): ContinuationSourceRevision {
+    const identity = this.getConversationIdentity();
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      ...identity,
+      messages: computeSourceFingerprint(this.messages),
+      mentor: this.kenTurns,
+      provider: this.provider,
+      model: this.model,
+      accountId: this.lastAccountId,
+      profile: this.openAICodexContextProfile,
+    })).digest("hex");
+    return { ...identity, fingerprint };
+  }
+
   getState(): AgentSessionState {
     return {
       provider: this.provider,
       model: this.model,
       cwd: this.cwd,
       sessionId: this.sessionId,
+      conversationId: this.conversationId,
       sessionPath: this.sessionPath,
       messageCount: this.messages.length,
       planMode: this.planModeRef.current,
       accountId: this.lastAccountId,
       openAICodexContextProfile: this.openAICodexContextProfile,
+      openAICodexContextProfileEligibility: this.getOpenAICodexContextProfileEligibility(),
       openAICodexFast: this.openAICodexFast,
     };
   }
@@ -3276,6 +3422,7 @@ export class AgentSession {
   queueMessage(text: string, attachments: SessionAttachment[] = []): number {
     const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
     if (inputPolicyError) throw new Error(inputPolicyError);
+    if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
     this.userQueue.push({ id: `q${this.queueSeq}`, text, attachments });
     return this.userQueue.length;
@@ -3574,6 +3721,18 @@ export class AgentSession {
     return structuredClone(record);
   }
 
+  getContinuationReviewRecord(): ContinuationReviewRecord | undefined {
+    for (const marker of [...this.appMarkers].reverse()) {
+      if (marker.kind !== "user_hint" || !Object.hasOwn(marker.data, "continuationReview")) continue;
+      // The latest candidate is authoritative: malformed data cannot resurrect
+      // an older record. Parsing returns a detached, bounded value.
+      return parseContinuationReviewRecord(marker.data.continuationReview, {
+        conversationId: this.conversationId, profile: this.openAICodexContextProfile,
+      });
+    }
+    return undefined;
+  }
+
   getApprovedPlanConsumption(): ApprovedPlanConsumptionRecord | undefined {
     return this.approvedPlanConsumption ? structuredClone(this.approvedPlanConsumption) : undefined;
   }
@@ -3632,6 +3791,7 @@ export class AgentSession {
         content: prompt,
         provenance: { source: "runtime", kind: "automation", visibility: "transcript" },
       };
+      this.contextProfileLocked = true;
       this.messages.push(userMessage);
       await this.persistMessage(userMessage, true);
       this.lastPersistedIndex = this.messages.length;
@@ -4116,6 +4276,7 @@ export class AgentSession {
   async persistKenTurn(question: string, reply: string): Promise<void> {
     const afterMessageCount = this.persistedTranscriptCount();
     const payload: KenTurnPayload = { version: 1, question, reply, afterMessageCount };
+    this.contextProfileLocked = true;
     this.kenTurns.push(payload);
     if (!this.sessionPath) return;
     const entry: CustomEntry = {
@@ -4544,7 +4705,9 @@ export class AgentSession {
     this.lastPersistedIndex = this.messages.length;
   }
 
-  private async loadExistingSession(sessionPath: string, resolveCanonical = true): Promise<void> {
+  private async loadExistingSession(
+    sessionPath: string, resolveCanonical = true, expectedConversationId?: string,
+  ): Promise<void> {
     // A stale physical checkpoint is only an address, not the conversation tip.
     // Resolve every resume—not just over-threshold/deferred compaction resumes—
     // before reading history so the next prompt cannot continue an old branch.
@@ -4556,6 +4719,27 @@ export class AgentSession {
       projectKey: expectedProjectKey,
       resolveCanonical: false,
     });
+    // A caller retaining mentor context must supply a captured conversation ID,
+    // and the durable header must verify it before any in-memory mutation.
+    if (expectedConversationId &&
+        (loaded.header.conversationId ?? loaded.header.id) !== expectedConversationId) {
+      throw new Error("Checkpoint conversation does not match the captured destination.");
+    }
+    // Inspect the whole durable DAG, not just the selected branch. Empty
+    // checkpoints with lineage cannot prove no conversation has ever started.
+    this.contextProfileLocked = Boolean(
+      (this.conversationId === (loaded.header.conversationId ?? loaded.header.id) &&
+        !this.getOpenAICodexContextProfileEligibility().canChange) ||
+      loaded.header.parentSessionId ||
+      (loaded.header.generation ?? 0) > 0 ||
+      (loaded.header.conversationId && loaded.header.conversationId !== loaded.header.id) ||
+      loaded.entries.some(
+        (entry) =>
+          (entry.type === "message" && entry.message.role !== "system") ||
+          entry.type === "compaction" ||
+          (entry.type === "custom" && entry.kind === KEN_TURN_CUSTOM_KIND),
+      ),
+    );
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.checkpointGeneration = loaded.header.generation ?? 0;

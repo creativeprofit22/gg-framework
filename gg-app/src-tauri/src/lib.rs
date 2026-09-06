@@ -3791,10 +3791,22 @@ fn parse_plan_mutation_response(
 const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContinuationSourceRevision {
+    conversation_id: String,
+    session_id: String,
+    leaf_id: Option<String>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ContinuationHandoffResponse {
     version: u8,
     prompt: String,
+    prepared_id: String,
+    source: ContinuationSourceRevision,
+    expires_at: u64,
 }
 
 fn parse_continuation_handoff_response(
@@ -3807,6 +3819,11 @@ fn parse_continuation_handoff_response(
     let response: ContinuationHandoffResponse = serde_json::from_str(body)
         .map_err(|_| "invalid continuation-handoff response".to_string())?;
     if response.version != 1
+        || response.prepared_id.is_empty()
+        || response.source.conversation_id.is_empty()
+        || response.source.session_id.is_empty()
+        || response.source.fingerprint.is_empty()
+        || response.expires_at == 0
         || response.prompt.trim().is_empty()
         || response.prompt.chars().count() > CONTINUATION_HANDOFF_PROMPT_MAX_CHARS
     {
@@ -3835,6 +3852,42 @@ async fn agent_continuation_handoff(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     parse_continuation_handoff_response(status, &body)
+}
+
+/// Preserve typed conflict/partial receipts instead of reducing them to error strings.
+fn parse_continuation_commit_response(body: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| "invalid continuation-commit response; outcome unknown".to_string())?;
+    let outcome = value.get("outcome").and_then(|v| v.as_str());
+    if !matches!(outcome, Some("accepted" | "rejected" | "partial" | "outcome-unknown"))
+        || value.get("operationId").and_then(|v| v.as_str()).is_none()
+        || value.get("preparedId").and_then(|v| v.as_str()).is_none()
+    {
+        return Err("invalid continuation-commit response; outcome unknown".to_string());
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+async fn agent_commit_continuation(
+    webview: WebviewWindow,
+    client: tauri::State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/continuation-commit", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("continuation outcome unknown; inspect the session before retry: {error}"))?;
+    let body = response.text().await
+        .map_err(|error| format!("continuation outcome unknown: {error}"))?;
+    parse_continuation_commit_response(&body)
 }
 
 fn parse_new_session_response(
@@ -4396,17 +4449,19 @@ async fn agent_ken_prompt(
     pane_id: String,
     client: tauri::State<'_, reqwest::Client>,
     text: String,
+    target: serde_json::Value,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    client
-        .post(format!("{}/ken/prompt", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "text": text }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/prompt",
+        &serde_json::json!({ "text": text, "target": target }),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Proxy: cancel Ken's in-flight run (leaves GG Coder's run untouched).
@@ -4415,16 +4470,19 @@ async fn agent_ken_cancel(
     webview: WebviewWindow,
     pane_id: String,
     client: tauri::State<'_, reqwest::Client>,
+    ken: serde_json::Value,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    client
-        .post(format!("{}/ken/cancel", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/cancel",
+        &serde_json::json!({ "ken": ken }),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Proxy: toggle autopilot (auto-review) for THIS window's project. Persisted
@@ -4564,16 +4622,14 @@ async fn agent_switch_ken_model(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/ken/model", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "model": model }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/model",
+        &serde_json::json!({ "model": model }),
+    )
+    .await
 }
 
 /// Proxy: rewrite a draft prompt into a tighter, terminology-correct version
@@ -10247,6 +10303,7 @@ pub fn run() {
             agent_usage,
             agent_prompt,
             agent_continuation_handoff,
+            agent_commit_continuation,
             agent_cancel,
             agent_cancel_roadmap_status_retry,
             agent_ken_prompt,
@@ -11024,7 +11081,17 @@ mod tests {
         status: reqwest::StatusCode,
         response_body: &str,
     ) -> Result<serde_json::Value, String> {
+        session_json_proxy_result(status, response_body, "/openai-codex-fast", serde_json::json!({ "enabled": true }))
+    }
+
+    fn session_json_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &str,
+        route: &'static str,
+        request_body: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         use std::io::{Read, Write};
+        let expected_body = request_body.to_string();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -11060,10 +11127,10 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&request);
             let request_lower = request.to_ascii_lowercase();
-            assert!(request.starts_with("POST /openai-codex-fast HTTP/1.1"));
+            assert!(request.starts_with(&format!("POST {route} HTTP/1.1")));
             assert!(request_lower.contains("x-gg-session: pane-session"));
             assert!(request_lower.contains("x-gg-token: daemon-token"));
-            assert!(request.contains(r#"{"enabled":true}"#));
+            assert!(request.contains(&expected_body));
 
             let response = format!(
                 "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -11085,11 +11152,35 @@ mod tests {
             &client,
             &format!("http://{address}"),
             "pane-session",
-            "/openai-codex-fast",
-            &serde_json::json!({ "enabled": true }),
+            route,
+            &request_body,
         ));
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn agent_switch_ken_model_propagates_http_errors() {
+        for (status, message) in [
+            (reqwest::StatusCode::CONFLICT, "cannot switch Ken's model while running"),
+            (reqwest::StatusCode::NOT_FOUND, "unknown model: missing"),
+        ] {
+            assert_eq!(
+                session_json_proxy_result(status, &serde_json::json!({ "error": message }).to_string(), "/ken/model", serde_json::json!({ "model": "missing" })),
+                Err(message.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn agent_switch_ken_model_posts_pin_and_clear() {
+        for model in [Some("gpt"), None] {
+            let result = serde_json::json!({ "kenProvider": "openai", "kenModel": "gpt", "kenModelOverride": model.is_some() });
+            assert_eq!(
+                session_json_proxy_result(reqwest::StatusCode::OK, &result.to_string(), "/ken/model", serde_json::json!({ "model": model })),
+                Ok(result)
+            );
+        }
     }
 
     #[test]
@@ -11825,7 +11916,7 @@ mod tests {
     fn continuation_handoff_response_is_strict_and_preserves_errors() {
         let valid = parse_continuation_handoff_response(
             reqwest::StatusCode::OK,
-            r###"{"version":1,"prompt":"## Objective\nContinue"}"###,
+            r###"{"version":1,"prompt":"## Objective\nContinue","preparedId":"prepared-1","source":{"conversationId":"conversation-1","sessionId":"session-1","leafId":null,"fingerprint":"revision"},"expiresAt":1234}"###,
         )
         .unwrap();
         assert_eq!(valid.version, 1);

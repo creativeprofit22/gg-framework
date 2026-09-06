@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { createRef } from "react";
 import type { MutableRefObject } from "react";
+import type * as AgentModule from "./agent";
 
 // playSound builds an <audio> element and ./agent calls Tauri APIs at module
 // scope (getCurrentWebviewWindow) which blow up in jsdom. Fully stub both. The
@@ -10,7 +11,12 @@ import type { MutableRefObject } from "react";
 // erased), so the mock just provides that, resolving empty so run_end's command
 // refresh is a no-op.
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
-vi.mock("./agent", () => ({
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main", listen: vi.fn().mockResolvedValue(() => {}) }),
+}));
+vi.mock("./agent", async (importOriginal) => ({
+  parseContextProfileEligibility: (await importOriginal<typeof AgentModule>())
+    .parseContextProfileEligibility,
   listCommands: vi.fn().mockResolvedValue([]),
   listModels: vi.fn().mockResolvedValue([]),
   isRoadmapPhaseDraftChangeEvent: (event: SidecarEvent) =>
@@ -18,6 +24,7 @@ vi.mock("./agent", () => ({
 }));
 
 import { listModels } from "./agent";
+import { useKenMentor } from "./useKenMentor";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
@@ -145,6 +152,42 @@ function setup(
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("correlates resets before applying real mentor authority", () => {
+    const mentor = renderHook(() => useKenMentor({ setItems: vi.fn(), nextId: () => 1 }));
+    const old = { conversationId: "old", activationEpoch: "old", activeRunId: "run" };
+    act(() => mentor.result.current.hydrateKen(old));
+    const { hook, deps } = setup((event) => mentor.result.current.handleKenEvent(event));
+    deps.hydrateKen = (value, replace) => mentor.result.current.hydrateKen(value, replace);
+    deps.shouldApplySessionReset = () => false;
+    hook.rerender();
+    const reset = ev("session_reset", { operationId: "reset", kenState: { conversationId: "new", activationEpoch: "new", activeRunId: null } });
+    act(() => hook.result.current.handleEvent(reset));
+    expect(mentor.result.current.captureKenRun()).toEqual({ conversationId: "old", activationEpoch: "old", runId: "run" });
+    deps.shouldApplySessionReset = () => true;
+    hook.rerender();
+    act(() => hook.result.current.handleEvent(reset));
+    expect(mentor.result.current.captureKenRun()).toBeNull();
+    expect(mentor.result.current.kenRunning).toBe(false);
+  });
+
+  it("filters stale resets before clearing the transcript and forwards accepted events without ending text", () => {
+    const { hook, deps, pushUserItem, getItems } = setup();
+    deps.shouldApplySessionReset = vi.fn(() => false);
+    deps.onContinuationAccepted = vi.fn();
+    hook.rerender();
+    pushUserItem("accepted handoff", false);
+    act(() => hook.result.current.handleEvent(ev("session_reset", { operationId: "stale" })));
+    expect(getItems()).toHaveLength(1);
+    const accepted = { operationId: "operation-1" };
+    act(() => hook.result.current.handleEvent(ev("continuation_accepted", accepted)));
+    expect(deps.onContinuationAccepted).toHaveBeenCalledWith(accepted);
+    expect(getItems()).toHaveLength(1);
+    deps.shouldApplySessionReset = () => true;
+    hook.rerender();
+    act(() => hook.result.current.handleEvent(ev("session_reset", { operationId: "current" })));
+    expect(getItems()).toEqual([]);
+  });
+
   it("forwards a validated Roadmap draft event without touching transcript state", () => {
     const onDraft = vi.fn();
     const { hook, getItems } = setup(() => false, {}, undefined, onDraft);
@@ -154,6 +197,48 @@ describe("useAgentEvents", () => {
 
     expect(onDraft).toHaveBeenCalledWith(draft);
     expect(getItems()).toEqual([]);
+  });
+
+  it.each(["ready", "extras"])(
+    "validates eligibility from %s, failing closed without history inference",
+    (type) => {
+      const { hook, getState, getItems } = setup();
+      const send = (eligibility: unknown) =>
+        act(() =>
+          hook.result.current.handleEvent(
+            ev(type, {
+              openAICodexContextProfileEligibility: eligibility,
+            }),
+          ),
+        );
+      send({ canChange: true });
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual({ canChange: true });
+      for (const malformed of [undefined, null, [], { canChange: "true" }, { canChange: false }]) {
+        send(malformed);
+        expect(getState()?.openAICodexContextProfileEligibility.canChange).toBe(false);
+      }
+      send({ canChange: false, reason: "authoritative lock" });
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual({
+        canChange: false,
+        reason: "authoritative lock",
+      });
+      expect(getItems()).toEqual([]);
+      send({ canChange: true });
+      expect(getState()?.openAICodexContextProfileEligibility.canChange).toBe(true);
+    },
+  );
+
+  it("preserves authoritative eligibility during unrelated partial extras", () => {
+    const { hook, getState } = setup();
+    for (const eligibility of [{ canChange: true }, { canChange: false, reason: "started" }]) {
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("extras", { openAICodexContextProfileEligibility: eligibility }),
+        ),
+      );
+      act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 2 })));
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual(eligibility);
+    }
   });
 
   it("applies validated context profile change events", () => {

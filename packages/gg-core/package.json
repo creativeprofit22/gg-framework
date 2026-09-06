@@ -15,6 +15,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./desktop-session-ux": {
+      "types": "./dist/desktop-session-ux.d.ts",
+      "import": "./dist/desktop-session-ux.js",
+      "require": "./dist/desktop-session-ux.cjs"
+    },
     "./models": {
       "types": "./dist/model-registry.d.ts",
       "import": "./dist/model-registry.js",

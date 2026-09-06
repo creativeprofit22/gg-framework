@@ -1,4 +1,5 @@
 import type { DesktopContextSnapshot } from "@kenkaiiii/gg-core";
+import type { DesktopSessionUXState } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { describe, expect, it, vi } from "vitest";
 import {
   getAgentSessionContextSnapshot,
@@ -13,6 +14,11 @@ describe("app sidecar context snapshot", () => {
         accountId: "account-1",
         openAICodexContextProfile: "experimental",
         openAICodexFast: true,
+        openAICodexContextProfileEligibility: {
+          canChange: false,
+          reason:
+            "Context mode is fixed after this session starts. Start a new session to change it.",
+        },
       }),
       getContextUsage,
     });
@@ -21,6 +27,11 @@ describe("app sidecar context snapshot", () => {
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
       openAICodexFast: true,
+      openAICodexContextProfileEligibility: {
+        canChange: false,
+        reason:
+          "Context mode is fixed after this session starts. Start a new session to change it.",
+      },
       contextTokens: 300_000,
       contextWindow: 872_000,
     });
@@ -28,19 +39,23 @@ describe("app sidecar context snapshot", () => {
   });
 
   it("matches the shared desktop context snapshot shape", () => {
-    const snapshot: DesktopContextSnapshot = getAgentSessionContextSnapshot({
-      getState: () => ({
-        accountId: undefined,
-        openAICodexContextProfile: "stable",
-        openAICodexFast: false,
-      }),
-      getContextUsage: () => ({ used: 0, size: 272_000 }),
-    });
+    const snapshot: DesktopContextSnapshot & DesktopSessionUXState = getAgentSessionContextSnapshot(
+      {
+        getState: () => ({
+          accountId: undefined,
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          openAICodexContextProfileEligibility: { canChange: true },
+        }),
+        getContextUsage: () => ({ used: 0, size: 272_000 }),
+      },
+    );
 
     expect(snapshot).toEqual({
       accountId: null,
       openAICodexContextProfile: "stable",
       openAICodexFast: false,
+      openAICodexContextProfileEligibility: { canChange: true },
       contextTokens: 0,
       contextWindow: 272_000,
     });

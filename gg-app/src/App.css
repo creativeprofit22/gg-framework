@@ -1778,6 +1778,18 @@ select {
      regardless of where it's rendered. */
   text-align: left;
 }
+.modal.continuation-confirmation {
+  width: min(440px, 90%);
+  max-height: 90%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.continuation-confirmation select {
+  max-width: 100%;
+}
+.continuation-confirmation .modal-actions {
+  flex-wrap: wrap;
+}
 /* Any scroll container inside a modal gets a thin, non-overlapping scrollbar so
    the thumb never sits on top of the row content. */
 .modal ::-webkit-scrollbar {

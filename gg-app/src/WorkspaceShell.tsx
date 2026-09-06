@@ -347,6 +347,7 @@ function ReadyWorkspaceShell({
         focusPaneDragHandle(scheduledPaneId);
         return;
       }
+      if (document.activeElement instanceof HTMLSelectElement) return;
       focusPaneInput(scheduledPaneId);
     });
   }, [focusPaneDragHandle, focusPaneInput, layout.focusedPaneId, leafIds]);

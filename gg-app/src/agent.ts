@@ -7,6 +7,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
+import { continuationInstructionError } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type {
+  ContinuationPrepareResponse,
+  ContinuationCommitRequest,
+  ContinuationCommitResponse,
+  ContinuationAcceptedEvent,
+  ContinuationDestination,
+  DesktopSessionUXState,
+  KenState,
+  KenTarget,
+  KenRunIdentity,
+  OpenAICodexContextProfileEligibility,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type {
   DesktopContextSnapshot,
@@ -514,7 +527,9 @@ function requirePlanRevisionResult(value: unknown): PlanRevisionResult {
   return { ok: true, operationId: value.operationId };
 }
 
-export interface AgentState extends DesktopContextSnapshot {
+export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXState {
+  kenState?: KenState | null;
+  conversationId?: string;
   provider: string;
   model: string;
   cwd: string;
@@ -691,8 +706,35 @@ export interface SwitchKenModelResult {
   kenModelOverride: boolean;
 }
 
+export const CONTEXT_PROFILE_LOCK_REASON =
+  "Context mode is fixed after this session starts. Start a new session to change it.";
+
+/** Missing or malformed authority must never unlock a conversation. */
+export function parseContextProfileEligibility(
+  value: unknown,
+): OpenAICodexContextProfileEligibility {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>;
+    if (candidate.canChange === true) return { canChange: true };
+    if (
+      candidate.canChange === false &&
+      typeof candidate.reason === "string" &&
+      candidate.reason.trim()
+    ) {
+      return { canChange: false, reason: candidate.reason };
+    }
+  }
+  return { canChange: false, reason: CONTEXT_PROFILE_LOCK_REASON };
+}
+
 export async function getState(): Promise<AgentState> {
-  return invoke<AgentState>("agent_state", { paneId: "primary" });
+  const state = await invoke<AgentState>("agent_state", { paneId: "primary" });
+  return {
+    ...state,
+    openAICodexContextProfileEligibility: parseContextProfileEligibility(
+      state.openAICodexContextProfileEligibility,
+    ),
+  };
 }
 
 // ── Progress (Ranks) ─────────────────────────────────────────────────────
@@ -877,10 +919,13 @@ export interface PromptMeta {
   enhancements?: PromptSegment[];
 }
 
-export interface ContinuationHandoffResponse {
-  version: 1;
-  prompt: string;
-}
+export type ContinuationHandoffResponse = ContinuationPrepareResponse;
+export type {
+  ContinuationCommitRequest,
+  ContinuationCommitResponse,
+  ContinuationAcceptedEvent,
+  ContinuationDestination,
+};
 
 const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS = 24_000;
 
@@ -889,8 +934,19 @@ export function requireContinuationHandoffResponse(value: unknown): Continuation
     throw new Error("invalid continuation-handoff response");
   }
   const response = value as Record<string, unknown>;
+  // Native HTTP forwarding can return an error body instead of rejecting IPC.
+  if (nonemptyString(response.error)) {
+    throw new Error(nonemptyString(response.message) ? response.message : response.error);
+  }
   if (
-    Object.keys(response).length !== 2 ||
+    !nonemptyString(response.preparedId) ||
+    !recordValue(response.source) ||
+    !nonemptyString(response.source.conversationId) ||
+    !nonemptyString(response.source.sessionId) ||
+    !(response.source.leafId === null || nonemptyString(response.source.leafId)) ||
+    !nonemptyString(response.source.fingerprint) ||
+    typeof response.expiresAt !== "number" ||
+    !Number.isFinite(response.expiresAt) ||
     response.version !== 1 ||
     typeof response.prompt !== "string" ||
     !response.prompt.trim() ||
@@ -898,7 +954,80 @@ export function requireContinuationHandoffResponse(value: unknown): Continuation
   ) {
     throw new Error("invalid continuation-handoff response");
   }
-  return { version: 1, prompt: response.prompt };
+  return response as unknown as ContinuationPrepareResponse;
+}
+
+function recordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function nonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+function validDestination(value: unknown): value is ContinuationDestination {
+  return (
+    recordValue(value) &&
+    nonemptyString(value.conversationId) &&
+    nonemptyString(value.sessionId) &&
+    (value.profile === "stable" || value.profile === "experimental")
+  );
+}
+export function requireContinuationAcceptedEvent(value: unknown): ContinuationAcceptedEvent {
+  if (
+    !recordValue(value) ||
+    !nonemptyString(value.operationId) ||
+    !nonemptyString(value.preparedId) ||
+    !validDestination(value.destination) ||
+    !nonemptyString(value.acceptedMessageId) ||
+    !nonemptyString(value.prompt) ||
+    value.kenSent !== true
+  )
+    throw new Error("invalid continuation accepted event");
+  return value as unknown as ContinuationAcceptedEvent;
+}
+export function requireContinuationCommitResponse(
+  value: unknown,
+  request: ContinuationCommitRequest,
+): ContinuationCommitResponse {
+  if (
+    !recordValue(value) ||
+    value.operationId !== request.operationId ||
+    value.preparedId !== request.preparedId ||
+    typeof value.resetAttempted !== "boolean" ||
+    (value.destination !== undefined && !validDestination(value.destination)) ||
+    (value.selectedProfile !== undefined &&
+      value.selectedProfile !== "stable" &&
+      value.selectedProfile !== "experimental") ||
+    ["recoveryPrompt", "error", "message", "acceptedMessageId"].some(
+      (key) => value[key] !== undefined && !nonemptyString(value[key]),
+    )
+  ) {
+    throw new Error("invalid continuation commit response");
+  }
+  const accepted =
+    value.outcome === "accepted" &&
+    value.accepted === true &&
+    value.resetAttempted === true &&
+    validDestination(value.destination) &&
+    (!request.profile || value.destination.profile === request.profile) &&
+    nonemptyString(value.acceptedMessageId);
+  const rejected =
+    value.outcome === "rejected" &&
+    value.accepted === false &&
+    value.resetAttempted === false &&
+    value.destination === undefined &&
+    value.acceptedMessageId === undefined;
+  const partial =
+    value.outcome === "partial" &&
+    (value.accepted === false || value.accepted === null) &&
+    value.resetAttempted === true &&
+    value.acceptedMessageId === undefined;
+  const unknown =
+    value.outcome === "outcome-unknown" &&
+    value.accepted === null &&
+    value.acceptedMessageId === undefined;
+  if (!(accepted || rejected || partial || unknown))
+    throw new Error("inconsistent continuation commit response");
+  return value as unknown as ContinuationCommitResponse;
 }
 
 /** Authoritative outcome of submitting one prompt to the sidecar. */
@@ -1061,11 +1190,12 @@ export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPe
 
 /** Ask Ken Kai. Fires the read-only mentor run; reply arrives via `ken_*`
  *  SSE events. Lazily boots Ken's session on first use. */
-export async function sendKenPrompt(text: string): Promise<void> {
+export async function sendKenPrompt(text: string, target: KenTarget): Promise<void> {
+  const capturedTarget = { conversationId: target.conversationId, activationEpoch: target.activationEpoch };
   await logInfo(`ken prompt: ${text.slice(0, 80)}`);
   try {
     await waitForReady();
-    await invoke("agent_ken_prompt", { paneId: "primary", text });
+    await invoke("agent_ken_prompt", { paneId: "primary", text, target: capturedTarget });
   } catch (e) {
     await logError(`agent_ken_prompt failed: ${String(e)}`);
     throw e;
@@ -1073,12 +1203,14 @@ export async function sendKenPrompt(text: string): Promise<void> {
 }
 
 /** Cancel Ken's in-flight run (does not touch GG Coder's run). */
-export async function cancelKen(): Promise<void> {
+export async function cancelKen(ken: KenRunIdentity): Promise<void> {
+  const identity = { ...ken };
   try {
     await waitForReady();
-    await invoke("agent_ken_cancel", { paneId: "primary" });
+    await invoke("agent_ken_cancel", { paneId: "primary", ken: identity });
   } catch (e) {
     await logError(`agent_ken_cancel failed: ${String(e)}`);
+    throw e;
   }
 }
 
@@ -1812,16 +1944,31 @@ export async function setOpenAICodexFast(enabled: boolean): Promise<OpenAICodexF
 
 /** Pin Ken (mentor + autopilot) to a model, or pass null to clear the pin so
  *  he follows GG Coder's model again. Returns his effective model. */
-export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult | null> {
-  try {
-    return await invoke<SwitchKenModelResult>("agent_switch_ken_model", {
-      paneId: "primary",
-      model,
-    });
-  } catch (e) {
-    await logError(`agent_switch_ken_model failed: ${String(e)}`);
-    return null;
+export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult> {
+  const response = await invoke<unknown>("agent_switch_ken_model", {
+    paneId: "primary",
+    model,
+  });
+  return requireSwitchKenModelResult(response);
+}
+
+function requireSwitchKenModelResult(value: unknown): SwitchKenModelResult {
+  if (isRecord(value) && typeof value.error === "string" && value.error.trim()) {
+    throw new Error(value.error);
   }
+  if (
+    !isRecord(value) ||
+    typeof value.kenProvider !== "string" || !value.kenProvider.trim() ||
+    typeof value.kenModel !== "string" || !value.kenModel.trim() ||
+    typeof value.kenModelOverride !== "boolean"
+  ) {
+    throw new Error("invalid Ken model response");
+  }
+  return {
+    kenProvider: value.kenProvider,
+    kenModel: value.kenModel,
+    kenModelOverride: value.kenModelOverride,
+  };
 }
 
 /** App settings. `configured` is true only when the user explicitly set a
@@ -2842,6 +2989,7 @@ export interface PaneAgentClient extends NotesClient {
     meta?: PromptMeta,
   ): Promise<PromptSubmissionResult>;
   prepareContinuationHandoff(nextInstruction: string): Promise<ContinuationHandoffResponse>;
+  commitContinuation(request: ContinuationCommitRequest): Promise<ContinuationCommitResponse>;
   answerAskUser(
     id: string,
     action: "answer" | "cancel",
@@ -2849,8 +2997,8 @@ export interface PaneAgentClient extends NotesClient {
   ): Promise<void>;
   cancel(): Promise<CancelResult>;
   retryCancelledRoadmapStatus(): Promise<PhaseCancellationPersistenceResult>;
-  sendKenPrompt(text: string): Promise<void>;
-  cancelKen(): Promise<void>;
+  sendKenPrompt(text: string, target: KenTarget): Promise<void>;
+  cancelKen(ken: KenRunIdentity): Promise<void>;
   setAutopilot(enabled: boolean): Promise<boolean>;
   acceptPlan(checkpointId: string, generation: number): Promise<PlanAcceptResult>;
   revisePlan(
@@ -2881,7 +3029,7 @@ export interface PaneAgentClient extends NotesClient {
     profile: OpenAICodexContextProfile,
   ): Promise<ContextProfileSelection>;
   setOpenAICodexFast(enabled: boolean): Promise<OpenAICodexFastSelection>;
-  switchKenModel(model: string | null): Promise<SwitchKenModelResult | null>;
+  switchKenModel(model: string | null): Promise<SwitchKenModelResult>;
   getSettings(): Promise<AppSettings | null>;
   saveSettings(projectsRoot: string): Promise<void>;
   listProjects(): Promise<DiscoveredProject[]>;
@@ -3030,7 +3178,15 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         void unlistenReadyPromise.then((unlistenReady) => unlistenReady());
       };
     },
-    getState: () => call("agent_state"),
+    getState: async () => {
+      const state = await call<AgentState>("agent_state");
+      return {
+        ...state,
+        openAICodexContextProfileEligibility: parseContextProfileEligibility(
+          state.openAICodexContextProfileEligibility,
+        ),
+      };
+    },
     async getNotes() {
       const outcome = await call<unknown>("agent_notes_get");
       if (!isProjectNotesReadOutcome(outcome)) throw new Error("invalid Notes read response");
@@ -3199,10 +3355,24 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       requirePromptSubmissionResult(
         await call<unknown>("agent_prompt", { text, attachments, meta: meta ?? null }),
       ),
-    prepareContinuationHandoff: async (nextInstruction) =>
-      requireContinuationHandoffResponse(
+    commitContinuation: async (request) => {
+      const body: ContinuationCommitRequest = {
+        preparedId: request.preparedId,
+        operationId: request.operationId,
+        ...(request.profile ? { profile: request.profile } : {}),
+      };
+      return requireContinuationCommitResponse(
+        await call("agent_commit_continuation", { request: body }),
+        body,
+      );
+    },
+    prepareContinuationHandoff: async (nextInstruction) => {
+      const error = continuationInstructionError(nextInstruction);
+      if (error) throw new Error(error);
+      return requireContinuationHandoffResponse(
         await call<unknown>("agent_continuation_handoff", { nextInstruction }),
-      ),
+      );
+    },
     answerAskUser: async (id, action, answers) => {
       await ready();
       await call("agent_ask_user", { id, action, answers: answers ?? null });
@@ -3216,13 +3386,15 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     retryCancelledRoadmapStatus: () =>
       call<PhaseCancellationPersistenceResult>("agent_cancel_roadmap_status_retry"),
-    sendKenPrompt: async (text) => {
+    sendKenPrompt: async (text, target) => {
+      const capturedTarget = { conversationId: target.conversationId, activationEpoch: target.activationEpoch };
       await ready();
-      await call("agent_ken_prompt", { text });
+      await call("agent_ken_prompt", { text, target: capturedTarget });
     },
-    cancelKen: async () => {
+    cancelKen: async (ken) => {
+      const identity = { ...ken };
       await ready();
-      await call("agent_ken_cancel");
+      await call("agent_ken_cancel", { ken: identity });
     },
     async setAutopilot(enabled) {
       await ready();
@@ -3371,11 +3543,8 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       return requireOpenAICodexFastSelection(response);
     },
     async switchKenModel(model) {
-      try {
-        return await call("agent_switch_ken_model", { model });
-      } catch {
-        return null;
-      }
+      const response = await call<unknown>("agent_switch_ken_model", { model });
+      return requireSwitchKenModelResult(response);
     },
     async getSettings() {
       try {

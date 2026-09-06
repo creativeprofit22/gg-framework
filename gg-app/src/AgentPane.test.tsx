@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useCallback, useState } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
+import type * as MentorModule from "./useKenMentor";
+import type * as EventsModule from "./useAgentEvents";
 import type * as ToastModule from "./toast";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
@@ -21,7 +23,9 @@ const nativeMocks = vi.hoisted(() => ({
   modelsChanged: null as null | (() => void),
   modelsUnlisten: vi.fn(),
   onSessionReset: null as null | ((operationId?: string) => void),
+  kenStateRef: null as null | { current: AgentModule.AgentState | null },
   kenRunning: false,
+  realMentor: false,
   toast: vi.fn(),
   appUpdate: {
     phase: "idle",
@@ -55,8 +59,14 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     setTitle: vi.fn(),
   }),
 }));
-vi.mock("./useKenMentor", () => ({
-  useKenMentor: () => ({
+vi.mock("./useKenMentor", async (importOriginal) => {
+  const actual = await importOriginal<typeof MentorModule>();
+  const captureKenHydration = () => vi.fn();
+  const clearKenStream = vi.fn();
+  return {
+  useKenMentor: (opts: Parameters<typeof MentorModule.useKenMentor>[0]) => {
+    const real = actual.useKenMentor(opts);
+    return nativeMocks.realMentor ? real : ({
     kenRunning: nativeMocks.kenRunning,
     kenTokens: 0,
     kenRunStartTs: null,
@@ -64,31 +74,48 @@ vi.mock("./useKenMentor", () => ({
     kenThinkingStartTs: null,
     kenThinkingAccumMs: 0,
     handleKenEvent: vi.fn(),
-  }),
-}));
+    hydrateKen: vi.fn(),
+    captureKenHydration,
+    clearKenStream,
+    captureKenTarget: () => ({ conversationId: "conversation", activationEpoch: "epoch" }),
+    captureKenRun: () => ({ conversationId: "conversation", activationEpoch: "epoch", runId: "run" }),
+    captureKenOperation: () => () => true,
+  });
+  },
+};
+});
 vi.mock("./useProgress", () => ({
   useProgress: () => ({ snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false }),
 }));
-vi.mock("./useAgentEvents", () => ({
-  HOOK_PRESENTATION: {},
-  useAgentEvents: (deps: {
-    handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
-    onSessionReset?: (operationId?: string) => void;
-    onRoadmapPhaseDraftChange?: (draft: AgentModule.RoadmapPhaseDraftChangeEvent["data"]) => void;
-    setItems: Dispatch<SetStateAction<Item[]>>;
-    setPlanReview: Dispatch<SetStateAction<AgentModule.PendingPlanReview | null>>;
-    planReviewPathRef: { current: string | null };
-  }) => {
+vi.mock("./useAgentEvents", async (importOriginal) => {
+  const actual = await importOriginal<typeof EventsModule>();
+  return {
+  HOOK_PRESENTATION: actual.HOOK_PRESENTATION,
+  useAgentEvents: (deps: Parameters<typeof EventsModule.useAgentEvents>[0]) => {
+    const real = actual.useAgentEvents(deps);
+    const { planReviewPathRef, setPlanReview } = deps;
     nativeMocks.onSessionReset = deps.onSessionReset ?? null;
+    nativeMocks.kenStateRef = deps.stateRef;
     const replacePlanReview = useCallback(
       (review: AgentModule.PendingPlanReview | null) => {
-        deps.planReviewPathRef.current = review?.planPath ?? null;
-        deps.setPlanReview(review);
+        planReviewPathRef.current = review?.planPath ?? null;
+        setPlanReview(review);
       },
-      [deps.planReviewPathRef, deps.setPlanReview],
+      [planReviewPathRef, setPlanReview],
     );
-    return {
+    return nativeMocks.realMentor ? real : {
       handleEvent: (event: AgentModule.SidecarEvent) => {
+        if (event.type === "continuation_accepted") {
+          deps.onContinuationAccepted?.(event.data);
+          return true;
+        }
+        if (event.type === "ken_text") {
+          deps.setItems((current) => [
+            ...current,
+            { kind: "ken", id: 99999, text: String((event.data as { text: string }).text) },
+          ]);
+          return true;
+        }
         if (event.type === "roadmap_phase_draft_change") {
           deps.onRoadmapPhaseDraftChange?.(
             event.data as AgentModule.RoadmapPhaseDraftChangeEvent["data"],
@@ -112,7 +139,8 @@ vi.mock("./useAgentEvents", () => ({
           return true;
         }
         if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
-        const data = event.data as { operationId?: unknown };
+        const data = event.data as Record<string, unknown>;
+        if (deps.shouldApplySessionReset && !deps.shouldApplySessionReset(data)) return;
         deps.setItems([]);
         deps.onSessionReset?.(typeof data.operationId === "string" ? data.operationId : undefined);
       },
@@ -121,7 +149,8 @@ vi.mock("./useAgentEvents", () => ({
       replacePlanReview,
     };
   },
-}));
+};
+});
 vi.mock("./HomeScreen", () => ({
   HomeScreen: (props: {
     onProjects?: () => void;
@@ -189,7 +218,7 @@ import {
   resolveRoadmapPhaseResume,
   resolveRoadmapPhaseResumeFromNotes,
 } from "./AgentPane";
-import { NewSessionError, PlanMutationError } from "./agent";
+import { PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type {
   AgentState,
@@ -245,6 +274,7 @@ const roadmapDraft: RoadmapPhaseDraft = {
 };
 const agentState = (model: string): AgentState => ({
   accountId: null,
+  openAICodexContextProfileEligibility: { canChange: true },
   openAICodexContextProfile: "stable",
   openAICodexFast: false,
   contextTokens: 0,
@@ -281,6 +311,17 @@ function deferred<T>(): {
     reject = fail;
   });
   return { promise, resolve, reject };
+}
+
+function liveEvents(pane: PaneAgentClient) {
+  const listeners = new Set<(event: AgentModule.SidecarEvent) => void>();
+  vi.mocked(pane.subscribe).mockImplementation((receive) => {
+    listeners.add(receive);
+    return () => { listeners.delete(receive); };
+  });
+  return (type: string, data: object) => {
+    for (const receive of listeners) receive({ type, data } as AgentModule.SidecarEvent);
+  };
 }
 
 function client(paneId: string, generation: number): PaneAgentClient {
@@ -342,13 +383,22 @@ function client(paneId: string, generation: number): PaneAgentClient {
     getSubscriptionUsage: vi.fn(),
     enhancePrompt: vi.fn(),
     sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
+    commitContinuation: vi.fn(),
     prepareContinuationHandoff: vi.fn(async () => ({
       version: 1 as const,
+      preparedId: "prepared-1",
+      source: {
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+        leafId: null,
+        fingerprint: "fingerprint-1",
+      },
+      expiresAt: Date.now() + 60_000,
       prompt: CONTINUATION_PROMPT,
     })),
     cancel: vi.fn(),
-    sendKenPrompt: vi.fn(),
-    cancelKen: vi.fn(),
+    sendKenPrompt: vi.fn().mockResolvedValue(undefined),
+    cancelKen: vi.fn().mockResolvedValue(undefined),
     setAutopilot: vi.fn(),
     acceptPlan: vi.fn(async () => ({ ok: true, planTotal: 0, operationId: "plan-accept-1" })),
     revisePlan: vi.fn(async () => ({ ok: true, operationId: "plan-revise-1" })),
@@ -389,11 +439,13 @@ async function renderKenPromptPane(
   running = false,
   prompt = KEN_PROMPT,
   onGenerationChange?: (generation: number) => void,
+  stateOverrides: Partial<AgentState> = {},
 ): Promise<HTMLButtonElement> {
   vi.mocked(pane.getState).mockResolvedValue({
     ...agentState("azure:gpt-test"),
     running,
     runState: running ? "running" : "idle",
+    ...stateOverrides,
   });
   vi.mocked(pane.listHistory).mockResolvedValue([
     {
@@ -405,7 +457,7 @@ async function renderKenPromptPane(
   render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
   fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
   fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-  return (await screen.findByRole("button", { name: "Continue here" })) as HTMLButtonElement;
+  return (await screen.findAllByRole("button", { name: "Continue here" }))[0] as HTMLButtonElement;
 }
 
 afterEach(() => {
@@ -415,6 +467,7 @@ afterEach(() => {
   nativeMocks.modelsUnlisten.mockReset();
   nativeMocks.onSessionReset = null;
   nativeMocks.kenRunning = false;
+  nativeMocks.realMentor = false;
   nativeMocks.toast.mockReset();
   nativeMocks.appUpdate.phase = "idle";
   nativeMocks.appUpdate.localPatched = true;
@@ -605,6 +658,38 @@ describe("AgentPane lifecycle", () => {
     expect(failedRow.textContent).toContain("fixture-is-error");
   });
 
+  it.each([false, undefined])(
+    "locks context without authority (%s), retaining value and Fast",
+    async (canChange) => {
+      const pane = client("astra-locked", 1);
+      const reason =
+        "Context mode is fixed after this session starts. Start a new session to change it.";
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("gpt-6-astra"),
+        provider: "openai",
+        accountId: "account-1",
+        openAICodexContextProfile: "experimental",
+        openAICodexContextProfileEligibility:
+          canChange === false ? { canChange: false, reason } : undefined,
+      } as unknown as AgentState);
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      const selector = (await screen.findByRole("combobox", {
+        name: "OpenAI Codex context profile",
+      })) as HTMLSelectElement;
+      expect(selector.disabled).toBe(true);
+      expect(selector.value).toBe("experimental");
+      expect(selector.title).toBe(reason);
+      expect(document.getElementById(selector.getAttribute("aria-describedby")!)?.textContent).toBe(
+        reason,
+      );
+      fireEvent.change(selector, { target: { value: "stable" } });
+      expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+      expect((screen.getByRole("switch", { name: /Fast off/ }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    },
+  );
+
   it("shows context profiles only for GPT-6 Astra using Codex OAuth", async () => {
     const oauthPane = client("astra-oauth", 1);
     vi.mocked(oauthPane.getState).mockResolvedValue({
@@ -694,6 +779,28 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getByText("300,000 / 872K · 34%")).toBeDefined();
   });
 
+  it.each(["cannot switch Ken's model while running", "unknown model: missing", "invalid Ken model response"])(
+    "preserves all Ken fields and displays rejected selection: %s", async (message) => {
+      const pane = client("ken-selection", 1);
+      const prior = { kenProvider: "anthropic", kenModel: "claude-prior", kenModelOverride: true };
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("gpt"), ...prior });
+      vi.mocked(pane.listModels).mockResolvedValue([
+        { id: "claude-prior", provider: "anthropic", name: "Prior" },
+        { id: "missing", provider: "openai", name: "Missing" },
+      ]);
+      vi.mocked(pane.switchKenModel).mockRejectedValue(message);
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      const picker = await screen.findByTitle(/is pinned to a separate model/);
+      fireEvent.click(picker);
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));
+      await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(message, "error"));
+      expect(pane.switchKenModel).toHaveBeenCalledExactlyOnceWith("missing");
+      expect(nativeMocks.kenStateRef?.current).toMatchObject(prior);
+      expect(picker.textContent).toContain("Prior");
+      expect(picker.title).toContain("pinned");
+    },
+  );
+
   it("disables the context profile selector while running", async () => {
     const pane = client("astra-running", 1);
     vi.mocked(pane.getState).mockResolvedValue({
@@ -741,7 +848,7 @@ describe("AgentPane lifecycle", () => {
     expect(fast).toMatchObject({ disabled: false });
   });
 
-  it("optimistically updates and settles a busy context profile", async () => {
+  it.each([false, true])("restores context profile focus unless moved (%s)", async (moved) => {
     const pane = client("astra-switch", 1);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
@@ -755,12 +862,23 @@ describe("AgentPane lifecycle", () => {
       contextWindow: number;
     }>();
     vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
-    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    render(
+      <>
+        <button>Other control</button>
+        <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />
+      </>,
+    );
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
     const fast = screen.getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
+    selector.focus();
     fireEvent.change(selector, { target: { value: "experimental" } });
+    // WebView2 drops focus when a focused select is disabled; jsdom does not.
+    const other = screen.getByRole("button", { name: "Other control" });
+    other.focus();
+    if (!moved) other.blur();
+    expect(document.activeElement).toBe(moved ? other : document.body);
     expect((selector as HTMLSelectElement).value).toBe("experimental");
     expect(selector).toMatchObject({ disabled: true });
     expect(fast).toMatchObject({ disabled: true });
@@ -769,6 +887,7 @@ describe("AgentPane lifecycle", () => {
     );
     mutation.resolve({ openAICodexContextProfile: "experimental", contextWindow: 872_000 });
     await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+    expect(document.activeElement).toBe(moved ? other : selector);
   });
 
   it("optimistically settles and rolls back Fast mutations", async () => {
@@ -1969,10 +2088,99 @@ describe("AgentPane lifecycle", () => {
       await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
       fireEvent.change(input, { target: { value: prompt } });
       fireEvent.keyDown(input, { key: "Enter" });
-      await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("question"));
+      await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("question", { conversationId: "conversation", activationEpoch: "epoch" }));
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it("keeps reset authority over pending initial hydration and reconnects to the announced run", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-ken-hydration", 1);
+    const emit = liveEvents(pane);
+    const pending = deferred<AgentModule.AgentState>();
+    vi.mocked(pane.getState).mockReturnValue(pending.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.getState).toHaveBeenCalled());
+    const ken = { conversationId: "new", activationEpoch: "new", runId: "new-run" };
+    act(() => emit("session_reset", { kenState: { ...ken, activeRunId: null } }));
+    await act(async () => pending.resolve({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" } } as AgentModule.AgentState));
+    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+    act(() => {
+      emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
+      emit("ken_text_delta", { ken, text: "reconnected mentor output" });
+    });
+    expect(await screen.findByText("reconnected mentor output")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "esc to cancel" }));
+    expect(pane.cancelKen).toHaveBeenCalledWith(ken);
+  });
+
+  it.each([false, true])("scopes real mentor cancel rejection across a newer run (replacement=%s)", async (replace) => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-real-ken", 1);
+    const emit = liveEvents(pane);
+    const identity = { conversationId: "conversation", activationEpoch: "epoch", runId: "old-run" };
+    vi.mocked(pane.getState).mockResolvedValue({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState: { conversationId: identity.conversationId, activationEpoch: identity.activationEpoch, activeRunId: identity.runId } } as AgentModule.AgentState);
+    const pending = deferred<void>();
+    vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const cancel = await screen.findByRole("button", { name: "esc to cancel" });
+    fireEvent.click(cancel);
+    expect(pane.cancelKen).toHaveBeenCalledWith(identity);
+    act(() => emit("extras", { kenState: { ...identity, activeRunId: replace ? "new-run" : identity.runId } }));
+    await act(async () => { pending.reject(new Error("cancel rejected for captured run")); });
+    expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
+    expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+    if (replace) {
+      act(() => emit("ken_run_end", { ken: identity }));
+      expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+    }
+  });
+
+  it.each(["same", "new-conversation", "rewind", "epoch-return"].flatMap((change) =>
+    ["quick", "composer", "edited-composer"].map((source) => ({ change, source })),
+  ))("scopes delayed mentor transport rejection ($change, $source)", async ({ change, source }) => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-real-ken-send", 1);
+    const emit = liveEvents(pane);
+    const kenState = { conversationId: "conversation", activationEpoch: "epoch", activeRunId: null };
+    vi.mocked(pane.getState).mockResolvedValue({ running: false, provider: "anthropic", model: "test", cwd: "/work", mode: "code", kenState } as AgentModule.AgentState);
+    const pending = deferred<void>();
+    vi.mocked(pane.sendKenPrompt).mockReturnValue(pending.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const quick = await screen.findByRole("button", { name: "Ken, next?" });
+    await waitFor(() => expect((quick as HTMLButtonElement).disabled).toBe(false));
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: source === "quick" ? "Keep this draft" : "@Ken next?" } });
+    if (source === "quick") fireEvent.click(quick);
+    else fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" });
+    if (source === "edited-composer") fireEvent.change(input, { target: { value: "New draft" } });
+    act(() => {
+      if (change === "same") emit("extras", { kenState });
+      else {
+        emit("session_reset", { kenState: { ...kenState, conversationId: change === "new-conversation" ? "NEW" : kenState.conversationId, activationEpoch: "reset" } });
+        if (change === "epoch-return") emit("session_reset", { kenState });
+      }
+    });
+    await act(async () => { pending.reject(new Error("send rejected for captured target")); });
+    const current = change === "same";
+    expect(screen.queryByText(/send rejected for captured target/) !== null).toBe(current);
+    if (current) expect(input.value).toBe(source === "quick" ? "Keep this draft" : source === "edited-composer" ? "New draft" : "@Ken next?");
+    else expect(input.value).not.toBe("@Ken next?");
+    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+  });
+
+  it("reports a rejected mentor send without claiming a run started", async () => {
+    const pane = client("pane-ken-rejected", 1);
+    vi.mocked(pane.sendKenPrompt).mockRejectedValue(new Error("mentor busy; retry"));
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
+    expect(await screen.findByText(/mentor busy; retry/)).toBeTruthy();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
 
   it("sends the Ken next quick action directly and adds a Ken-addressed bubble", async () => {
     const pane = client("pane-ken-next", 1);
@@ -1983,7 +2191,7 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
 
-    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?"));
+    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" }));
     expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe("@Ken next?");
@@ -2014,7 +2222,7 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
 
-    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?"));
+    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", { conversationId: "conversation", activationEpoch: "epoch" }));
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
   });
@@ -2109,132 +2317,428 @@ describe("AgentPane lifecycle", () => {
     expect(document.querySelector(".queued-pill")?.textContent).toBe("queued");
   });
 
-  it("adopts the new-session ready generation and handles reset-before-response once", async () => {
-    const pane = client("pane-ken-fresh", 1);
-    const creation = deferred<Awaited<ReturnType<PaneAgentClient["newSession"]>>>();
-    vi.mocked(pane.newSession).mockReturnValueOnce(creation.promise);
-    const onGenerationChange = vi.fn();
-    await renderKenPromptPane(pane, false, KEN_PROMPT, onGenerationChange);
-    onGenerationChange.mockClear();
-    vi.mocked(pane.waitForReady).mockResolvedValue({
-      ready: true,
-      error: null,
-      generation: 2,
-      sessionId: "pane-ken-fresh",
-    });
-    const fresh = screen.getByRole("button", { name: "New session" });
-
-    fireEvent.click(fresh);
-    fireEvent.click(fresh);
-    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
-    expect(pane.prepareContinuationHandoff).toHaveBeenCalledWith(KEN_PROMPT);
-    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
-    expect(vi.mocked(pane.prepareContinuationHandoff).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(pane.newSession).mock.invocationCallOrder[0],
-    );
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-
-    act(() => nativeMocks.onSessionReset?.("unrelated-operation"));
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-    act(() => nativeMocks.onSessionReset?.("operation-1"));
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-
-    await act(async () => creation.resolve({ operationId: "operation-1" }));
-    await waitFor(() =>
-      expect(pane.sendPrompt).toHaveBeenCalledWith(CONTINUATION_PROMPT, [], { kenSent: true }),
-    );
-    expect(onGenerationChange).toHaveBeenCalledWith(2);
-    expect(pane.sendPrompt).toHaveBeenCalledOnce();
-    expect(vi.mocked(pane.newSession).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(pane.sendPrompt).mock.invocationCallOrder[0],
-    );
-  });
-
   it.each([
-    ["provider failure", new Error("provider unavailable")],
-    ["malformed synthesis", new Error("invalid continuation-handoff response")],
-  ])("fails closed before reset on %s", async (_label, error) => {
-    const pane = client("pane-ken-prepare-failure", 1);
-    vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(error);
-    await renderKenPromptPane(pane);
-
+    ["oversized", "x".repeat(8001), "8001"],
+    ["whitespace-only", " \r\n\t ", "nonblank"],
+    ["emoji oversized", "🙂".repeat(4000) + "x", "8001"],
+  ])("blocks %s fresh instructions before confirmation or mutation", async (_name, prompt, error) => {
+    const pane = client("pane-invalid-instruction", 1);
+    await renderKenPromptPane(pane, false, prompt);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "unsent draft" } });
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("current session is unchanged");
-    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    expect((await screen.findByRole("alert")).textContent).toContain(error);
+    expect(screen.getByRole("alert").textContent).toContain("8000");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(input.value).toBe("unsent draft");
+    expect(input.disabled).toBe(false);
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.commitContinuation).not.toHaveBeenCalled();
     expect(pane.newSession).not.toHaveBeenCalled();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("keeps the old prompt card retryable after a known creation rejection", async () => {
-    const pane = client("pane-ken-rejected", 1);
-    vi.mocked(pane.newSession).mockRejectedValueOnce(
-      new NewSessionError("creation-rejected", "HTTP 409", 409),
-    );
+  it.each([["8000 units", "x".repeat(8000)], ["CRLF and emoji", "  🙂\r\n\tKeep outer whitespace  \r\n"]])(
+    "prepares a valid raw instruction unchanged: %s", async (_name, prompt) => {
+      const pane = client("pane-valid-instruction", 1);
+      vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => emitContinuation(pane, request));
+      await renderKenPromptPane(pane, false, prompt);
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(prompt);
+      expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(pane.prepareContinuationHandoff).toHaveBeenCalledExactlyOnceWith(prompt);
+      expect(pane.commitContinuation).toHaveBeenCalledOnce();
+      expect(pane.newSession).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it("opens a side-effect-free non-Astra confirmation and cancels without changing the composer", async () => {
+    const pane = client("pane-confirm-cancel", 1);
     await renderKenPromptPane(pane);
-
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "unsent draft" } });
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("current session is unchanged");
-    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(KEN_PROMPT);
+    expect(screen.queryByLabelText("Destination context mode")).toBeNull();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(pane.newSession).toHaveBeenCalledTimes(2));
-    expect(pane.prepareContinuationHandoff).toHaveBeenCalledTimes(2);
-    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
-      expect(pane.sendPrompt).toHaveBeenCalledWith(CONTINUATION_PROMPT, [], { kenSent: true }),
+      expect(screen.queryByRole("dialog", { name: "Continue in a new session" })).toBeNull(),
     );
-  });
-
-  it("restores the complete handoff after an ambiguous new-session outcome", async () => {
-    const pane = client("pane-ken-ambiguous", 1);
-    vi.mocked(pane.newSession).mockRejectedValueOnce(
-      new NewSessionError("outcome-unknown", "connection closed"),
-    );
-    await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn’t confirm which session is active");
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
+    expect(input.value).toBe("unsent draft");
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("times out without guessing and restores the complete handoff to the composer", async () => {
-    const pane = client("pane-ken-timeout", 1);
-    await renderKenPromptPane(pane);
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(8_001);
+  const destination = {
+    conversationId: "conversation-2",
+    sessionId: "session-2",
+    profile: "stable" as const,
+  };
+  function emitContinuation(
+    pane: PaneAgentClient,
+    request: AgentModule.ContinuationCommitRequest,
+    emitAccepted = true,
+  ) {
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const emit = subscriptions[subscriptions.length - 1][0];
+    const actual = { ...destination, profile: request.profile ?? ("stable" as const) };
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      ...actual,
+      openAICodexContextProfile: actual.profile,
     });
+    emit({ type: "session_reset", data: { ...actual, operationId: request.operationId } });
+    if (emitAccepted)
+      emit({
+        type: "continuation_accepted",
+        data: {
+          ...request,
+          destination: actual,
+          acceptedMessageId: "message-1",
+          prompt: CONTINUATION_PROMPT,
+          kenSent: true,
+        },
+      });
+    return {
+      ...request,
+      outcome: "accepted" as const,
+      accepted: true as const,
+      resetAttempted: true as const,
+      destination: actual,
+      acceptedMessageId: "message-1",
+    };
+  }
 
-    expect(pane.newSession).toHaveBeenCalledOnce();
+  it.each(["stable", "experimental"] as const)(
+    "commits %s atomically after confirmation despite a locked source",
+    async (profile) => {
+      const pane = client("pane-atomic", 1);
+      const receipt = deferred<AgentModule.ContinuationCommitResponse>();
+      vi.mocked(pane.commitContinuation).mockReturnValueOnce(receipt.promise);
+      const sourceProfile = profile === "stable" ? "experimental" : "stable";
+      await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+        provider: "openai",
+        model: "gpt-6-astra",
+        accountId: "account-1",
+        openAICodexContextProfile: sourceProfile,
+        openAICodexContextProfileEligibility: { canChange: false, reason: "Started" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+      const selector = screen.getByLabelText("Destination context mode") as HTMLSelectElement;
+      expect(selector.value).toBe(sourceProfile);
+      expect(selector.disabled).toBe(false);
+      fireEvent.change(selector, { target: { value: profile } });
+      const confirm = screen.getByRole("button", { name: "Continue" });
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+      await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
+      const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+      expect(request).toEqual({
+        preparedId: "prepared-1",
+        operationId: expect.any(String),
+        profile,
+      });
+      expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+      expect(pane.newSession).not.toHaveBeenCalled();
+      expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      await act(async () => receipt.resolve(emitContinuation(pane, request)));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      act(() => emitContinuation(pane, request));
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    },
+  );
+
+  it("captures the selected block once despite later mentor output", async () => {
+    const pane = client("pane-exact-block", 1);
+    vi.mocked(pane.commitContinuation).mockRejectedValueOnce(new Error("lost ack"));
+    const selected =
+      "Selected café 日本語\\n literal\n  keep indentation <script>not markup</script>";
+    await renderKenPromptPane(
+      pane,
+      false,
+      `First instruction\n\`\`\`\n\n\`\`\`prompt\n${selected}`,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "New session" })[1]);
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    act(() =>
+      subscriptions[subscriptions.length - 1][0]({
+        type: "ken_text",
+        data: { text: "```prompt\nLater instruction\n```" },
+      }),
+    );
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(selected);
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(pane.prepareContinuationHandoff).toHaveBeenCalledWith(selected));
+    await screen.findByRole("button", { name: "Check outcome" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
-    expect(screen.getByRole("alert").textContent).toContain("Couldn’t confirm which session");
   });
 
-  it("keeps the fresh session authoritative and restores the prompt when its send fails", async () => {
-    const pane = client("pane-ken-post-reset-failure", 1);
-    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("transport failed"));
+  it("retries a lost receipt explicitly with the same operation and never duplicates the accepted bubble", async () => {
+    const pane = client("pane-receipt", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      emitContinuation(pane, request);
+      throw new Error("lost ack");
+    });
     await renderKenPromptPane(pane);
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
-    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const retry = await screen.findByRole("button", { name: "Check outcome" });
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+    vi.mocked(pane.commitContinuation).mockResolvedValueOnce({
+      ...request,
+      outcome: "accepted",
+      accepted: true,
+      resetAttempted: true,
+      destination,
+      acceptedMessageId: "message-1",
+    });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.commitContinuation).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pane.commitContinuation).mock.calls[1][0]).toEqual(request);
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
 
-    act(() => nativeMocks.onSessionReset?.("operation-1"));
+  it.each(["rejected", "partial", "outcome-unknown"] as const)(
+    "recovers complete text and selected mode after %s without resending",
+    async (outcome) => {
+      const pane = client("pane-recovery", 1);
+      vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+        const base = { ...request, message: "Controlled failure" };
+        if (outcome === "rejected")
+          return { ...base, outcome, accepted: false, resetAttempted: false };
+        if (outcome === "partial")
+          return { ...base, outcome, accepted: false, resetAttempted: true };
+        return { ...base, outcome, accepted: null, resetAttempted: true };
+      });
+      await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+        provider: "openai",
+        model: "gpt-6-astra",
+        accountId: "account-1",
+        openAICodexContextProfile: "experimental",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      await waitFor(() =>
+        expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+          CONTINUATION_PROMPT,
+        ),
+      );
+      expect((screen.getByLabelText("Destination context mode") as HTMLSelectElement).value).toBe(
+        "experimental",
+      );
+      expect(screen.getByRole("dialog").textContent).toContain(
+        outcome === "outcome-unknown" ? "Acceptance is unknown" : "No continuation was accepted",
+      );
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(pane.newSession).not.toHaveBeenCalled();
+    },
+  );
 
-    await waitFor(() =>
-      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT),
+  it.each(["provider failure", "malformed synthesis", "next instruction is too long", "HTTP 413: Request body too large", "Session is busy. Retry preparation when idle."])(
+    "fails closed before commit on %s",
+    async (message) => {
+      const pane = client("pane-prepare-failure", 1);
+      vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(
+        message.startsWith("HTTP") ? message : new Error(message),
+      );
+      await renderKenPromptPane(pane);
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "No reset or submission was requested",
+      );
+      expect(screen.getByRole("alert").textContent).toContain(message);
+      expect(screen.getByRole("dialog").textContent).toContain(message);
+      if (message.includes("413") || message === "next instruction is too long") {
+        for (const surface of [screen.getByRole("alert"), screen.getByRole("dialog")]) {
+          expect(surface.textContent).toContain("Shorten the continuation instruction");
+          expect(surface.textContent).toContain(`current length: ${KEN_PROMPT.length}`);
+          expect(surface.textContent).toContain("maximum: 8000");
+          expect(surface.textContent).toContain("Nothing has been truncated");
+        }
+      }
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+      expect(pane.commitContinuation).not.toHaveBeenCalled();
+      expect(pane.newSession).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      fireEvent.click(within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0]);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("ignores wrong-operation and wrong-destination resets and late duplicate resets around acceptance", async () => {
+    const pane = client("pane-reset-identity", 1);
+    const receipt = deferred<AgentModule.ContinuationCommitResponse>();
+    vi.mocked(pane.commitContinuation).mockReturnValueOnce(receipt.promise);
+    await renderKenPromptPane(pane);
+    vi.mocked(pane.waitForReady).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
+    const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const emit = subscriptions[subscriptions.length - 1][0];
+    act(() =>
+      emit({ type: "session_reset", data: { ...destination, operationId: "wrong-operation" } }),
     );
-    expect(screen.getByRole("alert").textContent).toContain("new session opened");
-    expect(screen.getByRole("alert").textContent).toContain("back in the composer");
-    expect(document.querySelector(".user-ken-sent")).toBeNull();
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    // A forged/mismatched accepted event cannot insert into the source transcript.
+    act(() =>
+      emit({
+        type: "continuation_accepted",
+        data: {
+          ...request,
+          destination,
+          acceptedMessageId: "wrong-message",
+          prompt: CONTINUATION_PROMPT,
+          kenSent: true,
+        },
+      }),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    await act(async () =>
+      receipt.resolve({
+        ...request,
+        outcome: "accepted",
+        accepted: true,
+        resetAttempted: true,
+        destination,
+        acceptedMessageId: "message-1",
+      }),
+    );
+    await waitFor(() => expect(pane.waitForReady).toHaveBeenCalled());
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: {
+          ...destination,
+          conversationId: "wrong-destination",
+          operationId: request.operationId,
+        },
+      }),
+    );
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    act(() => emitContinuation(pane, request));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    act(() =>
+      emit({ type: "session_reset", data: { ...destination, operationId: request.operationId } }),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes selected and actual modes after a partial persistence failure", async () => {
+    const pane = client("pane-partial-mode", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => ({
+      ...request,
+      outcome: "partial",
+      accepted: false,
+      resetAttempted: true,
+      destination,
+      selectedProfile: "experimental",
+      recoveryPrompt: CONTINUATION_PROMPT,
+      error: "profile-persistence-failed",
+      message: "Saving the destination mode failed",
+    }));
+    await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+      provider: "openai",
+      model: "gpt-6-astra",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "Reported destination context mode: stable",
+      ),
+    );
+    expect(screen.getByRole("dialog").textContent).toContain("No continuation was accepted");
+    expect((screen.getByLabelText("Destination context mode") as HTMLSelectElement).value).toBe(
+      "experimental",
+    );
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+  });
+
+  it("does not attribute an accepted receipt to a different authoritative destination", async () => {
+    const pane = client("pane-mismatched-receipt", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      const receipt = emitContinuation(pane, request, false);
+      return {
+        ...receipt,
+        destination: { ...destination, conversationId: "another-conversation" },
+      };
+    });
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "different destination than the observed reset",
+      ),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("preserves known acceptance when the subsequent destination refresh fails", async () => {
+    const pane = client("pane-refresh-failure", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      const receipt = emitContinuation(pane, request, false);
+      vi.mocked(pane.getState).mockRejectedValueOnce(new Error("state unavailable"));
+      return receipt;
+    });
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "The server accepted the continuation, but refreshing the destination failed",
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Check outcome" })).toBeNull();
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("reports acceptance without inserting a late bubble when its SSE event is missing", async () => {
+    const pane = client("pane-missing-event", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) =>
+      emitContinuation(pane, request, false),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain("transcript event was not observed"),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it("blocks fresh resets during Autopilot review and shares correlation with the toolbar modal", async () => {

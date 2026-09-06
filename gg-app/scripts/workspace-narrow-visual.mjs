@@ -160,6 +160,10 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
       await action();
     } catch (error) {
       failures.push(`${label}: ${error.message}`);
+      if (label.startsWith("Continuation cancel")) {
+        const cancel = page.locator(".modal-actions").getByRole("button", { name: "Cancel", exact: true });
+        if (await cancel.count()) await cancel.evaluate((element) => element.click());
+      }
     }
   };
   await verify(`${mode} document width`, async () => {
@@ -200,6 +204,39 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
         assert.deepEqual(fragmented, [], "action label words must not fragment across lines");
       });
     }
+    await verify(`Continuation cancel ${index}`, async () => {
+      await page.evaluate(() => {
+        window.__continuationCalls = [];
+        if (window.__trackContinuationCalls) return;
+        window.__trackContinuationCalls = true;
+        const invoke = window.__TAURI_INTERNALS__.invoke;
+        window.__TAURI_INTERNALS__.invoke = (command, args) => {
+          if (["agent_continuation_handoff", "agent_commit_continuation"].includes(command)) {
+            window.__continuationCalls.push(command);
+          }
+          return invoke(command, args);
+        };
+      });
+      const fresh = block.getByRole("button", { name: "New session", exact: true });
+      await assertControlReachable(fresh, `${mode} New session ${index}`);
+      await page.keyboard.press("Enter");
+      const preview = page.getByLabel("Selected continuation prompt");
+      await preview.waitFor();
+      assert.equal(await preview.textContent(), promptBodies[index]);
+      const destination = page.getByRole("combobox", { name: "Destination context mode" });
+      await assertControlReachable(destination, `${mode} destination context mode`);
+      const initial = await destination.inputValue();
+      await destination.click();
+      await page.keyboard.press("Escape");
+      await page.keyboard.press(initial === "stable" ? "ArrowDown" : "ArrowUp");
+      await page.keyboard.press("Enter");
+      assert.equal(await destination.inputValue(), initial === "stable" ? "experimental" : "stable");
+      const cancel = page.locator(".modal-actions").getByRole("button", { name: "Cancel", exact: true });
+      await assertControlReachable(cancel, `${mode} continuation Cancel`);
+      await page.keyboard.press("Enter");
+      await preview.waitFor({ state: "detached" });
+      assert.deepEqual(await page.evaluate(() => window.__continuationCalls), []);
+    });
     const save = block.getByRole("button", { name: "Save to Notes", exact: true });
     await verify(`Save ${index}`, async () => {
       await assertControlReachable(save, `${mode} Save ${index}`);
@@ -286,12 +323,52 @@ async function applyAstraScenario(page, scenario) {
         contextTokens,
         contextWindow,
         openAICodexContextProfile,
+        openAICodexContextProfileEligibility: { canChange: true },
         openAICodexFast,
       },
       running: scenario.controls === "disabled",
     },
   );
   await page.waitForTimeout(150);
+}
+
+async function verifyContextSelectorFocus(page, pane = page) {
+  const selector = pane.getByRole("combobox", { name: "OpenAI Codex context profile" });
+  await page.evaluate(() => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = (command, args) =>
+      command === "agent_set_context_profile"
+        ? Promise.resolve({ openAICodexContextProfile: args.profile, contextWindow: 1_000_000 })
+        : invoke(command, args);
+  });
+  await selector.click();
+  await page.keyboard.press("Escape");
+
+  assert.equal(
+    await selector.evaluate((element) => document.activeElement === element),
+    true,
+    "Clicking the native context selector must retain keyboard focus",
+  );
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  assert.equal(
+    await selector.evaluate((element) => document.activeElement === element),
+    true,
+    "Window focus must not steal focus from the native context selector",
+  );
+  await applyAstraScenario(page, astraVisualScenarios[0]);
+  assert.equal(
+    await selector.evaluate((element) => document.activeElement === element),
+    true,
+    "Extras must preserve native context selector focus",
+  );
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  assert.equal(await selector.inputValue(), "experimental");
+  await selector.click();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  assert.equal(await selector.inputValue(), "stable");
 }
 
 export async function runWorkspaceNarrowVisualFixture({
@@ -353,7 +430,10 @@ export async function runWorkspaceNarrowVisualFixture({
     await context.addInitScript(initScript, {
       responses: {
         ...responses,
-        agent_state: astraVisualScenarios[0].state,
+        agent_state: {
+          ...astraVisualScenarios[0].state,
+          openAICodexContextProfileEligibility: { canChange: true },
+        },
         agent_history: {
           history: promptBodies.map((text) => ({
             role: "assistant",
@@ -363,7 +443,6 @@ export async function runWorkspaceNarrowVisualFixture({
         },
         agent_sessions: { sessions: [] },
         agent_pane_restore: 1,
-        agent_pane_status: { paneId: "primary", generation: 1, ready: true },
       },
       appVersion: "0.29.0",
     });
@@ -384,11 +463,55 @@ export async function runWorkspaceNarrowVisualFixture({
           },
         }),
       );
+      const focus = new URL(location.href).searchParams.get("focus-fixture");
+      if (focus !== null) {
+        const key = "gg-workspace-layout-recursive:main";
+        const layout = JSON.parse(localStorage.getItem(key));
+        layout.root = {
+          type: "split",
+          direction: "horizontal",
+          size: { type: "ratio", value: 0.5 },
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "secondary" },
+        };
+        layout.panes.secondary = { ...layout.panes.primary };
+        layout.focusedPaneId = focus === "true" ? "primary" : "secondary";
+        localStorage.setItem(key, JSON.stringify(layout));
+      }
     });
     const page = await context.newPage();
     await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(".chat-head-nav");
     await page.waitForTimeout(1_000);
+
+    const focusFailures = [];
+    for (const initiallyFocused of [true, false]) {
+      const focusPage = await context.newPage();
+      try {
+        await focusPage.setViewportSize({ width: 1440, height: 900 });
+        const focusUrl = new URL(fixtureUrl);
+        focusUrl.searchParams.set("focus-fixture", String(initiallyFocused));
+        await focusPage.goto(focusUrl.href, { waitUntil: "domcontentloaded" });
+        await focusPage.locator('[data-pane-id="primary"] textarea').waitFor();
+        await focusPage.locator('[data-pane-id="secondary"] textarea').waitFor();
+        // Establish the interaction precondition explicitly after both panes mount.
+        await focusPage.locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"] textarea`).click();
+        await focusPage
+          .locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"].pane-focused`)
+          .waitFor({ timeout: 5_000 });
+        const pane = focusPage.locator('[data-pane-id="primary"].workspace-pane-slot');
+        await pane
+          .getByRole("combobox", { name: "OpenAI Codex context profile" })
+          .waitFor({ timeout: 5_000 });
+        await verifyContextSelectorFocus(focusPage, pane);
+      } catch (error) {
+        focusFailures.push(`${initiallyFocused ? "focused" : "unfocused"} pane: ${error.message}`);
+
+      } finally {
+        await focusPage.close();
+      }
+    }
+    assert.deepEqual(focusFailures, [], "Native context selector interaction");
 
     const scenarioShells = {};
     const screenshots = [];

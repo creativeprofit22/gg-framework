@@ -40,10 +40,16 @@ describe("pane agent client", () => {
       if (command === "agent_pane_status") {
         return { ready: true, error: null, generation: 1, sessionId: "session" };
       }
+      if (command === "agent_switch_ken_model") return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
       if (command === "agent_prompt") return { queued: false, count: 0 };
       if (command === "agent_mcp_list") return { servers: [] };
       if (command === "agent_continuation_handoff") {
-        return { version: 1, prompt: "## Objective\nContinue" };
+        return {
+          version: 1, prompt: "## Objective\nContinue",
+          preparedId: "prepared-pane", expiresAt: Date.now() + 60_000,
+          source: { conversationId: "source-pane", sessionId: "source-session",
+            leafId: "source-leaf", fingerprint: "source-fingerprint" },
+        };
       }
       if (command === "agent_new_session") return { operationId: "new-session-op" };
       if (command === "agent_accept_plan") {
@@ -54,6 +60,30 @@ describe("pane agent client", () => {
       }
       return {};
     });
+  });
+
+  it.each(["cannot switch Ken's model while running", "unknown model: missing"])(
+    "rejects Ken HTTP errors: %s", async (message) => {
+      invoke.mockRejectedValueOnce(message);
+      await expect(createPaneAgentClient("right").switchKenModel("missing")).rejects.toEqual(message);
+      expect(invoke).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([null, {}, { error: "unknown model: missing" },
+    { kenProvider: "openai", kenModel: "gpt", kenModelOverride: "true" },
+    { kenProvider: "openai", kenModel: " ", kenModelOverride: false }])(
+    "rejects malformed Ken success bodies: %j", async (body) => {
+      invoke.mockResolvedValueOnce(body);
+      await expect(createPaneAgentClient("right").switchKenModel("gpt")).rejects.toThrow();
+    },
+  );
+
+  it.each(["gpt", null])("accepts Ken pin/clear %s", async (model) => {
+    const result = { kenProvider: "openai", kenModel: "gpt", kenModelOverride: model !== null };
+    invoke.mockResolvedValueOnce(result);
+    await expect(createPaneAgentClient("right").switchKenModel(model)).resolves.toEqual(result);
+    expect(invoke).toHaveBeenCalledWith("agent_switch_ken_model", { paneId: "right", model });
   });
 
   it("routes the current IPC surface with the complete pane argument matrix", async () => {
@@ -69,8 +99,12 @@ describe("pane agent client", () => {
     await c.sendPrompt("p", [], { kenSent: true });
     await c.prepareContinuationHandoff("next exactly");
     await c.cancel();
-    await c.sendKenPrompt("k");
-    await c.cancelKen();
+    const kenTarget = { conversationId: "conversation", activationEpoch: "epoch" };
+    await c.sendKenPrompt("k", kenTarget);
+    expect(invoke).toHaveBeenCalledWith("agent_ken_prompt", { paneId: "right", text: "k", target: kenTarget });
+    const ken = { conversationId: "conversation", activationEpoch: "epoch", runId: "run" };
+    await c.cancelKen(ken);
+    expect(invoke).toHaveBeenCalledWith("agent_ken_cancel", { paneId: "right", ken });
     await c.setAutopilot(true);
     await c.acceptPlan("checkpoint-1", 3);
     await c.revisePlan("checkpoint-1", 3, "Add recovery tests");
@@ -349,6 +383,30 @@ describe("pane agent client", () => {
     await expect(client.cancelPhaseRun("phase/21")).rejects.toThrow(
       "invalid phase cancellation response",
     );
+  });
+
+  it.each([
+    ["8001 units", "x".repeat(8001), "8001"],
+    ["whitespace", " \r\n\t", "nonblank"],
+  ])("rejects %s before prepare IPC", async (_name, instruction, message) => {
+    await expect(createPaneAgentClient("right").prepareContinuationHandoff(instruction)).rejects.toThrow(message);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { error: "next instruction is too long", message: "HTTP 413: Shorten the instruction." },
+    { error: "HTTP 400: empty next instruction" },
+    { error: "Session is busy. Retry preparation when idle." },
+    { error: "Provider credentials expired. Sign in again." },
+  ])("retains a server preparation error body: %j", async (body) => {
+    invoke.mockResolvedValueOnce(body);
+    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toThrow(body.message ?? body.error);
+  });
+
+  it("retains native HTTP 413 rejection text", async () => {
+    const message = "HTTP 413: Request body exceeds the transport limit.";
+    invoke.mockRejectedValueOnce(message);
+    await expect(createPaneAgentClient("right").prepareContinuationHandoff("next")).rejects.toBe(message);
   });
 
   it("rejects malformed continuation-handoff responses", async () => {

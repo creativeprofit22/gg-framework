@@ -30,6 +30,7 @@ export type KenPromptAction =
   | { type: "commit-save"; prompt: string; target: KenPromptSaveTarget };
 
 export type KenPromptActionResult =
+  | { status: "cancelled" }
   | { status: "sent"; session: "current" | "fresh" }
   | { status: "preview"; preview: KenPromptSavePreview }
   | { status: "saved"; phaseId: string; title: string }

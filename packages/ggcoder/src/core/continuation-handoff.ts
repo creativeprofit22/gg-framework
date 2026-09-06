@@ -1,10 +1,11 @@
 import type { ContentPart, Message } from "@kenkaiiii/gg-ai";
 import { z } from "zod";
+import { CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export const CONTINUATION_HANDOFF_VERSION = 1 as const;
 
 export const CONTINUATION_HANDOFF_LIMITS = {
-  nextInstructionChars: 8_000,
+  nextInstructionChars: CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
   objectiveChars: 1_200,
   listItems: 6,
   listItemChars: 500,

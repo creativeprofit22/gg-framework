@@ -23,6 +23,9 @@ import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkai
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import { appSettingsFile } from "./app-sidecar-paths.js";
+import {
+  createAppSidecarKenLifecycle, createKenSessionInitializer, parseKenPromptInput, parseKenRunIdentity,
+} from "./app-sidecar-ken-lifecycle.js";
 import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
@@ -59,9 +62,8 @@ import { buildJiwaTools, JiwaStore } from "./chat-agents/jiwa.js";
 import { buildMemoryTools, MemoryStore } from "./chat-agents/memory.js";
 import { buildKenSystemPrompt, buildKenAutopilotSystemPrompt } from "./core/ken-prompt.js";
 import {
-  buildKenDigest,
-  buildKenAutopilotContext,
-  buildKenAutopilotPlanContext,
+  buildKenInteractiveSessionContext,
+  runKenAutopilotSessionReview,
 } from "./core/ken-context.js";
 import { parseAutopilotVerdict, type AutopilotVerdict } from "./core/autopilot-verdict.js";
 import {
@@ -73,6 +75,7 @@ import {
   type WorkflowCommandSpec,
 } from "./core/autopilot-gate.js";
 import { driveAutopilotCycle, frameAutopilotInjection } from "./core/autopilot-cycle.js";
+import { createContinuationPromptAdapter, createStrandedQueueDrain, runUserTurn, type UserTurnDeps } from "./app-sidecar-user-turn.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
 import {
@@ -343,7 +346,11 @@ import {
 import {
   AppSidecarSessionMutationCoordinator,
   runAppSidecarNewSessionMutation,
+  runAppSidecarPromptStartup,
+  type SessionMutationOwner,
 } from "./app-sidecar-session-mutation.js";
+import { AppSidecarContinuationSession, parseContinuationCommitRequest } from "./app-sidecar-continuation-session.js";
+import type { ContinuationCommitResponse, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
@@ -1759,11 +1766,10 @@ function buildKenContext(
   workflowCommands: readonly WorkflowCommandSpec[],
   injectedPrompts: readonly string[],
 ): string {
-  return buildKenDigest({
+  return buildKenInteractiveSessionContext(buildSession, {
     question,
     cwd,
     gitBranch,
-    messages: buildSession.getMessages(),
     workflowCommands,
     injectedPrompts,
   });
@@ -2079,7 +2085,9 @@ async function createSession(
     return `data: ${JSON.stringify(safePayload)}\n\n`;
   }
 
+  let readKenState: () => KenState | null = () => null;
   function broadcast(type: string, data: unknown): void {
+    if (type === "session_reset") data = { ...(data as object), kenState: readKenState() };
     const frame = sseFrame(type, data);
     for (const client of clients) {
       try {
@@ -2769,8 +2777,10 @@ async function createSession(
     gitHubRepoUrl: string | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
     additionalRoots: string[];
+    kenState: KenState | null;
   } {
     return {
+      kenState: readKenState(),
       ...getAgentSessionContextSnapshot(session),
       gitBranch,
       isGitRepo: gitIsRepo,
@@ -3457,10 +3467,57 @@ async function createSession(
   // first `@Ken` so windows that never use Ken pay zero cost. His events ride the
   // SAME SSE stream with `ken_`-prefixed types, routed to the Ken bubble.
   let kenSession: AgentSession | null = null;
-  let kenAbort = new AbortController();
-  let kenRunning = false;
-  let pendingKenModel: { provider: Provider; model: string } | null = null;
+  const ensureKenSession = createKenSessionInitializer({
+    create: createKenSession,
+    initialize: async (ken: AgentSession) => { await ken.initialize(); },
+  });
   const kenToolCallNames = new Map<string, string>();
+  const kenLifecycle = createAppSidecarKenLifecycle({
+    mutations: sessionMutations,
+    getBuildSession: () => session,
+    ensureSession: ensureKenSession,
+    currentModel: kenCurrentModel,
+    buildContext: async (build, text) => buildKenContext(
+      build, cwd, gitBranch, text, await loadWorkflowCommandSpecs(), injectedAutopilotPrompts,
+    ),
+    replyText: (ken) => lastAssistantText(ken.getMessages()),
+    listen: (ken, publish) => {
+      const off = [
+        ken.eventBus.on("text_delta", (d) => { publish("ken_text_delta", d); }),
+        ken.eventBus.on("thinking_delta", (d) => { publish("ken_thinking_delta", d); }),
+        ken.eventBus.on("tool_call_start", (d) => {
+          if (publish("ken_tool_call_start", d)) kenToolCallNames.set(d.toolCallId, d.name);
+        }),
+        ken.eventBus.on("tool_call_update", (d) => { publish("ken_tool_call_update", d); }),
+        ken.eventBus.on("tool_call_end", (d) => {
+          if (publish("ken_tool_call_end", d)) kenToolCallNames.delete(d.toolCallId);
+        }),
+        ken.eventBus.on("server_tool_call", (d) => { publish("ken_server_tool_call", d); }),
+        ken.eventBus.on("turn_end", (d) => { publish("ken_turn_end", d); }),
+        ken.eventBus.on("error", (d) => {
+          publish("ken_error", formatSidecarError(d.error, desktopGuidance, sidecarErrorSecrets).event);
+        }),
+      ];
+      return () => { for (const detach of off) detach(); };
+    },
+    footerExtras,
+    broadcast,
+    reportError: (error) => {
+      const formatted = formatSidecarError(error, desktopGuidance, sidecarErrorSecrets);
+      captureSidecarError(error, "app-sidecar.ken-run-failed", { scope: "ken_error" });
+      log("ERROR", "app-sidecar", "ken run failed", formatted.logFields);
+      return formatted.event;
+    },
+    switchModel: async (ken, target: { provider: Provider; model: string }) => {
+      const state = ken.getState();
+      if (state.provider !== target.provider || state.model !== target.model) {
+        await ken.switchModel(target.provider, target.model);
+      }
+    },
+    clearPendingState: () => kenToolCallNames.clear(),
+  });
+  readKenState = () => kenLifecycle.state;
+  bindKenTransitions(session);
 
   // Ken's per-project model override. null → Ken (chat + autopilot) follows GG
   // Coder's model, including live switches (the historical behavior). Set → Ken
@@ -3494,19 +3551,17 @@ async function createSession(
   }
 
   async function syncKenModel(provider: Provider, model: string): Promise<void> {
-    if (kenRunning) {
-      pendingKenModel = { provider, model };
-      return;
-    }
-    if (!kenSession) return;
-    const st = kenSession.getState();
-    if (st.provider === provider && st.model === model) return;
-    await kenSession.switchModel(provider, model);
-    log("INFO", "app-sidecar", "ken session model synced", { provider, model });
+    await kenLifecycle.syncModel({ provider, model });
   }
 
-  async function ensureKenSession(): Promise<AgentSession> {
-    if (kenSession) return kenSession;
+  function bindKenTransitions(build: AgentSession): void {
+    build.setBeforeConversationTransition((kind) => {
+      if (build !== session) return () => {};
+      return kenLifecycle.beginTransition(kind === "checkpoint");
+    });
+  }
+
+  async function createKenSession(signal: AbortSignal): Promise<AgentSession> {
     const target = kenCurrentModel();
     const ken = new AgentSession({
       provider: target.provider,
@@ -3518,7 +3573,7 @@ async function createSession(
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       sharedMcpPool,
       transient: true,
-      signal: kenAbort.signal,
+      signal,
       // Ken belongs to THIS window, so its window is where an MCP prompt
       // should appear. Passing the bridge also keeps every session in the
       // daemon uniformly interactive, which is what lets them share ONE pooled
@@ -3530,30 +3585,10 @@ async function createSession(
       // TTL regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
     });
-    await ken.initialize();
-    // Bridge Ken's bus to the shared SSE fan-out with ken_-prefixed types so the
-    // webview routes them to the Ken bubble, never GG Coder's.
-    ken.eventBus.on("text_delta", (d) => broadcast("ken_text_delta", d));
-    ken.eventBus.on("thinking_delta", (d) => broadcast("ken_thinking_delta", d));
-    ken.eventBus.on("tool_call_start", (d) => {
-      kenToolCallNames.set(d.toolCallId, d.name);
-      broadcast("ken_tool_call_start", d);
-    });
-    ken.eventBus.on("tool_call_update", (d) => broadcast("ken_tool_call_update", d));
-    ken.eventBus.on("tool_call_end", (d) => {
-      kenToolCallNames.delete(d.toolCallId);
-      broadcast("ken_tool_call_end", d);
-    });
-    // Native server tools (Anthropic web_search) stream text both before AND
-    // after them in the same turn; forward so the webview can break the bubble
-    // (otherwise "...work.Local tools..." glues together). Mirrors the build bus.
-    ken.eventBus.on("server_tool_call", (d) => broadcast("ken_server_tool_call", d));
-    ken.eventBus.on("turn_end", (d) => broadcast("ken_turn_end", d));
-    ken.eventBus.on("error", (d) => {
-      broadcastError("ken_error", "ken error", d.error);
-    });
     kenSession = ken;
-    log("INFO", "app-sidecar", "ken session ready", {
+    // Initialization is owned by the single-instance initializer. Interactive
+    // listeners are attached only after it succeeds, per run by kenLifecycle.
+    log("INFO", "app-sidecar", "ken session allocated", {
       provider: target.provider,
       model: target.model,
     });
@@ -3890,6 +3925,7 @@ async function createSession(
       }
 
       const previousPhaseSessionPath = previousActivePhase?.session.sessionPath;
+      const previousPhaseConversationId = session.getConversationIdentity().conversationId;
       const previousLeaseMarker = session.getRoadmapPhaseLeaseMarker();
       const durablePlan =
         previousActivePhase && approvalWorkspace
@@ -3974,7 +4010,7 @@ async function createSession(
         durablePlan,
         restorePreviousSession: previousPhaseSessionPath
           ? async () => {
-              await session.loadSessionCheckpoint(previousPhaseSessionPath);
+              await session.loadSessionCheckpoint(previousPhaseSessionPath, previousPhaseConversationId);
               deactivateApprovedPlan();
             }
           : undefined,
@@ -4056,25 +4092,24 @@ async function createSession(
   // ── Autopilot orchestration ─────────────────────────────────
   // Ordinary Autopilot review remains independent from Roadmap completion.
   async function runAutopilotReview(originalRequest: string): Promise<AutopilotVerdict | null> {
+    const reviewConversation = session.getConversationIdentity().conversationId;
+    const destinationChanged = () => session.getConversationIdentity().conversationId !== reviewConversation;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      const ken = await ensureKenAutoSession();
-      const workflowCommands = await loadWorkflowCommandSpecs();
-      await ken.prompt(
-        buildKenAutopilotContext({
-          cwd,
-          gitBranch,
-          messages: session.getMessages(),
-          originalRequest,
-          injectedPrompts: [...injectedAutopilotPrompts],
-          workflowCommands,
-        }),
-      );
-      if (autopilotCancelled) return null;
-      return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+      return await runKenAutopilotSessionReview(() => session, async () => {
+        const ken = await ensureKenAutoSession();
+        const workflowCommands = await loadWorkflowCommandSpecs();
+        return {
+          input: { cwd, gitBranch, originalRequest, injectedPrompts: [...injectedAutopilotPrompts], workflowCommands },
+          review: async (digest) => {
+            await ken.prompt(digest);
+            return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+          },
+        };
+      }, () => !autopilotCancelled);
     } catch (error) {
-      if (!autopilotCancelled) {
+      if (!autopilotCancelled && !destinationChanged()) {
         broadcastError("autopilot_error", "autopilot review failed", error);
       }
       return null;
@@ -4092,35 +4127,33 @@ async function createSession(
   // on failure; a failure caused by the user's own action racing the review
   // SILENT when a human action wins the checkpoint race.
   async function runAutopilotPlanReview(originalRequest: string): Promise<AutopilotVerdict | null> {
+    const reviewConversation = session.getConversationIdentity().conversationId;
+    const destinationChanged = () => session.getConversationIdentity().conversationId !== reviewConversation;
     const checkpoint = planGate.current();
     if (!checkpoint || checkpoint.state !== "pending-review") return null;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      const ken = await ensureKenAutoSession();
-      const digest = buildKenAutopilotPlanContext({
-        cwd,
-        gitBranch,
-        messages: session.getMessages(),
-        originalRequest,
-        injectedPrompts: [...injectedAutopilotPrompts],
-        workflowCommands: await loadWorkflowCommandSpecs(),
-        planContent: checkpoint.content,
+      return await runKenAutopilotSessionReview(() => session, async () => {
+        const ken = await ensureKenAutoSession();
+        const workflowCommands = await loadWorkflowCommandSpecs();
+        return {
+          input: { cwd, gitBranch, originalRequest, injectedPrompts: [...injectedAutopilotPrompts],
+            workflowCommands, planContent: checkpoint.content },
+          review: async (digest) => {
+            await ken.prompt(digest);
+            return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+          },
+        };
+      }, () => {
+        const current = planGate.current();
+        return !autopilotCancelled && current?.checkpointId === checkpoint.checkpointId &&
+          current.generation === checkpoint.generation && current.state === "pending-review";
       });
-      await ken.prompt(digest);
-      const current = planGate.current();
-      if (
-        autopilotCancelled ||
-        current?.checkpointId !== checkpoint.checkpointId ||
-        current.generation !== checkpoint.generation ||
-        current.state !== "pending-review"
-      )
-        return null;
-      return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
     } catch (err) {
       const current = planGate.current();
       if (
-        autopilotCancelled ||
+        autopilotCancelled || destinationChanged() ||
         current?.checkpointId !== checkpoint.checkpointId ||
         current.generation !== checkpoint.generation ||
         current.state !== "pending-review"
@@ -4179,6 +4212,17 @@ ${checkpoints}`;
       });
       return;
     }
+    // launchBoundPhase acquires its phase-start lease synchronously. Fence the
+    // mentor before the launcher's first await, not only at replaceSession.
+    if (sessionMutations.owner) {
+      respond(409, {
+        status: "failed", code: "session-busy", message: "A session mutation is in progress; retry shortly.",
+        operationId: sessionMutations.owner.operationId,
+      });
+      return;
+    }
+    const finishKenTransition = kenLifecycle.beginTransition(false, true);
+    try {
     await launchBoundPhase({
       phaseId,
       advancementConfirmation,
@@ -4194,6 +4238,7 @@ ${checkpoints}`;
       createSession: (active) => createCodingSession(undefined, active),
       replaceSession: (replacement) => {
         session = replacement;
+        bindKenTransitions(replacement);
         planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
       },
       bindSessionEvents,
@@ -4225,6 +4270,7 @@ ${checkpoints}`;
       onAttentionFailure: (error, metadata) =>
         captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata),
     });
+    } finally { finishKenTransition(); }
   }
 
   // Drive the review→prompt→review loop for one finished user turn. Only ever
@@ -4351,11 +4397,9 @@ ${checkpoints}`;
   // unrelated run. Drain it here as a fresh turn of its own (with its own
   // gated review). Also covers the non-autopilot tail window: a message queued
   // after the run's last steering drain but before run_end.
-  let drainingStrandedQueue = false;
-  async function runStrandedQueue(): Promise<void> {
-    if (drainingStrandedQueue || planGate.pending()) return;
-    drainingStrandedQueue = true;
-    try {
+  const runStrandedQueue = createStrandedQueueDrain(
+    () => planGate.pending() !== null,
+    async () => {
       for (;;) {
         if (running || autopilotActive) return;
         const next = session.takeNextQueuedMessage();
@@ -4405,10 +4449,8 @@ ${checkpoints}`;
           });
         }
       }
-    } finally {
-      drainingStrandedQueue = false;
-    }
-  }
+    },
+  );
 
   // ── Task runner (project task list → sessions) ──────────────
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
@@ -4607,6 +4649,55 @@ ${checkpoints}`;
   const continuationHandoffService = new AppSidecarContinuationHandoffService({
     createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
       new AgentSession(options),
+  });
+  // Shared reset bookkeeping: ordinary reset and continuation use the same owner/event path.
+  async function resetBuildSession(mutation: SessionMutationOwner): Promise<void> {
+    await session.newSession(false);
+    if (mode === "chat") await session.persistAppMarker("agent_handoff", { chatAgent });
+    deactivateApprovedPlan();
+    injectedAutopilotPrompts = [];
+    planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
+    const { conversationId, sessionId } = session.getConversationIdentity();
+    log("INFO", "app-sidecar", "new session accepted", {
+      logicalSessionId: opts.id, operationId: mutation.operationId,
+    });
+    broadcast("session_reset", {
+      operationId: mutation.operationId, kind: mutation.kind, conversationId, sessionId,
+    });
+    broadcast("extras", footerExtras());
+  }
+  const userTurnDeps: UserTurnDeps = {
+    runAgent,
+    getMessages: () => session.getMessages(),
+    clearCancelled: () => { autopilotCancelled = false; },
+    gateState: () => ({ enabled: autopilot, cancelled: autopilotCancelled,
+      planMode: session.getPlanMode(), planPending: planGate.pending() !== null }),
+    review: runAutopilotCycle,
+    drainQueue: runStrandedQueue,
+    decision: (decision) => {
+      if (decision.start) {
+        log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
+      } else if (autopilot) {
+        log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+      }
+    },
+  };
+  const continuationSession = new AppSidecarContinuationSession({
+    session,
+    mutations: sessionMutations,
+    runClaim,
+    busy: () => running || autopilotActive || runLifecycle.running || planGateConflict() !== null,
+    prepare: (instruction) => continuationHandoffService.prepare(session, instruction),
+    reset: resetBuildSession,
+    prompt: createContinuationPromptAdapter({
+      prompt: (prompt, onAccepted) => promptActiveSession(prompt, undefined, { onAccepted }),
+      userTurn: userTurnDeps,
+      workflowCommand: async (text) => isWorkflowCommandText(text, await loadWorkflowCommandSpecs()),
+    }),
+    accepted: (event) => {
+      broadcast("continuation_accepted", event);
+      broadcast("extras", footerExtras());
+    },
   });
   const decisionSummaryService = new AppSidecarDecisionSummaryService(
     (options: DecisionSummarySessionOptions) => new AgentSession(options),
@@ -5555,8 +5646,8 @@ ${checkpoints}`;
             return;
           }
           try {
-            const prepared = await continuationHandoffService.prepare(session, nextInstruction);
-            json(res, 200, { version: prepared.version, prompt: prepared.prompt });
+            const prepared = await continuationSession.prepare(nextInstruction);
+            json(res, 200, prepared);
           } catch (error) {
             captureSidecarError(error, "app-sidecar.continuation-handoff");
             json(res, 502, {
@@ -5568,6 +5659,31 @@ ${checkpoints}`;
           captureSidecarError(error, "app-sidecar.continuation-handoff.route");
           json(res, 500, { error: "continuation handoff failed" });
         });
+      return;
+    }
+
+    if (method === "POST" && url === "/continuation-commit") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try { body = JSON.parse(raw); } catch { body = null; }
+        const request = parseContinuationCommitRequest(body);
+        if (!request) {
+          json(res, 400, {
+            operationId: "", preparedId: "", outcome: "rejected", accepted: false,
+            resetAttempted: false, error: "invalid_continuation_commit", message: "Expected preparedId, operationId and optional profile only.",
+          } satisfies ContinuationCommitResponse);
+          return;
+        }
+        const result = await continuationSession.commit(request);
+        json(res, result.status, result.body);
+      }).catch((error) => {
+        captureSidecarError(error, "app-sidecar.continuation-commit");
+        if (!res.headersSent) json(res, 500, {
+          operationId: "", preparedId: "", outcome: "outcome-unknown", accepted: null,
+          resetAttempted: true, error: "continuation_outcome_unknown", message: "Inspect the current session. Do not automatically reset or resend.",
+        } satisfies ContinuationCommitResponse);
+      });
       return;
     }
 
@@ -5610,189 +5726,154 @@ ${checkpoints}`;
             json(res, 400, { error: "command_input_not_allowed", message: inputPolicyError });
             return;
           }
-          // A typed prompt supersedes any question parked on the user: they
-          // answered with a message of their own. Release the blocked tool call
-          // before routing or steering this prompt.
-          asks.cancelAll({ action: "cancel", superseded: true });
+          await runAppSidecarPromptStartup({
+            mutations: sessionMutations,
+            conflict: (body) => json(res, 409, body),
+            perform: async (onAccepted) => {
+              // A typed prompt supersedes any question parked on the user: they
+              // answered with a message of their own. Release the blocked tool call
+              // before routing or steering this prompt.
+              asks.cancelAll({ action: "cancel", superseded: true });
 
-          // Classify the raw, case-sensitive built-in token before any generic
-          // workflow/custom-command lookup can expand a conflicting research.md.
-          const researchRoute = resolveChatResearchCommandRoute({
-            mode,
-            text,
-            attachmentCount: attachments.length,
-            busy: running || runClaim.active || autopilotActive || runLifecycle.running,
-          });
-          const handledResearch = await handleAppSidecarChatResearchPrompt({
-            route: researchRoute,
-            claimStart: () => {
-              // `/research` is a fail-fast transition, never mid-run steering. Claim
-              // synchronously before any switch or persistence operation can yield.
-              claimedStart = runClaim.claim();
-              return claimedStart;
-            },
-            respond: ({ status, body }) => json(res, status, body),
-            runAgent,
-            operations: {
-              session,
-              commitResearchTransition: (activeSession) =>
-                commitChatResearchTransition({
-                  session: activeSession,
-                  previousAgent: chatAgent,
-                  researchAgent: "research" as const,
-                  switchAgent: (targetSession, nextAgent) =>
-                    switchChatAgent(targetSession, nextAgent, false),
-                  persistAgentHandoff: (targetSession) =>
-                    targetSession.persistAppMarker("agent_handoff", {
-                      chatAgent: "research",
-                    }),
-                  onCommitted: (changed) => {
-                    chatAgent = "research";
-                    if (changed) broadcast("chat_agent_change", { chatAgent });
-                  },
-                }),
-              persistUserHint: (activeSession, displayText) =>
-                activeSession.persistAppMarker("user_hint", { command: displayText }, 1),
-              prompt: async (activeSession, continuationPrompt) => {
-                if (activeSession !== session) {
-                  throw new Error("Research handoff changed logical sessions");
-                }
-                await promptActiveSession(continuationPrompt);
-              },
-            },
-          });
-          if (handledResearch) return;
-          if (
-            runLifecycle.running &&
-            runLifecycle.isCancellationRequested(runLifecycle.generation)
-          ) {
-            json(res, 409, {
-              error: runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
-              runState: runLifecycle.state,
-            });
-            return;
-          }
-          // `runClaim` covers the gap before `runAgent` flips `running`: a
-          // prompt arriving in that window must queue, not start a second run.
-          if (running || runClaim.active || autopilotActive) {
-            // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
-            // an autopilot cycle is active but between injected runs (build idle,
-            // Ken reviewing) so the message never starts a run that collides with
-            // an injected one on the same session. Attachments are persisted to
-            // .gg/uploads first so the queued media rides the same native-block
-            // path as a non-queued attachment prompt when it drains.
-            const prepared =
-              attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-            const count = session.queueMessage(text, prepared);
-            broadcast("queued", { count, messages: session.listQueuedMessages() });
-            json(res, 202, { queued: true, count });
-            return;
-          }
-          // Claim the run NOW, synchronously. Everything below this line may
-          // yield, and `running` does not flip until runAgent begins.
-          claimedStart = runClaim.claim();
-          json(res, 202, { queued: false, count: 0 });
-          // Gate inputs captured around the run: whether this turn is a workflow
-          // slash command (attachment prompts skip slash expansion entirely), and
-          // how many assistant messages the run actually adds. Computed even when
-          // autopilot is currently off — the toggle can flip ON mid-run, and the
-          // gate reads the post-run value.
-          const workflowCommand =
-            attachments.length === 0 &&
-            isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
-          // Does this input actually expand into a persisted user message? Asked
-          // of the session itself, because only it knows whether the command
-          // resolves here (name/alias casing, custom `.gg/commands`, non-coder
-          // agents that don't expand at all). A looser guess would anchor the
-          // hint at +1 with no message to land on — decorating an unrelated
-          // later bubble with the wrong `/name`.
-          const expandsToTemplate =
-            attachments.length === 0 && (await session.willExpandPromptTemplate(text));
-          // Webview display hint for this prompt's user bubble (kenSent shimmer
-          // label / enhancer highlight segments / the `/name` a command was typed
-          // as). Anchored +1 so it attaches to the user message the prompt below
-          // is about to push. Queued prompts skip this (their position in the run
-          // is unpredictable).
-          //
-          // Recording the invocation matters because the agent persists the
-          // EXPANDED template as the user message. Resume used to recover
-          // `/name` by matching that body against the current templates, which
-          // silently fails the moment a template is edited or reworded — the
-          // reopened session then rendered the raw multi-KB prompt instead of
-          // the command chip.
-          if (
-            expandsToTemplate ||
-            (meta && (meta.kenSent === true || Array.isArray(meta.enhancements)))
-          ) {
-            void session
-              .persistAppMarker(
-                "user_hint",
-                {
-                  ...(expandsToTemplate ? { command: text.trim() } : {}),
-                  ...(meta?.kenSent === true ? { kenSent: true } : {}),
-                  ...(Array.isArray(meta?.enhancements) ? { enhancements: meta.enhancements } : {}),
+              // Classify the raw, case-sensitive built-in token before any generic
+              // workflow/custom-command lookup can expand a conflicting research.md.
+              const researchRoute = resolveChatResearchCommandRoute({
+                mode,
+                text,
+                attachmentCount: attachments.length,
+                busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+              });
+              const handledResearch = await handleAppSidecarChatResearchPrompt({
+                route: researchRoute,
+                claimStart: () => {
+                  // `/research` is a fail-fast transition, never mid-run steering. Claim
+                  // synchronously before any switch or persistence operation can yield.
+                  claimedStart = runClaim.claim();
+                  return claimedStart;
                 },
-                1,
-              )
-              .catch(() => {});
-          }
-          // Fresh user turn: clear any cancel flag left from a prior cycle so this
-          // turn's autopilot review can run.
-          autopilotCancelled = false;
-          const assistantsBefore = countAssistantMessages(session.getMessages());
-          const messagesBefore = session.getMessages().length;
-          await runAgent(text, async () => {
-            if (attachments.length > 0) {
-              // Persist each attachment under .gg/uploads so files are inspectable
-              // by the agent's tools, then prompt with the media as native blocks.
-              const prepared = await prepareAttachments(cwd, attachments);
-              await promptActiveSessionWithAttachments(text, prepared);
-            } else {
-              // Pass the raw text straight through. AgentSession.prompt() is the
-              // single source of truth for slash-command expansion (built-in +
-              // `.gg/commands/*.md` custom), so the agent gets the right body
-              // while the webview keeps showing the short `/name`.
-              await promptActiveSession(text);
-            }
+                respond: ({ status, body }) => json(res, status, body),
+                runAgent,
+                operations: {
+                  session,
+                  commitResearchTransition: (activeSession) =>
+                    commitChatResearchTransition({
+                      session: activeSession,
+                      previousAgent: chatAgent,
+                      researchAgent: "research" as const,
+                      switchAgent: (targetSession, nextAgent) =>
+                        switchChatAgent(targetSession, nextAgent, false),
+                      persistAgentHandoff: (targetSession) =>
+                        targetSession.persistAppMarker("agent_handoff", {
+                          chatAgent: "research",
+                        }),
+                      onCommitted: (changed) => {
+                        chatAgent = "research";
+                        if (changed) broadcast("chat_agent_change", { chatAgent });
+                      },
+                    }),
+                  persistUserHint: (activeSession, displayText) =>
+                    activeSession.persistAppMarker("user_hint", { command: displayText }, 1),
+                  prompt: async (activeSession, continuationPrompt) => {
+                    if (activeSession !== session) {
+                      throw new Error("Research handoff changed logical sessions");
+                    }
+                    await promptActiveSession(continuationPrompt, undefined, { onAccepted });
+                  },
+                },
+              });
+              if (handledResearch) return;
+              if (
+                runLifecycle.running &&
+                runLifecycle.isCancellationRequested(runLifecycle.generation)
+              ) {
+                json(res, 409, {
+                  error: runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
+                  runState: runLifecycle.state,
+                });
+                return;
+              }
+              // `runClaim` covers the gap before `runAgent` flips `running`: a
+              // prompt arriving in that window must queue, not start a second run.
+              if (running || runClaim.active || autopilotActive) {
+                // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
+                // an autopilot cycle is active but between injected runs (build idle,
+                // Ken reviewing) so the message never starts a run that collides with
+                // an injected one on the same session. Attachments are persisted to
+                // .gg/uploads first so the queued media rides the same native-block
+                // path as a non-queued attachment prompt when it drains.
+                const prepared =
+                  attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+                const count = session.queueMessage(text, prepared);
+                broadcast("queued", { count, messages: session.listQueuedMessages() });
+                json(res, 202, { queued: true, count });
+                return;
+              }
+              // Claim the run NOW, synchronously. Everything below this line may
+              // yield, and `running` does not flip until runAgent begins.
+              claimedStart = runClaim.claim();
+              json(res, 202, { queued: false, count: 0 });
+              // Gate inputs captured around the run: whether this turn is a workflow
+              // slash command (attachment prompts skip slash expansion entirely), and
+              // how many assistant messages the run actually adds. Computed even when
+              // autopilot is currently off — the toggle can flip ON mid-run, and the
+              // gate reads the post-run value.
+              const workflowCommand =
+                attachments.length === 0 &&
+                isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
+              // Does this input actually expand into a persisted user message? Asked
+              // of the session itself, because only it knows whether the command
+              // resolves here (name/alias casing, custom `.gg/commands`, non-coder
+              // agents that don't expand at all). A looser guess would anchor the
+              // hint at +1 with no message to land on — decorating an unrelated
+              // later bubble with the wrong `/name`.
+              const expandsToTemplate =
+                attachments.length === 0 && (await session.willExpandPromptTemplate(text));
+              // Webview display hint for this prompt's user bubble (kenSent shimmer
+              // label / enhancer highlight segments / the `/name` a command was typed
+              // as). Anchored +1 so it attaches to the user message the prompt below
+              // is about to push. Queued prompts skip this (their position in the run
+              // is unpredictable).
+              //
+              // Recording the invocation matters because the agent persists the
+              // EXPANDED template as the user message. Resume used to recover
+              // `/name` by matching that body against the current templates, which
+              // silently fails the moment a template is edited or reworded — the
+              // reopened session then rendered the raw multi-KB prompt instead of
+              // the command chip.
+              if (
+                expandsToTemplate ||
+                (meta && (meta.kenSent === true || Array.isArray(meta.enhancements)))
+              ) {
+                void session
+                  .persistAppMarker(
+                    "user_hint",
+                    {
+                      ...(expandsToTemplate ? { command: text.trim() } : {}),
+                      ...(meta?.kenSent === true ? { kenSent: true } : {}),
+                      ...(Array.isArray(meta?.enhancements) ? { enhancements: meta.enhancements } : {}),
+                    },
+                    1,
+                  )
+                  .catch(() => {});
+              }
+              // Fresh user turn: clear any cancel flag left from a prior cycle so this
+              // turn's autopilot review can run.
+              await runUserTurn(userTurnDeps, text, async () => {
+                if (attachments.length > 0) {
+                  // Persist each attachment under .gg/uploads so files are inspectable
+                  // by the agent's tools, then prompt with the media as native blocks.
+                  const prepared = await prepareAttachments(cwd, attachments);
+                  await promptActiveSessionWithAttachments(text, prepared, { onAccepted });
+                } else {
+                  // Pass the raw text straight through. AgentSession.prompt() is the
+                  // single source of truth for slash-command expansion (built-in +
+                  // `.gg/commands/*.md` custom), so the agent gets the right body
+                  // while the webview keeps showing the short `/name`.
+                  await promptActiveSession(text, undefined, { onAccepted });
+                }
+              }, workflowCommand, onAccepted);
+            },
           });
-          // After the user's run settles, kick off Ken's auto-review loop — but
-          // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-          // workflow commands (/compare, /expand, …) end with reports or
-          // A/B/C choices reserved for the USER; registry commands (/help) and
-          // failed runs add no assistant work to judge; a turn that ended in plan
-          // mode has a pending Accept/Reject modal Ken must not preempt. This is
-          // the ONLY entry point into the cycle besides the stranded-queue drain —
-          // it drives any follow-up GG Coder runs itself, so the shared runAgent
-          // finally never recurses.
-          const decision = shouldStartAutopilotCycle({
-            enabled: autopilot,
-            cancelled: autopilotCancelled,
-            planMode: session.getPlanMode(),
-            // A submitted plan (exit_plan fired) routes into the PLAN review
-            // branch — the cycle reviews the plan itself instead of skipping.
-            planPending: planGate.pending() !== null,
-            workflowCommand,
-            assistantMessagesAdded:
-              countAssistantMessages(session.getMessages()) - assistantsBefore,
-            // Skip the review API call outright for turns that only started a
-            // background process (dev server/watcher), ran a read-only lookup, or
-            // committed/pushed — Ken's autopilot contract already IGNOREs these,
-            // so there's no reason to pay for that verdict.
-            mechanicalOnly: isMechanicalOnlyTurn(
-              extractTurnToolCalls(session.getMessages(), messagesBefore),
-            ),
-          });
-          if (decision.start) {
-            log("INFO", "app-sidecar", "autopilot cycle starting", {
-              kind: decision.kind,
-            });
-            await runAutopilotCycle(text);
-          } else if (autopilot) {
-            log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
-          }
-          // A prompt sent while Ken was reviewing (build idle) queued but had no
-          // run to steer into — run it now as a fresh turn so it never strands.
-          await runStrandedQueue();
         })
         .finally(() => {
           if (claimedStart) runClaim.release();
@@ -5811,60 +5892,46 @@ ${checkpoints}`;
       }
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
-        let text: string;
+        let input: ReturnType<typeof parseKenPromptInput>;
         try {
-          text = (JSON.parse(raw) as { text?: string }).text ?? "";
+          input = parseKenPromptInput(JSON.parse(raw));
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (!text.trim()) {
-          json(res, 400, { error: "empty prompt" });
+        if (input === null) {
+          json(res, 400, { error: "invalid_ken_prompt", retryable: false,
+            message: "Non-empty text and target conversationId and activationEpoch are required." });
           return;
         }
-        if (kenRunning) {
-          json(res, 409, { error: "Ken is already thinking — wait for his reply." });
+        const result = kenLifecycle.prompt(input.text, input.target);
+        if (result.status !== 202) {
+          json(res, result.status, result.body);
           return;
         }
-        json(res, 202, { accepted: true });
-        kenRunning = true;
-        broadcast("ken_run_start", { text });
-        try {
-          const ken = await ensureKenSession();
-          const digest = await buildKenContext(
-            session,
-            cwd,
-            gitBranch,
-            text,
-            await loadWorkflowCommandSpecs(),
-            injectedAutopilotPrompts,
-          );
-          await ken.prompt(digest);
-          // Record the turn against the BUILD session so it persists + survives
-          // resume (advisory custom entry, never an LLM message). Reply is Ken's
-          // last assistant message; skip persistence if he produced nothing.
-          const reply = lastAssistantText(ken.getMessages());
-          if (reply.trim()) await session.persistKenTurn(text, reply);
-        } catch (err) {
-          broadcastError("ken_error", "ken run failed", err);
-        } finally {
-          kenRunning = false;
-          broadcast("ken_run_end", {});
-          const pending = pendingKenModel;
-          pendingKenModel = null;
-          if (pending) await syncKenModel(pending.provider, pending.model);
-        }
+        json(res, 202, { accepted: true, ken: result.identity });
+        await result.completion;
       });
       return;
     }
 
     if (method === "POST" && url === "/ken/cancel") {
-      kenAbort.abort();
-      kenAbort = new AbortController();
-      kenSession?.setSignal(kenAbort.signal);
-      kenRunning = false;
-      broadcast("ken_run_end", { cancelled: true });
-      json(res, 200, { cancelled: true });
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let identity;
+        try {
+          const body: unknown = JSON.parse(raw);
+          identity = parseKenRunIdentity(body && typeof body === "object" && "ken" in body ? body.ken : null);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!identity) {
+          json(res, 400, { error: "ken conversationId, activationEpoch and runId are required" });
+          return;
+        }
+        json(res, 200, { cancelled: kenLifecycle.cancel(identity) });
+      });
       return;
     }
 
@@ -6230,7 +6297,7 @@ ${checkpoints}`;
         // chat session AND the autopilot reviewer, and `switchModel` on a
         // session mid-turn races the stream it is already consuming. The
         // footer picker is disabled to match; this is the enforcement.
-        if (running || kenRunning || autopilotReviewing) {
+        if (running || kenLifecycle.running || autopilotReviewing) {
           json(res, 409, { error: "cannot switch Ken's model while running" });
           return;
         }
@@ -6481,24 +6548,7 @@ ${checkpoints}`;
       void runAppSidecarNewSessionMutation({
         busyState: sessionBusyState(),
         mutations: sessionMutations,
-        perform: async (mutation) => {
-          await session.newSession();
-          if (mode === "chat") {
-            await session.persistAppMarker("agent_handoff", { chatAgent });
-          }
-          deactivateApprovedPlan();
-          injectedAutopilotPrompts = [];
-          planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
-          log("INFO", "app-sidecar", "new session accepted", {
-            logicalSessionId: opts.id,
-            operationId: mutation.operationId,
-          });
-          broadcast("session_reset", {
-            operationId: mutation.operationId,
-            kind: mutation.kind,
-          });
-          broadcast("extras", footerExtras());
-        },
+        perform: resetBuildSession,
       }).then((result) => {
         if (result.status === 500) {
           captureSidecarError(result.error, "app-sidecar.session.new");
@@ -7483,7 +7533,7 @@ ${checkpoints}`;
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();
-    kenAbort.abort();
+    kenLifecycle.abort();
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});

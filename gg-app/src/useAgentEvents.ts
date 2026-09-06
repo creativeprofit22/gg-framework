@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import {
+  parseContextProfileEligibility,
   listCommands as listPrimaryCommands,
   listModels as listPrimaryModels,
   type SidecarEvent,
@@ -157,6 +158,7 @@ export interface AgentEventsDeps {
   nextId: () => number;
   /** Ken (mentor) event delegate — consulted first; ken events early-return. */
   handleKenEvent: (e: SidecarEvent) => boolean;
+  hydrateKen?: (value: unknown, replaceHistory?: boolean) => void;
   /** Autopilot event delegate — consulted first; autopilot events early-return. */
   handleAutopilotEvent: (e: SidecarEvent) => boolean;
 
@@ -192,6 +194,8 @@ export interface AgentEventsDeps {
   stickToBottomRef: MutableRefObject<boolean>;
   /** Notifies session-mutation callers after the reset has been applied locally. */
   onSessionReset?: (operationId?: string) => void;
+  shouldApplySessionReset?: (data: Record<string, unknown>) => boolean;
+  onContinuationAccepted?: (data: unknown) => void;
 }
 
 export interface AgentEvents {
@@ -211,6 +215,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setItems,
     nextId,
     handleKenEvent,
+    hydrateKen,
     handleAutopilotEvent,
     setState,
     setTasks,
@@ -234,13 +239,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setModels,
     onAstraStateChange,
     onRoadmapPhaseDraftChange,
-    stateRef,
     planDoneRef,
     planTotalRef,
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
     onSessionReset,
+    shouldApplySessionReset,
+    onContinuationAccepted,
   } = deps;
   const listCommands = client?.listCommands ?? listPrimaryCommands;
   const listModels = client?.listModels ?? listPrimaryModels;
@@ -608,7 +614,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       const d = e.data as Record<string, unknown>;
       switch (e.type) {
         case "ready": {
-          const readyState = d as unknown as AgentState;
+          const readyState = {
+            ...d,
+            openAICodexContextProfileEligibility: parseContextProfileEligibility(
+              d.openAICodexContextProfileEligibility,
+            ),
+          } as unknown as AgentState;
           onAstraStateChange?.();
           setState(readyState);
           setRunning(readyState.running);
@@ -1343,7 +1354,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "continuation_accepted":
+          onContinuationAccepted?.(d);
+          break;
         case "session_reset":
+          if (shouldApplySessionReset && !shouldApplySessionReset(d)) break;
+          hydrateKen?.(d.kenState, true);
           // Sidecar started a fresh session — clear the transcript + counters.
           // Buffered sub-agent snapshots are dropped, not flushed: a late
           // flush would recreate a stale group in the fresh transcript.
@@ -1400,6 +1416,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // Context window / git status refresh (model switch, run end).
           if (
             d.accountId !== undefined ||
+            d.openAICodexContextProfileEligibility !== undefined ||
             d.openAICodexContextProfile !== undefined ||
             d.openAICodexFast !== undefined ||
             d.contextTokens !== undefined ||
@@ -1420,6 +1437,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                     d.openAICodexContextProfile === "experimental"
                       ? d.openAICodexContextProfile
                       : s.openAICodexContextProfile,
+                  openAICodexContextProfileEligibility:
+                    "openAICodexContextProfileEligibility" in d
+                      ? parseContextProfileEligibility(d.openAICodexContextProfileEligibility)
+                      : s.openAICodexContextProfileEligibility,
                   openAICodexFast:
                     typeof d.openAICodexFast === "boolean" ? d.openAICodexFast : s.openAICodexFast,
                   contextTokens:
@@ -1455,6 +1476,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     },
     [
       handleKenEvent,
+      hydrateKen,
       handleAutopilotEvent,
       onRoadmapPhaseDraftChange,
       onAstraStateChange,
@@ -1491,13 +1513,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setAttachments,
       setCommands,
       setModels,
-      stateRef,
-      planDoneRef,
+        planDoneRef,
       planTotalRef,
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
       onSessionReset,
+      shouldApplySessionReset,
+      onContinuationAccepted,
     ],
   );
 

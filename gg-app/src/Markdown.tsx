@@ -212,7 +212,7 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
 
   const runAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult | null> => {
-      if (!dispatcher || !prompt || actionLockRef.current) return null;
+      if (!dispatcher || (!prompt && action.type !== "send-fresh") || actionLockRef.current) return null;
       actionLockRef.current = true;
       setPending(action.type);
       setFailedAction(null);
@@ -263,12 +263,12 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   }, [prompt, runAction]);
 
   const sendFresh = useCallback(async () => {
-    const result = await runAction({ type: "send-fresh", prompt });
+    const result = await runAction({ type: "send-fresh", prompt: body.replace(/\n$/, "") });
     if (result?.status === "sent") {
       setSaveDraft(null);
       setAnnouncement("Started in new session.");
     }
-  }, [prompt, runAction]);
+  }, [body, runAction]);
 
   const prepareSave = useCallback(async () => {
     const result = await runAction({ type: "prepare-save", prompt });
@@ -651,14 +651,22 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
 function parseMarkdownIntoBlocks(markdown: string): string[] {
   try {
     const tokens = marked.lexer(markdown);
+    let offset = 0;
     return tokens.flatMap((token) => {
-      const end = promptClosingFenceEnd(token.raw);
+      // marked normalizes CRLF/CR before lexing. Recover each token's original
+      // source span so runnable prompt text never inherits that normalization.
+      const start = offset;
+      for (let index = 0; index < token.raw.length; index++, offset++) {
+        if (markdown[offset] === "\r" && markdown[offset + 1] === "\n") offset++;
+      }
+      const raw = markdown.slice(start, offset);
+      const end = promptClosingFenceEnd(raw);
       // marked rejects trailing tabs that the renderer accepts on closing fences.
       // Split there so later prompts cannot inherit this prompt's ready state.
-      if (end !== null && token.raw.slice(end).trim()) {
-        return [token.raw.slice(0, end), ...parseMarkdownIntoBlocks(token.raw.slice(end))];
+      if (end !== null && raw.slice(end).trim()) {
+        return [raw.slice(0, end), ...parseMarkdownIntoBlocks(raw.slice(end))];
       }
-      return [token.raw];
+      return [raw];
     });
   } catch {
     return [markdown];
@@ -677,12 +685,16 @@ function isPromptBlockComplete(raw: string): boolean {
 }
 
 function promptClosingFenceEnd(raw: string): number | null {
-  const opening = /^ {0,3}(`{3,})[ \t]*prompt\b[^\n]*\n/i.exec(raw);
+  return promptSourceFence(raw)?.end ?? null;
+}
+
+function promptSourceFence(raw: string): { body: string; end: number } | null {
+  const opening = /^ {0,3}(`{3,})[ \t]*prompt\b[^\r\n]*(?:\r\n|\r|\n)/i.exec(raw);
   if (!opening) return null;
   const body = raw.slice(opening[0].length);
-  for (const closing of body.matchAll(/(?:^|\n) {0,3}(`{3,})[ \t]*(?=\n|$)/g)) {
+  for (const closing of body.matchAll(/(?:^|\r\n|\r|\n) {0,3}(`{3,})[ \t]*(?=\r|\n|$)/g)) {
     if (closing[1].length >= opening[1].length) {
-      return opening[0].length + closing.index + closing[0].length;
+      return { body: body.slice(0, closing.index), end: opening[0].length + closing.index + closing[0].length };
     }
   }
   return null;
@@ -702,6 +714,14 @@ const MemoizedMarkdownBlock = memo(
     animate: boolean;
   }): React.ReactElement {
     const normalized = content.replace(/^\n+|\n+$/g, "");
+    const sourceFence = promptSourceFence(content);
+    if (sourceFence && promptReady) {
+      return (
+        <PromptReadyContext.Provider value={true}>
+          <PromptBlock body={`${sourceFence.body}\n`} />
+        </PromptReadyContext.Provider>
+      );
+    }
     return (
       <PromptReadyContext.Provider value={promptReady}>
         <ReactMarkdown

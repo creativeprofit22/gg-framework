@@ -6,7 +6,10 @@ import {
 } from "./app-sidecar-context-profile.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 
-const state = { provider: "openai", model: "gpt-6-astra", accountId: "account-1" };
+const state = {
+  provider: "openai", model: "gpt-6-astra", accountId: "account-1",
+  openAICodexContextProfileEligibility: { canChange: true as const },
+};
 
 function run(
   profile: "stable" | "experimental",
@@ -91,6 +94,22 @@ describe("app sidecar context profile route", () => {
     expect(result.status).toBe(409);
     expect(result.body.error).toContain("Compact or start a new session first.");
     expect(switchProfile).not.toHaveBeenCalled();
+  });
+
+  it("returns typed history locks, fails closed without eligibility, and keeps same-profile requests idempotent", async () => {
+    for (const eligibility of [undefined, { canChange: false as const, reason: "history started" }]) {
+      const mutations = new AppSidecarSessionMutationCoordinator();
+      const switchProfile = vi.fn(async () => {});
+      const options = {
+        state: { ...state, openAICodexContextProfile: "stable" as const, openAICodexContextProfileEligibility: eligibility },
+        running: false, activeUsage: 0, mutations, switchProfile,
+      };
+      expect(await runContextProfileRequest({ ...options, body: { profile: "experimental" } }))
+        .toMatchObject({ status: 409, body: { error: "context_profile_locked" } });
+      expect(switchProfile).not.toHaveBeenCalled();
+      expect(mutations.owner).toBeNull();
+      expect((await runContextProfileRequest({ ...options, body: { profile: "stable" } })).status).toBe(200);
+    }
   });
 
   it("reports persistence failures without changing the response state", async () => {

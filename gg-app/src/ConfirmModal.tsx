@@ -9,6 +9,7 @@ interface Props {
   cancelLabel?: string;
   busy?: boolean;
   content?: ReactNode;
+  className?: string;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -25,11 +26,12 @@ export function ConfirmModal({
   cancelLabel = "Cancel",
   busy = false,
   content,
+  className,
   onConfirm,
   onClose,
 }: Props): React.ReactElement {
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={onClose} className={className}>
       <div className="modal-hint" style={{ color: theme.textSecondary }}>
         {message}
       </div>

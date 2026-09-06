@@ -28,3 +28,4 @@ export * from "./roadmap-workflow.js";
 export * from "./plan-review.js";
 export * from "./slash-command-contract.js";
 export * from "./desktop-context-snapshot.js";
+export * from "./desktop-session-ux.js";

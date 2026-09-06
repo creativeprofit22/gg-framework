@@ -5,7 +5,11 @@ export type SessionMutationKind =
   | "task-run"
   | "phase-start"
   | "prompt-start"
+  | "ken-start"
+  | "ken-append"
+  | "ken-transition"
   | "context-profile"
+  | "continuation-commit"
   | "openai-codex-fast"
   | "manual-plan-accept"
   | "autopilot-plan-accept"
@@ -88,6 +92,26 @@ export async function runAppSidecarNewSessionMutation(
       body: { error: error instanceof Error ? error.message : String(error) },
       error,
     };
+  } finally {
+    mutation.release();
+  }
+}
+
+/** Shared `/prompt` startup seam. Never queue behind a profile save or reset.
+ * The core acceptance callback releases after durable append, before generation;
+ * finally also releases commands, rejected input, and failed startup operations. */
+export async function runAppSidecarPromptStartup(options: {
+  mutations: AppSidecarSessionMutationCoordinator;
+  conflict(body: SessionMutationConflictBody): void;
+  perform(onAccepted: () => void): Promise<void>;
+}): Promise<void> {
+  const mutation = options.mutations.tryAcquire("prompt-start");
+  if (!mutation) {
+    options.conflict(options.mutations.conflictBody());
+    return;
+  }
+  try {
+    await options.perform(mutation.release);
   } finally {
     mutation.release();
   }

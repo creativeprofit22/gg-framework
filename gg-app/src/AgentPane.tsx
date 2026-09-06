@@ -1,3 +1,4 @@
+import { CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS, continuationInstructionError } from "@kenkaiiii/gg-core/desktop-session-ux";
 import {
   createElement,
   memo,
@@ -14,9 +15,14 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { autosizeComposer } from "./composer-autosize";
 import {
+  requireContinuationAcceptedEvent,
+  type ContinuationCommitRequest,
+  type ContinuationDestination,
+  type ContinuationHandoffResponse,
   createPaneAgentClient,
   isSwitchModelError,
   newWindow,
+  parseContextProfileEligibility,
   focusWindowByOffset,
   arrangeAllWindows,
   onWindowOrder,
@@ -322,6 +328,8 @@ export type Item =
   | {
       kind: "user";
       id: number;
+      /** Server-assigned continuation acceptance identity, distinct from the UI row ID. */
+      acceptedMessageId?: string;
       text: string;
       command?: boolean;
       label?: string;
@@ -616,6 +624,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     getState,
     sendPrompt,
     prepareContinuationHandoff,
+    commitContinuation,
     sendKenPrompt,
     cancelKen,
     setAutopilot,
@@ -729,6 +738,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     kenThinkingStartTs,
     kenThinkingAccumMs,
     handleKenEvent,
+    hydrateKen,
+    clearKenStream,
+    captureKenHydration,
+    captureKenTarget,
+    captureKenRun,
+    captureKenOperation,
   } = useKenMentor({ setItems, nextId });
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
   // compact transcript markers + a "Ken reviewing…" flag. Separate hook, same
@@ -896,6 +911,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [astraControlsBusy, setAstraControlsBusy] = useState(false);
   const astraMutationBusyRef = useRef(false);
   const astraAuthoritativeRevisionRef = useRef(0);
+  const contextProfileFocusRef = useRef<HTMLSelectElement | null>(null);
+  useLayoutEffect(() => {
+    if (astraControlsBusy) return;
+    const selector = contextProfileFocusRef.current;
+    contextProfileFocusRef.current = null;
+    // Disabling the select during a save drops WebView2 focus onto the body.
+    // Restore only that lost focus, never a control the user moved to.
+    if (selector?.isConnected && !selector.disabled && document.activeElement === document.body) {
+      selector.focus({ preventScroll: true });
+    }
+  }, [astraControlsBusy]);
   // Project task list (the agent's `tasks` tool store) + the Tasks modal.
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
@@ -963,6 +989,26 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const sessionMutationLockRef = useRef(false);
   const kenPromptActionLockRef = useRef(false);
+  const continuationAttemptRef = useRef<{
+    request: ContinuationCommitRequest;
+    prepared: ContinuationHandoffResponse;
+    destination?: ContinuationDestination;
+    acceptedMessageId?: string;
+  } | null>(null);
+  const appliedContinuationMessagesRef = useRef(new Set<string>());
+  const continuationResetsRef = useRef(new Set<string>());
+  const retiredConversationIdsRef = useRef(new Set<string>());
+  const [continuationConfirmation, setContinuationConfirmation] = useState<{
+    prompt: string;
+    profile: "stable" | "experimental" | null;
+    busy: boolean;
+    error?: string;
+    retry?: boolean;
+  } | null>(null);
+  const continuationConfirmationRef = useRef<
+    ((choice: { profile: "stable" | "experimental" | null } | null) => void) | null
+  >(null);
+  useEffect(() => () => continuationConfirmationRef.current?.(null), []);
   // Transcript export (the download button in the activity bar). The chosen
   // folder is remembered so the second export lands where the first one did —
   // stored per-machine, not per-project, because that's how people organise
@@ -1521,7 +1567,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   useEffect(() => {
     const focusInput = (): void => {
       const active = document.activeElement;
-      if (active && active !== document.body && active.tagName === "BUTTON") return;
+      if (active instanceof HTMLElement && active.closest("button, select")) return;
       if (window.getSelection()?.toString()) return;
       // A modal/overlay owns keyboard focus while open — stealing it back to the
       // chat input means the user can't type in the modal's fields. Bail when one
@@ -1614,6 +1660,95 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     });
   }, []);
 
+  const shouldApplySessionReset = useCallback((data: Record<string, unknown>): boolean => {
+    const operationId = typeof data.operationId === "string" ? data.operationId : undefined;
+    const conversationId =
+      typeof data.conversationId === "string" ? data.conversationId : undefined;
+    const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
+    if (operationId && continuationResetsRef.current.has(operationId)) return false;
+    if (conversationId && retiredConversationIdsRef.current.has(conversationId)) return false;
+    const attempt = continuationAttemptRef.current;
+    if (sessionMutationLockRef.current && attempt && operationId !== attempt.request.operationId)
+      return false;
+    if (attempt && operationId === attempt.request.operationId) {
+      if (
+        !conversationId ||
+        !sessionId ||
+        conversationId === attempt.prepared.source.conversationId
+      )
+        return false;
+      if (
+        attempt.destination &&
+        (attempt.destination.conversationId !== conversationId ||
+          attempt.destination.sessionId !== sessionId)
+      )
+        return false;
+      continuationResetsRef.current.add(operationId);
+      if (continuationResetsRef.current.size > 32)
+        continuationResetsRef.current.delete(continuationResetsRef.current.values().next().value!);
+      attempt.destination = {
+        conversationId,
+        sessionId,
+        profile: attempt.request.profile ?? stateRef.current?.openAICodexContextProfile ?? "stable",
+      };
+    }
+    if (conversationId && sessionId) {
+      const previous = stateRef.current;
+      if (previous?.conversationId && previous.conversationId !== conversationId) {
+        retiredConversationIdsRef.current.add(previous.conversationId);
+        if (retiredConversationIdsRef.current.size > 32)
+          retiredConversationIdsRef.current.delete(
+            retiredConversationIdsRef.current.values().next().value!,
+          );
+      }
+      if (previous) stateRef.current = { ...previous, conversationId, sessionId };
+      setState((current) => (current ? { ...current, conversationId, sessionId } : current));
+    }
+    return true;
+  }, []);
+
+  const onContinuationAccepted = useCallback((data: unknown) => {
+    let event;
+    try {
+      event = requireContinuationAcceptedEvent(data);
+    } catch {
+      return;
+    }
+    const attempt = continuationAttemptRef.current;
+    const current = stateRef.current;
+    if (
+      !attempt ||
+      event.operationId !== attempt.request.operationId ||
+      event.preparedId !== attempt.request.preparedId ||
+      current?.conversationId !== event.destination.conversationId ||
+      current.sessionId !== event.destination.sessionId ||
+      !continuationResetsRef.current.has(event.operationId) ||
+      (attempt.request.profile && attempt.request.profile !== event.destination.profile) ||
+      (attempt.acceptedMessageId && attempt.acceptedMessageId !== event.acceptedMessageId) ||
+      event.prompt !== attempt.prepared.prompt
+    )
+      return;
+    attempt.destination = event.destination;
+    attempt.acceptedMessageId = event.acceptedMessageId;
+    const key = `${event.destination.conversationId}:${event.acceptedMessageId}`;
+    if (appliedContinuationMessagesRef.current.has(key)) return;
+    appliedContinuationMessagesRef.current.add(key);
+    if (appliedContinuationMessagesRef.current.size > 32)
+      appliedContinuationMessagesRef.current.delete(
+        appliedContinuationMessagesRef.current.values().next().value!,
+      );
+    setItems((currentItems) => [
+      ...currentItems,
+      {
+        kind: "user",
+        id: nextId(),
+        text: attempt.prepared.prompt,
+        kenSent: true,
+        acceptedMessageId: event.acceptedMessageId,
+      },
+    ]);
+  }, []);
+
   const onAuthoritativeSessionReset = useCallback((operationId?: string) => {
     if (!operationId) return;
     const waiter = sessionResetOperationWaitersRef.current.get(operationId);
@@ -1660,6 +1795,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setItems,
     nextId,
     handleKenEvent,
+    hydrateKen,
     handleAutopilotEvent,
     setState,
     setTasks,
@@ -1690,6 +1826,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     pendingPlanTotalRef,
     stickToBottomRef,
     onSessionReset: onAuthoritativeSessionReset,
+    shouldApplySessionReset,
+    onContinuationAccepted,
   });
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -1702,7 +1840,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     try {
       await waitForReady();
       readyRef.current = true;
+      const applyKenHydration = captureKenHydration();
       const st = await getState().catch(() => null);
+      if (st) applyKenHydration(st.kenState);
       if (st) {
         setState(st);
         setRunning(st.running);
@@ -1725,6 +1865,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
       if (history.length > 0) {
+        clearKenStream();
         // A freshly hydrated session lands at the bottom (newest message).
         stickToBottomRef.current = true;
         // Seed ↑/↓ recall from the resumed prompts (chronological), so history
@@ -1856,7 +1997,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // session is in hand — one fade-in, no staggered reflow.
       setHydrated(true);
     }
-  }, [getState, listCommands, listHistory, listModels, listTasks, replacePlanReview, waitForReady]);
+  }, [getState, listCommands, listHistory, listModels, listTasks, replacePlanReview, waitForReady, captureKenHydration, clearKenStream]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
@@ -2020,7 +2161,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (state && modelId !== null && state.kenModelOverride && modelId === state.kenModel) return;
     if (state && modelId === null && !state.kenModelOverride) return;
     void switchKenModel(modelId).then((res) => {
-      if (res) {
         setState((s) =>
           s
             ? {
@@ -2031,7 +2171,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               }
             : s,
         );
-      }
+    }).catch((error: unknown) => {
+      toast(error instanceof Error ? error.message : String(error), "error");
     });
   }
 
@@ -2061,17 +2202,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     });
   }
 
-  function onSelectContextProfile(profile: string): void {
+  function onSelectContextProfile(profile: string, selector: HTMLSelectElement): void {
     if (
       running ||
       autopilotReviewing ||
       astraMutationBusyRef.current ||
       !state ||
+      !parseContextProfileEligibility(state.openAICodexContextProfileEligibility).canChange ||
       (profile !== "stable" && profile !== "experimental") ||
       profile === state.openAICodexContextProfile
     ) {
       return;
     }
+    contextProfileFocusRef.current = document.activeElement === selector ? selector : null;
     const previousProfile = state.openAICodexContextProfile;
     const previousWindow = state.contextWindow;
     const authoritativeRevision = astraAuthoritativeRevisionRef.current;
@@ -2144,6 +2287,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       });
   }
 
+  const contextProfileEligibility = parseContextProfileEligibility(
+    state?.openAICodexContextProfileEligibility,
+  );
+  const contextProfileLockReason = contextProfileEligibility.canChange
+    ? undefined
+    : contextProfileEligibility.reason;
+  const contextProfileDescriptionId = `context-profile-lock-${paneId}`;
   const showContextProfileSelector =
     state?.provider === "openai" && state.model === "gpt-6-astra" && Boolean(state.accountId);
 
@@ -2402,6 +2552,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // prompt firing on its interval. Those must NOT clear the composer, or a
   // schedule that comes due mid-sentence deletes what the user was typing.
   function submitText(text: string, label?: string, opts?: { keepInput?: boolean }): void {
+    if (sessionMutationLockRef.current) return;
     // A pending plan is the only operation that can move this session forward.
     // Do not let toolbar commands or scheduled prompts silently clear its gate.
     if (planReview !== null) return;
@@ -2450,9 +2601,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     null,
   );
 
-  function hasOpenAsk(): boolean {
+  const hasOpenAsk = useCallback((): boolean => {
     return items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled);
-  }
+  }, [items]);
 
   const dismissOpenAsks = useCallback((): void => {
     setItems(dropSupersededAsks);
@@ -2550,9 +2701,127 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     });
   }, []);
 
+  const commitPreparedContinuation = useCallback(
+    async (ownsLock = false): Promise<KenPromptActionResult> => {
+      const attempt = continuationAttemptRef.current;
+      if (!attempt || (!ownsLock && sessionMutationLockRef.current)) return { status: "cancelled" };
+      sessionMutationLockRef.current = true;
+      setNewSessionBusy(true);
+      setContinuationConfirmation((current) =>
+        current ? { ...current, busy: true, error: undefined } : current,
+      );
+      // Attach the rejection handler immediately: an HTTP request may outlive the reset timeout.
+      const reset = registerSessionResetOperationWaiter(attempt.request.operationId).then(
+        () => true,
+        () => false,
+      );
+      const recover = (message: string, retry: boolean): KenPromptActionResult => {
+        restorePromptToComposer(attempt.prepared.prompt);
+        setContinuationConfirmation((current) =>
+          current ? { ...current, busy: false, retry, error: message } : current,
+        );
+        return {
+          status: "failed",
+          action: "send-fresh",
+          message,
+          recoverPrompt: attempt.prepared.prompt,
+        };
+      };
+      let receiptAccepted = false;
+      try {
+        const receipt = await commitContinuation(attempt.request);
+        receiptAccepted = receipt.outcome === "accepted";
+        if (receipt.outcome !== "accepted") {
+          const acceptance = attempt.acceptedMessageId
+            ? "Acceptance was observed in the session event."
+            : receipt.accepted === false
+              ? "No continuation was accepted."
+              : "Acceptance is unknown. Do not resend the composer automatically.";
+          const actualMode = receipt.destination
+            ? ` Reported destination context mode: ${receipt.destination.profile}.`
+            : "";
+          return recover(
+            `${receipt.message ?? receipt.error ?? receipt.outcome}. ${acceptance} ${receipt.resetAttempted ? "A destination reset was attempted; inspect the active session." : "No destination reset was attempted."}${actualMode}`,
+            receipt.outcome === "outcome-unknown",
+          );
+        }
+        const destination = receipt.destination;
+        if (
+          attempt.destination &&
+          (attempt.destination.conversationId !== destination.conversationId ||
+            attempt.destination.sessionId !== destination.sessionId)
+        ) {
+          return recover(
+            "The server reports acceptance in a different destination than the observed reset. Inspect Sessions; no additional local message was added.",
+            false,
+          );
+        }
+        attempt.destination = destination;
+        await waitForReady();
+        const resetObserved =
+          continuationResetsRef.current.has(attempt.request.operationId) || (await reset);
+        const current = await getState();
+        if (
+          !resetObserved ||
+          current.conversationId !== destination.conversationId ||
+          current.sessionId !== destination.sessionId ||
+          current.openAICodexContextProfile !== destination.profile ||
+          (attempt.request.profile && attempt.request.profile !== destination.profile) ||
+          (attempt.acceptedMessageId && attempt.acceptedMessageId !== receipt.acceptedMessageId)
+        ) {
+          return recover(
+            "The server accepted the continuation, but the active destination could not be verified. No additional local message was added. Inspect Sessions before taking further action.",
+            false,
+          );
+        }
+        // SSE owns insertion; a late receipt must not append a user bubble after assistant deltas.
+        if (!attempt.acceptedMessageId)
+          return recover(
+            "The server accepted the continuation, but its transcript event was not observed. No local message was added. Refresh or inspect the destination session; do not resend the composer.",
+            false,
+          );
+        setContinuationConfirmation(null);
+        return { status: "sent", session: "fresh" };
+      } catch {
+        if (receiptAccepted) {
+          return recover(
+            "The server accepted the continuation, but refreshing the destination failed. Inspect Sessions; do not resend the composer. No additional local message was added.",
+            false,
+          );
+        }
+        return recover(
+          attempt.acceptedMessageId
+            ? "The continuation was accepted in the session event, but its receipt was not received. Check outcome to retrieve the same operation receipt; do not resend the composer."
+            : "The commit outcome is unknown. Check outcome retries only this same operation; do not resend the composer.",
+          true,
+        );
+      } finally {
+        const waiter = sessionResetOperationWaitersRef.current.get(attempt.request.operationId);
+        if (waiter) {
+          clearTimeout(waiter.timeout);
+          sessionResetOperationWaitersRef.current.delete(attempt.request.operationId);
+          waiter.resolve();
+        }
+        sessionMutationLockRef.current = false;
+        setNewSessionBusy(false);
+      }
+    },
+    [
+      commitContinuation,
+      getState,
+      registerSessionResetOperationWaiter,
+      restorePromptToComposer,
+      waitForReady,
+    ],
+  );
+
   const dispatchKenPromptAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult> => {
       const prompt = action.prompt;
+      if (action.type === "send-fresh") {
+        const message = continuationInstructionError(prompt);
+        if (message) return { status: "failed", action: action.type, message, recoverPrompt: prompt };
+      }
       if (!prompt) {
         return { status: "failed", action: action.type, message: "This prompt is empty." };
       }
@@ -2640,63 +2909,62 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         kenPromptActionLockRef.current = true;
         try {
-          let preparedPrompt: string;
-          try {
-            preparedPrompt = (await prepareContinuationHandoff(prompt)).prompt;
-          } catch {
+          const choice = await new Promise<{ profile: "stable" | "experimental" | null } | null>(
+            (resolve) => {
+              continuationConfirmationRef.current = resolve;
+              setContinuationConfirmation({
+                prompt,
+                profile: showContextProfileSelector ? state!.openAICodexContextProfile : null,
+                busy: false,
+              });
+            },
+          );
+          continuationConfirmationRef.current = null;
+          if (!choice) return { status: "cancelled" };
+          if (sessionMutationLockRef.current)
             return {
               status: "failed",
               action: action.type,
-              message:
-                "Couldn’t prepare the continuation handoff. The current session is unchanged; try again.",
+              message: "A session change is already in progress.",
             };
-          }
+          sessionMutationLockRef.current = true;
+          setNewSessionBusy(true);
           try {
-            await createAuthoritativeNewSession();
+            const prepared = await prepareContinuationHandoff(prompt);
+            continuationAttemptRef.current = {
+              prepared,
+              request: {
+                preparedId: prepared.preparedId,
+                operationId: crypto.randomUUID(),
+                ...(choice.profile ? { profile: choice.profile } : {}),
+              },
+            };
           } catch (error) {
-            if (error instanceof LocalSessionMutationBusyError) {
-              return { status: "failed", action: action.type, message: error.message };
-            }
-            if (error instanceof NewSessionError && error.kind === "creation-rejected") {
-              return {
-                status: "failed",
-                action: action.type,
-                message:
-                  "Couldn’t create a new session. The current session is unchanged; try again.",
-              };
-            }
-            restorePromptToComposer(preparedPrompt);
+            const reason = taskErrorMessage(error);
+            const sizeAdvice = /\b413\b|next instruction is too long|request body too large/i.test(reason)
+              ? ` Shorten the continuation instruction and try again (current length: ${prompt.length} UTF-16 units; maximum: ${CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS}). Nothing has been truncated.`
+              : "";
+            const message = `Couldn’t prepare the continuation handoff. ${reason}${sizeAdvice} No reset or submission was requested.`;
+            sessionMutationLockRef.current = false;
+            setNewSessionBusy(false);
+            restorePromptToComposer(prompt);
+            setContinuationConfirmation((current) =>
+              current
+                ? {
+                    ...current,
+                    busy: false,
+                    error: message,
+                  }
+                : current,
+            );
             return {
               status: "failed",
               action: action.type,
-              message: `${AMBIGUOUS_NEW_SESSION_MESSAGE} The complete continuation handoff is in the composer.`,
-              recoverPrompt: preparedPrompt,
+              message,
+              recoverPrompt: prompt,
             };
           }
-          try {
-            planResumePromptRef.current = preparedPrompt;
-            const submission = await sendPrompt(preparedPrompt, [], { kenSent: true });
-            stickToBottomRef.current = true;
-            setQueuedCount(submission.count);
-            pushItem({
-              kind: "user",
-              id: nextId(),
-              text: preparedPrompt,
-              kenSent: true,
-              queued: submission.queued,
-            });
-            endStreamingText();
-            return { status: "sent", session: "fresh" };
-          } catch {
-            restorePromptToComposer(preparedPrompt);
-            return {
-              status: "failed",
-              action: action.type,
-              message:
-                "The new session opened, but sending failed. The complete continuation handoff is back in the composer.",
-              recoverPrompt: preparedPrompt,
-            };
-          }
+          return await commitPreparedContinuation(true);
         } finally {
           kenPromptActionLockRef.current = false;
         }
@@ -2743,7 +3011,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     },
     [
       autopilotReviewing,
-      createAuthoritativeNewSession,
+      commitPreparedContinuation,
       dismissOpenAsks,
       endStreamingText,
       noteSupersedingSend,
@@ -2753,6 +3021,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       running,
       sendPrompt,
       prepareContinuationHandoff,
+      hasOpenAsk,
+      showContextProfileSelector,
+      state,
     ],
   );
 
@@ -2930,6 +3201,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Both typed `@Ken` prompts and composer quick actions use this path so Ken's
   // transcript identity and transport stay identical. Quick actions opt out of
   // clearing composer state, preserving the user's in-progress work.
+  function cancelCurrentKen(): void {
+    const identity = captureKenRun(); // Capture before transport readiness or any other await.
+    if (!identity) return;
+    const isCurrent = captureKenOperation();
+    void cancelKen(identity).catch((error: unknown) => {
+      if (isCurrent()) pushItem({ kind: "error", id: nextId(), text: `Supah: ${String(error)}` });
+    });
+  }
+
   function sendToKen(question: string, addressedText: string, preserveComposer = false): void {
     const trimmedQuestion = question.trim();
     const trimmedAddressedText = addressedText.trim();
@@ -2937,6 +3217,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return;
     }
 
+    // Authority comes from Ken hydration, never from the displayed session or a later ready response.
+    const kenTarget = captureKenTarget();
+    if (!kenTarget) return;
+    const isCurrent = captureKenOperation();
+    const composerDraft = input;
     recordHistory(trimmedAddressedText);
     stickToBottomRef.current = true;
     pushItem({ kind: "user", id: nextId(), text: trimmedAddressedText, ken: true });
@@ -2947,12 +3232,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setMentionedPaths([]);
       setEnhancement(null);
     }
-    void sendKenPrompt(trimmedQuestion);
+    void sendKenPrompt(trimmedQuestion, kenTarget).catch((error: unknown) => {
+      if (!isCurrent()) return;
+      pushItem({ kind: "error", id: nextId(), text: `Supah: ${String(error)}` });
+      // Recover a rejected typed question without overwriting work entered while it was pending.
+      if (!preserveComposer) setInput((current) => current || composerDraft);
+    });
   }
 
   // Submit the current input together with any staged attachments. Images are
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
+    if (sessionMutationLockRef.current) return;
     const trimmed = input.trim();
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
@@ -3803,7 +4094,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             isThinking={kenIsThinking}
             thinkingStartTs={kenThinkingStartTs}
             thinkingAccumMs={kenThinkingAccumMs}
-            onCancel={() => void cancelKen()}
+            onCancel={() => cancelCurrentKen()}
           />
         )}
         {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
@@ -4008,7 +4299,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   // "esc to cancel" on his bar actually works.
                   if (slashOpen) setInput("");
                   else if (running && !cancelling) requestCancel();
-                  else if (kenRunning) void cancelKen();
+                  else if (kenRunning) cancelCurrentKen();
                 }
               }}
               autoFocus
@@ -4122,7 +4413,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   <span className="astra-control-group" aria-busy={astraControlsBusy}>
                     <label
                       className="model-picker"
-                      title="OpenAI Codex context window: stable 272K or experimental 872K"
+                      title={
+                        contextProfileLockReason ??
+                        "OpenAI Codex context window: stable 272K or experimental 872K"
+                      }
                     >
                       <span className="model-select-text" style={{ color: theme.secondary }}>
                         Context {state.openAICodexContextProfile}
@@ -4131,13 +4425,29 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         aria-label="OpenAI Codex context profile"
                         className="model-select"
                         value={state.openAICodexContextProfile}
-                        disabled={running || autopilotReviewing || astraControlsBusy}
-                        onChange={(event) => onSelectContextProfile(event.target.value)}
+                        title={contextProfileLockReason}
+                        aria-describedby={
+                          contextProfileLockReason ? contextProfileDescriptionId : undefined
+                        }
+                        disabled={
+                          running ||
+                          autopilotReviewing ||
+                          astraControlsBusy ||
+                          !contextProfileEligibility.canChange
+                        }
+                        onChange={(event) =>
+                          onSelectContextProfile(event.target.value, event.currentTarget)
+                        }
                       >
                         <option value="stable">Stable · 272K</option>
                         <option value="experimental">Experimental · 872K</option>
                       </select>
                     </label>
+                    {contextProfileLockReason && (
+                      <span id={contextProfileDescriptionId} hidden>
+                        {contextProfileLockReason}
+                      </span>
+                    )}
                     <button
                       aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
                       title={
@@ -4310,6 +4620,84 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           onClose={() => {
             setShowLocalUpdateConfirm(false);
             setSummarizeDecisions(false);
+          }}
+        />
+      )}
+
+      {continuationConfirmation && (
+        <ConfirmModal
+          title="Continue in a new session"
+          className="continuation-confirmation"
+          message={
+            continuationConfirmation.error ??
+            "Start a fresh conversation with this exact instruction and a continuation handoff? Your current conversation is saved in Sessions."
+          }
+          confirmLabel={
+            continuationConfirmation.error
+              ? continuationConfirmation.retry
+                ? "Check outcome"
+                : "Close"
+              : "Continue"
+          }
+          busy={continuationConfirmation.busy}
+          content={
+            <>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  overflowWrap: "anywhere",
+                  maxHeight: "35vh",
+                  overflow: "auto",
+                }}
+                aria-label="Selected continuation prompt"
+              >
+                {continuationConfirmation.prompt}
+              </pre>
+              {continuationConfirmation.profile !== null && (
+                <label>
+                  Destination context mode
+                  <select
+                    aria-label="Destination context mode"
+                    value={continuationConfirmation.profile}
+                    disabled={continuationConfirmation.busy || !!continuationConfirmation.error}
+                    onChange={(event) => {
+                      const profile = event.target.value;
+                      if (profile === "stable" || profile === "experimental") {
+                        setContinuationConfirmation((current) =>
+                          current ? { ...current, profile } : current,
+                        );
+                      }
+                    }}
+                  >
+                    <option value="stable">Stable · 272K</option>
+                    <option value="experimental">Experimental · 872K</option>
+                  </select>
+                </label>
+              )}
+            </>
+          }
+          onConfirm={() => {
+            if (continuationConfirmation.error) {
+              if (continuationConfirmation.retry) {
+                void commitPreparedContinuation();
+                return;
+              }
+              setContinuationConfirmation(null);
+              return;
+            }
+            const resolve = continuationConfirmationRef.current;
+            if (!resolve) return;
+            continuationConfirmationRef.current = null;
+            setContinuationConfirmation((current) =>
+              current ? { ...current, busy: true } : current,
+            );
+            resolve({ profile: continuationConfirmation.profile });
+          }}
+          onClose={() => {
+            if (continuationConfirmation.busy) return;
+            continuationConfirmationRef.current?.(null);
+            continuationConfirmationRef.current = null;
+            setContinuationConfirmation(null);
           }}
         />
       )}

@@ -9,6 +9,7 @@ import {
   appSidecarSessionBusyConflictBody,
   isAppSidecarSessionBusy,
   runAppSidecarNewSessionMutation,
+  runAppSidecarPromptStartup,
   type SessionMutationKind,
 } from "./app-sidecar-session-mutation.js";
 
@@ -33,6 +34,62 @@ interface Harness {
   maxConcurrentResets(): number;
   close(): Promise<void>;
 }
+
+describe("prompt startup lease", () => {
+  it("releases on startup error and never releases a subsequent owner from finally", async () => {
+    const mutations = new AppSidecarSessionMutationCoordinator();
+    await expect(runAppSidecarPromptStartup({
+      mutations, conflict: vi.fn(), perform: async () => { throw new Error("preparation failed"); },
+    })).rejects.toThrow("preparation failed");
+    expect(mutations.owner).toBeNull();
+    const finish = deferred();
+    const run = runAppSidecarPromptStartup({ mutations, conflict: vi.fn(), perform: async (accepted) => {
+      accepted();
+      await finish.promise;
+    } });
+    const next = mutations.tryAcquire("context-profile")!;
+    finish.resolve();
+    await run;
+    expect(mutations.owner?.operationId).toBe(next.operationId);
+    next.release();
+  });
+});
+
+describe("mentor mutation leases", () => {
+  it.each(["ken-start", "ken-append", "ken-transition"] as const)(
+    "%s conflicts fail-fast with every build reset producer in both acquisition orders", (mentorKind) => {
+      for (const resetKind of ["new-session", "phase-start", "task-run", "continuation-commit", "manual-plan-accept", "prompt-start"] as const) {
+        const mutations = new AppSidecarSessionMutationCoordinator();
+        const mentor = mutations.tryAcquire(mentorKind)!;
+        expect(mutations.tryAcquire(resetKind)).toBeNull();
+        expect(mutations.conflictBody().owner.kind).toBe(mentorKind);
+        mentor.release();
+        const reset = mutations.tryAcquire(resetKind)!;
+        expect(mutations.tryAcquire(mentorKind)).toBeNull();
+        mentor.release(); // An old finalizer cannot release a subsequent owner.
+        expect(mutations.owner?.operationId).toBe(reset.operationId);
+        reset.release();
+        expect(mutations.tryAcquire(mentorKind)).not.toBeNull();
+      }
+    },
+  );
+
+  it("mentor append blocks the authoritative reset gate before perform", async () => {
+    const mutations = new AppSidecarSessionMutationCoordinator();
+    const append = mutations.tryAcquire("ken-append")!;
+    const perform = vi.fn(async () => {});
+    const result = await runAppSidecarNewSessionMutation({
+      mutations, busyState: { running: false, autopilotActive: false, runLifecycleRunning: false }, perform,
+    });
+    expect(result).toMatchObject({ status: 409, body: { owner: { kind: "ken-append" } } });
+    expect(perform).not.toHaveBeenCalled();
+    append.release();
+    expect((await runAppSidecarNewSessionMutation({
+      mutations, busyState: { running: false, autopilotActive: false, runLifecycleRunning: false }, perform,
+    })).status).toBe(200);
+    expect(perform).toHaveBeenCalledTimes(1);
+  });
+});
 
 const harnesses: Harness[] = [];
 

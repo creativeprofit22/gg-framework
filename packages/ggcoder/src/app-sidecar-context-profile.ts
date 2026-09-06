@@ -3,6 +3,7 @@ import {
   getContextWindow,
   type OpenAICodexContextProfile,
 } from "@kenkaiiii/gg-core/models";
+import type { OpenAICodexContextProfileEligibility } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 
 export interface OpenAICodexAstraSessionState {
@@ -15,6 +16,7 @@ export interface ContextProfileMutationResult {
   status: 200 | 400 | 409 | 500;
   body: {
     error?: string;
+    reason?: string;
     openAICodexContextProfile?: OpenAICodexContextProfile;
     contextWindow?: number;
   };
@@ -28,7 +30,10 @@ export function parseContextProfileBody(body: unknown): OpenAICodexContextProfil
 
 interface ContextProfileMutationOptions {
   profile: OpenAICodexContextProfile;
-  state: OpenAICodexAstraSessionState;
+  state: OpenAICodexAstraSessionState & {
+    openAICodexContextProfile?: OpenAICodexContextProfile;
+    openAICodexContextProfileEligibility?: OpenAICodexContextProfileEligibility;
+  };
   running: boolean;
   activeUsage: number;
   mutations: AppSidecarSessionMutationCoordinator;
@@ -73,6 +78,18 @@ export async function runContextProfileMutation(
   if (!mutation) return { status: 409, body: mutations.conflictBody() };
 
   try {
+    const eligibility = state.openAICodexContextProfileEligibility;
+    if (profile !== state.openAICodexContextProfile && !eligibility?.canChange) {
+      return {
+        status: 409,
+        body: {
+          error: "context_profile_locked",
+          reason: eligibility && !eligibility.canChange
+            ? eligibility.reason
+            : "Context mode eligibility is unavailable. Start a new session to change it.",
+        },
+      };
+    }
     try {
       assertOpenAICodexContextProfileFitsUsage(state.model, profile, activeUsage);
     } catch (error) {

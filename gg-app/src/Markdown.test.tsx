@@ -105,6 +105,21 @@ describe("Ken prompt actions", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("dispatches exact selected source for a fresh session without trimming whitespace", async () => {
+    const bodies = ['  Keep literal \\n and café 日本語\n\n    Trailing spaces  \n', "  CRLF 🙂\r\n\tkeep outer whitespace  \r\n", "Second independent block"];
+    const dispatch = vi.fn(async () => ({ status: "cancelled" }) as const);
+    render(
+      <KenPromptActionProvider value={{ dispatch }}>
+        <Markdown>{bodies.map((body) => promptMarkdown(body)).join("\n\n")}</Markdown>
+      </KenPromptActionProvider>,
+    );
+    const actions = screen.getAllByRole("button", { name: "New session" });
+    for (const [index, body] of bodies.entries()) {
+      await act(async () => fireEvent.click(actions[index]));
+      expect(dispatch).toHaveBeenNthCalledWith(index + 1, { type: "send-fresh", prompt: body });
+    }
+  });
+
   it.each(["rejection", "missing", "throw"])(
     "reports clipboard %s independently and retries through Copy",
     async (failure) => {

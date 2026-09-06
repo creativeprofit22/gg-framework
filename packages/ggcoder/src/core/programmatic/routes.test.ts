@@ -20,6 +20,7 @@ import { getPromptCommand } from "../prompt-commands.js";
 import {
   resolveOpportunityRoute,
   resolveProgrammaticRoutes,
+  resolveProgrammaticSpecialist,
   resolveSpecialistAvailability,
 } from "./routes.js";
 
@@ -94,6 +95,23 @@ function opportunity(command: SpecialistCommand): DiscoveredOpportunityV1 {
     route: { status: "routable", specialistCommand: command },
   };
 }
+
+it("pins exact bodies and ownership and detects command drift", async () => {
+  const cwd = await temporaryDir("gg-pinned-route-");
+  const file = path.join(mockedPaths.agentDir, "commands", "research.md");
+  await writeCommand(file);
+  const first = await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint);
+  expect(first).toHaveProperty("command.prompt", "Run research.");
+  expect(first).toHaveProperty("owner", file);
+  await fs.appendFile(file, "\nChanged body.");
+  const second = await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint);
+  expect(second).not.toEqual(first);
+  await writeCommand(path.join(cwd, ".gg", "commands", "research.md"));
+  expect(await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint))
+    .toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
+  const bundled = await resolveProgrammaticSpecialist(cwd, opportunity("setup-tauri-package"), fingerprint);
+  expect(bundled).toHaveProperty("command.prompt", getPromptCommand("setup-tauri-package")!.prompt);
+});
 
 beforeEach(async () => {
   mockedPaths.agentDir = await temporaryDir("gg-route-app-");

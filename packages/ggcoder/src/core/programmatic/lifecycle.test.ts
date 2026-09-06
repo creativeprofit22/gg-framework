@@ -17,6 +17,7 @@ import {
   PROGRAMMATIC_STATE_PATH,
   reconcileProgrammaticLifecycle,
   runProgrammaticScan,
+  accessProgrammaticExecutionRecord,
 } from "./lifecycle.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./profile.js";
 
@@ -96,6 +97,54 @@ async function persistedState(root: string): Promise<ProgrammaticLifecycleStateV
     JSON.parse(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")) as unknown,
   );
 }
+
+it("transitions one selected record, refuses overlap and preserves unrelated records", async () => {
+  const root = await createRepository();
+  await runProgrammaticScan(root);
+  const initial = await persistedState(root);
+  const selected = initial.records[0]!;
+  const id = selected.opportunity.identity.id;
+  const fp = initial.configurationFingerprint;
+  const unrelated = initial.records.slice(1);
+  const move = (from: "discovered" | "queued" | "running", to: "queued" | "running" | "completed") =>
+    accessProgrammaticExecutionRecord(root, id, fp, { from, to });
+  await expect(move("discovered", "completed")).rejects.toThrow();
+  await move("discovered", "queued");
+  await move("queued", "running");
+  await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("running");
+  await expect(move("queued", "running")).rejects.toThrow();
+  await move("running", "queued");
+  await move("queued", "running");
+  await move("running", "completed");
+  expect((await persistedState(root)).records.slice(1)).toEqual(unrelated);
+  await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("nonterminal");
+});
+
+it("recovers the previous valid execution state and refuses changed approved selections", async () => {
+  const root = await createRepository();
+  await runProgrammaticScan(root);
+  const initial = await persistedState(root);
+  const id = initial.records[0]!.opportunity.identity.id;
+  const fp = initial.configurationFingerprint;
+  const selected = await accessProgrammaticExecutionRecord(root, id, fp);
+  await accessProgrammaticExecutionRecord(root, id, fp, { from: "discovered", to: "queued" });
+  await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "broken primary");
+  expect(await accessProgrammaticExecutionRecord(root, id, fp)).toMatchObject({ lifecycle: { state: "discovered" } });
+  await expect(accessProgrammaticExecutionRecord(root, id, fp, { from: "discovered", to: "queued", expectedProfileSha256: "f".repeat(64) })).rejects.toThrow("selection changed");
+  await accessProgrammaticExecutionRecord(root, id, fp, { from: "discovered", to: "queued", expectedProfileSha256: selected.approvalSha256, expectedOpportunity: selected.opportunity });
+  expect((await persistedState(root)).records[0]!.lifecycle.state).toBe("queued");
+});
+
+it("does not replace primary state after a failed execution write", async () => {
+  const root = await createRepository();
+  await runProgrammaticScan(root);
+  const initial = await persistedState(root);
+  await expect(accessProgrammaticExecutionRecord(root, initial.records[0]!.opportunity.identity.id,
+    initial.configurationFingerprint, { from: "discovered", to: "queued" }, {
+      operations: { rename: async () => { throw new Error("fixture rename failure"); } },
+    })).rejects.toThrow("fixture rename failure");
+  expect(await persistedState(root)).toEqual(initial);
+});
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

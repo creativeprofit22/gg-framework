@@ -1,3 +1,4 @@
+import { sha256 as hash } from "../tauri-package/paths.js";
 import { loadCustomCommands, type CustomCommand } from "../custom-commands.js";
 import { getPromptCommand, type PromptCommand } from "../prompt-commands.js";
 import type {
@@ -225,15 +226,47 @@ export function resolveOpportunityRoute(
   });
 }
 
+/** Ephemeral host snapshot; never persist command bodies in lifecycle or scan results. */
+export type ResolvedSpecialist = Readonly<{
+  route: Extract<RouteResolutionV1, { status: "routable" }>;
+  command: Readonly<{ name: SpecialistCommand; prompt: string }>;
+  owner: string;
+  sha256: string;
+}>;
+
+async function loadSpecialistInputs(cwd: string) {
+  return {
+    customs: await loadCustomCommands(cwd),
+    builtIns: new Map(SPECIALIST_ROUTES.map(({ command }) => [command, getPromptCommand(command)] as const)),
+  };
+}
+
+export async function resolveProgrammaticSpecialist(
+  cwd: string,
+  opportunity: DiscoveredOpportunityV1,
+  fingerprint: ConfigurationFingerprintV1,
+): Promise<ResolvedSpecialist | RouteResolutionV1> {
+  const { customs, builtIns } = await loadSpecialistInputs(cwd);
+  const builtin = opportunity.route.status === "routable"
+    ? builtIns.get(opportunity.route.specialistCommand)
+    : undefined;
+  const route = resolveOpportunityRoute(opportunity, fingerprint, customs, builtin);
+  if (route.status !== "routable") return route;
+  const custom = customs.find(({ name }) => name === route.specialistCommand);
+  const prompt = builtin?.prompt ?? custom?.prompt;
+  if (!prompt?.trim()) throw new Error("Specialist command body is unavailable.");
+  const owner = builtin ? "built-in" : custom!.filePath;
+  const command = Object.freeze({ name: route.specialistCommand, prompt });
+  const sha256 = hash(JSON.stringify({ route, owner, command }));
+  return Object.freeze({ route, command, owner, sha256 });
+}
+
 export async function resolveProgrammaticRoutes(
   cwd: string,
   opportunities: readonly DiscoveredOpportunityV1[],
   configurationFingerprint: ConfigurationFingerprintV1,
 ): Promise<RouteResolutionV1[]> {
-  const customCommands = await loadCustomCommands(cwd);
-  const builtIns = new Map(
-    SPECIALIST_ROUTES.map(({ command }) => [command, getPromptCommand(command)] as const),
-  );
+  const { customs: customCommands, builtIns } = await loadSpecialistInputs(cwd);
   return opportunities.map((opportunity) =>
     resolveOpportunityRoute(
       opportunity,

@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import type {
   ConfigurationFingerprintV1,
+  DiscoveredOpportunityV1,
   OpportunityDiscoveryResultV1,
   ProgrammaticLifecycleRecordV1,
   ProgrammaticLifecycleStateV1,
@@ -12,6 +13,7 @@ import type {
 import {
   configurationFingerprintV1Schema,
   opportunityDiscoveryResultV1Schema,
+  opportunityTransitionV1Schema,
   PROGRAMMATIC_CONTRACT_VERSION,
   PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT,
   programmaticLifecycleStateV1Schema,
@@ -31,6 +33,8 @@ import {
   compareText,
   containedPath,
   rejectLinks,
+  stableJson,
+  sha256,
 } from "../tauri-package/paths.js";
 
 export const PROGRAMMATIC_STATE_PATH = ".gg/programmatic/state.json";
@@ -310,6 +314,73 @@ async function ensureCommitInputsUnchanged(
   ) {
     throw new StaleConfigurationError("Programmatic configuration changed during scanning");
   }
+}
+
+export async function accessProgrammaticExecutionRecord(
+  repositoryRoot: string,
+  opportunityId: string,
+  fingerprint: ConfigurationFingerprintV1,
+  transition?: {
+    from: "discovered" | "queued" | "running";
+    to: "queued" | "running" | "completed";
+    expectedOpportunity?: DiscoveredOpportunityV1;
+    expectedProfileSha256?: string;
+  },
+  options: RunProgrammaticScanOptions = {},
+): Promise<ProgrammaticLifecycleRecordV1 & { approvalSha256: string }> {
+  configurationFingerprintV1Schema.parse(fingerprint);
+  if (!/^[a-f0-9]{64}$/.test(opportunityId)) throw new Error("Invalid opportunity selection.");
+  const root = await canonicalRepositoryRoot(repositoryRoot);
+  const operations = { ...localOperations, ...options.operations };
+  await rejectLinks(root, ".gg/programmatic");
+  return withFileLock(containedPath(root, PROGRAMMATIC_STATE_PATH), async () => {
+    const profile = await loadProfile(root, operations);
+    if (profile.status !== "valid" || profile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256) {
+      throw new Error("Approved configuration is unavailable or changed.");
+    }
+    const revalidate = () => ensureCommitInputsUnchanged(
+      root, operations, options.inventoryOperations, profile.bytes, fingerprint,
+    );
+    await revalidate();
+    const primary = await readStateCandidate(containedPath(root, PROGRAMMATIC_STATE_PATH), operations);
+    const loaded = primary.status === "valid" ? primary
+      : await readStateCandidate(containedPath(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), operations);
+    if (loaded.status !== "valid" || loaded.state.configurationFingerprint.sha256 !== fingerprint.sha256) {
+      throw new Error("Lifecycle state is unavailable or changed; recovery required.");
+    }
+    const record = loaded.state.records.find(({ opportunity }) => opportunity.identity.id === opportunityId);
+    if (!record || record.presence !== "present" || ["completed", "dismissed"].includes(record.lifecycle.state)) {
+      throw new Error("Choose a present, nonterminal opportunity.");
+    }
+    const configured = profile.envelope.profile.scanners.find(({ id }) => id === record.opportunity.identity.detectorId);
+    if (!configured || record.opportunity.route.status !== "routable" || configured.specialistCommand !== record.opportunity.route.specialistCommand) {
+      throw new Error("Selected specialist is not approved in the current profile.");
+    }
+    if (loaded.state.records.some((item) => item.lifecycle.state === "running" &&
+      (item !== record || transition?.from !== "running"))) {
+      throw new Error("An opportunity is running; recovery required if its owner is unavailable.");
+    }
+    const approvalSha256 = sha256(profile.bytes);
+    if (!transition) return { ...record, approvalSha256 };
+    if ((transition.expectedOpportunity && stableJson(transition.expectedOpportunity) !== stableJson(record.opportunity)) ||
+      (transition.expectedProfileSha256 && transition.expectedProfileSha256 !== approvalSha256)) {
+      throw new Error("Approved selection changed.");
+    }
+    if (record.lifecycle.state !== transition.from) throw new Error("Opportunity state changed.");
+    opportunityTransitionV1Schema.parse({ version: 1, opportunity: record.opportunity.identity, from: transition.from, to: transition.to });
+    const next = { ...record, lifecycle: { ...record.lifecycle, state: transition.to } };
+    const state = programmaticLifecycleStateV1Schema.parse({
+      ...loaded.state,
+      records: loaded.state.records.map((item) => item === record ? next : item),
+    });
+    if (primary.status === "valid") {
+      await replaceStateFile(root, PROGRAMMATIC_PREVIOUS_STATE_PATH, PREVIOUS_STATE_TEMPORARY_PATH,
+        loaded.state, operations, options, revalidate);
+    }
+    await replaceStateFile(root, PROGRAMMATIC_STATE_PATH, STATE_TEMPORARY_PATH,
+      state, operations, options, revalidate);
+    return { ...next, approvalSha256 };
+  });
 }
 
 export async function runProgrammaticScan(

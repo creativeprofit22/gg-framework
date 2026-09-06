@@ -20,7 +20,7 @@ export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v2"
 
 export interface VerificationEvidence {
   command: string;
-  status: "passed" | "failed" | "rejected";
+  status: "passed" | "failed" | "rejected" | "unavailable";
   reason: string;
 }
 
@@ -643,11 +643,14 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
         });
         continue;
       }
-      const passed = !result.isError && /^Exit code:\s*0(?:\s|$)/i.test(resultText(result).trim());
+      const exit = /^Exit code:\s*(-?\d+)(?:\s|$)/i.exec(resultText(result).trim());
+      const passed = !result.isError && exit?.[1] === "0";
       evidence.push({
         command: call.command,
-        status: passed ? "passed" : "failed",
-        reason: passed ? call.classification.reason : "bounded check did not exit successfully",
+        status: passed ? "passed" : exit ? "failed" : "unavailable",
+        reason: passed ? call.classification.reason : exit
+          ? "bounded check did not exit successfully"
+          : "execution outcome unavailable from retained transcript",
       });
     }
   }
@@ -662,6 +665,12 @@ export type RoadmapShellEvidence = Omit<VerificationEvidence, "status"> & {
   safeToolEnvironmentDigest?: string;
   workspace?: NotesWorkspaceSnapshotV1;
   classifierVersion?: string;
+  terminalReason?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  elapsedMs?: number;
+  timeoutMs?: number;
+  logPath?: string;
 };
 
 export function safeToolEnvironmentDigest(
@@ -718,6 +727,10 @@ interface BashExecutionDiagnostics {
   exitCode?: unknown;
   cwd?: unknown;
   startedAt?: unknown;
+  signal?: unknown;
+  elapsedMs?: unknown;
+  timeoutMs?: unknown;
+  logPath?: unknown;
 }
 
 // simplification: Retain 100 executions; persist per-phase evidence if deeper history is required.
@@ -732,7 +745,13 @@ export class SessionVerificationEvidenceLedger {
     { generation: number; evidence: RoadmapShellEvidence }
   >();
 
+  get revision(): number {
+    return this.generation;
+  }
+
   recordToolResult(input: {
+    /** Captured by the host at tool start, never from model arguments. */
+    evidenceRevision?: number;
     name: string;
     args: Record<string, unknown>;
     isError: boolean;
@@ -781,8 +800,17 @@ export class SessionVerificationEvidenceLedger {
         !input.isError && diagnostics?.reason === "completed" && diagnostics.exitCode === 0;
       evidence = {
         command,
-        status: passed ? "passed" : "failed",
-        reason: passed ? classification.reason : "bounded check did not exit successfully",
+        status: passed ? "passed" :
+          ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(String(diagnostics?.reason))
+            ? "failed" : "unavailable",
+        reason: passed ? classification.reason :
+          diagnostics?.reason === "spawnError" ? "launch failed" :
+          diagnostics?.reason === "timedOut" ? "timed out" :
+          diagnostics?.reason === "aborted" ? "cancelled" :
+          typeof diagnostics?.exitCode === "number" && Number.isInteger(diagnostics.exitCode) && diagnostics.exitCode !== 0
+            ? `failed (exit ${diagnostics.exitCode})` :
+          diagnostics?.reason === "nonZeroExit" ? "failed (no numeric exit code)" :
+          diagnostics?.reason === "completed" ? "inconsistent completion metadata" : "execution outcome unavailable",
       };
     }
     Object.assign(evidence, {
@@ -791,13 +819,29 @@ export class SessionVerificationEvidenceLedger {
       cwd,
       safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
     });
+    if (["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(String(diagnostics?.reason))) {
+      evidence.terminalReason = String(diagnostics?.reason);
+    }
+    if (diagnostics?.exitCode === null || (typeof diagnostics?.exitCode === "number" && Number.isSafeInteger(diagnostics.exitCode))) {
+      evidence.exitCode = diagnostics.exitCode;
+    }
+    if (diagnostics?.signal === null || (typeof diagnostics?.signal === "string" && /^SIG[A-Z0-9]{1,20}$/.test(diagnostics.signal))) {
+      evidence.signal = diagnostics.signal;
+    }
+    for (const key of ["elapsedMs", "timeoutMs"] as const) {
+      const value = diagnostics?.[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) evidence[key] = value;
+    }
+    if (typeof diagnostics?.logPath === "string" && diagnostics.logPath.length <= 2048 && !Array.from(diagnostics.logPath).some((character) => character.charCodeAt(0) < 32)) {
+      evidence.logPath = diagnostics.logPath;
+    }
     if (input.workspace) {
       evidence.workspace = structuredClone(input.workspace);
       evidence.classifierVersion = ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
     }
     const existing = this.entries.get(executionId);
     if (existing) return;
-    this.entries.set(executionId, { generation: this.generation, evidence });
+    this.entries.set(executionId, { generation: input.evidenceRevision ?? this.generation, evidence });
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       const oldestExecutionId = this.entries.keys().next().value;
       if (oldestExecutionId === undefined) break;

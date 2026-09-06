@@ -10,6 +10,8 @@ import {
   INJECTED_PROMPT_LABEL,
 } from "./ken-context.js";
 import { USER_INSTRUCTIONS_HEADER } from "./autopilot-gate.js";
+import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
+import { SessionVerificationEvidenceLedger } from "./verification-evidence.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 import { createTools } from "../tools/index.js";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -130,6 +132,68 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("PROMPT");
     expect(digest).toContain("ALL_CLEAR");
     expect(digest).toContain("HUMAN");
+  });
+
+  it("preserves successful verification after pruning", () => {
+    const command = "tsc --noEmit";
+    const executionId = "pruning-success";
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash", args: { command }, isError: false,
+      details: { bashDiagnostics: {
+        executionId, command, cwd: base.cwd, startedAt: 1000,
+        reason: "completed", exitCode: 0,
+      } },
+    });
+    const result = {
+      type: "tool_result" as const, toolCallId: executionId,
+      content: `Exit code: 0\n${"check output\n".repeat(30)}`,
+    };
+    const messages: Message[] = [
+      { role: "assistant", content: [{ type: "tool_call", id: executionId, name: "bash", args: { command } }] },
+      { role: "tool", content: [result] },
+      { role: "assistant", content: [{ type: "tool_call", id: "read", name: "read", args: { file_path: "README.md" } }] },
+      { role: "tool", content: [{ type: "tool_result", toolCallId: "read", content: "recent read" }] },
+    ];
+    const snapshot = ledger.snapshot();
+    const input = { ...base, messages, verificationEvidence: snapshot };
+    const before = buildKenDigest(input);
+    const pruning = pruneStaleToolResults(messages, {
+      protectTokens: 0, minimumTokens: 0, protectToolBatches: 1,
+    });
+    const after = buildKenDigest(input);
+
+    expect(before).toContain("PASSED: `tsc --noEmit`");
+    expect(pruning.prunedResults).toBe(1);
+    expect(result.content).toMatch(/^\[Pruned:/);
+    expect(result.toolCallId).toBe(executionId);
+    expect(ledger.snapshot()).toEqual(snapshot);
+    expect(snapshot.currentEvidence[0]).toMatchObject({ executionId, cwd: base.cwd, status: "passed" });
+    expect(after).toContain("PASSED: `tsc --noEmit`");
+    expect(after).not.toContain("FAILED:");
+  });
+
+  it("keeps host failures, rejections and stale outcomes distinct from missing legacy output", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (const [executionId, command, exitCode] of [
+      ["failed", "tsc --noEmit", 1], ["rejected", "vitest --watch", 0],
+    ] as const) {
+      ledger.recordToolResult({ name: "bash", args: { command }, isError: exitCode !== 0,
+        details: { bashDiagnostics: { executionId, command, exitCode,
+          reason: exitCode ? "nonZeroExit" : "completed", cwd: base.cwd, startedAt: 1000 } } });
+    }
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/index.ts" }, isError: false });
+    const digest = buildKenDigest({ ...base, messages: [], verificationEvidence: ledger.snapshot() });
+    expect(digest).toContain("STALE FAILED: `tsc --noEmit`");
+    expect(digest).toContain("STALE REJECTED: `vitest --watch`");
+    expect(digest).toContain("execution failed; cwd /tmp/proj");
+    const legacy = buildKenDigest({ ...base, messages: [
+      { role: "assistant", content: [{ type: "tool_call", id: "legacy", name: "bash", args: { command: "tsc --noEmit" } }] },
+      { role: "tool", content: [{ type: "tool_result", toolCallId: "legacy", content: "[Pruned: old tool output]" }] },
+    ] });
+    expect(legacy).toContain("UNAVAILABLE: `tsc --noEmit`");
+    expect(legacy).not.toContain("FAILED:");
+    expect(legacy).not.toContain("PASSED:");
   });
 
   it("feeds only harness-classified command outcomes into verification evidence", () => {

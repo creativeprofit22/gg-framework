@@ -95,6 +95,25 @@ describe("isCodeFilePath", () => {
 });
 
 describe("VerificationGate", () => {
+  it("keeps conservative note invalidation and never clears failures by resetting reminder budgets", () => {
+    const gate = new VerificationGate();
+    const command = "pnpm --filter @kenkaiiii/ggcoder exec tsc --noEmit";
+    gate.recordMutation("packages/ggcoder/src/core/example.ts");
+    gate.recordVerification(gate.revision, command);
+    const oldRevision = gate.revision;
+    gate.recordMutation("gg-app/src/local-changelog.ts");
+    gate.recordVerification(oldRevision, command);
+    expect(gate.verificationProblem()).toContain("Unverified");
+    gate.recordFailedVerification(command);
+    expect(gate.followUp()).not.toBeNull();
+    expect(gate.followUp()).toBeNull();
+    gate.beginRun();
+    expect(gate.verificationProblem()).toContain("failed");
+    expect(gate.followUp()).not.toBeNull();
+    expect(gate.followUp()).toBeNull();
+    gate.recordVerification(gate.revision, "pnpm --filter gg-app check");
+    expect(gate.verificationProblem()).toContain("failed");
+  });
   it("keeps an authoritative problem after all reminder budgets are exhausted", () => {
     const gate = new VerificationGate();
     gate.recordMutation("a.ts");

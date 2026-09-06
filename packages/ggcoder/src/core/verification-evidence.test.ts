@@ -808,6 +808,27 @@ describe("SessionVerificationEvidenceLedger", () => {
     });
   }
 
+  it.each([
+    ["completed", 0, "passed", "bounded TypeScript no-emit check"],
+    ["nonZeroExit", 1, "failed", "failed (exit 1)"],
+    ["spawnError", null, "failed", "launch failed"],
+    ["timedOut", null, "failed", "timed out"],
+    ["aborted", null, "failed", "cancelled"],
+    [undefined, null, "unavailable", "execution outcome unavailable"],
+  ])("retains terminal diagnostics for %s", (reason, exitCode, status, explanation) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({ name: "bash", args: { command: "tsc --noEmit" }, isError: exitCode !== 0,
+      details: { bashDiagnostics: {
+        executionId: "terminal", command: "tsc --noEmit", cwd: "C:/project", startedAt: 1000,
+        reason, exitCode, signal: "SIGTERM", elapsedMs: 123, timeoutMs: 120000,
+        logPath: "C:/logs/terminal.log", tail: "fixture debugging target timed out: fetch failed",
+      } } });
+    const evidence = ledger.snapshot().currentEvidence[0];
+    expect(evidence).toMatchObject({ status, reason: explanation,
+      exitCode, signal: "SIGTERM", elapsedMs: 123, timeoutMs: 120000, logPath: "C:/logs/terminal.log" });
+    expect(evidence).not.toHaveProperty("tail");
+  });
+
   it("accepts a successful path-qualified Windows Go test as ready evidence", () => {
     const command =
       "./.tools/go/bin/go.exe test ./internal/architecture -run '^TestProjectImportDAG$' -count=1";
@@ -887,6 +908,44 @@ describe("SessionVerificationEvidenceLedger", () => {
 
     expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
   });
+
+  it("does not promote a check started before an edit with a completion-time snapshot", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    const evidenceRevision = ledger.revision;
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/example.ts" }, isError: false });
+    ledger.recordToolResult({ name: "bash", args: { command: "pnpm check" }, isError: false,
+      evidenceRevision, workspace: TEST_WORKSPACE,
+      details: { bashDiagnostics: { executionId: "in-flight", command: "pnpm check",
+        cwd: "C:/project", startedAt: 1000, reason: "completed", exitCode: 0 } } });
+    expect(ledger.snapshot()).toMatchObject({ currentEvidence: [], staleEvidence: [
+      { executionId: "in-flight", status: "passed", workspace: TEST_WORKSPACE },
+    ] });
+  });
+
+  it("keeps equal commands isolated by execution, cwd, and reset boundary", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (const [executionId, cwd, exitCode] of [["one", "C:/one", 1], ["two", "C:/two", 0]] as const) {
+      ledger.recordToolResult({ name: "bash", args: { command: "pnpm check" }, isError: exitCode !== 0,
+        details: { bashDiagnostics: { executionId, cwd, exitCode, command: "pnpm check",
+          startedAt: 1000, reason: exitCode ? "nonZeroExit" : "completed" } } });
+    }
+    expect(ledger.snapshot().currentEvidence).toMatchObject([
+      { executionId: "one", cwd: "C:/one", status: "failed" },
+      { executionId: "two", cwd: "C:/two", status: "passed" },
+    ]);
+    ledger.clear();
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+  });
+
+  it.each(["gg-app/src/local-release-notes.json", "gg-app/src/local-changelog.ts", "tsconfig.json"])(
+    "conservatively stales backend evidence after editing %s", (file_path) => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      record(ledger, "backend", "pnpm --filter @kenkaiiii/ggcoder exec tsc --noEmit");
+      ledger.recordToolResult({ name: "edit", args: { file_path }, isError: false });
+      expect(ledger.snapshot().currentEvidence).toEqual([]);
+      expect(ledger.snapshot().staleEvidence[0]).toMatchObject({ executionId: "backend", status: "passed" });
+    },
+  );
 
   it("moves accepted evidence to stale after a workspace mutation", () => {
     const ledger = new SessionVerificationEvidenceLedger();

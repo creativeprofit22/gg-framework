@@ -488,7 +488,7 @@ export class AgentSession {
   private hookFileEditCounts = new Map<string, number>();
   private hookToolCalls = new Map<
     string,
-    { name: string; args: Record<string, unknown>; revision: number }
+    { name: string; args: Record<string, unknown>; revision: number; evidenceRevision: number }
   >();
   private backgroundVerification = new Map<string, { revision: number; command: string }>();
   private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
@@ -1687,6 +1687,7 @@ export class AgentSession {
           name: event.name,
           args: event.args ?? {},
           revision: this.verificationGate.revision,
+          evidenceRevision: this.verificationEvidenceLedger.revision,
         });
         if (
           event.name === "bash" &&

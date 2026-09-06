@@ -19,7 +19,7 @@
 import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
 import { continuationReviewSchema, parseContinuationReviewRecord, type ContinuationReviewRecord } from "./continuation-review-context.js";
 import { matchExpandedCommand, type WorkflowCommandSpec } from "./autopilot-gate.js";
-import { collectVerificationEvidence } from "./verification-evidence.js";
+import { collectVerificationEvidence, type SessionVerificationEvidenceLedgerSnapshot } from "./verification-evidence.js";
 
 /** How many of the most recent build-session messages to inline verbatim. */
 export const KEN_RECENT_MESSAGE_LIMIT = 20;
@@ -48,6 +48,8 @@ export interface KenDigestInput {
   gitBranch: string | null;
   /** Build session messages (`buildSession.getMessages()`). */
   messages: Message[];
+  /** Host-owned execution outcomes, independent of transcript retention. */
+  verificationEvidence?: SessionVerificationEvidenceLedgerSnapshot;
   /** Platform string (defaults to process.platform). */
   platform?: string;
   /** Override the recent-message cap (tests). */
@@ -213,17 +215,17 @@ export function buildKenAutopilotContext(input: KenAutopilotContextInput): strin
 
 /** Production build-session input composition, without importing the daemon. */
 export function buildKenAutopilotSessionContext(
-  session: { getMessages(): Message[]; getContinuationReviewRecord(): ContinuationReviewRecord | undefined },
+  session: { getMessages(): Message[]; getContinuationReviewRecord(): ContinuationReviewRecord | undefined; getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot },
   input: Omit<KenAutopilotContextInput, "messages">,
 ): string {
-  return buildKenAutopilotContext({ ...input, messages: session.getMessages(), continuationReview: session.getContinuationReviewRecord() });
+  return buildKenAutopilotContext({ ...input, messages: session.getMessages(), verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.(), continuationReview: session.getContinuationReviewRecord() });
 }
 
 export function buildKenAutopilotPlanSessionContext(
-  session: { getMessages(): Message[]; getContinuationReviewRecord(): ContinuationReviewRecord | undefined },
+  session: { getMessages(): Message[]; getContinuationReviewRecord(): ContinuationReviewRecord | undefined; getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot },
   input: Omit<KenAutopilotContextInput, "messages" | "continuationReview"> & { planContent: string },
 ): string {
-  return buildKenAutopilotPlanContext({ ...input, messages: session.getMessages(), continuationReview: session.getContinuationReviewRecord() });
+  return buildKenAutopilotPlanContext({ ...input, messages: session.getMessages(), verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.(), continuationReview: session.getContinuationReviewRecord() });
 }
 
 /** Interactive-only composition. Capture the authoritative build synchronously;
@@ -232,6 +234,7 @@ export function buildKenAutopilotPlanSessionContext(
 export function buildKenInteractiveSessionContext(
   session: {
     getMessages(): Message[];
+    getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot;
     getContinuationReviewRecord(): ContinuationReviewRecord | undefined;
     getConversationIdentity(): { conversationId: string };
     getState(): { openAICodexContextProfile: string };
@@ -242,7 +245,7 @@ export function buildKenInteractiveSessionContext(
   const conversationId = session.getConversationIdentity().conversationId;
   const profile = session.getState().openAICodexContextProfile;
   const record = parseContinuationReviewRecord(session.getContinuationReviewRecord(), { conversationId, profile });
-  const digest = buildKenDigest({ ...input, messages });
+  const digest = buildKenDigest({ ...input, messages, verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.() });
   if (!record) return digest;
 
   const quote = (text: string): string => {
@@ -423,15 +426,26 @@ export function buildKenDigest(input: KenDigestInput): string {
     }`,
   );
 
-  const verificationEvidence = collectVerificationEvidence(afterSummary).slice(-12);
+  const snapshot = input.verificationEvidence;
+  const verificationEvidence = snapshot
+    ? [...snapshot.staleEvidence.map((evidence) => ({ ...evidence, stale: true })),
+       ...snapshot.currentEvidence.map((evidence) => ({ ...evidence, stale: evidence.cwd !== input.cwd }))]
+        .filter((evidence) => evidence.status !== "unclassified").slice(-12)
+    : collectVerificationEvidence(afterSummary).slice(-12).map((evidence) => ({ ...evidence, stale: true }));
   if (verificationEvidence.length > 0) {
     const rows = verificationEvidence.map(
       (evidence) =>
-        `- ${evidence.status.toUpperCase()}: \`${cap(evidence.command, 180)}\` — ${evidence.reason}`,
+        `- ${evidence.stale ? "STALE " : ""}${evidence.status.toUpperCase()}: \`${cap(evidence.command, 180)}\` — ${evidence.reason}` +
+        ("executionId" in evidence ? ` (execution ${evidence.executionId}; cwd ${evidence.cwd})` +
+          [evidence.signal ? `signal ${evidence.signal}` : "",
+           evidence.elapsedMs !== undefined ? `elapsed ${evidence.elapsedMs}ms` : "",
+           evidence.timeoutMs !== undefined ? `deadline ${evidence.timeoutMs}ms` : "",
+           evidence.logPath ? `log ${evidence.logPath}` : ""].filter(Boolean).map((detail) => `; ${detail}`).join("")
+          : " (legacy transcript; current scope unavailable)"),
     );
     sections.push(
       "## Harness-classified verification evidence\n" +
-        "Only PASSED entries below count as bounded verification evidence; model-authored claims do not.\n" +
+        "Only current PASSED entries below are bounded execution evidence, not approval of arbitrary scope. STALE outcomes do not approve current changes; model-authored claims do not count.\n" +
         rows.join("\n"),
     );
   }

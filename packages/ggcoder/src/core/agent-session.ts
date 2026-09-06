@@ -352,6 +352,8 @@ export interface AgentSessionOptions {
   orchestrationPrompt?: boolean;
   /** Host-provided tools appended to this session only (for example, chat delegation). */
   additionalTools?: AgentTool[];
+  /** Host approval gate, applied to every registered tool including stale references. */
+  approveToolExecution?: (name: string, args: unknown, signal?: AbortSignal) => Promise<boolean>;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -1422,10 +1424,37 @@ export class AgentSession {
     if (!promptText) return { kind: "command" };
     return {
       kind: "template",
-      fullPrompt: parsed.args
-        ? `${promptText}\n\n## User Instructions\n\n${parsed.args}`
-        : promptText,
+      fullPrompt: this.expandResolvedPromptCommand(promptText, parsed.args),
     };
+  }
+
+  private expandResolvedPromptCommand(prompt: string, args: string): string {
+    return args ? `${prompt}\n\n## User Instructions\n\n${args}` : prompt;
+  }
+
+  /** Host-only pinned command entry: no slash lookup or project override. */
+  async promptResolvedCommand(command: Readonly<{ prompt: string }>, args: string): Promise<void> {
+    if (!this.opts.transient) throw new Error("Resolved commands require a transient session.");
+    if (!command.prompt.trim()) throw new Error("Resolved command body is empty.");
+    await this.adoptDeferredCheckpointBeforePrompt();
+    await this.acceptPromptTemplate(this.expandResolvedPromptCommand(command.prompt, args), {
+      source: "human", kind: "prompt", visibility: "transcript",
+    });
+  }
+
+  private async acceptPromptTemplate(
+    content: string,
+    provenance: MessageProvenance,
+    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void> } = {},
+  ): Promise<void> {
+    await this.ensureActivePhaseSessionMetadata();
+    const userMessage: Message = { role: "user", content, provenance };
+    this.contextProfileLocked = true;
+    this.messages.push(userMessage);
+    await this.persistMessage(userMessage, !!options.onAccepted);
+    this.lastPersistedIndex = this.messages.length;
+    await options.onAccepted?.();
+    await this.runLoop(options);
   }
 
   /**
@@ -1459,15 +1488,7 @@ export class AgentSession {
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
     if (slash?.kind === "template") {
-      await this.ensureActivePhaseSessionMetadata();
-      // Prompt templates remain human-originated: the user invoked the command.
-      const userMessage: Message = { role: "user", content: slash.fullPrompt, provenance };
-      this.contextProfileLocked = true;
-      this.messages.push(userMessage);
-      await this.persistMessage(userMessage, !!options.onAccepted);
-      this.lastPersistedIndex = this.messages.length;
-      await options.onAccepted?.();
-      await this.runLoop(options);
+      await this.acceptPromptTemplate(slash.fullPrompt, provenance, options);
       return;
     }
     if (slash?.kind === "command") {
@@ -3621,6 +3642,14 @@ export class AgentSession {
     return true;
   }
 
+  /** Read-only host preflight against the live guarded registry, without executing a tool. */
+  supportsToolCall(name: string, args?: unknown): boolean {
+    const tool = this.tools.find((candidate) => candidate.name === name);
+    return !!tool && this.isToolCapabilityAllowed(name) &&
+      !this.unavailableToolNames.has(name) &&
+      (args === undefined || tool.parameters.safeParse(args).success);
+  }
+
   /** Register or replace a host-owned runtime tool under the active capability policy. */
   registerTool(tool: AgentTool): void {
     if (!this.prepareToolRegistration(tool)) return;
@@ -3662,6 +3691,11 @@ export class AgentSession {
               `${tool.name} is unavailable under the active tool capability policy.`,
           );
         }
+        if (this.opts.approveToolExecution &&
+          !(await this.opts.approveToolExecution(tool.name, args, context.signal))) {
+          throw new Error("Tool execution was not approved.");
+        }
+        context.signal?.throwIfAborted();
         return executionTarget.execute(args, context);
       },
     };

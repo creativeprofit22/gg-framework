@@ -66,6 +66,25 @@ async function writeCustomCommand(name: string, body: string): Promise<void> {
 }
 
 describe("slash-command restore", () => {
+  it("runs a pinned body without project lookup or argument substitution", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("research", "PROJECT SHADOW");
+    const session = new AgentSession({
+      provider: "anthropic", model: "claude-test", cwd: tmpProject,
+      systemPrompt: "sys", transient: true,
+    });
+    try {
+      await session.initialize();
+      await session.promptResolvedCommand({ prompt: "/literal $ARGUMENTS" }, "selected scope");
+      expect(session.getMessages().filter((m) => m.role === "user")).toEqual([
+        expect.objectContaining({ content: "/literal $ARGUMENTS\n\n## User Instructions\n\nselected scope" }),
+      ]);
+      expect(agentLoopMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("expands a custom command to its template and reports it as expanding", async () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("shipit", "Ship the release now.");

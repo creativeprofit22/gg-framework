@@ -119,6 +119,9 @@ const phaseLeaseRequired = [
 ] as const;
 
 const rawInputSchema = {
+  // Raw schemas bypass Zod normalization; DeepSeek requires an explicit object root.
+  // Keep oneOf intact so each action retains its required fields and confirmations.
+  type: "object",
   oneOf: [
     {
       type: "object",

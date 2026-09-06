@@ -1,7 +1,68 @@
 import { describe, expect, it, vi } from "vitest";
+import { resolveToolSchema, stream } from "@kenkaiiii/gg-ai";
 import { RoadmapBindParams, createRoadmapBindTool } from "./roadmap-bind.js";
 
 describe("roadmap_bind tool", () => {
+  it("sends an object-root schema through the installed DeepSeek adapter without losing branches", async () => {
+    const tool = createRoadmapBindTool(async () => ({ status: "missing" as const }));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        `data: ${JSON.stringify({
+          choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+        })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    await stream({
+      provider: "deepseek",
+      model: "deepseek-chat",
+      apiKey: "test-only-not-a-credential",
+      messages: [{ role: "user", content: "schema regression fixture" }],
+      tools: [tool],
+      fetch: fetchMock,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      "https://api.deepseek.com/v1/chat/completions",
+    );
+    // Inspect only tool metadata, never headers or conversation contents.
+    const { tools } = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)) as {
+      tools: {
+        function: {
+          name: string;
+          strict?: boolean;
+          parameters: {
+            type?: string;
+            oneOf: { type: string; properties: { action: { const: string } } }[];
+          };
+        };
+      }[];
+    };
+    const definition = tools[0]!.function;
+    expect(definition.name).toBe("roadmap_bind");
+    expect(definition.strict).toBeUndefined();
+    expect(definition.parameters).toEqual(resolveToolSchema(tool));
+    expect(definition.parameters).toEqual(tool.rawInputSchema);
+    expect({
+      rootType: definition.parameters.type ?? null,
+      branchTypes: definition.parameters.oneOf.map((branch) => branch.type),
+      actions: definition.parameters.oneOf.map((branch) => branch.properties.action.const),
+    }).toEqual({
+      rootType: "object",
+      branchTypes: Array(7).fill("object"),
+      actions: [
+        "inspect",
+        "bind-current",
+        "rebind-current",
+        "acquire",
+        "renew",
+        "release",
+        "takeover",
+      ],
+    });
+  });
+
   it("maps bind-current without accepting a destination", async () => {
     const handle = vi.fn(async () => ({ status: "missing" as const }));
     const tool = createRoadmapBindTool(handle);

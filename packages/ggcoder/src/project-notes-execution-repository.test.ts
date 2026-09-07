@@ -9,10 +9,7 @@ import {
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
-  roadmapCriterionId,
-} from "./core/verification-evidence.js";
+import { ROADMAP_VERIFICATION_CLASSIFIER_VERSION } from "./core/verification-evidence.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
 
@@ -86,7 +83,7 @@ function v2Evidence(index: number): NotesVerificationEvidenceV2 {
     exitCode: 0,
     classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
     verdict: "approved",
-    criterionId: roadmapCriterionId(index, document.phases[0]!.doneWhen[index - 1]!),
+    criterionId: String(index).padStart(64, "0"),
     observedAt: NOW,
     workspace,
     safeToolEnvironmentDigest: "9".repeat(64),
@@ -105,7 +102,7 @@ async function approve() {
 }
 
 describe("Project Notes durable phase execution", () => {
-  it("atomically commits seven V2 records and pending completion in one revision", async () => {
+  it("commits Done atomically without turning legacy binding input into evidence", async () => {
     const plan = approvedPlan();
     await approve();
     await repository.checkpointPhaseExecutionStep(cwd, {
@@ -169,8 +166,8 @@ describe("Project Notes durable phase execution", () => {
       snapshot: { revision: 5 },
       phase: {
         execution: {
-          evidence: verificationEvidence,
-          pendingCompletion: { completionId: request.updateId, statusRevision: 5 },
+          evidence: [],
+          pendingCompletion: null,
         },
       },
     });
@@ -186,7 +183,7 @@ describe("Project Notes durable phase execution", () => {
           verificationEvidence: retry.durableCompletion.verificationEvidence.slice(0, 1),
         },
       }),
-    ).toEqual({ status: "operation-conflict", revision: 5 });
+    ).toMatchObject({ status: "duplicate", revision: 5, statusOutcome: "applied" });
   });
 
   it("makes V2 execution replay idempotent and rejects conflicting identity reuse", async () => {
@@ -240,409 +237,36 @@ describe("Project Notes durable phase execution", () => {
         ?.state,
     ).toBe("needs-reconciliation");
   });
-  it("settles once after a crash, unrelated revision, and retry", async () => {
-    const approval = await approve();
-    expect(approval).toMatchObject({ status: "committed", snapshot: { revision: 2 } });
-    expect(await approve()).toMatchObject({ status: "duplicate", revision: 2 });
-    const plan = approvedPlan();
-
-    expect(
-      await repository.checkpointPhaseExecutionStep(cwd, {
-        phaseId: document.phases[0]!.id,
-        expectedRevision: 2,
-        planHash: plan.contentHash,
-        stepId: plan.steps[1]!.id,
-        completedAt: NOW,
-        workspace,
-      }),
-    ).toEqual({ status: "step-order-invalid" });
-
-    const firstStep = {
-      phaseId: document.phases[0]!.id,
+  it("allows an honest completion report with an unfinished historical execution record", async () => {
+    await approve();
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("Expected Notes");
+    const phase = before.snapshot.document.phases[0]!;
+    expect(phase.execution?.plan?.steps.some((step) => step.state !== "completed")).toBe(true);
+    const result = await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: "direct-with-partial-history",
+      phaseId: phase.id,
       expectedRevision: 2,
-      planHash: plan.contentHash,
-      stepId: plan.steps[0]!.id,
-      completedAt: NOW,
-      workspace,
-    };
-    expect(
-      await repository.checkpointPhaseExecutionStep(cwd, {
-        ...firstStep,
-        workspace: {
-          ...workspace,
-          repository: { ...workspace.repository, identityHash: "9".repeat(64) },
-        },
-      }),
-    ).toEqual({ status: "workspace-mismatch" });
-    expect(await repository.checkpointPhaseExecutionStep(cwd, firstStep)).toMatchObject({
-      status: "committed",
-      snapshot: { revision: 3 },
-    });
-    expect(await repository.checkpointPhaseExecutionStep(cwd, firstStep)).toMatchObject({
-      status: "duplicate",
-      revision: 3,
-    });
-    repository = new ProjectNotesRepository(agentDir);
-    expect(
-      await repository.checkpointPhaseExecutionStep(cwd, {
-        ...firstStep,
-        expectedRevision: 3,
-        completedAt: "2026-08-31T10:00:00.000Z",
-        workspace: { ...workspace, worktreeDigest: "8".repeat(64), clean: false },
-      }),
-    ).toMatchObject({ status: "duplicate", revision: 3 });
-    const restarted = await repository.load(cwd);
-    expect(
-      restarted.status === "ok" && restarted.snapshot.document.phases[0]!.execution?.plan?.steps[0],
-    ).toMatchObject({
-      completedAt: NOW,
-      workspace,
-    });
-    expect(
-      await repository.checkpointPhaseExecutionStep(cwd, {
-        ...firstStep,
-        expectedRevision: 3,
-        stepId: plan.steps[1]!.id,
-      }),
-    ).toMatchObject({ status: "committed", snapshot: { revision: 4 } });
-
-    const evidence = {
-      commandHash: "5".repeat(64),
-      commandDisplay: "pnpm test",
-      exitCode: 0,
-      classifierVersion: "roadmap-v1",
-      verdict: "approved" as const,
-      criterionId: "criterion-1",
-      observedAt: NOW,
-      workspace,
-    };
-    expect(
-      await repository.recordPhaseExecutionEvidence(cwd, {
-        phaseId: document.phases[0]!.id,
-        expectedRevision: 4,
-        planHash: plan.contentHash,
-        evidence,
-      }),
-    ).toMatchObject({ status: "committed", snapshot: { revision: 5 } });
-
-    const completionRequest = {
-      updateId: "completion-1",
-      phaseId: document.phases[0]!.id,
-      expectedRevision: 5,
-      actor: "gg-coder" as const,
-      transition: "done" as const,
-      progress: "Implementation and verification completed",
+      actor: "gg-coder",
+      transition: "done",
+      progress: "Inspected current code against requirements",
+      evidence: ["The current implementation satisfies the documented requirements"],
+      verification: "passed",
+      verificationReason: null,
       blocker: null,
       requiredExternalAction: null,
-      evidence: document.phases[0]!.doneWhen.map((criterion) => `Verified: ${criterion}`),
-      verification: "passed" as const,
-      verificationReason: null,
       proposedReferences: [],
       timestamp: NOW,
-      expectedSession: document.phases[0]!.session,
-      requireBoundPhase: true,
       autopilotEnabled: false,
-      durableCompletion: {
-        runJournal: { sessionPath: "/sessions/one.jsonl", generation: 2 },
-        planHash: plan.contentHash,
-        workspace,
-        safeToolEnvironmentDigest: "9".repeat(64),
-        verificationEvidence: Array.from({ length: 7 }, (_, index) => v2Evidence(index + 1)),
-      },
-    };
-    expect(await repository.recordRoadmapStatusUpdate(cwd, completionRequest)).toMatchObject({
-      status: "committed",
-      snapshot: { revision: 6 },
     });
-
-    repository = new ProjectNotesRepository(agentDir);
-    const afterRestart = await repository.load(cwd);
-    expect(afterRestart.status).toBe("ok");
-    if (afterRestart.status !== "ok") throw new Error("Expected persisted Project Notes");
-    const restartedPhase = afterRestart.snapshot.document.phases.find(
-      (phase) => phase.id === completionRequest.phaseId,
-    )!;
-    expect(afterRestart.snapshot.revision).toBe(6);
-    expect(restartedPhase.execution).toMatchObject({
-      state: "completion-pending",
-      pendingCompletion: {
-        completionId: "completion-1",
-        statusRevision: 6,
-        runJournal: completionRequest.durableCompletion.runJournal,
-        planHash: plan.contentHash,
-        workspace,
-        safeToolEnvironmentDigest: "9".repeat(64),
-      },
-    });
-    expect(restartedPhase.roadmapEvents).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "status-update",
-          id: "completion-1",
-          statusOutcome: "completion-pending",
-        }),
-      ]),
-    );
-    expect(await repository.recordRoadmapStatusUpdate(cwd, completionRequest)).toMatchObject({
-      status: "duplicate",
-      revision: 6,
-    });
-    expect(
-      await repository.recordRoadmapStatusUpdate(cwd, {
-        ...completionRequest,
-        progress: "Changed retry payload",
-      }),
-    ).toMatchObject({ status: "operation-conflict", revision: 6 });
-    expect(
-      await repository.recordRoadmapStatusUpdate(cwd, {
-        ...completionRequest,
-        durableCompletion: {
-          ...completionRequest.durableCompletion,
-          runJournal: { ...completionRequest.durableCompletion.runJournal, generation: 3 },
-        },
-      }),
-    ).toMatchObject({ status: "operation-conflict", revision: 6 });
-    expect(await repository.load(cwd)).toMatchObject({
-      status: "ok",
-      snapshot: { revision: 6 },
-    });
-
-    const pendingCompletion = {
-      completionId: completionRequest.updateId,
-      statusRevision: 6,
-      ...completionRequest.durableCompletion,
-    };
-
-    const settlement = {
-      phaseId: document.phases[0]!.id,
-      expectedRevision: 6,
-      completionId: pendingCompletion.completionId,
-      planHash: plan.contentHash,
-      workspace,
-    };
-    const committedSettlement = await repository.settleDurablePhaseCompletion(cwd, settlement);
-    expect(committedSettlement).toMatchObject({
-      status: "committed",
-      snapshot: { revision: 7 },
-      phase: { status: "done", execution: { state: "completed" } },
-      advancementCheckpoint: {
-        verificationStatusUpdateId: pendingCompletion.completionId,
-        completedPhaseId: settlement.phaseId,
-        nextPhaseId: document.phases[1]!.id,
-      },
-    });
-    if (committedSettlement.status !== "committed") throw new Error("Expected settlement commit");
-    expect(
-      committedSettlement.phase.roadmapEvents.filter(
-        (event) =>
-          event.type === "implementation-checkpoint" &&
-          event.verificationStatusUpdateId === pendingCompletion.completionId,
-      ),
-    ).toHaveLength(1);
-    expect(
-      committedSettlement.phase.roadmapEvents.filter(
-        (event) =>
-          event.type === "phase-advancement-checkpoint" &&
-          "verificationStatusUpdateId" in event &&
-          event.verificationStatusUpdateId === pendingCompletion.completionId,
-      ),
-    ).toHaveLength(1);
-
-    expect(
-      await repository.recordPhaseExecutionEvidence(cwd, {
-        phaseId: document.phases[0]!.id,
-        expectedRevision: 7,
-        planHash: plan.contentHash,
-        evidence: { ...evidence, commandHash: "6".repeat(64), criterionId: "criterion-2" },
-      }),
-    ).toMatchObject({ status: "committed", snapshot: { revision: 8 } });
-
-    // Simulate a crash after repository settlement but before local pending state is cleared.
-    repository = new ProjectNotesRepository(agentDir);
-    expect(await repository.settleDurablePhaseCompletion(cwd, settlement)).toMatchObject({
-      status: "duplicate",
-      revision: 8,
-      advancementCheckpoint: {
-        id: committedSettlement.advancementCheckpoint?.id,
-        verificationStatusUpdateId: pendingCompletion.completionId,
-      },
-    });
-    expect(
-      await repository.settleDurablePhaseCompletion(cwd, {
-        ...settlement,
-        planHash: "9".repeat(64),
-      }),
-    ).toMatchObject({ status: "operation-conflict", revision: 8 });
-    expect(
-      await repository.settleDurablePhaseCompletion(cwd, {
-        ...settlement,
-        workspace: { ...workspace, worktreeDigest: "7".repeat(64) },
-      }),
-    ).toMatchObject({ status: "operation-conflict", revision: 8 });
-
-    const afterRetry = await repository.load(cwd);
-    expect(afterRetry).toMatchObject({ status: "ok", snapshot: { revision: 8 } });
-    if (afterRetry.status !== "ok") throw new Error("Expected persisted Project Notes");
-    const settledEvents = afterRetry.snapshot.document.phases[0]!.roadmapEvents;
-    expect(
-      settledEvents.filter(
-        (event) =>
-          event.type === "implementation-checkpoint" &&
-          event.verificationStatusUpdateId === pendingCompletion.completionId,
-      ),
-    ).toHaveLength(1);
-    expect(
-      settledEvents.filter(
-        (event) =>
-          event.type === "phase-advancement-checkpoint" &&
-          "verificationStatusUpdateId" in event &&
-          event.verificationStatusUpdateId === pendingCompletion.completionId,
-      ),
-    ).toHaveLength(1);
+    expect(result).toMatchObject({ status: "committed", statusOutcome: "applied" });
+    const after = await repository.load(cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]!.execution).toEqual(phase.execution);
+    expect(after.snapshot.document.phases[0]!.status).toBe("done");
   });
 
-  it("rejects every completion mutation during reconciliation without writing", async () => {
-    const plan = approvedPlan();
-    const phaseId = document.phases[0]!.id;
-    const session = document.phases[0]!.session;
-    if (!session) throw new Error("Expected a bound phase session");
-
-    await approve();
-    await repository.markPhaseExecutionNeedsReconciliation(cwd, {
-      phaseId,
-      expectedRevision: 2,
-      planHash: plan.contentHash,
-      timestamp: "2026-08-31T10:00:00.000Z",
-    });
-    const before = await repository.load(cwd);
-    expect(before).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
-    if (before.status !== "ok") throw new Error("Expected persisted Project Notes");
-
-    const implementation = {
-      checkpointId: "implementation-while-reconciling",
-      phaseId,
-      expectedSession: session,
-      planStepTotal: plan.steps.length,
-      completedPlanSteps: plan.steps.map((_step, index) => index + 1),
-      runOutcome: "succeeded" as const,
-      timestamp: "2026-08-31T10:01:00.000Z",
-    };
-    const pendingCompletion = {
-      completionId: "completion-while-reconciling",
-      statusRevision: 3,
-      runJournal: { sessionPath: session.sessionPath!, generation: 1 },
-      planHash: plan.contentHash,
-      workspace,
-    };
-    const conflict = { status: "operation-conflict", revision: 3 };
-
-    await expect(
-      repository.checkpointPhaseExecutionStep(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        planHash: plan.contentHash,
-        stepId: plan.steps[0]!.id,
-        completedAt: "2026-08-31T10:01:00.000Z",
-        workspace,
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.recordPhaseExecutionEvidence(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        planHash: plan.contentHash,
-        evidence: {
-          commandHash: "5".repeat(64),
-          commandDisplay: "pnpm test",
-          exitCode: 0,
-          classifierVersion: "roadmap-v1",
-          verdict: "approved",
-          criterionId: "criterion-1",
-          observedAt: "2026-08-31T10:01:00.000Z",
-          workspace,
-        },
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.beginDurablePhaseCompletion(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        pendingCompletion,
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.clearDurablePhaseCompletion(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        completionId: pendingCompletion.completionId,
-        currentWorkspace: workspace,
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.settleDurablePhaseCompletion(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        completionId: pendingCompletion.completionId,
-        planHash: plan.contentHash,
-        workspace,
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.recordRoadmapStatusUpdate(cwd, {
-        updateId: pendingCompletion.completionId,
-        phaseId,
-        expectedRevision: 3,
-        actor: "gg-coder",
-        transition: "done",
-        progress: "Implementation completed",
-        blocker: null,
-        requiredExternalAction: null,
-        evidence: document.phases[0]!.doneWhen.map((criterion) => `Verified: ${criterion}`),
-        verification: "passed",
-        verificationReason: null,
-        proposedReferences: [],
-        timestamp: "2026-08-31T10:01:00.000Z",
-        expectedSession: session,
-        requireBoundPhase: true,
-        autopilotEnabled: false,
-        durableCompletion: {
-          runJournal: pendingCompletion.runJournal,
-          planHash: plan.contentHash,
-          workspace,
-          safeToolEnvironmentDigest: "9".repeat(64),
-          verificationEvidence: Array.from({ length: 7 }, (_, index) => v2Evidence(index + 1)),
-        },
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(
-      repository.settlePhaseCompletion(cwd, {
-        ...implementation,
-        expectedRevision: 3,
-        completionIntentId: pendingCompletion.completionId,
-      }),
-    ).resolves.toEqual(conflict);
-    await expect(repository.recordImplementationCheckpoint(cwd, implementation)).resolves.toEqual(
-      conflict,
-    );
-    await expect(
-      repository.previewManualCompletionApproval(cwd, phaseId, 3, session),
-    ).resolves.toEqual({ status: "unmet-gate", revision: 3, code: "inactive-phase" });
-    await expect(
-      repository.commitManualCompletionApproval(cwd, {
-        phaseId,
-        expectedRevision: 3,
-        expectedSession: session,
-        implementationCheckpointId: implementation.checkpointId,
-        verificationStatusUpdateId: pendingCompletion.completionId,
-        approvalId: "manual-approval-while-reconciling",
-        timestamp: "2026-08-31T10:01:00.000Z",
-      }),
-    ).resolves.toEqual({ status: "unmet-gate", revision: 3, code: "inactive-phase" });
-
-    await expect(repository.load(cwd)).resolves.toEqual(before);
-  });
-
-  it("imports once and clears failed completion while dropping stale evidence", async () => {
+  it("imports a historical execution record idempotently only when explicitly requested", async () => {
     const plan = approvedPlan();
     const execution = {
       version: 1 as const,
@@ -738,9 +362,9 @@ describe("Project Notes durable phase execution", () => {
       status: "reconciled",
       revision: 7,
       phaseId,
-      preservedStepIds: [plan.steps[0]!.id],
-      revalidationStepIds: [plan.steps[1]!.id],
-      revalidationEvidenceCount: 1,
+      preservedStepIds: plan.steps.map((step) => step.id),
+      revalidationStepIds: [],
+      revalidationEvidenceCount: 0,
       reconciledAt: request.reconciledAt,
       snapshot: { revision: 7 },
     });
@@ -764,9 +388,9 @@ describe("Project Notes durable phase execution", () => {
       status: "duplicate",
       revision: 7,
       phaseId,
-      preservedStepIds: [plan.steps[0]!.id],
-      revalidationStepIds: [plan.steps[1]!.id],
-      revalidationEvidenceCount: 1,
+      preservedStepIds: plan.steps.map((step) => step.id),
+      revalidationStepIds: [],
+      revalidationEvidenceCount: 0,
       reconciledAt: request.reconciledAt,
     });
 
@@ -780,7 +404,7 @@ describe("Project Notes durable phase execution", () => {
         reconciledAt: request.reconciledAt,
         reconciliation: { operationId: request.operationId },
       },
-      evidence: [{ state: "needs-revalidation" }],
+      evidence: [{ commandHash: "8".repeat(64), workspace: dirtyWorkspace }],
     });
   });
 

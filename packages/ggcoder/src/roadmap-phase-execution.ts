@@ -6,11 +6,10 @@ import type {
   NotesApprovedPlanV1,
   NotesPlanStepV1,
   NotesRepositoryIdentityV1,
-  NotesVerificationEvidence,
   NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core";
 import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
-import { workspaceVerificationEvidenceMatches } from "./core/verification-evidence.js";
+import { isDeepStrictEqual } from "node:util";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -208,54 +207,7 @@ export function workspaceSnapshotsEqual(
   left: NotesWorkspaceSnapshotV1,
   right: NotesWorkspaceSnapshotV1,
 ): boolean {
-  return workspaceVerificationEvidenceMatches(
-    { workspace: left, safeToolEnvironmentDigest: "" },
-    { workspace: right, safeToolEnvironmentDigest: "" },
-  );
-}
-
-export function reconcilePlanSteps(
-  steps: readonly NotesPlanStepV1[],
-  current: NotesWorkspaceSnapshotV1,
-  isAncestor: (commit: string, descendant: string) => boolean,
-): PlanReconciliationResult {
-  const needsRevalidation: string[] = [];
-  let changed = false;
-  const reconciled = steps.map((step) => {
-    if (step.state === "pending" || step.workspace === null) return step;
-    const valid = step.workspace.clean
-      ? isAncestor(step.workspace.headCommit, current.headCommit)
-      : workspaceSnapshotsEqual(step.workspace, current);
-    if (valid) return step;
-    needsRevalidation.push(step.id);
-    if (step.state === "needs-revalidation") return step;
-    changed = true;
-    return { ...step, state: "needs-revalidation" as const };
-  });
-  return { steps: changed ? reconciled : [...steps], changed, needsRevalidation };
-}
-
-export function isEvidenceCurrent(
-  evidence: NotesVerificationEvidence,
-  current: NotesWorkspaceSnapshotV1,
-  classifierVersion: string,
-  currentSafeToolEnvironmentDigest: string,
-): boolean {
-  return (
-    "version" in evidence &&
-    evidence.version === 2 &&
-    evidence.state !== "needs-revalidation" &&
-    evidence.exitCode === 0 &&
-    evidence.verdict === "approved" &&
-    evidence.classifierVersion === classifierVersion &&
-    workspaceVerificationEvidenceMatches(
-      {
-        workspace: evidence.workspace,
-        safeToolEnvironmentDigest: evidence.safeToolEnvironmentDigest,
-      },
-      { workspace: current, safeToolEnvironmentDigest: currentSafeToolEnvironmentDigest },
-    )
-  );
+  return isDeepStrictEqual(left, right);
 }
 
 export async function captureGitWorkspaceSnapshot(

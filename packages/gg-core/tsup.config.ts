@@ -10,7 +10,6 @@ export default defineConfig({
     "src/project-notes.ts",
     "src/project-task-contract.ts",
     "src/project-notes-diagnostics.ts",
-    "src/manual-completion-approval-protocol.ts",
     "src/phase-binding-protocol.ts",
     "src/phase-start-protocol.ts",
     "src/roadmap-workflow.ts",

@@ -429,28 +429,11 @@ describe("pane Notes storage diagnostics", () => {
       "invalid phase execution reconciliation response",
     );
   });
-  it("parses typed manual completion domain outcomes", async () => {
-    invoke
-      .mockResolvedValueOnce({ status: "unmet-gate", revision: 2, code: "stale-verification" })
-      .mockResolvedValueOnce({ status: "nonce-expired" });
+  it("does not expose obsolete evidence approval commands", () => {
     const client = createPaneAgentClient("pane-a");
-
-    await expect(client.previewManualCompletionApproval("phase-1", 1)).resolves.toEqual({
-      status: "unmet-gate",
-      revision: 2,
-      code: "stale-verification",
-    });
-    await expect(client.commitManualCompletionApproval("nonce-1")).resolves.toEqual({
-      status: "nonce-expired",
-    });
-  });
-
-  it("keeps manual completion parsers as the final shape gate", async () => {
-    invoke.mockResolvedValue({ status: "nonce-expired", detail: "unexpected" });
-
-    await expect(
-      createPaneAgentClient("pane-a").commitManualCompletionApproval("nonce-1"),
-    ).rejects.toThrow("invalid manual completion approval commit response");
+    expect("previewManualCompletionApproval" in client).toBe(false);
+    expect("commitManualCompletionApproval" in client).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("rejects responses with unknown fields", async () => {

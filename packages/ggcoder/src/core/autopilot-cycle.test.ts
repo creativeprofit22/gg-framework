@@ -39,7 +39,6 @@ function makeDeps(
   const deps = {
     maxRounds: 3,
     isCancelled: () => false,
-    verificationProblem: () => null,
     isPlanMode: () => false,
     planPending: () => false,
     resetReviewer: vi.fn(async () => {}),
@@ -64,17 +63,15 @@ function makeDeps(
     },
     ...overrides,
   };
-  // Overrides may swap the vi.fn defaults for plain functions; every test that
-  // asserts on mock calls passes a vi.fn itself, so the cast is safe.
-  return Object.assign(deps, { emitted, injected, ran, counters }) as AutopilotCycleDeps & {
-    emitted: AutopilotCycleEmit[];
-    injected: Array<{ body: string; round: number }>;
-    ran: string[];
-    counters: { ready: number; revisions: number };
-    resetReviewer: ReturnType<typeof vi.fn<() => Promise<void>>>;
-    review: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
-    reviewPlan: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
-  };
+  return Object.assign(deps, {
+    emitted,
+    injected,
+    ran,
+    counters,
+    resetReviewer: vi.fn(deps.resetReviewer),
+    review: vi.fn(deps.review),
+    reviewPlan: vi.fn(deps.reviewPlan),
+  });
 }
 
 /** planPending() driven by a mutable flag the plan deps flip, mirroring the
@@ -83,50 +80,6 @@ function pendingFlag(initial = true): { get: () => boolean; set: (v: boolean) =>
   let value = initial;
   return { get: () => value, set: (v) => (value = v) };
 }
-
-describe("host verification control", () => {
-  it("blocks unverified work before spending a reviewer call", async () => {
-    const deps = makeDeps([{ kind: "all_clear" }], {
-      verificationProblem: () => "Unverified: current checks are missing.",
-    });
-    await driveAutopilotCycle(deps);
-    expect(deps.review).not.toHaveBeenCalled();
-    expect(deps.resetReviewer).not.toHaveBeenCalled();
-    expect(deps.emitted).toEqual([
-      { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
-    ]);
-  });
-
-  it("rejects ALL_CLEAR if verification becomes stale during the review", async () => {
-    let problem: string | null = null;
-    const deps = makeDeps([], {
-      verificationProblem: () => problem,
-      review: vi.fn(async (): Promise<AutopilotVerdict> => {
-        problem = "Unverified: code changed during review.";
-        return { kind: "all_clear", evidenceLimitation: "corpus_unverified" };
-      }),
-    });
-    await driveAutopilotCycle(deps);
-    expect(deps.emitted).toEqual([{ type: "autopilot_human", data: { reason: problem } }]);
-    expect(deps.ran).toEqual([]);
-  });
-
-  it("never approves a plan over outstanding verification", async () => {
-    const pending = pendingFlag();
-    const deps = makeDeps(
-      [],
-      {
-        planPending: pending.get,
-        verificationProblem: () => "Unverified: a check failed.",
-      },
-      [{ kind: "all_clear" }],
-    );
-    await driveAutopilotCycle(deps);
-    expect(deps.reviewPlan).not.toHaveBeenCalled();
-    expect(deps.counters.ready).toBe(0);
-    expect(deps.ran).toEqual([]);
-  });
-});
 
 describe("frameAutopilotInjection", () => {
   it("prepends the autopilot preamble and preserves the body verbatim", () => {

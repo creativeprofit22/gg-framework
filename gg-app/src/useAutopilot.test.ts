@@ -55,7 +55,6 @@ describe("Autopilot evidence limitation delivery", () => {
       driveAutopilotCycle({
         maxRounds: 1,
         isCancelled: () => false,
-        verificationProblem: () => null,
         isPlanMode: () => false,
         planPending: () => false,
         resetReviewer: async () => {},

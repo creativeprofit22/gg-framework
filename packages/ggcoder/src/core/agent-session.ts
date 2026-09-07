@@ -19,7 +19,10 @@ import {
   type VideoContent,
 } from "@kenkaiiii/gg-ai";
 import { EventBus, type McpToolEventIdentity } from "./event-bus.js";
-import { parseContinuationReviewRecord, type ContinuationReviewRecord } from "./continuation-review-context.js";
+import {
+  parseContinuationReviewRecord,
+  type ContinuationReviewRecord,
+} from "./continuation-review-context.js";
 import {
   SlashCommandRegistry,
   createBuiltinCommands,
@@ -173,19 +176,8 @@ import { buildEnvDeltaMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import {
-  VerificationGate,
-  extractAddedLines,
-  isCheckOwnFile,
-  isCodeFilePath,
-  VERIFICATION_STATE_KIND,
-  isVerificationCommand,
-} from "./verification-gate.js";
-import {
   SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
-  evaluateRoadmapVerificationEvidence as evaluateRoadmapVerificationEvidenceCore,
-  type RoadmapVerificationBinding,
-  type RoadmapVerificationEvidenceEvaluation,
   type SessionVerificationEvidenceLedgerSnapshot,
 } from "./verification-evidence.js";
 
@@ -195,7 +187,6 @@ import {
   ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
   ROADMAP_PHASE_LEASE_KIND,
-  buildActivePhaseVerificationFollowUp,
   parseActivePhaseContext,
   parseRoadmapPhaseLeaseMarker,
   renderActivePhasePackage,
@@ -442,7 +433,10 @@ function hasUnresolvedToolCalls(message: Message): boolean {
 
 // ── State ──────────────────────────────────────────────────
 
-import type { ContinuationSourceRevision, OpenAICodexContextProfileEligibility } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type {
+  ContinuationSourceRevision,
+  OpenAICodexContextProfileEligibility,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export interface AgentSessionState {
   provider: Provider;
@@ -530,10 +524,8 @@ export class AgentSession {
     string,
     { name: string; args: Record<string, unknown>; revision: number; evidenceRevision: number }
   >();
-  private backgroundVerification = new Map<string, { revision: number; command: string }>();
   private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
-  private activePhaseVerificationInjected = false;
   /** Runtime-only suppression while Ken owns verification in autopilot mode. */
   private idealReviewSuppressed = false;
   /** Mirror of the last `hook_armed` value broadcast this run, so the event
@@ -576,10 +568,8 @@ export class AgentSession {
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
   /** Verification gate: code edited this run, nothing proved it since. */
-  private readonly verificationGate = new VerificationGate();
   /** Mirror of the last verification `hook_armed` value, so the event fires
    *  only on a real edge. */
-  private verificationArmed = false;
   private compactionOccurred = false;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
@@ -1491,7 +1481,9 @@ export class AgentSession {
     if (!command.prompt.trim()) throw new Error("Resolved command body is empty.");
     await this.adoptDeferredCheckpointBeforePrompt();
     await this.acceptPromptTemplate(this.expandResolvedPromptCommand(command.prompt, args), {
-      source: "human", kind: "prompt", visibility: "transcript",
+      source: "human",
+      kind: "prompt",
+      visibility: "transcript",
     });
   }
 
@@ -1709,7 +1701,6 @@ export class AgentSession {
     this.idealReviewPhase = "idle";
     // No event here: clients reset their own hold on run_start.
     this.idealReviewArmed = false;
-    this.verificationArmed = false;
     this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
@@ -1724,15 +1715,6 @@ export class AgentSession {
     this.independentReviewStarted = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
-    this.verificationGate.beginRun();
-    const processes = new Set(this.processManager?.list().map((p) => p.id) ?? []);
-    for (const [id, started] of this.backgroundVerification) {
-      if (!processes.has(id)) {
-        // Losing the process is not observing its success.
-        this.verificationGate.recordFailedVerification(started.command, started.revision);
-        this.backgroundVerification.delete(id);
-      }
-    }
     this.compactionOccurred = false;
     this.originalRequest = originalRequest;
   }
@@ -1770,28 +1752,9 @@ export class AgentSession {
         this.hookToolCalls.set(event.toolCallId, {
           name: event.name,
           args: event.args ?? {},
-          revision: this.verificationGate.revision,
+          revision: this.verificationEvidenceLedger.revision,
           evidenceRevision: this.verificationEvidenceLedger.revision,
         });
-        if (
-          event.name === "bash" &&
-          typeof event.args?.command === "string" &&
-          (isVerificationCommand(event.args.command) ||
-            classifyVerificationCommand(event.args.command).candidate)
-        ) {
-          // A check that can rewrite files (--fix, build scripts, emitters)
-          // invalidates earlier in-flight evidence AND marks the run as
-          // touched. A check that is merely UNRECOGNIZED (`make test`, `deno
-          // test`) rewrites nothing we can point to: bumping the revision for
-          // it poisoned the gate on green output and re-armed the hook into
-          // every later question turn.
-          const classification = classifyVerificationCommand(event.args.command);
-          this.verificationGate.requireFreshVerification(
-            !classification.accepted && classification.mayMutate,
-            event.args.command,
-          );
-          await this.persistVerificationState();
-        }
         break;
       case "tool_call_end": {
         const call = this.hookToolCalls.get(event.toolCallId);
@@ -1852,77 +1815,6 @@ export class AgentSession {
           const removed = (diff.match(/^-[^-]/gm) ?? []).length;
           this.hookStats.changedLines += added + removed;
         }
-        // Only host-observed successful mutations and trustworthy check results
-        // affect approval. The model's text is never evidence.
-        let verificationChanged = false;
-        if (!event.isError && args) {
-          if (name === "edit" || name === "write") {
-            const filePath = String((args as { file_path?: unknown }).file_path ?? "");
-            // Check-owning files (tsconfig.json, pytest.ini, vitest.config.ts …)
-            // are tracked even when they are not source code: editing one is how
-            // a red suite is turned green without fixing anything.
-            if (filePath && (isCodeFilePath(filePath) || isCheckOwnFile(filePath))) {
-              const addedText =
-                name === "write"
-                  ? String((args as { content?: unknown }).content ?? "")
-                  : extractAddedLines(
-                      (event.details as { diff?: string } | undefined)?.diff ?? event.result,
-                    );
-              this.verificationGate.recordMutation(filePath, addedText);
-              verificationChanged = true;
-            }
-          }
-        }
-        if (args && name === "bash") {
-          const command = typeof args.command === "string" ? args.command : "";
-          const diagnostics = (event.details as {
-            bashDiagnostics?: { reason?: unknown; exitCode?: unknown };
-          } | undefined)?.bashDiagnostics;
-          const classification = classifyVerificationCommand(command);
-          if (classification.accepted) {
-            if (args.run_in_background === true && !event.isError && args.persist !== true) {
-              const id = /^ID:\s*(\S+)/m.exec(event.result)?.[1];
-              // No parseable ID means the check cannot be tracked to a real exit
-              // code — no evidence either way. Recording a FAILURE here made
-              // every later green run of a different spelling look owed.
-              if (id) this.backgroundVerification.set(id, { revision: call.revision, command });
-            } else if (args.persist === true) {
-              // Persistent-shell checks are not bounded evidence (steering can
-              // interleave): neither a pass nor a failure. A recorded failure
-              // here blocked approval for sessions that prefer the shell.
-            } else {
-              if (
-                !event.isError &&
-                (diagnostics !== undefined
-                  ? diagnostics.reason === "completed" && diagnostics.exitCode === 0
-                  : /^Exit code:\s*0(?:\s|$)/i.test(event.result.trim()))
-              ) {
-                this.verificationGate.recordVerification(call.revision, command);
-              } else {
-                this.verificationGate.recordFailedVerification(command, call.revision);
-              }
-              verificationChanged = true;
-            }
-          } else if (classification.candidate) {
-            // Green but untrusted: remember WHY so the demand can tell the
-            // agent which command shape actually clears the gate.
-            this.verificationGate.recordRejectedCheck(command, classification.reason);
-          }
-        }
-        if (!event.isError && args && name === "task_output" && typeof args.id === "string") {
-          const started = this.backgroundVerification.get(args.id);
-          const proc = this.processManager?.list().find((p) => p.id === args.id);
-          if (started && proc && proc.exitCode !== null) {
-            if (proc.exitCode === 0) {
-              this.verificationGate.recordVerification(started.revision, started.command);
-            } else {
-              this.verificationGate.recordFailedVerification(started.command, started.revision);
-            }
-            this.backgroundVerification.delete(args.id);
-            verificationChanged = true;
-          }
-        }
-        if (verificationChanged) await this.persistVerificationState();
         if (this.hookToolCalls.get(event.toolCallId) !== call) break;
         this.hookToolCalls.delete(event.toolCallId);
         // Tool results are what push the run over the review gate, and they all
@@ -2385,15 +2277,6 @@ export class AgentSession {
     return this.idealDriftProbe.drifted;
   }
 
-  /** Would a stop right now inject the verification gate? Same conditions as
-   *  the pre-stop branch below, so arming and injection cannot disagree. */
-  private wouldInjectVerification(): boolean {
-    if (this.opts.selfCorrectionHooks === false) return false;
-    if (!this.settingsManager.get("verificationGateEnabled")) return false;
-    if (this.opts.allowedTools && !this.opts.allowedTools.includes("bash")) return false;
-    return this.verificationGate.willInject();
-  }
-
   /** Broadcast pre-final hook arming on change. Both edges matter: armed=false
    *  after the hook fires is what lets a client stream the REVIEWED final
    *  answer live again.
@@ -2406,10 +2289,6 @@ export class AgentSession {
   private refreshHookArming(): void {
     if (!this.settingsManager) return;
     this.refreshIdealReviewArmed();
-    const armed = this.wouldInjectVerification();
-    if (armed === this.verificationArmed) return;
-    this.verificationArmed = armed;
-    this.eventBus.emit("hook_armed", { kind: "verification", armed });
   }
 
   private refreshIdealReviewArmed(): void {
@@ -2443,48 +2322,8 @@ export class AgentSession {
       return processFollowUp;
     }
 
-    const phaseVerificationFollowUp = (): Message[] | null => {
-      const context = this.activePhaseContext;
-      if (
-        !context ||
-        context.executionStage !== "implementing" ||
-        this.activePhaseVerificationInjected
-      ) {
-        return null;
-      }
-      this.activePhaseVerificationInjected = true;
-      return [
-        {
-          role: "user",
-          provenance: { source: "runtime", kind: "review_follow_up", visibility: "hidden" },
-          content: buildActivePhaseVerificationFollowUp(context),
-        },
-      ];
-    };
-    // Run verification before phase and Ideal-review gates.
-    if (
-      this.opts.selfCorrectionHooks !== false &&
-      this.settingsManager.get("verificationGateEnabled") &&
-      (!this.opts.allowedTools || this.opts.allowedTools.includes("bash"))
-    ) {
-      const verificationReason = this.verificationGate.pendingReason();
-      const verificationFollowUp = this.verificationGate.followUp();
-      if (verificationFollowUp) {
-        log("INFO", "verification-gate", "Injecting verification follow-up", {});
-        // Announce, THEN disarm: clients release held text on disarm, so the
-        // reverse order paints the draft and immediately deletes it — the exact
-        // flash arming exists to prevent.
-        this.eventBus.emit("hook", {
-          kind: "verification",
-          ...(verificationReason === "recheck" ? { verificationReason } : {}),
-        });
-        this.refreshHookArming();
-        return verificationFollowUp;
-      }
-    }
-
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) {
-      return phaseVerificationFollowUp();
+      return null;
     }
 
     if (this.idealReviewPhase === "reviewing") {
@@ -2528,16 +2367,16 @@ export class AgentSession {
         return [buildReviewCoverageEscalationMessage(coverage.missing)];
       }
       this.idealReviewPhase = "complete";
-      return phaseVerificationFollowUp();
+      return null;
     }
-    if (this.idealReviewPhase === "complete") return phaseVerificationFollowUp();
-    if (!this.settingsManager.get("idealReviewEnabled")) return phaseVerificationFollowUp();
+    if (this.idealReviewPhase === "complete") return null;
+    if (!this.settingsManager.get("idealReviewEnabled")) return null;
 
     const decision = evaluateIdealReview(this.hookStats);
     // Test drift fires the review even on a small change the score would skip:
     // a green-but-stale test is exactly what the volume gate sleeps through.
     const driftedFiles = detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).slice(0, 5);
-    if (!decision.shouldReview && driftedFiles.length === 0) return phaseVerificationFollowUp();
+    if (!decision.shouldReview && driftedFiles.length === 0) return null;
 
     // Independent reviewer first (async, bounded): its findings ride in the
     // SAME follow-up batch as the in-thread review + coverage requirements, so
@@ -3052,7 +2891,8 @@ export class AgentSession {
     ) {
       return {
         canChange: false,
-        reason: "Context mode is fixed after this session starts. Start a new session to change it.",
+        reason:
+          "Context mode is fixed after this session starts. Start a new session to change it.",
       };
     }
     return { canChange: true };
@@ -3294,7 +3134,6 @@ export class AgentSession {
     await this.rePersistAutopilotMarkers();
     await this.rePersistApprovedPlanConsumption();
     await this.rePersistAppMarkers();
-    await this.persistVerificationState();
     await this.persistAppMarker("compaction", {
       originalCount: result.originalCount,
       newCount: result.newCount,
@@ -3478,27 +3317,38 @@ export class AgentSession {
 
   /** Host-owned synchronous fence, entered before any transition await. The
    * returned finalizer also runs on failure so the host can rebind authority. */
-  setBeforeConversationTransition(hook: NonNullable<AgentSession["beforeConversationTransition"]>): void {
+  setBeforeConversationTransition(
+    hook: NonNullable<AgentSession["beforeConversationTransition"]>,
+  ): void {
     this.beforeConversationTransition = hook;
   }
 
   async newSession(preserveConversation = false): Promise<void> {
-    const finish = this.beforeConversationTransition?.(preserveConversation ? "checkpoint" : "reset");
+    const finish = this.beforeConversationTransition?.(
+      preserveConversation ? "checkpoint" : "reset",
+    );
     // Reset replaces these values rather than mutating their source containers.
     // Keep authority until every required destination write has succeeded. This
     // snapshot deliberately excludes provider signals, workers and run ownership.
     const sourcePath = this.sessionPath;
     const sourcePlanMode = this.planModeRef.current;
     const source = {
-      sessionId: this.sessionId, conversationId: this.conversationId,
-      checkpointGeneration: this.checkpointGeneration, sessionPreview: this.sessionPreview,
-      activePhaseContext: this.activePhaseContext, approvedPlanPath: this.approvedPlanPath,
+      sessionId: this.sessionId,
+      conversationId: this.conversationId,
+      checkpointGeneration: this.checkpointGeneration,
+      sessionPreview: this.sessionPreview,
+      activePhaseContext: this.activePhaseContext,
+      approvedPlanPath: this.approvedPlanPath,
       approvedPlanConsumption: this.approvedPlanConsumption,
       contextProfileLocked: this.contextProfileLocked,
-      kenTurns: this.kenTurns, autopilotMarkers: this.autopilotMarkers,
-      appMarkers: this.appMarkers, turnMetrics: this.turnMetrics,
-      messages: this.messages, currentLeafId: this.currentLeafId,
-      baseSystemPrompt: this.baseSystemPrompt, renderedEnvironment: this.renderedEnvironment,
+      kenTurns: this.kenTurns,
+      autopilotMarkers: this.autopilotMarkers,
+      appMarkers: this.appMarkers,
+      turnMetrics: this.turnMetrics,
+      messages: this.messages,
+      currentLeafId: this.currentLeafId,
+      baseSystemPrompt: this.baseSystemPrompt,
+      renderedEnvironment: this.renderedEnvironment,
       lastPersistedIndex: this.lastPersistedIndex,
     };
     let parentResetAttempted = false;
@@ -3519,29 +3369,42 @@ export class AgentSession {
           // create() only returns after its header append; active-path ownership
           // is changed by AgentSession, not SessionManager. Remove a failed newer
           // checkpoint so a subsequent canonical resume cannot select it.
-          try { await fs.rm(failedDestination, { force: true }); }
-          catch (cleanupError) { rollbackErrors.push(cleanupError); }
+          try {
+            await fs.rm(failedDestination, { force: true });
+          } catch (cleanupError) {
+            rollbackErrors.push(cleanupError);
+          }
         }
         if (parentResetAttempted) {
           // Rebind the resource manager, but never restore its retired workers.
-          try { await this.subAgentManager?.resetParentSession(source.sessionId); }
-          catch (rebindError) { rollbackErrors.push(rebindError); }
+          try {
+            await this.subAgentManager?.resetParentSession(source.sessionId);
+          } catch (rebindError) {
+            rollbackErrors.push(rebindError);
+          }
         }
-        if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], "Session reset failed; source restored but destination cleanup failed.", { cause: error });
+        if (rollbackErrors.length)
+          throw new AggregateError(
+            [error, ...rollbackErrors],
+            "Session reset failed; source restored but destination cleanup failed.",
+            { cause: error },
+          );
         throw error;
       }
       // Commit: only successful reset retires source-checkpoint evidence.
       // Preserve conversation/phase identity when requested, never its approval.
       this.verificationEvidenceLedger.clear();
-      this.verificationGate.reset();
-      this.backgroundVerification.clear();
       this.hookToolCalls.clear();
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
-    } finally { finish?.(); }
+    } finally {
+      finish?.();
+    }
   }
 
   private async resetSession(preserveConversation: boolean): Promise<void> {
-    const continuationReview = preserveConversation ? this.getContinuationReviewRecord() : undefined;
+    const continuationReview = preserveConversation
+      ? this.getContinuationReviewRecord()
+      : undefined;
     // Stay fail-closed while preparing. The caller restores source eligibility
     // on failure; a successful checkpoint never establishes fresh eligibility.
     this.contextProfileLocked = true;
@@ -3604,19 +3467,25 @@ export class AgentSession {
       this.verificationEvidenceLedger.clear();
       if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
-    } finally { finish?.(); }
+    } finally {
+      finish?.();
+    }
   }
 
   /** Restore one physical checkpoint without resolving to its conversation tip. */
   async loadSessionCheckpoint(sessionPath: string, expectedConversationId?: string): Promise<void> {
-    const retain = Boolean(expectedConversationId && expectedConversationId === this.conversationId);
+    const retain = Boolean(
+      expectedConversationId && expectedConversationId === this.conversationId,
+    );
     const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
     try {
       await this.loadExistingSession(sessionPath, false, expectedConversationId);
       this.verificationEvidenceLedger.clear();
       if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
-    } finally { finish?.(); }
+    } finally {
+      finish?.();
+    }
   }
 
   /**
@@ -3628,11 +3497,16 @@ export class AgentSession {
    */
   async branch(stepsBack = 2): Promise<{ branchedFrom: number; messagesKept: number }> {
     const finish = this.beforeConversationTransition?.("history");
-    try { return await this.branchSession(stepsBack); }
-    finally { finish?.(); }
+    try {
+      return await this.branchSession(stepsBack);
+    } finally {
+      finish?.();
+    }
   }
 
-  private async branchSession(stepsBack: number): Promise<{ branchedFrom: number; messagesKept: number }> {
+  private async branchSession(
+    stepsBack: number,
+  ): Promise<{ branchedFrom: number; messagesKept: number }> {
     // Load the full session to access the DAG
     const loaded = await this.sessionManager.load(this.sessionPath);
     this.setSessionPath(loaded.path);
@@ -3682,21 +3556,30 @@ export class AgentSession {
 
   /** Cheap server identity; never derive conversation identity from a path. */
   getConversationIdentity(): { conversationId: string; sessionId: string; leafId: string | null } {
-    return { conversationId: this.conversationId, sessionId: this.sessionId, leafId: this.currentLeafId };
+    return {
+      conversationId: this.conversationId,
+      sessionId: this.sessionId,
+      leafId: this.currentLeafId,
+    };
   }
 
   /** Only preparation/commit need the full revision, not state/extras polling. */
   getContinuationSourceRevision(): ContinuationSourceRevision {
     const identity = this.getConversationIdentity();
-    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({
-      ...identity,
-      messages: computeSourceFingerprint(this.messages),
-      mentor: this.kenTurns,
-      provider: this.provider,
-      model: this.model,
-      accountId: this.lastAccountId,
-      profile: this.openAICodexContextProfile,
-    })).digest("hex");
+    const fingerprint = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify({
+          ...identity,
+          messages: computeSourceFingerprint(this.messages),
+          mentor: this.kenTurns,
+          provider: this.provider,
+          model: this.model,
+          accountId: this.lastAccountId,
+          profile: this.openAICodexContextProfile,
+        }),
+      )
+      .digest("hex");
     return { ...identity, fingerprint };
   }
 
@@ -3776,7 +3659,6 @@ export class AgentSession {
     this.idealReviewSuppressed = suppressed;
     if (suppressed) {
       this.idealReviewPhase = "idle";
-      this.activePhaseVerificationInjected = false;
       this.reviewCoverage.reset();
     }
     // Suppression flips mid-run (autopilot takes over verification), so a client
@@ -3927,9 +3809,12 @@ export class AgentSession {
   /** Read-only host preflight against the live guarded registry, without executing a tool. */
   supportsToolCall(name: string, args?: unknown): boolean {
     const tool = this.tools.find((candidate) => candidate.name === name);
-    return !!tool && this.isToolCapabilityAllowed(name) &&
+    return (
+      !!tool &&
+      this.isToolCapabilityAllowed(name) &&
       !this.unavailableToolNames.has(name) &&
-      (args === undefined || tool.parameters.safeParse(args).success);
+      (args === undefined || tool.parameters.safeParse(args).success)
+    );
   }
 
   /** Register or replace a host-owned runtime tool under the active capability policy. */
@@ -3973,8 +3858,10 @@ export class AgentSession {
               `${tool.name} is unavailable under the active tool capability policy.`,
           );
         }
-        if (this.opts.approveToolExecution &&
-          !(await this.opts.approveToolExecution(tool.name, args, context.signal))) {
+        if (
+          this.opts.approveToolExecution &&
+          !(await this.opts.approveToolExecution(tool.name, args, context.signal))
+        ) {
           throw new Error("Tool execution was not approved.");
         }
         context.signal?.throwIfAborted();
@@ -4104,11 +3991,13 @@ export class AgentSession {
 
   getContinuationReviewRecord(): ContinuationReviewRecord | undefined {
     for (const marker of [...this.appMarkers].reverse()) {
-      if (marker.kind !== "user_hint" || !Object.hasOwn(marker.data, "continuationReview")) continue;
+      if (marker.kind !== "user_hint" || !Object.hasOwn(marker.data, "continuationReview"))
+        continue;
       // The latest candidate is authoritative: malformed data cannot resurrect
       // an older record. Parsing returns a detached, bounded value.
       return parseContinuationReviewRecord(marker.data.continuationReview, {
-        conversationId: this.conversationId, profile: this.openAICodexContextProfile,
+        conversationId: this.conversationId,
+        profile: this.openAICodexContextProfile,
       });
     }
     return undefined;
@@ -4398,20 +4287,6 @@ export class AgentSession {
     return this.messages;
   }
 
-  evaluateRoadmapVerificationEvidence(input: {
-    doneWhen: readonly string[];
-    evidence: readonly string[];
-    verificationBindings: readonly RoadmapVerificationBinding[];
-    expectedRevision: number | undefined;
-  }): RoadmapVerificationEvidenceEvaluation {
-    const ledger = this.verificationEvidenceLedger.snapshot();
-    return evaluateRoadmapVerificationEvidenceCore({
-      ...input,
-      currentLedgerEvidence: ledger.currentEvidence,
-      staleLedgerEvidence: ledger.staleEvidence,
-    });
-  }
-
   getVerificationEvidenceLedgerSnapshot(): SessionVerificationEvidenceLedgerSnapshot {
     return this.verificationEvidenceLedger.snapshot();
   }
@@ -4693,31 +4568,6 @@ export class AgentSession {
    * instead of dropping the marker or falling back to a raw verdict string.
    * No-op persistence for transient sessions (kept in memory only).
    */
-  getVerificationProblem(): string | null {
-    return (
-      this.verificationGate.verificationProblem() ??
-      (this.backgroundVerification.size > 0
-        ? "Unverified: a background check is still running or its result has not been confirmed."
-        : null)
-    );
-  }
-
-  private async persistVerificationState(): Promise<void> {
-    if (!this.sessionPath) return;
-    const entry: CustomEntry = {
-      type: "custom",
-      kind: VERIFICATION_STATE_KIND,
-      id: crypto.randomUUID(),
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      data: {
-        ...this.verificationGate.snapshot(),
-        unknown: this.getVerificationProblem() !== null,
-      },
-    };
-    await this.sessionManager.appendEntry(this.sessionPath, entry);
-  }
-
   async persistAutopilotMarker(
     phase: AutopilotMarkerPayload["phase"],
     extra?: { reason?: string; body?: string },
@@ -5070,7 +4920,11 @@ export class AgentSession {
     const processes = awaitProcesses
       ? [this.processManager?.shutdownAllAndWait(), this.lspManager?.shutdownAllAndWait()]
       : [this.processManager?.shutdownAll(), this.lspManager?.shutdownAll()];
-    await Promise.all([...processes, this.subAgentManager?.shutdownAll(), this.disposeMcpConnections()]);
+    await Promise.all([
+      ...processes,
+      this.subAgentManager?.shutdownAll(),
+      this.disposeMcpConnections(),
+    ]);
     await this.extensionLoader.deactivateAll();
     try {
       await beforeSessionReset?.();
@@ -5112,7 +4966,9 @@ export class AgentSession {
   }
 
   private async loadExistingSession(
-    sessionPath: string, resolveCanonical = true, expectedConversationId?: string,
+    sessionPath: string,
+    resolveCanonical = true,
+    expectedConversationId?: string,
   ): Promise<void> {
     // A stale physical checkpoint is only an address, not the conversation tip.
     // Resolve every resume—not just over-threshold/deferred compaction resumes—
@@ -5127,8 +4983,10 @@ export class AgentSession {
     });
     // A caller retaining mentor context must supply a captured conversation ID,
     // and the durable header must verify it before any in-memory mutation.
-    if (expectedConversationId &&
-        (loaded.header.conversationId ?? loaded.header.id) !== expectedConversationId) {
+    if (
+      expectedConversationId &&
+      (loaded.header.conversationId ?? loaded.header.id) !== expectedConversationId
+    ) {
       throw new Error("Checkpoint conversation does not match the captured destination.");
     }
     // Inspect the whole durable DAG, not just the selected branch. Empty
@@ -5149,30 +5007,6 @@ export class AgentSession {
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.hookToolCalls.clear();
-    this.backgroundVerification.clear();
-    const savedVerification = [...loaded.entries]
-      .reverse()
-      .find((entry) => entry.type === "custom" && entry.kind === VERIFICATION_STATE_KIND);
-    if (savedVerification?.type === "custom") {
-      this.verificationGate.restore(savedVerification.data);
-    } else {
-      this.verificationGate.reset();
-      // Legacy sessions have no host checkpoint. Tool-authored code history is
-      // not proof of today's files; require fresh evidence before approval.
-      if (
-        loadedMessages.some(
-          (message) =>
-            message.role === "assistant" &&
-            Array.isArray(message.content) &&
-            message.content.some(
-              (part) =>
-                part.type === "tool_call" && (part.name === "edit" || part.name === "write"),
-            ),
-        )
-      ) {
-        this.verificationGate.requireFreshVerification();
-      }
-    }
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";

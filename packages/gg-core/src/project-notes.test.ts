@@ -33,6 +33,7 @@ import {
   NOTES_REFERENCE_URL_MAX_LENGTH,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   isNotesDirectCompletionAuthority,
+  isNotesPhaseAdvancementSourceCurrent,
   validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
@@ -54,6 +55,13 @@ import {
   type NotesRoadmapStatusOutcome,
   type NotesSessionLink,
 } from "./project-notes.js";
+
+import {
+  completionCompatibilityFixture,
+  encodeCompatibleDone,
+} from "./test-fixtures/project-notes-completion-compatibility.js";
+// Frozen verbatim pre-step-2 validator, not a permissive mock or future validator alias.
+import { validateNotesDocumentV3 as validateOldNotes } from "./test-fixtures/project-notes-pre-simplification-validator.js";
 
 const NOW = "2026-07-25T12:34:56.000Z";
 const CURRENT_SESSION = { sessionId: "session-current", sessionPath: "/sessions/current.jsonl" };
@@ -236,6 +244,37 @@ function expectError(value: unknown, path: string, message?: string): void {
 }
 
 describe("project Notes contract", () => {
+  it("preserves copied legacy evidence and pending intent through both real validators", async () => {
+    const document = await completionCompatibilityFixture();
+    const before = structuredClone(document);
+    expect(validateOldNotes(document)).toMatchObject({ ok: true });
+    expect(validateNotesDocumentV3(document)).toMatchObject({ ok: true });
+    expect(document).toEqual(before);
+    expect(document.phases[0]!.execution!.evidence).toHaveLength(2);
+    expect(document.phases[0]!.execution!.pendingCompletion).not.toBeNull();
+  });
+
+  it("accepts direct Done's legacy wire encoding without fabricating checkpoints", async () => {
+    const before = await completionCompatibilityFixture();
+    const next = encodeCompatibleDone(before);
+    const oldResult = validateOldNotes(next);
+    expect(oldResult, JSON.stringify(oldResult.ok ? null : oldResult.error)).toMatchObject({
+      ok: true,
+    });
+    expect(validateNotesDocumentV3(next)).toMatchObject({ ok: true });
+    expect(next.phases[0]).toEqual(before.phases[0]);
+    expect(next.phases[2]!.execution).toEqual(before.phases[2]!.execution);
+    expect(next.phases[2]!.roadmapEvents.slice(0, -1)).toEqual(before.phases[2]!.roadmapEvents);
+    expect(next.phases[2]!.roadmapEvents.at(-1)).toMatchObject({
+      transition: "done",
+      statusOutcome: "completion-pending",
+      verificationSession: null,
+    });
+    expect(next.phases[2]!.lifecycleEvents.slice(0, -1)).toEqual(before.phases[2]!.lifecycleEvents);
+    const invalid = structuredClone(next);
+    Object.assign(invalid.phases[2]!.roadmapEvents.at(-1)!, { statusOutcome: "applied" });
+    expect(validateOldNotes(invalid)).toMatchObject({ ok: false });
+  });
   it("classifies automatic Roadmap candidates by exact full-set eligibility", async () => {
     const document = await fixture();
     const template = document.phases[0]!;
@@ -985,6 +1024,21 @@ describe("project Notes contract", () => {
     );
   });
 
+  it("uses current status, not legacy certification, for explicit next-phase selection", async () => {
+    const { phase, checkpoint } = await directCompletionFixture();
+    phase.roadmapEvents = [];
+    phase.status = "done";
+    phase.overrides.status = null;
+    phase.completedAt = checkpoint.timestamp;
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(true);
+    phase.completedAt = "2099-01-01T00:00:00.000Z";
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
+    phase.completedAt = checkpoint.timestamp;
+    phase.status = "in-progress";
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
+  });
+
+  // Persisted legacy evidence chains remain strictly validated for old-reader compatibility.
   it("accepts authoritative direct completion evidence", async () => {
     const state = await directCompletionFixture();
 

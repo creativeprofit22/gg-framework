@@ -1,6 +1,6 @@
 import {
   classifyRoadmapAutoStartEligibility,
-  isNotesDirectCompletionAuthority,
+  isNotesPhaseAdvancementSourceCurrent,
   notesSessionLinksEqual,
   type NotesPhase,
   type NotesRoadmapAutoStartEligibility,
@@ -58,27 +58,11 @@ function orderedRoadmapPhases(snapshot: ProjectNotesSnapshot): NotesPhase[] {
     .map(({ phase }) => phase);
 }
 
-function latestCompletionReview(phase: NotesPhase) {
-  return [...phase.roadmapEvents].reverse().find((event) => event.type === "completion-review");
-}
-
 function isAdvancementAuthorityCurrent(
   source: NotesPhase,
   checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
 ): boolean {
-  if (source.archivedAt !== null || source.status !== "done" || source.overrides.status !== null) {
-    return false;
-  }
-  if ("completionReviewId" in checkpoint) {
-    const review = latestCompletionReview(source);
-    return (
-      review?.id === checkpoint.completionReviewId &&
-      review.reviewer === checkpoint.reviewer &&
-      review.decision === "accepted" &&
-      review.gateOutcome === "done"
-    );
-  }
-  return isNotesDirectCompletionAuthority(source, checkpoint);
+  return isNotesPhaseAdvancementSourceCurrent(source, checkpoint);
 }
 
 /** Classify every automatically startable phase after authoritative completion. */

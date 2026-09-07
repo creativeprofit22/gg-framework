@@ -32,14 +32,6 @@ import {
   type SubAgentSnapshot,
 } from "../core/subagent-manager.js";
 import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
-import {
-  VerificationGate,
-  isCodeFilePath,
-  isCheckOwnFile,
-  extractAddedLines,
-  isVerificationCommand,
-} from "../core/verification-gate.js";
-import { classifyVerificationCommand } from "../core/verification-evidence.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -171,7 +163,6 @@ import {
   IDEAL_HOOK_NOTICE_TEXT,
   LOOP_BREAK_NOTICE_TEXT,
   REGROUNDING_NOTICE_TEXT,
-  VERIFICATION_HOOK_NOTICE_TEXT,
   TRUNCATED_CONTINUING_NOTICE_TEXT,
   TRUNCATED_INCOMPLETE_NOTICE_TEXT,
   TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT,
@@ -230,7 +221,6 @@ export interface AppProps {
   showTokenUsage?: boolean;
   idealReviewEnabled?: boolean;
   /** Kill switch for the pre-stop verification gate (default on). */
-  verificationGateEnabled?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
@@ -350,7 +340,6 @@ export interface AppProps {
     planMode?: boolean;
     sessionStats?: SessionStats;
     idealReviewEnabled?: boolean;
-    verificationGateEnabled?: boolean;
   };
 }
 
@@ -527,7 +516,6 @@ export function App(props: AppProps) {
   // times we've nudged the agent to continue the same step. Reset whenever a
   // new [DONE:n] marker advances progress (see onTurnText). Caps at 2 nudges
   // so a genuinely stuck agent surfaces instead of looping forever.
-  const followUpNudgesRef = useRef<{ step: number; count: number }>({ step: 0, count: 0 });
   // Background-process completion gate bookkeeping. Keyed by the loop's run
   // start timestamp so the injection budget resets itself on each new run
   // without needing a run-start callback.
@@ -561,15 +549,6 @@ export function App(props: AppProps) {
     props.sessionStore?.idealReviewEnabled ?? props.idealReviewEnabled ?? true,
   );
   const idealReviewEnabledRef = useRef(idealReviewEnabled);
-  /** Pre-stop verification gate: code edited this run, nothing proved it since. */
-  const verificationGateRef = useRef(new VerificationGate());
-  const verificationStartsRef = useRef(new Map<string, number>());
-  const backgroundVerificationRef = useRef(
-    new Map<string, { revision: number; command: string }>(),
-  );
-  const verificationGateEnabledRef = useRef(
-    props.sessionStore?.verificationGateEnabled ?? props.verificationGateEnabled ?? true,
-  );
   /**
    * Languages whose style packs are currently injected into the system prompt.
    * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
@@ -1088,7 +1067,6 @@ export function App(props: AppProps) {
               }
               // Real progress happened — reset the stuck-guard so the next
               // step gets its own fresh nudge budget.
-              followUpNudgesRef.current = { step: 0, count: 0 };
             }
           }
 
@@ -1183,18 +1161,6 @@ export function App(props: AppProps) {
       onRunStart: useCallback(
         (startedAt: number) => {
           processGateRef.current = { runStartedAt: startedAt, injected: 0 };
-          verificationGateRef.current.beginRun();
-          verificationStartsRef.current.clear();
-          const processes = new Set(props.processManager?.list().map((p) => p.id) ?? []);
-          for (const [id, started] of backgroundVerificationRef.current) {
-            if (!processes.has(id)) {
-              verificationGateRef.current.recordFailedVerification(
-                started.command,
-                started.revision,
-              );
-              backgroundVerificationRef.current.delete(id);
-            }
-          }
         },
         [props.processManager],
       ),
@@ -1205,16 +1171,6 @@ export function App(props: AppProps) {
           args: Record<string, unknown>,
           stream: StreamSnapshot,
         ) => {
-          verificationStartsRef.current.set(toolCallId, verificationGateRef.current.revision);
-          if (name === "bash" && typeof args.command === "string") {
-            const classification = classifyVerificationCommand(args.command);
-            if (classification.candidate || isVerificationCommand(args.command)) {
-              verificationGateRef.current.requireFreshVerification(
-                !classification.accepted && classification.mayMutate,
-                args.command,
-              );
-            }
-          }
           log("INFO", "tool", `Tool call started: ${name}`, { id: toolCallId });
           const startedAt = Date.now();
           const animateUntil = startedAt + RUNNING_INDICATOR_ANIMATION_MS;
@@ -1367,67 +1323,7 @@ export function App(props: AppProps) {
           isError: boolean,
           durationMs: number,
           details?: unknown,
-          args?: Record<string, unknown>,
         ) => {
-          const revision = verificationStartsRef.current.get(toolCallId);
-          verificationStartsRef.current.delete(toolCallId);
-          // Fold host callbacks into the shared gate; output prose is not proof.
-          if (args && revision !== undefined) {
-            const filePath = String(args.file_path ?? "");
-            if (
-              !isError &&
-              (name === "edit" || name === "write") &&
-              (isCodeFilePath(filePath) || isCheckOwnFile(filePath))
-            ) {
-              const addedText =
-                name === "write"
-                  ? String(args.content ?? "")
-                  : extractAddedLines((details as { diff?: string } | undefined)?.diff ?? result);
-              verificationGateRef.current.recordMutation(filePath, addedText);
-            }
-            if (name === "bash") {
-              const command = typeof args.command === "string" ? args.command : "";
-              const classification = classifyVerificationCommand(command);
-              const diagnostics = (
-                details as
-                  | {
-                      bashDiagnostics?: { reason?: unknown; exitCode?: unknown };
-                    }
-                  | undefined
-              )?.bashDiagnostics;
-              if (classification.accepted && args.persist !== true) {
-                if (args.run_in_background === true && !isError) {
-                  const id = /^ID:\s*(\S+)/m.exec(result)?.[1];
-                  if (id) backgroundVerificationRef.current.set(id, { revision, command });
-                } else if (
-                  !isError &&
-                  diagnostics?.reason === "completed" &&
-                  diagnostics.exitCode === 0
-                ) {
-                  verificationGateRef.current.recordVerification(revision, command);
-                } else {
-                  verificationGateRef.current.recordFailedVerification(command, revision);
-                }
-              } else if (classification.candidate && !classification.accepted) {
-                verificationGateRef.current.recordRejectedCheck(command, classification.reason);
-              }
-            }
-            if (!isError && name === "task_output" && typeof args.id === "string") {
-              const started = backgroundVerificationRef.current.get(args.id);
-              const proc = props.processManager?.list().find((p) => p.id === args.id);
-              if (started && proc && proc.exitCode !== null) {
-                if (proc.exitCode === 0) {
-                  verificationGateRef.current.recordVerification(started.revision, started.command);
-                } else {
-                  verificationGateRef.current.recordFailedVerification(
-                    started.command,
-                    started.revision,
-                  );
-                }
-                backgroundVerificationRef.current.delete(args.id);
-              }
-            }
-          }
           recordToolEnd(sessionStatsRef.current, name, isError, durationMs);
           setLiveToolFeed((prev) =>
             prev.map((entry) =>
@@ -1896,47 +1792,7 @@ export function App(props: AppProps) {
           return processFollowUp;
         }
 
-        // Verification gate: code was edited but no test/typecheck/lint/build
-        // completed since the last edit — demand it once, then let the run stop.
-        if (verificationGateEnabledRef.current) {
-          const verificationFollowUp = verificationGateRef.current.followUp();
-          if (verificationFollowUp) {
-            // Say why the run is continuing past its apparent end, or the extra
-            // answer reads as the agent talking to itself.
-            setLiveItems((prev) => [
-              ...prev,
-              {
-                kind: "ideal_hook",
-                text: VERIFICATION_HOOK_NOTICE_TEXT,
-                tone: "review",
-                id: getId(),
-              },
-            ]);
-            return verificationFollowUp;
-          }
-        }
-
-        const steps = planStepsRef.current;
-        if (steps.length === 0 || !approvedPlanPathRef.current) return null;
-        const next = steps.find((s) => !s.completed);
-        if (!next) return null;
-        const r = followUpNudgesRef.current;
-        if (r.step !== next.step) {
-          r.step = next.step;
-          r.count = 0;
-        }
-        if (r.count >= 2) return null;
-        r.count++;
-        return [
-          {
-            role: "user" as const,
-            content:
-              `Continue with step ${next.step}: ${next.text}. ` +
-              `Emit [DONE:${next.step}] when done, then proceed to step ${next.step + 1} ` +
-              `in the same turn. Only stop when every step in \`## Steps\` is complete ` +
-              `or you genuinely need user input.`,
-          },
-        ];
+        return null;
       }, [props.subAgentManager, props.processManager]),
       onRetry: useCallback(() => {
         // Roll back any pending progressive flushes from the aborted attempt.

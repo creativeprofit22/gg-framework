@@ -17,8 +17,6 @@ import {
   v3NotesKey,
 } from "./notes-storage";
 import type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
   NotesClient,
   NotesDocumentV3,
   NotesPhase,
@@ -469,14 +467,6 @@ class FakeProjectNotesClient implements NotesClient {
     selectedPhase.execution.state = "implementing";
     this.snapshots.set(projectKey, { projectKey, revision: outcome.revision, document });
     return outcome;
-  }
-
-  async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
-    return { status: "missing" };
-  }
-
-  async commitManualCompletionApproval(): Promise<ManualCompletionApprovalCommitOutcome> {
-    return { status: "nonce-not-found" };
   }
 
   async migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome> {
@@ -1154,7 +1144,7 @@ describe("ProjectNotes", () => {
     fireEvent.keyDown(viewTabs[0]!, { key: "ArrowRight" });
     expect(viewTabs[1]?.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(viewTabs[1]);
-    expect(screen.getByRole("heading", { name: "Completion gates" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Status and last report" })).toBeTruthy();
 
     const viewSelector = screen.getByLabelText("Phase view") as HTMLSelectElement;
     expect(viewSelector.value).toBe("completion");
@@ -2038,7 +2028,7 @@ describe("ProjectNotes", () => {
     expect(onStartPhase).not.toHaveBeenCalled();
   });
 
-  it("renders empty completion gates before a completion intent", async () => {
+  it("shows current status before a progress report exists", async () => {
     const cwd = "/work/completion-empty";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("empty completion evidence");
@@ -2050,14 +2040,15 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Completion evidence has not been recorded.");
-    expect(gates?.textContent).toContain("Typed verification has not been recorded.");
-    expect(gates?.textContent).toContain("Not requested");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("No progress report yet.");
+    expect(gates?.textContent).toContain("in progress");
     expect(gates?.textContent).not.toContain("Final review");
   });
 
-  it("shows Done intent pending until the owning run settles", async () => {
+  it("keeps legacy pending intent historical without waiting for run settlement", async () => {
     const cwd = "/work/completion-pending";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("pending completion evidence");
@@ -2077,14 +2068,16 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Passed");
-    expect(gates?.textContent).toContain("Pending");
-    expect(gates?.textContent).toContain("Waiting for the owning implementation run to settle.");
-    expect(gates?.textContent).not.toContain("reviewer");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("Reported passed");
+    expect(gates?.textContent).toContain("in progress");
+    expect(gates?.textContent).toContain("not rechecked on opening");
+    expect(gates?.textContent).not.toContain("owning implementation run");
   });
 
-  it("uses durable pending completion instead of legacy prose evidence", async () => {
+  it("shows durable command history without promoting pending intent", async () => {
     const cwd = "/work/durable-completion-pending";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("durable pending completion");
@@ -2096,14 +2089,16 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Ready to settle");
-    expect(gates?.textContent).toContain("Pending");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("Historical command reports");
     expect(gates?.textContent).toContain("pnpm test");
-    expect(gates?.textContent).not.toContain("Record implementation evidence next.");
+    expect(gates?.textContent).toContain("not rechecked on opening");
+    expect(gates?.textContent).not.toContain("Ready to settle");
   });
 
-  it("shows cleared stale durable evidence as needing revalidation", async () => {
+  it("shows old command outcomes without demanding revalidation", async () => {
     const cwd = "/work/durable-completion-stale";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("durable stale completion");
@@ -2115,12 +2110,13 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Revalidation required");
-    expect(gates?.textContent).toContain("Needs revalidation");
-    expect(gates?.textContent).not.toContain("Ready to settle");
-    expect(gates?.textContent).not.toContain(
-      "Waiting for the owning implementation run to settle.",
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("Historical command reports");
+    expect(gates?.textContent).toContain("pnpm test");
+    expect(gates?.textContent).not.toMatch(
+      /Revalidation required|Needs revalidation|Ready to settle/,
     );
   });
 
@@ -2156,16 +2152,15 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    const verificationGate = Array.from(gates?.querySelectorAll(":scope > dl > div") ?? []).find(
-      (row) => row.querySelector("dt")?.textContent === "Verification",
-    );
-    expect(verificationGate?.textContent).toContain("Typed verification has not been recorded.");
-    expect(verificationGate?.textContent).not.toContain("Passed");
-    expect(gates?.textContent).not.toContain("Ready to settle");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("Not reported");
+    expect(gates?.textContent).not.toContain("Reported passed");
+    expect(gates?.textContent).toContain("Work continued after verification.");
   });
 
-  it("shows exact failed and incomplete run settlement blockers", async () => {
+  it("keeps interrupted run history without making it a status gate", async () => {
     const cwd = "/work/completion-open";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("open completion evidence");
@@ -2190,11 +2185,13 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("1 of 2 plan steps");
-    expect(gates?.textContent).toContain("was interrupted");
-    expect(gates?.textContent).toContain("Open");
-    expect(gates?.textContent).not.toContain("Final review pending");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("in progress");
+    expect(gates?.textContent).not.toContain("settle");
+    selectPhaseView("Activity");
+    expect(screen.getByText(/1 of 2 plan steps, run was interrupted/)).toBeTruthy();
   });
 
   it("shows direct Done evidence while keeping archive separate", async () => {
@@ -2222,17 +2219,18 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("2 of 2 plan steps");
-    expect(gates?.textContent).toContain("Passed");
-    expect(gates?.textContent).toContain("Settled");
-    expect(gates?.textContent).toContain("All automatic completion gates passed.");
-    expect(gates?.textContent).not.toContain("Accepted by");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
+    expect(gates?.textContent).toContain("Done");
+    expect(gates?.textContent).toContain("Reported passed");
+    expect(gates?.textContent).toContain("not rechecked on opening");
+    expect(gates?.textContent).not.toContain("All automatic completion gates passed");
     selectPhaseView("More");
     expect(screen.getByRole("button", { name: "Archive phase" })).toBeTruthy();
   });
 
-  it("keeps manual overrides authoritative and offers exception approval", async () => {
+  it("keeps manual overrides authoritative without evidence approval ceremony", async () => {
     const cwd = "/work/completion-override";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("override completion evidence");
@@ -2254,22 +2252,14 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     await openRoadmapPhase(selected.title);
-    const manualCompletion = screen
-      .getByRole("heading", { name: "Manual completion" })
-      .closest("section");
-    expect(manualCompletion?.textContent).toContain(
-      "Current passed verification or an explicit current exception request may be approved after successful implementation.",
-    );
+    expect(screen.queryByRole("heading", { name: "Manual completion" })).toBeNull();
     selectPhaseView("Completion");
 
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    const gates = screen
+      .getByRole("heading", { name: "Status and last report" })
+      .closest("section");
     expect(gates?.textContent).toContain(longReason);
-    expect(globalThis.document.querySelector(".notes-phase-overview")?.textContent).toContain(
-      "Manual override protected",
-    );
-    expect(gates?.textContent).toContain(
-      "Automatic completion cannot replace the user-selected state.",
-    );
+    expect(gates?.textContent).toContain("User-selected status is protected.");
   });
 
   it("labels historical completion-review events as legacy history", async () => {
@@ -2709,7 +2699,7 @@ describe("ProjectNotes", () => {
     expect(savedPrompt.querySelector("pre")?.textContent).toBe(prompt);
   });
 
-  it("blocks roadmap and detail actions while reconciliation is required", async () => {
+  it("allows roadmap and detail actions without a historical reconciliation ritual", async () => {
     const cwd = "/work/reconciliation-blocked";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("reconciliation blocked");
@@ -2720,21 +2710,20 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    expect(screen.getByText("Needs reconciliation:")).toBeTruthy();
+    expect(screen.queryByText("Needs reconciliation:")).toBeNull();
     expect(
       (screen.getByRole("button", { name: `Resume phase: ${selected.title}` }) as HTMLButtonElement)
         .disabled,
-    ).toBe(true);
+    ).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${selected.title}` }));
     expect(
       (screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(screen.getByText("Resume and completion are blocked")).toBeTruthy();
-    expect(
-      (screen.getByRole("button", { name: "Review completion evidence" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    ).toBe(false);
+    expect(screen.getByText("Review saved context if needed")).toBeTruthy();
+    expect((screen.getByRole("tab", { name: "Completion" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
     expect((screen.getByRole("button", { name: "Reconcile" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
@@ -2762,9 +2751,9 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reconcile" }));
 
-    expect(await screen.findByText("Safe progress was preserved")).toBeTruthy();
+    expect(await screen.findByText("Stored progress was preserved")).toBeTruthy();
     expect(
-      screen.getByText("1 preserved steps · 1 revalidation steps · 2 evidence checks"),
+      screen.getByText("1 stored steps retained. This update did not verify the current code."),
     ).toBeTruthy();
     await waitFor(() => expect(client.getNotesCalls).toBeGreaterThan(readsBeforeReconciliation));
     expect(client.reconciliationCalls).toHaveLength(1);
@@ -2788,7 +2777,7 @@ describe("ProjectNotes", () => {
     ).toBe(false);
   });
 
-  it("keeps reconciliation blocked and displays typed denial outcomes", async () => {
+  it("displays denied optional reconciliation without blocking Resume", async () => {
     const cwd = "/work/reconciliation-denied";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("reconciliation denied");
@@ -2804,10 +2793,10 @@ describe("ProjectNotes", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Reconciliation denied: workspace-mismatch.",
     );
-    expect(screen.getByText("Resume and completion are blocked")).toBeTruthy();
+    expect(screen.getByText("Review saved context if needed")).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    ).toBe(false);
     expect(screen.getByRole("button", { name: "Reconcile" })).toBeTruthy();
   });
 

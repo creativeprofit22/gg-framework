@@ -45,11 +45,6 @@
       "import": "./dist/project-notes-diagnostics.js",
       "require": "./dist/project-notes-diagnostics.cjs"
     },
-    "./manual-completion-approval-protocol": {
-      "types": "./dist/manual-completion-approval-protocol.d.ts",
-      "import": "./dist/manual-completion-approval-protocol.js",
-      "require": "./dist/manual-completion-approval-protocol.cjs"
-    },
     "./phase-binding-protocol": {
       "types": "./dist/phase-binding-protocol.d.ts",
       "import": "./dist/phase-binding-protocol.js",

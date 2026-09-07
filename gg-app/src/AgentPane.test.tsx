@@ -505,7 +505,7 @@ describe("preferredRoadmapPhaseSession", () => {
     );
   });
 
-  it("blocks reconciliation instead of returning a stale session while preserving Resume", () => {
+  it("resumes the preferred session without treating historical reconciliation as a gate", () => {
     const stale = { sessionId: "planning", sessionPath: "/planning.jsonl" };
     const implementation = { sessionId: "implementation", sessionPath: "/implementation.jsonl" };
 
@@ -516,12 +516,7 @@ describe("preferredRoadmapPhaseSession", () => {
       },
       stale,
     );
-    expect(blocked).toEqual({
-      status: "blocked",
-      message:
-        "Resume is blocked until this phase is reconciled. Open Project Notes, select Roadmap, then choose Reconcile.",
-    });
-    expect("session" in blocked).toBe(false);
+    expect(blocked).toEqual({ status: "ready", session: implementation });
     expect(
       resolveRoadmapPhaseResume(
         { session: stale, execution: { state: "implementing", lastSession: implementation } },

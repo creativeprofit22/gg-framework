@@ -139,7 +139,7 @@ describe("selectRoadmapAdvancement", () => {
   });
 
   it.each(["malformed", "later-untyped"] as const)(
-    "rejects %s direct completion evidence",
+    "does not gate explicit phase selection on %s historical certification",
     (kind) => {
       const source = completedWithDirectCheckpoint();
       const verification = source.roadmapEvents.find((event) => event.type === "status-update");
@@ -167,7 +167,11 @@ describe("selectRoadmapAdvancement", () => {
         });
       }
 
-      expect(selectRoadmapAdvancement([source, phase("next", 1)])).toBeNull();
+      expect(selectRoadmapAdvancement([source, phase("next", 1)])).toMatchObject({
+        completedPhase: { id: source.id, status: "done" },
+        nextPhase: { id: "next" },
+        ready: true,
+      });
     },
   );
 

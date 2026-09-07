@@ -6,6 +6,8 @@ import {
   type NotesSessionLink,
   type NotesWorkspaceSnapshotV1,
   type ProjectNotesCorruptReason,
+  type ProjectNotesUnsupportedFormat,
+  isProjectNotesUnsupportedFormat,
 } from "./project-notes.js";
 
 export type PhaseBindingAction = "bind-current" | "rebind-current";
@@ -22,6 +24,7 @@ export interface PhaseBindingRequest {
 }
 
 export type PhaseBindingOutcome =
+  | ProjectNotesUnsupportedFormat
   | {
       status: "committed" | "duplicate";
       revision: number;
@@ -101,6 +104,7 @@ export type PhaseBindingProtocolRequest =
   | PhaseExecutionReconciliationRequestV3;
 
 export type PhaseLeaseOutcome =
+  | ProjectNotesUnsupportedFormat
   | {
       status: "inspected" | "acquired" | "renewed" | "released" | "duplicate";
       roadmapRevision: number;
@@ -150,6 +154,7 @@ export interface PhaseExecutionReconciliationRequestV3 {
 }
 
 export type PhaseExecutionReconciliationOutcome =
+  | ProjectNotesUnsupportedFormat
   | {
       status: "reconciled" | "duplicate";
       revision: number;
@@ -316,7 +321,8 @@ export function isPhaseExecutionReconciliationOutcome(
       isBoundedString(candidate.currentProjectKey, MAX_PROJECT_KEY_LENGTH)
     );
   }
-  if (status === "corrupt") {
+  if (status === "unsupported") return isProjectNotesUnsupportedFormat(candidate);
+  if ("corrupt" === status) {
     return (
       isRecordWithExactKeys(candidate, CORRUPT_KEYS) &&
       (candidate.primary === null ||
@@ -475,7 +481,8 @@ export function isPhaseBindingOutcome(value: unknown): value is PhaseBindingOutc
   ) {
     return isRecordWithExactKeys(value, STATUS_KEYS);
   }
-  if (status === "corrupt") {
+  if (status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === status) {
     return (
       isRecordWithExactKeys(value, CORRUPT_KEYS) &&
       (value.primary === null ||
@@ -553,7 +560,8 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
   ) {
     return isRecordWithExactKeys(value, STATUS_KEYS);
   }
-  if (status === "corrupt") {
+  if (status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === status) {
     return (
       isRecordWithExactKeys(value, CORRUPT_KEYS) &&
       (value.primary === null ||

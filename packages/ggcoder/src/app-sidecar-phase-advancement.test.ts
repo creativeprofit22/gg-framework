@@ -196,7 +196,7 @@ describe("selectNextEligibleRoadmapPhase", () => {
     ).toEqual({ kind: "unique", phase: candidate });
   });
 
-  it("requires an authoritative latest accepted Done review", () => {
+  it("uses explicit Done status instead of requiring an accepted historical review", () => {
     const candidate = phase("candidate", 20);
     const superseded = completedSource([
       completionReview(),
@@ -208,20 +208,21 @@ describe("selectNextEligibleRoadmapPhase", () => {
       }),
     ]);
 
-    expect(select([superseded, candidate])).toEqual({ kind: "none" });
-    expect(select([completedSource([]), candidate])).toEqual({ kind: "none" });
+    expect(select([superseded, candidate])).toEqual({ kind: "unique", phase: candidate });
+    expect(select([completedSource([]), candidate])).toEqual({ kind: "unique", phase: candidate });
     expect(
       select([completedSource([completionReview({ reviewer: "ken-autopilot" })]), candidate]),
-    ).toEqual({ kind: "none" });
+    ).toEqual({ kind: "unique", phase: candidate });
   });
 
   it.each(["malformed-evidence", "later-untyped-status"] as const)(
-    "does not present %s direct completion as advancement authority",
+    "does not use %s historical certification to gate explicit phase selection",
     (kind) => {
       const fixture = directCompletionFixture(kind);
 
       expect(selectNextEligibleRoadmapPhase(snapshot(fixture.phases), fixture.checkpoint)).toEqual({
-        kind: "none",
+        kind: "unique",
+        phase: fixture.phases[1],
       });
     },
   );
@@ -621,16 +622,10 @@ describe("selectLatestRoadmapPhaseAdvancement", () => {
 
   it.each([
     [
-      "superseded review",
-      (source: NotesPhase) =>
-        source.roadmapEvents.push(
-          completionReview({
-            id: "later-review",
-            decision: "rejected",
-            gateOutcome: "review",
-            timestamp: "2026-08-12T12:03:00.000Z",
-          }),
-        ),
+      "a newer explicit Done",
+      (source: NotesPhase) => {
+        source.completedAt = "2026-08-12T12:03:00.000Z";
+      },
     ],
     [
       "status override",

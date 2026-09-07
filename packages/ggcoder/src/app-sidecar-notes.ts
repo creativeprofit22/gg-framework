@@ -5,14 +5,7 @@ import {
   readJsonBody,
   requestPathname,
 } from "./app-sidecar-http-json.js";
-import {
-  isManualCompletionApprovalCommitRequest,
-  isManualCompletionApprovalPreviewRequest,
-  type ManualCompletionApprovalCommitOutcome,
-  type ManualCompletionApprovalPreviewOutcome,
-} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 import type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
-import type { ManualCompletionApprovalService } from "./app-sidecar-manual-completion-approval.js";
 import type { StorageDiagnosticsSessionContext } from "./app-sidecar-storage-diagnostics.js";
 import {
   type NotesValidationError,
@@ -32,7 +25,6 @@ export interface AppSidecarNotesHandlerOptions {
   diagnostics: {
     inspect(context: StorageDiagnosticsSessionContext): Promise<ProjectNotesStorageDiagnostics>;
   };
-  manualCompletionApproval: ManualCompletionApprovalService;
   onCommittedSnapshot(snapshot: ProjectNotesSnapshot): void;
   onError?: (error: unknown) => void;
 }
@@ -53,8 +45,7 @@ type ErrorResponse = { status: "error"; message: "notes request failed" };
 export function createAppSidecarNotesHandler(
   options: AppSidecarNotesHandlerOptions,
 ): AppSidecarNotesHandler {
-  const { repository, diagnostics, manualCompletionApproval, onCommittedSnapshot, onError } =
-    options;
+  const { repository, diagnostics, onCommittedSnapshot, onError } = options;
 
   return {
     handle(req, res, context, requestUrl, method) {
@@ -62,43 +53,9 @@ export function createAppSidecarNotesHandler(
       const isNotesRoute =
         pathname === "/notes" ||
         pathname === "/notes/diagnostics" ||
-        pathname === "/notes/roadmap/completion-approval/preview" ||
-        pathname === "/notes/roadmap/completion-approval/commit" ||
         pathname === "/notes/migrate" ||
         pathname === "/notes/roadmap/blocker-resolution";
       if (!isNotesRoute) return false;
-
-      if (method === "POST" && pathname === "/notes/roadmap/completion-approval/preview") {
-        void readJsonBody(req, NOTES_REQUEST_BODY_MAX_BYTES)
-          .then((body) => {
-            if (!isManualCompletionApprovalPreviewRequest(body)) {
-              sendJson(res, 400, { status: "invalid-request" });
-              return;
-            }
-            return manualCompletionApproval
-              .preview(body, {
-                getState: () => ({ cwd: context.cwd, ...context.currentSession }),
-              })
-              .then((outcome) => sendJson(res, manualApprovalStatus(outcome), outcome));
-          })
-          .catch((error) => sendUnexpectedError(res, error, onError));
-        return true;
-      }
-
-      if (method === "POST" && pathname === "/notes/roadmap/completion-approval/commit") {
-        void readJsonBody(req, NOTES_REQUEST_BODY_MAX_BYTES)
-          .then((body) => {
-            if (!isManualCompletionApprovalCommitRequest(body)) {
-              sendJson(res, 400, { status: "invalid-request" });
-              return;
-            }
-            return manualCompletionApproval
-              .commit(body)
-              .then((outcome) => sendJson(res, manualApprovalStatus(outcome), outcome));
-          })
-          .catch((error) => sendUnexpectedError(res, error, onError));
-        return true;
-      }
 
       if (method === "GET" && pathname === "/notes/diagnostics") {
         void diagnostics
@@ -176,14 +133,14 @@ export function createAppSidecarNotesHandler(
 }
 
 function sendLoadOutcome(res: http.ServerResponse, outcome: ProjectNotesLoadOutcome): void {
-  sendJson(res, outcome.status === "corrupt" ? 409 : 200, outcome);
+  sendJson(res, outcome.status === "unsupported" || outcome.status === "corrupt" ? 409 : 200, outcome);
 }
 
 function sendMigrationOutcome(
   res: http.ServerResponse,
   outcome: ProjectNotesMigrationOutcome,
 ): void {
-  const status = outcome.status === "invalid" ? 400 : outcome.status === "corrupt" ? 409 : 200;
+  const status = outcome.status === "invalid" ? 400 : outcome.status === "unsupported" || outcome.status === "corrupt" ? 409 : 200;
   sendJson(res, status, outcome);
 }
 
@@ -197,6 +154,7 @@ function sendBlockerResolutionOutcome(
       : outcome.status === "stale-revision" ||
           outcome.status === "stale-session" ||
           outcome.status === "duplicate-id-conflict" ||
+          outcome.status === "unsupported" ||
           outcome.status === "corrupt"
         ? 409
         : 200;
@@ -209,7 +167,7 @@ function sendSaveOutcome(res: http.ServerResponse, outcome: ProjectNotesSaveOutc
       ? 400
       : outcome.status === "missing"
         ? 404
-        : outcome.status === "conflict" || outcome.status === "corrupt"
+        : outcome.status === "conflict" || outcome.status === "unsupported" || outcome.status === "corrupt"
           ? 409
           : 200;
   sendJson(res, status, outcome);
@@ -294,26 +252,6 @@ function sendBodyReadError(
     sendJson(res, 413, requestBodyTooLarge());
   } else {
     sendUnexpectedError(res, error, onError);
-  }
-}
-
-function manualApprovalStatus(
-  outcome: ManualCompletionApprovalPreviewOutcome | ManualCompletionApprovalCommitOutcome,
-): number {
-  switch (outcome.status) {
-    case "ready":
-    case "committed":
-    case "duplicate":
-      return 200;
-    case "missing":
-    case "nonce-not-found":
-      return 404;
-    case "nonce-expired":
-      return 410;
-    case "corrupt":
-      return 500;
-    default:
-      return 409;
   }
 }
 

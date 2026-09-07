@@ -98,6 +98,10 @@ export class AppSidecarRoadmapDraftToolHost {
       this.clearInspection();
       return { status: "notes-missing" };
     }
+    if (loaded.status === "unsupported") {
+      this.clearInspection();
+      return loaded;
+    }
     if (loaded.status === "corrupt") {
       this.clearInspection();
       return { status: "notes-corrupt", primary: loaded.primary, backup: loaded.backup };
@@ -131,6 +135,7 @@ export function projectRoadmapInspection(
   loaded: ProjectNotesLoadOutcome,
 ): RoadmapInspectionOutcome {
   const projectKey = canonicalProjectKey(cwd);
+  if (loaded.status === "unsupported") return loaded;
   if (loaded.status === "missing") return { status: "missing", projectKey };
   if (loaded.status === "corrupt") {
     return {

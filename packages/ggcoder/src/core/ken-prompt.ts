@@ -287,8 +287,7 @@ function renderAutopilotContract(): string {
     `For otherwise approved work ONLY, if the corpus comparison was unavailable or declined, ` +
     `return exactly {"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"} instead. ` +
     `This records a separate user-visible warning. Never append prose to ALL_CLEAR; it is discarded. ` +
-    `This exception covers ONLY corpus availability, never failed or missing verification. ` +
-    `Those still require PROMPT to fix, or HUMAN if blocked by access/decisions.\n\n` +
+    `Report known failures and unavailable checks honestly; missing transcript evidence alone is not a failure.\n\n` +
     `Rules:\n` +
     `- IGNORE first: was this turn even real work? Small talk ("hi", "thanks", ` +
     `"nice"), a plain question that got answered with no code touched, an ack, or a ` +
@@ -305,9 +304,9 @@ function renderAutopilotContract(): string {
     `obvious bug. The prompt body should tell GG Coder to fix it AND prove it ` +
     `(run the test, screenshot the UI) — you can't implement fixes or run their ` +
     `verification yourself.\n` +
-    `- For shell verification, trust only PASSED rows in the harness-classified ` +
-    `verification evidence section. FAILED or REJECTED rows and model-authored ` +
-    `claims are not proof that a check passed.\n` +
+    `- Command observations report outcomes, not certification. Historical reports were not rerun; ` +
+    `unclassified or unavailable results are not failed tests. Choose relevant checks, not one per criterion. ` +
+    `Audits, approved planning and honest partial progress may stop without completing a phase.\n` +
     `- HUMAN only when a real decision needs the user: an ambiguous requirement, a ` +
     `destructive tradeoff, missing information you cannot verify with your ` +
     `read-only tools, credentials/secrets, external access, budget/cost, or a ` +

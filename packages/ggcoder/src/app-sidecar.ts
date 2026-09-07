@@ -24,7 +24,10 @@ import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import { appSettingsFile } from "./app-sidecar-paths.js";
 import {
-  createAppSidecarKenLifecycle, createKenSessionInitializer, parseKenPromptInput, parseKenRunIdentity,
+  createAppSidecarKenLifecycle,
+  createKenSessionInitializer,
+  parseKenPromptInput,
+  parseKenRunIdentity,
 } from "./app-sidecar-ken-lifecycle.js";
 import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
@@ -76,7 +79,12 @@ import {
   type WorkflowCommandSpec,
 } from "./core/autopilot-gate.js";
 import { driveAutopilotCycle, frameAutopilotInjection } from "./core/autopilot-cycle.js";
-import { createContinuationPromptAdapter, createStrandedQueueDrain, runUserTurn, type UserTurnDeps } from "./app-sidecar-user-turn.js";
+import {
+  createContinuationPromptAdapter,
+  createStrandedQueueDrain,
+  runUserTurn,
+  type UserTurnDeps,
+} from "./app-sidecar-user-turn.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
 import {
@@ -181,8 +189,14 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { handleAppSidecarProgrammaticExecution, settleProgrammaticRun } from "./app-sidecar-programmatic-execution.js";
-import { executeProgrammaticOpportunity, type ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
+import {
+  handleAppSidecarProgrammaticExecution,
+  settleProgrammaticRun,
+} from "./app-sidecar-programmatic-execution.js";
+import {
+  executeProgrammaticOpportunity,
+  type ProgrammaticExecutionOutcome,
+} from "./core/programmatic/execution.js";
 import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
@@ -223,7 +237,6 @@ import {
 import type { ElicitResult } from "@modelcontextprotocol/client";
 import { createAskUserBridge, type AskUserResult } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
-import type { NotesPhaseExecutionV1 } from "@kenkaiiii/gg-core/project-notes";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
 import { awardPrompt, awardCommits } from "./core/progress/engine.js";
@@ -233,7 +246,6 @@ import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
-import { createManualCompletionApprovalService } from "./app-sidecar-manual-completion-approval.js";
 import {
   createAppSidecarStorageDiagnostics,
   parseAppIdentityArgument,
@@ -252,10 +264,8 @@ import {
 import {
   captureGitWorkspaceSnapshot,
   createApprovedPlan,
-  isLegacyPlanImportEligible,
   PlanSnapshotResumeError,
   RepositoryUnverifiableError,
-  resolveExecutionPlanSnapshot,
 } from "./roadmap-phase-execution.js";
 import {
   isPhaseBindingRoute,
@@ -295,19 +305,13 @@ import {
   AppSidecarPlanHandoff,
   type ApprovedPlanConsumptionIdentity,
 } from "./app-sidecar-plan-handoff.js";
-import { createAppSidecarRoadmapPhaseAdvancementCoordinator } from "./app-sidecar-phase-advancement.js";
 import {
   parsePhaseAdvancementStartBody,
   parsePhaseAdvancementStartRoute,
 } from "./app-sidecar-phase-advancement-route.js";
 import { AppSidecarJsonBodyError, readJsonBody } from "./app-sidecar-http-json.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
-import {
-  AppSidecarPhaseCompletionCoordinator,
-  AppSidecarPhaseImplementationPlanTracker,
-  restorePhaseImplementationPlanEvidence,
-} from "./app-sidecar-phase-completion.js";
-import { AppSidecarCompletionIntentTracker } from "./app-sidecar-completion-intent.js";
+import { AppSidecarPhaseImplementationPlanTracker } from "./app-sidecar-phase-completion.js";
 import {
   AppSidecarPhaseCancellationCoordinator,
   type ActiveOperationCancellationResult,
@@ -353,8 +357,15 @@ import {
   runAppSidecarPromptStartup,
   type SessionMutationOwner,
 } from "./app-sidecar-session-mutation.js";
-import { AppSidecarContinuationSession, parseContinuationCommitRequest } from "./app-sidecar-continuation-session.js";
-import type { AskUserAcknowledgement, ContinuationCommitResponse, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  AppSidecarContinuationSession,
+  parseContinuationCommitRequest,
+} from "./app-sidecar-continuation-session.js";
+import type {
+  AskUserAcknowledgement,
+  ContinuationCommitResponse,
+  KenState,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
@@ -1147,14 +1158,9 @@ async function main(): Promise<void> {
 
   const oauthInFlightProviders = new Set<string>();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
-  const durableRoadmapExecution = process.env.GG_ROADMAP_DURABLE_EXECUTION === "1";
-  log("INFO", "roadmap-durability", "feature rollout state", {
-    enabled: durableRoadmapExecution,
-    contractVersion: 1,
-  });
-  const phaseLeaseRepository = durableRoadmapExecution
-    ? new RoadmapPhaseLeaseRepository(paths.agentDir)
-    : undefined;
+  // Mutation fencing is standard, independent of historical completion rollout settings.
+  const durableRoadmapExecution = true;
+  const phaseLeaseRepository = new RoadmapPhaseLeaseRepository(paths.agentDir);
   const daemonInstanceId = process.env.GG_DAEMON_INSTANCE_ID?.trim() || randomUUID();
   const processStartToken =
     process.env.GG_PROCESS_START_TOKEN?.trim() || `${process.pid}:${Date.now()}`;
@@ -1192,10 +1198,6 @@ async function main(): Promise<void> {
     processStartToken,
     predecessorProof,
   });
-  const manualCompletionApproval = createManualCompletionApprovalService({
-    repository: notesRepository,
-    onCommittedSnapshot: broadcastNotesSnapshot,
-  });
   const roadmapDraftDecisions = new AppSidecarRoadmapDraftDecisionService({
     drafts: roadmapDrafts,
     repository: notesRepository,
@@ -1225,7 +1227,6 @@ async function main(): Promise<void> {
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
     diagnostics: storageDiagnostics,
-    manualCompletionApproval,
     onCommittedSnapshot: broadcastNotesSnapshot,
     onError: (error) => {
       captureSidecarError(error, "app-sidecar.notes.request");
@@ -2012,15 +2013,6 @@ async function createSession(
     if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
     return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
   };
-  const phaseCompletion = new AppSidecarPhaseCompletionCoordinator({
-    cwd,
-    repository: notesRepository,
-    broadcastSnapshot: broadcastNotesSnapshot,
-    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
-    releaseCompletedPhaseLease: releaseOrDeferCompletedPhaseLease,
-    captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
-    onError: (error) => captureSidecarError(error, "app-sidecar.phase-completion"),
-  });
   const phaseImplementationPlans = new AppSidecarPhaseImplementationPlanTracker();
 
   const saved = loadSavedSettings(paths.settingsFile);
@@ -2225,8 +2217,6 @@ async function createSession(
   let planGate!: AppSidecarPlanGate;
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
-  const roadmapCompletionIntents = new AppSidecarCompletionIntentTracker();
-  let activeRunGeneration = 0;
   let deferredPhaseLeaseReleaseOperationId: string | null = null;
   async function releaseCurrentPhaseLease(operationId: string): Promise<void> {
     if (!session.getRoadmapPhaseLeaseMarker()) return;
@@ -2246,27 +2236,17 @@ async function createSession(
     }
     throw new Error(`Phase lease release failed: ${outcome.status}`);
   }
-  async function releaseOrDeferCompletedPhaseLease(operationId: string): Promise<void> {
+  async function releaseOrDeferPhaseLease(operationId: string): Promise<void> {
     if (session.getPhaseLeaseRunState() === "running") {
       deferredPhaseLeaseReleaseOperationId = operationId;
       return;
     }
     await releaseCurrentPhaseLease(operationId);
   }
-  const roadmapPhaseAdvancement = createAppSidecarRoadmapPhaseAdvancementCoordinator({
-    repository: notesRepository,
-    onCommittedSnapshot: broadcastNotesSnapshot,
-    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
-    releaseCompletedPhaseLease: releaseCurrentPhaseLease,
-    isAutopilotEnabled: (projectCwd) => projectAutopilot.isEnabled(projectCwd),
-  });
   async function settleDeferredPhaseLeaseRelease(): Promise<boolean> {
     const operationId = deferredPhaseLeaseReleaseOperationId;
     if (!operationId) return false;
-    const advancement = await roadmapPhaseAdvancement.recover(session);
-    if (advancement.status !== "accepted" && advancement.status !== "already-bound") {
-      await releaseCurrentPhaseLease(operationId);
-    }
+    await releaseCurrentPhaseLease(operationId);
     deferredPhaseLeaseReleaseOperationId = null;
     return true;
   }
@@ -2277,18 +2257,15 @@ async function createSession(
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
-    captureVerificationWorkspace,
-    getRunGeneration: () => activeRunGeneration,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    mutateStatusWithLeaseFence: (phaseId, operation) =>
+      phaseBinding.withStatusLease(session, phaseId, operation),
     resolvePlanProgress: ({ phaseId, session: expectedSession }) =>
       phaseImplementationPlans.resolve({
         phaseId,
         session: expectedSession,
         current: planProgressPayload(),
       }),
-    onCompletionIntent: (intent) => {
-      roadmapCompletionIntents.record(intent);
-    },
     broadcastNotesSnapshot,
     onError: (error, metadata) =>
       captureSidecarError(error, "app-sidecar.roadmap-status", metadata),
@@ -2936,242 +2913,7 @@ async function createSession(
     if (!options?.retainImplementationEvidence) phaseImplementationPlans.clear();
   }
 
-  if (durableRoadmapExecution && mode === "code") {
-    await phaseBinding.reconcile(session);
-    const active = session.getActivePhaseContext();
-    const consumption = session.getApprovedPlanConsumption();
-    const planContext = session.getApprovedPlanPhaseContext();
-    // Re-read authoritative Notes only after reconciliation owns a lease fence.
-    const loaded = await notesRepository.load(cwd);
-    const phase =
-      loaded.status === "ok" && active
-        ? loaded.snapshot.document.phases.find((candidate) => candidate.id === active.phase.id)
-        : undefined;
-    if (loaded.status === "ok" && phase && !phase.execution) {
-      const workspace = await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
-      const currentSessionPath = session.getState().sessionPath;
-      const exactLegacyPlan = consumption
-        ? isLegacyPlanImportEligible({
-            projectKey: loaded.snapshot.projectKey,
-            phaseId: phase.id,
-            phaseSessionPath: phase.session?.sessionPath ?? null,
-            currentSessionPath,
-            planId: consumption.checkpointId,
-            planState: consumption.state,
-            planProjectKey: planContext?.projectKey ?? null,
-            planPhaseId: planContext?.phase.id ?? null,
-            planSessionPath: planContext?.session.sessionPath ?? null,
-          })
-        : false;
-      let execution: NotesPhaseExecutionV1 = {
-        version: 1,
-        state: "needs-reconciliation",
-        repository: workspace.repository,
-        plan: null,
-        evidence: [],
-        pendingCompletion: null,
-        lastSession: phase.session,
-        migration: { source: "legacy-session", reconciledAt: null },
-      };
-      if (!consumption) recordRoadmapDurabilityDiagnostic("legacy-plan-missing");
-      else if (!exactLegacyPlan) {
-        recordRoadmapDurabilityDiagnostic("legacy-plan-identity-mismatch");
-      }
-      if (exactLegacyPlan && consumption) {
-        const timestamp = phase.updatedAt;
-        const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, {
-          version: 1,
-          checkpointId: consumption.checkpointId,
-          generation: consumption.generation,
-          planPath: consumption.approvedPlanPath ?? "legacy-session",
-          content: consumption.content,
-          contentHash: consumption.contentHash,
-          state: "human-approved",
-          reviewStatus: "ready",
-          actor: "user",
-          timestamp,
-          feedback: null,
-        });
-        const content = approvedPlanArtifactContent(consumption.content);
-        const plan = createApprovedPlan({
-          planId: consumption.checkpointId,
-          content,
-          snapshotPath: path.relative(cwd, approvedPlanPath).split(path.sep).join("/"),
-          approvedAt: timestamp,
-          approvedRevision: loaded.snapshot.revision + 1,
-          baseCommit: workspace.headCommit,
-        });
-        const markers = new Set<number>();
-        for (const message of session.getMessages()) {
-          if (message.role !== "assistant") continue;
-          const text =
-            typeof message.content === "string"
-              ? message.content
-              : message.content
-                  .map((part) => (part.type === "text" && "text" in part ? part.text : ""))
-                  .join("");
-          for (const match of text.matchAll(/\[DONE:(\d+)\]/gi)) markers.add(Number(match[1]));
-        }
-        let completedPrefix = 0;
-        while (markers.has(completedPrefix + 1)) completedPrefix += 1;
-        plan.steps = plan.steps.map((step) =>
-          step.index <= completedPrefix
-            ? { ...step, state: "needs-revalidation", completedAt: timestamp }
-            : step,
-        );
-        execution = {
-          ...execution,
-          state: "implementing",
-          plan,
-          migration: { source: "legacy-session", reconciledAt: new Date().toISOString() },
-        };
-      }
-      const imported = await phaseBinding.withLeaseFence(session, () =>
-        notesRepository.importLegacyPhaseExecution(cwd, {
-          operationId: `legacy-migration:${phase.id}`,
-          phaseId: phase.id,
-          expectedRevision: loaded.snapshot.revision,
-          execution,
-        }),
-      );
-      if (
-        imported.status === "executed" &&
-        (imported.value.status === "committed" || imported.value.status === "duplicate")
-      ) {
-        // Import changes plan identity; rotate the fence from the new Notes snapshot.
-        await phaseBinding.reconcile(session);
-      }
-    }
-    await roadmapPhaseAdvancement
-      .recover(session)
-      .catch((error) =>
-        captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
-      );
-  }
-
-  const durableActivePhase = session.getActivePhaseContext();
-  if (durableActivePhase?.executionStage === "implementing") {
-    const loaded = await notesRepository.load(cwd);
-    const phase =
-      loaded.status === "ok"
-        ? loaded.snapshot.document.phases.find(
-            (candidate) => candidate.id === durableActivePhase.phase.id,
-          )
-        : undefined;
-    if (durableRoadmapExecution && (loaded.status !== "ok" || !phase?.execution)) {
-      throw new PlanSnapshotResumeError(
-        "reconciliation-required",
-        durableActivePhase.approvedPlanPath ?? "",
-      );
-    }
-    if (loaded.status === "ok" && phase?.execution && durableRoadmapExecution) {
-      const plan = phase.execution.plan;
-      if (!plan || phase.execution.state === "needs-reconciliation") {
-        throw new PlanSnapshotResumeError(
-          "reconciliation-required",
-          plan?.snapshotPath ?? durableActivePhase.approvedPlanPath ?? "",
-        );
-      }
-      const consumption = session.getApprovedPlanConsumption();
-      const planContext = session.getApprovedPlanPhaseContext();
-      const resolved = await resolveExecutionPlanSnapshot({
-        cwd,
-        plan,
-        ...(consumption
-          ? {
-              recovery: {
-                projectKey: loaded.snapshot.projectKey,
-                phaseId: phase.id,
-                phaseSessionPath:
-                  phase.execution.lastSession?.sessionPath ?? phase.session?.sessionPath ?? null,
-                currentSessionPath: session.getState().sessionPath,
-                planId: consumption.checkpointId,
-                checkpointId: consumption.checkpointId,
-                planState: consumption.state,
-                planProjectKey: planContext?.projectKey ?? null,
-                planPhaseId: planContext?.phase.id ?? null,
-                planSessionPath: planContext?.session.sessionPath ?? null,
-                content: consumption.content,
-                contentHash: consumption.contentHash,
-              },
-            }
-          : {}),
-      });
-      if (resolved.status !== "ready") {
-        const marked = await phaseBinding.withLeaseFence(session, () =>
-          notesRepository.markPhaseExecutionNeedsReconciliation(cwd, {
-            phaseId: phase.id,
-            expectedRevision: loaded.snapshot.revision,
-            planHash: plan.contentHash,
-            timestamp: new Date().toISOString(),
-          }),
-        );
-        if (
-          marked.status !== "executed" ||
-          (marked.value.status !== "committed" && marked.value.status !== "duplicate")
-        ) {
-          throw new Error("Could not persist plan snapshot reconciliation state.");
-        }
-        if (marked.value.status === "committed") broadcastNotesSnapshot(marked.value.snapshot);
-        throw new PlanSnapshotResumeError(resolved.status, resolved.path);
-      }
-      const state: "approval-committed" | "implementation-prompt-started" =
-        consumption?.state === "approval-committed"
-          ? "approval-committed"
-          : "implementation-prompt-started";
-      const canonicalConsumption = {
-        checkpointId: plan.planId,
-        generation: consumption?.generation ?? 0,
-        content: resolved.content,
-        contentHash: plan.contentHash,
-        state,
-        approvedPlanPath: resolved.path,
-      };
-      await session.updateActivePhaseStage("implementing", resolved.path);
-      await session.hydrateCanonicalApprovedPlan(canonicalConsumption);
-    }
-    if (phase?.execution) {
-      restorePhaseImplementationPlanEvidence({
-        tracker: phaseImplementationPlans,
-        phase,
-        expectedSession: durableActivePhase.session,
-      });
-      const pending = phase.execution.pendingCompletion;
-      if (pending?.runJournal.sessionPath) {
-        const journal = await session
-          .getRunJournalForSession(pending.runJournal.sessionPath)
-          .catch(() => []);
-        const run = [...journal]
-          .reverse()
-          .find((entry) => entry.generation === pending.runJournal.generation);
-        if (run?.outcome) {
-          const expectedSession = {
-            sessionId:
-              phase.execution.lastSession?.sessionId ?? durableActivePhase.session.sessionId,
-            sessionPath: pending.runJournal.sessionPath,
-          };
-          const recovered = await phaseCompletion.settleDurableRun({
-            phaseId: phase.id,
-            expectedSession,
-            runGeneration: run.generation,
-            runOutcome:
-              run.outcome === "completed"
-                ? "succeeded"
-                : run.outcome === "aborted"
-                  ? "cancelled"
-                  : "failed",
-          });
-          if (
-            (recovered?.status === "committed" || recovered?.status === "duplicate") &&
-            "advancementCheckpoint" in recovered &&
-            recovered.advancementCheckpoint
-          ) {
-            await roadmapPhaseAdvancement.recover(session);
-          }
-        }
-      }
-    }
-  }
+  // Opening a session does not import, revalidate, or settle historical Roadmap execution.
 
   const restoredApprovedPlan = session.getApprovedPlanConsumption();
   const restoredApprovedPlanPath =
@@ -3187,23 +2929,6 @@ async function createSession(
               .map((content) => (content.type === "text" && "text" in content ? content.text : ""))
               .join("");
       recordApprovedPlanMarkers(text);
-    }
-    await queueApprovedPlanProgressSync();
-  } else if (!durableRoadmapExecution) {
-    const activePhase = session.getActivePhaseContext();
-    if (activePhase?.executionStage === "implementing") {
-      const loaded = await notesRepository.load(cwd);
-      const persistedPhase =
-        loaded.status === "ok"
-          ? loaded.snapshot.document.phases.find((phase) => phase.id === activePhase.phase.id)
-          : undefined;
-      if (persistedPhase) {
-        restorePhaseImplementationPlanEvidence({
-          tracker: phaseImplementationPlans,
-          phase: persistedPhase,
-          expectedSession: activePhase.session,
-        });
-      }
     }
   }
 
@@ -3300,7 +3025,6 @@ async function createSession(
     // begin()/settle() would break run ownership itself.
     {
       started: (generation) => {
-        activeRunGeneration = generation;
         runJournalPersistence = runJournalPersistence
           .then(() => session.persistRunStarted(generation))
           .catch((err) => {
@@ -3478,7 +3202,9 @@ async function createSession(
   let kenSession: AgentSession | null = null;
   const ensureKenSession = createKenSessionInitializer({
     create: createKenSession,
-    initialize: async (ken: AgentSession) => { await ken.initialize(); },
+    initialize: async (ken: AgentSession) => {
+      await ken.initialize();
+    },
   });
   const kenToolCallNames = new Map<string, string>();
   const kenLifecycle = createAppSidecarKenLifecycle({
@@ -3486,28 +3212,49 @@ async function createSession(
     getBuildSession: () => session,
     ensureSession: ensureKenSession,
     currentModel: kenCurrentModel,
-    buildContext: async (build, text) => buildKenContext(
-      build, cwd, gitBranch, text, await loadWorkflowCommandSpecs(), injectedAutopilotPrompts,
-    ),
+    buildContext: async (build, text) =>
+      buildKenContext(
+        build,
+        cwd,
+        gitBranch,
+        text,
+        await loadWorkflowCommandSpecs(),
+        injectedAutopilotPrompts,
+      ),
     replyText: (ken) => lastAssistantText(ken.getMessages()),
     listen: (ken, publish) => {
       const off = [
-        ken.eventBus.on("text_delta", (d) => { publish("ken_text_delta", d); }),
-        ken.eventBus.on("thinking_delta", (d) => { publish("ken_thinking_delta", d); }),
+        ken.eventBus.on("text_delta", (d) => {
+          publish("ken_text_delta", d);
+        }),
+        ken.eventBus.on("thinking_delta", (d) => {
+          publish("ken_thinking_delta", d);
+        }),
         ken.eventBus.on("tool_call_start", (d) => {
           if (publish("ken_tool_call_start", d)) kenToolCallNames.set(d.toolCallId, d.name);
         }),
-        ken.eventBus.on("tool_call_update", (d) => { publish("ken_tool_call_update", d); }),
+        ken.eventBus.on("tool_call_update", (d) => {
+          publish("ken_tool_call_update", d);
+        }),
         ken.eventBus.on("tool_call_end", (d) => {
           if (publish("ken_tool_call_end", d)) kenToolCallNames.delete(d.toolCallId);
         }),
-        ken.eventBus.on("server_tool_call", (d) => { publish("ken_server_tool_call", d); }),
-        ken.eventBus.on("turn_end", (d) => { publish("ken_turn_end", d); }),
+        ken.eventBus.on("server_tool_call", (d) => {
+          publish("ken_server_tool_call", d);
+        }),
+        ken.eventBus.on("turn_end", (d) => {
+          publish("ken_turn_end", d);
+        }),
         ken.eventBus.on("error", (d) => {
-          publish("ken_error", formatSidecarError(d.error, desktopGuidance, sidecarErrorSecrets).event);
+          publish(
+            "ken_error",
+            formatSidecarError(d.error, desktopGuidance, sidecarErrorSecrets).event,
+          );
         }),
       ];
-      return () => { for (const detach of off) detach(); };
+      return () => {
+        for (const detach of off) detach();
+      };
     },
     footerExtras,
     broadcast,
@@ -3729,8 +3476,10 @@ async function createSession(
 
   // Core provider-run bracket. Standalone runs own a lifecycle generation;
   // injected autopilot runs share the cycle's outer generation.
-  async function runAgent(label: string, run: () => Promise<void | ProgrammaticExecutionOutcome>): Promise<void> {
-    const completionIntentRun = roadmapCompletionIntents.beginRun();
+  async function runAgent(
+    label: string,
+    run: () => Promise<void | ProgrammaticExecutionOutcome>,
+  ): Promise<void> {
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
       ? runLifecycle.begin(abortOwnedWork).generation
@@ -3743,7 +3492,6 @@ async function createSession(
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
     let programmaticSettlement: ReturnType<typeof settleProgrammaticRun>;
-    let advancementError: { cause: unknown } | null = null;
     broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
       if (ownsGeneration) {
@@ -3758,22 +3506,14 @@ async function createSession(
         broadcastError("error", "run failed", err);
       }
     } finally {
-      const completionIntentFinalizer = roadmapCompletionIntents.finalizeRun(completionIntentRun);
-      let cancelled = runLifecycle.isCancellationRequested(generation) || programmaticSettlement?.cancelled === true;
-      // The isolated specialist has its own verification; parent gates may be stale.
-      const verificationProblem = cancelled ? null : programmaticSettlement
-        ? (programmaticSettlement.succeeded ? null : "Specialist execution did not complete.")
-        : session.getVerificationProblem();
-      let outcome: RunOutcome = cancelled ? "aborted" : programmaticSettlement?.journalOutcome ??
-        (!runSucceeded ? "failed" : verificationProblem ? "unverified" : "completed");
-      if (runSucceeded && verificationProblem && ownsGeneration) {
-        // Expected control outcome: run_end and the journal already carry Unverified.
-        // Do not format it as a crash or persist a misleading error marker.
-        log("WARN", "app-sidecar", "verification incomplete", { message: verificationProblem });
-      }
+      let cancelled =
+        runLifecycle.isCancellationRequested(generation) ||
+        programmaticSettlement?.cancelled === true;
+      let outcome: RunOutcome = cancelled
+        ? "aborted"
+        : (programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed"));
       if (
         runSucceeded &&
-        !verificationProblem &&
         !cancelled &&
         cancelGeneration === cancelGenAtStart &&
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
@@ -3796,13 +3536,9 @@ async function createSession(
       cancelled ||= runLifecycle.isCancellationRequested(generation);
       if (cancelled) outcome = "aborted";
       runLifecycle.recordOutcome(generation, outcome);
-      // Settle and fsync the owning run journal before consuming durable completion intent.
+      // Persist the real run outcome independently of explicit Roadmap status updates.
       if (ownsGeneration) {
-        finishOwnedGeneration(
-          generation,
-          false,
-          outcome,
-        );
+        finishOwnedGeneration(generation, false, outcome);
         await runJournalPersistence;
         if (!(await settleDeferredPhaseLeaseRelease())) {
           await renewCurrentPhaseLease(`run:${generation}:idle`);
@@ -3815,47 +3551,9 @@ async function createSession(
           ? await durableApprovedPlanComplete()
           : markerComplete;
       }
-      const activePhase = session.getActivePhaseContext();
-      if (activePhase?.executionStage === "implementing") {
-        const completionOutcome = await completionIntentFinalizer.checkpoint({
-          coordinator: phaseCompletion,
-          tracker: phaseImplementationPlans,
-          checkpointId: randomUUID(),
-          phaseId: activePhase.phase.id,
-          expectedSession: activePhase.session,
-          currentPlanProgress: durableRoadmapExecution
-            ? { total: 0, completed: [] }
-            : planProgressPayload(),
-          runOutcome: cancelled ? "cancelled" : runSucceeded && !verificationProblem ? "succeeded" : "failed",
-          runGeneration: generation,
-          timestamp: new Date().toISOString(),
-        });
-        if (
-          completionOutcome?.status === "committed" &&
-          "advancementCheckpoint" in completionOutcome &&
-          completionOutcome.advancementCheckpoint
-        ) {
-          try {
-            const advancement = await roadmapPhaseAdvancement.recover(session);
-            if (advancement.status === "stale" || advancement.status === "invalid-confirmation") {
-              log("WARN", "app-sidecar", "automatic roadmap phase binding deferred", {
-                outcome: advancement,
-              });
-            }
-          } catch (error) {
-            if (!deferredPhaseLeaseReleaseOperationId) advancementError = { cause: error };
-          }
-        }
-      }
       // Once every canonical step is complete, remove the approved plan from
       // future system prompts and clear the widget before run_end paints idle.
-      if (
-        runSucceeded &&
-        !cancelled &&
-        !verificationProblem &&
-        approvedPlanPath !== null &&
-        terminalPlanComplete
-      ) {
+      if (runSucceeded && !cancelled && approvedPlanPath !== null && terminalPlanComplete) {
         try {
           await session.completeApprovedPlanConsumption();
           deactivateApprovedPlan({ retainImplementationEvidence: true });
@@ -3889,7 +3587,6 @@ async function createSession(
       });
       broadcast("extras", footerExtras());
     }
-    if (advancementError) throw advancementError.cause;
   }
 
   const planHandoff = new AppSidecarPlanHandoff({
@@ -3920,25 +3617,6 @@ async function createSession(
           : undefined;
       const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
       if (hasPlanOnlyBoundary(checkpoint.content)) {
-        if (previousActivePhase) {
-          const checkpointOutcome = await phaseCompletion.checkpoint({
-            checkpointId: checkpoint.checkpointId,
-            phaseId: previousActivePhase.phase.id,
-            expectedSession: previousActivePhase.session,
-            // The phase deliverable is the reviewed plan itself. Its implementation
-            // steps belong to later Roadmap phases and must not gate this contract phase.
-            planStepTotal: 1,
-            completedPlanSteps: [1],
-            runOutcome: "succeeded",
-            timestamp: checkpoint.timestamp,
-          });
-          if (
-            checkpointOutcome.status !== "committed" &&
-            checkpointOutcome.status !== "duplicate"
-          ) {
-            throw new Error(`Plan-only completion checkpoint failed: ${checkpointOutcome.status}`);
-          }
-        }
         const committed = await session.persistApprovedPlanConsumption({
           checkpointId: checkpoint.checkpointId,
           generation: checkpoint.generation,
@@ -3952,12 +3630,7 @@ async function createSession(
           generation: committed.generation,
           state: "completed",
         });
-        const advancement = await roadmapPhaseAdvancement.recover(session);
-        if (advancement.status === "none" || advancement.status === "missing-session-path") {
-          await releaseCurrentPhaseLease(`${checkpoint.checkpointId}:phase-lease-release`);
-        } else if (advancement.status === "phase-lease-lost") {
-          throw new Error("Plan-only advancement lost its phase lease.");
-        }
+        await releaseOrDeferPhaseLease(`${checkpoint.checkpointId}:phase-lease-release`);
         return {
           checkpointId: committed.checkpointId,
           generation: committed.generation,
@@ -4051,7 +3724,10 @@ async function createSession(
         durablePlan,
         restorePreviousSession: previousPhaseSessionPath
           ? async () => {
-              await session.loadSessionCheckpoint(previousPhaseSessionPath, previousPhaseConversationId);
+              await session.loadSessionCheckpoint(
+                previousPhaseSessionPath,
+                previousPhaseConversationId,
+              );
               deactivateApprovedPlan();
             }
           : undefined,
@@ -4134,21 +3810,32 @@ async function createSession(
   // Ordinary Autopilot review remains independent from Roadmap completion.
   async function runAutopilotReview(originalRequest: string): Promise<AutopilotVerdict | null> {
     const reviewConversation = session.getConversationIdentity().conversationId;
-    const destinationChanged = () => session.getConversationIdentity().conversationId !== reviewConversation;
+    const destinationChanged = () =>
+      session.getConversationIdentity().conversationId !== reviewConversation;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      return await runKenAutopilotSessionReview(() => session, async () => {
-        const ken = await ensureKenAutoSession();
-        const workflowCommands = await loadWorkflowCommandSpecs();
-        return {
-          input: { cwd, gitBranch, originalRequest, injectedPrompts: [...injectedAutopilotPrompts], workflowCommands },
-          review: async (digest) => {
-            await ken.prompt(digest);
-            return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
-          },
-        };
-      }, () => !autopilotCancelled);
+      return await runKenAutopilotSessionReview(
+        () => session,
+        async () => {
+          const ken = await ensureKenAutoSession();
+          const workflowCommands = await loadWorkflowCommandSpecs();
+          return {
+            input: {
+              cwd,
+              gitBranch,
+              originalRequest,
+              injectedPrompts: [...injectedAutopilotPrompts],
+              workflowCommands,
+            },
+            review: async (digest) => {
+              await ken.prompt(digest);
+              return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+            },
+          };
+        },
+        () => !autopilotCancelled,
+      );
     } catch (error) {
       if (!autopilotCancelled && !destinationChanged()) {
         broadcastError("autopilot_error", "autopilot review failed", error);
@@ -4169,32 +3856,48 @@ async function createSession(
   // SILENT when a human action wins the checkpoint race.
   async function runAutopilotPlanReview(originalRequest: string): Promise<AutopilotVerdict | null> {
     const reviewConversation = session.getConversationIdentity().conversationId;
-    const destinationChanged = () => session.getConversationIdentity().conversationId !== reviewConversation;
+    const destinationChanged = () =>
+      session.getConversationIdentity().conversationId !== reviewConversation;
     const checkpoint = planGate.current();
     if (!checkpoint || checkpoint.state !== "pending-review") return null;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      return await runKenAutopilotSessionReview(() => session, async () => {
-        const ken = await ensureKenAutoSession();
-        const workflowCommands = await loadWorkflowCommandSpecs();
-        return {
-          input: { cwd, gitBranch, originalRequest, injectedPrompts: [...injectedAutopilotPrompts],
-            workflowCommands, planContent: checkpoint.content },
-          review: async (digest) => {
-            await ken.prompt(digest);
-            return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
-          },
-        };
-      }, () => {
-        const current = planGate.current();
-        return !autopilotCancelled && current?.checkpointId === checkpoint.checkpointId &&
-          current.generation === checkpoint.generation && current.state === "pending-review";
-      });
+      return await runKenAutopilotSessionReview(
+        () => session,
+        async () => {
+          const ken = await ensureKenAutoSession();
+          const workflowCommands = await loadWorkflowCommandSpecs();
+          return {
+            input: {
+              cwd,
+              gitBranch,
+              originalRequest,
+              injectedPrompts: [...injectedAutopilotPrompts],
+              workflowCommands,
+              planContent: checkpoint.content,
+            },
+            review: async (digest) => {
+              await ken.prompt(digest);
+              return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+            },
+          };
+        },
+        () => {
+          const current = planGate.current();
+          return (
+            !autopilotCancelled &&
+            current?.checkpointId === checkpoint.checkpointId &&
+            current.generation === checkpoint.generation &&
+            current.state === "pending-review"
+          );
+        },
+      );
     } catch (err) {
       const current = planGate.current();
       if (
-        autopilotCancelled || destinationChanged() ||
+        autopilotCancelled ||
+        destinationChanged() ||
         current?.checkpointId !== checkpoint.checkpointId ||
         current.generation !== checkpoint.generation ||
         current.state !== "pending-review"
@@ -4257,61 +3960,65 @@ ${checkpoints}`;
     // mentor before the launcher's first await, not only at replaceSession.
     if (sessionMutations.owner) {
       respond(409, {
-        status: "failed", code: "session-busy", message: "A session mutation is in progress; retry shortly.",
+        status: "failed",
+        code: "session-busy",
+        message: "A session mutation is in progress; retry shortly.",
         operationId: sessionMutations.owner.operationId,
       });
       return;
     }
     const finishKenTransition = kenLifecycle.beginTransition(false, true);
     try {
-    await launchBoundPhase({
-      phaseId,
-      advancementConfirmation,
-      mode,
-      busyState: sessionBusyState(),
-      mutations: sessionMutations,
-      reconciliations: roadmapReconciliations,
-      repository: notesRepository,
-      cwd,
-      candidates: phaseCandidates,
-      getSession: () => session,
-      getThinkingLevel: () => session.getThinkingLevel(),
-      createSession: (active) => createCodingSession(undefined, active),
-      replaceSession: (replacement) => {
-        session = replacement;
-        bindKenTransitions(replacement);
-        planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
-      },
-      bindSessionEvents,
-      autopilotEnabled: projectAutopilot.isEnabled(cwd),
-      broadcastNotesSnapshot,
-      broadcast,
-      resetSessionState: () => {
-        deactivateApprovedPlan();
-        injectedAutopilotPrompts = [];
-      },
-      enterPlanMode: async (reason) => {
-        await session.setPlanMode(true);
-        broadcast("plan_progress", { total: 0, completed: [] });
-        broadcast("plan_enter", { reason });
-      },
-      startPrompt: (label, run, onFailure) => {
-        void runAgent(label, async () => {
-          try {
-            await run();
-          } catch (error) {
-            await onFailure(error);
-            throw error;
-          }
-        });
-      },
-      respond,
-      onLaunchFailure: (error, metadata) =>
-        captureSidecarError(error, "app-sidecar.phase.launch", metadata),
-      onAttentionFailure: (error, metadata) =>
-        captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata),
-    });
-    } finally { finishKenTransition(); }
+      await launchBoundPhase({
+        phaseId,
+        advancementConfirmation,
+        mode,
+        busyState: sessionBusyState(),
+        mutations: sessionMutations,
+        reconciliations: roadmapReconciliations,
+        repository: notesRepository,
+        cwd,
+        candidates: phaseCandidates,
+        getSession: () => session,
+        getThinkingLevel: () => session.getThinkingLevel(),
+        createSession: (active) => createCodingSession(undefined, active),
+        replaceSession: (replacement) => {
+          session = replacement;
+          bindKenTransitions(replacement);
+          planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
+        },
+        bindSessionEvents,
+        autopilotEnabled: projectAutopilot.isEnabled(cwd),
+        broadcastNotesSnapshot,
+        broadcast,
+        resetSessionState: () => {
+          deactivateApprovedPlan();
+          injectedAutopilotPrompts = [];
+        },
+        enterPlanMode: async (reason) => {
+          await session.setPlanMode(true);
+          broadcast("plan_progress", { total: 0, completed: [] });
+          broadcast("plan_enter", { reason });
+        },
+        startPrompt: (label, run, onFailure) => {
+          void runAgent(label, async () => {
+            try {
+              await run();
+            } catch (error) {
+              await onFailure(error);
+              throw error;
+            }
+          });
+        },
+        respond,
+        onLaunchFailure: (error, metadata) =>
+          captureSidecarError(error, "app-sidecar.phase.launch", metadata),
+        onAttentionFailure: (error, metadata) =>
+          captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata),
+      });
+    } finally {
+      finishKenTransition();
+    }
   }
 
   // Drive the review→prompt→review loop for one finished user turn. Only ever
@@ -4322,7 +4029,7 @@ ${checkpoints}`;
   // every exit path is unit-tested; this only wires the real dependencies.
 
   async function runAutopilotCycle(originalRequest: string): Promise<void> {
-    if (!autopilot || autopilotCancelled || session.getVerificationProblem()) return;
+    if (!autopilot || autopilotCancelled) return;
     const generation = runLifecycle.begin(abortOwnedWork).generation;
     pendingCancelDrain = null;
     autopilotActive = true;
@@ -4332,7 +4039,6 @@ ${checkpoints}`;
       await driveAutopilotCycle({
         maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
-        verificationProblem: () => session.getVerificationProblem(),
         // An injected run entering plan mode WITHOUT submitting (enter_plan,
         // no exit_plan) halts the cycle — Ken never prompts into a read-only
         // plan-mode session. A submitted plan takes the planPending branch.
@@ -4348,7 +4054,11 @@ ${checkpoints}`;
         markPlanReady: async (reason) => {
           const identity = planReviewIdentity;
           if (!identity) return null;
-          const result = await planGate.markReady(identity.checkpointId, identity.generation, reason);
+          const result = await planGate.markReady(
+            identity.checkpointId,
+            identity.generation,
+            reason,
+          );
           return result.status === "committed" ? identity : null;
         },
         requestPlanRevision: async (feedback) => {
@@ -4427,11 +4137,7 @@ ${checkpoints}`;
     } finally {
       autopilotActive = false;
       session.setIdealReviewSuppressed(autopilot);
-      finishOwnedGeneration(
-        generation,
-        true,
-        session.getVerificationProblem() ? "unverified" : "completed",
-      );
+      finishOwnedGeneration(generation, true, "completed");
       queueMicrotask(() => {
         void runStrandedQueue();
       });
@@ -4713,19 +4419,29 @@ ${checkpoints}`;
     planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
     const { conversationId, sessionId } = session.getConversationIdentity();
     log("INFO", "app-sidecar", "new session accepted", {
-      logicalSessionId: opts.id, operationId: mutation.operationId,
+      logicalSessionId: opts.id,
+      operationId: mutation.operationId,
     });
     broadcast("session_reset", {
-      operationId: mutation.operationId, kind: mutation.kind, conversationId, sessionId,
+      operationId: mutation.operationId,
+      kind: mutation.kind,
+      conversationId,
+      sessionId,
     });
     broadcast("extras", footerExtras());
   }
   const userTurnDeps: UserTurnDeps = {
     runAgent,
     getMessages: () => session.getMessages(),
-    clearCancelled: () => { autopilotCancelled = false; },
-    gateState: () => ({ enabled: autopilot, cancelled: autopilotCancelled,
-      planMode: session.getPlanMode(), planPending: planGate.pending() !== null }),
+    clearCancelled: () => {
+      autopilotCancelled = false;
+    },
+    gateState: () => ({
+      enabled: autopilot,
+      cancelled: autopilotCancelled,
+      planMode: session.getPlanMode(),
+      planPending: planGate.pending() !== null,
+    }),
     review: runAutopilotCycle,
     drainQueue: runStrandedQueue,
     decision: (decision) => {
@@ -4746,7 +4462,8 @@ ${checkpoints}`;
     prompt: createContinuationPromptAdapter({
       prompt: (prompt, onAccepted) => promptActiveSession(prompt, undefined, { onAccepted }),
       userTurn: userTurnDeps,
-      workflowCommand: async (text) => isWorkflowCommandText(text, await loadWorkflowCommandSpecs()),
+      workflowCommand: async (text) =>
+        isWorkflowCommandText(text, await loadWorkflowCommandSpecs()),
     }),
     accepted: (event) => {
       broadcast("continuation_accepted", event);
@@ -5717,27 +5434,44 @@ ${checkpoints}`;
     }
 
     if (method === "POST" && url === "/continuation-commit") {
-      void readBody(req, res).then(async (raw) => {
-        if (raw === null) return;
-        let body: unknown;
-        try { body = JSON.parse(raw); } catch { body = null; }
-        const request = parseContinuationCommitRequest(body);
-        if (!request) {
-          json(res, 400, {
-            operationId: "", preparedId: "", outcome: "rejected", accepted: false,
-            resetAttempted: false, error: "invalid_continuation_commit", message: "Expected preparedId, operationId and optional profile only.",
-          } satisfies ContinuationCommitResponse);
-          return;
-        }
-        const result = await continuationSession.commit(request);
-        json(res, result.status, result.body);
-      }).catch((error) => {
-        captureSidecarError(error, "app-sidecar.continuation-commit");
-        if (!res.headersSent) json(res, 500, {
-          operationId: "", preparedId: "", outcome: "outcome-unknown", accepted: null,
-          resetAttempted: true, error: "continuation_outcome_unknown", message: "Inspect the current session. Do not automatically reset or resend.",
-        } satisfies ContinuationCommitResponse);
-      });
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let body: unknown;
+          try {
+            body = JSON.parse(raw);
+          } catch {
+            body = null;
+          }
+          const request = parseContinuationCommitRequest(body);
+          if (!request) {
+            json(res, 400, {
+              operationId: "",
+              preparedId: "",
+              outcome: "rejected",
+              accepted: false,
+              resetAttempted: false,
+              error: "invalid_continuation_commit",
+              message: "Expected preparedId, operationId and optional profile only.",
+            } satisfies ContinuationCommitResponse);
+            return;
+          }
+          const result = await continuationSession.commit(request);
+          json(res, result.status, result.body);
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.continuation-commit");
+          if (!res.headersSent)
+            json(res, 500, {
+              operationId: "",
+              preparedId: "",
+              outcome: "outcome-unknown",
+              accepted: null,
+              resetAttempted: true,
+              error: "continuation_outcome_unknown",
+              message: "Inspect the current session. Do not automatically reset or resend.",
+            } satisfies ContinuationCommitResponse);
+        });
       return;
     }
 
@@ -5785,13 +5519,19 @@ ${checkpoints}`;
             conflict: (body) => json(res, 409, body),
             perform: async (onAccepted) => {
               if (programmaticExecutionActive) {
-                json(res, 409, { error: "programmatic_execution_busy", message: "Finish or cancel the isolated opportunity first; messages are not forwarded to it." });
+                json(res, 409, {
+                  error: "programmatic_execution_busy",
+                  message:
+                    "Finish or cancel the isolated opportunity first; messages are not forwarded to it.",
+                });
                 return;
               }
               const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
-                text, attachmentCount: attachments.length,
+                text,
+                attachmentCount: attachments.length,
                 busy: running || runClaim.active || autopilotActive || runLifecycle.running,
-                automated: meta?.kenSent === true, codeMode: mode !== "chat",
+                automated: meta?.kenSent === true,
+                codeMode: mode !== "chat",
                 claimStart: () => {
                   if (runClaim.active) return false;
                   asks.cancelAll({ action: "cancel", superseded: true });
@@ -5805,14 +5545,22 @@ ${checkpoints}`;
                   try {
                     const active = session.getState();
                     const result = await executeProgrammaticOpportunity({
-                      ...selection, cwd, provider: active.provider, model: active.model,
+                      ...selection,
+                      cwd,
+                      provider: active.provider,
+                      model: active.model,
                       signal: abort.signal,
-                      ask: asks.park, cancelQuestions: () => asks.cancelAll(),
+                      ask: asks.park,
+                      cancelQuestions: () => asks.cancelAll(),
                       progress: (text) => broadcast("text_delta", { text }),
                     });
-                    broadcast("text_delta", { text: `\n${result.status === "rejected" ? result.reason : result.summary}\n` });
+                    broadcast("text_delta", {
+                      text: `\n${result.status === "rejected" ? result.reason : result.summary}\n`,
+                    });
                     return result;
-                  } finally { programmaticExecutionActive = false; }
+                  } finally {
+                    programmaticExecutionActive = false;
+                  }
                 },
               });
               if (handledProgrammatic) return;
@@ -5936,7 +5684,9 @@ ${checkpoints}`;
                     {
                       ...(expandsToTemplate ? { command: text.trim() } : {}),
                       ...(meta?.kenSent === true ? { kenSent: true } : {}),
-                      ...(Array.isArray(meta?.enhancements) ? { enhancements: meta.enhancements } : {}),
+                      ...(Array.isArray(meta?.enhancements)
+                        ? { enhancements: meta.enhancements }
+                        : {}),
                     },
                     1,
                   )
@@ -5944,20 +5694,26 @@ ${checkpoints}`;
               }
               // Fresh user turn: clear any cancel flag left from a prior cycle so this
               // turn's autopilot review can run.
-              await runUserTurn(userTurnDeps, text, async () => {
-                if (attachments.length > 0) {
-                  // Persist each attachment under .gg/uploads so files are inspectable
-                  // by the agent's tools, then prompt with the media as native blocks.
-                  const prepared = await prepareAttachments(cwd, attachments);
-                  await promptActiveSessionWithAttachments(text, prepared, { onAccepted });
-                } else {
-                  // Pass the raw text straight through. AgentSession.prompt() is the
-                  // single source of truth for slash-command expansion (built-in +
-                  // `.gg/commands/*.md` custom), so the agent gets the right body
-                  // while the webview keeps showing the short `/name`.
-                  await promptActiveSession(text, undefined, { onAccepted });
-                }
-              }, workflowCommand, onAccepted);
+              await runUserTurn(
+                userTurnDeps,
+                text,
+                async () => {
+                  if (attachments.length > 0) {
+                    // Persist each attachment under .gg/uploads so files are inspectable
+                    // by the agent's tools, then prompt with the media as native blocks.
+                    const prepared = await prepareAttachments(cwd, attachments);
+                    await promptActiveSessionWithAttachments(text, prepared, { onAccepted });
+                  } else {
+                    // Pass the raw text straight through. AgentSession.prompt() is the
+                    // single source of truth for slash-command expansion (built-in +
+                    // `.gg/commands/*.md` custom), so the agent gets the right body
+                    // while the webview keeps showing the short `/name`.
+                    await promptActiveSession(text, undefined, { onAccepted });
+                  }
+                },
+                workflowCommand,
+                onAccepted,
+              );
             },
           });
         })
@@ -5986,8 +5742,11 @@ ${checkpoints}`;
           return;
         }
         if (input === null) {
-          json(res, 400, { error: "invalid_ken_prompt", retryable: false,
-            message: "Non-empty text and target conversationId and activationEpoch are required." });
+          json(res, 400, {
+            error: "invalid_ken_prompt",
+            retryable: false,
+            message: "Non-empty text and target conversationId and activationEpoch are required.",
+          });
           return;
         }
         const result = kenLifecycle.prompt(input.text, input.target);
@@ -6007,7 +5766,9 @@ ${checkpoints}`;
         let identity;
         try {
           const body: unknown = JSON.parse(raw);
-          identity = parseKenRunIdentity(body && typeof body === "object" && "ken" in body ? body.ken : null);
+          identity = parseKenRunIdentity(
+            body && typeof body === "object" && "ken" in body ? body.ken : null,
+          );
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;

@@ -17,11 +17,11 @@ export function NotesPhaseReconciliationBanner(): ReactElement | null {
   const [pending, setPending] = useState(false);
   const [outcome, setOutcome] = useState<PhaseExecutionReconciliationOutcome | null>(null);
   const [transportError, setTransportError] = useState("");
-  const blocked = phase.execution?.state === "needs-reconciliation";
+  const historicalReconciliation = phase.execution?.state === "needs-reconciliation";
   const workspace = latestReconciliationWorkspace(phase);
   const succeeded = outcome?.status === "reconciled" || outcome?.status === "duplicate";
 
-  if (!blocked && !succeeded) return null;
+  if (!historicalReconciliation && !succeeded) return null;
 
   const unavailable =
     expectedProjectKey === null ||
@@ -84,15 +84,15 @@ export function NotesPhaseReconciliationBanner(): ReactElement | null {
     >
       <div>
         <p className="notes-phase-reconciliation-kicker">
-          {succeeded ? "Reconciliation complete" : "Needs reconciliation"}
+          {succeeded ? "Context updated" : "Historical execution context"}
         </p>
         <h4 id={`notes-phase-reconciliation-${phase.id}`}>
-          {succeeded ? "Safe progress was preserved" : "Resume and completion are blocked"}
+          {succeeded ? "Stored progress was preserved" : "Review saved context if needed"}
         </h4>
         <p>
           {succeeded
-            ? `${outcome.preservedStepIds.length} preserved steps · ${outcome.revalidationStepIds.length} revalidation steps · ${outcome.revalidationEvidenceCount} evidence checks`
-            : "Confirm the current plan and workspace before continuing this phase."}
+            ? `${outcome.preservedStepIds.length} stored steps retained. This update did not verify the current code.`
+            : "This optional context update is not required to audit, resume, or report this phase."}
         </p>
         {outcome && !succeeded && (
           <p className="notes-phase-reconciliation-error" role="alert">
@@ -104,13 +104,13 @@ export function NotesPhaseReconciliationBanner(): ReactElement | null {
             {transportError}
           </p>
         )}
-        {blocked && unavailable && (
+        {historicalReconciliation && unavailable && (
           <p className="notes-phase-reconciliation-error" role="alert">
-            Reconciliation is unavailable until Notes contains a trusted workspace checkpoint.
+            This optional update is unavailable without a saved workspace snapshot.
           </p>
         )}
       </div>
-      {blocked && (
+      {historicalReconciliation && (
         <button
           type="button"
           className="notes-roadmap-primary"

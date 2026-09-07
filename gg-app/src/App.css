@@ -9981,53 +9981,6 @@ select {
   padding-inline-start: 8px;
   color: var(--text);
 }
-.notes-manual-completion {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px 16px;
-  padding: 14px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-1);
-}
-.notes-manual-completion h4,
-.notes-manual-completion p,
-.notes-manual-completion dl {
-  margin: 0;
-}
-.notes-manual-completion p,
-.notes-manual-completion dt,
-.notes-manual-completion dd {
-  font-size: 11px;
-}
-.notes-manual-completion-confirm {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  align-items: end;
-  gap: 8px;
-}
-.notes-manual-completion-confirm dl,
-.notes-manual-completion-confirm > p {
-  grid-column: 1 / -1;
-}
-.notes-manual-completion-confirm dl {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.notes-manual-completion-confirm dt {
-  color: var(--text-secondary);
-}
-.notes-manual-completion-confirm dd {
-  max-width: 170px;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.notes-manual-completion > .notes-phase-action-feedback {
-  grid-column: 1 / -1;
-}
 .notes-phase-rebind {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -10627,13 +10580,11 @@ select {
     width: 100%;
   }
 
-  .notes-manual-completion,
   .notes-phase-rebind {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
   }
 
-  .notes-manual-completion > button,
   .notes-phase-rebind > button {
     width: 100%;
   }

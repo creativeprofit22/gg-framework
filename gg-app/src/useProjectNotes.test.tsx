@@ -5,8 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { NotesReferenceInput } from "./notes-reference";
 import { createEmptyNotesDocument, createNotesRepository, v3NotesKey } from "./notes-storage";
 import type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
   NotesClient,
   NotesDocumentV3,
   NotesReferenceOperationResult,
@@ -313,14 +311,6 @@ class FakeNotesClient implements NotesClient {
     return { status: "missing" };
   }
 
-  async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
-    return { status: "missing" };
-  }
-
-  async commitManualCompletionApproval(): Promise<ManualCompletionApprovalCommitOutcome> {
-    return { status: "nonce-not-found" };
-  }
-
   async migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome> {
     if (this.migrationError) throw this.migrationError;
     if (this.migrationOutcome) return this.migrationOutcome;
@@ -429,6 +419,37 @@ const hookOptions = (
 afterEach(() => cleanup());
 
 describe("useProjectNotes sidecar authority", () => {
+  it.each(["load", "migration", "save"])("blocks unsupported %s without local fallback writes", async (stage) => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    seed(storage, cwd, notes("local copy must survive"));
+    const before = storage.getItem(v3NotesKey(cwd));
+    const server = new FakeNotesServer();
+    const client = server.connect(cwd);
+    const unsupported = {
+      status: "unsupported", source: "primary", message: "Open with a compatible app; files were preserved.",
+    } as const;
+    if (stage === "load") client.getOverride = async () => unsupported;
+    if (stage === "migration") client.migrationOutcome = unsupported;
+    if (stage === "save") {
+      server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("server") });
+      client.saveOutcome = unsupported;
+    }
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    if (stage === "save") {
+      await waitFor(() => expect(hook.result.current.revision).toBe(1));
+      act(() => hook.result.current.onChange("attempted write"));
+    }
+    await waitFor(() => expect(hook.result.current.diagnostics.authority).toEqual([
+      { kind: "sidecar-unsupported", format: unsupported },
+    ]));
+    expect(hook.result.current.authorityReady).toBe(false);
+    act(() => hook.result.current.onChange("must not write fallback"));
+    expect(client.saveCalls).toHaveLength(stage === "save" ? 1 : 0);
+    expect(server.migrationCreates).toBe(0);
+    expect(storage.getItem(v3NotesKey(cwd))).toBe(before);
+  });
+
   it("subscribes first and migrates a valid local v2 document exactly once", async () => {
     const cwd = "/work/project";
     const storage = new MemoryStorage();

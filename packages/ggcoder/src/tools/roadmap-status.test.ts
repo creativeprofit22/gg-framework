@@ -49,7 +49,7 @@ describe("RoadmapStatusParams", () => {
     },
   );
 
-  it("accepts evidenced progress and Done without prose evidence", () => {
+  it("requires supporting prose for progress and Done reports", () => {
     expect(
       RoadmapStatusParams.parse({
         ...base,
@@ -62,10 +62,10 @@ describe("RoadmapStatusParams", () => {
       RoadmapStatusParams.parse({
         ...base,
         transition: "done",
+        evidence: ["Required documentation sections are present"],
         verification: { result: "passed" },
-        verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
       }).evidence,
-    ).toEqual([]);
+    ).toEqual(["Required documentation sections are present"]);
   });
 
   it.each(["failed", "exception-requested"])("preserves %s reason requirements", (result) => {
@@ -103,7 +103,39 @@ describe("RoadmapStatusParams", () => {
     ).toThrow();
   });
 
-  it("requires passed verification and explicit bindings for Done", () => {
+  it("accepts null placeholders while requiring an honest completion report", () => {
+    const input = {
+      ...base,
+      transition: "done",
+      evidence: ["Documentation reviewed"],
+      proposed_references: null,
+      blocker: null,
+      required_external_action: null,
+      verification: { result: "passed", reason: null },
+      verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
+    };
+    expect(RoadmapStatusParams.parse(input)).toMatchObject({
+      transition: "done",
+      verification: { result: "passed" },
+      evidence: ["Documentation reviewed"],
+    });
+    for (const verification_bindings of [undefined, null, []]) {
+      expect(RoadmapStatusParams.safeParse({ ...input, verification_bindings }).success).toBe(true);
+    }
+    for (const invalid of [
+      { evidence: null },
+      { evidence: [] },
+      { verification: { result: "failed", reason: null } },
+      { verification: { result: "passed", reason: "not allowed" } },
+      { blocker: "not allowed" },
+      { required_external_action: "not allowed" },
+      { transition: "blocked" },
+      { unexpected: null },
+    ])
+      expect(RoadmapStatusParams.safeParse({ ...input, ...invalid }).success).toBe(false);
+  });
+
+  it("requires passed verification but accepts shared historical executions for Done", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "done" })).toThrow();
     expect(
       RoadmapStatusParams.parse({
@@ -121,17 +153,18 @@ describe("RoadmapStatusParams", () => {
       verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
       verification: { result: "passed" },
     });
-    expect(() =>
-      RoadmapStatusParams.parse({
+    expect(
+      RoadmapStatusParams.safeParse({
         ...base,
         transition: "done",
+        evidence: ["One check covers both criteria"],
         verification_bindings: [
           { criterion_id: "a".repeat(64), execution_id: "execution-1" },
           { criterion_id: "b".repeat(64), execution_id: "execution-1" },
         ],
         verification: { result: "passed" },
-      }),
-    ).toThrow();
+      }).success,
+    ).toBe(true);
   });
 
   it("normalizes optional reference coordinates", () => {
@@ -173,9 +206,7 @@ describe("createRoadmapStatusTool", () => {
       JSON.stringify({ result: "phase-not-bound", phaseId: "phase-1" }),
     );
     expect(record).toHaveBeenCalledWith({ actor: "gg-coder", input });
-    expect(tool.description).toContain(
-      'transition: "done" is the only public completion-intent API',
-    );
-    expect(tool.description).toContain("settlement is host-only after the owning run ends");
+    expect(tool.description).toContain('transition: "done" records Done immediately');
+    expect(tool.description).not.toMatch(/owning run|classifier-approved|per criterion/);
   });
 });

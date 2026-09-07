@@ -90,7 +90,7 @@ describe("roadmap_status provider schema", () => {
     ).toBe(false);
   });
 
-  it("accepts Done only with passed verification and explicit bindings", () => {
+  it("accepts Done with a passed report without execution bindings", () => {
     const tool = createRoadmapStatusTool("gg-coder", async () => ({
       result: "committed",
       phaseId: "phase-1",
@@ -116,7 +116,8 @@ describe("roadmap_status provider schema", () => {
         verification_bindings: [{ criterion_id: "a".repeat(64), execution_id: "execution-1" }],
       }).success,
     ).toBe(true);
-    expect(tool.parameters.safeParse(doneInput).success).toBe(false);
+    expect(tool.parameters.safeParse(doneInput).success).toBe(true);
+    expect(tool.parameters.safeParse({ ...doneInput, evidence: [] }).success).toBe(false);
     expect(
       tool.parameters.safeParse({
         ...doneInput,

@@ -15,8 +15,6 @@ import type {
   NotesReference,
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
   NotesRoadmapMutationResult,
   NotesSessionLink,
   PhaseBindingOutcome,
@@ -119,11 +117,6 @@ interface Props {
   onReconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  onPreviewManualCompletionApproval(
-    phaseId: string,
-    expectedRevision: number,
-  ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommitManualCompletionApproval(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   commands: SlashCommand[];
   onRunCommand(invocation: string): void;
@@ -195,8 +188,6 @@ export function NotesModal({
   onRebindPhase,
   onMutatePhaseLease,
   onReconcilePhaseExecution,
-  onPreviewManualCompletionApproval,
-  onCommitManualCompletionApproval,
   onStartNextPhase,
   commands,
   onRunCommand,
@@ -386,8 +377,6 @@ export function NotesModal({
                   onRebindPhase={onRebindPhase}
                   onMutatePhaseLease={onMutatePhaseLease}
                   onReconcilePhaseExecution={onReconcilePhaseExecution}
-                  onPreviewManualCompletionApproval={onPreviewManualCompletionApproval}
-                  onCommitManualCompletionApproval={onCommitManualCompletionApproval}
                   onStartNextPhase={onStartNextPhase}
                   commands={commands}
                   onRunCommand={onRunCommand}

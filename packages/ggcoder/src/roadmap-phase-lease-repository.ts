@@ -174,9 +174,8 @@ export class RoadmapPhaseLeaseRepository {
         currentProjectKey: context.projectKey,
       };
     }
-    if (request.action !== "release" && context.phaseStatus === "done") {
-      return { status: "phase-terminal" };
-    }
+    // Runner admission rejects terminal phases in the binding service. The lease
+    // itself also fences explicit status updates and idempotent retries on Done.
     if (request.action !== "release" && request.planId !== context.planId) {
       return { status: "plan-mismatch" };
     }

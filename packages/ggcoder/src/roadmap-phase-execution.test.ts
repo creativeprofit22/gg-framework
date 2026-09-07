@@ -8,10 +8,8 @@ import {
   captureGitWorkspaceSnapshot,
   captureRepositoryIdentity,
   createApprovedPlan,
-  isEvidenceCurrent,
   isLegacyPlanImportEligible,
   planStepId,
-  reconcilePlanSteps,
   resolveExecutionPlanSnapshot,
   sha256,
   workspaceSnapshotsEqual,
@@ -89,63 +87,18 @@ describe("durable roadmap plan reconciliation", () => {
     ]);
   });
 
-  it("preserves clean ancestor and exact dirty steps, invalidating uncertain work", async () => {
+  it("compares exact workspace snapshots for genuine approval and reconciliation fences", async () => {
     const clean = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const cleanStep = {
-      id: "1".repeat(64),
-      index: 1,
-      text: "Clean step",
-      state: "completed" as const,
-      completedAt: "2026-08-30T10:00:00.000Z",
-      workspace: clean,
-    };
-    await fs.writeFile(path.join(repository, "descendant.txt"), "descendant\n");
-    git("add", "descendant.txt");
-    git("commit", "--quiet", "-m", "descendant");
-    const descendant = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const preserved = reconcilePlanSteps(
-      [cleanStep],
-      descendant,
-      (ancestor, current) => ancestor === clean.headCommit && current === descendant.headCommit,
-    );
-    expect(preserved.needsRevalidation).toEqual([]);
-
-    await fs.writeFile(path.join(repository, "dirty.txt"), "dirty\n");
-    const dirty = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const dirtyStep = { ...cleanStep, workspace: dirty };
-    expect(reconcilePlanSteps([dirtyStep], dirty, () => false).needsRevalidation).toEqual([]);
-
+    expect(workspaceSnapshotsEqual(clean, structuredClone(clean))).toBe(true);
     await fs.writeFile(path.join(repository, "dirty.txt"), "changed\n");
     const changed = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const invalidated = reconcilePlanSteps([dirtyStep], changed, () => false);
-    expect(invalidated.steps[0]!.state).toBe("needs-revalidation");
-    expect(invalidated.needsRevalidation).toEqual([dirtyStep.id]);
-  });
-
-  it("requires final evidence on the exact classifier, workspace, and safe environment", async () => {
-    const workspace = await captureGitWorkspaceSnapshot(repository, "project-key");
-    const legacyEvidence = {
-      commandHash: "1".repeat(64),
-      commandDisplay: "pnpm test",
-      exitCode: 0,
-      classifierVersion: "roadmap-v1",
-      verdict: "approved" as const,
-      criterionId: "1".repeat(64),
-      observedAt: "2026-08-30T10:00:00.000Z",
-      workspace,
-    };
-    const evidence = {
-      ...legacyEvidence,
-      version: 2 as const,
-      executionId: "execution-1",
-      cwd: repository,
-      safeToolEnvironmentDigest: "2".repeat(64),
-    };
-    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v1", "2".repeat(64))).toBe(true);
-    expect(isEvidenceCurrent(legacyEvidence, workspace, "roadmap-v1", "2".repeat(64))).toBe(false);
-    expect(workspaceSnapshotsEqual(workspace, workspace)).toBe(true);
-    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v2", "2".repeat(64))).toBe(false);
-    expect(isEvidenceCurrent(evidence, workspace, "roadmap-v1", "3".repeat(64))).toBe(false);
+    expect(workspaceSnapshotsEqual(clean, changed)).toBe(false);
+    expect(
+      workspaceSnapshotsEqual(clean, {
+        ...clean,
+        repository: { ...clean.repository, projectKey: "other" },
+      }),
+    ).toBe(false);
   });
 
   it("rejects the exact revision-105 phase-4 plan from phase 5", () => {

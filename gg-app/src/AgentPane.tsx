@@ -584,13 +584,6 @@ export function resolveRoadmapPhaseResume(
     | undefined,
   compatibilitySession: NotesSessionLink,
 ): { status: "blocked"; message: string } | { status: "ready"; session: NotesSessionLink } {
-  if (phase?.execution?.state === "needs-reconciliation") {
-    return {
-      status: "blocked",
-      message:
-        "Resume is blocked until this phase is reconciled. Open Project Notes, select Roadmap, then choose Reconcile.",
-    };
-  }
   return { status: "ready", session: preferredRoadmapPhaseSession(phase, compatibilitySession) };
 }
 

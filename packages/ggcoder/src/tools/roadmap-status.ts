@@ -9,7 +9,6 @@ import {
   type NotesRoadmapStatusOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
-import type { RoadmapVerificationEvidenceUnmetCode } from "../core/verification-evidence.js";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -247,7 +246,7 @@ const commonFields = {
   proposed_references: ProposedReferences,
 };
 
-export const RoadmapStatusParams = z
+const RoadmapStatusReport = z
   .discriminatedUnion("transition", [
     z
       .object({
@@ -291,38 +290,51 @@ export const RoadmapStatusParams = z
         blocker: z.never().optional(),
         required_external_action: z.never().optional(),
         evidence: Evidence,
-        verification_bindings: VerificationBindings.refine(
-          (bindings) => bindings.length > 0,
-          "Done reports require explicit criterion-to-execution bindings; rerun legacy checks once.",
-        ),
+        verification_bindings: VerificationBindings,
         verification: PassedVerification,
       })
       .strict(),
   ])
   .superRefine((report, context) => {
-    if (
-      report.transition !== "done" &&
-      !isNotesVerificationEvidenceSatisfied(report.verification?.result, report.evidence)
-    ) {
+    if (!isNotesVerificationEvidenceSatisfied(report.verification?.result, report.evidence)) {
       context.addIssue({
         code: "custom",
         path: ["evidence"],
-        message: "Non-Done passed verification requires nonempty evidence.",
-      });
-    }
-    const criterionIds = report.verification_bindings.map((binding) => binding.criterion_id);
-    const executionIds = report.verification_bindings.map((binding) => binding.execution_id);
-    if (
-      new Set(criterionIds).size !== criterionIds.length ||
-      new Set(executionIds).size !== executionIds.length
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["verification_bindings"],
-        message: "Verification bindings require unique criterion and execution IDs",
+        message: "Passed verification requires nonempty evidence.",
       });
     }
   });
+
+// Strict providers encode absent optional fields as null. Normalize only known
+// placeholders before validating the transition and truthful report.
+export const RoadmapStatusParams = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const input = { ...value } as Record<string, unknown>;
+  for (const key of [
+    "evidence",
+    "verification_bindings",
+    "proposed_references",
+    "blocker",
+    "required_external_action",
+  ]) {
+    if (input[key] === null) delete input[key];
+  }
+  const verification = input.verification;
+  if (
+    verification &&
+    typeof verification === "object" &&
+    !Array.isArray(verification) &&
+    "result" in verification &&
+    verification.result === "passed" &&
+    "reason" in verification &&
+    verification.reason === null
+  ) {
+    const normalized = { ...verification } as Record<string, unknown>;
+    delete normalized.reason;
+    input.verification = normalized;
+  }
+  return input;
+}, RoadmapStatusReport);
 
 export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;
 export type RoadmapReferenceProposalInput = z.infer<typeof RoadmapReferenceProposalParams>;
@@ -339,7 +351,6 @@ export type RoadmapStatusToolResult =
       revision: number;
       statusOutcome: NotesRoadmapStatusOutcome;
       phaseTransitionOutcome: NotesRoadmapStatusOutcome;
-      completionIntentId?: string;
       proposals: ProjectNotesRoadmapProposalOutcome[];
       message?: string;
     }
@@ -349,6 +360,7 @@ export type RoadmapStatusToolResult =
         | "phase-not-bound"
         | "notes-missing"
         | "notes-corrupt"
+        | "unsupported"
         | "duplicate-id-conflict"
         | "operation-conflict"
         | "stale-revision"
@@ -356,21 +368,13 @@ export type RoadmapStatusToolResult =
         | "phase-archived"
         | "stale-session"
         | "phase-lease-lost"
-        | "plan-not-approved"
-        | "plan-snapshot-missing"
-        | "plan-reconciliation-required"
-        | "repository-unverifiable"
         | "invalid-reference"
-        | "verification-incomplete"
-        | "missing-plan-progress";
+        | "verification-incomplete";
       phaseId: string;
       revision?: number;
       owner?: { operationId: string; kind: string } | null;
       path?: string;
       message?: string;
-      unmetEvidenceCodes?: RoadmapVerificationEvidenceUnmetCode[];
-      staleCriterionIds?: string[];
-      missingCriterionIds?: string[];
     };
 
 export function createRoadmapStatusTool(
@@ -380,7 +384,7 @@ export function createRoadmapStatusTool(
   return {
     name: "roadmap_status",
     description:
-      'Report bounded Roadmap progress or a real external blocker. Non-Done passed verification requires nonempty evidence. transition: "done" is the only public completion-intent API. Done requires passed verification and one current classifier-approved command per criterion; settlement is host-only after the owning run ends.',
+      'Report bounded Roadmap progress or a real external blocker. Passed verification requires nonempty evidence. transition: "done" records Done immediately with passed verification and nonempty supporting evidence. Legacy verification_bindings are accepted but do not authorize completion.',
     parameters: RoadmapStatusParams,
     rawInputSchema: roadmapStatusInputSchema,
     executionMode: "sequential",

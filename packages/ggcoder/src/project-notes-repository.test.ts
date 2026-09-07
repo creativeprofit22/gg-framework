@@ -1650,12 +1650,12 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       repository.recordRoadmapStatusUpdate(cwd, {
         ...passingRequest,
         updateId: "verification-missing",
-        evidence: ["pnpm test: passed"],
+        evidence: [],
       }),
     ).resolves.toEqual({
       status: "verification-incomplete",
       revision: 2,
-      message: "Durable completion requires a revision-bound GG Coder Done report.",
+      message: "Passed verification requires nonempty evidence.",
     });
     await expect(
       repository.recordRoadmapStatusUpdate(cwd, {
@@ -1667,23 +1667,23 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
     ).resolves.toEqual({
       status: "verification-incomplete",
       revision: 2,
-      message: "Done requires a passed verification result.",
+      message: "Done requires passed verification and a current expected revision.",
     });
 
-    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toEqual({
-      status: "verification-incomplete",
-      revision: 2,
-      message: "Durable completion requires a revision-bound GG Coder Done report.",
+    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "applied",
+      snapshot: { revision: 3 },
+      phase: { status: "done" },
     });
-
-    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toEqual({
-      status: "verification-incomplete",
-      revision: 2,
-      message: "Durable completion requires a revision-bound GG Coder Done report.",
+    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 3,
+      statusOutcome: "applied",
     });
     await expect(repository.load(cwd)).resolves.toMatchObject({
       status: "ok",
-      snapshot: { revision: 2 },
+      snapshot: { revision: 3 },
     });
   });
 
@@ -1734,13 +1734,13 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
 
     await expect(repository.recordRoadmapStatusUpdate(cwd, request)).resolves.toMatchObject({
       status: "committed",
-      statusOutcome: "completion-pending",
+      statusOutcome: "applied",
       snapshot: { revision: 2 },
-      phase: { status: "in-progress" },
+      phase: { status: "done" },
     });
   });
 
-  it("does not let unbound or durable phases use legacy completion", async () => {
+  it("honors explicit binding guards but does not require a completed durable plan", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
     const unboundCwd = "/work/roadmap-unbound-legacy-completion";
     const unboundDocument = roadmapDocument();
@@ -1798,10 +1798,11 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
         ...request,
         expectedSession: durablePhase.session,
       }),
-    ).resolves.toEqual({
-      status: "verification-incomplete",
-      revision: 1,
-      message: "Durable completion requires a revision-bound GG Coder Done report.",
+    ).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "applied",
+      snapshot: { revision: 2 },
+      phase: { status: "done", execution: durablePhase.execution },
     });
   });
 
@@ -2444,7 +2445,7 @@ describe("project Notes identity and validation", () => {
     ["both additive fields absent", ["archivedAt", "roadmapEvents"]],
     ["archivedAt absent and roadmapEvents present", ["archivedAt"]],
   ])(
-    "rewrites a v3 phase with %s without changing its revision or existing data",
+    "projects a v3 phase with %s without changing stored bytes",
     async (caseName, missingFields) => {
       const agentDir = await tempAgentDir();
       const cwd = `/work/${caseName.replace(/ /g, "-")}`;
@@ -2465,7 +2466,6 @@ describe("project Notes identity and validation", () => {
       await fs.writeFile(paths.primary, JSON.stringify(envelope), "utf8");
 
       const loaded = await repository.load(cwd);
-      const expectedEnvelope = { ...envelope, document: expected };
 
       expect(loaded).toEqual({
         status: "ok",
@@ -2476,8 +2476,8 @@ describe("project Notes identity and validation", () => {
         },
         recoveredFromBackup: false,
       });
-      expect(await readEnvelope(paths.primary)).toEqual(expectedEnvelope);
-      expect(await readEnvelope(paths.backup)).toEqual(expectedEnvelope);
+      expect(await fs.readFile(paths.primary, "utf8")).toBe(JSON.stringify(envelope));
+      await expect(fs.stat(paths.backup)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 
@@ -2560,9 +2560,7 @@ describe("project Notes identity and validation", () => {
         },
       },
     });
-    expect((await readEnvelope(paths.primary)).document.phases[0]!.roadmapEvents[0]).toMatchObject({
-      proposedReferences: [{ policyOutcome: "manual-review" }],
-    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(JSON.stringify(envelope));
   });
 
   it("rejects proposal policy outcomes that contradict their disposition", () => {
@@ -2756,7 +2754,7 @@ describe("ProjectNotesRepository durability", () => {
     expect((await fs.readFile(paths.primary, "utf8")).endsWith("\n")).toBe(true);
   });
 
-  it("upgrades legacy lifecycle events in place and preserves semantic kinds after restart", async () => {
+  it("projects legacy lifecycle kinds after restart without rewriting history", async () => {
     const agentDir = await tempAgentDir();
     const cwd = "/work/legacy-lifecycle-kind";
     const repository = new ProjectNotesRepository(agentDir);
@@ -2786,14 +2784,14 @@ describe("ProjectNotesRepository durability", () => {
       },
     });
     const persisted = await readEnvelope(paths.primary);
-    expect(persisted.document.phases[0]!.lifecycleEvents.map(({ kind }) => kind)).toEqual([
-      "other",
-      "other",
-    ]);
+    expect(persisted.document).toEqual(legacy);
     await expect(new ProjectNotesRepository(agentDir).load(cwd)).resolves.toMatchObject({
       status: "ok",
       recoveredFromBackup: false,
-      snapshot: { revision: 7, document: persisted.document },
+      snapshot: {
+        revision: 7,
+        document: { phases: [{ lifecycleEvents: [{ kind: "other" }, { kind: "other" }] }] },
+      },
     });
   });
 
@@ -2847,7 +2845,7 @@ describe("ProjectNotesRepository durability", () => {
     expect(restarted.snapshot.document.tasks.map(({ id }) => id)).toEqual(expectedIds);
   });
 
-  it("upgrades a v2 disk envelope in place before the next restart", async () => {
+  it("projects a v2 disk envelope across restart without upgrading stored data", async () => {
     const agentDir = await tempAgentDir();
     const cwd = "/work/disk-v2";
     const repository = new ProjectNotesRepository(agentDir);
@@ -2873,11 +2871,7 @@ describe("ProjectNotesRepository durability", () => {
       snapshot: { revision: 4, document: { version: 3, reference: "disk v2" } },
     });
     expect(restarted).toEqual(loaded);
-    expect((await readEnvelope(paths.primary)).document).toMatchObject({
-      version: 3,
-      phases: [],
-      references: [],
-    });
+    expect((await readEnvelope(paths.primary)).document).toEqual(legacy);
   });
 
   it("allows exactly one of two simultaneous migrations to create the store", async () => {
@@ -2903,7 +2897,7 @@ describe("ProjectNotesRepository durability", () => {
     expect((await first.load("/work/project")).status).toBe("ok");
   });
 
-  it("recovers and rewrites a Phase 22 backup without changing revision or data", async () => {
+  it("projects a Phase 22 backup without replacing either recovery candidate", async () => {
     const agentDir = await tempAgentDir();
     const cwd = "/work/phase-22-backup";
     const repository = new ProjectNotesRepository(agentDir);
@@ -2924,7 +2918,6 @@ describe("ProjectNotesRepository durability", () => {
     await fs.writeFile(paths.backup, JSON.stringify(envelope), "utf8");
 
     const recovered = await repository.load(cwd);
-    const expectedEnvelope = { ...envelope, document: expected };
 
     expect(recovered).toEqual({
       status: "ok",
@@ -2935,8 +2928,8 @@ describe("ProjectNotesRepository durability", () => {
       },
       recoveredFromBackup: true,
     });
-    expect(await readEnvelope(paths.primary)).toEqual(expectedEnvelope);
-    expect(await readEnvelope(paths.backup)).toEqual(expectedEnvelope);
+    expect(await fs.readFile(paths.primary, "utf8")).toBe("{broken");
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(JSON.stringify(envelope));
   });
 
   it("reports dual corruption without replacing either file", async () => {

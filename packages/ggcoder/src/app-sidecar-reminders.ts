@@ -19,6 +19,7 @@ import {
   type ProjectNotesReminderDeliveryRequest,
   type ProjectNotesRepository,
   type ProjectNotesSnapshot,
+  type ProjectNotesUnsupportedFormat,
 } from "./project-notes-repository.js";
 
 export const REMINDER_BACKGROUND_GRACE_MS = 750;
@@ -45,6 +46,7 @@ export interface ReservedReminderOccurrence {
 }
 
 export type ReminderReserveOutcome =
+  | ProjectNotesUnsupportedFormat
   | ({ status: "reserved" } & ReservedReminderOccurrence)
   | { status: "deferred"; retryAt: string }
   | { status: "leased" }
@@ -249,6 +251,7 @@ export class AppSidecarReminderCoordinator {
     const loaded = await this.repository.load(session.cwd);
     if (loaded.status === "missing") return { status: "missing" };
     if (loaded.status === "corrupt") return { status: "corrupt" };
+    if (loaded.status === "unsupported") return loaded;
     project.snapshot = loaded.snapshot;
     const occurrence = selectDueReminder(loaded.snapshot.document, now);
     if (!occurrence) {

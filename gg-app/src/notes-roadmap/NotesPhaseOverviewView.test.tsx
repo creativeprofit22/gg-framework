@@ -3,7 +3,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NotesPhase, PhaseLeaseOutcome, ProjectNotesStorageDiagnostics } from "../notes-types";
-import { ManualCompletionApprovalControl, PhaseRebindControl } from "./NotesPhaseOverviewView";
+import { PhaseRebindControl } from "./NotesPhaseOverviewView";
+import { NotesPhaseCompletionGates } from "../NotesPhaseCompletionGates";
 
 const previousSession = { sessionId: "session-a", sessionPath: "C:\\sessions\\a.jsonl" };
 const phase: NotesPhase = {
@@ -51,165 +52,15 @@ const diagnostics: ProjectNotesStorageDiagnostics = {
 
 afterEach(cleanup);
 
-describe("manual completion approval", () => {
-  const reviewPhase = { ...phase, status: "review" as const };
-  const checkpoint = {
-    nonce: "nonce-1",
-    projectKey: "c:/work/project",
-    phaseId: "phase-1",
-    revision: 7,
-    session: previousSession,
-    implementationCheckpointId: "implementation-1",
-    verificationStatusUpdateId: "verification-1",
-    expiresAt: "2026-08-27T21:30:00.000Z",
-  };
-
-  it("shows current evidence for active phases before explicit confirmation", async () => {
-    const onCommit = vi.fn(async () => ({
-      status: "committed" as const,
-      revision: 8,
-      phaseId: "phase-1",
-      approvalId: "approval-1",
-    }));
-    const onSuccess = vi.fn();
-    render(
-      <ManualCompletionApprovalControl
-        phase={phase}
-        expectedRevision={7}
-        onPreview={async () => ({ status: "ready", checkpoint })}
-        onCommit={onCommit}
-        onSuccess={onSuccess}
-      />,
-    );
-
+describe("explicit phase status", () => {
+  it("shows Done without asking for a completion evidence preview", () => {
+    render(<NotesPhaseCompletionGates phase={{ ...phase, status: "done" }} />);
+    expect(screen.getByText("Done")).toBeTruthy();
+    expect(screen.getByText("No progress report yet.")).toBeTruthy();
     expect(
-      screen.getByText(
-        "Current passed verification or an explicit current exception request may be approved after successful implementation.",
-      ),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(await screen.findByText("implementation-1")).toBeTruthy();
-    expect(screen.getByText("verification-1")).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Confirming marks this phase Done. Any Notes change requires a fresh preview.",
-      ),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm completion" }));
-
-    expect(onCommit).toHaveBeenCalledWith("nonce-1");
-    expect(await screen.findByText("Completion approved from current evidence.")).toBeTruthy();
-    expect(onSuccess).toHaveBeenCalledOnce();
-  });
-
-  it("moves focus into the confirmation and restores it when cancelled", async () => {
-    render(
-      <ManualCompletionApprovalControl
-        phase={reviewPhase}
-        expectedRevision={7}
-        onPreview={async () => ({ status: "ready", checkpoint })}
-        onCommit={async () => ({ status: "nonce-not-found" })}
-        onSuccess={vi.fn()}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: "Review completion evidence" });
-    trigger.focus();
-    fireEvent.click(trigger);
-
-    const confirm = await screen.findByRole("button", { name: "Confirm completion" });
-    expect(document.activeElement).toBe(confirm);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Review completion evidence" }),
-    );
-  });
-
-  it("refreshes typed stale results and explains non-current gates", async () => {
-    const onStale = vi.fn();
-    render(
-      <ManualCompletionApprovalControl
-        phase={reviewPhase}
-        expectedRevision={7}
-        onPreview={async () => ({ status: "stale-revision", revision: 8 })}
-        onCommit={async () => ({ status: "nonce-not-found" })}
-        onSuccess={onStale}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(
-      await screen.findByText("Notes changed. Refresh and review the current evidence again."),
-    ).toBeTruthy();
-    expect(onStale).toHaveBeenCalledOnce();
-
-    cleanup();
-    render(
-      <ManualCompletionApprovalControl
-        phase={reviewPhase}
-        expectedRevision={8}
-        onPreview={async () => ({
-          status: "unmet-gate",
-          revision: 8,
-          code: "verification-exception",
-        })}
-        onCommit={async () => ({ status: "nonce-not-found" })}
-        onSuccess={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(
-      await screen.findByText("The verification exception request is no longer current."),
-    ).toBeTruthy();
-
-    cleanup();
-    render(
-      <ManualCompletionApprovalControl
-        phase={reviewPhase}
-        expectedRevision={8}
-        onPreview={async () => ({ status: "unmet-gate", revision: 8, code: "inactive-phase" })}
-        onCommit={async () => ({ status: "nonce-not-found" })}
-        onSuccess={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(
-      await screen.findByText("The phase must be active before completion can be approved."),
-    ).toBeTruthy();
-  });
-
-  it("shows typed nonce expiry and refreshes a stale commit", async () => {
-    const onSuccess = vi.fn();
-    const onCommit = vi
-      .fn()
-      .mockResolvedValueOnce({ status: "nonce-expired" })
-      .mockResolvedValueOnce({ status: "stale-revision", revision: 8 });
-    const renderControl = () =>
-      render(
-        <ManualCompletionApprovalControl
-          phase={reviewPhase}
-          expectedRevision={7}
-          onPreview={async () => ({ status: "ready", checkpoint })}
-          onCommit={onCommit}
-          onSuccess={onSuccess}
-        />,
-      );
-
-    renderControl();
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm completion" }));
-    expect(
-      await screen.findByText("The approval preview expired. Review the current evidence again."),
-    ).toBeTruthy();
-    expect(onSuccess).not.toHaveBeenCalled();
-
-    cleanup();
-    renderControl();
-    fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm completion" }));
-    expect(
-      await screen.findByText("Notes changed. Refresh and review the current evidence again."),
-    ).toBeTruthy();
-    expect(onSuccess).toHaveBeenCalledOnce();
+      screen.queryByRole("button", { name: /completion evidence|confirm completion/i }),
+    ).toBeNull();
+    expect(screen.queryByText(/stale|revalidation|implementation required/i)).toBeNull();
   });
 });
 

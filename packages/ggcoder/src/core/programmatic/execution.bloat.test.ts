@@ -10,7 +10,7 @@ describe("isolated execution touched-file architecture", () => {
     expect(execution).toContain("transient: true");
     expect(execution).toContain('agentContext: "project"');
     expect(execution).toContain("session!.promptResolvedCommand(");
-    expect(execution).toContain("session.dispose()");
+    expect(execution).toContain("session.dispose(undefined, true)");
     expect(execution).toContain("session.setToolCapabilityPolicy(");
     expect(execution).not.toMatch(/agentLoop\(|new ToolRegistry|spawn\(|runAgentLoop|resumePath|new SessionManager|setInterval\(/);
     expect(execution).not.toMatch(/node:fs|node:child_process|writeFile\(|rename\(|withFileLock\(/);

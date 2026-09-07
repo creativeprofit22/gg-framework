@@ -1,6 +1,6 @@
 import {
   classifyRoadmapAutoStartEligibility,
-  isNotesDirectCompletionAuthority,
+  isNotesPhaseAdvancementSourceCurrent,
 } from "@kenkaiiii/gg-core/project-notes";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
 import type {
@@ -97,24 +97,8 @@ export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): Roadmap
     return null;
   }
   const checkpoint = latest.checkpoint;
-  let authority = "recorded";
-  if ("completionReviewId" in checkpoint) {
-    authority = "reviewed";
-    const latestReview = [...latest.phase.roadmapEvents]
-      .reverse()
-      .find((event) => event.type === "completion-review");
-    if (
-      latestReview?.type !== "completion-review" ||
-      latestReview.id !== checkpoint.completionReviewId ||
-      latestReview.reviewer !== checkpoint.reviewer ||
-      latestReview.decision !== "accepted" ||
-      latestReview.gateOutcome !== "done"
-    ) {
-      return null;
-    }
-  } else if (!isNotesDirectCompletionAuthority(latest.phase, checkpoint)) {
-    return null;
-  }
+  const authority = "completionReviewId" in checkpoint ? "reviewed" : "recorded";
+  if (!isNotesPhaseAdvancementSourceCurrent(latest.phase, checkpoint)) return null;
   const nextPhase = phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId);
   if (!nextPhase) return null;
   const eligibility = classifyRoadmapAutoStartEligibility(phases, latest.phase.id);
@@ -420,7 +404,7 @@ export function phaseNextAction(phase: NotesPhase, actionLabel: string): string 
   if (actionLabel === "Retry") return "Retry this phase";
   return phase.status === "done"
     ? "Review completion; archive when ready"
-    : "Review completion evidence";
+    : "Review current code and the last report";
 }
 
 export function savedPromptPreview(sourcePrompt: string): string {

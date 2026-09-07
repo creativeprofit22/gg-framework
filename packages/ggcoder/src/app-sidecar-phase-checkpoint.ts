@@ -15,6 +15,7 @@ export type PhaseCheckpointErrorCode =
   | "phase-stage-persistence-failed"
   | "notes-missing"
   | "notes-corrupt"
+  | "notes-unsupported"
   | "phase-not-found"
   | "phase-archived"
   | "phase-link-persistence-failed"
@@ -465,6 +466,13 @@ function phaseLinkOutcomeError(
   outcome: Exclude<ProjectNotesPhaseLinkOutcome, { status: "ok" }>,
 ): PhaseCheckpointError {
   switch (outcome.status) {
+    case "unsupported":
+      return new PhaseCheckpointError(
+        "notes-unsupported",
+        phaseId,
+        outcome.message,
+        "Open the project with a version that supports these Notes; do not restore an older backup.",
+      );
     case "stale-session":
       return new PhaseCheckpointError(
         "stale-phase-session",

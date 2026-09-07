@@ -24,6 +24,9 @@ import {
   RoadmapPhaseLeaseRepository,
 } from "./roadmap-phase-lease-repository.js";
 import type { RoadmapPhaseLeaseMarkerV1 } from "./phase-context.js";
+import { AppSidecarRoadmapToolHost } from "./app-sidecar-roadmap-tool-host.js";
+import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const roots: string[] = [];
 const sessionA = { sessionId: "session-a", sessionPath: "/sessions/a.jsonl" };
@@ -103,6 +106,116 @@ async function setup(name: string, previousSession = sessionA) {
   if (migrated.status !== "ok") throw new Error(`Failed binding fixture: ${migrated.status}`);
   return { cwd, repository, agentDir: path.join(root, "agent") };
 }
+
+describe("transparent status leases", () => {
+  it("lets a fresh host record Done and replay without changing historical session or execution", async () => {
+    const { cwd, repository, agentDir } = await setup("status-fresh");
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir),
+      daemonInstanceId: "status-daemon",
+      processId: process.pid,
+      processStartToken: "status-start",
+    });
+    const fresh = new FakeSession(cwd, sessionB);
+    const before = await repository.load(cwd);
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      durableExecution: true,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => {
+        throw new Error("Must not require old plan progress");
+      },
+      broadcastNotesSnapshot: () => {},
+      mutateStatusWithLeaseFence: (phaseId, operation) =>
+        service.withStatusLease(fresh, phaseId, operation),
+    });
+    const [tool] = host.createSessionTools("coding", () => ({
+      getActivePhaseContext: () => undefined,
+      getMessages: () => [],
+      getState: () => fresh.getState(),
+    }));
+    const input = RoadmapStatusParams.parse({
+      update_id: "fresh-done",
+      phase_id: "phase-1",
+      expected_revision: 1,
+      transition: "done",
+      progress: "Inspected documentation and checked implementation",
+      evidence: ["A single focused check covers the related requirements"],
+      verification: { result: "passed" },
+    });
+    for (const result of ["committed", "duplicate"]) {
+      const output = await tool!.execute(input, {} as never);
+      if (typeof output !== "string") throw new Error("Expected serialized Roadmap response");
+      expect(JSON.parse(output)).toMatchObject({ result, revision: 2, statusOutcome: "applied" });
+    }
+    const after = await repository.load(cwd);
+    if (before.status !== "ok" || after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]).toMatchObject({ status: "done", session: sessionA });
+    expect(after.snapshot.document.phases[0]!.execution).toEqual(
+      before.snapshot.document.phases[0]!.execution,
+    );
+    expect(fresh.setCalls).toEqual([]);
+    expect(fresh.leaseMarker).toBeUndefined();
+    expect(
+      await service.lease(
+        { ...leaseRequest(cwd, "no-new-run-after-done"), expectedRevision: 2 },
+        fresh,
+      ),
+    ).toEqual({ status: "phase-terminal" });
+  });
+
+  it("reports a missing phase without invoking a mutation or inventing a lease conflict", async () => {
+    const { cwd, repository, agentDir } = await setup("status-missing-phase");
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir),
+      daemonInstanceId: "status-daemon",
+      processId: process.pid,
+      processStartToken: "status-start",
+    });
+    const operation = vi.fn(async () => "updated");
+    expect(
+      await service.withStatusLease(new FakeSession(cwd, sessionB), "missing-phase", operation),
+    ).toEqual({ status: "phase-not-found" });
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("protects another runner and releases transient leases after failure", async () => {
+    const { cwd, repository, agentDir } = await setup("status-conflict");
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir),
+      daemonInstanceId: "status-daemon",
+      processId: process.pid,
+      processStartToken: "status-start",
+    });
+    const first = new FakeSession(cwd, sessionA);
+    const second = new FakeSession(cwd, sessionB);
+    expect(await service.lease(leaseRequest(cwd, "runner-acquire"), first)).toMatchObject({
+      status: "acquired",
+    });
+    const operation = vi.fn(async () => "updated");
+    expect(await service.withStatusLease(second, "phase-1", operation)).toEqual({
+      status: "phase-lease-lost",
+    });
+    expect(operation).not.toHaveBeenCalled();
+    expect(await service.releaseCurrent("runner-release", first)).toMatchObject({
+      status: "released",
+    });
+    await expect(
+      service.withStatusLease(second, "phase-1", async () => {
+        throw new Error("write failed");
+      }),
+    ).rejects.toThrow("write failed");
+    expect(await service.withStatusLease(second, "phase-1", operation)).toEqual({
+      status: "executed",
+      value: "updated",
+    });
+  });
+});
 
 function request(cwd: string, overrides: Partial<PhaseBindingRequest> = {}): PhaseBindingRequest {
   return {

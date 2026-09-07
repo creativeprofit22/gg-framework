@@ -21,7 +21,6 @@ export * from "./auto-update.js";
 export * from "./project-notes.js";
 export * from "./project-notes-diagnostics.js";
 export * from "./project-task-contract.js";
-export * from "./manual-completion-approval-protocol.js";
 export * from "./phase-binding-protocol.js";
 export * from "./phase-start-protocol.js";
 export * from "./roadmap-workflow.js";

@@ -407,12 +407,6 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onRebindPhase={(request) => client.bindRoadmapPhase(request)}
             onMutatePhaseLease={(request) => client.mutateRoadmapPhaseLease(request)}
             onReconcilePhaseExecution={(request) => client.reconcileRoadmapPhaseExecution(request)}
-            onPreviewManualCompletionApproval={(phaseId, expectedRevision) =>
-              client.previewManualCompletionApproval(phaseId, expectedRevision)
-            }
-            onCommitManualCompletionApproval={(nonce) =>
-              client.commitManualCompletionApproval(nonce)
-            }
             onStartNextPhase={onStartNextPhase}
             commands={commands}
             onRunCommand={onRunCommand}
@@ -451,6 +445,14 @@ function notesPersistenceStatus(
       title: "Local save failed",
       detail:
         "Your latest edits are still visible but may be lost when this app closes. Free space, then edit again to retry.",
+    };
+  }
+  const unsupported = authority.find((item) => item.kind === "sidecar-unsupported");
+  if (unsupported?.kind === "sidecar-unsupported") {
+    return {
+      tone: "error",
+      title: "Project Notes need a compatible app",
+      detail: unsupported.format.message,
     };
   }
   if (authority.some((item) => item.kind === "save-failed")) {

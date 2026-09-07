@@ -6,15 +6,12 @@ import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats, ReviewCoverageTracker } from "./ideal-review.js";
 import type { ActivePhaseContextV1 } from "../phase-context.js";
-import { roadmapCriterionId } from "./verification-evidence.js";
-import type { VerificationGate } from "./verification-gate.js";
 
 interface ReviewInternals {
   settingsManager: { get(key: string): boolean };
   hookStats: IdealReviewStats;
   hookFileEditCounts: Map<string, number>;
   reviewCoverage: ReviewCoverageTracker;
-  verificationGate: VerificationGate;
   subAgentManager?: { completionGateMessage(): string | undefined };
   activePhaseContext?: ActivePhaseContextV1;
   getHookFollowUpMessages(): Promise<Message[] | null>;
@@ -88,42 +85,28 @@ describe("AgentSession Ideal review coverage gate", () => {
     expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
-  it("orders verification before Ideal and finishes without repeating satisfied gates", async () => {
+  it("runs Ideal without injecting verification", async () => {
     const cwd = makeWorkspace(["src/a.ts"]);
     const internal = makeReviewSession(cwd, ["src/a.ts"]);
     const notices: string[] = [];
     internal.eventBus.on("hook", ({ kind }) => notices.push(kind));
-    internal.verificationGate.recordMutation("src/a.ts");
 
-    expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
-      "Run the project's verification",
-    );
-    internal.verificationGate.recordVerification();
     expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain("Ideal?");
     internal.reviewCoverage.recordRead("src/a.ts");
 
     expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(await internal.getHookFollowUpMessages()).toBeNull();
-    expect(notices).toEqual(["verification", "ideal"]);
+    expect(notices).toEqual(["ideal"]);
   });
 
-  it("invalidates review reads and earlier verification when a reviewed file changes", async () => {
+  it("invalidates review reads when a reviewed file changes", async () => {
     const cwd = makeWorkspace(["src/a.ts"]);
     const internal = makeReviewSession(cwd, ["src/a.ts"]);
-    internal.verificationGate.recordMutation("src/a.ts");
-    internal.verificationGate.recordVerification();
     expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain("Ideal?");
     internal.reviewCoverage.recordRead("src/a.ts");
 
     internal.reviewCoverage.recordChanged("src/a.ts");
-    internal.verificationGate.recordMutation("src/a.ts");
     expect(internal.reviewCoverage.evidence().missing).toEqual(["src/a.ts"]);
-    expect(internal.verificationGate.isOwed()).toBe(true);
-    // Voluntary initial checks still get a distinctly labelled post-edit pass.
-    expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
-      "Re-run the affected checks",
-    );
-    internal.verificationGate.recordVerification();
     expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
       "coverage is incomplete",
     );
@@ -151,40 +134,26 @@ describe("AgentSession Ideal review coverage gate", () => {
     expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
-  it("re-arms verification once when Ideal changes code after the first check", async () => {
+  it("allows Ideal to finish after reading its changed code without a verification loop", async () => {
     const cwd = makeWorkspace(["src/a.ts"]);
     const internal = makeReviewSession(cwd, ["src/a.ts"]);
-    internal.verificationGate.recordMutation("src/a.ts");
-    expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
-      "Run the project's verification",
-    );
-    internal.verificationGate.recordVerification();
     expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain("Ideal?");
     internal.reviewCoverage.recordRead("src/a.ts");
     internal.reviewCoverage.recordChanged("src/a.ts");
-    internal.verificationGate.recordMutation("src/a.ts");
     internal.reviewCoverage.recordRead("src/a.ts");
 
-    expect(internal.verificationGate.isOwed()).toBe(true);
-    expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain("Re-run");
-    internal.verificationGate.recordVerification();
     expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
-  it("retains verification while suppressing Ideal for the independent reviewer", async () => {
+  it("stops without injected checks when Ideal is suppressed for the independent reviewer", async () => {
     const cwd = makeWorkspace(["src/a.ts"]);
     const internal = makeReviewSession(cwd, ["src/a.ts"]);
     const notices: string[] = [];
     internal.eventBus.on("hook", ({ kind }) => notices.push(kind));
     internal.setIdealReviewSuppressed(true);
-    internal.verificationGate.recordMutation("src/a.ts");
 
-    expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
-      "Run the project's verification",
-    );
-    internal.verificationGate.recordVerification();
     expect(await internal.getHookFollowUpMessages()).toBeNull();
-    expect(notices).toEqual(["verification"]);
+    expect(notices).toEqual([]);
   });
 
   it("stops gating a changed file the run deleted before review", async () => {
@@ -375,7 +344,7 @@ describe("AgentSession Ideal review coverage gate", () => {
     ]);
   });
 
-  it("steers an implementing active phase through verification exactly once", async () => {
+  it("allows an implementing phase to stop without a verification injection", async () => {
     const session = new AgentSession({
       provider: "anthropic",
       model: "claude-sonnet-5",
@@ -402,18 +371,7 @@ describe("AgentSession Ideal review coverage gate", () => {
       executionStage: "implementing",
     };
 
-    const followUp = (await internal.getHookFollowUpMessages())?.[0]?.content;
-    expect(followUp).toContain("Run one bounded check per Done When criterion");
-    expect(followUp).toContain(
-      `${roadmapCriterionId(1, "Focused tests pass")} — Focused tests pass`,
-    );
-    expect(followUp).toContain(
-      `${roadmapCriterionId(2, "Package build passes")} — Package build passes`,
-    );
-    expect(followUp).toContain(
-      'roadmap_status with transition: "done" is the only public completion-intent API',
-    );
-    expect(followUp).toContain("Settlement is host-only");
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 });

@@ -10,7 +10,6 @@ import { MODELS } from "./model-registry.js";
 import { estimateConversationTokens } from "./compaction/token-estimator.js";
 import type * as McpModule from "./mcp/index.js";
 import { approvedPlanContentHash } from "./session-manager.js";
-import { roadmapCriterionId } from "./verification-evidence.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
@@ -313,28 +312,9 @@ describe("AgentSession verification evidence compaction", () => {
     expect(session.getMessages()).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ role: "tool" })]),
     );
-    expect(
-      session.evaluateRoadmapVerificationEvidence({
-        doneWhen: ["types pass"],
-        evidence: [command],
-        verificationBindings: [
-          { criterionId: roadmapCriterionId(1, "types pass"), executionId: "verify-1" },
-        ],
-        expectedRevision: 1,
-      }),
-    ).toMatchObject({
-      ready: true,
-      unmetEvidenceCodes: [],
-      criterionCoverage: [
-        {
-          criterionIndex: 1,
-          criterion: "types pass",
-          evidence: command,
-          command,
-          executionId: "verify-1",
-        },
-      ],
-    });
+    expect(session.getVerificationEvidenceLedgerSnapshot().currentEvidence).toMatchObject([
+      { command, executionId: "verify-1", status: "passed" },
+    ]);
     await session.dispose();
   });
 
@@ -375,18 +355,9 @@ describe("AgentSession verification evidence compaction", () => {
     await session.prompt("Verify the task.");
     await session.newSession(true);
 
-    expect(
-      session.evaluateRoadmapVerificationEvidence({
-        doneWhen: ["types pass"],
-        evidence: [command],
-        verificationBindings: [
-          { criterionId: roadmapCriterionId(1, "types pass"), executionId: "verify-reset" },
-        ],
-        expectedRevision: 1,
-      }),
-    ).toEqual({
-      ready: false,
-      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+    expect(session.getVerificationEvidenceLedgerSnapshot()).toEqual({
+      currentEvidence: [],
+      staleEvidence: [],
     });
     await session.dispose();
   });

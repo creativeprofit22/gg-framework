@@ -52,7 +52,8 @@ export type PhaseLifecycleRepositoryOutcome =
         | "stale-session"
         | "done-terminal"
         | "missing"
-        | "corrupt";
+        | "corrupt"
+        | "unsupported";
     };
 
 export interface PhaseLifecycleRepository {
@@ -79,7 +80,8 @@ export type PhaseLifecycleReconcileOutcome =
         | "stale-session"
         | "done-terminal"
         | "missing"
-        | "corrupt";
+        | "corrupt"
+        | "unsupported";
     }
   | { status: "storage-failure"; error: unknown };
 

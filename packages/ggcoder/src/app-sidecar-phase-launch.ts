@@ -232,6 +232,16 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       } satisfies PhaseStartResponseBody);
       return;
     }
+    if (outcome.status === "unsupported") {
+      await dependencies.candidates.disposeCandidate(phaseId);
+      dependencies.respond(409, {
+        status: "failed",
+        code: "launch-failed",
+        operationId: mutation.operationId,
+        message: outcome.message,
+      } satisfies PhaseStartResponseBody);
+      return;
+    }
     if (outcome.status === "missing" || outcome.status === "corrupt") {
       dependencies.respond(outcome.status === "missing" ? 404 : 409, {
         status: "failed",

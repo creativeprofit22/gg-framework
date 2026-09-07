@@ -537,22 +537,7 @@ export function notesSessionLinksEqual(
   return left.sessionId === right.sessionId && left.sessionPath === right.sessionPath;
 }
 
-/** Runtime eligibility for an explicitly selected next-phase operation, not test certification. */
-export function isNotesPhaseAdvancementSourceCurrent(
-  phase: NotesPhase,
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
-): boolean {
-  return (
-    phase.id === checkpoint.completedPhaseId &&
-    phase.status === "done" &&
-    phase.archivedAt === null &&
-    phase.overrides.status === null &&
-    phase.completedAt !== null &&
-    Date.parse(phase.completedAt) <= Date.parse(checkpoint.timestamp)
-  );
-}
-
-/** Legacy evidence-chain validation for persisted records only; never authorize new Done calls with it. */
+/** Verifies the complete, current evidence chain authorizing direct phase completion. */
 export function isNotesDirectCompletionAuthority(
   phase: Pick<NotesPhase, "session" | "roadmapEvents">,
   checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint,
@@ -650,33 +635,17 @@ export interface ProjectNotesCorruption {
   backup: ProjectNotesCorruptReason | null;
 }
 
-export interface ProjectNotesUnsupportedFormat {
-  status: "unsupported";
-  source: "primary" | "backup";
-  message: string;
-}
-
-export function isProjectNotesUnsupportedFormat(value: unknown): value is ProjectNotesUnsupportedFormat {
-  return isRecordWithKeys(value, ["status", "source", "message"]) &&
-    value.status === "unsupported" &&
-    (value.source === "primary" || value.source === "backup") &&
-    typeof value.message === "string" && value.message.length > 0 && value.message.length <= 1024;
-}
-
 export type ProjectNotesLoadOutcome =
-  | ProjectNotesUnsupportedFormat
   | { status: "ok"; snapshot: ProjectNotesSnapshot; recoveredFromBackup: boolean }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
 export type ProjectNotesMigrationOutcome =
-  | ProjectNotesUnsupportedFormat
   | { status: "ok"; snapshot: ProjectNotesSnapshot; migrated: boolean }
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
 
 export type ProjectNotesSaveOutcome =
-  | ProjectNotesUnsupportedFormat
   | { status: "ok"; snapshot: ProjectNotesSnapshot }
   | { status: "conflict"; snapshot: ProjectNotesSnapshot }
   | { status: "missing" }

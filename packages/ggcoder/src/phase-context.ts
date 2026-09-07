@@ -1,5 +1,4 @@
 import { estimateTokens } from "./core/compaction/token-estimator.js";
-import { roadmapCriterionId } from "./core/verification-evidence.js";
 import {
   validateNotesReferenceProjection,
   validateNotesSessionLink,
@@ -357,7 +356,7 @@ function compactProse(context: ActivePhaseContextV1, maxLength: number): ActiveP
 function renderActivePhaseInitialPrompt(data: string): string {
   return [
     "Enter Plan Mode for this bound Roadmap phase.",
-    "Read only the phase package below, inspect its attached sources with current tools, and write a concrete implementation plan for approval.",
+    "Inspect current code, criteria and history without rewriting saved progress. Identify remaining gaps and plan authorized work for approval; no old transcript or phase lease is required for an audit.",
     'During implementation, report transition: "blocked" only when work cannot continue until a person or external actor supplies a concrete decision or action.',
     "For blocked reports, blocker must state why work cannot continue and required_external_action must state the exact decision or action needed; recoverable or transient tool failures are not blockers.",
     'After blocked work actually resumes, send a fresh transition: "in-progress" report.',
@@ -366,33 +365,15 @@ function renderActivePhaseInitialPrompt(data: string): string {
   ].join("\n");
 }
 
-function renderCriterionBindings(criteria: readonly string[]): string {
-  return criteria
-    .map((criterion, index) => `${roadmapCriterionId(index + 1, criterion)} — ${criterion}`)
-    .join("\n");
-}
-
-export function buildActivePhaseVerificationFollowUp(context: ActivePhaseContextV1): string {
-  const criteria = renderCriterionBindings(context.phase.doneWhen);
-  return [
-    "Implementation is not ready to stop until the active Roadmap phase is verified.",
-    "Run one bounded check per Done When criterion, then bind each criterion ID to its bash execution ID using verification_bindings:",
-    criteria,
-    'roadmap_status with transition: "done" is the only public completion-intent API; use it only when verification.result is "passed" and every criterion has one unique execution binding.',
-    'If verification fails or is incomplete, report transition: "in-progress" with a concrete reason; use "blocked" only for a concrete external dependency.',
-    "Settlement is host-only after the owning implementation run ends successfully; do not call or search for another completion tool.",
-  ].join("\n");
-}
-
 function renderPackageText(context: ActivePhaseContextV1): Omit<ActivePhasePackage, "context"> {
   const data = renderUntrustedData(context);
   const stageInstructions =
     context.executionStage === "implementing"
       ? [
-          "Complete only this phase, then run its completion checks before stopping.",
-          "Use roadmap_status to request Done only with passed verification and one unique execution binding per criterion.",
-          renderCriterionBindings(context.phase.doneWhen),
-          "Failed or incomplete verification stays in progress, unless a concrete external dependency blocks work.",
+          "Implement only authorized work for this phase. Partial progress, audits and planning may stop without declaring Done.",
+          "Select relevant checks for the changes; one check may cover several criteria, and non-command evidence may support documentation or design.",
+          "Report observed checks, historical reports, unavailable checks and known gaps honestly. Do not relabel failures as passed.",
+          "Explicit roadmap_status Done needs the current revision, a passed conclusion and supporting summary; it applies immediately without old-session links or execution bindings.",
         ]
       : [];
   const systemPromptSuffix = [

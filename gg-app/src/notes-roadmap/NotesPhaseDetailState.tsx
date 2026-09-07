@@ -20,8 +20,6 @@ import {
 } from "../roadmap-reminders";
 import type { NotesPhaseInput } from "../useProjectNotes";
 import type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
   NotesPhase,
   NotesPhaseStatus,
   PhaseRunCancellationResult,
@@ -108,11 +106,6 @@ export interface NotesPhaseDetailProps {
   onReconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  onPreviewManualCompletionApproval(
-    phaseId: string,
-    expectedRevision: number,
-  ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommitManualCompletionApproval(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
   actionDisabled: boolean;
@@ -271,9 +264,8 @@ export function NotesPhaseDetailProvider({
       phase.status === "in-progress" ||
       phase.status === "review");
   const phaseStartDisabled =
-    phase.execution?.state === "needs-reconciliation" ||
-    ((effectiveAction === "Start" || effectiveAction === "Recover") &&
-      startUnavailableReason !== null);
+    (effectiveAction === "Start" || effectiveAction === "Recover") &&
+    startUnavailableReason !== null;
 
   useEffect(() => {
     if (authoritativeSession) setRaceLink(null);

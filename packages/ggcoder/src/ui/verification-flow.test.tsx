@@ -8,7 +8,7 @@ import type * as AgentLoopModule from "./hooks/useAgentLoop.js";
 import type { useAgentLoop } from "./hooks/useAgentLoop.js";
 
 // Drive the real hook and App callbacks; replace only the agent event source
-// and OS process snapshots, not the verification gate or stop bookkeeping.
+// and OS process snapshots. Stopping does not certify task or phase completion.
 vi.mock("../core/logger.js", () => ({ log: vi.fn() }));
 const flow = vi.hoisted(() => ({
   events: [] as AgentEvent[],
@@ -108,7 +108,7 @@ beforeEach(() => {
   );
 });
 
-describe("CLI verification callback and stop flow", () => {
+describe("CLI reports without verification stop gates", () => {
   it("allows a fresh successful check and an exact rerun after failure", async () => {
     flow.events = [
       ...edit(),
@@ -120,11 +120,11 @@ describe("CLI verification callback and stop flow", () => {
     await flow.loop!.run("fix source");
     expect(flow.stops).toEqual([null]);
   });
-  it("budgets stops per run without interrupting later question-only runs", async () => {
+  it("allows partial progress and later question-only runs to stop without follow-up injection", async () => {
     flow.stopCount = 2;
     flow.events = [...edit(), start("red", "bash", { command: "pnpm test" }), end("red", 1)];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
     expect(flow.stops[1]).toBeNull();
     flow.stopCount = 1;
     flow.events = [];
@@ -132,38 +132,38 @@ describe("CLI verification callback and stop flow", () => {
     expect(flow.stops[2]).toBeNull();
     flow.events = edit();
     await flow.loop!.run("edit again");
-    expect(String(flow.stops[3]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[3]).toBeNull();
   });
-  it("accepts background success once, not after another edit", async () => {
+  it("does not demand reruns after another edit following a background observation", async () => {
     background(0);
     flow.events = [...edit(), ...launch(), ...output()];
     await flow.loop!.run("fix source");
     expect(flow.stops).toEqual([null]);
     flow.events = [...edit(), ...output()];
     await flow.loop!.run("edit again");
-    expect(String(flow.stops[1]?.[0]?.content)).toContain("Re-run the affected checks");
+    expect(flow.stops[1]).toBeNull();
   });
   it.each([0, null])(
-    "rejects stale or still-running background evidence (exit %s)",
+    "allows a report to stop with historical or still-running background work (exit %s)",
     async (exitCode) => {
       background(exitCode);
       flow.events = [...launch(), ...edit(), ...output()];
       await flow.loop!.run("fix source");
-      expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+      expect(flow.stops[0]).toBeNull();
     },
   );
   it.each([
     undefined,
     { bashDiagnostics: { reason: "timedOut", exitCode: 0 } },
     { bashDiagnostics: { reason: "completed", exitCode: null } },
-  ])("rejects missing or inconsistent host diagnostics %j", async (details) => {
+  ])("does not inject checks for unavailable diagnostics %j", async (details) => {
     flow.events = [
       ...edit(),
       start("check", "bash", { command: "pnpm test" }),
       { ...end("check"), details },
     ];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
   it.each([
     { command: "pnpm test", persist: true },
@@ -171,12 +171,12 @@ describe("CLI verification callback and stop flow", () => {
     { command: "pnpm test --watch" },
     { command: "pnpm dev" },
     { command: "pnpm lint --fix" },
-  ])("rejects unbounded or unsafe check $command", async (args) => {
+  ])("does not use command classification as a stop gate: $command", async (args) => {
     flow.events = [...edit(), start("check", "bash", args), end("check", 0)];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
-  it("retains tool-error failures even when another check succeeds", async () => {
+  it("can report tool errors and other successful checks without a rerun loop", async () => {
     flow.events = [
       ...edit(),
       start("test", "bash", { command: "pnpm test" }),
@@ -185,20 +185,20 @@ describe("CLI verification callback and stop flow", () => {
       end("lint", 0),
     ];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
-  it("rejects background exit 1 despite claimed success in output", async () => {
+  it("can report background exit 1 without a synthetic follow-up", async () => {
     background(1);
     flow.events = [...edit(), ...launch(), ...output()];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
-  it("rejects completion of a check started before an edit", async () => {
+  it("does not require a check started after every edit", async () => {
     flow.events = [start("test", "bash", { command: "pnpm test" }), ...edit(), end("test", 0)];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
-  it("retains a failed check after an unrelated pass", async () => {
+  it("can stop with a failed check and an unrelated pass", async () => {
     flow.events = [
       ...edit(),
       start("test", "bash", { command: "pnpm test" }),
@@ -207,12 +207,12 @@ describe("CLI verification callback and stop flow", () => {
       end("lint", 0),
     ];
     await flow.loop!.run("fix source");
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
-  it("demands a check after an edit at the first stop", async () => {
+  it("allows explicit partial work to stop after an edit", async () => {
     flow.events = edit();
     await flow.loop!.run("edit the source");
     expect(flow.stops).toHaveLength(1);
-    expect(String(flow.stops[0]?.[0]?.content)).toContain("Run the project's verification");
+    expect(flow.stops[0]).toBeNull();
   });
 });

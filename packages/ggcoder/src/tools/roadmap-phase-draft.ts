@@ -3,6 +3,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
   NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
   type ProjectNotesCorruption,
+  type ProjectNotesUnsupportedFormat,
 } from "@kenkaiiii/gg-core/project-notes";
 import {
   ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
@@ -269,6 +270,7 @@ function toRoadmapPhaseDraftRequest(
 }
 
 export type RoadmapPhaseDraftToolResult =
+  | ProjectNotesUnsupportedFormat
   | { status: "drafted"; draft: RoadmapPhaseDraft }
   | { status: "proposal-pending"; draftId: string }
   | { status: "inspection-required" }

@@ -13,6 +13,8 @@ import {
   type NotesRoadmapReviewer,
   type NotesVerificationStatus,
   type ProjectNotesCorruption,
+  type ProjectNotesUnsupportedFormat,
+  isProjectNotesUnsupportedFormat,
 } from "./project-notes.js";
 
 export const ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH = 4_096;
@@ -69,6 +71,7 @@ export interface RoadmapInspection {
 }
 
 export type RoadmapInspectionOutcome =
+  | ProjectNotesUnsupportedFormat
   | { status: "ok"; inspection: RoadmapInspection }
   | { status: "missing"; projectKey: string }
   | ({ status: "corrupt"; projectKey: string } & ProjectNotesCorruption);
@@ -326,6 +329,7 @@ export function isRoadmapPhaseDraft(value: unknown): value is RoadmapPhaseDraft 
 
 export function isRoadmapInspectionOutcome(value: unknown): value is RoadmapInspectionOutcome {
   if (!isRecord(value) || typeof value.status !== "string") return false;
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
   if (value.status === "missing") {
     return (
       isRecordWithExactKeys(value, ["status", "projectKey"]) && isNonEmptyString(value.projectKey)

@@ -129,7 +129,7 @@ export interface UseProjectNotesResult {
   };
 }
 
-type AuthorityMode = "opening" | "sidecar" | "fallback" | "none";
+type AuthorityMode = "opening" | "sidecar" | "fallback" | "none" | "unsupported";
 type CoalesceKey = "reference" | "current-focus" | "handoff";
 
 interface NotesMutationEvaluation {
@@ -282,6 +282,16 @@ export function useProjectNotes(
     [addAuthorityDiagnostic, repository, showDocument],
   );
 
+  const blockUnsupported = useCallback((format: Extract<ProjectNotesSaveOutcome, { status: "unsupported" }>) => {
+    modeRef.current = "unsupported";
+    setAuthorityReady(false);
+    settlePendingMutations(queueRef.current, "unavailable");
+    queueRef.current = [];
+    inFlightMutationIdRef.current = null;
+    if (authoritativeRef.current) showDocument(authoritativeRef.current.document);
+    setAuthorityDiagnostics([{ kind: "sidecar-unsupported", format }]);
+  }, [showDocument]);
+
   useEffect(() => {
     const epoch = epochRef.current + 1;
     epochRef.current = epoch;
@@ -327,6 +337,10 @@ export function useProjectNotes(
           return;
         }
 
+        if (opened.status === "unsupported") {
+          blockUnsupported(opened);
+          return;
+        }
         if (opened.status === "ok") {
           if (opened.snapshot.projectKey !== projectKey) {
             const diagnostic: NotesAuthorityDiagnostic = {
@@ -343,15 +357,17 @@ export function useProjectNotes(
 
           if (
             opened.recoveredFromBackup ||
+            modeRef.current === "unsupported" ||
             !authoritativeRef.current ||
             opened.snapshot.revision > authoritativeRef.current.revision
           ) {
-            adoptSnapshot(opened.snapshot, projectKey, epoch, opened.recoveredFromBackup);
+            adoptSnapshot(opened.snapshot, projectKey, epoch, opened.recoveredFromBackup || modeRef.current === "unsupported");
           }
           processQueueRef.current();
           return;
         }
 
+        if (modeRef.current === "unsupported") return;
         if (authoritativeRef.current && modeRef.current === "sidecar") {
           addAuthorityDiagnostic(
             opened.status === "corrupt"
@@ -385,6 +401,10 @@ export function useProjectNotes(
             activeCwdRef.current !== projectCwd ||
             requestGeneration !== readGeneration
           ) {
+            return;
+          }
+          if (migrated.status === "unsupported") {
+            blockUnsupported(migrated);
             return;
           }
           if (migrated.status === "ok") {
@@ -428,6 +448,7 @@ export function useProjectNotes(
           epoch !== epochRef.current ||
           activeCwdRef.current !== projectCwd ||
           modeRef.current === "fallback" ||
+          modeRef.current === "unsupported" ||
           requestGeneration !== readGeneration
         ) {
           return;
@@ -454,6 +475,10 @@ export function useProjectNotes(
         return;
       }
       if (!isNotesChangeEvent(event)) return;
+      if (modeRef.current === "unsupported") {
+        void readAuthoritativeNotes();
+        return;
+      }
       if (adoptSnapshot(event.data, projectKey, epoch)) processQueueRef.current();
     });
 
@@ -470,6 +495,7 @@ export function useProjectNotes(
   }, [
     addAuthorityDiagnostic,
     adoptSnapshot,
+    blockUnsupported,
     client,
     clock,
     cwd,
@@ -520,6 +546,10 @@ export function useProjectNotes(
           return;
         }
         inFlightMutationIdRef.current = null;
+        if (outcome.status === "unsupported") {
+          blockUnsupported(outcome);
+          return;
+        }
         if (outcome.status === "ok") {
           queueRef.current = queueRef.current.filter((queued) => queued.id !== mutation.id);
           if (
@@ -586,7 +616,7 @@ export function useProjectNotes(
           queueMicrotask(() => processQueueRef.current());
         }
       });
-  }, [addAuthorityDiagnostic, adoptSnapshot, client, renderSidecarState]);
+  }, [addAuthorityDiagnostic, adoptSnapshot, blockUnsupported, client, renderSidecarState]);
   useEffect(() => {
     processQueueRef.current = processQueue;
   }, [processQueue]);
@@ -594,7 +624,7 @@ export function useProjectNotes(
   const enqueueMutation = useCallback(
     (mutation: Omit<NotesMutation, "id" | "cachedEvaluation">) => {
       const projectCwd = activeCwdRef.current;
-      if (projectCwd === null || modeRef.current === "none") {
+      if (projectCwd === null || modeRef.current === "none" || modeRef.current === "unsupported") {
         mutation.settle?.(
           mutation.failure?.("unavailable") ?? { status: "failed", reason: "unavailable" },
         );

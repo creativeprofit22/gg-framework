@@ -1,10 +1,7 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { notesLifecyclePresentation } from "../notes-lifecycle-presentation";
 import { notesCompletionGateOverview } from "../NotesPhaseCompletionGates";
 import type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalGateCode,
-  ManualCompletionApprovalPreviewOutcome,
   NotesPhase,
   NotesRoadmapStatusUpdate,
   PhaseBindingOutcome,
@@ -24,25 +21,6 @@ import {
   visibleRoadmapAttentionReason,
 } from "./roadmap-presentation";
 
-const MANUAL_COMPLETION_APPROVAL_GATE_LABELS = {
-  "phase-not-found": "The phase no longer exists.",
-  "already-done": "The phase is already Done.",
-  "inactive-phase": "The phase must be active before completion can be approved.",
-  "archived-phase": "Restore the phase before approving completion.",
-  "missing-implementation": "No successful implementation checkpoint is available.",
-  "run-not-successful": "The latest implementation run did not succeed.",
-  "incomplete-plan": "The latest implementation checkpoint is incomplete.",
-  "missing-verification": "No current verification result is available.",
-  "stale-verification": "Verification does not match the latest successful implementation.",
-  "failed-verification": "The latest verification failed.",
-  "verification-exception": "The verification exception request is no longer current.",
-  "stale-session": "The evidence belongs to another session.",
-  "unresolved-approval": "Resolve the pending approval before completion.",
-  "unresolved-attention": "Resolve the phase attention item before completion.",
-  "status-override": "Clear the manual status override before approving completion.",
-  "evidence-mismatch": "Completion evidence changed. Review the current evidence again.",
-} as const satisfies Record<ManualCompletionApprovalGateCode, string>;
-
 export function NotesPhaseOverviewView(): ReactElement {
   const {
     phase,
@@ -58,8 +36,6 @@ export function NotesPhaseOverviewView(): ReactElement {
     onGetStorageDiagnostics,
     onRebindPhase,
     onMutatePhaseLease,
-    onPreviewManualCompletionApproval,
-    onCommitManualCompletionApproval,
     onActionSuccess,
     onResolveRoadmapBlocker,
     runRoadmapMutation,
@@ -173,13 +149,6 @@ export function NotesPhaseOverviewView(): ReactElement {
           </button>
         </section>
       )}
-      <ManualCompletionApprovalControl
-        phase={phase}
-        expectedRevision={expectedRevision}
-        onPreview={onPreviewManualCompletionApproval}
-        onCommit={onCommitManualCompletionApproval}
-        onSuccess={onActionSuccess}
-      />
       <PhaseRebindControl
         phase={phase}
         expectedRevision={expectedRevision}
@@ -257,184 +226,6 @@ export function NotesPhaseOverviewView(): ReactElement {
       </dl>
     </>
   );
-}
-
-export function ManualCompletionApprovalControl({
-  phase,
-  expectedRevision,
-  onPreview,
-  onCommit,
-  onSuccess,
-}: {
-  phase: NotesPhase;
-  expectedRevision: number | null;
-  onPreview(
-    phaseId: string,
-    expectedRevision: number,
-  ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommit(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
-  onSuccess(): void;
-}): ReactElement | null {
-  const [preview, setPreview] = useState<
-    Extract<ManualCompletionApprovalPreviewOutcome, { status: "ready" }> | undefined
-  >();
-  const [pending, setPending] = useState(false);
-  const [message, setMessage] = useState("");
-  const previewTriggerRef = useRef<HTMLButtonElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
-  const restoreFocusRef = useRef(false);
-  const reconciliationBlocked = phase.execution?.state === "needs-reconciliation";
-
-  useEffect(() => {
-    if (preview) {
-      confirmRef.current?.focus();
-      return;
-    }
-    if (!restoreFocusRef.current) return;
-    restoreFocusRef.current = false;
-    previewTriggerRef.current?.focus();
-  }, [preview]);
-
-  const closePreview = (): void => {
-    restoreFocusRef.current = true;
-    setPreview(undefined);
-  };
-  if (
-    phase.archivedAt !== null ||
-    ["not-started", "planning", "cancelled", "done"].includes(phase.status)
-  ) {
-    return null;
-  }
-
-  const loadPreview = async (): Promise<void> => {
-    if (reconciliationBlocked) return;
-    if (expectedRevision === null) {
-      setMessage("Notes are still loading. Refresh before approving completion.");
-      return;
-    }
-    setPending(true);
-    setMessage("");
-    try {
-      const outcome = await onPreview(phase.id, expectedRevision);
-      if (outcome.status === "ready") setPreview(outcome);
-      else {
-        setMessage(manualApprovalOutcomeMessage(outcome));
-        if (outcome.status === "stale-revision") onSuccess();
-      }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Completion evidence is unavailable.");
-    } finally {
-      setPending(false);
-    }
-  };
-
-  const commit = async (): Promise<void> => {
-    if (!preview || reconciliationBlocked) return;
-    setPending(true);
-    setMessage("");
-    try {
-      const outcome = await onCommit(preview.checkpoint.nonce);
-      if (outcome.status === "committed" || outcome.status === "duplicate") {
-        setMessage("Completion approved from current evidence.");
-        onSuccess();
-        return;
-      }
-      closePreview();
-      setMessage(manualApprovalOutcomeMessage(outcome));
-      if (outcome.status === "stale-revision") onSuccess();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Completion could not be approved.");
-    } finally {
-      setPending(false);
-    }
-  };
-
-  return (
-    <section className="notes-manual-completion" aria-labelledby={`manual-completion-${phase.id}`}>
-      <div>
-        <h4 id={`manual-completion-${phase.id}`}>Manual completion</h4>
-        <p>
-          Current passed verification or an explicit current exception request may be approved after
-          successful implementation.
-        </p>
-      </div>
-      {preview ? (
-        <div
-          className="notes-manual-completion-confirm"
-          role="group"
-          aria-label="Confirm manual completion"
-        >
-          <dl>
-            <div>
-              <dt>Implementation</dt>
-              <dd>{preview.checkpoint.implementationCheckpointId}</dd>
-            </div>
-            <div>
-              <dt>Verification</dt>
-              <dd>{preview.checkpoint.verificationStatusUpdateId}</dd>
-            </div>
-            <div>
-              <dt>Session</dt>
-              <dd>{preview.checkpoint.session.sessionId}</dd>
-            </div>
-            <div>
-              <dt>Revision</dt>
-              <dd>{preview.checkpoint.revision}</dd>
-            </div>
-          </dl>
-          <p>Confirming marks this phase Done. Any Notes change requires a fresh preview.</p>
-          <button
-            ref={confirmRef}
-            type="button"
-            disabled={pending || reconciliationBlocked}
-            onClick={() => void commit()}
-          >
-            {pending ? "Approving…" : "Confirm completion"}
-          </button>
-          <button type="button" disabled={pending} onClick={closePreview}>
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <button
-          ref={previewTriggerRef}
-          type="button"
-          disabled={pending || reconciliationBlocked}
-          title={
-            reconciliationBlocked ? "Reconcile this phase before approving completion." : undefined
-          }
-          onClick={() => void loadPreview()}
-        >
-          {pending ? "Checking evidence…" : "Review completion evidence"}
-        </button>
-      )}
-      {reconciliationBlocked && (
-        <p className="notes-phase-action-feedback">
-          Reconcile this phase before approving completion.
-        </p>
-      )}
-      {message && (
-        <p className="notes-phase-action-feedback" role="status">
-          {message}
-        </p>
-      )}
-    </section>
-  );
-}
-
-function manualApprovalOutcomeMessage(
-  outcome: ManualCompletionApprovalPreviewOutcome | ManualCompletionApprovalCommitOutcome,
-): string {
-  if (outcome.status === "stale-revision") {
-    return "Notes changed. Refresh and review the current evidence again.";
-  }
-  if (outcome.status === "unmet-gate") {
-    return MANUAL_COMPLETION_APPROVAL_GATE_LABELS[outcome.code];
-  }
-  if (outcome.status === "nonce-expired" || outcome.status === "nonce-not-found") {
-    return "The approval preview expired. Review the current evidence again.";
-  }
-  return "Completion approval is unavailable for this phase.";
 }
 
 export function PhaseRebindControl({
@@ -622,7 +413,9 @@ export function PhaseRebindControl({
             </>
           )}
           {phase.execution?.state === "needs-reconciliation" && (
-            <p className="notes-phase-attention">Plan or workspace reconciliation is required.</p>
+            <p className="notes-phase-attention">
+              Historical plan context is available for review.
+            </p>
           )}
           <dl>
             <div>
@@ -788,7 +581,7 @@ function PhaseOverview({
 
       <div className="notes-phase-overview-completion">
         <div className="notes-phase-overview-completion-heading">
-          <span>Completion gates</span>
+          <span>Status and last report</span>
           <strong className={`notes-phase-overview-tone-${completion.tone}`}>
             {completion.outcome}
           </strong>
@@ -798,7 +591,7 @@ function PhaseOverview({
             <dt>Implementation</dt>
             <dd className={`notes-phase-overview-tone-${completion.implementation.tone}`}>
               <strong>{completion.implementation.label}</strong>
-              <span title={completion.implementation.detail}>
+              <span title={completion.implementation.detail ?? undefined}>
                 {completion.implementation.detail}
               </span>
             </dd>
@@ -813,7 +606,7 @@ function PhaseOverview({
             </dd>
           </div>
           <div>
-            <dt>Settlement</dt>
+            <dt>Status</dt>
             <dd className={`notes-phase-overview-tone-${completion.settlement.tone}`}>
               <strong>{completion.settlement.label}</strong>
               {completion.settlement.detail && (
@@ -822,9 +615,7 @@ function PhaseOverview({
             </dd>
           </div>
         </dl>
-        {completion.blocker && (
-          <p className="notes-phase-overview-blocker">Blocked: {completion.blocker}</p>
-        )}
+        {completion.blocker && <p className="notes-phase-overview-blocker">{completion.blocker}</p>}
       </div>
 
       <dl className="notes-phase-overview-summary">

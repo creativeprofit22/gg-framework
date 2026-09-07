@@ -7,7 +7,6 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAppSidecarNotesHandler, NOTES_REQUEST_BODY_MAX_BYTES } from "./app-sidecar-notes.js";
 import { AppSidecarJsonBodyError } from "./app-sidecar-http-json.js";
-import { createManualCompletionApprovalService } from "./app-sidecar-manual-completion-approval.js";
 import {
   createAppSidecarStorageDiagnostics,
   type StorageDiagnosticsSessionContext,
@@ -164,10 +163,6 @@ beforeEach(async () => {
       agentDataRoot: path.join(root, ".gg"),
       repository,
     }),
-    manualCompletionApproval: createManualCompletionApprovalService({
-      repository,
-      onCommittedSnapshot,
-    }),
     onCommittedSnapshot,
   });
   server = http.createServer((req, res) => {
@@ -311,10 +306,6 @@ function dispatchSyntheticNotesRequest(headers: http.IncomingHttpHeaders = {}): 
       agentDataRoot: path.join(root, ".gg"),
       repository,
     }),
-    manualCompletionApproval: createManualCompletionApprovalService({
-      repository,
-      onCommittedSnapshot,
-    }),
     onCommittedSnapshot,
     onError: (error) => errors.push(error),
   });
@@ -347,6 +338,32 @@ describe("app sidecar Notes routes", () => {
     expect(result.body).toEqual({ status: "missing" });
   });
 
+  it("returns actionable unsupported outcomes without writes or broadcasts", async () => {
+    const document = notes("older backup");
+    await repository.migrate(sessions.get("a")!.cwd, document);
+    const paths = repository.paths(sessions.get("a")!.cwd);
+    const primary = JSON.parse(await fs.readFile(paths.primary, "utf8"));
+    primary.revision = 9;
+    primary.document.reference = "newer primary";
+    primary.document.futureMetadata = { preserve: "verbatim" };
+    await fs.writeFile(paths.primary, JSON.stringify(primary));
+    const before = await Promise.all([fs.readFile(paths.primary), fs.readFile(paths.backup)]);
+    for (const [route, init] of [
+      ["/notes", {}],
+      ["/notes", { method: "PUT", body: JSON.stringify({ expectedRevision: 1, document }) }],
+      ["/notes/migrate", { method: "POST", body: JSON.stringify({ document }) }],
+    ] as const) {
+      const result = await request("a", route, init);
+      expect(result.response.status).toBe(409);
+      expect(result.body).toMatchObject({
+        status: "unsupported", source: "primary", message: expect.stringContaining("supports these Notes"),
+      });
+      expect(await Promise.all([fs.readFile(paths.primary), fs.readFile(paths.backup)])).toEqual(before);
+    }
+    expect(committedSnapshots).toEqual([]);
+    expect(sessions.get("a")!.events).toEqual([]);
+  });
+
   it("delegates authenticated storage diagnostics for the logical session", async () => {
     const result = await request("a", "/notes/diagnostics");
 
@@ -366,83 +383,17 @@ describe("app sidecar Notes routes", () => {
     expect(JSON.stringify(result.body)).not.toMatch(/token|secret/i);
   });
 
-  it("delegates strict native completion approval routes", async () => {
-    const preview = await request("a", "/notes/roadmap/completion-approval/preview", {
-      method: "POST",
-      body: JSON.stringify({ version: 1, phaseId: "phase-1", expectedRevision: 0 }),
-    });
-    expect(preview).toEqual({
-      response: expect.objectContaining({ status: 409 }),
-      body: { status: "unmet-gate", revision: 0, code: "stale-session" },
-    });
-
-    const invalidCommit = await request("a", "/notes/roadmap/completion-approval/commit", {
-      method: "POST",
-      body: JSON.stringify({ version: 1, nonce: "nonce", confirmed: false }),
-    });
-    expect(invalidCommit.response.status).toBe(400);
-    expect(invalidCommit.body).toEqual({ status: "invalid-request" });
-  });
-
-  it("broadcasts one committed native completion snapshot without changing its wire outcome", async () => {
-    const projectSession = { sessionId: "session-1", sessionPath: "/session" };
-    sessions.get("a")!.currentSession = projectSession;
-    const document = notes("manual completion broadcast");
-    document.phases[0]!.status = "in-progress";
-    const cwd = sessions.get("a")!.cwd;
-    await repository.migrate(cwd, document);
-    await repository.recordImplementationCheckpoint(cwd, {
-      checkpointId: "implementation-1",
-      phaseId: "phase-1",
-      expectedSession: projectSession,
-      planStepTotal: 1,
-      completedPlanSteps: [1],
-      runOutcome: "succeeded",
-      timestamp: "2026-07-25T12:01:00.000Z",
-    });
-    await repository.recordRoadmapStatusUpdate(cwd, {
-      updateId: "verification-1",
-      phaseId: "phase-1",
-      actor: "gg-coder",
-      transition: "review",
-      progress: "Focused verification passed",
-      blocker: null,
-      requiredExternalAction: null,
-      evidence: ["pnpm test"],
-      verification: "passed",
-      verificationReason: null,
-      proposedReferences: [],
-      timestamp: "2026-07-25T12:02:00.000Z",
-      expectedSession: projectSession,
-      requireBoundPhase: true,
-      autopilotEnabled: false,
-    });
-
-    const preview = await request("a", "/notes/roadmap/completion-approval/preview", {
-      method: "POST",
-      body: JSON.stringify({ version: 1, phaseId: "phase-1", expectedRevision: 3 }),
-    });
-    expect(preview.response.status).toBe(200);
-    const nonce = (preview.body as { checkpoint: { nonce: string } }).checkpoint.nonce;
-    const committed = await request("a", "/notes/roadmap/completion-approval/commit", {
-      method: "POST",
-      body: JSON.stringify({ version: 1, nonce, confirmed: true }),
-    });
-
-    expect(committed).toEqual({
-      response: expect.objectContaining({ status: 200 }),
-      body: {
-        status: "committed",
-        revision: 4,
-        phaseId: "phase-1",
-        approvalId: `manual-approval-${nonce}`,
-      },
-    });
-    expect(committedSnapshots).toEqual([{ projectKey: "c:/work/project", revision: 4 }]);
-    expect(sessions.get("a")!.events).toHaveLength(1);
-    expect(sessions.get("alias")!.events).toEqual(sessions.get("a")!.events);
-    expect(sessions.get("other")!.events).toEqual([]);
-  });
+  it.each(["preview", "commit"])(
+    "does not expose the obsolete completion %s route",
+    async (action) => {
+      const result = await request("a", `/notes/roadmap/completion-approval/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ version: 1 }),
+      });
+      expect(result.response.status).toBe(404);
+      expect(committedSnapshots).toEqual([]);
+    },
+  );
 
   it("migrates with the authenticated session cwd and returns the stored snapshot", async () => {
     const document = notes("  legacy\r\nbytes 😀\n");

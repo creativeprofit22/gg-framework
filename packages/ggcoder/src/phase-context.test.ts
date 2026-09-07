@@ -6,12 +6,10 @@ import {
   ACTIVE_PHASE_UNTRUSTED_END,
   ACTIVE_PHASE_UNTRUSTED_START,
   ActivePhaseContextError,
-  buildActivePhaseVerificationFollowUp,
   createActivePhaseContext,
   parseActivePhaseContext,
   renderActivePhasePackage,
 } from "./phase-context.js";
-import { roadmapCriterionId } from "./core/verification-evidence.js";
 
 const NOW = "2026-07-26T00:00:00.000Z";
 
@@ -144,25 +142,19 @@ describe("active phase context", () => {
     expect(rendered.initialPrompt).not.toContain("historical MCP");
   });
 
-  it("renders stable criterion IDs for explicit completion bindings", () => {
+  it("retains criteria while allowing partial work and direct completion", () => {
     const active = context({ phase: { doneWhen: ["Tests pass", "Types pass"] } });
-    const followUp = buildActivePhaseVerificationFollowUp(active);
-    const packageText = renderActivePhasePackage({
+    const text = renderActivePhasePackage({
       ...active,
       executionStage: "implementing",
     }).systemPromptSuffix;
-
-    for (const [index, criterion] of active.phase.doneWhen.entries()) {
-      const criterionId = roadmapCriterionId(index + 1, criterion);
-      expect(followUp).toContain(`${criterionId} — ${criterion}`);
-      expect(packageText).toContain(`${criterionId} — ${criterion}`);
-    }
-    expect(followUp).toContain("verification_bindings");
-    expect(followUp).toContain(
-      'roadmap_status with transition: "done" is the only public completion-intent API',
+    expect(text).toContain("Tests pass");
+    expect(text).toContain("Types pass");
+    expect(text).toContain("Partial progress, audits and planning may stop");
+    expect(text).toContain("applies immediately");
+    expect(text).not.toMatch(
+      /criterion_id|verification_bindings|owning run|Settlement is host-only/,
     );
-    expect(followUp).toContain("Settlement is host-only");
-    expect(followUp).toContain("do not call or search for another completion tool");
   });
 
   it("renders empty optional content without importing unrelated Notes data", () => {

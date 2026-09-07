@@ -88,8 +88,6 @@ export interface AutopilotCycleDeps {
   maxRounds: number;
   /** True once /cancel fires — checked between every step. */
   isCancelled: () => boolean;
-  /** Host evidence, independent of Ken's verdict and reminder budgets. */
-  verificationProblem: () => string | null;
   /** Live plan-mode state of the BUILD session. */
   isPlanMode: () => boolean;
   /** True while a submitted plan (exit_plan) awaits a verdict. */
@@ -129,20 +127,14 @@ export interface AutopilotCycleDeps {
  *  - rounds exhausted          → autopilot_capped
  */
 export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<void> {
-  const stopIfUnverified = () => {
-    const reason = deps.verificationProblem();
-    if (!reason) return false;
-    deps.emit({ type: "autopilot_human", data: { reason } });
-    return true;
-  };
-  if (deps.isCancelled() || stopIfUnverified()) return;
+  if (deps.isCancelled()) return;
   await deps.resetReviewer();
   let remediationRounds = 0;
   for (;;) {
-    if (deps.isCancelled() || stopIfUnverified()) return;
+    if (deps.isCancelled()) return;
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
-      if (!verdict || deps.isCancelled() || stopIfUnverified()) return;
+      if (!verdict || deps.isCancelled()) return;
       if (verdict.kind === "human") {
         deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
         return;
@@ -162,11 +154,12 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       }
       // ALL_CLEAR and IGNORE mean Ken found no objection. Persist readiness,
       // keep the human gate pending, and stop without implementation.
-      const reason = verdict.kind === "all_clear" && verdict.evidenceLimitation
-        ? CORPUS_UNVERIFIED_REASON
-        : undefined;
+      const reason =
+        verdict.kind === "all_clear" && verdict.evidenceLimitation
+          ? CORPUS_UNVERIFIED_REASON
+          : undefined;
       const readyIdentity = await deps.markPlanReady(reason);
-      if (!readyIdentity || deps.isCancelled() || stopIfUnverified()) return;
+      if (!readyIdentity || deps.isCancelled()) return;
       deps.emit({
         type: "autopilot_plan_ready",
         data: { ...readyIdentity, ...(reason ? { reason } : {}) },
@@ -181,7 +174,7 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       return;
     }
     const verdict = await deps.review();
-    if (!verdict || deps.isCancelled() || stopIfUnverified()) return;
+    if (!verdict || deps.isCancelled()) return;
     if (verdict.kind === "all_clear") {
       deps.emit({
         type: "autopilot_done",

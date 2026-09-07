@@ -16,11 +16,9 @@ import {
   type ProjectNotesMigrationOutcome,
   type ProjectNotesSaveOutcome,
   type ProjectNotesSnapshot,
+  type ProjectNotesUnsupportedFormat,
+  isProjectNotesUnsupportedFormat,
 } from "@kenkaiiii/gg-core/project-notes";
-import type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
-} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 import type {
   PhaseBindingOutcome,
   PhaseBindingRequest,
@@ -30,15 +28,6 @@ import type {
   PhaseLeaseRequestV2,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
-export {
-  isManualCompletionApprovalCommitOutcome,
-  isManualCompletionApprovalPreviewOutcome,
-} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
-export type {
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalGateCode,
-  ManualCompletionApprovalPreviewOutcome,
-} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 export {
   isPhaseBindingOutcome,
   isPhaseBindingRequest,
@@ -335,11 +324,13 @@ export interface ReservedReminderOccurrence {
 }
 
 export type ReminderReserveOutcome =
+  | ProjectNotesUnsupportedFormat
   | ({ status: "reserved" } & ReservedReminderOccurrence)
   | { status: "deferred"; retryAt: string }
   | { status: "leased" | "none" | "already-delivered" | "missing" | "corrupt" };
 
 export type ReminderClaimOutcome =
+  | ProjectNotesUnsupportedFormat
   | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
   | {
       status:
@@ -373,6 +364,7 @@ export interface ProjectNotesRoadmapBlockerResolutionRequest {
 }
 
 export type ProjectNotesRoadmapBlockerResolutionOutcome =
+  | ProjectNotesUnsupportedFormat
   | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
   | { status: "duplicate" | "already-resolved"; revision: number; phaseId: string }
   | { status: "duplicate-id-conflict" | "stale-revision"; revision: number }
@@ -390,11 +382,6 @@ export interface NotesClient {
   reconcileRoadmapPhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  previewManualCompletionApproval(
-    phaseId: string,
-    expectedRevision: number,
-  ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  commitManualCompletionApproval(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
   resolveRoadmapBlocker(
@@ -411,6 +398,7 @@ export interface NotesClient {
 }
 
 export type NotesAuthorityDiagnostic =
+  | { kind: "sidecar-unsupported"; format: ProjectNotesUnsupportedFormat }
   | { kind: "sidecar-open"; error: unknown }
   | { kind: "sidecar-corrupt"; corruption: ProjectNotesCorruption }
   | { kind: "migration-refused"; load: NotesLoadResult }
@@ -447,7 +435,8 @@ export function isProjectNotesSnapshot(value: unknown): value is ProjectNotesSna
 export function isProjectNotesReadOutcome(value: unknown): value is ProjectNotesReadOutcome {
   if (!isRecord(value) || typeof value.status !== "string") return false;
   if (value.status === "missing") return hasExactKeys(value, ["status"]);
-  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === value.status) return isCorruption(value);
   return (
     value.status === "ok" &&
     typeof value.recoveredFromBackup === "boolean" &&
@@ -460,7 +449,8 @@ export function isProjectNotesMigrationOutcome(
 ): value is ProjectNotesMigrationOutcome {
   if (!isRecord(value) || typeof value.status !== "string") return false;
   if (value.status === "invalid") return isInvalidOutcome(value);
-  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === value.status) return isCorruption(value);
   return (
     value.status === "ok" &&
     typeof value.migrated === "boolean" &&
@@ -489,7 +479,8 @@ export function isProjectNotesRoadmapBlockerResolutionOutcome(
   if (value.status === "duplicate-id-conflict" || value.status === "stale-revision") {
     return Number.isInteger(value.revision) && (value.revision as number) >= 0;
   }
-  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === value.status) return isCorruption(value);
   return [
     "phase-not-found",
     "phase-archived",
@@ -503,7 +494,8 @@ export function isProjectNotesSaveOutcome(value: unknown): value is ProjectNotes
   if (!isRecord(value) || typeof value.status !== "string") return false;
   if (value.status === "missing") return hasExactKeys(value, ["status"]);
   if (value.status === "invalid") return isInvalidOutcome(value);
-  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === value.status) return isCorruption(value);
   return (
     (value.status === "ok" || value.status === "conflict") && isProjectNotesSnapshot(value.snapshot)
   );
@@ -511,6 +503,7 @@ export function isProjectNotesSaveOutcome(value: unknown): value is ProjectNotes
 
 export function isReminderReserveOutcome(value: unknown): value is ReminderReserveOutcome {
   if (!isRecord(value) || typeof value.status !== "string") return false;
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
   if (
     value.status === "leased" ||
     value.status === "none" ||
@@ -559,7 +552,8 @@ export function isReminderClaimOutcome(value: unknown): value is ReminderClaimOu
     "missing",
   ]);
   if (bareStatuses.has(value.status)) return hasExactKeys(value, ["status"]);
-  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
+  if ("corrupt" === value.status) return isCorruption(value);
   if (value.status === "invalid") return isInvalidOutcome(value);
   if (
     value.status !== "ok" ||

@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
 import {
   NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
-  type NotesVerificationEvidence,
-  type NotesVerificationEvidenceV2,
   type NotesWorkspaceSnapshotV1,
 } from "@kenkaiiii/gg-core/project-notes";
 import { hasUnsafeShellSyntax, splitShellCommandSegments } from "../tools/read-only-bash.js";
@@ -29,42 +27,6 @@ export interface VerificationEvidence {
   status: "passed" | "failed" | "rejected" | "unavailable";
   reason: string;
 }
-
-export type RoadmapVerificationEvidenceUnmetCode =
-  | "missing-expected-revision"
-  | "missing-approved-evidence"
-  | "rejected-evidence"
-  | "unclassified-evidence"
-  | "failed-evidence"
-  | "unavailable-evidence"
-  | "stale-evidence"
-  | "duplicate-evidence"
-  | "criterion-evidence-mismatch"
-  | "unmatched-evidence"
-  | "missing-verification-bindings";
-
-export interface RoadmapVerificationCriterionCoverage {
-  criterionIndex: number;
-  criterion: string;
-  evidence: string;
-  command: string;
-  executionId: string;
-  observedAt: string;
-  cwd: string;
-  safeToolEnvironmentDigest: string;
-  workspace: NotesWorkspaceSnapshotV1;
-}
-
-export type RoadmapVerificationEvidenceEvaluation =
-  | {
-      ready: false;
-      unmetEvidenceCodes: RoadmapVerificationEvidenceUnmetCode[];
-    }
-  | {
-      ready: true;
-      unmetEvidenceCodes: [];
-      criterionCoverage: RoadmapVerificationCriterionCoverage[];
-    };
 
 const LONG_RUNNING_FLAGS = new Set([
   "--watch",
@@ -399,12 +361,6 @@ function resultText(result: ToolResult): string {
     .join("\n");
 }
 
-export function roadmapCriterionId(index: number, criterion: string): string {
-  return createHash("sha256")
-    .update(`${index}\0${criterion.trim().replace(/\s+/g, " ")}`)
-    .digest("hex");
-}
-
 const GENERIC_VERIFICATION_COMMAND_DISPLAY = "Approved verification command";
 const REDACTED_COMMAND_VALUE = "[REDACTED]";
 const SENSITIVE_COMMAND_NAME =
@@ -525,118 +481,6 @@ export function formatVerificationCommandDisplay(command: string): string {
   const formatted = display.join(" ").slice(0, NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH);
   return formatted || GENERIC_VERIFICATION_COMMAND_DISPLAY;
 }
-export function createDurableVerificationEvidence(input: {
-  coverage: readonly RoadmapVerificationCriterionCoverage[];
-}): NotesVerificationEvidenceV2[] {
-  return input.coverage.map((coverage) => ({
-    version: 2,
-    executionId: coverage.executionId,
-    commandHash: createHash("sha256").update(coverage.command).digest("hex"),
-    commandDisplay: formatVerificationCommandDisplay(coverage.command),
-    cwd: coverage.cwd,
-    exitCode: 0,
-    classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
-    verdict: "approved",
-    criterionId: roadmapCriterionId(coverage.criterionIndex, coverage.criterion),
-    observedAt: coverage.observedAt,
-    workspace: structuredClone(coverage.workspace),
-    safeToolEnvironmentDigest: coverage.safeToolEnvironmentDigest,
-  }));
-}
-
-export interface DurableVerificationEvidenceEvaluation {
-  ready: boolean;
-  staleCriterionIds: string[];
-  missingCriterionIds: string[];
-  criterionCoverage: RoadmapVerificationCriterionCoverage[];
-}
-
-export function evaluateDurableVerificationEvidence(input: {
-  doneWhen: readonly string[];
-  evidence: readonly NotesVerificationEvidence[];
-  verificationBindings: readonly RoadmapVerificationBinding[];
-  workspace: NotesWorkspaceSnapshotV1;
-  safeToolEnvironmentDigest: string;
-  classifierVersion?: string;
-}): DurableVerificationEvidenceEvaluation {
-  const classifierVersion = input.classifierVersion ?? ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
-  const staleCriterionIds: string[] = [];
-  const missingCriterionIds: string[] = [];
-  const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
-  const usedExecutionIds = new Set<string>();
-  for (let offset = 0; offset < input.doneWhen.length; offset += 1) {
-    const criterion = input.doneWhen[offset] ?? "";
-    const criterionId = roadmapCriterionId(offset + 1, criterion);
-    const candidates = input.evidence.filter((item) => item.criterionId === criterionId);
-    const binding = input.verificationBindings.find(
-      (candidate) => candidate.criterionId === criterionId,
-    );
-    const current = candidates.find(
-      (item): item is NotesVerificationEvidenceV2 =>
-        !!binding &&
-        "version" in item &&
-        item.version === 2 &&
-        item.executionId === binding.executionId &&
-        item.exitCode === 0 &&
-        item.verdict === "approved" &&
-        item.classifierVersion === classifierVersion &&
-        workspaceVerificationEvidenceMatches(
-          {
-            workspace: item.workspace,
-            safeToolEnvironmentDigest: item.safeToolEnvironmentDigest,
-          },
-          input,
-        ),
-    );
-    if (!current || usedExecutionIds.has(current.executionId)) {
-      (candidates.length > 0 ? staleCriterionIds : missingCriterionIds).push(criterionId);
-      continue;
-    }
-    usedExecutionIds.add(current.executionId);
-    criterionCoverage.push({
-      criterionIndex: offset + 1,
-      criterion,
-      evidence: current.commandDisplay,
-      command: current.commandDisplay,
-      executionId: current.executionId,
-      observedAt: current.observedAt,
-      cwd: current.cwd,
-      safeToolEnvironmentDigest: current.safeToolEnvironmentDigest,
-      workspace: current.workspace,
-    });
-  }
-  return {
-    ready: criterionCoverage.length === input.doneWhen.length,
-    staleCriterionIds,
-    missingCriterionIds,
-    criterionCoverage,
-  };
-}
-
-export function workspaceVerificationEvidenceMatches(
-  left: {
-    workspace: NotesWorkspaceSnapshotV1;
-    safeToolEnvironmentDigest: string;
-  },
-  right: {
-    workspace: NotesWorkspaceSnapshotV1;
-    safeToolEnvironmentDigest: string;
-  },
-): boolean {
-  const leftWorkspace = left.workspace;
-  const rightWorkspace = right.workspace;
-  return (
-    leftWorkspace.version === rightWorkspace.version &&
-    leftWorkspace.repository.projectKey === rightWorkspace.repository.projectKey &&
-    leftWorkspace.repository.identityHash === rightWorkspace.repository.identityHash &&
-    leftWorkspace.repository.rootCommit === rightWorkspace.repository.rootCommit &&
-    leftWorkspace.headCommit === rightWorkspace.headCommit &&
-    leftWorkspace.worktreeDigest === rightWorkspace.worktreeDigest &&
-    leftWorkspace.clean === rightWorkspace.clean &&
-    left.safeToolEnvironmentDigest === right.safeToolEnvironmentDigest
-  );
-}
-
 /** Extract harness-owned evidence from completed bash calls in a transcript. */
 export function collectVerificationEvidence(
   messages: readonly Message[],
@@ -687,16 +531,22 @@ export function collectVerificationEvidence(
       evidence.push({
         command: call.command,
         status: passed ? "passed" : exit ? "failed" : "unavailable",
-        reason: passed ? call.classification.reason : exit
-          ? "bounded check did not exit successfully"
-          : "execution outcome unavailable from retained transcript",
+        reason: passed
+          ? call.classification.reason
+          : exit
+            ? "bounded check did not exit successfully"
+            : "execution outcome unavailable from retained transcript",
       });
     }
   }
   if (includeMissingResults) {
     for (const call of calls.values()) {
       if (!call.classification.candidate) continue;
-      evidence.push({ command: call.command, status: "unavailable", reason: "execution outcome unavailable from retained transcript" });
+      evidence.push({
+        command: call.command,
+        status: "unavailable",
+        reason: "execution outcome unavailable from retained transcript",
+      });
     }
   }
   return evidence;
@@ -827,35 +677,43 @@ export class SessionVerificationEvidenceLedger {
       return;
     }
 
-    const classification = classifyVerificationCommand(command);
     const background = input.args.run_in_background === true || input.args.persist === true;
     let evidence: RoadmapShellEvidence;
     if (background) {
       evidence = {
         command,
-        status: "rejected",
-        reason: "background or persistent commands are not bounded evidence",
+        status: "unavailable",
+        reason: "final outcome unavailable from this background or persistent command response",
       };
-    } else if (!classification.candidate) {
-      evidence = { command, status: "unclassified", reason: classification.reason };
-    } else if (!classification.accepted) {
-      evidence = { command, status: "rejected", reason: classification.reason };
     } else {
       const passed =
         !input.isError && diagnostics?.reason === "completed" && diagnostics.exitCode === 0;
       evidence = {
         command,
-        status: passed ? "passed" :
-          ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(String(diagnostics?.reason))
-            ? "failed" : "unavailable",
-        reason: passed ? classification.reason :
-          diagnostics?.reason === "spawnError" ? "launch failed" :
-          diagnostics?.reason === "timedOut" ? "timed out" :
-          diagnostics?.reason === "aborted" ? "cancelled" :
-          typeof diagnostics?.exitCode === "number" && Number.isInteger(diagnostics.exitCode) && diagnostics.exitCode !== 0
-            ? `failed (exit ${diagnostics.exitCode})` :
-          diagnostics?.reason === "nonZeroExit" ? "failed (no numeric exit code)" :
-          diagnostics?.reason === "completed" ? "inconsistent completion metadata" : "execution outcome unavailable",
+        status: passed
+          ? "passed"
+          : ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
+                String(diagnostics?.reason),
+              )
+            ? "failed"
+            : "unavailable",
+        reason: passed
+          ? "command exited successfully; requirement coverage is not certified"
+          : diagnostics?.reason === "spawnError"
+            ? "launch failed"
+            : diagnostics?.reason === "timedOut"
+              ? "timed out"
+              : diagnostics?.reason === "aborted"
+                ? "cancelled"
+                : typeof diagnostics?.exitCode === "number" &&
+                    Number.isInteger(diagnostics.exitCode) &&
+                    diagnostics.exitCode !== 0
+                  ? `failed (exit ${diagnostics.exitCode})`
+                  : diagnostics?.reason === "nonZeroExit"
+                    ? "failed (no numeric exit code)"
+                    : diagnostics?.reason === "completed"
+                      ? "inconsistent completion metadata"
+                      : "execution outcome unavailable",
       };
     }
     Object.assign(evidence, {
@@ -864,20 +722,34 @@ export class SessionVerificationEvidenceLedger {
       cwd,
       safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
     });
-    if (["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(String(diagnostics?.reason))) {
+    if (
+      ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
+        String(diagnostics?.reason),
+      )
+    ) {
       evidence.terminalReason = String(diagnostics?.reason);
     }
-    if (diagnostics?.exitCode === null || (typeof diagnostics?.exitCode === "number" && Number.isSafeInteger(diagnostics.exitCode))) {
+    if (
+      diagnostics?.exitCode === null ||
+      (typeof diagnostics?.exitCode === "number" && Number.isSafeInteger(diagnostics.exitCode))
+    ) {
       evidence.exitCode = diagnostics.exitCode;
     }
-    if (diagnostics?.signal === null || (typeof diagnostics?.signal === "string" && /^SIG[A-Z0-9]{1,20}$/.test(diagnostics.signal))) {
+    if (
+      diagnostics?.signal === null ||
+      (typeof diagnostics?.signal === "string" && /^SIG[A-Z0-9]{1,20}$/.test(diagnostics.signal))
+    ) {
       evidence.signal = diagnostics.signal;
     }
     for (const key of ["elapsedMs", "timeoutMs"] as const) {
       const value = diagnostics?.[key];
       if (typeof value === "number" && Number.isFinite(value) && value >= 0) evidence[key] = value;
     }
-    if (typeof diagnostics?.logPath === "string" && diagnostics.logPath.length <= 2048 && !Array.from(diagnostics.logPath).some((character) => character.charCodeAt(0) < 32)) {
+    if (
+      typeof diagnostics?.logPath === "string" &&
+      diagnostics.logPath.length <= 2048 &&
+      !Array.from(diagnostics.logPath).some((character) => character.charCodeAt(0) < 32)
+    ) {
       evidence.logPath = diagnostics.logPath;
     }
     if (input.workspace) {
@@ -886,7 +758,10 @@ export class SessionVerificationEvidenceLedger {
     }
     const existing = this.entries.get(executionId);
     if (existing) return;
-    this.entries.set(executionId, { generation: input.evidenceRevision ?? this.generation, evidence });
+    this.entries.set(executionId, {
+      generation: input.evidenceRevision ?? this.generation,
+      evidence,
+    });
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       const oldestExecutionId = this.entries.keys().next().value;
       if (oldestExecutionId === undefined) break;
@@ -941,105 +816,4 @@ export function partitionVerificationMessagesForWorkspaceMutation(messages: read
     staleMessages: messages.slice(0, boundary),
     currentMessages: messages.slice(boundary),
   };
-}
-
-export interface RoadmapVerificationBinding {
-  criterionId: string;
-  executionId: string;
-}
-
-/** Bind every Done When criterion to one immutable, harness-owned shell execution. */
-export function evaluateRoadmapVerificationEvidence(input: {
-  doneWhen: readonly string[];
-  evidence: readonly string[];
-  verificationBindings?: readonly RoadmapVerificationBinding[];
-  expectedRevision: number | undefined;
-  currentLedgerEvidence?: readonly RoadmapShellEvidence[];
-  staleLedgerEvidence?: readonly RoadmapShellEvidence[];
-}): RoadmapVerificationEvidenceEvaluation {
-  const unmet = new Set<RoadmapVerificationEvidenceUnmetCode>();
-  if (input.expectedRevision === undefined) unmet.add("missing-expected-revision");
-  const bindings = input.verificationBindings ?? [];
-  if (bindings.length === 0) unmet.add("missing-verification-bindings");
-  if (bindings.length !== input.doneWhen.length) unmet.add("criterion-evidence-mismatch");
-
-  const criterionIds = input.doneWhen.map((criterion, index) =>
-    roadmapCriterionId(index + 1, criterion),
-  );
-  const knownCriteria = new Set(criterionIds);
-  const boundCriterionIds = bindings.map((binding) => binding.criterionId);
-  const boundExecutionIds = bindings.map((binding) => binding.executionId);
-  if (
-    new Set(boundCriterionIds).size !== boundCriterionIds.length ||
-    new Set(boundExecutionIds).size !== boundExecutionIds.length
-  ) {
-    unmet.add("duplicate-evidence");
-  }
-  if (boundCriterionIds.some((criterionId) => !knownCriteria.has(criterionId))) {
-    unmet.add("criterion-evidence-mismatch");
-  }
-
-  const current = input.currentLedgerEvidence ?? [];
-  const stale = input.staleLedgerEvidence ?? [];
-  const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
-  for (const [offset, criterionId] of criterionIds.entries()) {
-    const criterion = input.doneWhen[offset] ?? "";
-    const binding = bindings.find((candidate) => candidate.criterionId === criterionId);
-    if (!binding) {
-      unmet.add("missing-approved-evidence");
-      continue;
-    }
-    const candidate = current.find((item) => item.executionId === binding.executionId);
-    if (!candidate) {
-      unmet.add(
-        stale.some((item) => item.executionId === binding.executionId)
-          ? "stale-evidence"
-          : "unmatched-evidence",
-      );
-      continue;
-    }
-    const classification = classifyVerificationCommand(candidate.command);
-    if (!classification.candidate) {
-      unmet.add("unclassified-evidence");
-      continue;
-    }
-    if (!classification.accepted || candidate.status === "rejected") {
-      unmet.add("rejected-evidence");
-      continue;
-    }
-    if (candidate.status === "unavailable") {
-      unmet.add("unavailable-evidence");
-      continue;
-    }
-    if (candidate.status !== "passed") {
-      unmet.add(candidate.status === "unclassified" ? "unclassified-evidence" : "failed-evidence");
-      continue;
-    }
-    if (
-      candidate.classifierVersion !== ROADMAP_VERIFICATION_CLASSIFIER_VERSION ||
-      !candidate.executionId ||
-      !candidate.observedAt ||
-      !candidate.cwd ||
-      !candidate.safeToolEnvironmentDigest ||
-      !candidate.workspace
-    ) {
-      unmet.add("stale-evidence");
-      continue;
-    }
-    criterionCoverage.push({
-      criterionIndex: offset + 1,
-      criterion,
-      evidence: input.evidence[offset] ?? candidate.command,
-      command: candidate.command,
-      executionId: candidate.executionId,
-      observedAt: candidate.observedAt,
-      cwd: candidate.cwd,
-      safeToolEnvironmentDigest: candidate.safeToolEnvironmentDigest,
-      workspace: candidate.workspace,
-    });
-  }
-
-  if (criterionCoverage.length !== input.doneWhen.length) unmet.add("missing-approved-evidence");
-  if (unmet.size > 0) return { ready: false, unmetEvidenceCodes: [...unmet] };
-  return { ready: true, unmetEvidenceCodes: [], criterionCoverage };
 }

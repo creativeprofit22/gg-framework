@@ -28,8 +28,6 @@ import type {
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
   NotesRoadmapMutationResult,
-  ManualCompletionApprovalCommitOutcome,
-  ManualCompletionApprovalPreviewOutcome,
   NotesSessionLink,
   PhaseBindingOutcome,
   PhaseBindingRequest,
@@ -97,11 +95,6 @@ interface RoadmapProps {
   onReconcilePhaseExecution?(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  onPreviewManualCompletionApproval?(
-    phaseId: string,
-    expectedRevision: number,
-  ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommitManualCompletionApproval?(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   commands: SlashCommand[];
   onRunCommand(invocation: string): void;
@@ -151,8 +144,6 @@ export function NotesRoadmap({
   onRebindPhase = async () => ({ status: "missing" }),
   onMutatePhaseLease = async () => ({ status: "missing" }),
   onReconcilePhaseExecution = async () => ({ status: "missing" }),
-  onPreviewManualCompletionApproval = async () => ({ status: "missing" }),
-  onCommitManualCompletionApproval = async () => ({ status: "nonce-not-found" }),
   onStartNextPhase,
   commands,
   onRunCommand,
@@ -246,11 +237,7 @@ export function NotesRoadmap({
       selectPhase(phase.id);
       return;
     }
-    if (
-      pendingPhaseId !== null ||
-      actionDisabled ||
-      phase.execution?.state === "needs-reconciliation"
-    ) {
+    if (pendingPhaseId !== null || actionDisabled) {
       return;
     }
     if (
@@ -424,8 +411,6 @@ export function NotesRoadmap({
         onRebindPhase,
         onMutatePhaseLease,
         onReconcilePhaseExecution,
-        onPreviewManualCompletionApproval,
-        onCommitManualCompletionApproval,
         onResumePhase,
         startUnavailableReason: isRoadmapPhaseStartProtected(phases, selectedPhase.id)
           ? "Use Start next phase to confirm the pending Roadmap advancement."
@@ -582,7 +567,6 @@ export function NotesRoadmap({
               const actionLabel = phaseActionLabel(phase, action);
               const lifecycle = notesLifecyclePresentation(phase);
               const blocker = activeRoadmapBlocker(phase);
-              const reconciliationBlocked = phase.execution?.state === "needs-reconciliation";
               const detailProps =
                 selectedPhaseDetailProps?.phase.id === phase.id ? selectedPhaseDetailProps : null;
               return (
@@ -627,12 +611,6 @@ export function NotesRoadmap({
                       </p>
                     )}
 
-                    {reconciliationBlocked && (
-                      <p className="notes-roadmap-reconciliation" role="status">
-                        <strong>Needs reconciliation:</strong> Resume and completion are blocked.
-                      </p>
-                    )}
-
                     {phase.doneWhen.length > 0 && (
                       <section
                         className="notes-roadmap-criteria"
@@ -664,7 +642,6 @@ export function NotesRoadmap({
                           disabled={
                             pendingPhaseId !== null ||
                             actionDisabled ||
-                            reconciliationBlocked ||
                             ((action === "Start" || action === "Recover") &&
                               (startUnavailableReason !== null ||
                                 isRoadmapPhaseStartProtected(phases, phase.id)))

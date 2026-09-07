@@ -54,8 +54,6 @@ import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
   isPhaseRunCancellationResult,
   isPhaseStartResult,
-  isManualCompletionApprovalCommitOutcome,
-  isManualCompletionApprovalPreviewOutcome,
   isPhaseBindingOutcome,
   isPhaseExecutionReconciliationOutcome,
   isPhaseExecutionReconciliationRequestV3,
@@ -3284,23 +3282,6 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       const outcome = await call<unknown>("agent_notes_phase_binding", { request });
       if (!isPhaseExecutionReconciliationOutcome(outcome)) {
         throw new Error("invalid phase execution reconciliation response");
-      }
-      return outcome;
-    },
-    async previewManualCompletionApproval(phaseId, expectedRevision) {
-      const outcome = await call<unknown>("agent_notes_completion_approval_preview", {
-        phaseId,
-        expectedRevision,
-      });
-      if (!isManualCompletionApprovalPreviewOutcome(outcome)) {
-        throw new Error("invalid manual completion approval preview response");
-      }
-      return outcome;
-    },
-    async commitManualCompletionApproval(nonce) {
-      const outcome = await call<unknown>("agent_notes_completion_approval_commit", { nonce });
-      if (!isManualCompletionApprovalCommitOutcome(outcome)) {
-        throw new Error("invalid manual completion approval commit response");
       }
       return outcome;
     },

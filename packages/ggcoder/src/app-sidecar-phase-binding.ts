@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalProjectKey,
   notesSessionLinksEqual,
@@ -51,6 +51,13 @@ export interface PhaseBindingSession {
   getPhaseLeaseRunState?(): "idle" | "running";
 }
 
+export type PhaseStatusLeaseFailure =
+  | "phase-lease-lost"
+  | "corrupt"
+  | "notes-missing"
+  | "phase-not-found"
+  | "phase-archived";
+
 export interface AppSidecarPhaseBindingService {
   bind(request: PhaseBindingRequest, session: PhaseBindingSession): Promise<PhaseBindingOutcome>;
   lease(request: PhaseLeaseRequestV2, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
@@ -63,6 +70,11 @@ export interface AppSidecarPhaseBindingService {
     session: PhaseBindingSession,
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+  withStatusLease<T>(
+    session: PhaseBindingSession,
+    phaseId: string,
+    operation: () => Promise<T>,
+  ): Promise<{ status: "executed"; value: T } | { status: PhaseStatusLeaseFailure }>;
   reconcile(session: PhaseBindingSession): Promise<"none" | "consistent" | "cleared">;
 }
 
@@ -192,6 +204,78 @@ export function createAppSidecarPhaseBindingService(
         operation,
       );
       return outcome.status === "executed" ? outcome : { status: outcome.status };
+    },
+
+    async withStatusLease(session, phaseId, operation) {
+      const leases = options.leaseRepository;
+      if (!leases) return { status: "executed", value: await operation() };
+      const state = session.getState();
+      const holder = phaseLeaseHolder(options, state);
+      const marker = session.getRoadmapPhaseLeaseMarker?.();
+      if (marker?.phaseId === phaseId) {
+        const result = await leases.withFence(
+          {
+            cwd: state.cwd,
+            phaseId,
+            holder,
+            token: { leaseId: marker.leaseId, fence: marker.fence },
+          },
+          operation,
+        );
+        return result.status === "executed" ? result : { status: result.status };
+      }
+      const loaded = await options.repository.load(state.cwd);
+      if (loaded.status !== "ok")
+        return { status: loaded.status === "missing" ? "notes-missing" : "corrupt" };
+      const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === phaseId);
+      if (!phase) return { status: "phase-not-found" };
+      if (phase.archivedAt !== null) return { status: "phase-archived" };
+      const context = {
+        projectKey: loaded.snapshot.projectKey,
+        roadmapRevision: loaded.snapshot.revision,
+        phaseId,
+        phaseStatus: phase.status,
+        planId: phase.execution?.plan?.planId ?? null,
+      };
+      const request: PhaseLeaseRequestV2 = {
+        version: 2,
+        action: "acquire",
+        phaseId,
+        expectedProjectKey: context.projectKey,
+        expectedRevision: context.roadmapRevision,
+        planId: context.planId,
+        operationId: randomUUID(),
+        lease: null,
+        confirmTakeover: false,
+        takeoverReason: null,
+        predecessorProof: null,
+      };
+      const acquired = await leases.execute({
+        cwd: state.cwd,
+        request,
+        context,
+        holder,
+        runState: "idle",
+      });
+      if (!("lease" in acquired) || !acquired.lease || acquired.status !== "acquired") {
+        return { status: acquired.status === "corrupt" ? "corrupt" : "phase-lease-lost" };
+      }
+      const token = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
+      try {
+        const result = await leases.withFence(
+          { cwd: state.cwd, phaseId, holder, token },
+          operation,
+        );
+        return result.status === "executed" ? result : { status: result.status };
+      } finally {
+        await leases.execute({
+          cwd: state.cwd,
+          holder,
+          context,
+          runState: "idle",
+          request: { ...request, action: "release", operationId: randomUUID(), lease: token },
+        });
+      }
     },
 
     async reconcile(session) {
@@ -575,6 +659,9 @@ async function executePhaseLease(
   if (!phase) return { status: "phase-not-found" };
   if (phase.archivedAt !== null && request.action !== "release") {
     return { status: "phase-archived" };
+  }
+  if (phase.status === "done" && request.action !== "release" && request.action !== "renew") {
+    return { status: "phase-terminal" };
   }
   const input = {
     cwd: state.cwd,

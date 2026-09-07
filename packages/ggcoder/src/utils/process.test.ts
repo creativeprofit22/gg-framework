@@ -138,6 +138,84 @@ describe("verified tree cleanup", () => {
   });
 });
 
+describe("Windows MSYS process-tree cleanup", () => {
+  const table = [
+    "PID PPID PGID WINPID TTY UID STIME COMMAND",
+    "WIN 0 0 1",
+    "12 1 12 124 ? 100 12:00 /usr/bin/bash",
+    "13 12 12 125 ? 100 12:00 /usr/bin/sleep",
+    "WIN 123 1 100", "WIN 124 123 101", "WIN 125 999 102", "WIN 126 999 99", "WIN 127 124 98",
+  ].join("\n");
+  const target = { pid: 123, isExited: () => false, msysPsPath: "E:\\Git's tools\\usr\\bin\\ps.exe" };
+
+  it.each([false, true])("kills logically owned reparented children, not outsiders (sync=%s)", async (sync) => {
+    const alive = new Set([123, 124, 125, 126, 127]);
+    const kill = vi.fn((pid: number, signal?: string | number): true => {
+      if (!alive.has(pid)) throw errno("ESRCH");
+      if (signal === "SIGKILL") alive.delete(pid);
+      return true;
+    });
+    const helper = createPsHelper();
+    const killer = createKiller();
+    const spawnProcess = vi.fn((file: string, args: readonly string[]) => {
+      if (file.endsWith("powershell.exe")) {
+        expect(Buffer.from(args.at(-1)!, "base64").toString("utf16le")).toContain("E:\\Git''s tools\\usr\\bin\\ps.exe");
+        queueMicrotask(() => { helper.stdout.write(table); helper.events.emit("close", 0); });
+        return helper.child;
+      }
+      queueMicrotask(() => { alive.delete(123); alive.delete(124); killer.events.emit("close", 0, null); });
+      return killer.child;
+    }) as unknown as typeof spawn;
+    if (sync) {
+      const spawnProcessSync = vi.fn((file: string) => {
+        if (!file.endsWith("powershell.exe")) { alive.delete(123); alive.delete(124); }
+        return { pid: 1, output: [], status: 0, signal: null, stdout: table, stderr: "" };
+      }) as unknown as typeof spawnSync;
+      killProcessTree(target, { platform: "win32", kill, spawnSync: spawnProcessSync });
+    } else {
+      await killProcessTreeAsync(target, { platform: "win32", requireSettlement: true, kill, spawn: spawnProcess });
+    }
+    expect(kill).toHaveBeenCalledWith(125, "SIGKILL");
+    expect([...alive]).toEqual([126, 127]);
+    expect(kill).not.toHaveBeenCalledWith(126, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(127, "SIGKILL");
+  });
+
+  it("rejects MSYS survivors even when taskkill reports success", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const killer = createKiller();
+    const spawnProcess = vi.fn((file: string) => {
+      if (file.endsWith("powershell.exe")) {
+        queueMicrotask(() => { helper.stdout.write(table); helper.events.emit("close", 0); });
+        return helper.child;
+      }
+      queueMicrotask(() => killer.events.emit("close", 0, null));
+      return killer.child;
+    }) as unknown as typeof spawn;
+    const result = expect(killProcessTreeAsync(target, {
+      platform: "win32", requireSettlement: true, taskkillTimeoutMs: 25, kill: aliveKill(), spawn: spawnProcess,
+    })).rejects.toThrow("MSYS process cleanup has live or unverified survivors");
+    await vi.runAllTimersAsync();
+    await result;
+  });
+
+  it.each(["missing header", table.replace("WIN 123 1", "WIN 999 1"), table + "\n13 12 12 127 ? 100 12:00 duplicate"])("rejects incomplete or ambiguous snapshots: %s", async (output) => {
+    const helper = createPsHelper();
+    const killer = createKiller();
+    const spawnProcess = vi.fn((file: string) => {
+      if (file.endsWith("powershell.exe")) {
+        queueMicrotask(() => { helper.stdout.write(output); helper.events.emit("close", 0); });
+        return helper.child;
+      }
+      queueMicrotask(() => killer.events.emit("close", 0, null));
+      return killer.child;
+    }) as unknown as typeof spawn;
+    await expect(killProcessTreeAsync(target, { platform: "win32", requireSettlement: true, kill: aliveKill(), spawn: spawnProcess })).rejects.toThrow(/header|absent|identity/);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("POSIX process-tree cleanup", () => {
   it.each([0, -1, Number.NaN, 1.5])(
     "rejects invalid PID %s without constructing a PGID",

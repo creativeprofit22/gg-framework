@@ -3,15 +3,16 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import os from "node:os";
 import { localProcessLifecycle } from "../tools/operations.js";
 import { PersistentShell } from "./persistent-shell.js";
+import { resolveShell } from "./shell.js";
 
 const isWindows = os.platform() === "win32";
-const d = describe.skipIf(isWindows);
+const d = describe.skipIf(resolveShell("").isCmdFallback);
 
 d("PersistentShell", () => {
   let shell: PersistentShell | null = null;
 
-  afterEach(() => {
-    shell?.kill();
+  afterEach(async () => {
+    await shell?.shutdownAndWait();
     shell = null;
   });
 
@@ -22,7 +23,7 @@ d("PersistentShell", () => {
 
   const signal = () => new AbortController().signal;
 
-  it("spawns the session shell as a detached process-group owner", async () => {
+  it("spawns the session shell with platform ownership and pipefail", async () => {
     const spawnProcess = vi.fn((command: string, args: string[], options: SpawnOptions) =>
       spawn(command, args, options),
     );
@@ -34,9 +35,9 @@ d("PersistentShell", () => {
     await shell.run("true", 10_000, signal());
 
     expect(spawnProcess).toHaveBeenCalledWith(
-      "bash",
-      ["--norc", "--noprofile"],
-      expect.objectContaining({ detached: true }),
+      resolveShell("").file,
+      ["--norc", "--noprofile", "-o", "pipefail"],
+      expect.objectContaining({ detached: !isWindows }),
     );
   });
 
@@ -50,6 +51,15 @@ d("PersistentShell", () => {
       output: "hello\n",
       outputSnapshot: { content: "hello\n", capped: false },
     });
+  });
+
+  it("enforces pipefail for an explicit launch and restores it before each command", async () => {
+    shell = new PersistentShell(os.tmpdir(), { ...process.env }, 1024 * 1024,
+      localProcessLifecycle, {}, { ...resolveShell(""), args: ["--norc", "--noprofile"] });
+    expect((await shell.run("false | tail -1", 10_000, signal())).exitCode).toBe(1);
+    await shell.run("set +o pipefail", 10_000, signal());
+    expect((await shell.run("false | tail -1", 10_000, signal())).exitCode).toBe(1);
+    expect((await shell.run("echo ok | tail -1", 10_000, signal())).exitCode).toBe(0);
   });
 
   it("propagates non-zero exit codes", async () => {
@@ -72,6 +82,33 @@ d("PersistentShell", () => {
     // Session still healthy afterwards.
     const next = await sh.run("echo ok", 5_000, signal());
     expect(next.output).toBe("ok\n");
+  });
+
+  it("shares timeout cleanup with shutdown and waits for confirmed close", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const cleanup = vi.fn(async (...args: Parameters<typeof localProcessLifecycle.cleanupProcessTree>) => {
+      await gate;
+      await localProcessLifecycle.cleanupProcessTree(...args);
+    });
+    shell = new PersistentShell(os.tmpdir(), { ...process.env }, 1024 * 1024, {
+      ...localProcessLifecycle, cleanupProcessTree: cleanup,
+    });
+    await shell.run("echo ready", 10_000, signal());
+    await shell.run("while :; do :; done", 50, signal());
+    const shutdown = shell.shutdownAndWait();
+    let settled = false;
+    void shutdown.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await Promise.resolve();
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(cleanup).toHaveBeenCalledWith(expect.objectContaining({ pid: expect.any(Number) }), { requireSettlement: true });
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      await shutdown;
+    }
+    expect(settled).toBe(true);
   });
 
   it("timeout kills the session; the next call gets a fresh shell", async () => {

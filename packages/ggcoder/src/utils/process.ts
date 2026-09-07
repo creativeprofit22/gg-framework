@@ -15,6 +15,8 @@ export const DEFAULT_POSIX_TERM_GRACE_MS = 500;
 export interface ProcessTarget {
   pid: number;
   isExited?: () => boolean;
+  /** Captured from the exact locally spawned Bash installation, never from PATH. */
+  msysPsPath?: string;
 }
 
 export type ProcessTargetInput = number | ProcessTarget;
@@ -132,18 +134,69 @@ function parseDescendants(output: string, rootPid: number, maximum: number, requ
   return descendants.sort((a, b) => b.depth - a.depth).map(({ pid }) => pid);
 }
 
-function snapshotDescendantsSync(pid: number, options: ProcessTreeKillOptions): number[] {
+function msysSnapshotCommand(psPath: string, env?: NodeJS.ProcessEnv): { file: string; args: string[] } {
+  // Git Bash exec preserves its logical PID but changes the native PID. Join
+  // both parent tables so taskkill's native-only tree cannot miss these children.
+  const script = `$ErrorActionPreference='Stop'; & '${psPath.replace(/'/g, "''")}' -l; ` +
+    `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ` +
+    `Get-CimInstance Win32_Process | ForEach-Object { if ($null -ne $_.CreationDate) { 'WIN ' + $_.ProcessId + ' ' + $_.ParentProcessId + ' ' + $_.CreationDate.ToFileTimeUtc() } }`;
+  return {
+    file: path.win32.join(path.win32.dirname(resolveWindowsTaskkillPath(env)), "WindowsPowerShell", "v1.0", "powershell.exe"),
+    args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+  };
+}
+
+function parseMsysDescendants(output: string, rootPid: number, maximum: number): number[] {
+  if (!/^\s*PID\s+PPID\s+PGID\s+WINPID\s/m.test(output)) throw new Error("MSYS process table header is missing");
+  const msys = new Map<number, { parent: number; native: number }>();
+  const windows = new Map<number, { parent: number; created: bigint }>();
+  const pairs: string[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const native = /^WIN (\d+) (\d+) (\d+)$/.exec(line);
+    if (native) {
+      const pid = Number(native[1]);
+      if (pid === 0) continue; // Windows' System Idle Process is not a killable process.
+      if (!validPid(pid) || windows.has(pid)) throw new Error("Invalid Windows process identity");
+      windows.set(pid, { parent: Number(native[2]), created: BigInt(native[3]) });
+      continue;
+    }
+    const match = /^\s*[SIO]?\s*(\d+)\s+(\d+)\s+\d+\s+(\d+)\s/.exec(line);
+    if (match) {
+      const [pid, parent, winpid] = match.slice(1).map(Number);
+      if (!validPid(pid) || !validPid(parent) || !validPid(winpid) || msys.has(pid)) {
+        throw new Error("Invalid MSYS process identity");
+      }
+      msys.set(pid, { parent, native: winpid });
+    }
+  }
+  if (!windows.has(rootPid)) throw new Error("Owned Windows process is absent from snapshot");
+  const addEdge = (pid: number, parentPid: number): void => {
+    const child = windows.get(pid);
+    const parent = windows.get(parentPid);
+    // An older orphan can retain a parent PID that now belongs to our child.
+    if (child && parent && child.created >= parent.created) pairs.push(`${pid} ${parentPid}`);
+  };
+  for (const [pid, child] of windows) addEdge(pid, child.parent);
+  for (const child of msys.values()) {
+    const parent = msys.get(child.parent);
+    if (parent) addEdge(child.native, parent.native);
+  }
+  return parseDescendants(pairs.join("\n"), rootPid, maximum, true);
+}
+
+function snapshotDescendantsSync(pid: number, options: ProcessTreeKillOptions, msysPsPath?: string): number[] {
   try {
-    const result = (options.spawnSync ?? spawnSync)(POSIX_PS_PATH, POSIX_PS_ARGUMENTS, {
+    const source = msysPsPath ? msysSnapshotCommand(msysPsPath, options.env) : { file: POSIX_PS_PATH, args: POSIX_PS_ARGUMENTS };
+    const result = (options.spawnSync ?? spawnSync)(source.file, source.args, {
       encoding: "utf8",
-      timeout: options.posixPsTimeoutMs ?? DEFAULT_POSIX_PS_TIMEOUT_MS,
+      timeout: msysPsPath ? options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS : options.posixPsTimeoutMs ?? DEFAULT_POSIX_PS_TIMEOUT_MS,
       maxBuffer: options.posixPsOutputBytes ?? DEFAULT_POSIX_PS_OUTPUT_BYTES,
       windowsHide: true,
     });
     if (result.error !== undefined || result.status !== 0) {
       throw result.error ?? new Error(`ps exited with status ${String(result.status)}`);
     }
-    return parseDescendants(
+    return (msysPsPath ? parseMsysDescendants : parseDescendants)(
       typeof result.stdout === "string" ? result.stdout : "",
       pid,
       options.posixMaxDescendants ?? DEFAULT_POSIX_MAX_DESCENDANTS,
@@ -157,10 +210,12 @@ function snapshotDescendantsSync(pid: number, options: ProcessTreeKillOptions): 
 async function snapshotDescendantsAsync(
   pid: number,
   options: AsyncProcessTreeKillOptions,
+  msysPsPath?: string,
 ): Promise<number[]> {
   let helper: ChildProcess;
   try {
-    helper = (options.spawn ?? spawn)(POSIX_PS_PATH, POSIX_PS_ARGUMENTS, {
+    const source = msysPsPath ? msysSnapshotCommand(msysPsPath, options.env) : { file: POSIX_PS_PATH, args: POSIX_PS_ARGUMENTS };
+    helper = (options.spawn ?? spawn)(source.file, source.args, {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -216,7 +271,7 @@ async function snapshotDescendantsAsync(
       }
       // Normally SIGKILL produces close immediately; retain a hard bound for a broken handle.
       reapTimer = setTimeout(() => settle({ error: new Error("ps timed out") }), 50);
-    }, options.posixPsTimeoutMs ?? DEFAULT_POSIX_PS_TIMEOUT_MS);
+    }, msysPsPath ? options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS : options.posixPsTimeoutMs ?? DEFAULT_POSIX_PS_TIMEOUT_MS);
     helper.once("error", onError);
     helper.once("close", onClose);
     stdout?.on("data", onData);
@@ -227,7 +282,7 @@ async function snapshotDescendantsAsync(
     if (options.requireSettlement) throw result.error;
     return [];
   }
-  return parseDescendants(
+  return (msysPsPath ? parseMsysDescendants : parseDescendants)(
     result.output ?? "",
     pid,
     options.posixMaxDescendants ?? DEFAULT_POSIX_MAX_DESCENDANTS,
@@ -398,6 +453,7 @@ export function killProcessTree(
   }
 
   if (originalProcessExited(target) || !isPidAlive(pid, kill)) return;
+  const descendants = target.msysPsPath ? snapshotDescendantsSync(pid, options, target.msysPsPath) : [];
   const executable = resolveWindowsTaskkillPath(options.env);
   if (originalProcessExited(target)) return;
   try {
@@ -406,6 +462,7 @@ export function killProcessTree(
       windowsHide: true,
       timeout: options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS,
     });
+    signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
     if (result.status === 0 && result.error === undefined) return;
     handleWindowsTaskkillFailure(target, executable, kill, {
       error: result.error,
@@ -480,8 +537,18 @@ export async function killProcessTreeAsync(
     if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed before parent exit");
     return;
   }
+  let descendants: number[] = [];
+  let snapshotError: unknown;
+  if (target.msysPsPath) {
+    try {
+      descendants = await snapshotDescendantsAsync(pid, { ...options, requireSettlement: true }, target.msysPsPath);
+    } catch (error) {
+      snapshotError = error;
+    }
+  }
   const executable = resolveWindowsTaskkillPath(options.env);
   if (originalProcessExited(target)) {
+    signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
     if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed before parent exit");
     return;
   }
@@ -534,10 +601,19 @@ export async function killProcessTreeAsync(
     killer.once("close", onClose);
   });
 
-  if (failure !== undefined) {
-    if (!originalProcessExited(target)) handleWindowsTaskkillFailure(target, executable, kill, failure);
-    if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed");
+  signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+  if (failure !== undefined && !originalProcessExited(target)) {
+    handleWindowsTaskkillFailure(target, executable, kill, failure);
   }
+  if (options.requireSettlement) {
+    if (snapshotError) throw snapshotError;
+    const deadline = Date.now() + (options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS);
+    while (descendants.some((childPid) => isPidAlive(childPid, kill))) {
+      if (Date.now() >= deadline) throw new Error("MSYS process cleanup has live or unverified survivors");
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  if (failure !== undefined && options.requireSettlement) throw new Error("Process tree cleanup was not confirmed");
 }
 
 /** Reap only the tracked wrapper PID, never its descendants or process group. */

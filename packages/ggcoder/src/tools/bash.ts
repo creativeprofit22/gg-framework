@@ -727,6 +727,11 @@ export function createBashTool(
       if (networkBlocked) {
         return `Error: ${networkBlocked}`;
       }
+      // cmd.exe cannot preserve the failing stage's status. Refuse pipelines
+      // rather than let a successful limiter turn a failed check into evidence.
+      if (resolveShell(command, shellOpts).isCmdFallback && /(^|[^|])\|([^|]|$)/.test(command)) {
+        return "Error: pipelines require Bash with pipefail. Run the check without a pipe on Windows cmd.exe.";
+      }
       const sandboxPolicy = getSandboxPolicy?.() ?? { mode: "off", allowedDomains: [] };
       const prepareLaunch = async (
         shell: ReturnType<typeof resolveShell>,

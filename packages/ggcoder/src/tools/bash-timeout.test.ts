@@ -2260,7 +2260,7 @@ if (selectedProbe !== undefined) {
   it("settles pre-aborted persistent runs as ABORTED without retaining listeners", async () => {
     const controller = new AbortController();
     controller.abort();
-    const cleanup = vi.fn(async (target: ProcessTarget) => killProcessTree(target));
+    const cleanup = vi.fn(async (target: ProcessTarget) => localOperations.process.killProcessTree(target));
     const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, {
       ...localOperations.process,
       cleanupProcessTree: cleanup,
@@ -2278,14 +2278,16 @@ if (selectedProbe !== undefined) {
     expect((shell as unknown as { child: ChildProcess | null }).child).toBeNull();
     expect(cleanup).toHaveBeenCalledWith(
       expect.objectContaining({ pid: expect.any(Number), isExited: expect.any(Function) }),
+      { requireSettlement: true },
     );
+    await shell.shutdownAndWait();
   });
 
   it("cleans persistent-run listeners and logs rejected process cleanup", async () => {
     const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
     const controller = new AbortController();
     const cleanup = vi.fn(async (target: ProcessTarget) => {
-      killProcessTree(target);
+      localOperations.process.killProcessTree(target);
       throw new Error("persistent cleanup rejected");
     });
     const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, {
@@ -2294,6 +2296,7 @@ if (selectedProbe !== undefined) {
     });
     const runPromise = shell.run("sleep 30", 5_000, controller.signal);
     const child = (shell as unknown as { child: ChildProcess }).child;
+    const closed = new Promise<void>((resolve) => child.once("close", resolve));
 
     expect(child.listenerCount("exit")).toBe(1);
     expect(child.listenerCount("error")).toBe(1);
@@ -2314,7 +2317,12 @@ if (selectedProbe !== undefined) {
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
     expect(cleanup).toHaveBeenCalledWith(
       expect.objectContaining({ pid: child.pid, isExited: expect.any(Function) }),
+      { requireSettlement: true },
     );
+    await closed;
+    await expect(shell.shutdownAndWait()).rejects.toThrow("persistent cleanup rejected");
+    await expect(shell.shutdownAndWait()).rejects.toThrow("persistent cleanup rejected");
+    expect(cleanup).toHaveBeenCalledTimes(1);
     expect(warning).toHaveBeenCalledWith(
       "WARN",
       "bash",

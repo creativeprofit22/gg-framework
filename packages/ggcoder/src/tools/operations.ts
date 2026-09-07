@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
-import { constants as fsConstants, createReadStream, type ReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream, existsSync, type ReadStream } from "node:fs";
+import path from "node:path";
 import type { Dirent, Stats } from "node:fs";
 import {
   killProcessTree,
@@ -149,16 +150,39 @@ export interface ToolOperations {
  * Default local filesystem + process operations.
  * This is what tools use when running on the local machine.
  */
+const msysProcesses = new Map<number, { child: ChildProcess; psPath: string }>();
+
+function localProcessTarget(target: ProcessTarget): ProcessTarget {
+  const owned = msysProcesses.get(target.pid);
+  return owned ? { ...target, msysPsPath: owned.psPath,
+    isExited: () => owned.child.exitCode !== null || owned.child.signalCode !== null || (target.isExited?.() ?? false),
+  } : target;
+}
+
 export const localProcessLifecycle: ProcessLifecycleAdapter = {
-  spawn: (command, args, options) =>
-    spawn(command, args, {
+  spawn: (command, args, options) => {
+    const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       detached: options.detached,
       stdio: options.stdio as Parameters<typeof spawn>[2] extends { stdio: infer S } ? S : never,
-    }),
-  cleanupProcessTree: (target, options) => killProcessTreeAsync(target, options),
-  killProcessTree: (target) => killProcessTree(target),
+    });
+    if (process.platform === "win32" && child.pid !== undefined &&
+        path.win32.isAbsolute(command) && /^bash\.exe$/i.test(path.win32.basename(command))) {
+      const dir = path.win32.dirname(command);
+      const psPath = [path.win32.join(dir, "ps.exe"), path.win32.join(dir, "..", "usr", "bin", "ps.exe")].find(existsSync);
+      if (psPath) {
+        const pid = child.pid;
+        msysProcesses.set(pid, { child, psPath });
+        child.once("close", () => {
+          if (msysProcesses.get(pid)?.child === child) msysProcesses.delete(pid);
+        });
+      }
+    }
+    return child;
+  },
+  cleanupProcessTree: (target, options) => killProcessTreeAsync(localProcessTarget(target), options),
+  killProcessTree: (target) => killProcessTree(localProcessTarget(target)),
   reapProcessWrapper: (target) => reapProcessWrapper(target),
 };
 

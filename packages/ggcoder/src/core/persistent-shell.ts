@@ -12,7 +12,7 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ForegroundExecutionReason } from "../types.js";
-import type { ProcessTarget } from "../utils/process.js";
+
 import {
   BOUNDED_OUTPUT_MAX_LINES,
   BoundedOutputTail,
@@ -59,7 +59,7 @@ export class PersistentShell {
   private child: ChildProcess | null = null;
   private busy = false;
   private closing = false;
-  private readonly owned = new Map<ChildProcess, Promise<void>>();
+  private readonly owned = new Map<ChildProcess, { closed: Promise<void>; cleanup?: Promise<void> }>();
 
   constructor(
     private readonly cwd: string,
@@ -70,15 +70,27 @@ export class PersistentShell {
     private readonly launch?: ShellResolution,
   ) {}
 
-  private startCleanup(target: ProcessTarget): void {
-    void Promise.resolve()
-      .then(() => this.lifecycle.cleanupProcessTree(target))
-      .catch((error: unknown) => {
-        log("WARN", "bash", "Persistent process-tree cleanup failed", {
-          pid: String(target.pid),
-          error: error instanceof Error ? error.message : String(error),
-        });
+  private startCleanup(child: ChildProcess): Promise<void> {
+    const owned = this.owned.get(child);
+    if (!owned) return Promise.resolve();
+    if (owned.cleanup) return owned.cleanup;
+    // Timeout, kill and shutdown share one confirmed cleanup per child. Keep
+    // failures owned even after close so shutdown cannot silently pass them.
+    owned.cleanup = Promise.resolve().then(async () => {
+      if (child.pid !== undefined) await this.lifecycle.cleanupProcessTree({
+        pid: child.pid,
+        isExited: () => child.exitCode !== null || child.signalCode !== null,
+      }, { requireSettlement: true });
+      await owned.closed;
+      this.owned.delete(child);
+    });
+    void owned.cleanup.catch((error: unknown) => {
+      log("WARN", "bash", "Persistent process-tree cleanup failed", {
+        pid: String(child.pid),
+        error: error instanceof Error ? error.message : String(error),
       });
+    });
+    return owned.cleanup;
   }
 
   /** True while a previous persistent command is still running. */
@@ -103,10 +115,10 @@ export class PersistentShell {
       env: this.env,
       detached: process.platform !== "win32",
     });
-    this.owned.set(child, new Promise((resolve) => child.once("close", () => {
-      this.owned.delete(child);
+    this.owned.set(child, { closed: new Promise((resolve) => child.once("close", () => {
+      if (!this.owned.get(child)?.cleanup) this.owned.delete(child);
       resolve();
-    })));
+    })) });
     // Don't let a lingering session shell keep the parent process alive.
     child.unref();
     this.child = child;
@@ -178,7 +190,9 @@ export class PersistentShell {
     // `</dev/null` keeps stdin-reading commands (cat, read) from eating the
     // next sentinel line instead of hanging the session. Merge command stderr
     // into stdout so the sentinel is ordered after every command output byte.
-    const wrapped = `{ ${command}\n} </dev/null 2>&1; echo "${sentinelText}$?"\n`;
+    // Prior calls and explicit launches may have disabled pipefail. Restore it
+    // before every command so bounded checks cannot inherit false success.
+    const wrapped = `set -o pipefail && { ${command}\n} </dev/null 2>&1; echo "${sentinelText}$?"\n`;
 
     return new Promise<PersistentRunResult>((resolve) => {
       const outputTail = new BoundedOutputTail(BOUNDED_OUTPUT_MAX_LINES, this.maxOutputBytes);
@@ -356,10 +370,7 @@ export class PersistentShell {
         if (done) return;
         if (this.child === child) this.child = null;
         if (child.pid !== undefined) {
-          this.startCleanup({
-            pid: child.pid,
-            isExited: () => child.exitCode !== null || child.signalCode !== null,
-          });
+          void this.startCleanup(child);
         }
         finish(reason, null, child.signalCode);
       };
@@ -414,10 +425,7 @@ export class PersistentShell {
   kill(): void {
     const childToKill = this.takeChild();
     if (childToKill?.pid !== undefined) {
-      this.startCleanup({
-        pid: childToKill.pid,
-        isExited: () => childToKill.exitCode !== null || childToKill.signalCode !== null,
-      });
+      void this.startCleanup(childToKill);
     }
   }
 
@@ -425,13 +433,7 @@ export class PersistentShell {
   async shutdownAndWait(): Promise<void> {
     this.closing = true;
     this.takeChild();
-    await Promise.all([...this.owned].map(async ([child, closed]) => {
-      if (child.pid !== undefined) await this.lifecycle.cleanupProcessTree({
-        pid: child.pid,
-        isExited: () => child.exitCode !== null || child.signalCode !== null,
-      }, { requireSettlement: true });
-      await closed;
-    }));
+    await Promise.all([...this.owned.keys()].map((child) => this.startCleanup(child)));
   }
 
   /** Immediately kill the session tree from synchronous process-exit hooks. */

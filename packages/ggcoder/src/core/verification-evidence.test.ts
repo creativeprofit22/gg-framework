@@ -255,14 +255,14 @@ describe("classifyVerificationCommand", () => {
   });
 
   it.each([
-    "go.exe test ./... | cat",
-    "go.exe test ./... || echo ignored",
-    "go.exe test ./...; echo ignored",
-  ])("rejects Windows Go checks with unsafe control operators: %s", (command) => {
+    ["go.exe test ./... | cat", "pipe stage can transform check results"],
+    ["go.exe test ./... || echo ignored", "shell control operator can hide a failed check"],
+    ["go.exe test ./...; echo ignored", "shell control operator can hide a failed check"],
+  ])("rejects Windows Go checks with unsafe control operators: %s", (command, reason) => {
     expect(classifyVerificationCommand(command)).toMatchObject({
       accepted: false,
       candidate: true,
-      reason: expect.stringContaining("control operator"),
+      reason,
     });
   });
 

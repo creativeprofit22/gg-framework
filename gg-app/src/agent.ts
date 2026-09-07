@@ -7,7 +7,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
-import { continuationInstructionError, requireAskUserAcknowledgement } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  continuationInstructionError,
+  requireAskUserAcknowledgement,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import type {
   ContinuationPrepareResponse,
   ContinuationCommitRequest,

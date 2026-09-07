@@ -562,7 +562,12 @@ async function openTasksModal(pane: PaneAgentClient): Promise<void> {
 }
 
 describe("AgentPane question acknowledgement", () => {
-  const question = { id: "approval", kind: "choice", question: "Allow this action?", options: [{ label: "Allow action", value: "allow" }] };
+  const question = {
+    id: "approval",
+    kind: "choice",
+    question: "Allow this action?",
+    options: [{ label: "Allow action", value: "allow" }],
+  };
 
   it("does not show sent until acknowledged, and leaves refusal unsent", async () => {
     nativeMocks.realMentor = true;
@@ -594,7 +599,10 @@ describe("AgentPane question acknowledgement", () => {
     await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
     act(() => {
       emit("ask_user", { id: "ask-1", questions: [question] });
-      emit("ask_user", { id: "ask-2", questions: [{ ...question, options: [{ label: "Other action" }] }] });
+      emit("ask_user", {
+        id: "ask-2",
+        questions: [{ ...question, options: [{ label: "Other action" }] }],
+      });
       emit("ask_user_settled", { id: "ask-1", action: "cancel" });
       emit("run_end", {});
     });

@@ -1166,10 +1166,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         case "ask_user_settled":
           if (!isAskUserSettledEvent(d)) break;
-          setItems((previous) => previous.map((item) => {
-            if (item.kind !== "ask" || item.prompt.id !== d.id || item.sent || item.cancelled) return item;
-            return d.action === "cancel" ? { ...item, cancelled: true } : { ...item, sent: true };
-          }));
+          setItems((previous) =>
+            previous.map((item) => {
+              if (item.kind !== "ask" || item.prompt.id !== d.id || item.sent || item.cancelled)
+                return item;
+              return d.action === "cancel" ? { ...item, cancelled: true } : { ...item, sent: true };
+            }),
+          );
           break;
 
         case "ask_user":

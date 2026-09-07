@@ -2051,6 +2051,12 @@ export class ProjectNotesRepository {
       ) {
         return { status: "stale-session" };
       }
+      const lastStatus = [...currentPhase.lifecycleEvents]
+        .reverse()
+        .find((event) => event.toStatus !== null)?.toStatus;
+      const awaitingDecision = [currentPhase.status, lastStatus].some(
+        (status) => status === "waiting-for-approval" || status === "needs-attention",
+      );
       if (request.transition === "done") {
         if (request.verification !== "passed" || request.expectedRevision === undefined) {
           return {
@@ -2059,14 +2065,7 @@ export class ProjectNotesRepository {
             message: "Done requires passed verification and a current expected revision.",
           };
         }
-        const lastStatus = [...currentPhase.lifecycleEvents]
-          .reverse()
-          .find((event) => event.toStatus !== null)?.toStatus;
-        if (
-          [currentPhase.status, lastStatus].some(
-            (status) => status === "waiting-for-approval" || status === "needs-attention",
-          )
-        ) {
+        if (awaitingDecision) {
           return { status: "operation-conflict", revision };
         }
       }
@@ -2106,6 +2105,9 @@ export class ProjectNotesRepository {
             kind: "other",
           });
         }
+      } else if (awaitingDecision) {
+        // Progress is evidence, not authorization to resolve an approval or attention request.
+        statusOutcome = phase.overrides.status !== null ? "manual-override" : "evidence-only";
       } else {
         const targetStatus = notesPhaseStatusForRoadmapTransition(request.transition);
         if (targetStatus === "done")

@@ -1,3 +1,4 @@
+import type { AskUserSettledEvent } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { createParkedRequests, type ParkedRequests } from "./parked-requests.js";
 
 /**
@@ -54,11 +55,13 @@ export type AskUserBridge = ParkedRequests<AskUserRequest, AskUserResult>;
 export function createAskUserBridge(opts: {
   broadcast: (prompt: AskUserPrompt) => void;
   onTimeout?: (prompt: AskUserPrompt) => void;
+  onSettled?: (event: AskUserSettledEvent) => void;
   timeoutMs?: number;
 }): AskUserBridge {
   return createParkedRequests<AskUserRequest, AskUserResult>({
     idPrefix: "ask",
     broadcast: opts.broadcast,
+    onSettled: (id, result) => opts.onSettled?.({ id, action: result.action }),
     cancelValue: () => ({ action: "cancel" }),
     timeoutMs: opts.timeoutMs ?? ASK_USER_TIMEOUT_MS,
     ...(opts.onTimeout ? { onTimeout: opts.onTimeout } : {}),

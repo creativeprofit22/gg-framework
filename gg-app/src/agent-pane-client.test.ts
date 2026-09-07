@@ -19,6 +19,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
 import {
   createPaneAgentClient,
+  answerAskUser,
   getState,
   isRoadmapPhaseDraftChangeEvent,
   PlanMutationError,
@@ -72,6 +73,27 @@ describe("pane agent client", () => {
         return { ok: true, operationId: "plan-revise-op" };
       }
       return {};
+    });
+  });
+
+  it.each(["primary", "right"])("requires an ask acknowledgement for %s", async (paneId) => {
+    const submit = () => paneId === "primary"
+      ? answerAskUser("ask-1", "answer", { approval: "allow" })
+      : createPaneAgentClient(paneId).answerAskUser("ask-1", "answer", { approval: "allow" });
+    const ready = invoke.getMockImplementation()!;
+    for (const body of [null, {}, { error: "no question is awaiting an answer" }, { ok: false }, { ok: true, error: "refused" }]) {
+      invoke.mockImplementation(async (command, args) => command === "agent_ask_user" ? body : ready(command, args));
+      await expect(submit()).rejects.toThrow("not acknowledged");
+    }
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "agent_ask_user") throw new Error("no question is awaiting an answer");
+      return ready(command, args);
+    });
+    await expect(submit()).rejects.toThrow("no question is awaiting an answer");
+    invoke.mockImplementation(async (command, args) => command === "agent_ask_user" ? { ok: true } : ready(command, args));
+    await expect(submit()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("agent_ask_user", {
+      paneId, id: "ask-1", action: "answer", answers: { approval: "allow" },
     });
   });
 

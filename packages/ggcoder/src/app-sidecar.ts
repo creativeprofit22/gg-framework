@@ -353,7 +353,7 @@ import {
   type SessionMutationOwner,
 } from "./app-sidecar-session-mutation.js";
 import { AppSidecarContinuationSession, parseContinuationCommitRequest } from "./app-sidecar-continuation-session.js";
-import type { ContinuationCommitResponse, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type { AskUserAcknowledgement, ContinuationCommitResponse, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
@@ -2192,6 +2192,7 @@ async function createSession(
   // answer, so the tool is absent there rather than hanging on a dead channel.
   const asks = createAskUserBridge({
     broadcast: (prompt) => broadcast("ask_user", prompt),
+    onSettled: (event) => broadcast("ask_user_settled", event),
     onTimeout: (prompt) => log("WARN", "app-sidecar", "ask_user timed out", { id: prompt.id }),
   });
   const askUserTool = createAskUserTool(asks.park);
@@ -7049,7 +7050,7 @@ ${checkpoints}`;
           json(res, 409, { error: "no question is awaiting an answer" });
           return;
         }
-        json(res, 200, { ok: true });
+        json(res, 200, { ok: true } satisfies AskUserAcknowledgement);
       });
       return;
     }

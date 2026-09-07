@@ -1776,6 +1776,19 @@ describe("models_change", () => {
       ]);
     });
 
+    it("closes only the host-settled question across an ordinary run end", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        for (const id of ["ask-1", "ask-2"]) {
+          hook.result.current.handleEvent(ev("ask_user", { id, questions: [question] }));
+        }
+        hook.result.current.handleEvent(ev("ask_user_settled", { id: "ask-1", action: "cancel" }));
+        hook.result.current.handleEvent(ev("run_end", {}));
+      });
+      expect(getItems()[0]).toMatchObject({ cancelled: true });
+      expect(getItems()[1]).not.toHaveProperty("cancelled", true);
+    });
+
     it("drops a malformed frame instead of rendering an unanswerable band", () => {
       const { hook, getItems } = setup();
       act(() => {

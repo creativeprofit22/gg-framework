@@ -21,6 +21,7 @@ import {
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { isAskUserPrompt } from "./ask-user";
+import { isAskUserSettledEvent } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -1045,7 +1046,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // The queue drained into this run — un-dim any messages that were
           // waiting, since the agent has now consumed them.
           //
-          // A question band closes ONLY on a cancelled run, which is the case
+          // A run boundary closes question bands only on cancellation, when
           // the sidecar answers with `asks.cancelAll()`. A plain run_end must
           // leave it live: autopilot emits one per injected round while the
           // parked tool call is still waiting, so closing here would kill a
@@ -1163,6 +1164,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
           break;
+        case "ask_user_settled":
+          if (!isAskUserSettledEvent(d)) break;
+          setItems((previous) => previous.map((item) => {
+            if (item.kind !== "ask" || item.prompt.id !== d.id || item.sent || item.cancelled) return item;
+            return d.action === "cancel" ? { ...item, cancelled: true } : { ...item, sent: true };
+          }));
+          break;
+
         case "ask_user":
           // The agent's turn is parked on this question until App POSTs the
           // answers back (or the run ends and `run_end` closes the band). A

@@ -2655,22 +2655,26 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [queuedMessages, supersedingText],
   );
 
+  const pendingAskAnswers = useRef(new Set<number>());
   const handleAskAnswer = useCallback(
     (itemId: number, promptId: string, delta: Record<string, string | string[]>): void => {
-      setItems((current) =>
-        current.map((item) => {
-          if (item.kind !== "ask" || item.id !== itemId || item.sent || item.cancelled) return item;
-          const merged = mergeAskAnswers(item.answers, delta, item.prompt.questions);
-          if (merged.complete) {
-            void client
-              .answerAskUser(promptId, "answer", merged.answers)
-              .catch((error) => setStatus(`could not answer question: ${String(error)}`));
-          }
-          return { ...item, answers: merged.answers, sent: merged.complete || undefined };
-        }),
-      );
+      const item = items.find((candidate) => candidate.id === itemId);
+      if (!item || item.kind !== "ask" || item.prompt.id !== promptId || item.sent || item.cancelled || pendingAskAnswers.current.has(itemId)) return;
+      const merged = mergeAskAnswers(item.answers, delta, item.prompt.questions);
+      setItems((current) => current.map((candidate) =>
+        candidate === item ? { ...item, answers: merged.answers } : candidate,
+      ));
+      if (!merged.complete) return;
+      pendingAskAnswers.current.add(itemId);
+      void client.answerAskUser(promptId, "answer", merged.answers)
+        .then(() => setItems((current) => current.map((candidate) =>
+          candidate.kind === "ask" && candidate.id === itemId && candidate.prompt.id === promptId && !candidate.cancelled
+            ? { ...candidate, sent: true } : candidate,
+        )))
+        .catch((error) => setStatus(`could not answer question: ${String(error)}`))
+        .finally(() => pendingAskAnswers.current.delete(itemId));
     },
-    [client],
+    [client, items],
   );
 
   const handleAskType = useCallback(

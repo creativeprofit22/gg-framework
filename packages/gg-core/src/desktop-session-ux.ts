@@ -1,3 +1,28 @@
+/** Host settlement of one question, independent of parent run boundaries. */
+export interface AskUserSettledEvent {
+  id: string;
+  action: "answer" | "cancel";
+}
+
+export function isAskUserSettledEvent(value: unknown): value is AskUserSettledEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as Record<string, unknown>;
+  return typeof event.id === "string" && event.id.length > 0 &&
+    (event.action === "answer" || event.action === "cancel");
+}
+
+/** Successful /ask acknowledgement; absence of this is never authorization. */
+export interface AskUserAcknowledgement {
+  ok: true;
+}
+
+export function requireAskUserAcknowledgement(value: unknown): AskUserAcknowledgement {
+  if (value && typeof value === "object" && "ok" in value && value.ok === true && !("error" in value)) {
+    return { ok: true };
+  }
+  throw new Error("The question answer was not acknowledged.");
+}
+
 /** Interactive mentor authority; never inferred from drafts, models or run events. */
 export interface KenTarget {
   conversationId: string;

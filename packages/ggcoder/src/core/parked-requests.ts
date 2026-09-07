@@ -34,6 +34,8 @@ export interface ParkedRequestsOptions<Req, Res> {
   cancelValue: () => Res;
   /** How long a request waits for the user before auto-cancelling. */
   timeoutMs: number;
+  /** Called once after removing a settled request, including timeout/teardown. Must not throw. */
+  onSettled?: (id: string, result: Res) => void;
   /** Called when a request auto-cancels on timeout, for logging. */
   onTimeout?: (prompt: Req & { id: string }) => void;
 }
@@ -53,6 +55,7 @@ export function createParkedRequests<Req extends object, Res>(
     pending.delete(id);
     clearTimeout(entry.timer);
     entry.resolve(result);
+    opts.onSettled?.(id, result);
     return true;
   };
 

@@ -4035,6 +4035,25 @@ async fn agent_mcp_elicit(
         .map_err(|e| e.to_string())
 }
 
+fn parse_ask_user_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    let value = parse_sidecar_json_response(status, body)?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
+        || value.get("error").is_some()
+    {
+        return Err("The question answer was not acknowledged.".to_string());
+    }
+    Ok(value)
+}
+
+async fn ask_user_response(res: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_ask_user_response(status, &body)
+}
+
 /// Proxy: answer an `ask_user` question band.
 ///
 /// `action` is `answer` | `cancel`; `answers` maps each question id to the
@@ -4058,9 +4077,7 @@ async fn agent_ask_user(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    ask_user_response(res).await
 }
 
 /// Proxy: disconnect a provider (clear its stored credentials).
@@ -11816,6 +11833,45 @@ mod tests {
         ] {
             assert_eq!(prompt_proxy_result(status, body), Err(expected.to_string()));
         }
+    }
+
+    #[test]
+    fn ask_user_response_rejects_mocked_http_409() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /ask/expired HTTP/1.1"));
+            let body = r#"{"error":"no question is awaiting an answer"}"#;
+            write!(stream, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let result = tauri::async_runtime::block_on(async {
+            let response = http_client_builder().build().unwrap()
+                .post(format!("http://{address}/ask/expired"))
+                .send().await.unwrap();
+            ask_user_response(response).await
+        });
+        server.join().unwrap();
+        assert_eq!(result, Err("no question is awaiting an answer".to_string()));
+    }
+
+    #[test]
+    fn ask_user_response_requires_successful_acknowledgement() {
+        assert_eq!(
+            parse_ask_user_response(reqwest::StatusCode::CONFLICT, r#"{"error":"no question is awaiting an answer"}"#),
+            Err("no question is awaiting an answer".to_string())
+        );
+        for body in ["{}", "null", r#"{"ok":false}"#, r#"{"ok":true,"error":"refused"}"#] {
+            assert!(parse_ask_user_response(reqwest::StatusCode::OK, body).is_err());
+        }
+        assert_eq!(
+            parse_ask_user_response(reqwest::StatusCode::OK, r#"{"ok":true}"#),
+            Ok(serde_json::json!({ "ok": true }))
+        );
     }
 
     #[test]

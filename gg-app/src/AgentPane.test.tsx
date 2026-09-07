@@ -410,6 +410,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
       prompt: CONTINUATION_PROMPT,
     })),
     cancel: vi.fn(),
+    answerAskUser: vi.fn(async () => {}),
     sendKenPrompt: vi.fn().mockResolvedValue(undefined),
     cancelKen: vi.fn().mockResolvedValue(undefined),
     setAutopilot: vi.fn(),
@@ -559,6 +560,52 @@ async function openTasksModal(pane: PaneAgentClient): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Tasks (1)" }));
   await screen.findByRole("dialog", { name: "Tasks" });
 }
+
+describe("AgentPane question acknowledgement", () => {
+  const question = { id: "approval", kind: "choice", question: "Allow this action?", options: [{ label: "Allow action", value: "allow" }] };
+
+  it("does not show sent until acknowledged, and leaves refusal unsent", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-ack", 1);
+    const emit = liveEvents(pane);
+    const acknowledgement = deferred<void>();
+    vi.mocked(pane.answerAskUser).mockReturnValueOnce(acknowledgement.promise);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+    fireEvent.click(await screen.findByRole("button", { name: /Allow action/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".ask-band.is-done")).toBeNull();
+    await act(async () => acknowledgement.reject(new Error("no question is awaiting an answer")));
+    expect(container.querySelector(".ask-band.is-done")).toBeNull();
+    expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
+  });
+
+  it("host expiry closes only its card and disables click and keyboard answers", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-expiry", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => {
+      emit("ask_user", { id: "ask-1", questions: [question] });
+      emit("ask_user", { id: "ask-2", questions: [{ ...question, options: [{ label: "Other action" }] }] });
+      emit("ask_user_settled", { id: "ask-1", action: "cancel" });
+      emit("run_end", {});
+    });
+    expect(container.querySelectorAll(".ask-band.is-closed")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Other action/ })).toBeTruthy();
+    act(() => emit("ask_user_settled", { id: "ask-2", action: "cancel" }));
+    fireEvent.keyDown(document, { key: "1" });
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+  });
+});
 
 describe("AgentPane task request failures", () => {
   it("keeps the current tasks visible when refreshing the list fails", async () => {
@@ -805,7 +852,9 @@ describe("AgentPane lifecycle", () => {
       { id: "missing", provider: "openai", name: "Missing" },
     ]);
     vi.mocked(pane.switchKenModel).mockRejectedValue(message);
-    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await act(async () => {
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    });
     const picker = await screen.findByTitle(/is pinned to a separate model/);
     fireEvent.click(picker);
     fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));

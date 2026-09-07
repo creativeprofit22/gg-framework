@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
-import { continuationInstructionError } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { continuationInstructionError, requireAskUserAcknowledgement } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type {
   ContinuationPrepareResponse,
   ContinuationCommitRequest,
@@ -1557,7 +1557,9 @@ export async function answerAskUser(
   answers?: Record<string, string | string[]>,
 ): Promise<void> {
   await waitForReady();
-  await invoke("agent_ask_user", { paneId: "primary", id, action, answers: answers ?? null });
+  requireAskUserAcknowledgement(
+    await invoke("agent_ask_user", { paneId: "primary", id, action, answers: answers ?? null }),
+  );
 }
 
 /**
@@ -3431,7 +3433,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     answerAskUser: async (id, action, answers) => {
       await ready();
-      await call("agent_ask_user", { id, action, answers: answers ?? null });
+      requireAskUserAcknowledgement(
+        await call("agent_ask_user", { id, action, answers: answers ?? null }),
+      );
     },
     async cancel() {
       try {

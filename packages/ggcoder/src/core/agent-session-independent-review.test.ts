@@ -5,7 +5,10 @@ import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats } from "./ideal-review.js";
-import { REVIEWER_TOOLS } from "./ideal-review-subagent.js";
+import { REVIEWER_TOOLS, REVIEWER_WAIT_MS } from "./ideal-review-subagent.js";
+import { SubAgentManager } from "./subagent-manager.js";
+import { fileURLToPath } from "node:url";
+import { createReadTool } from "../tools/read.js";
 
 interface ReviewInternals {
   settingsManager: { get(key: string): boolean };
@@ -16,6 +19,12 @@ interface ReviewInternals {
   opts: { allowedTools?: string[] };
   subAgentManager?: unknown;
   independentReviewStarted: boolean;
+  originalRequest: string;
+  idealReviewPhase: string;
+  eventBus: { on(event: string, listener: (value: unknown) => void): () => void };
+  cwd: string;
+  reviewCoverage: { recordRead(filePath: string): void };
+  refreshHookArming(): void;
   getHookFollowUpMessages(): Promise<Message[] | null>;
 }
 
@@ -95,6 +104,75 @@ function fakeManager(output: string) {
 }
 
 describe("AgentSession independent Ideal reviewer", () => {
+  it.each([false, true])(
+    "exercises real worker initialization and unresolved-child ownership (refusal=%s)",
+    async (refuse) => {
+      const manager = new SubAgentManager({
+        cwd: makeWorkspace(),
+        agents: [],
+        getProvider: () => "anthropic",
+        getModel: () => "claude-sonnet-5",
+        getThinkingLevel: () => undefined,
+        workerEntry: fileURLToPath(
+          new URL("../tools/__fixtures__/fake-subagent-worker.mjs", import.meta.url),
+        ),
+      });
+      const internal = makeSession(highStakesStats, manager);
+      internal.model = "claude-opus-4-6";
+      internal.originalRequest = refuse ? "fixture:reject-interrupt" : "fixture:review-initialize";
+      const armed: unknown[] = [];
+      internal.eventBus.on("hook_armed", (event) => armed.push(event));
+      internal.refreshHookArming();
+      const realWait = manager.wait.bind(manager);
+      let armedAtWait: unknown[] = [];
+      const wait = vi.spyOn(manager, "wait").mockImplementation((ids, condition) => {
+        // Exercise real waiting/collection; only shorten the fixture's clock budget.
+        armedAtWait = [...armed];
+        return realWait(ids, condition, refuse ? 20 : 2_000);
+      });
+      try {
+        const messages = await internal.getHookFollowUpMessages();
+        expect(wait).toHaveBeenCalledWith([manager.list()[0]!.agent_id], "all", REVIEWER_WAIT_MS);
+        expect(armedAtWait).toContainEqual({ kind: "ideal", armed: true });
+        expect(internal.idealReviewPhase).toBe("reviewing");
+        if (refuse) {
+          expect(messages?.[0]?.content).toContain("Ideal?");
+          expect(manager.list()[0]).toMatchObject({ state: "running", collected: false });
+          expect(manager.completionGate().unresolved).toBe(1);
+          expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain(
+            "Child-agent completion gate",
+          );
+        } else {
+          const output = manager.list()[0]!.output!;
+          const options = JSON.parse(output.slice(output.indexOf("{")));
+          expect(options.model).toBe("claude-opus-4-6");
+          expect(options.allowedTools).toEqual([...REVIEWER_TOOLS]);
+          expect(options.allowedTools).not.toContain("spawn_agent");
+          expect(options.allowedTools).not.toContain("bash");
+          expect(messages?.[0]?.content).toContain("worker initialization");
+          expect(manager.completionGate().unresolved).toBe(0);
+          // A reviewer response (and its own tool events) is never a parent's file read.
+          expect((await internal.getHookFollowUpMessages())?.[0]?.content).toContain("src/a.ts");
+          expect(internal.idealReviewPhase).toBe("reviewing");
+          const read = createReadTool(internal.cwd, undefined, undefined, (file) =>
+            internal.reviewCoverage.recordRead(file),
+          );
+          const result = await read.execute(
+            { file_path: "src/a.ts" },
+            { toolCallId: "parent-read", signal: new AbortController().signal },
+          );
+          expect(result).toContain("export const value = 1;");
+          expect(await internal.getHookFollowUpMessages()).toBeNull();
+          expect(internal.idealReviewPhase).toBe("complete");
+        }
+        expect(manager.list()).toHaveLength(1);
+      } finally {
+        wait.mockRestore();
+        await manager.shutdownAll();
+        await manager.waitForPersistence();
+      }
+    },
+  );
   it("spawns on the ACTIVE model with read-only tools and prepends findings", async () => {
     const manager = fakeManager(
       "VERDICT: ISSUES\nFINDINGS:\n- src/a.ts: value should be validated before export",

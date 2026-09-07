@@ -109,6 +109,11 @@ describe("VerificationGate", () => {
     expect(gate.followUp()).toBeNull();
     gate.beginRun();
     expect(gate.verificationProblem()).toContain("failed");
+    // Question turns are quiet, not approved. Resuming work re-arms the same debt.
+    expect(gate.followUp()).toBeNull();
+    gate.requireFreshVerification(true, "a mutating command resumed work");
+    expect(gate.verificationProblem()).toContain("failed");
+    gate.recordFailedVerification(command);
     expect(gate.followUp()).not.toBeNull();
     expect(gate.followUp()).toBeNull();
     gate.recordVerification(gate.revision, "pnpm --filter gg-app check");
@@ -657,7 +662,9 @@ describe("VerificationGate tamper disclosure (bench 18 replay)", () => {
     expect(reminder).toContain("Re-run the affected checks against these changes");
     expect(reminder).toContain("- src/parser.ts");
     expect(reminder).not.toContain("- src/parser.test.ts");
-    expect(reminder).toContain("Do not describe the change as tested or working without having run it");
+    expect(reminder).toContain(
+      "Do not describe the change as tested or working without having run it",
+    );
     expect(gate.followUp()).toBeNull();
   });
 

@@ -4,6 +4,8 @@ import { createInterface } from "node:readline";
 let running = false;
 let timer;
 let contextTurns = 0;
+let initializeOptions;
+let rejectInterrupt = false;
 
 const emit = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
 const ack = (frame, extra = {}) =>
@@ -23,6 +25,7 @@ const complete = (status = "completed", output = `turn-${contextTurns}`) => {
 createInterface({ input: process.stdin }).on("line", (line) => {
   const frame = JSON.parse(line);
   if (frame.command === "initialize") {
+    initializeOptions = frame.options;
     // Named agents arrive as `agentPrompt` (composed with the standard prompt
     // scaffolding); `systemPrompt` remains the full-replacement path.
     const prompt = frame.options?.agentPrompt ?? frame.options?.systemPrompt;
@@ -58,6 +61,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         usage: { inputTokens: 10, outputTokens: 2, cacheRead: 20, cacheWrite: 5 },
       },
     });
+    if (frame.task.includes("fixture:reject-interrupt")) {
+      rejectInterrupt = true;
+      return;
+    }
+    if (frame.task.includes("fixture:review-initialize")) {
+      timer = setTimeout(
+        () =>
+          complete(
+            "completed",
+            `VERDICT: ISSUES\nFINDINGS:\n- worker initialization: ${JSON.stringify(initializeOptions)}`,
+          ),
+        15,
+      );
+      return;
+    }
     const delay = /slow/.test(frame.task) ? 150 : 15;
     timer = setTimeout(() => complete("completed", `${frame.task}|context:${contextTurns}`), delay);
     return;
@@ -67,6 +85,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (frame.command === "interrupt") {
+    if (rejectInterrupt) {
+      emit({
+        type: "ack",
+        request_id: frame.request_id,
+        ok: false,
+        error: "fixture interruption refused",
+      });
+      return;
+    }
     ack(frame);
     complete("interrupted", "partial");
     return;

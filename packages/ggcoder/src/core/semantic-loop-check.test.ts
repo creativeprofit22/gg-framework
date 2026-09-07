@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSemanticLoopJudgePrompt,
   buildSemanticLoopMessage,
@@ -6,6 +6,7 @@ import {
   parseSemanticLoopVerdict,
   shouldRunSemanticLoopCheck,
   SEMANTIC_LOOP_COOLDOWN_TURNS,
+  withJudgeTimeout,
   type SemanticCallDigest,
 } from "./semantic-loop-check.js";
 
@@ -24,6 +25,49 @@ const calls: SemanticCallDigest[] = [
     result: "Exit code: 1\n3 tests failed",
   },
 ];
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("owned judge deadline", () => {
+  it.each([false, true])(
+    "removes deadline and cancellation listeners after settlement (failure=%s)",
+    async (fail) => {
+      vi.useFakeTimers();
+      const parent = new AbortController();
+      const owned = new AbortController();
+      const removeParent = vi.spyOn(parent.signal, "removeEventListener");
+      const removeOwned = vi.spyOn(owned.signal, "removeEventListener");
+      const result = withJudgeTimeout(
+        async () => {
+          if (fail) throw new Error("judge failed");
+          return "ok";
+        },
+        owned,
+        parent.signal,
+      );
+      if (fail) await expect(result).rejects.toThrow("judge failed");
+      else await expect(result).resolves.toBe("ok");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(removeParent).toHaveBeenCalledWith("abort", expect.any(Function));
+      expect(removeOwned).toHaveBeenCalledWith("abort", expect.any(Function));
+      parent.abort();
+      expect(owned.signal.aborted).toBe(false);
+    },
+  );
+
+  it("never starts a judge for an already cancelled run", async () => {
+    const parent = new AbortController();
+    parent.abort();
+    const owned = new AbortController();
+    const operation = vi.fn(async () => "unused");
+    await expect(withJudgeTimeout(operation, owned, parent.signal)).rejects.toThrow();
+    expect(owned.signal.aborted).toBe(true);
+    expect(operation).not.toHaveBeenCalled();
+  });
+});
 
 describe("shouldRunSemanticLoopCheck", () => {
   const base = {

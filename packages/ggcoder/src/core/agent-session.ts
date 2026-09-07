@@ -157,7 +157,6 @@ import {
   MAX_SEMANTIC_LOOP_CALLS,
   parseSemanticLoopVerdict,
   shouldRunSemanticLoopCheck,
-  SEMANTIC_LOOP_JUDGE_TIMEOUT_MS,
   withJudgeTimeout,
   type SemanticCallDigest,
   type SemanticLoopVerdict,
@@ -381,7 +380,7 @@ export interface AgentSessionOptions {
   /** Override the semantic-loop judge LLM call (tests). Receives the finished
    *  prompt, returns the model's raw reply. Default: one-shot `stream()` call
    *  on the session's ACTIVE model. */
-  semanticLoopJudge?: (prompt: string) => Promise<string>;
+  semanticLoopJudge?: (prompt: string, signal: AbortSignal) => Promise<string>;
   /** Load project skills/agents and create local .gg directories. Defaults to true. */
   projectCustomization?: boolean;
   /** Register global + bundled subagents without loading project customization. */
@@ -563,6 +562,7 @@ export class AgentSession {
     pending: boolean;
     verdict: SemanticLoopVerdict | null;
     injected: boolean;
+    controller?: AbortController;
   } = { checksUsed: 0, lastCheckTurn: 0, pending: false, verdict: null, injected: false };
   /** Independent Ideal reviewer spawned once per run (score-gated). */
   private independentReviewStarted = false;
@@ -1687,6 +1687,7 @@ export class AgentSession {
    * is the verbatim user ask, pinned for post-compaction re-grounding.
    */
   private resetHookState(originalRequest: string): void {
+    this.semanticLoop.controller?.abort();
     this.hookStats = {
       changedLines: 0,
       toolCalls: 0,
@@ -2162,6 +2163,8 @@ export class AgentSession {
     // not publish a verdict or consume the next run's budget/cooldown.
     const runState = this.semanticLoop;
     runState.pending = true;
+    const controller = new AbortController();
+    runState.controller = controller;
     log("INFO", "loop-break", "Starting semantic loop judge", {
       turn: String(this.hookStats.turns),
       consecutiveFailures: String(this.hookConsecutiveFailures),
@@ -2170,10 +2173,17 @@ export class AgentSession {
     void (async () => {
       try {
         const prompt = buildSemanticLoopJudgePrompt(this.hookRecentCalls, this.originalRequest);
-        const raw = await (this.opts.semanticLoopJudge?.(prompt) ??
-          this.callSemanticLoopJudge(prompt));
+        const raw = await withJudgeTimeout(
+          (signal) =>
+            this.opts.semanticLoopJudge?.(prompt, signal) ??
+            this.callSemanticLoopJudge(prompt, signal),
+          controller,
+          this.opts.signal,
+        );
         const verdict = parseSemanticLoopVerdict(raw);
-        if (this.semanticLoop === runState && verdict?.loop) runState.verdict = verdict;
+        if (this.semanticLoop === runState && !controller.signal.aborted && verdict?.loop) {
+          runState.verdict = verdict;
+        }
       } catch (error) {
         // Fail open: judge errors never stop a run. Budget and cooldown are
         // still consumed in `finally` so a flaky judge cannot retry-loop.
@@ -2183,6 +2193,7 @@ export class AgentSession {
       } finally {
         if (this.semanticLoop === runState) {
           runState.pending = false;
+          runState.controller = undefined;
           runState.checksUsed += 1;
           runState.lastCheckTurn = this.hookStats.turns;
         }
@@ -2193,10 +2204,12 @@ export class AgentSession {
   /** One-shot judge call on the session's ACTIVE model — deliberately not a
    *  cheaper routing: judging a model's own failure patterns with a weaker
    *  model swaps false negatives for false positives. */
-  private async callSemanticLoopJudge(prompt: string): Promise<string> {
+  private async callSemanticLoopJudge(prompt: string, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
     const creds = await this.authStorage.resolveCredentials(this.provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
+    signal.throwIfAborted();
     const result = stream({
       provider: this.provider,
       model: this.model,
@@ -2206,9 +2219,9 @@ export class AgentSession {
       accountId: creds.accountId,
       projectId: creds.projectId,
       baseUrl: this.baseUrl ?? creds.baseUrl,
-      signal: this.opts.signal,
+      signal,
     });
-    const response = await withJudgeTimeout(result.response, SEMANTIC_LOOP_JUDGE_TIMEOUT_MS);
+    const response = await result.response;
     // Providers differ in reply shape: some return a bare string, others an
     // array of parts (glm-5.3 among them) — joining text parts covers both,
     // where the string-only branch silently dropped the whole verdict.
@@ -4934,6 +4947,7 @@ export class AgentSession {
 
   /** Replace the abort signal (e.g. after cancellation). */
   setSignal(signal: AbortSignal): void {
+    if (signal !== this.opts.signal) this.semanticLoop.controller?.abort();
     this.opts = { ...this.opts, signal };
     this.bindManagerCancellation(signal);
   }
@@ -5055,6 +5069,8 @@ export class AgentSession {
   }
 
   async dispose(beforeSessionReset?: () => Promise<void>, awaitProcesses = false): Promise<void> {
+    this.semanticLoop.controller?.abort();
+    this.semanticLoop.verdict = null;
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
     if (awaitProcesses) this.eventBus.removeAllListeners();
     const processes = awaitProcesses

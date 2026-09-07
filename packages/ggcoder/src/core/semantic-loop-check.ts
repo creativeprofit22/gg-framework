@@ -118,21 +118,34 @@ export function parseSemanticLoopVerdict(raw: string): SemanticLoopVerdict | nul
  *  a hung call must not pin memory or budget forever. */
 export const SEMANTIC_LOOP_JUDGE_TIMEOUT_MS = 20_000;
 
-export async function withJudgeTimeout<T>(response: Promise<T>, timeoutMs: number): Promise<T> {
+export async function withJudgeTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  controller: AbortController,
+  parentSignal?: AbortSignal,
+  timeoutMs = SEMANTIC_LOOP_JUDGE_TIMEOUT_MS,
+): Promise<T> {
+  const { signal } = controller;
+  const cancel = () => controller.abort(parentSignal?.reason);
+  let rejectAbort!: () => void;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
-      response,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Semantic loop judge timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-        timer.unref();
-      }),
-    ]);
+    parentSignal?.addEventListener("abort", cancel, { once: true });
+    if (parentSignal?.aborted) cancel();
+    signal.throwIfAborted();
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", rejectAbort, { once: true });
+    });
+    timer = setTimeout(
+      () => controller.abort(new Error(`Semantic loop judge timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref();
+    return await Promise.race([aborted, operation(signal)]);
   } finally {
     clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", cancel);
+    if (rejectAbort) signal.removeEventListener("abort", rejectAbort);
   }
 }
 

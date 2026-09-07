@@ -1,8 +1,18 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Message } from "@kenkaiiii/gg-ai";
+import { stream, StreamResult, type Message } from "@kenkaiiii/gg-ai";
+import { SEMANTIC_LOOP_JUDGE_TIMEOUT_MS } from "./semantic-loop-check.js";
+
+vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  stream: vi.fn(),
+}));
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 import { AgentSession } from "./agent-session.js";
 
 interface SemanticInternals {
@@ -60,6 +70,130 @@ function primeSuspicion(internal: SemanticInternals): void {
 }
 
 describe("AgentSession semantic loop check", () => {
+  it.each(["timeout", "reset", "cancel", "dispose"] as const)(
+    "aborts the underlying provider signal on %s, without publishing a verdict",
+    async (cause) => {
+      vi.useFakeTimers();
+      const parent = new AbortController();
+      const session = new AgentSession({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        cwd: makeWorkspace(),
+        transient: true,
+        systemPrompt: "test",
+        signal: parent.signal,
+      });
+      const internal = session as unknown as SemanticInternals & {
+        authStorage: { resolveCredentials(): Promise<object> };
+      };
+      internal.settingsManager = { get: () => true };
+      internal.authStorage = { resolveCredentials: vi.fn().mockResolvedValue({}) };
+      let finish!: (value: string) => void;
+      const pending = new Promise<string>((resolve) => {
+        finish = resolve;
+      });
+      vi.mocked(stream).mockClear();
+      vi.mocked(stream).mockImplementation(
+        () =>
+          new StreamResult(
+            (async function* () {
+              const content = await pending;
+              return {
+                message: { role: "assistant", content },
+                stopReason: "end_turn",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            })(),
+          ),
+      );
+      primeSuspicion(internal);
+      internal.getHookSteeringMessages();
+      await vi.advanceTimersByTimeAsync(0);
+      const options = vi.mocked(stream).mock.calls[0]![0];
+      expect(options.model).toBe("claude-sonnet-5");
+      expect(options.signal?.aborted).toBe(false);
+      if (cause === "timeout") await vi.advanceTimersByTimeAsync(SEMANTIC_LOOP_JUDGE_TIMEOUT_MS);
+      if (cause === "reset") internal.resetHookState("Another question");
+      if (cause === "cancel") parent.abort();
+      if (cause === "dispose") await session.dispose();
+      expect(options.signal?.aborted).toBe(true);
+      finish('{"loop":true,"reason":"late","advice":"retry"}');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(internal.semanticLoop.verdict).toBeNull();
+      expect(internal.semanticLoop.pending).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      if (cause !== "dispose") await session.dispose();
+    },
+  );
+
+  it("includes credential resolution in the deadline and prevents a late provider call", async () => {
+    vi.useFakeTimers();
+    const internal = makeSession(async () => "unused") as SemanticInternals & {
+      opts: { semanticLoopJudge?: unknown };
+      authStorage: { resolveCredentials(): Promise<object> };
+    };
+    internal.opts.semanticLoopJudge = undefined;
+    let resolve!: (credentials: object) => void;
+    internal.authStorage = {
+      resolveCredentials: () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    };
+    vi.mocked(stream).mockClear();
+    primeSuspicion(internal);
+    internal.getHookSteeringMessages();
+    await vi.advanceTimersByTimeAsync(SEMANTIC_LOOP_JUDGE_TIMEOUT_MS);
+    expect(internal.semanticLoop.pending).toBe(false);
+    resolve({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stream).not.toHaveBeenCalled();
+    expect(internal.semanticLoop.verdict).toBeNull();
+  });
+
+  it("accepts provider text parts through the real stream response seam", async () => {
+    const internal = makeSession(async () => "unused") as SemanticInternals & {
+      opts: { semanticLoopJudge?: unknown };
+      authStorage: { resolveCredentials(): Promise<object> };
+    };
+    internal.opts.semanticLoopJudge = undefined;
+    internal.authStorage = { resolveCredentials: async () => ({}) };
+    vi.mocked(stream).mockImplementation(
+      () =>
+        new StreamResult(
+          (async function* () {
+            return {
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "text",
+                    text: '{"loop":true,"reason":"same failures","advice":"inspect first"}',
+                  },
+                ],
+              },
+              stopReason: "end_turn",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          })(),
+        ),
+    );
+    primeSuspicion(internal);
+    internal.getHookSteeringMessages();
+    await vi.waitFor(() => expect(internal.semanticLoop.pending).toBe(false));
+    expect(internal.getHookSteeringMessages()?.[0]?.content).toContain("inspect first");
+  });
+
+  it("bounds the injected judge too", async () => {
+    vi.useFakeTimers();
+    const internal = makeSession(() => new Promise<string>(() => {}));
+    primeSuspicion(internal);
+    internal.getHookSteeringMessages();
+    await vi.advanceTimersByTimeAsync(SEMANTIC_LOOP_JUDGE_TIMEOUT_MS);
+    expect(internal.semanticLoop.pending).toBe(false);
+    expect(internal.semanticLoop.checksUsed).toBe(1);
+    expect(internal.semanticLoop.verdict).toBeNull();
+  });
   it("starts the judge on a suspicious burst and injects its verdict at the next poll", async () => {
     const judge = vi.fn(
       async () =>

@@ -375,7 +375,7 @@ describe("AgentSession Ideal review coverage gate", () => {
     ]);
   });
 
-  it("steers an implementing active phase through verification exactly once", () => {
+  it("steers an implementing active phase through verification exactly once", async () => {
     const session = new AgentSession({
       provider: "anthropic",
       model: "claude-sonnet-5",
@@ -402,7 +402,7 @@ describe("AgentSession Ideal review coverage gate", () => {
       executionStage: "implementing",
     };
 
-    const followUp = internal.getHookFollowUpMessages()?.[0]?.content;
+    const followUp = (await internal.getHookFollowUpMessages())?.[0]?.content;
     expect(followUp).toContain("Run one bounded check per Done When criterion");
     expect(followUp).toContain(
       `${roadmapCriterionId(1, "Focused tests pass")} — Focused tests pass`,
@@ -414,6 +414,6 @@ describe("AgentSession Ideal review coverage gate", () => {
       'roadmap_status with transition: "done" is the only public completion-intent API',
     );
     expect(followUp).toContain("Settlement is host-only");
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 });

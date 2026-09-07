@@ -170,10 +170,14 @@ describe("useAgentEvents", () => {
     deps.planTotalRef.current = 1;
     deps.planDoneRef.current = new Set([1]);
     act(() => {
-      hook.result.current.handleEvent(ev("error", { headline: "run failed", message: "provider unavailable" }));
+      hook.result.current.handleEvent(
+        ev("error", { headline: "run failed", message: "provider unavailable" }),
+      );
       hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload("failed", "idle") }));
     });
-    expect(getItems()).toContainEqual(expect.objectContaining({ kind: "error", headline: "run failed" }));
+    expect(getItems()).toContainEqual(
+      expect.objectContaining({ kind: "error", headline: "run failed" }),
+    );
     expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
     expect(deps.planTotalRef.current).toBe(1);
     expect(deps.planDoneRef.current).toEqual(new Set([1]));
@@ -197,28 +201,38 @@ describe("useAgentEvents", () => {
       else expect(playSound).not.toHaveBeenCalledWith("done");
       if (outcome === "aborted") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
       if (outcome === "failed" || outcome === "unverified") {
-        expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(outcome === "failed" ? /^Failed / : /^Unverified /));
+        expect(deps.setDoneStatus).toHaveBeenLastCalledWith(
+          expect.stringMatching(outcome === "failed" ? /^Failed / : /^Unverified /),
+        );
       }
     },
   );
 
-  it.each([
-    { outcome: "failed", unverified: true, cancelled: true },
-    { outcome: "unknown" },
-  ])("never turns an explicit failure or unknown outcome into success: %j", (data) => {
-    const { hook, deps } = setup();
-    act(() => hook.result.current.handleEvent(ev("run_end", data)));
-    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
-    expect(playSound).not.toHaveBeenCalledWith("done");
-  });
+  it.each([{ outcome: "failed", unverified: true, cancelled: true }, { outcome: "unknown" }])(
+    "never turns an explicit failure or unknown outcome into success: %j",
+    (data) => {
+      const { hook, deps } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_end", data)));
+      expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
+      expect(playSound).not.toHaveBeenCalledWith("done");
+    },
+  );
 
   it("keeps autopilot review alive across injected failures and settles explicit cancellation", () => {
     const { result } = renderHook(() => useAutopilot({ setItems: vi.fn(), nextId: () => 1 }));
     act(() => result.current.handleAutopilotEvent(ev("autopilot_review_start")));
     expect(result.current.autopilotReviewing).toBe(true);
-    act(() => result.current.handleAutopilotEvent(ev("run_end", { ...createRunEndPayload("failed", "running") })));
+    act(() =>
+      result.current.handleAutopilotEvent(
+        ev("run_end", { ...createRunEndPayload("failed", "running") }),
+      ),
+    );
     expect(result.current.autopilotReviewing).toBe(true);
-    act(() => result.current.handleAutopilotEvent(ev("run_end", { outcome: "cancelled", runState: "idle" })));
+    act(() =>
+      result.current.handleAutopilotEvent(
+        ev("run_end", { outcome: "cancelled", runState: "idle" }),
+      ),
+    );
     expect(result.current.autopilotReviewing).toBe(false);
   });
 

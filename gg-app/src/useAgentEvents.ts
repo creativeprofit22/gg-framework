@@ -1080,7 +1080,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                       aborted: runCancelled ? true : it.aborted,
                       agents: it.agents.map((a) =>
                         a.status === "running" && !a.async
-                          ? { ...a, status: runCancelled || runFailed ? ("error" as const) : ("done" as const) }
+                          ? {
+                              ...a,
+                              status:
+                                runCancelled || runFailed ? ("error" as const) : ("done" as const),
+                            }
                           : a,
                       ),
                     }
@@ -1093,7 +1097,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = runFailed ? "Failed" : outcome === "unverified" ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
+            const verb = runFailed
+              ? "Failed"
+              : outcome === "unverified"
+                ? "Unverified"
+                : pickDoneVerb(toolsUsedRef.current);
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);

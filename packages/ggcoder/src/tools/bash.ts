@@ -758,7 +758,7 @@ export function createBashTool(
               launch,
             );
             sessionShell = shell;
-            processManager.registerShutdown(() => shell.killNow());
+            processManager.registerShutdown(() => shell.killNow(), () => shell.shutdownAndWait());
             sessionSandboxKey = sandboxKey;
             sessionSandboxed = launch.sandboxed;
           } catch (error) {

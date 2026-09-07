@@ -20,7 +20,7 @@ export interface SpawnProcessOptions {
 export interface ProcessLifecycleAdapter {
   spawn(command: string, args: string[], options: SpawnProcessOptions): ChildProcess;
   /** Graceful tree cleanup, with escalation owned by the target adapter. */
-  cleanupProcessTree(target: ProcessTarget): Promise<void>;
+  cleanupProcessTree(target: ProcessTarget, options?: { requireSettlement: boolean }): Promise<void>;
   /** Immediate tree cleanup for synchronous shutdown paths. */
   killProcessTree(target: ProcessTarget): void;
   /** Reap only the exact completed wrapper, never its descendants. */
@@ -157,7 +157,7 @@ export const localProcessLifecycle: ProcessLifecycleAdapter = {
       detached: options.detached,
       stdio: options.stdio as Parameters<typeof spawn>[2] extends { stdio: infer S } ? S : never,
     }),
-  cleanupProcessTree: (target) => killProcessTreeAsync(target),
+  cleanupProcessTree: (target, options) => killProcessTreeAsync(target, options),
   killProcessTree: (target) => killProcessTree(target),
   reapProcessWrapper: (target) => reapProcessWrapper(target),
 };

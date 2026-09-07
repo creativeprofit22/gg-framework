@@ -32,7 +32,10 @@ export interface ProcessTreeKillOptions {
   posixMaxDescendants?: number;
 }
 
-export type AsyncProcessTreeKillOptions = ProcessTreeKillOptions;
+export interface AsyncProcessTreeKillOptions extends ProcessTreeKillOptions {
+  /** Reject unconfirmed tree cleanup; default callers remain best-effort. */
+  requireSettlement?: boolean;
+}
 
 function getEnvCaseInsensitive(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const normalizedName = name.toLowerCase();
@@ -98,7 +101,7 @@ function warnPosix(message: string, pid: number, details: Record<string, string>
   log("WARN", "process", message, { pid: String(pid), ...details });
 }
 
-function parseDescendants(output: string, rootPid: number, maximum: number): number[] {
+function parseDescendants(output: string, rootPid: number, maximum: number, requireComplete = false): number[] {
   const children = new Map<number, number[]>();
   for (const line of output.split(/\r?\n/)) {
     const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
@@ -125,6 +128,7 @@ function parseDescendants(output: string, rootPid: number, maximum: number): num
       if (descendants.length >= maximum) break;
     }
   }
+  if (requireComplete && queue.length > 0) throw new Error("Process tree snapshot exceeded descendant limit");
   return descendants.sort((a, b) => b.depth - a.depth).map(({ pid }) => pid);
 }
 
@@ -162,6 +166,7 @@ async function snapshotDescendantsAsync(
     });
   } catch (error) {
     warnPosix("POSIX descendant snapshot failed", pid, { error: errorDetail(error) });
+    if (options.requireSettlement) throw error;
     return [];
   }
 
@@ -219,12 +224,14 @@ async function snapshotDescendantsAsync(
 
   if (result.error !== undefined) {
     warnPosix("POSIX descendant snapshot failed", pid, { error: errorDetail(result.error) });
+    if (options.requireSettlement) throw result.error;
     return [];
   }
   return parseDescendants(
     result.output ?? "",
     pid,
     options.posixMaxDescendants ?? DEFAULT_POSIX_MAX_DESCENDANTS,
+    options.requireSettlement,
   );
 }
 
@@ -425,12 +432,31 @@ export async function killProcessTreeAsync(
       warnPosix("Refusing to clean up an invalid POSIX PID", pid);
       return;
     }
-    if (originalProcessExited(target)) return;
-    const descendants = await snapshotDescendantsAsync(pid, options);
-    if (originalProcessExited(target)) return;
+    if (originalProcessExited(target)) {
+      if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed before parent exit");
+      return;
+    }
+    let descendants: number[];
+    try {
+      descendants = await snapshotDescendantsAsync(pid, options);
+    } catch (error) {
+      // An unavailable snapshot must not prevent cleanup of the still-owned group.
+      signalPosixGroup(target, [], "SIGKILL", kill);
+      throw error;
+    }
+    const verify = async (): Promise<void> => {
+      if (!options.requireSettlement) return;
+      const deadline = Date.now() + (options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS);
+      while (posixTargetsAlive(pid, descendants, true, kill)) {
+        if (Date.now() >= deadline) throw new Error("Process tree cleanup has live or unverified survivors");
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    if (originalProcessExited(target)) { await verify(); return; }
     const termResult = signalPosixGroup(target, descendants, "SIGTERM", kill);
     if (termResult === "dead") {
       signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+      await verify();
       return;
     }
     await new Promise<void>((resolve) =>
@@ -438,6 +464,7 @@ export async function killProcessTreeAsync(
     );
     if (originalProcessExited(target)) {
       signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+      await verify();
       return;
     }
     if (!posixTargetsAlive(pid, descendants, termResult === "sent", kill)) return;
@@ -445,12 +472,19 @@ export async function killProcessTreeAsync(
     if (killResult !== "failed" || originalProcessExited(target)) {
       signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
     }
+    await verify();
     return;
   }
 
-  if (originalProcessExited(target) || !isPidAlive(pid, kill)) return;
+  if (originalProcessExited(target) || !isPidAlive(pid, kill)) {
+    if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed before parent exit");
+    return;
+  }
   const executable = resolveWindowsTaskkillPath(options.env);
-  if (originalProcessExited(target)) return;
+  if (originalProcessExited(target)) {
+    if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed before parent exit");
+    return;
+  }
   let killer: ReturnType<typeof spawn>;
   try {
     killer = (options.spawn ?? spawn)(executable, TASKKILL_TREE_ARGUMENTS(pid), {
@@ -459,6 +493,7 @@ export async function killProcessTreeAsync(
     });
   } catch (error) {
     handleWindowsTaskkillFailure(target, executable, kill, { error });
+    if (options.requireSettlement) throw new Error("Process tree cleanup could not start", { cause: error });
     return;
   }
 
@@ -499,8 +534,9 @@ export async function killProcessTreeAsync(
     killer.once("close", onClose);
   });
 
-  if (failure !== undefined && !originalProcessExited(target)) {
-    handleWindowsTaskkillFailure(target, executable, kill, failure);
+  if (failure !== undefined) {
+    if (!originalProcessExited(target)) handleWindowsTaskkillFailure(target, executable, kill, failure);
+    if (options.requireSettlement) throw new Error("Process tree cleanup was not confirmed");
   }
 }
 

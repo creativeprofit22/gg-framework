@@ -185,6 +185,31 @@ describe("bash explicit command modes", () => {
     });
   });
 
+  it("awaits persistent-shell native close without using synchronous shutdown", async () => {
+    const harness = await createHarness();
+    try {
+      const tool = createBashTool(process.cwd(), harness.manager, harness.ops);
+      const execution = Promise.resolve(tool.execute({ command: "printf managed", persist: true }, toolContext()));
+      await vi.waitFor(() => expect(harness.spawn).toHaveBeenCalledOnce());
+      let settled = false;
+      const cleanup = harness.manager.shutdownAllAndWait().then(() => { settled = true; });
+      await vi.waitFor(() => expect(harness.cleanupProcessTree).toHaveBeenCalledOnce());
+      expect(harness.cleanupProcessTree).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 42_424, isExited: expect.any(Function) }), { requireSettlement: true },
+      );
+      expect(harness.killProcessTree).not.toHaveBeenCalled();
+      harness.child.emit("exit", 0, null);
+      await execution;
+      expect(settled).toBe(false);
+      completeChild(harness.child, "");
+      await cleanup;
+      expect(settled).toBe(true);
+    } finally {
+      if (harness.child.exitCode === null && harness.child.signalCode === null) completeChild(harness.child, "");
+      await harness.cleanup();
+    }
+  });
+
   it("kills a persistent shell synchronously during process-manager shutdown", async () => {
     const harness = await createHarness();
     try {

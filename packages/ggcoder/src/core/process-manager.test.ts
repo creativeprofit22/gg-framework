@@ -156,6 +156,66 @@ async function managedStopHarness(
   };
 }
 
+describe("ProcessManager verified shutdown", () => {
+  it("waits for native close and flushed completion, rejects new work, and shares cleanup", async () => {
+    const fixture = await managedStopHarness(undefined);
+    let settled = false;
+    const shutdown = fixture.manager.shutdownAllAndWait();
+    void shutdown.then(() => { settled = true; });
+    try {
+      expect(fixture.manager.shutdownAllAndWait()).toBe(shutdown);
+      await vi.waitFor(() => expect(fixture.cleanupProcessTree).toHaveBeenCalledOnce());
+      expect(fixture.cleanupProcessTree).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: fixture.started.pid, isExited: expect.any(Function) }),
+        { requireSettlement: true },
+      );
+      expect(settled).toBe(false);
+      await expect(fixture.manager.start("must not spawn", "/workspace")).rejects.toThrow("shutting down");
+      fixture.fake.emitClose(null, "SIGTERM");
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await fixture.flushLog();
+      await shutdown;
+      expect(settled).toBe(true);
+      expect((await fixture.manager.readOutput(fixture.started.id)).isRunning).toBe(false);
+    } finally {
+      fixture.fake.emitClose();
+      await fixture.flushLog();
+      await fixture.removeLogRoot();
+    }
+  });
+
+  it("surfaces failed cleanup even if native close later arrives", async () => {
+    const cleanupProcessTree = vi.fn(async () => { throw new Error("survivor"); });
+    const killProcessTree = vi.fn();
+    const { manager, child, proc } = trackedManager(lifecycle({ cleanupProcessTree, killProcessTree }));
+    await expect(manager.shutdownAllAndWait()).rejects.toThrow("survivor");
+    expect(manager.list()[0]?.isRunning).toBe(true);
+    child.emit("close", 0, null);
+    await expect(manager.shutdownAllAndWait()).rejects.toThrow("survivor");
+    expect(proc.completedAt).not.toBeNull();
+    expect(killProcessTree).not.toHaveBeenCalled();
+  });
+
+  it("starts session-owned cleanup concurrently without invoking synchronous exit hooks", async () => {
+    const manager = new ProcessManager();
+    const synchronous = vi.fn();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const first = vi.fn(() => pending);
+    const second = vi.fn(async () => {});
+    manager.registerShutdown(synchronous, first);
+    manager.registerShutdown(synchronous.bind(null), second);
+    const shutdown = manager.shutdownAllAndWait();
+    await Promise.resolve();
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    expect(synchronous).not.toHaveBeenCalled();
+    finish();
+    await shutdown;
+  });
+});
+
 describe("ProcessManager foreground logs", () => {
   it("creates unique foreground log files before returning", async () => {
     const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-logs-"));

@@ -36,6 +36,8 @@ interface PoolEntry {
   key: string;
   /** Resolves once the spawn+initialize attempt settles. */
   pending: Promise<PooledClient>;
+  /** Retain failed/evicted native handles until their holders release ownership. */
+  native: { client?: LspClient; closed?: boolean };
   /** Managers currently holding this entry. Size is the reference count. */
   holders: Set<object>;
   /** Diagnostics passes in flight, so the idle sweep cannot evict mid-call. */
@@ -93,6 +95,10 @@ export class LspClientPool {
     this.sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
   }
 
+  private readonly retiring = new Map<PoolEntry, Promise<void>>();
+  private readonly heldEntries = new WeakMap<object, Set<PoolEntry>>();
+  private readonly releasedHolders = new WeakSet<object>();
+
   private keyFor(spec: LspServerSpec, root: string): string {
     return `${specIdentity(spec)}\u0000${root}`;
   }
@@ -103,12 +109,18 @@ export class LspClientPool {
    * are registered synchronously before the first `await`.
    */
   async retain(spec: LspServerSpec, root: string, holder: object): Promise<PooledClient> {
+    if (this.releasedHolders.has(holder)) return { status: "unavailable" };
     const key = this.keyFor(spec, root);
+    const retirements = [...this.retiring].filter(([entry]) => entry.key === key).map(([, cleanup]) => cleanup);
+    if (retirements.length) await Promise.all(retirements);
+    if (this.releasedHolders.has(holder)) return { status: "unavailable" };
     let entry = this.entries.get(key);
     if (!entry) {
+      const native: PoolEntry["native"] = {};
       entry = {
         key,
-        pending: this.spawn(spec, root),
+        pending: this.spawn(spec, root, native),
+        native,
         holders: new Set(),
         activeCalls: 0,
         lastUsedAt: Date.now(),
@@ -116,9 +128,18 @@ export class LspClientPool {
       };
       this.generations.set(key, entry.generation);
       this.entries.set(key, entry);
+      const ownedEntry = entry;
+      void native.client?.waitForClose().then(() => {
+        native.closed = true;
+        // Retain live survivors, not dead generations' diagnostic caches.
+        for (const holder of ownedEntry.holders) this.heldEntries.get(holder)?.delete(ownedEntry);
+      });
       this.startSweep();
     }
     entry.holders.add(holder);
+    const held = this.heldEntries.get(holder) ?? new Set<PoolEntry>();
+    if (!entry.native.closed) held.add(entry);
+    this.heldEntries.set(holder, held);
 
     const resolved = await entry.pending;
     // Only a WORKING server counts as use. A failure stays cached so a broken
@@ -189,7 +210,35 @@ export class LspClientPool {
    * rather than waiting for the idle sweep, because a disposed session is
    * proof the work is over.
    */
+  /** Release shared references, but retain exclusive ownership until native close. */
+  async releaseAndWait(holder: object): Promise<void> {
+    this.releasedHolders.add(holder);
+    const owned = [...new Set([
+      ...(this.heldEntries.get(holder) ?? []),
+      ...[...this.entries.values()].filter((entry) => entry.holders.has(holder)),
+    ])];
+    await Promise.all(owned.map((entry) => {
+      if (entry.holders.size > 1) { entry.holders.delete(holder); return; }
+      const existing = this.retiring.get(entry);
+      if (existing) return existing;
+      const cleanup = (async () => {
+        await Promise.all([entry.pending, entry.native.client?.shutdownAndWait()]);
+        entry.holders.delete(holder);
+        if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+        this.retiring.delete(entry);
+      })();
+      this.retiring.set(entry, cleanup);
+      return cleanup;
+    }));
+    this.heldEntries.delete(holder);
+    if (this.entries.size === 0) this.stopSweep();
+  }
+
   release(holder: object): void {
+    for (const entry of this.heldEntries.get(holder) ?? []) {
+      if (this.entries.get(entry.key) !== entry) entry.holders.delete(holder);
+    }
+    this.heldEntries.delete(holder);
     for (const entry of [...this.entries.values()]) {
       if (!entry.holders.delete(holder)) continue;
       if (entry.holders.size === 0) this.evict(entry, "last holder released");
@@ -238,6 +287,7 @@ export class LspClientPool {
   }
 
   private evict(entry: PoolEntry, reason: string): void {
+    if (this.retiring.has(entry)) return;
     // Only remove the entry if it is still the live one for its key, so a
     // rebuild that raced this eviction is not torn down by it.
     if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
@@ -265,12 +315,7 @@ export class LspClientPool {
     this.sweepTimer = undefined;
   }
 
-  private async spawn(spec: LspServerSpec, root: string): Promise<PooledClient> {
-    const command = spec.resolveCommand(root);
-    if (!command) {
-      log("INFO", "lsp", `${spec.id} language server not available`, { root });
-      return { status: "unavailable" };
-    }
+  private async spawn(spec: LspServerSpec, root: string, native: PoolEntry["native"]): Promise<PooledClient> {
     // `client` is declared outside the try so one that fails to initialize can
     // still be killed. `new LspClient` SPAWNS the process, so discarding the
     // reference on a throw leaked the server forever — one orphan per
@@ -278,8 +323,15 @@ export class LspClientPool {
     // Windows the orphan keeps handles open in the project directory.
     let client: LspClient | undefined;
     try {
+      const command = spec.resolveCommand(root);
+      if (!command) {
+        native.closed = true;
+        log("INFO", "lsp", `${spec.id} language server not available`, { root });
+        return { status: "unavailable" };
+      }
       const startedAt = Date.now();
       client = new LspClient(spec, root, command);
+      native.client = client;
       await client.initialize(INIT_TIMEOUT_MS);
       if (!client.isAlive) return { status: "server_failed" };
       log("INFO", "lsp", `${spec.id} server initialized`, {
@@ -288,6 +340,7 @@ export class LspClientPool {
       });
       return { status: "ready", client };
     } catch (error) {
+      if (!client) native.closed = true;
       log("WARN", "lsp", `${spec.id} server failed to start`, {
         root,
         error: error instanceof Error ? error.message : String(error),

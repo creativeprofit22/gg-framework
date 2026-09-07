@@ -58,6 +58,8 @@ function longestSentinelPrefix(candidate: Buffer, sentinel: Buffer): number {
 export class PersistentShell {
   private child: ChildProcess | null = null;
   private busy = false;
+  private closing = false;
+  private readonly owned = new Map<ChildProcess, Promise<void>>();
 
   constructor(
     private readonly cwd: string,
@@ -85,6 +87,7 @@ export class PersistentShell {
   }
 
   private ensureChild(): ChildProcess {
+    if (this.closing) throw new Error("Persistent shell is shutting down");
     if (this.child && this.child.exitCode === null && !this.child.killed) {
       return this.child;
     }
@@ -98,6 +101,10 @@ export class PersistentShell {
       env: this.env,
       detached: process.platform !== "win32",
     });
+    this.owned.set(child, new Promise((resolve) => child.once("close", () => {
+      this.owned.delete(child);
+      resolve();
+    })));
     // Don't let a lingering session shell keep the parent process alive.
     child.unref();
     this.child = child;
@@ -410,6 +417,19 @@ export class PersistentShell {
         isExited: () => childToKill.exitCode !== null || childToKill.signalCode !== null,
       });
     }
+  }
+
+  /** Await every still-owned shell, including one detached by cancellation. */
+  async shutdownAndWait(): Promise<void> {
+    this.closing = true;
+    this.takeChild();
+    await Promise.all([...this.owned].map(async ([child, closed]) => {
+      if (child.pid !== undefined) await this.lifecycle.cleanupProcessTree({
+        pid: child.pid,
+        isExited: () => child.exitCode !== null || child.signalCode !== null,
+      }, { requireSettlement: true });
+      await closed;
+    }));
   }
 
   /** Immediately kill the session tree from synchronous process-exit hooks. */

@@ -115,6 +115,7 @@ export class LspManager {
   private readonly warmKeys = new Map<string, number>();
   private readonly latestOutcomes = new Map<string, LspDiagnosticOutcome>();
   private shutDown = false;
+  private cleanup?: Promise<void>;
 
   constructor(
     private readonly cwd: string,
@@ -261,6 +262,12 @@ export class LspManager {
    * keeps running, and one left with no holders is shut down immediately. The
    * name is kept because every caller wires it into an exit path.
    */
+  shutdownAllAndWait(): Promise<void> {
+    this.shutDown = true;
+    this.warmKeys.clear();
+    return this.cleanup ??= this.pool.releaseAndWait(this);
+  }
+
   shutdownAll(): void {
     this.shutDown = true;
     this.pool.release(this);
@@ -275,6 +282,7 @@ export class LspManager {
   }
 
   private record(outcome: LspDiagnosticOutcome): LspDiagnosticOutcome {
+    if (this.shutDown) return outcome;
     this.latestOutcomes.delete(outcome.filePath);
     this.latestOutcomes.set(outcome.filePath, outcome);
     while (this.latestOutcomes.size > this.snapshotLimit) {
@@ -298,6 +306,7 @@ export class LspManager {
     // the caller has already given up and reported a timeout.
     const deadline = Date.now() + budgetMs;
     const resolution = await this.pool.retain(spec, root, this);
+    if (this.shutDown) return this.outcome("unavailable", filePath);
     if (resolution.status !== "ready") return this.outcome(resolution.status, filePath);
     const { client } = resolution;
     if (!client.isAlive) {
@@ -334,6 +343,7 @@ export class LspManager {
     let diagnostics = await client.collectDiagnostics(uri, budgetMs);
     // Record WHICH build of the server went warm, so a later reclamation of it
     // is detectable rather than silently inherited as warm.
+    if (this.shutDown) return this.outcome("unavailable", filePath);
     this.warmKeys.set(key, this.pool.generationFor(spec, root));
     if (!client.isAlive) {
       this.pool.markDead(spec, root);
@@ -434,6 +444,7 @@ export class LspManager {
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
 
       const resolution = await this.pool.retain(spec, root, this);
+      if (this.shutDown) return { kind: "unavailable", filePath: normalizedFilePath };
       if (resolution.status !== "ready") {
         return { kind: resolution.status, filePath: normalizedFilePath, serverId: spec.id };
       }
@@ -451,6 +462,7 @@ export class LspManager {
         const outcome = await withBudget(run(client, uri, budgetMs), budgetMs, () => ({
           status: "timeout" as const,
         }));
+        if (this.shutDown) return { kind: "unavailable", filePath: normalizedFilePath };
         this.warmKeys.set(key, this.pool.generationFor(spec, root));
         if (outcome.status === "ok") {
           return {

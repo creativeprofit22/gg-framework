@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { JsonRpcConnection, JsonRpcRequestError, type WireTracer } from "./jsonrpc.js";
 import { getSafeToolEnv } from "../../tools/safe-env.js";
-import { killProcessTree } from "../../utils/process.js";
+import { killProcessTree, killProcessTreeAsync } from "../../utils/process.js";
 import { log } from "../logger.js";
 import type { LspServerSpec, ResolvedCommand } from "./servers.js";
 
@@ -277,6 +277,8 @@ export class LspClient {
   private readonly activeProgressTokens = new Set<string>();
   private sawProgress = false;
   private alive = true;
+  private readonly nativeClose: Promise<void>;
+  private cleanup?: Promise<void>;
 
   private readonly initializationOptions: unknown;
   private stderrBuffer = "";
@@ -300,6 +302,7 @@ export class LspClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: getSafeToolEnv(),
     });
+    this.nativeClose = new Promise((resolve) => this.proc.once("close", () => resolve()));
     this.captureStderr();
     this.proc.on("error", () => this.markDead());
     this.proc.on("exit", (code, signal) => {
@@ -606,8 +609,28 @@ export class LspClient {
    * exit notification are written immediately; the SIGKILL timer covers
    * servers that ignore them (and stdin EOF reaps them when we die first).
    */
+  waitForClose(): Promise<void> {
+    return this.nativeClose;
+  }
+
+  /** Verified transient teardown; no synchronous taskkill or handshake timer. */
+  shutdownAndWait(): Promise<void> {
+    if (this.cleanup) return this.cleanup;
+    this.markDead();
+    this.cleanup = (async () => {
+      if (this.proc.pid !== undefined) {
+        await killProcessTreeAsync({
+          pid: this.proc.pid,
+          isExited: () => this.proc.exitCode !== null || this.proc.signalCode !== null,
+        }, { requireSettlement: true });
+      }
+      await this.nativeClose;
+    })();
+    return this.cleanup;
+  }
+
   shutdown(): void {
-    if (!this.alive) return;
+    if (!this.alive || this.cleanup) return;
     void this.conn.request("shutdown", null, SHUTDOWN_TIMEOUT_MS).catch(() => {});
     this.conn.notify("exit");
     const killTimer = setTimeout(() => {
@@ -629,6 +652,7 @@ export class LspClient {
    * handles in the project directory.
    */
   terminate(): void {
+    if (this.cleanup) return;
     this.conn.dispose();
     if (this.proc.pid !== undefined) killProcessTree(this.proc.pid);
     this.markDead();

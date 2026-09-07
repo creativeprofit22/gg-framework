@@ -191,7 +191,10 @@ function lifecycleFromOptions(options: ProcessManagerOptions): ProcessLifecycleA
   };
   return {
     ...localProcessLifecycle,
-    cleanupProcessTree: async (target) => killTree(target),
+    cleanupProcessTree: async (target, cleanupOptions) => {
+      if (cleanupOptions?.requireSettlement) throw new Error("Legacy process overrides cannot verify cleanup");
+      killTree(target);
+    },
     killProcessTree: killTree,
   };
 }
@@ -206,6 +209,10 @@ export class ProcessManager {
   private activeBackgroundLogs = new Set<string>();
   private openForegroundLogs = new Set<string>();
   private shutdownDisposers = new Set<() => void>();
+  private shutdownSettlers = new Map<() => void, () => Promise<void>>();
+  private shutdownPromise?: Promise<void>;
+  private closing = false;
+  private pendingStarts = new Set<Promise<StartResult>>();
   private logSweepPromise: Promise<void> | null = null;
   private lastLogSweepAt: number | null = null;
   private watchers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -248,13 +255,16 @@ export class ProcessManager {
   }
 
   /** Register session-owned cleanup and return an idempotent unregister function. */
-  registerShutdown(dispose: () => void): () => void {
+  registerShutdown(dispose: () => void, settle?: () => Promise<void>): () => void {
+    if (this.closing) throw new Error("Process manager is shutting down");
     this.shutdownDisposers.add(dispose);
+    if (settle) this.shutdownSettlers.set(dispose, settle);
     let registered = true;
     return () => {
       if (!registered) return;
       registered = false;
       this.shutdownDisposers.delete(dispose);
+      this.shutdownSettlers.delete(dispose);
     };
   }
 
@@ -602,6 +612,7 @@ export class ProcessManager {
     launch?: SandboxLaunch,
     wake?: WakeRules,
   ): Promise<StartResult> {
+    if (this.closing) throw new Error("Process manager is shutting down");
     this.pruneExpiredRecords();
     await this.sweepStaleLogs();
     const backgroundLogRoot = this.options.backgroundLogRoot ?? BG_DIR;
@@ -634,6 +645,7 @@ export class ProcessManager {
       : getSafeToolEnv();
     let child: ChildProcess;
     try {
+      if (this.closing) throw new Error("Process manager is shutting down");
       child = this.lifecycle.spawn(shell.file, shell.args, {
         cwd,
         detached: true,
@@ -656,7 +668,7 @@ export class ProcessManager {
       settleNativeClose = resolveNativeClose;
     });
 
-    return new Promise<StartResult>((resolve, reject) => {
+    const startup = new Promise<StartResult>((resolve, reject) => {
       let startupSettled = false;
       let proc: BackgroundProcess | undefined;
       let pid: number | undefined;
@@ -712,11 +724,11 @@ export class ProcessManager {
           await this.refreshLogSize(completedProcess);
           this.scheduleRecordExpiry(id, completedProcess.completedAt);
           try {
-            this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
+            if (!this.closing) this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
           } catch {
             // Completion is authoritative; wrapper reaping remains best-effort.
           }
-          this.notifyExit(completedProcess);
+          if (!this.closing) this.notifyExit(completedProcess);
           settleCompletion();
         });
       };
@@ -748,8 +760,8 @@ export class ProcessManager {
         this.completions.set(id, completion);
         this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
         child.unref();
-        this.armWatcher(proc);
-        const shouldArmWake = wake?.pattern !== undefined || wake?.silenceMs !== undefined;
+        if (!this.closing) this.armWatcher(proc);
+        const shouldArmWake = !this.closing && (wake?.pattern !== undefined || wake?.silenceMs !== undefined);
         const wakeArmed = shouldArmWake ? this.armWakeWatcher(proc, wake!) : false;
         startupSettled = true;
         resolve({ id, pid, logFile, wakeArmed });
@@ -761,6 +773,9 @@ export class ProcessManager {
       child.on("close", onClose);
       child.once("spawn", onSpawn);
     });
+    this.pendingStarts.add(startup);
+    try { return await startup; }
+    finally { this.pendingStarts.delete(startup); }
   }
 
   /** Wait for terminal process settlement without guessing a sleep duration. */
@@ -1068,6 +1083,38 @@ export class ProcessManager {
     }));
   }
 
+  /** Await owned native close and completion, not merely signal dispatch.
+   * The transient caller bounds this promise with its single cleanup deadline. */
+  shutdownAllAndWait(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.closing = true;
+    for (const id of this.processes.keys()) this.disposeWatcher(id);
+    const settlers = [...this.shutdownDisposers].map((dispose) => {
+      const settle = this.shutdownSettlers.get(dispose);
+      return Promise.resolve().then(() => {
+        if (!settle) throw new Error("Session process has no awaited cleanup");
+        return settle();
+      });
+    });
+    const processes = (async () => {
+      await Promise.allSettled([...this.pendingStarts]);
+      await Promise.all([...this.children].map(async ([id, child]) => {
+        const proc = this.processes.get(id);
+        if (!proc) throw new Error("Owned process identity is missing");
+        const closed = this.getNativeClose(id, proc, child);
+        await this.lifecycle.cleanupProcessTree(processTarget(proc.pid, child), { requireSettlement: true });
+        await closed;
+        await this.waitForTerminalSettlement(id, proc, closed);
+      }));
+      await Promise.all(this.completions.values());
+    })();
+    this.shutdownPromise = Promise.all([...settlers, processes]).then(() => {
+      this.shutdownDisposers.clear();
+      this.shutdownSettlers.clear();
+    });
+    return this.shutdownPromise;
+  }
+
   shutdownAll(): void {
     this.pruneExpiredRecords();
     void this.sweepStaleLogs();
@@ -1117,7 +1164,7 @@ export class ProcessManager {
       proc.signal = signal;
       proc.completedAt = this.now();
       this.disposeWatcher(id);
-      void this.refreshLogSize(proc).then(() => this.notifyExit(proc));
+      void this.refreshLogSize(proc).then(() => { if (!this.closing) this.notifyExit(proc); });
       this.scheduleRecordExpiry(id, proc.completedAt);
     };
 

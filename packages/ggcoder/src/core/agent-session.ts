@@ -4784,11 +4784,13 @@ export class AgentSession {
     await this.disposeMcpResources(manager, leases);
   }
 
-  async dispose(beforeSessionReset?: () => Promise<void>): Promise<void> {
+  async dispose(beforeSessionReset?: () => Promise<void>, awaitProcesses = false): Promise<void> {
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
-    this.processManager?.shutdownAll();
-    this.lspManager?.shutdownAll();
-    await Promise.all([this.subAgentManager?.shutdownAll(), this.disposeMcpConnections()]);
+    if (awaitProcesses) this.eventBus.removeAllListeners();
+    const processes = awaitProcesses
+      ? [this.processManager?.shutdownAllAndWait(), this.lspManager?.shutdownAllAndWait()]
+      : [this.processManager?.shutdownAll(), this.lspManager?.shutdownAll()];
+    await Promise.all([...processes, this.subAgentManager?.shutdownAll(), this.disposeMcpConnections()]);
     await this.extensionLoader.deactivateAll();
     try {
       await beforeSessionReset?.();

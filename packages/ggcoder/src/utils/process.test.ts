@@ -70,6 +70,74 @@ function successfulPsSync(stdout: string): typeof spawnSync {
   })) as unknown as typeof spawnSync;
 }
 
+describe("verified tree cleanup", () => {
+  it.each(["linux", "win32"] as const)("does not certify descendants of an exited %s parent", async (platform) => {
+    const spawnProcess = vi.fn();
+    const kill = aliveKill();
+    await expect(killProcessTreeAsync({ pid: 123, isExited: () => true }, {
+      platform, requireSettlement: true, kill, spawn: spawnProcess,
+    })).rejects.toThrow("not confirmed");
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("does not certify descendants when the Windows parent PID is absent", async () => {
+    const spawnProcess = vi.fn();
+    const kill = vi.fn(() => { throw errno("ESRCH"); });
+    await expect(killProcessTreeAsync(123, {
+      platform: "win32", requireSettlement: true, kill, spawn: spawnProcess,
+    })).rejects.toThrow("not confirmed");
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledExactlyOnceWith(123, 0);
+  });
+
+  it("attempts known-target termination before rejecting a failed POSIX snapshot", async () => {
+    const kill = aliveKill();
+    await expect(killProcessTreeAsync({ pid: 123, isExited: () => false }, {
+      platform: "linux", requireSettlement: true, kill,
+      spawn: vi.fn(() => { throw new Error("injected snapshot failure"); }),
+    })).rejects.toThrow("injected snapshot failure");
+    expect(kill).toHaveBeenCalledWith(-123, "SIGKILL");
+  });
+
+  it.each(["nonzero", "error", "timeout"])("rejects Windows %s instead of accepting fallback dispatch", async (mode) => {
+    vi.useFakeTimers();
+    vi.spyOn(logger, "log").mockImplementation(() => {});
+    const killer = createKiller();
+    const cleanup = killProcessTreeAsync({ pid: 123, isExited: () => false }, {
+      platform: "win32", requireSettlement: true, taskkillTimeoutMs: 20,
+      kill: aliveKill(), spawn: vi.fn(() => killer.child) as unknown as typeof spawn,
+    });
+    const result = expect(cleanup).rejects.toThrow("not confirmed");
+    if (mode === "nonzero") killer.events.emit("close", 1, null);
+    if (mode === "error") killer.events.emit("error", new Error("injected failure"));
+    await vi.runAllTimersAsync();
+    await result;
+  });
+
+  it("rejects a POSIX survivor even when signal dispatch succeeds", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const cleanup = killProcessTreeAsync({ pid: 123, isExited: () => false }, {
+      platform: "linux", requireSettlement: true, taskkillTimeoutMs: 25, posixGraceMs: 0,
+      kill: aliveKill(), spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+    });
+    const result = expect(cleanup).rejects.toThrow("survivors");
+    helper.stdout.write("124 123\n");
+    helper.events.emit("close", 0);
+    await vi.runAllTimersAsync();
+    await result;
+  });
+
+  it("rejects an unverified POSIX snapshot", async () => {
+    vi.spyOn(logger, "log").mockImplementation(() => {});
+    await expect(killProcessTreeAsync({ pid: 123, isExited: () => false }, {
+      platform: "linux", requireSettlement: true, kill: aliveKill(),
+      spawn: vi.fn(() => { throw new Error("snapshot unavailable"); }) as unknown as typeof spawn,
+    })).rejects.toThrow("snapshot unavailable");
+  });
+});
+
 describe("POSIX process-tree cleanup", () => {
   it.each([0, -1, Number.NaN, 1.5])(
     "rejects invalid PID %s without constructing a PGID",

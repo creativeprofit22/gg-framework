@@ -32,7 +32,6 @@ import {
   evaluateDurableVerificationEvidence,
   evaluateRoadmapVerificationEvidence,
   formatVerificationCommandDisplay,
-  partitionVerificationMessagesForWorkspaceMutation,
   safeToolEnvironmentDigest,
   workspaceVerificationEvidenceMatches,
   type RoadmapVerificationBinding,
@@ -393,8 +392,6 @@ export class AppSidecarRoadmapToolHost {
           executionId: binding.execution_id,
         })),
         expectedRevision,
-        currentMessages: [],
-        staleMessages: [],
         currentLedgerEvidence: ledgerPartition.currentEvidence,
         staleLedgerEvidence: ledgerPartition.staleEvidence,
       });
@@ -551,12 +548,8 @@ export class AppSidecarRoadmapToolHost {
             currentEnvironmentDigest,
             cwd,
           );
-          const partition = partitionVerificationMessagesForWorkspaceMutation(
-            owningSession.getMessages(),
-          );
           const verificationEvidence = evaluateRoadmapVerificationEvidence({
             ...evaluationInput,
-            ...partition,
             currentLedgerEvidence: ledgerPartition.currentEvidence,
             staleLedgerEvidence: ledgerPartition.staleEvidence,
           });

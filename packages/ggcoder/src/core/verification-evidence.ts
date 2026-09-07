@@ -954,8 +954,6 @@ export function evaluateRoadmapVerificationEvidence(input: {
   evidence: readonly string[];
   verificationBindings?: readonly RoadmapVerificationBinding[];
   expectedRevision: number | undefined;
-  currentMessages: readonly Message[];
-  staleMessages?: readonly Message[];
   currentLedgerEvidence?: readonly RoadmapShellEvidence[];
   staleLedgerEvidence?: readonly RoadmapShellEvidence[];
 }): RoadmapVerificationEvidenceEvaluation {

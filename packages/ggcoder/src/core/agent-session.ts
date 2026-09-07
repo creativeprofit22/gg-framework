@@ -184,7 +184,6 @@ import {
   SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
   evaluateRoadmapVerificationEvidence as evaluateRoadmapVerificationEvidenceCore,
-  partitionVerificationMessagesForWorkspaceMutation,
   type RoadmapVerificationBinding,
   type RoadmapVerificationEvidenceEvaluation,
   type SessionVerificationEvidenceLedgerSnapshot,
@@ -4405,14 +4404,9 @@ export class AgentSession {
     verificationBindings: readonly RoadmapVerificationBinding[];
     expectedRevision: number | undefined;
   }): RoadmapVerificationEvidenceEvaluation {
-    const partition =
-      input.expectedRevision === undefined
-        ? { currentMessages: this.messages, staleMessages: [] }
-        : partitionVerificationMessagesForWorkspaceMutation(this.messages);
     const ledger = this.verificationEvidenceLedger.snapshot();
     return evaluateRoadmapVerificationEvidenceCore({
       ...input,
-      ...partition,
       currentLedgerEvidence: ledger.currentEvidence,
       staleLedgerEvidence: ledger.staleEvidence,
     });

@@ -494,7 +494,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       evidence,
       verificationBindings,
       expectedRevision,
-      currentMessages: [],
       currentLedgerEvidence,
       staleLedgerEvidence,
     });
@@ -521,7 +520,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         evidence: ["Seven focused checks passed; wording intentionally omits commands."],
         verificationBindings,
         expectedRevision: 231,
-        currentMessages: [],
         currentLedgerEvidence,
       }),
     ).toMatchObject({
@@ -552,7 +550,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
           { criterionId: roadmapCriterionId(1, criterion), executionId: execution.executionId },
         ],
         expectedRevision: 15,
-        currentMessages: [],
         currentLedgerEvidence: [execution],
       }),
     ).toEqual({
@@ -581,7 +578,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
           { criterionId: roadmapCriterionId(2, doneWhen[1]!), executionId: execution.executionId },
         ],
         expectedRevision: 15,
-        currentMessages: [],
         currentLedgerEvidence: [execution],
       }),
     ).toMatchObject({
@@ -595,7 +591,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         evidence: [],
         verificationBindings: [{ criterionId: "f".repeat(64), executionId: execution.executionId }],
         expectedRevision: 15,
-        currentMessages: [],
         currentLedgerEvidence: [execution],
       }),
     ).toMatchObject({ ready: false });
@@ -637,7 +632,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
           evidence: [],
           verificationBindings: [{ criterionId, executionId }],
           expectedRevision: 15,
-          currentMessages: [],
           currentLedgerEvidence,
         }),
       ).toMatchObject({ ready: true });
@@ -694,7 +688,6 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       evidence: [command],
       verificationBindings: [{ criterionId: roadmapCriterionId(1, criterion), executionId }],
       expectedRevision: 15,
-      currentMessages: [],
       currentLedgerEvidence,
     })).toEqual({
       ready: false,
@@ -941,7 +934,6 @@ describe("SessionVerificationEvidenceLedger", () => {
           { criterionId: roadmapCriterionId(1, criterion), executionId: "windows-go-test" },
         ],
         expectedRevision: 15,
-        currentMessages: [],
         currentLedgerEvidence,
       }),
     ).toMatchObject({ ready: true, unmetEvidenceCodes: [] });

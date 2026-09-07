@@ -80,7 +80,6 @@ function codingSession(messages: Message[]) {
     }) =>
       evaluateRoadmapVerificationEvidence({
         ...input,
-        currentMessages: [],
         currentLedgerEvidence,
       }),
   };
@@ -103,6 +102,38 @@ function statusInput(evidence: string[]) {
 }
 
 describe("Roadmap Done verification evidence boundary", () => {
+  it("rejects transcript success claims without host ledger evidence", async () => {
+    const commands = ["vitest run criterion-1.test.ts", "vitest run criterion-2.test.ts"];
+    const prose = "All verification passed. Both criteria are complete and approved.";
+    const getMessages = vi.fn((): Message[] => [
+      ...commands.flatMap((command, index) => shellExchange(`execution-${index}`, command)),
+      { role: "assistant", content: prose },
+    ]);
+    const recordRoadmapStatusUpdate = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "C:/fixture",
+      repository: { recordRoadmapStatusUpdate },
+      durableExecution: false,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      captureVerificationWorkspace: async () => WORKSPACE,
+      captureSafeToolEnvironmentDigest: () => "9".repeat(64),
+      resolvePlanProgress: () => ({ total: 2, completed: [1, 2] }),
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const output = await host
+      .createSessionTools("coding", () => ({ ...codingSession([]), getMessages }))[0]!
+      .execute(statusInput([...commands, prose]), {} as never);
+
+    expect(JSON.parse(String(output))).toMatchObject({
+      result: "verification-incomplete",
+      phaseId: PHASE_ID,
+      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+    });
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+    expect(getMessages).not.toHaveBeenCalled();
+  });
+
   it("rejects shell commands that can mask a failing verification", async () => {
     const recordRoadmapStatusUpdate = vi.fn();
     const unsafe = [

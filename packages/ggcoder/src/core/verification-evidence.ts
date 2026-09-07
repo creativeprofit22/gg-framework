@@ -637,7 +637,10 @@ export function workspaceVerificationEvidenceMatches(
 }
 
 /** Extract harness-owned evidence from completed bash calls in a transcript. */
-export function collectVerificationEvidence(messages: readonly Message[]): VerificationEvidence[] {
+export function collectVerificationEvidence(
+  messages: readonly Message[],
+  includeMissingResults = false,
+): VerificationEvidence[] {
   const calls = new Map<
     string,
     { command: string; classification: VerificationCommandClassification; background: boolean }
@@ -661,6 +664,7 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
     for (const result of message.content as ToolResult[]) {
       const call = calls.get(result.toolCallId);
       if (!call || !call.classification.candidate) continue;
+      calls.delete(result.toolCallId);
       if (call.background) {
         evidence.push({
           command: call.command,
@@ -686,6 +690,12 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
           ? "bounded check did not exit successfully"
           : "execution outcome unavailable from retained transcript",
       });
+    }
+  }
+  if (includeMissingResults) {
+    for (const call of calls.values()) {
+      if (!call.classification.candidate) continue;
+      evidence.push({ command: call.command, status: "unavailable", reason: "execution outcome unavailable from retained transcript" });
     }
   }
   return evidence;

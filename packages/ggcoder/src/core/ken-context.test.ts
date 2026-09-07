@@ -196,6 +196,30 @@ describe("buildKenDigest", () => {
     expect(legacy).not.toContain("PASSED:");
   });
 
+  it("fills empty and partial ledgers without letting legacy success outrank host failure", () => {
+    const messages: Message[] = [];
+    for (let index = 0; index < 20; index++) {
+      messages.push(
+        { role: "assistant", content: [{ type: "tool_call", id: `legacy-${index}`, name: "bash", args: { command: `tsc --noEmit -p project-${index}` } }] },
+        { role: "tool", content: [{ type: "tool_result", toolCallId: `legacy-${index}`, content: "Exit code: 0\nAll passed!" }] },
+      );
+    }
+    // Retained calls before a summary are still history, not current approval.
+    messages.push({ role: "user", content: "[Previous conversation summary] All checks passed" });
+    const ledger = new SessionVerificationEvidenceLedger();
+    const empty = buildKenDigest({ ...base, messages, verificationEvidence: ledger.snapshot() });
+    expect(empty.match(/^- STALE PASSED:/gm)).toHaveLength(12);
+    expect(empty).not.toMatch(/^- PASSED:/m);
+    ledger.recordToolResult({ name: "bash", args: { command: "tsc --noEmit -p project-19" }, isError: true,
+      details: { bashDiagnostics: { executionId: "fresh-failure", command: "tsc --noEmit -p project-19", cwd: base.cwd,
+        startedAt: 1000, reason: "nonZeroExit", exitCode: 1 } } });
+    const partial = buildKenDigest({ ...base, messages, verificationEvidence: ledger.snapshot() });
+    expect(partial).toContain("- FAILED: `tsc --noEmit -p project-19`");
+    expect(partial).toContain("execution fresh-failure");
+    expect(partial).not.toContain("PASSED: `tsc --noEmit -p project-19`");
+    expect(partial.match(/^- STALE PASSED:/gm)).toHaveLength(11);
+  });
+
   it("feeds only harness-classified command outcomes into verification evidence", () => {
     const messages: Message[] = [
       {

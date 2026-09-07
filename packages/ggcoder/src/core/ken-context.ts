@@ -427,11 +427,19 @@ export function buildKenDigest(input: KenDigestInput): string {
   );
 
   const snapshot = input.verificationEvidence;
-  const verificationEvidence = snapshot
+  const hostEvidence = snapshot
     ? [...snapshot.staleEvidence.map((evidence) => ({ ...evidence, stale: true })),
        ...snapshot.currentEvidence.map((evidence) => ({ ...evidence, stale: evidence.cwd !== input.cwd }))]
-        .filter((evidence) => evidence.status !== "unclassified").slice(-12)
-    : collectVerificationEvidence(afterSummary).slice(-12).map((evidence) => ({ ...evidence, stale: true }));
+    : [];
+  // Legacy text is historical only. Any surviving host record for the same
+  // command takes precedence, including failures and records outside the cap.
+  const hostCommands = new Set(hostEvidence.map((evidence) => evidence.command.trim()));
+  const legacyEvidence = collectVerificationEvidence(input.messages, true)
+    .filter((evidence) => !hostCommands.has(evidence.command));
+  const verificationEvidence = [
+    ...legacyEvidence.slice(-12).map((evidence) => ({ ...evidence, stale: true })),
+    ...hostEvidence.filter((evidence) => evidence.status !== "unclassified"),
+  ].slice(-12);
   if (verificationEvidence.length > 0) {
     const rows = verificationEvidence.map(
       (evidence) =>

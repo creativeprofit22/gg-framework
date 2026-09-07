@@ -21,7 +21,7 @@ vi.mock("./core/model-registry.js", async () => ({
 }));
 // Cold production imports deliberately occur outside timed test bodies.
 import { AgentSession } from "./core/agent-session.js";
-import { buildKenInteractiveSessionContext } from "./core/ken-context.js";
+import { buildKenInteractiveSessionContext, runKenAutopilotSessionReview } from "./core/ken-context.js";
 import { approvedPlanContentHash } from "./core/session-manager.js";
 import { useFakeHome } from "./test-support/fake-home.js";
 import { RunClaim } from "./core/run-claim.js";
@@ -59,6 +59,50 @@ async function withStore(run: (create: (sessionId?: string, transient?: boolean)
     await fs.rm(root, { recursive: true, force: true });
   }
 }
+
+it.each(["reload", "checkpoint"] as const)("projects historical checks through all review wrappers after %s", async (mode) => {
+  await withStore(async (create, cwd) => {
+    const build = await create();
+    const command = "tsc --noEmit";
+    provider.mockImplementationOnce(async function* (messages: Message[]) {
+      const args = { command };
+      messages.push({ role: "assistant", content: [{ type: "tool_call", id: "check", name: "bash", args }] });
+      yield { type: "tool_call_start", toolCallId: "check", name: "bash", args };
+      const result = "Exit code: 0\nCompleted bounded check";
+      messages.push({ role: "tool", content: [{ type: "tool_result", toolCallId: "check", content: result }] });
+      yield { type: "tool_call_end", toolCallId: "check", result, isError: false, durationMs: 1,
+        details: { bashDiagnostics: { executionId: "host-check", command, cwd, startedAt: 1000, reason: "completed", exitCode: 0 } } };
+      yield { type: "agent_done" };
+    });
+    await build.prompt("Check the implementation");
+    expect(build.getVerificationEvidenceLedgerSnapshot().currentEvidence[0]).toMatchObject({ executionId: "host-check", status: "passed" });
+    const saved = build.getState().sessionPath;
+    if (mode === "reload") await build.loadSession(saved);
+    else await build.loadSessionCheckpoint(saved, build.getConversationIdentity().conversationId);
+    expect(build.getVerificationEvidenceLedgerSnapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+    const mentor = await create(undefined, true);
+    const ken = interactive(() => build, mentor, cwd);
+    for (const retained of ["complete", "pruned", "missing"] as const) {
+      const messages = build.getMessages();
+      const resultMessage = messages.find((message) => message.role === "tool");
+      if (!resultMessage || !Array.isArray(resultMessage.content)) throw new Error("missing test result");
+      if (retained === "pruned") resultMessage.content = [{ type: "tool_result", toolCallId: "check", content: "[Pruned: old tool output]" }];
+      if (retained === "missing") resultMessage.content = [];
+      const digests = [(await ken.ask()).digest];
+      for (const planContent of [undefined, "# Review this plan"]) {
+        digests.push((await runKenAutopilotSessionReview(() => build, async () => ({
+          input: { cwd, gitBranch: null, planContent }, review: async (digest) => digest,
+        }), () => true))!);
+      }
+      for (const digest of digests) {
+        expect(digest).toContain(`STALE ${retained === "complete" ? "PASSED" : "UNAVAILABLE"}: \`${command}\``);
+        expect(digest).toContain("legacy transcript; current scope unavailable");
+        expect(digest).not.toContain("execution host-check");
+        expect(digest).not.toMatch(/^- PASSED:/m);
+      }
+    }
+  });
+});
 
 function interactive(getBuild: () => AgentSession, mentor: AgentSession, cwd: string) {
   const errors: unknown[] = [];

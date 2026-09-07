@@ -329,6 +329,20 @@ describe("verification gate flow", () => {
     expect(resumed.internal.getVerificationProblem()).toBeNull();
   });
 
+  it.each(["reload", "checkpoint"] as const)("requires a fresh check for edits after a historical pass (%s)", async (mode) => {
+    const { internal } = await makeSession(false);
+    await simulateToolCall(internal, "edit", { file_path: "subject.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+    // Completed sessions remain settled; only subsequent unverified work is owed.
+    await simulateToolCall(internal, "edit", { file_path: "subject.ts" });
+    if (mode === "reload") await session!.loadSession(internal.sessionPath);
+    else await session!.loadSessionCheckpoint(internal.sessionPath, session!.getConversationIdentity().conversationId);
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
   it("has notice copy for every hook kind the session can emit", async () => {
     // Both surfaces render from a fixed map keyed by hook kind; a kind with no
     // entry renders nothing at all, which is the silent-duplicate bug again.

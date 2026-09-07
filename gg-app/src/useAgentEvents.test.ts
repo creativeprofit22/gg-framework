@@ -112,8 +112,8 @@ function setup(
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
-    setPlanTotal: noop as unknown as AgentEventsDeps["setPlanTotal"],
-    setPlanDone: noop as unknown as AgentEventsDeps["setPlanDone"],
+    setPlanTotal: vi.fn<AgentEventsDeps["setPlanTotal"]>(),
+    setPlanDone: vi.fn<AgentEventsDeps["setPlanDone"]>(),
     setPlanReview: ((
       u: PendingPlanReview | null | ((p: PendingPlanReview | null) => PendingPlanReview | null),
     ) => {
@@ -191,8 +191,8 @@ describe("useAgentEvents", () => {
         hook.result.current.handleEvent(ev("error", { message: "a recoverable tool error" }));
         hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
       });
-      expect(deps.planTotalRef.current).toBe(outcome === "completed" ? 0 : 1);
-      expect(deps.planDoneRef.current).toEqual(outcome === "completed" ? new Set() : new Set([1]));
+      expect(deps.planTotalRef.current).toBe(1);
+      expect(deps.planDoneRef.current).toEqual(new Set([1]));
       if (outcome === "completed") expect(playSound).toHaveBeenCalledWith("done");
       else expect(playSound).not.toHaveBeenCalledWith("done");
       if (outcome === "aborted") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
@@ -1614,19 +1614,84 @@ describe("useAgentEvents", () => {
     expect(deps.pendingPlanTotalRef.current).toBeNull();
   });
 
-  it("run_end clears completed plan progress and running state", () => {
-    const { hook, deps, setRunning } = setup();
-    deps.planTotalRef.current = 3;
-    deps.planDoneRef.current = new Set([1, 2, 3]);
+  it("authoritative consumption clears plan progress before run_end paints idle", () => {
+    const { hook, deps, setRunning, getState } = setup();
 
     act(() => {
       hook.result.current.handleEvent(ev("run_start"));
-      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [1, 2, 3] }));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 0, completed: [] }));
     });
-
-    expect(setRunning).toHaveBeenLastCalledWith(false);
     expect(deps.planTotalRef.current).toBe(0);
     expect(deps.planDoneRef.current.size).toBe(0);
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(0);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set());
+    expect(getState()?.running).toBe(true);
+
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));
+
+    expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(deps.planTotalRef.current).toBe(0);
+    expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
+  it.each([
+    { cancelled: false },
+    { outcome: "completed", runState: "idle" },
+    { unverified: true },
+    { cancelled: true },
+  ])("retains fully displayed progress without consumption confirmation: %j", (terminal) => {
+    const { hook, deps, setRunning, getState } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2] [DONE:3]" }));
+    });
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1, 2, 3]));
+
+    // Cleanup failure leaves the canonical completed snapshot, but emits no clear.
+    act(() => {
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [1, 2, 3] }));
+      hook.result.current.handleEvent(ev("run_end", terminal));
+    });
+    expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(deps.planTotalRef.current).toBe(3);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(3);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1, 2, 3]));
+  });
+
+  it("retains streamed completion without any canonical consumption event", () => {
+    const { hook, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 2, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2]" }));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+    });
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
+  it("canonical corrections replace streamed completion and survive run_end", () => {
+    const { hook, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2] [DONE:3]" }));
+    });
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    act(() => {
+      hook.result.current.handleEvent(ev("plan_progress", { total: 2, completed: [1] }));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+    });
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1]));
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(2);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1]));
   });
 
   it("upserts persistent async agents by agent_id through idle and interrupted states", async () => {

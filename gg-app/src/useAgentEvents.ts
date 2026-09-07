@@ -1100,17 +1100,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             }
             setDoneStatus(parts.join(" \u2022 "));
             setStatus("ready");
-            const completedPlan =
-              planTotalRef.current > 0 &&
-              Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
-                planDoneRef.current.has(step),
-              );
-            if (completedPlan && outcome === "completed") {
-              planTotalRef.current = 0;
-              planDoneRef.current = new Set();
-              setPlanTotal(0);
-              setPlanDone(new Set());
-            }
+            // Only plan_progress confirms approved-plan consumption. Even a
+            // completed run can retain the plan when backend cleanup fails.
             if (outcome === "completed") playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right

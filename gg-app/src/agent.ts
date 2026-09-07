@@ -22,6 +22,7 @@ import type {
   KenTarget,
   KenRunIdentity,
   OpenAICodexContextProfileEligibility,
+  RunEndPayload,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type {
@@ -135,7 +136,7 @@ export interface SidecarEvent {
 
 export interface RunEndEvent extends SidecarEvent {
   type: "run_end";
-  data: import("@kenkaiiii/gg-core/desktop-session-ux").RunEndPayload;
+  data: RunEndPayload;
 }
 
 export interface ContextProfileChangeEvent extends SidecarEvent {

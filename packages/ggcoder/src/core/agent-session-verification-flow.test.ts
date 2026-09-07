@@ -17,10 +17,21 @@ import { useFakeHome } from "../test-support/fake-home.js";
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import type { AgentSession } from "./agent-session.js";
 import type { ProcessManager } from "./process-manager.js";
+import { randomUUID } from "node:crypto";
+import { classifyVerificationCommand } from "./verification-evidence.js";
+import type { VerificationGate } from "./verification-gate.js";
 
 interface FlowInternals {
   sessionPath: string;
   processManager: ProcessManager;
+  resetHookState(originalRequest: string): void;
+  verificationGate: {
+    revision: number;
+    injections: number;
+    recheckInjections: number;
+    tamperInjections: number;
+    snapshot(): ReturnType<VerificationGate["snapshot"]>;
+  };
   getHookFollowUpMessages(): Promise<Message[] | null>;
   getVerificationProblem(): string | null;
   trackHookEvent(event: AgentEvent): Promise<void>;
@@ -84,32 +95,71 @@ async function makeSession(
   return { internal, events };
 }
 
+function bashDetails(executionId: string, command: string, startedAt: number, result: string) {
+  const exitMatch = /^Exit code:\s*(-?\d+)(?:\s|$)/.exec(result);
+  if (!exitMatch) return undefined;
+  const exitCode = Number(exitMatch[1]);
+  return { bashDiagnostics: {
+    executionId,
+    pid: process.pid,
+    command,
+    cwd: tmpProject,
+    startedAt,
+    timeoutMs: 120_000,
+    reason: exitCode === 0 ? "completed" : "nonZeroExit",
+    exitCode,
+    signal: null,
+    elapsedMs: 1,
+    logPath: path.join(tmpHome, ".gg", "foreground", `${executionId}.log`),
+    tail: result,
+    outputCapped: false,
+    totalOutputBytes: Buffer.byteLength(result),
+    retainedOutputBytes: Buffer.byteLength(result),
+    droppedOutputBytes: 0,
+  } };
+}
+
 async function simulateToolCall(
   internal: FlowInternals,
   name: string,
   args: Record<string, unknown>,
   result = name === "bash" ? "Exit code: 0\n" : "",
-): Promise<void> {
-  const toolCallId = `call-${Math.random().toString(36).slice(2)}`;
+) {
+  const toolCallId = randomUUID();
+  const startedAt = Date.now();
+  const startRevision = internal.verificationGate.revision;
+  const command = typeof args.command === "string" ? args.command : "";
   await internal.trackHookEvent({
     type: "tool_call_start",
     toolCallId,
     name,
     args,
   } as unknown as AgentEvent);
-  const exitMatch = /^Exit code:\s*(-?\d+)(?:\s|$)/.exec(result);
-  const exitCode = exitMatch ? Number(exitMatch[1]) : undefined;
   await internal.trackHookEvent({
     type: "tool_call_end",
     toolCallId,
     result,
     isError: false,
     durationMs: 1,
-    details:
-      name === "bash" && exitCode !== undefined
-        ? { bashDiagnostics: { reason: exitCode === 0 ? "completed" : "nonZeroExit", exitCode } }
-        : undefined,
+    details: name === "bash" ? bashDetails(toolCallId, command, startedAt, result) : undefined,
   } as unknown as AgentEvent);
+  // Bounded assertion diagnostics only: never dump arguments, output or environment.
+  return {
+    sessionId: session!.getConversationIdentity().conversationId,
+    runGeneration: session!.getRunJournal().at(-1)?.generation ?? 0,
+    executionId: name === "bash" ? toolCallId : null,
+    classification: name === "bash" ? classifyVerificationCommand(command) : null,
+    startRevision,
+    endRevision: internal.verificationGate.revision,
+    mutationReason: internal.verificationGate.revision !== startRevision
+      ? name === "bash" ? "potentially-mutating-check" : "file-edit"
+      : null,
+    reminderBudgetUsed: {
+      initial: internal.verificationGate.injections,
+      recheck: internal.verificationGate.recheckInjections,
+      tamper: internal.verificationGate.tamperInjections,
+    },
+  };
 }
 
 describe("verification gate flow", () => {
@@ -152,6 +202,99 @@ describe("verification gate flow", () => {
     // Disarmed by the verification, so no draft is ever held back.
     expect(events).toEqual(["hook_armed:verification:true", "hook_armed:verification:false"]);
     expect(await internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("keeps accepted foreground evidence settled across completed explanation-only runs", async () => {
+    const { internal, events } = await makeSession(false);
+    internal.resetHookState("Repair the verification flow");
+    await session!.persistRunStarted(1);
+    const edit = await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    const check = await simulateToolCall(internal, "bash", {
+      command: "pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/verification-gate.test.ts",
+      run_in_background: false,
+      persist: false,
+    });
+    const typecheck = await simulateToolCall(internal, "bash", {
+      command: "pnpm --filter @kenkaiiii/ggcoder check",
+    });
+    const diagnostic = JSON.stringify({ edit, check, typecheck });
+    expect(check.classification?.accepted, diagnostic).toBe(true);
+    expect(check.startRevision, diagnostic).toBe(edit.endRevision);
+    expect(check.endRevision, diagnostic).toBe(check.startRevision);
+    expect(check.mutationReason, diagnostic).toBeNull();
+    const ledger = session!.getVerificationEvidenceLedgerSnapshot();
+    expect(ledger.currentEvidence, diagnostic).toEqual([
+      expect.objectContaining({ executionId: check.executionId, status: "passed", cwd: tmpProject }),
+      expect.objectContaining({ executionId: typecheck.executionId, status: "passed", cwd: tmpProject }),
+    ]);
+    expect(ledger.staleEvidence, diagnostic).toEqual([]);
+    expect(internal.getVerificationProblem(), diagnostic).toBeNull();
+    expect(await internal.getHookFollowUpMessages(), diagnostic).toBeNull();
+    await session!.persistRunFinished(1, "completed");
+    const settled = internal.verificationGate.snapshot();
+    const before = events.length;
+
+    for (const generation of [2, 3, 4]) {
+      // Exercise the session's real per-prompt reset, not Gate.beginRun alone.
+      internal.resetHookState("Explain the previous result");
+      await session!.persistRunStarted(generation);
+      await internal.trackHookEvent({ type: "text_delta", text: "The checks passed." });
+      expect(internal.getVerificationProblem(), diagnostic).toBeNull();
+      expect(await internal.getHookFollowUpMessages(), diagnostic).toBeNull();
+      expect(internal.verificationGate.snapshot(), diagnostic).toEqual(settled);
+      expect(session!.getVerificationEvidenceLedgerSnapshot(), diagnostic).toEqual(ledger);
+      expect(events.length, diagnostic).toBe(before);
+      await session!.persistRunFinished(generation, "completed");
+    }
+    expect(session!.getRunJournal().map(({ generation, outcome }) => ({ generation, outcome })))
+      .toEqual([1, 2, 3, 4].map((generation) => ({ generation, outcome: "completed" })));
+  });
+
+  it("re-arms after an actual edit in a later run and spends only one reminder", async () => {
+    const { internal, events } = await makeSession();
+    internal.resetHookState("Repair code");
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    const evidence = session!.getVerificationEvidenceLedgerSnapshot().currentEvidence;
+
+    internal.resetHookState("Change code again");
+    const edit = await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    const diagnostic = JSON.stringify(edit);
+    expect(edit.endRevision, diagnostic).toBeGreaterThan(edit.startRevision);
+    expect(edit.mutationReason, diagnostic).toBe("file-edit");
+    expect(session!.getVerificationEvidenceLedgerSnapshot(), diagnostic).toEqual({
+      currentEvidence: [], staleEvidence: evidence,
+    });
+    expect(internal.getVerificationProblem(), diagnostic).toContain("Unverified");
+    expect(await internal.getHookFollowUpMessages(), diagnostic).not.toBeNull();
+    expect(await internal.getHookFollowUpMessages(), diagnostic).toBeNull();
+    expect(internal.verificationGate.injections, diagnostic).toBe(1);
+    expect(internal.verificationGate.recheckInjections, diagnostic).toBe(1);
+    const before = events.length;
+    internal.resetHookState("Explain what remains");
+    expect(await internal.getHookFollowUpMessages(), diagnostic).toBeNull();
+    expect(internal.getVerificationProblem(), diagnostic).toContain("Unverified");
+    expect(events.length, diagnostic).toBe(before);
+  });
+
+  it("preserves same-revision failure debt across a later explanation and unrelated pass", async () => {
+    const { internal } = await makeSession();
+    internal.resetHookState("Repair code");
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    const failed = await simulateToolCall(internal, "bash", { command: "pnpm test" }, "Exit code: 1\n");
+    expect(await internal.getHookFollowUpMessages()).not.toBeNull();
+    internal.resetHookState("Explain the failed check");
+    await simulateToolCall(internal, "bash", { command: "pnpm lint" });
+    const diagnostic = JSON.stringify(failed);
+    expect(internal.getVerificationProblem(), diagnostic).toContain("failed");
+    expect(await internal.getHookFollowUpMessages(), diagnostic).toBeNull();
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence, diagnostic).toEqual([
+      expect.objectContaining({ executionId: failed.executionId, status: "failed" }),
+      expect.objectContaining({ status: "passed", command: "pnpm lint" }),
+    ]);
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem(), diagnostic).toBeNull();
   });
 
   it("counts a check piped through a tail limiter, so a question turn is never hijacked", async () => {
@@ -212,6 +355,7 @@ describe("verification gate flow", () => {
   it("invalidates an earlier check when a later check can rewrite files", async () => {
     const { internal } = await makeSession();
     await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    const startedAt = Date.now();
     await internal.trackHookEvent({
       type: "tool_call_start",
       toolCallId: "before-fix",
@@ -225,6 +369,7 @@ describe("verification gate flow", () => {
       result: "Exit code: 0\n",
       isError: false,
       durationMs: 1,
+      details: bashDetails("before-fix", "pnpm test", startedAt, "Exit code: 0\n"),
     } as unknown as AgentEvent);
     expect(internal.getVerificationProblem()).toContain("Unverified");
     await simulateToolCall(internal, "bash", { command: "pnpm test" });
@@ -234,6 +379,7 @@ describe("verification gate flow", () => {
   it("does not let a check finishing after an intervening edit verify that edit", async () => {
     const { internal } = await makeSession();
     await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });
+    const startedAt = Date.now();
     await internal.trackHookEvent({
       type: "tool_call_start",
       toolCallId: "stale",
@@ -247,6 +393,7 @@ describe("verification gate flow", () => {
       result: "Exit code: 0\n",
       isError: false,
       durationMs: 1,
+      details: bashDetails("stale", "pnpm test", startedAt, "Exit code: 0\n"),
     } as unknown as AgentEvent);
     expect(internal.getVerificationProblem()).toContain("Unverified");
     await simulateToolCall(internal, "bash", { command: "pnpm test" });
@@ -325,8 +472,16 @@ describe("verification gate flow", () => {
     await session!.dispose();
     const resumed = await makeSession(false, saved);
     expect(resumed.internal.getVerificationProblem()).toContain("failed");
-    await simulateToolCall(resumed.internal, "bash", { command: "pnpm test" });
+    expect(resumed.internal.verificationGate.snapshot().failedChecks).toHaveLength(1);
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([]);
+    resumed.internal.resetHookState("Explain the restored failure");
+    expect(await resumed.internal.getHookFollowUpMessages()).toBeNull();
+    expect(resumed.internal.getVerificationProblem()).toContain("failed");
+    const fresh = await simulateToolCall(resumed.internal, "bash", { command: "pnpm test" });
     expect(resumed.internal.getVerificationProblem()).toBeNull();
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([
+      expect.objectContaining({ executionId: fresh.executionId, status: "passed" }),
+    ]);
   });
 
   it.each(["reload", "checkpoint"] as const)("requires a fresh check for edits after a historical pass (%s)", async (mode) => {
@@ -390,7 +545,7 @@ describe("verification gate flow", () => {
     // The next user prompt: a new run with no edits. The inherited debt must
     // NOT re-arm — no hold, no notice, the answer streams untouched.
     const before = events.length;
-    (internal as unknown as { verificationGate: { beginRun(): void } }).verificationGate.beginRun();
+    internal.resetHookState("Explain the previous result");
     expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(events.length).toBe(before);
   });

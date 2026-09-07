@@ -265,7 +265,7 @@ describe("local-fixes updater", () => {
     ]);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Push: disabled");
-    expect(result.stdout).toContain("git merge --no-ff --no-commit upstream/main");
+    expect(result.stdout).toContain("git merge --no-ff --no-commit <resolved-source-commit>");
     expect(result.stdout).not.toContain("git rebase");
     expect({
       head: git(fixture.repo, "rev-parse", "HEAD"),
@@ -298,6 +298,80 @@ describe("local-fixes updater", () => {
     expect(result.stderr).toContain("Failed to fetch upstream/main");
     expect(result.stderr).not.toContain("Backup branch:");
     expect(result.stderr).not.toContain("Manifest:");
+  }, 30_000);
+
+  it("pins a reviewed commit despite a newer remote tip and stays up-to-date on retry", () => {
+    const fixture = createUpdateFixture(false, true);
+    const pin = git(fixture.repo, "rev-parse", "main");
+    const startingHead = git(fixture.repo, "rev-parse", "HEAD");
+    const advance = join(fixture.root, "advance");
+    git(fixture.root, "clone", "--branch", "main", fixture.upstream, advance);
+    configureRepository(advance);
+    write(join(advance, "unreviewed.txt"), "not approved\n");
+    git(advance, "add", ".");
+    git(advance, "commit", "-m", "unreviewed advance");
+    git(advance, "push", "origin", "main");
+    const newer = git(advance, "rev-parse", "HEAD");
+    const args = ["--source-commit", pin, "--no-install", "--no-build", "--no-check"];
+    const result = runUpdater(fixture.repo, args);
+    expect(result.status, result.stderr).toBe(0);
+    const mergedHead = git(fixture.repo, "rev-parse", "HEAD");
+    expect(git(fixture.repo, "rev-list", "--parents", "-n", "1", "HEAD").split(" ").slice(1))
+      .toEqual([startingHead, pin]);
+    expect(git(fixture.repo, "rev-parse", "upstream/main")).toBe(newer);
+    expect(existsSync(join(fixture.repo, "unreviewed.txt"))).toBe(false);
+    const retry = runUpdater(fixture.repo, args);
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(git(fixture.repo, "rev-parse", "HEAD")).toBe(mergedHead);
+    expect(retry.stdout).toContain("Already up to date");
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    expect(readdirSync(backupRoot)).toHaveLength(2);
+    for (const dir of readdirSync(backupRoot)) {
+      const manifest = JSON.parse(readFileSync(join(backupRoot, dir, "manifest.json"), "utf8"));
+      const decisions = JSON.parse(readFileSync(join(backupRoot, dir, "decisions.json"), "utf8"));
+      expect(manifest).toMatchObject({ sourceOid: pin, decisionMerge: mergedHead, verified: true });
+      expect(manifest.mergeBase).toBe(git(fixture.repo, "merge-base", manifest.startingHead, pin));
+      expect(decisions.evidence.merge).toBe(mergedHead);
+      expect(manifest.installer).toBeNull();
+    }
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
+    expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
+    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe("dirty untracked\n");
+    expect(git(fixture.repo, "stash", "list")).toBe("");
+    expect(result.stdout).not.toContain("build:local-patched");
+    expect(result.stdout).not.toMatch(/^> git push/m);
+  }, 30_000);
+
+  it.each(["short", "missing", "blob", "unrelated"])("rejects a %s pin before disturbing dirty work", (kind) => {
+    const fixture = createUpdateFixture();
+    const head = git(fixture.repo, "rev-parse", "HEAD");
+    const pin = kind === "short" ? "abc123"
+      : kind === "missing" ? "f".repeat(40)
+      : kind === "blob" ? git(fixture.repo, "rev-parse", "HEAD:local-two.txt")
+      : head;
+    const beforeBranches = git(fixture.repo, "for-each-ref", "refs/heads", "--format=%(refname) %(objectname)");
+    const result = runUpdater(fixture.repo, ["--source-commit", pin, "--no-install", "--no-build"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(kind === "short" ? "full 40-character hex commit ID"
+      : kind === "unrelated" ? "must be an ancestor" : "existing commit");
+    expect(git(fixture.repo, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fixture.repo, "for-each-ref", "refs/heads", "--format=%(refname) %(objectname)")).toBe(beforeBranches);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
+    expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
+    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe("dirty untracked\n");
+    expect(git(fixture.repo, "stash", "list")).toBe("");
+    expect(existsSync(join(fixture.repo, ".gg"))).toBe(false);
+    expect(result.stdout).not.toMatch(/^> git (?:stash |merge |branch (?!--show-current))/m);
+  }, 30_000);
+
+  it("dry-runs a pin without fetching or changing refs or dirty bytes", () => {
+    const fixture = createUpdateFixture();
+    const refs = git(fixture.repo, "show-ref");
+    const result = runUpdater(fixture.repo, ["--source-commit", git(fixture.repo, "rev-parse", "main"), "--dry-run", "--no-install", "--no-build"]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(git(fixture.repo, "show-ref")).toBe(refs);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
+    expect(existsSync(join(fixture.repo, ".gg"))).toBe(false);
   }, 30_000);
 
   it("restores dirty work and omits decisions when merged paths do not overlap", () => {
@@ -483,7 +557,7 @@ describe("local-fixes updater", () => {
       write(fakePnpm, "#!/bin/sh\nexit 7\n");
       chmodSync(fakePnpm, 0o755);
     }
-    const result = runUpdater(fixture.repo, ["--no-install", "--no-build"], {
+    const result = runUpdater(fixture.repo, ["--source-commit", git(fixture.repo, "rev-parse", "main"), "--no-install", "--no-build"], {
       PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     });
 
@@ -548,7 +622,7 @@ describe("local-fixes updater", () => {
   }, 30_000);
 
   it("rejects push when checks or build are disabled", () => {
-    const result = runUpdater(repoRoot, ["--dry-run", "--push", "--no-build"]);
+    const result = runUpdater(repoRoot, ["--source-commit", "a".repeat(40), "--dry-run", "--push", "--no-build"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("--push requires checks and installer build");
   });

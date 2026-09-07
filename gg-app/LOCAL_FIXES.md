@@ -44,6 +44,14 @@ pnpm --filter gg-app update:local-fixes -- --no-install --no-build --no-check
 pnpm --filter gg-app update:local-fixes -- --allow-other-branch --no-build --no-check
 ```
 
+To sync only a reviewed revision, add `--source-commit <full-40-character-SHA>` to the same workflow:
+
+```bash
+pnpm --filter gg-app update:local-fixes -- --remote upstream --branch main --source-commit d3786e388e15f6b26f984a9b1cc42eb79ff43d96 --no-install --no-build
+```
+
+The pin must be an existing commit reachable from the fetched source branch. Invalid, missing, non-commit, or unrelated pins fail before backup creation, stashing, or merging. Fetching may download newer commits, but only the pinned OID is merged and recorded as the source. Without a pin, the workflow merges the immutable OID resolved from that fetch. Dry runs do not fetch or validate remote ancestry; they only print those steps. Pins do not bypass checks, identity validation, dirty-work recovery, installer requirements for push, or normal-push restrictions. `--no-build` leaves the installed application unchanged.
+
 ## Conflict recovery
 
 A merge conflict, dirty-work restore conflict, identity drift, changed merge result, failed check, or failed build stops before push. Dirty bytes stay stashed through checks and packaging. After either success or a check/build failure, the workflow reapplies them and verifies both Git status and captured file bytes. If automatic restoration itself conflicts, the backup branch, stash, patch, and byte snapshots remain available. Follow the printed manifest instructions, then:

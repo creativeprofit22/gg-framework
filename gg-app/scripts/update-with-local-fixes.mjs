@@ -53,6 +53,7 @@ and builds an isolated installer. It never pushes unless --push is explicit.
 Options:
   --remote <name>        Source remote (default: upstream, then origin)
   --branch <name>        Source branch (default: main)
+  --source-commit <sha>  Merge only this full 40-character commit on the source branch
   --push                 Push the verified branch normally (never force-push)
   --allow-other-branch   Allow a noncanonical local branch (never pushable)
   --no-install           Skip dependency refresh
@@ -69,6 +70,7 @@ function parseArgs(args) {
   const options = {
     remote: null,
     branch: null,
+    sourceCommit: null,
     push: false,
     allowOtherBranch: false,
     install: true,
@@ -84,6 +86,12 @@ function parseArgs(args) {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       options[arg.slice(2)] = value;
+    } else if (arg === "--source-commit") {
+      const value = args[++i];
+      if (!value || !/^[0-9a-f]{40}$/i.test(value)) {
+        throw new Error("--source-commit requires a full 40-character hex commit ID.");
+      }
+      options.sourceCommit = value.toLowerCase();
     } else if (arg === "--push") options.push = true;
     else if (arg === "--allow-other-branch") options.allowOtherBranch = true;
     else if (arg === "--no-install") options.install = false;
@@ -568,6 +576,27 @@ async function main() {
     ),
     `Failed to fetch ${target}.`,
   );
+  let sourceOid = options.sourceCommit ?? "<resolved-source-commit>";
+  if (!options.dryRun) {
+    const fetchedTip = capture("git", [
+      "rev-parse", "--verify", `refs/remotes/${remote}/${branch}^{commit}`,
+    ]).stdout.trim();
+    sourceOid = options.sourceCommit ?? fetchedTip;
+    if (options.sourceCommit) {
+      const type = capture("git", ["cat-file", "-t", sourceOid], { allowFailure: true });
+      if (type.status !== 0 || type.stdout.trim() !== "commit") {
+        throw new Error("--source-commit must identify an existing commit.");
+      }
+      requireSuccess(
+        capture("git", ["merge-base", "--is-ancestor", sourceOid, fetchedTip], {
+          allowFailure: true,
+        }),
+        `--source-commit must be an ancestor of fetched ${target}.`,
+      );
+    }
+  } else {
+    console.log(`[dry-run] resolve immutable source OID${options.sourceCommit ? " and verify pinned commit ancestry" : ""}`);
+  }
   let originFetched = false;
   if (gitRemotes().includes(DEFAULT_PUSH_REMOTE)) {
     const originFetch = run(
@@ -591,14 +620,14 @@ async function main() {
   } else if (options.push) throw new Error(`Missing push remote ${DEFAULT_PUSH_REMOTE}.`);
 
   if (!options.dryRun) {
-    manifest.sourceOid = capture("git", ["rev-parse", target]).stdout.trim();
+    manifest.sourceOid = sourceOid;
     const originResult = originFetched
       ? capture("git", ["rev-parse", `refs/remotes/${DEFAULT_PUSH_REMOTE}/${localBranch}`], {
           allowFailure: true,
         })
       : { status: 1, stdout: "" };
     manifest.originOid = originResult.status === 0 ? originResult.stdout.trim() : null;
-    manifest.mergeBase = capture("git", ["merge-base", startingHead, target]).stdout.trim();
+    manifest.mergeBase = capture("git", ["merge-base", startingHead, sourceOid]).stdout.trim();
     manifest.localCommits = commitList(`${manifest.mergeBase}..${startingHead}`);
     requireSuccess(
       run("git", ["branch", backupBranch, startingHead]),
@@ -631,7 +660,7 @@ async function main() {
   }
 
   try {
-    const merge = run("git", ["merge", "--no-ff", "--no-commit", target], options);
+    const merge = run("git", ["merge", "--no-ff", "--no-commit", sourceOid], options);
     if (merge.status !== 0) throw new Error("Merge stopped for manual semantic conflict review.");
     if (!options.dryRun) {
       manifest.phase = "merged-uncommitted";

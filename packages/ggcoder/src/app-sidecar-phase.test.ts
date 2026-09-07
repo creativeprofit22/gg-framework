@@ -7,6 +7,15 @@ import {
   AppSidecarCancellationPersistence,
   handleCancellationPersistenceRetryRoute,
 } from "./app-sidecar-cancellation.js";
+import { createAppSidecarPhaseBindingService } from "./app-sidecar-phase-binding.js";
+import { RoadmapPhaseLeaseRepository } from "./roadmap-phase-lease-repository.js";
+import type { RoadmapPhaseLeaseMarkerV1 } from "./phase-context.js";
+import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
+import {
+  moveApprovedPhaseLeaseToFreshSession,
+  persistApprovedPlanSnapshot,
+} from "./app-sidecar-approved-plan.js";
+import { createApprovedPlan } from "./roadmap-phase-execution.js";
 import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
@@ -102,6 +111,25 @@ class FakePhaseSession implements BoundPhaseSession {
     sessionPath: string;
   };
   activeContext: ActivePhaseContextV1 | undefined;
+  leaseMarker: RoadmapPhaseLeaseMarkerV1 | undefined;
+  cwd = "";
+  assertPromptLease: (() => Promise<void>) | undefined;
+  runState: "idle" | "running" = "idle";
+  getPhaseLeaseRunState() {
+    return this.runState;
+  }
+
+  getRoadmapPhaseLeaseMarker() {
+    return this.leaseMarker;
+  }
+  async setRoadmapPhaseLeaseMarker(marker: RoadmapPhaseLeaseMarkerV1) {
+    if (this.failures.leaseMarker) throw new Error("lease marker persistence failed");
+    this.leaseMarker = marker;
+  }
+  async clearActivePhaseContext() {
+    this.activeContext = undefined;
+    this.leaseMarker = undefined;
+  }
   disposeCalls = 0;
   promptCalls = 0;
   lastPrompt = "";
@@ -111,7 +139,12 @@ class FakePhaseSession implements BoundPhaseSession {
   constructor(
     sessionNumber: number,
     private readonly events: string[],
-    private readonly failures: { initialize?: boolean; context?: boolean; prompt?: boolean } = {},
+    private readonly failures: {
+      initialize?: boolean;
+      context?: boolean;
+      prompt?: boolean;
+      leaseMarker?: boolean;
+    } = {},
     private readonly label = `candidate-${sessionNumber}`,
   ) {
     this.state = {
@@ -128,7 +161,7 @@ class FakePhaseSession implements BoundPhaseSession {
   }
 
   getState() {
-    return { ...this.state };
+    return { ...this.state, cwd: this.cwd };
   }
 
   async setActivePhaseContext(context: ActivePhaseContextV1): Promise<void> {
@@ -192,6 +225,7 @@ class FakePhaseSession implements BoundPhaseSession {
   }
 
   async prompt(text: string): Promise<void> {
+    await this.assertPromptLease?.();
     this.promptCalls += 1;
     this.lastPrompt = text;
     this.events.push("prompt");
@@ -254,6 +288,7 @@ interface FixtureOptions {
   failBindingCount?: number;
   failAttention?: boolean;
   failEnterPlanMode?: boolean;
+  failLeaseMarker?: boolean;
   pauseBinding?: { promise: Promise<void> };
   pauseAttention?: { promise: Promise<void> };
   sessionNumberBase?: number;
@@ -267,6 +302,8 @@ class ProductionPhaseFixture {
   readonly candidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<FakePhaseSession>>();
   readonly mutations: AppSidecarSessionMutationCoordinator;
   readonly reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+  readonly binding: ReturnType<typeof createAppSidecarPhaseBindingService>;
+  readonly leases: RoadmapPhaseLeaseRepository;
   readonly previousSession: FakePhaseSession;
   currentSession: FakePhaseSession;
   createdSessions: FakePhaseSession[] = [];
@@ -283,6 +320,11 @@ class ProductionPhaseFixture {
     readonly cwd: string,
     readonly options: FixtureOptions = {},
   ) {
+    this.leases = new RoadmapPhaseLeaseRepository(path.join(cwd, ".test-leases"));
+    this.binding = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: this.leases,
+    });
     this.mutations = new AppSidecarSessionMutationCoordinator(() => `operation-${++this.sequence}`);
     this.previousSession = new FakePhaseSession(0, this.events, {}, "previous");
     this.currentSession = this.previousSession;
@@ -329,10 +371,24 @@ class ProductionPhaseFixture {
             initialize: this.takeFailure("initialize"),
             context: this.takeFailure("context"),
             prompt: this.takeFailure("prompt"),
+            leaseMarker: this.options.failLeaseMarker,
           },
         );
+        session.cwd = this.cwd;
+        session.assertPromptLease = async () => {
+          expect(await this.binding.withLeaseFence(session, async () => true)).toEqual({
+            status: "executed",
+            value: true,
+          });
+        };
         this.createdSessions.push(session);
         return session;
+      },
+      acquirePhaseLease: (session, snapshot, id) =>
+        this.binding.acquireForLaunch(session, snapshot, id),
+      releasePhaseLease: async (session, operationId) => {
+        const outcome = await this.binding.releaseCurrent(operationId, session);
+        expect(outcome.status).toBe("released");
       },
       replaceSession: (session) => {
         this.events.push("session-replaced");
@@ -642,6 +698,258 @@ describe("cancel route phase persistence", () => {
 });
 
 describe("production launchBoundPhase orchestration", () => {
+  it("holds a real phase lease before the planning runner starts", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    expect(
+      await fixture.binding.withLeaseFence(fixture.currentSession, async () => "planning"),
+    ).toEqual({ status: "executed", value: "planning" });
+  });
+
+  it("rejects a competing status writer while the launched planning runner owns the phase", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const competitor = new FakePhaseSession(99, []);
+    competitor.cwd = cwd;
+    await competitor.initialize();
+    const write = vi.fn(async () => true);
+    expect(await fixture.binding.withStatusLease(competitor, "phase-21", write)).toEqual({
+      status: "phase-lease-lost",
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(fixture.currentSession.getActivePhaseContext()?.executionStage).toBe("planning");
+  });
+
+  it("submits, pauses, approves and transfers the fenced plan to a fresh implementation session", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const session = fixture.currentSession;
+    const gate = new AppSidecarPlanGate([], async (checkpoint) => {
+      await fs.writeFile(path.join(cwd, "checkpoint.json"), JSON.stringify(checkpoint));
+    });
+    const submitted = await gate.submit(
+      path.join(cwd, "plan.md"),
+      "# Plan\n\n## Steps\n\n1. Verify launch ownership.\n",
+    );
+    await session.updateActivePhaseStage("awaiting-approval");
+    const marker = session.getRoadmapPhaseLeaseMarker()!;
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    expect(
+      await fixture.binding.lease(
+        {
+          version: 2,
+          action: "renew",
+          phaseId: marker.phaseId,
+          expectedProjectKey: loaded.snapshot.projectKey,
+          expectedRevision: loaded.snapshot.revision,
+          planId: marker.planId,
+          operationId: "planning-pause",
+          lease: { leaseId: marker.leaseId, fence: marker.fence },
+          confirmTakeover: false,
+          takeoverReason: null,
+          predecessorProof: null,
+        },
+        session,
+      ),
+    ).toMatchObject({ status: "renewed" });
+    expect(session.getActivePhaseContext()?.executionStage).toBe("awaiting-approval");
+    expect(gate.pending()?.state).toBe("pending-review");
+    const approved = await gate.approve(submitted.checkpointId, submitted.generation);
+    if (approved.status !== "committed") throw new Error(approved.status);
+    const checkpoint = gate.current()!;
+    const approvedPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
+    const plan = createApprovedPlan({
+      planId: checkpoint.checkpointId,
+      content: await fs.readFile(approvedPath, "utf8"),
+      snapshotPath: path.relative(cwd, approvedPath).split(path.sep).join("/"),
+      approvedAt: checkpoint.timestamp,
+      approvedRevision: loaded.snapshot.revision + 1,
+      baseCommit: "b".repeat(40),
+    });
+    const previousLease = session.getRoadmapPhaseLeaseMarker()!;
+    const previousSession = session.getActivePhaseContext()!.session;
+    await commitPlanApprovalCheckpoint({
+      session,
+      repository,
+      cwd,
+      planPath: approvedPath,
+      durablePlan: {
+        request: {
+          operationId: checkpoint.checkpointId,
+          phaseId: "phase-21",
+          expectedRevision: loaded.snapshot.revision,
+          repository: {
+            projectKey: loaded.snapshot.projectKey,
+            identityHash: "a".repeat(64),
+            rootCommit: "b".repeat(40),
+          },
+          plan,
+          lastSession: previousSession,
+        },
+        mutateWithLeaseFence: (operation) => fixture.binding.withLeaseFence(session, operation),
+        moveLeaseToFreshSession: (snapshot) =>
+          moveApprovedPhaseLeaseToFreshSession({
+            binding: fixture.binding,
+            repository,
+            session,
+            snapshot,
+            phaseId: "phase-21",
+            checkpoint,
+            previousLease,
+          }),
+      },
+      prepareFreshSession: async () => {
+        await session.newSession(true);
+        return plan.steps.length;
+      },
+    });
+    expect(session.getActivePhaseContext()).toMatchObject({
+      executionStage: "implementing",
+      approvedPlanPath: approvedPath,
+    });
+    expect(session.getState().sessionId).not.toBe(previousSession.sessionId);
+    expect(session.getRoadmapPhaseLeaseMarker()!.fence).toBeGreaterThan(previousLease.fence);
+    expect(await fixture.binding.withLeaseFence(session, async () => "implementation")).toEqual({
+      status: "executed",
+      value: "implementation",
+    });
+    const latest = await repository.load(cwd);
+    if (latest.status !== "ok") throw new Error(latest.status);
+    expect(latest.snapshot.document.phases[0]?.session?.sessionId).toBe(
+      session.getState().sessionId,
+    );
+    expect(latest.snapshot.document.phases[0]?.execution?.plan?.planId).toBe(
+      checkpoint.checkpointId,
+    );
+  });
+
+  it.each(["marker", "plan-mode"])(
+    "releases the real launch lease after %s persistence fails",
+    async (failure) => {
+      const { repository, cwd } = await setup();
+      const fixture = new ProductionPhaseFixture(repository, cwd, {
+        failLeaseMarker: failure === "marker",
+        failEnterPlanMode: failure === "plan-mode",
+      });
+      expect((await fixture.start()).status).toBe(500);
+      expect(fixture.createdSessions[0]?.promptCalls).toBe(0);
+      expect(fixture.createdSessions[0]?.getRoadmapPhaseLeaseMarker()).toBeUndefined();
+      if (failure === "marker") expect(fixture.createdSessions[0]?.disposeCalls).toBe(1);
+      const competitor = new FakePhaseSession(99, []);
+      competitor.cwd = cwd;
+      expect(
+        await fixture.binding.withStatusLease(competitor, "phase-21", async () => true),
+      ).toEqual({ status: "executed", value: true });
+    },
+  );
+
+  it("releases cancellation authority only after the planning runner has stopped", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const session = fixture.currentSession;
+    session.runState = "running";
+    expect(await fixture.binding.releaseCurrent("cancel-running", session)).toMatchObject({
+      status: "phase-lease-held",
+    });
+    expect(session.getActivePhaseContext()).toBeDefined();
+    session.runState = "idle";
+    expect(await fixture.binding.releaseCurrent("cancel-settled", session)).toMatchObject({
+      status: "released",
+    });
+    expect(session.getActivePhaseContext()).toBeUndefined();
+    expect(session.getRoadmapPhaseLeaseMarker()).toBeUndefined();
+    expect(await fixture.binding.withLeaseFence(session, async () => true)).toEqual({
+      status: "phase-lease-lost",
+    });
+  });
+
+  it("requires next-phase confirmation and acquires its planning lease before running", async () => {
+    const { repository, cwd } = await setup(false);
+    const input = document();
+    const source = structuredClone(input.phases[0]!);
+    source.id = "previous-phase";
+    for (const phase of input.phases) phase.order += 1;
+    source.order = 0;
+    source.status = "done";
+    source.completedAt = NOW;
+    source.session = { sessionId: "previous-owner", sessionPath: "/sessions/previous.jsonl" };
+    source.roadmapEvents = [
+      {
+        type: "status-update",
+        id: "verified",
+        actor: "gg-coder",
+        transition: "done",
+        progress: "Verified",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: ["tests passed"],
+        verification: "passed",
+        verificationReason: null,
+        verificationSession: source.session,
+        statusOutcome: "completion-pending",
+        proposedReferences: [],
+        timestamp: NOW,
+      },
+      {
+        type: "implementation-checkpoint",
+        id: "implemented",
+        session: source.session,
+        planStepTotal: 1,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        verificationStatusUpdateId: "verified",
+        timestamp: NOW,
+      },
+      {
+        type: "phase-advancement-checkpoint",
+        id: "advance",
+        implementationCheckpointId: "implemented",
+        verificationStatusUpdateId: "verified",
+        completedPhaseId: source.id,
+        nextPhaseId: "phase-21",
+        timestamp: NOW,
+      },
+    ];
+    input.phases.unshift(source);
+    expect(await repository.migrate(cwd, input)).toMatchObject({ status: "ok" });
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    const invalid = await fixture.start("phase-21", {
+      checkpointId: "wrong",
+      nextPhaseId: "phase-21",
+      action: "start-next-phase",
+    });
+    expect(invalid.status).not.toBe(202);
+    expect(fixture.createCalls).toBe(0);
+    const accepted = await fixture.start("phase-21", {
+      checkpointId: "advance",
+      nextPhaseId: "phase-21",
+      action: "start-next-phase",
+    });
+    expect(accepted.status).toBe(202);
+    await fixture.promptSettled;
+    expect(fixture.currentSession.promptCalls).toBe(1);
+    expect(await fixture.binding.withLeaseFence(fixture.currentSession, async () => true)).toEqual({
+      status: "executed",
+      value: true,
+    });
+    const repeated = await fixture.start("phase-21", {
+      checkpointId: "advance",
+      nextPhaseId: "phase-21",
+      action: "start-next-phase",
+    });
+    expect(repeated.status).not.toBe(202);
+    expect(fixture.createCalls).toBe(1);
+  });
+
   it("uses the production bind → fan-out → replacement → reset → Plan Mode → response → prompt order", async () => {
     const { repository, cwd } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);
@@ -664,6 +972,7 @@ describe("production launchBoundPhase orchestration", () => {
       "candidate-initialize",
       "context-persisted",
       "bind-committed",
+      "context-persisted",
       "notes-fan-out",
       "session-replaced",
       "events-bound",
@@ -1227,8 +1536,8 @@ describe("production launchBoundPhase orchestration", () => {
 
     const accepted = await fixture.start();
     expect(accepted).toMatchObject({ status: 202, body: { status: "accepted" } });
-    expect(fixture.events.indexOf("response:202")).toBeLessThan(fixture.events.indexOf("prompt"));
     await fixture.promptSettled;
+    expect(fixture.events.indexOf("response:202")).toBeLessThan(fixture.events.indexOf("prompt"));
 
     expect(await repository.load(cwd)).toMatchObject({
       status: "ok",

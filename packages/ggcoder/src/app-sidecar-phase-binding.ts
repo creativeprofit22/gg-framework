@@ -61,6 +61,11 @@ export type PhaseStatusLeaseFailure =
 export interface AppSidecarPhaseBindingService {
   bind(request: PhaseBindingRequest, session: PhaseBindingSession): Promise<PhaseBindingOutcome>;
   lease(request: PhaseLeaseRequestV2, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
+  acquireForLaunch(
+    session: PhaseBindingSession,
+    snapshot: ProjectNotesSnapshot,
+    phaseId: string,
+  ): Promise<void>;
   releaseCurrent(operationId: string, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
   reconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
@@ -160,6 +165,89 @@ export function createAppSidecarPhaseBindingService(
 
     async lease(request, session) {
       return executePhaseLease(options, request, session);
+    },
+
+    async acquireForLaunch(session, snapshot, phaseId) {
+      const leases = options.leaseRepository;
+      if (!leases || !session.setRoadmapPhaseLeaseMarker || !session.getRoadmapPhaseLeaseMarker) {
+        throw new Error("Phase launch requires durable lease storage.");
+      }
+      const state = session.getState();
+      if (!state.sessionPath) throw new Error("Phase launch requires a persisted session.");
+      const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
+      if (
+        !phase ||
+        phase.archivedAt !== null ||
+        phase.status === "done" ||
+        !notesSessionLinksEqual(phase.session, state)
+      ) {
+        throw new Error("Phase launch binding is no longer active.");
+      }
+      const request = leaseRequest({
+        action: "acquire",
+        phaseId,
+        projectKey: snapshot.projectKey,
+        revision: snapshot.revision,
+        planId: phase.execution?.plan?.planId ?? null,
+        operationId: randomUUID(),
+      });
+      const input = {
+        cwd: state.cwd,
+        request,
+        holder: phaseLeaseHolder(options, state),
+        runState: "idle" as const,
+        context: {
+          projectKey: snapshot.projectKey,
+          roadmapRevision: snapshot.revision,
+          phaseId,
+          phaseStatus: phase.status,
+          planId: request.planId,
+        },
+      };
+      const acquired = await leases.execute(input);
+      if (
+        (acquired.status !== "acquired" && acquired.status !== "duplicate") ||
+        !acquired.lease ||
+        !publicHolderMatches(acquired.lease.holder, input.holder)
+      ) {
+        throw new Error(`Phase launch lease failed: ${acquired.status}`);
+      }
+      const lease = acquired.lease;
+      try {
+        const fenced = await leases.withFence(
+          {
+            cwd: state.cwd,
+            phaseId,
+            holder: input.holder,
+            token: { leaseId: lease.leaseId, fence: lease.fence },
+          },
+          async () => {
+            const latest = await options.repository.load(state.cwd);
+            if (
+              latest.status !== "ok" ||
+              latest.snapshot.revision !== snapshot.revision ||
+              !(await persistLeaseContextFromLatestNotes(options, session, lease))
+            ) {
+              throw new Error("Phase launch binding changed before lease persistence.");
+            }
+          },
+        );
+        if (fenced.status !== "executed")
+          throw new Error(`Phase launch fence failed: ${fenced.status}`);
+      } catch (error) {
+        // Compensate even when persisting the session marker itself failed.
+        await leases.execute({
+          ...input,
+          request: {
+            ...request,
+            action: "release",
+            operationId: `${request.operationId}:cleanup`,
+            lease: { leaseId: lease.leaseId, fence: lease.fence },
+          },
+        });
+        await clearSessionContext(session, "binding-compensation");
+        throw error;
+      }
     },
 
     async releaseCurrent(operationId, session) {
@@ -609,10 +697,14 @@ async function persistLeaseContextFromLatestNotes(
     phase.archivedAt !== null ||
     phase.status === "done" ||
     lease.projectKey !== latest.snapshot.projectKey ||
+    !notesSessionLinksEqual(phase.session, state) ||
     lease.planId !== (phase.execution?.plan?.planId ?? null)
   ) {
     return false;
   }
+  const active = session.getActivePhaseContext();
+  const samePhase =
+    active?.projectKey === latest.snapshot.projectKey && active.phase.id === phase.id;
   await session.setRoadmapPhaseLeaseMarker?.({
     version: 1,
     projectKey: latest.snapshot.projectKey,
@@ -629,7 +721,9 @@ async function persistLeaseContextFromLatestNotes(
       phase,
       references: latest.snapshot.document.references,
       session: { sessionId: state.sessionId, sessionPath: state.sessionPath },
-      executionStage: "implementing",
+      // Heartbeats must not turn a planning pause into implementation.
+      executionStage: samePhase ? active.executionStage : "implementing",
+      approvedPlanPath: samePhase ? active.approvedPlanPath : undefined,
     }),
   );
   return true;

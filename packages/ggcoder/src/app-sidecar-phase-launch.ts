@@ -93,6 +93,12 @@ export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession
     model: string;
     thinkingLevel?: ThinkingLevel;
   }): TSession;
+  acquirePhaseLease(
+    session: TSession,
+    snapshot: ProjectNotesSnapshot,
+    phaseId: string,
+  ): Promise<void>;
+  releasePhaseLease(session: TSession, operationId: string): Promise<void>;
   replaceSession(session: TSession): void;
   bindSessionEvents(session: TSession): void;
   autopilotEnabled: boolean;
@@ -169,6 +175,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
   }
 
   let attentionExpectedSession: NotesSessionLink | null = null;
+  let leasedSession: TSession | undefined;
   try {
     const createBinding = async (frozen: FrozenPhaseLaunchContext) => {
       attentionExpectedSession = frozen.phase.session ? { ...frozen.phase.session } : null;
@@ -263,8 +270,18 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       return;
     }
 
-    const candidate = dependencies.candidates.take(phaseId);
+    const candidate = dependencies.candidates.get(phaseId);
     if (!candidate) throw new Error("Committed phase binding has no candidate session.");
+    // Acquire outside the Notes transaction (lease → Notes is the fence lock order).
+    // No candidate can be promoted or run until authenticated ownership is durable.
+    try {
+      await dependencies.acquirePhaseLease(candidate.session, outcome.snapshot, phaseId);
+    } catch (error) {
+      await dependencies.candidates.disposeCandidate(phaseId);
+      throw error;
+    }
+    leasedSession = candidate.session;
+    dependencies.candidates.take(phaseId);
 
     dependencies.broadcastNotesSnapshot(outcome.snapshot);
     const previousSession = dependencies.getSession();
@@ -318,6 +335,16 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       },
     );
   } catch (error) {
+    if (leasedSession) {
+      await dependencies
+        .releasePhaseLease(leasedSession, `${mutation.operationId}:cleanup`)
+        .catch((cleanupError) =>
+          dependencies.onLaunchFailure?.(cleanupError, {
+            operationId: mutation.operationId,
+            phaseId,
+          }),
+        );
+    }
     dependencies.onLaunchFailure?.(error, { operationId: mutation.operationId, phaseId });
     const attention = await dependencies.repository
       .recordPhaseLaunchAttention(

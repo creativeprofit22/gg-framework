@@ -295,7 +295,10 @@ import {
   planGateConflictCode,
   type PersistedPlanReviewCheckpoint,
 } from "./app-sidecar-plan-gate.js";
-import { persistApprovedPlanSnapshot } from "./app-sidecar-approved-plan.js";
+import {
+  moveApprovedPhaseLeaseToFreshSession,
+  persistApprovedPlanSnapshot,
+} from "./app-sidecar-approved-plan.js";
 import {
   executePlanRevisionRequest,
   isPlanRevisionSessionBusy,
@@ -3541,7 +3544,17 @@ async function createSession(
         finishOwnedGeneration(generation, false, outcome);
         await runJournalPersistence;
         if (!(await settleDeferredPhaseLeaseRelease())) {
-          await renewCurrentPhaseLease(`run:${generation}:idle`);
+          if (
+            (outcome === "aborted" || outcome === "failed") &&
+            session.getActivePhaseContext()?.executionStage === "planning" &&
+            !planGate.pending()
+          ) {
+            // A failed launch without a submitted plan has no handoff to preserve.
+            await releaseCurrentPhaseLease(`run:${generation}:release`);
+          } else {
+            // Keep planning association and authority while waiting for user approval.
+            await renewCurrentPhaseLease(`run:${generation}:idle`);
+          }
         }
       }
       let terminalPlanComplete = false;
@@ -3602,6 +3615,14 @@ async function createSession(
     },
     commitApproval: async (checkpoint) => {
       const previousActivePhase = session.getActivePhaseContext();
+      if (durableRoadmapExecution && previousActivePhase) {
+        if (!session.getRoadmapPhaseLeaseMarker()) {
+          throw new Error("Phase plan approval requires authenticated lease ownership.");
+        }
+        // Approval may arrive after a long idle planning pause. Renew the same
+        // fenced owner before committing the plan; never acquire over a competitor.
+        await renewCurrentPhaseLease(`${checkpoint.checkpointId}:approval`);
+      }
       const approvalWorkspace =
         durableRoadmapExecution && previousActivePhase
           ? await (async () => {
@@ -3669,34 +3690,17 @@ async function createSession(
                 mutateWithLeaseFence: <T>(operation: () => Promise<T>) =>
                   phaseBinding.withLeaseFence(session, operation),
                 moveLeaseToFreshSession: async (snapshot: ProjectNotesSnapshot) => {
-                  const action = previousLeaseMarker ? ("takeover" as const) : ("acquire" as const);
-                  const outcome = await phaseBinding.lease(
-                    {
-                      version: 2,
-                      action,
-                      phaseId: previousActivePhase.phase.id,
-                      expectedProjectKey: snapshot.projectKey,
-                      expectedRevision: snapshot.revision,
-                      planId: plan.planId,
-                      operationId: `${checkpoint.checkpointId}:fresh-session`,
-                      lease: previousLeaseMarker
-                        ? { leaseId: previousLeaseMarker.leaseId, fence: previousLeaseMarker.fence }
-                        : null,
-                      confirmTakeover: action === "takeover",
-                      takeoverReason:
-                        action === "takeover" ? "Move approved work to its fresh session" : null,
-                      predecessorProof: null,
-                    },
+                  if (!previousLeaseMarker)
+                    throw new Error("Phase lease missing before approved handoff.");
+                  return moveApprovedPhaseLeaseToFreshSession({
+                    binding: phaseBinding,
+                    repository: notesRepository,
                     session,
-                  );
-                  if (outcome.status !== "acquired" && outcome.status !== "duplicate") {
-                    throw new Error(`Fresh phase lease failed: ${outcome.status}`);
-                  }
-                  const latest = await notesRepository.load(cwd);
-                  if (latest.status !== "ok") {
-                    throw new Error(`Fresh phase session could not be reloaded: ${latest.status}`);
-                  }
-                  return latest.snapshot;
+                    snapshot,
+                    phaseId: previousActivePhase.phase.id,
+                    checkpoint,
+                    previousLease: previousLeaseMarker,
+                  });
                 },
               };
             })()
@@ -3982,6 +3986,17 @@ ${checkpoints}`;
         getSession: () => session,
         getThinkingLevel: () => session.getThinkingLevel(),
         createSession: (active) => createCodingSession(undefined, active),
+        acquirePhaseLease: (candidate, snapshot, id) =>
+          phaseBinding.acquireForLaunch(candidate, snapshot, id),
+        releasePhaseLease: async (candidate, operationId) => {
+          const released = await phaseBinding.releaseCurrent(operationId, candidate);
+          if (
+            released.status !== "released" &&
+            !(released.status === "duplicate" && released.lease === null)
+          ) {
+            throw new Error(`Phase launch cleanup failed: ${released.status}`);
+          }
+        },
         replaceSession: (replacement) => {
           session = replacement;
           bindKenTransitions(replacement);

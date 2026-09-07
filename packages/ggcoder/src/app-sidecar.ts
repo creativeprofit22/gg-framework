@@ -180,8 +180,8 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { handleAppSidecarProgrammaticExecution } from "./app-sidecar-programmatic-execution.js";
-import { executeProgrammaticOpportunity } from "./core/programmatic/execution.js";
+import { handleAppSidecarProgrammaticExecution, settleProgrammaticRun } from "./app-sidecar-programmatic-execution.js";
+import { executeProgrammaticOpportunity, type ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
 import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
@@ -3728,7 +3728,7 @@ async function createSession(
 
   // Core provider-run bracket. Standalone runs own a lifecycle generation;
   // injected autopilot runs share the cycle's outer generation.
-  async function runAgent(label: string, run: () => Promise<void>): Promise<void> {
+  async function runAgent(label: string, run: () => Promise<void | ProgrammaticExecutionOutcome>): Promise<void> {
     const completionIntentRun = roadmapCompletionIntents.beginRun();
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
@@ -3741,22 +3741,28 @@ async function createSession(
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
+    let programmaticSettlement: ReturnType<typeof settleProgrammaticRun>;
     let advancementError: { cause: unknown } | null = null;
     broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
       if (ownsGeneration) {
         await renewCurrentPhaseLease(`run:${generation}:running`);
       }
-      if (!runLifecycle.isCancellationRequested(generation)) await run();
-      runSucceeded = true;
+      if (!runLifecycle.isCancellationRequested(generation)) {
+        programmaticSettlement = settleProgrammaticRun(await run());
+        runSucceeded = programmaticSettlement?.succeeded ?? true;
+      }
     } catch (err) {
       if (!runLifecycle.isCancellationRequested(generation)) {
         broadcastError("error", "run failed", err);
       }
     } finally {
       const completionIntentFinalizer = roadmapCompletionIntents.finalizeRun(completionIntentRun);
-      const cancelled = runLifecycle.isCancellationRequested(generation);
-      const verificationProblem = cancelled ? null : session.getVerificationProblem();
+      const cancelled = runLifecycle.isCancellationRequested(generation) || programmaticSettlement?.cancelled === true;
+      // The isolated specialist has its own verification; parent gates may be stale.
+      const verificationProblem = cancelled ? null : programmaticSettlement
+        ? (programmaticSettlement.succeeded ? null : "Specialist execution did not complete.")
+        : session.getVerificationProblem();
       if (runSucceeded && verificationProblem && ownsGeneration) {
         // Expected control outcome: run_end and the journal already carry Unverified.
         // Do not format it as a crash or persist a misleading error marker.
@@ -3788,7 +3794,7 @@ async function createSession(
         finishOwnedGeneration(
           generation,
           false,
-          verificationProblem ? "unverified" : runSucceeded ? "completed" : "failed",
+          programmaticSettlement?.journalOutcome ?? (verificationProblem ? "unverified" : runSucceeded ? "completed" : "failed"),
         );
         await runJournalPersistence;
         if (!(await settleDeferredPhaseLeaseRelease())) {
@@ -3860,6 +3866,7 @@ async function createSession(
       if (!(cancelled && !ownsGeneration)) {
         if (cancelled) cancelledRunEndGenerations.add(generation);
         broadcast("run_end", {
+          ...programmaticSettlement?.event,
           ...(cancelled ? { cancelled: true } : {}),
           ...(verificationProblem ? { unverified: true } : {}),
           runState: runLifecycle.state,
@@ -5797,6 +5804,7 @@ ${checkpoints}`;
                       progress: (text) => broadcast("text_delta", { text }),
                     });
                     broadcast("text_delta", { text: `\n${result.status === "rejected" ? result.reason : result.summary}\n` });
+                    return result;
                   } finally { programmaticExecutionActive = false; }
                 },
               });

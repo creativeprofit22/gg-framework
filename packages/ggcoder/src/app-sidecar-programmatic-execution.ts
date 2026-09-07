@@ -1,3 +1,25 @@
+import type { ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
+import type { RunOutcome } from "./core/session-manager.js";
+
+/** Project only the bounded result, never the isolated route or conversation. */
+export function settleProgrammaticRun(result: ProgrammaticExecutionOutcome | void) {
+  if (!result) return undefined;
+  const cancelled = result.status === "cancelled" || result.status === "rejected";
+  const succeeded = result.status === "succeeded";
+  const journalOutcome: RunOutcome = cancelled ? "aborted" : succeeded ? "completed" : result.status === "blocked" ? "unverified" : "failed";
+  return {
+    succeeded,
+    cancelled,
+    journalOutcome,
+    event: {
+      ...(cancelled ? { cancelled: true } : !succeeded ? { unverified: true } : {}),
+      programmaticResult: result.status === "rejected"
+        ? { version: result.version, status: result.status, reason: result.reason }
+        : { version: result.version, status: result.status, summary: result.summary, evidence: result.evidence },
+    },
+  };
+}
+
 export type ProgrammaticRunSelection = { opportunityId: string; configurationSha256: string };
 
 /** Raw app command only: no template lookup, steering, attachments, or model authorization. */
@@ -15,8 +37,8 @@ export async function handleAppSidecarProgrammaticExecution(options: {
   codeMode: boolean;
   claimStart(): boolean;
   respond(status: number, body: Record<string, unknown>): void;
-  runAgent(label: string, run: () => Promise<void>): Promise<void>;
-  execute(selection: ProgrammaticRunSelection): Promise<void>;
+  runAgent(label: string, run: () => Promise<ProgrammaticExecutionOutcome>): Promise<void>;
+  execute(selection: ProgrammaticRunSelection): Promise<ProgrammaticExecutionOutcome>;
 }): Promise<boolean> {
   const selection = parseProgrammaticRunSelection(options.text);
   if (selection === null) return false;

@@ -2,6 +2,9 @@ import fs from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
+import { handleAppSidecarProgrammaticExecution, settleProgrammaticRun } from "../../app-sidecar-programmatic-execution.js";
+import { RunLifecycle } from "../run-lifecycle.js";
+import type { ProgrammaticExecutionOutcome } from "./execution.js";
 import { ProcessManager } from "../process-manager.js";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +45,35 @@ function answer(request: AskUserRequest): Promise<AskUserResult> {
 function options(extra: Partial<ProgrammaticExecutionOptions> = {}): ProgrammaticExecutionOptions {
   return { cwd: root, opportunityId: selected, configurationSha256: sha256, provider: "azure", model: "azure:fixture", baseUrl: providerUrl,
     signal: new AbortController().signal, ask: answer, cancelQuestions: vi.fn(), progress: vi.fn(), ...extra };
+}
+async function executeThroughApp(input: ProgrammaticExecutionOptions, expectedStatus: ProgrammaticExecutionOutcome["status"]) {
+  const journal = { started: vi.fn(), finished: vi.fn() };
+  const lifecycle = new RunLifecycle(undefined, journal);
+  const broadcast = vi.fn();
+  let result: ProgrammaticExecutionOutcome | undefined;
+  await handleAppSidecarProgrammaticExecution({
+    text: `/programmatic-run ${input.opportunityId} ${input.configurationSha256}`,
+    attachmentCount: 0, busy: false, automated: false, codeMode: true,
+    claimStart: () => true, respond: vi.fn(),
+    execute: (selection) => executeProgrammaticOpportunity({ ...input, ...selection }),
+    runAgent: async (_label, run) => {
+      const { generation } = lifecycle.begin(() => {});
+      result = await run();
+      const settlement = settleProgrammaticRun(result)!;
+      lifecycle.settle(generation, settlement.journalOutcome);
+      broadcast("run_end", { ...settlement.event, runState: lifecycle.state });
+    },
+  });
+  expect(result?.status).toBe(expectedStatus);
+  const cancelled = expectedStatus === "cancelled" || expectedStatus === "rejected";
+  const succeeded = expectedStatus === "succeeded";
+  expect(journal.finished).toHaveBeenCalledExactlyOnceWith(1, cancelled ? "aborted" : succeeded ? "completed" : expectedStatus === "blocked" ? "unverified" : "failed");
+  expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", {
+    ...(cancelled ? { cancelled: true } : !succeeded ? { unverified: true } : {}),
+    runState: "idle", programmaticResult: expect.objectContaining({ status: expectedStatus }),
+  });
+  expect(JSON.stringify(broadcast.mock.calls)).not.toContain("fixture-provider-failure");
+  return result!;
 }
 function sse(events: Record<string, unknown>[]) {
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
@@ -121,7 +153,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     const before = await state();
     const progress = vi.fn();
     try {
-      const result = await executeProgrammaticOpportunity(options({ progress }));
+      const result = await executeThroughApp(options({ progress }), "succeeded");
       expect(result).toMatchObject({ status: "succeeded", summary: "Fixture manifest inspected." });
       expect(progress).toHaveBeenCalledWith("\n[research] read\n");
       const input = JSON.stringify(requests[0]);
@@ -152,6 +184,11 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect((await state()).records.find((record) => record.opportunity.identity.id === selected)!.lifecycle.state).toBe("discovered");
   });
 
+  it("settles a rejected approval as aborted in the parent without provider dispatch", async () => {
+    await executeThroughApp(options({ ask: async () => ({ action: "cancel" }) }), "rejected");
+    expect(requests).toHaveLength(0);
+  });
+
   it("rejects two selected IDs concurrently and consumes one fresh question-card answer", async () => {
     let release!: () => void;
     const ready = new Promise<void>((resolve) => { release = resolve; });
@@ -173,8 +210,10 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
       if (mode === "cancel-run") { abort.abort(); return textResponse(); }
       return sse([{ type: "response.output_text.delta", delta: "Partial text" }, { type: "response.failed", response: { error: { message: "fixture-provider-failure" } } }]);
     });
-    const result = await executeProgrammaticOpportunity(options({ signal: abort.signal }));
+    const progress = vi.fn();
+    const result = await executeThroughApp(options({ signal: abort.signal, progress }), mode === "cancel-run" ? "cancelled" : "failed");
     expect(result.status).not.toBe("succeeded");
+    if (mode === "provider-failure") expect(progress).toHaveBeenCalledWith("Partial text");
     expect((await state()).records.find((record) => record.opportunity.identity.id === selected)!.lifecycle.state).toBe("queued");
   }, 20_000);
 
@@ -185,7 +224,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(requests).toHaveLength(0);
     const realSetTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => realSetTimeout(callback, delay === EXECUTION_DEADLINE_MS ? 30 : delay, ...args));
-    const timeout = await executeProgrammaticOpportunity(options({ ask: () => new Promise(() => {}) }));
+    const timeout = await executeThroughApp(options({ ask: () => new Promise(() => {}) }), "failed");
     expect(timeout).toMatchObject({ status: "failed", summary: expect.stringContaining("timeout") });
   });
 
@@ -218,11 +257,11 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
       ready();
     } });
     const parent = new AbortController();
-    const run = executeProgrammaticOpportunity(options({ signal: parent.signal, cancelQuestions: () => bridge.cancelAll(), ask: (request) => {
+    const run = executeThroughApp(options({ signal: parent.signal, cancelQuestions: () => bridge.cancelAll(), ask: (request) => {
       const question = request.questions[0]!.question;
       const shouldPark = mode === "execution" || (mode === "action" ? question.startsWith("Allow this specialist action") : question.startsWith("Approve this isolated"));
       return shouldPark ? bridge.park(request) : answer(request);
-    } }));
+    } }), "failed");
     await parked;
     expect(bridge.pendingCount).toBe(1);
     await vi.advanceTimersByTimeAsync(EXECUTION_DEADLINE_MS);
@@ -401,7 +440,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     const available = (await state()).records.find((record) => record.presence === "present" && record.lifecycle.state !== "completed");
     expect(available).toBeDefined();
     const refreshedAsk = vi.fn(async () => ({ action: "cancel" as const }));
-    expect(await executeProgrammaticOpportunity(options({ opportunityId: available!.opportunity.identity.id, configurationSha256: fresh.configurationFingerprint.sha256, ask: refreshedAsk }))).toMatchObject({ status: "failed", summary: expect.stringContaining("approval-rejected") });
+    expect(await executeProgrammaticOpportunity(options({ opportunityId: available!.opportunity.identity.id, configurationSha256: fresh.configurationFingerprint.sha256, ask: refreshedAsk }))).toMatchObject({ status: "rejected", reason: "approval-rejected" });
     expect(refreshedAsk).toHaveBeenCalledTimes(1);
   }, 20_000);
 

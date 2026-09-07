@@ -304,7 +304,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
     }
     if (cleanupOk) projectClaims.delete(root);
   }
-  if (!snapshot || reason === "specialist-tools-unavailable") return { version: 1, status: "rejected", reason };
+  if (!snapshot || reason === "specialist-tools-unavailable" || reason === "approval-rejected") return { version: 1, status: "rejected", reason };
   const success = reason === "specialist-completed";
   return executionResultV1Schema.parse({
     version: 1, route: snapshot.route,

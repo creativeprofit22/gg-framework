@@ -10,10 +10,7 @@ GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runt
 - `packages/gg-agent`: the reusable agent loop, tool execution, compaction, subagents, and transport-independent session orchestration.
 - `packages/gg-core`: shared auth/config/path storage plus Project Notes and Roadmap contracts used across processes.
 - `packages/ggcoder`: the `ggcoder` CLI and desktop Node daemon; owns prompts, sessions, skills, MCP, tools, and app HTTP/SSE endpoints.
-- `packages/gg-boss`: the `ggboss` CLI for higher-level multi-agent orchestration.
 - `gg-app`: React/Tauri desktop shell; TypeScript owns UI state, Rust owns native OS access and proxies the Node daemon.
-- `packages/gg-editor` and `packages/gg-editor-premiere-panel`: Premiere automation runtime and its CEP panel.
-- `packages/gg-voice` and `packages/ggcoder-eyes`: speech tooling and the vision/screen-observation service.
 - `Matey`: a separate MCP-enabled local agent application in the same workspace.
 
 ## Architecture

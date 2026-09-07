@@ -22,6 +22,15 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.62.0",
+    date: "2026-09-07",
+    items: [
+      "Big coding jobs now get a fresh pair of eyes. I gave `Ideal` an independent reviewer that reads your changes without the original agent's excuses, then sends real issues back for another pass before you get the final answer.",
+      "Less spinning, more progress. I upgraded `loop detection` to spot failed retries even when the agent keeps changing the wording, so it can try a genuinely different approach. Your next prompt gets a clean slate, not yesterday's warning.",
+      "Ask a question and get an answer, not a surprise testing detour. I stopped unfinished checks from dragging `Hook engaged` into your question-only turns, and made verification explain exactly why a check did not count.",
+    ],
+  },
+  {
     version: "0.61.2",
     date: "2026-09-07",
     items: [

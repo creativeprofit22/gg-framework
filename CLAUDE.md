@@ -1,7 +1,7 @@
 <!-- gg:init:start -->
 # gg-framework
 
-Provider-flexible AI-agent monorepo whose primary product is the `ggcoder` coding agent, with terminal, Tauri desktop, multi-project, media-editing, voice, and probe surfaces.
+Provider-flexible AI-agent monorepo whose primary product is the `ggcoder` coding agent, with terminal and Tauri desktop surfaces.
 
 ## Ownership
 
@@ -9,13 +9,9 @@ Provider-flexible AI-agent monorepo whose primary product is the `ggcoder` codin
 - `packages/gg-agent` owns the provider-independent turn loop, tool execution, and agent events.
 - `packages/gg-core` owns UI-free shared models, auth/OAuth, paths, usage, logging, transcription, Project Notes, and roadmap protocols.
 - `packages/ggcoder` owns coding sessions, built-in/MCP/LSP tools, persistence, Ink UI, CLI modes, and the desktop app sidecar.
-- `packages/gg-boss` owns multi-project orchestration; workers are in-process `ggcoder` sessions, not spawned CLIs.
-- `packages/gg-editor` owns Resolve/Premiere agent sessions; `gg-editor-premiere-panel` owns the UXP/CEP extension and local bridge.
-- `packages/gg-voice` owns provider-neutral realtime voice contracts and ggcoder/ggboss bridges.
-- `packages/ggcoder-eyes` owns installable screenshot, log, HTTP, and email perception probes.
 - `gg-app` is the production React/Tauri desktop workspace; `Matey` is a separate Electron UI prototype with renderer-local chat state.
 
-Package layering is `gg-ai → gg-agent`/`gg-core → ggcoder → gg-boss`; `gg-editor` layers on `gg-ai`, `gg-agent`, and `ggcoder`. Keep transports/raw provider failures in `gg-ai`, reusable UI-free state in `gg-core`, and native window/IPC behavior in `gg-app`.
+Package layering is `gg-ai → gg-agent`/`gg-core → ggcoder`. Keep transports/raw provider failures in `gg-ai`, reusable UI-free state in `gg-core`, and native window/IPC behavior in `gg-app`.
 
 ## Desktop architecture
 
@@ -30,9 +26,8 @@ Package layering is `gg-ai → gg-agent`/`gg-core → ggcoder → gg-boss`; `gg-
 - Root `pnpm install` runs the `prepare` script and therefore recursively builds the workspace. Transactional/update flows use frozen install with `--ignore-scripts` before their explicit checks/build so generated output cannot mutate the protected worktree early.
 - Auth storage is shared across windows/processes. Provider mutations and token refreshes must lock, re-read the complete latest `auth.json`, and modify only one provider; `resolveCredentials` intentionally does not call `ensureFresh`, because doing so loses evidence of a concurrent re-login and can overwrite new credentials.
 - Keep repository text LF on every OS because seeded agent fixtures are content-hashed. Only `.bat`, `.cmd`, and `.ps1` use CRLF, as enforced by `.gitattributes`.
-- `packages/gg-editor/src/skills.ts` is generated from `packages/gg-editor/src/skills/*.md`; edit the Markdown sources. Editor build/check/test regenerates the TypeScript registry.
 - Generated-output audits report presence/tracked/ignored state; they do not check freshness or clean artifacts. `gg-app/src-tauri/{binaries,sidecar,target,gen/schemas}` are generated.
-- Changesets fixes `gg-ai`, `gg-agent`, `gg-core`, `ggcoder`, and `gg-boss` to one version. Desktop versioning is separate; its bump script must keep `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` aligned.
+- Changesets fixes `gg-ai`, `gg-agent`, `gg-core`, and `ggcoder` to one version. Desktop versioning is separate; its bump script must keep `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` aligned.
 
 ## Project-specific workflows
 

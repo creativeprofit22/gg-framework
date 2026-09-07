@@ -7,7 +7,7 @@ You are cutting a release for this monorepo. There are **two independent release
 tracks** and they must go in this order. Read this whole file, then execute.
 
 - **Track A — npm framework packages** (`@kenkaiiii/gg-ai`, `gg-agent`, `gg-core`,
-  `ggcoder`, `gg-boss`, and dependents) via **Changesets**. These are the engine the
+  `ggcoder`, and dependents) via **Changesets**. These are the engine the
   CLI ships from. The spine is a *fixed group* — one changeset bumps them together.
 - **Track B — gg-app desktop** (`gg-app`, currently a `0.1.x` line, `private: true`,
   never on npm). Released by pushing a `v*` git tag, which triggers

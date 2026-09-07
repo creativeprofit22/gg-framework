@@ -19,10 +19,7 @@ concurrency:
 # typecheck + test + bin-smoke on macOS, Linux, and Windows so we catch
 # platform-specific regressions before they hit npm.
 #
-# We deliberately keep the gg-editor + gg-pixel packages out of the matrix
-# for now — they have heavier native deps (sharp, transformers) that slow CI
-# without buying us much for the framework's release-critical packages
-# (gg-ai, gg-agent, gg-core, ggcoder, gg-boss).
+# The framework release spine is gg-ai, gg-agent, gg-core, and ggcoder.
 
 jobs:
   test:
@@ -60,7 +57,7 @@ jobs:
       # On Windows the default shell is PowerShell, which does not abort a
       # multi-line script when an intermediate command exits non-zero — only the
       # LAST line decides the step's outcome. So `ggcoder test` failing was
-      # silently swallowed by `gg-boss test` succeeding right after it, and the
+      # silently swallowed by a later command succeeding, and the
       # Windows leg reported SUCCESS while 72 ggcoder tests were failing. Every
       # Windows bug this suite was supposed to catch shipped through that gap.
       # bash's `-e` (set by the runner) makes each line fail the step.
@@ -71,7 +68,6 @@ jobs:
           pnpm --filter @kenkaiiii/gg-agent build
           pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
-          pnpm --filter @kenkaiiii/gg-boss build
 
       # Deterministic perf budgets (fx-pattern ratchet): bundle size + CLI
       # startup. Baseline lives in bench/baseline/sizes.json; intentional
@@ -92,7 +88,6 @@ jobs:
           pnpm --filter @kenkaiiii/gg-agent check
           pnpm --filter @kenkaiiii/gg-core check
           pnpm --filter @kenkaiiii/ggcoder check
-          pnpm --filter @kenkaiiii/gg-boss check
 
       - name: Test framework packages
         shell: bash
@@ -100,7 +95,6 @@ jobs:
           pnpm --filter @kenkaiiii/gg-ai test
           pnpm --filter @kenkaiiii/gg-agent test
           pnpm --filter @kenkaiiii/gg-core test
-          pnpm --filter @kenkaiiii/gg-boss test
 
       # Blocking on every OS, Windows included. This started as a 72-failure
       # Windows backlog that had been invisible because the default PowerShell
@@ -110,10 +104,6 @@ jobs:
       - name: Test ggcoder
         shell: bash
         run: pnpm --filter @kenkaiiii/ggcoder test
-
-      - name: ggboss CLI smoke (extra belt-and-braces)
-        run: node packages/gg-boss/dist/cli.js --help
-        shell: bash
 
   # Distribution-critical cross-OS job: stages the per-platform Node runtime,
   # bundles the sidecar, boots it with the bundled runtime (smoke), and runs the

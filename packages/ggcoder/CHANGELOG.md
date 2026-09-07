@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.58.0
+
+### Minor Changes
+
+- Add independent read-only reviews for substantial coding tasks and model-assisted detection of unproductive retries. Keep stale loop judgments and unfinished verification from interrupting later question-only turns, and explain why a check does not count as verification.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.58.0
+- @kenkaiiii/gg-agent@5.58.0
+- @kenkaiiii/gg-core@5.58.0
+
 ## 5.57.2
 
 ### Patch Changes

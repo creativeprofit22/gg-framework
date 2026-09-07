@@ -12,9 +12,9 @@
   <a href="https://github.com/KenKaiii"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
 </p>
 
-A coding agent that ships only what the model needs to work — a tiny system prompt, one carefully-chosen MCP, and a focused tool set. Switch between Anthropic, OpenAI, GLM, Moonshot, MiniMax, Xiaomi, DeepSeek, and OpenRouter mid-conversation. Run it on its own, or let [`@kenkaiiii/gg-boss`](../gg-boss/README.md) drive a fleet of `ggcoder` workers across many projects from a single chat.
+A coding agent that ships only what the model needs to work — a tiny system prompt, one carefully-chosen MCP, and a focused tool set. Switch between Anthropic, OpenAI, GLM, Moonshot, MiniMax, Xiaomi, DeepSeek, and OpenRouter mid-conversation. Run it in the terminal, or use the same engine in the [GG Coder desktop app](../../README.md).
 
-Built on [`@kenkaiiii/gg-ai`](../gg-ai/README.md) and [`@kenkaiiii/gg-agent`](../gg-agent/README.md). Part of the [GG Framework](../../README.md) monorepo.
+Built on [`@kenkaiiii/gg-ai`](../gg-ai/README.md), [`@kenkaiiii/gg-agent`](../gg-agent/README.md), and `@kenkaiiii/gg-core`. Part of the [GG Framework](../../README.md) monorepo.
 
 ---
 
@@ -27,7 +27,7 @@ ggcoder login    # Pick provider, authenticate
 ggcoder          # Start coding
 ```
 
-OAuth for Anthropic and OpenAI (log in once, auto-refresh, no key to leak). API keys for the rest. Up and running in seconds either way. Auth lives in `~/.gg/auth.json` and is shared with `gg-boss`.
+OAuth for Anthropic and OpenAI (log in once, auto-refresh, no key to leak). API keys for the rest. Up and running in seconds either way. Auth lives in `~/.gg/auth.json` and is shared with the GG Coder desktop app.
 
 ---
 
@@ -81,24 +81,6 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 The same conversation, the same tools, the same project context — only the model changes. Use a strong reasoning model when you need it, swap to a fast cheap one for grunt work, never restart your session.
 
 **Attachments.** Drag, paste, or type a path to attach images and video in the chat input. Video is sent natively to models that support it (Gemini 3.x, Kimi K3/K2.7 Code, MiniMax M3, MiMo-V2.5); for other models the video is saved to a temp file and the model is told to inspect it with ffmpeg or its own tools.
-
----
-
-## 🤝 Pair it with gg-boss
-
-`ggcoder` is the unit of work. [`gg-boss`](../gg-boss/README.md) is the orchestrator that drives many of them at once.
-
-```bash
-npm i -g @kenkaiiii/gg-boss
-ggboss link    # pick which projects to drive
-ggboss         # one chat, N parallel ggcoder workers
-```
-
-Inside `gg-boss`, every project gets its own `ggcoder` `AgentSession` running in that project's directory. The boss dispatches work — `prompt_worker(project, "...")` — and each worker uses the **same** focused tool set (read, write, edit, bash, grep, find, ls, web fetch, sub-agents) you'd get running `ggcoder` solo. Workers reply with a tight `Changed / Skipped / Verified / Notes / Status` summary the boss reads, cross-checks, and routes off.
-
-Why this works: ggcoder's lean prompt and tight tool set keep each worker cheap and predictable, so the boss can run six or more in parallel without context blow-up. Anything you can do in a single `ggcoder` session — slash commands, skills, MCPs, custom commands, project `CLAUDE.md` rules — works inside the boss too.
-
-Run `ggcoder` directly when you're heads-down on one project. Switch to `ggboss` when you want a coordinator on top.
 
 ---
 

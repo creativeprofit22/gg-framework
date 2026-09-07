@@ -46,10 +46,6 @@ target/
 # npm
 .npmrc
 
-# gg-editor: local roadmap and generated skill bundle
-packages/gg-editor/ROADMAP.md
-packages/gg-editor/src/skills.ts
-
 # Goal audit generated evidence
 .goal-artifacts/
 .goal-evidence/

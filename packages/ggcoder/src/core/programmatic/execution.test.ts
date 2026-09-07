@@ -1,4 +1,8 @@
 import fs from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
+import { ProcessManager } from "../process-manager.js";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -185,6 +189,53 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(timeout).toMatchObject({ status: "failed", summary: expect.stringContaining("timeout") });
   });
 
+  it.each(["execution", "action", "plan"])("settles the matching parked %s approval at the bounded deadline", async (mode) => {
+    if (mode !== "execution") {
+      await fs.writeFile(path.join(home, ".gg/commands/setup-sweep.md"), "---\nname: setup-sweep\ndescription: fixture\n---\nAct only after approval.\n");
+      const seeded = await state();
+      seeded.records.forEach((record) => { record.opportunity.route = { status: "routable", specialistCommand: "setup-sweep" }; });
+      await json(path.join(root, PROGRAMMATIC_STATE_PATH), seeded);
+      const file = path.join(root, ".gg/programmatic/profile.json");
+      const profile = JSON.parse(await fs.readFile(file, "utf8"));
+      profile.profile.scanners[0].specialistCommand = "setup-sweep";
+      await json(file, profile);
+      await fs.mkdir(path.join(root, ".gg/plans"), { recursive: true });
+      await fs.writeFile(path.join(root, ".gg/plans/test.md"), "## Steps\n1. Inspect the manifest.\n");
+      provider((index) => index === 1 ? mode === "plan"
+        ? responseTool("exit_plan", { plan_path: ".gg/plans/test.md" }, "plan")
+        : responseTool("write", { file_path: "not-approved.txt", content: "never write" }, "mutate") : textResponse());
+    }
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let ready!: () => void;
+    const parked = new Promise<void>((resolve) => { ready = resolve; });
+    let promptId = "";
+    let replay: AskUserResult = { action: "cancel" };
+    const onSettled = vi.fn();
+    const bridge = createAskUserBridge({ timeoutMs: EXECUTION_DEADLINE_MS * 2, onSettled, broadcast: (prompt) => {
+      promptId = prompt.id;
+      const question = prompt.questions[0]!;
+      replay = { action: "answer", answers: { [question.id]: question.options![0]!.value! } };
+      ready();
+    } });
+    const parent = new AbortController();
+    const run = executeProgrammaticOpportunity(options({ signal: parent.signal, cancelQuestions: () => bridge.cancelAll(), ask: (request) => {
+      const question = request.questions[0]!.question;
+      const shouldPark = mode === "execution" || (mode === "action" ? question.startsWith("Allow this specialist action") : question.startsWith("Approve this isolated"));
+      return shouldPark ? bridge.park(request) : answer(request);
+    } }));
+    await parked;
+    expect(bridge.pendingCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(EXECUTION_DEADLINE_MS);
+    expect(await run).toMatchObject({ status: "failed", summary: expect.stringContaining("timeout") });
+    expect(parent.signal.aborted).toBe(false);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith({ id: promptId, action: "cancel" });
+    expect(bridge.pendingCount).toBe(0);
+    expect(bridge.settle(promptId, replay)).toBe(false);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    if (mode === "execution") expect(requests).toHaveLength(0);
+    await expect(fs.stat(path.join(root, "not-approved.txt"))).rejects.toThrow();
+  }, 20_000);
+
   it("cancels during real initialization and ignores late completion events", async () => {
     const abort = new AbortController();
     const initialize = AgentSession.prototype.initialize;
@@ -201,19 +252,74 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
   it("times out a provider wait and releases its run only after settlement", async () => {
     const original = globalThis.setTimeout;
     let shorten = false;
-    vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => original(callback, delay === EXECUTION_DEADLINE_MS ? 300 : delay, ...args));
+    let expire: (() => void) | undefined;
+    vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+      if (delay === EXECUTION_DEADLINE_MS) expire = () => callback(...args);
+      return original(callback, delay, ...args);
+    });
     vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
       shorten = true;
       return new Promise<Response>((_resolve, reject) => {
         const fail = () => reject(new Error("Fixture provider aborted"));
         if (init?.signal?.aborted) fail();
         else init?.signal?.addEventListener("abort", fail, { once: true });
+        expect(expire).toBeDefined();
+        queueMicrotask(() => expire!());
       });
     }));
     const result = await executeProgrammaticOpportunity(options());
     expect(shorten).toBe(true);
     expect(result).toMatchObject({ status: "failed", summary: expect.stringContaining("timeout") });
     expect((await state()).records.find((record) => record.opportunity.identity.id === selected)!.lifecycle.state).toBe("queued");
+  });
+
+  it.each(["kill-failed", "close-pending"])("retains ownership for a real managed %s survivor and ignores late cleanup", async (mode) => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4321, exitCode: null, signalCode: null,
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), unref: vi.fn(),
+    }) as unknown as ChildProcess;
+    const cleanup = vi.fn(async () => { if (mode === "kill-failed") throw new Error("injected kill failure"); });
+    const kill = vi.fn();
+    const disposal = vi.spyOn(AgentSession.prototype, "dispose");
+    const manager = new ProcessManager({
+      spawn: () => { queueMicrotask(() => child.emit("spawn")); return child; },
+      cleanupProcessTree: cleanup, killProcessTree: kill, reapProcessWrapper: vi.fn(),
+    }, undefined, { backgroundLogRoot: path.join(root, "logs") });
+    let id = "";
+    const initialize = AgentSession.prototype.initialize;
+    const initialization = vi.spyOn(AgentSession.prototype, "initialize").mockImplementation(async function (this: AgentSession) {
+      await initialize.call(this);
+      (this as unknown as { processManager: ProcessManager }).processManager = manager;
+      id = (await manager.start("injected background task", root)).id;
+    });
+    const timeout = AbortSignal.timeout;
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => timeout(ms === 5_000 ? 50 : ms));
+    const progress = vi.fn();
+    try {
+      const result = await executeProgrammaticOpportunity(options({ progress }));
+      expect(result).toMatchObject({ status: "failed", summary: expect.stringContaining("cleanup-unresolved") });
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(disposal).toHaveBeenCalledWith(undefined, true);
+      expect(kill).not.toHaveBeenCalled();
+      expect((await manager.readOutput(id)).isRunning).toBe(true);
+      const before = await state();
+      expect(before.records.find((record) => record.opportunity.identity.id === selected)!.lifecycle.state).toBe("running");
+      expect(await executeProgrammaticOpportunity(options({ opportunityId: "f".repeat(64) }))).toMatchObject({ status: "rejected" });
+      const count = progress.mock.calls.length;
+      child.emit("close", 0, null);
+      await manager.waitForExit(id, 1000);
+      await disposal.mock.results[0]!.value.catch(() => {});
+      const session = initialization.mock.contexts[0];
+      if (!(session instanceof AgentSession)) throw new Error("Expected the initialized child session");
+      session.eventBus.emit("text_delta", { text: "late output" });
+      session.eventBus.emit("agent_done", { totalTurns: 1, totalUsage: { inputTokens: 0, outputTokens: 0 } });
+      expect(progress).toHaveBeenCalledTimes(count);
+      expect(await state()).toEqual(before);
+      expect(await executeProgrammaticOpportunity(options({ opportunityId: "f".repeat(64) }))).toMatchObject({ status: "rejected" });
+    } finally {
+      child.emit("close", 0, null);
+      await manager.waitForExit(id, 1000);
+    }
   });
 
   it("retains running ownership when disposal fails", async () => {
@@ -250,6 +356,54 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(JSON.stringify(requests[2])).toContain('evidence_sha256');
     expect(ask).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["complete", "provider-failure", "cancel"])("settles an approved manifest write after %s and requires fresh approval", async (mode) => {
+    await fs.writeFile(path.join(home, ".gg/commands/setup-sweep.md"), "---\nname: setup-sweep\ndescription: fixture\n---\nWrite only after approval.\n");
+    const seeded = await state();
+    seeded.records.forEach((record) => { record.opportunity.route = { status: "routable", specialistCommand: "setup-sweep" }; });
+    await json(path.join(root, PROGRAMMATIC_STATE_PATH), seeded);
+    const file = path.join(root, ".gg/programmatic/profile.json");
+    const profile = JSON.parse(await fs.readFile(file, "utf8"));
+    profile.profile.scanners[0].specialistCommand = "setup-sweep";
+    await json(file, profile);
+    const abort = new AbortController();
+    provider((index) => {
+      if (index === 1) return responseTool("read", { file_path: "package.json" }, "read-manifest");
+      if (index === 2) return responseTool("write", { file_path: "package.json", content: '{"name":"changed-fixture"}\n' }, "write-manifest");
+      if (mode === "cancel") { abort.abort(); return textResponse(); }
+      if (mode === "provider-failure") return sse([{ type: "response.failed", response: { error: { message: "fixture-provider-failure" } } }]);
+      if (index === 3) return responseTool("programmatic_result", { summary: "Manifest updated.", successCondition: condition, toolCallIds: ["write-manifest"] }, "complete");
+      return textResponse();
+    });
+    const ask = vi.fn(answer);
+    const result = await executeProgrammaticOpportunity(options({ ask, signal: abort.signal }));
+    expect(await fs.readFile(path.join(root, "package.json"), "utf8")).toBe('{"name":"changed-fixture"}\n');
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe(mode === "complete" ? "succeeded" : mode === "cancel" ? "cancelled" : "failed");
+    const settled = await state();
+    expect(settled.configurationRefreshRequired).toBe(true);
+    expect(settled.configurationFingerprint.sha256).toBe(sha256);
+    expect(result).toMatchObject({ evidence: { items: expect.arrayContaining([expect.objectContaining({ code: "configuration-refresh-required" })]) } });
+    expect(settled.records.find((record) => record.opportunity.identity.id === selected)!.lifecycle.state).toBe(mode === "complete" ? "completed" : "queued");
+    expect(settled.records.find((record) => record.opportunity.identity.id !== selected)).toEqual(seeded.records.find((record) => record.opportunity.identity.id !== selected));
+    expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
+    const nextAsk = vi.fn(answer);
+    expect(await executeProgrammaticOpportunity(options({ opportunityId: "f".repeat(64), ask: nextAsk }))).toMatchObject({ status: "rejected", reason: "preflight-rejected" });
+    expect(nextAsk).not.toHaveBeenCalled();
+    await fs.mkdir(path.join(root, "other-app/src-tauri"), { recursive: true });
+    await json(path.join(root, "other-app/package.json"), { name: "other-fixture" });
+    await json(path.join(root, "other-app/src-tauri/tauri.conf.json"), {});
+    await fs.writeFile(path.join(root, "other-app/src-tauri/Cargo.toml"), "[package]\nname = 'other-fixture'\n");
+    const fresh = await buildProgrammaticProfileProposal(root);
+    expect(fresh.configurationFingerprint.sha256).not.toBe(sha256);
+    expect((await persistProgrammaticProfile(root, fresh.configurationFingerprint, fresh.profile)).ok).toBe(true);
+    expect((await runProgrammaticScan(root)).ok).toBe(true);
+    const available = (await state()).records.find((record) => record.presence === "present" && record.lifecycle.state !== "completed");
+    expect(available).toBeDefined();
+    const refreshedAsk = vi.fn(async () => ({ action: "cancel" as const }));
+    expect(await executeProgrammaticOpportunity(options({ opportunityId: available!.opportunity.identity.id, configurationSha256: fresh.configurationFingerprint.sha256, ask: refreshedAsk }))).toMatchObject({ status: "failed", summary: expect.stringContaining("approval-rejected") });
+    expect(refreshedAsk).toHaveBeenCalledTimes(1);
+  }, 20_000);
 
   it("refuses mutating actions after initial execution approval", async () => {
     await fs.writeFile(path.join(home, ".gg/commands/setup-sweep.md"), "---\nname: setup-sweep\ndescription: fixture\n---\nWrite only after approval.\n");

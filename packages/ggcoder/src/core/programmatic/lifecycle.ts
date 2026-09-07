@@ -325,6 +325,7 @@ export async function accessProgrammaticExecutionRecord(
     to: "queued" | "running" | "completed";
     expectedOpportunity?: DiscoveredOpportunityV1;
     expectedProfileSha256?: string;
+    runId?: string;
   },
   options: RunProgrammaticScanOptions = {},
 ): Promise<ProgrammaticLifecycleRecordV1 & { approvalSha256: string }> {
@@ -348,6 +349,9 @@ export async function accessProgrammaticExecutionRecord(
     if (loaded.status !== "valid" || loaded.state.configurationFingerprint.sha256 !== fingerprint.sha256) {
       throw new Error("Lifecycle state is unavailable or changed; recovery required.");
     }
+    if (loaded.state.configurationRefreshRequired) {
+      throw new Error("Refresh inventory and approve the current configuration before execution.");
+    }
     const record = loaded.state.records.find(({ opportunity }) => opportunity.identity.id === opportunityId);
     if (!record || record.presence !== "present" || ["completed", "dismissed"].includes(record.lifecycle.state)) {
       throw new Error("Choose a present, nonterminal opportunity.");
@@ -368,7 +372,8 @@ export async function accessProgrammaticExecutionRecord(
     }
     if (record.lifecycle.state !== transition.from) throw new Error("Opportunity state changed.");
     opportunityTransitionV1Schema.parse({ version: 1, opportunity: record.opportunity.identity, from: transition.from, to: transition.to });
-    const next = { ...record, lifecycle: { ...record.lifecycle, state: transition.to } };
+    if (record.lifecycle.runId) throw new Error("Owned execution requires owner settlement.");
+    const next = { ...record, lifecycle: { ...record.lifecycle, state: transition.to, ...(transition.runId ? { runId: transition.runId } : {}) } };
     const state = programmaticLifecycleStateV1Schema.parse({
       ...loaded.state,
       records: loaded.state.records.map((item) => item === record ? next : item),
@@ -380,6 +385,77 @@ export async function accessProgrammaticExecutionRecord(
     await replaceStateFile(root, PROGRAMMATIC_STATE_PATH, STATE_TEMPORARY_PATH,
       state, operations, options, revalidate);
     return { ...next, approvalSha256 };
+  });
+}
+
+/** Settles only an owned run; never grants approval to the configuration left behind. */
+export async function settleProgrammaticExecutionRecord(
+  repositoryRoot: string,
+  opportunityId: string,
+  runId: string,
+  fingerprint: ConfigurationFingerprintV1,
+  to: "queued" | "completed",
+  options: RunProgrammaticScanOptions = {},
+): Promise<{ configurationRefreshRequired: boolean }> {
+  configurationFingerprintV1Schema.parse(fingerprint);
+  const root = await canonicalRepositoryRoot(repositoryRoot);
+  const operations = { ...localOperations, ...options.operations };
+  await rejectLinks(root, ".gg/programmatic");
+  const statePath = containedPath(root, PROGRAMMATIC_STATE_PATH);
+  const stateChanged = new Error("Lifecycle state changed during settlement; recovery required.");
+  const settle = async () => {
+    const primary = await readStateCandidate(statePath, operations);
+    const sourcePath = primary.status === "valid" ? statePath : containedPath(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const loaded = primary.status === "valid" ? primary : await readStateCandidate(sourcePath, operations);
+    if (loaded.status !== "valid") throw new Error("Lifecycle recovery required.");
+    const record = loaded.state.records.find(({ opportunity }) => opportunity.identity.id === opportunityId);
+    if (!record || record.lifecycle.state !== "running" || !record.lifecycle.runId || record.lifecycle.runId !== runId) {
+      throw new Error("Execution ownership changed; recovery required.");
+    }
+    opportunityTransitionV1Schema.parse({ version: 1, opportunity: record.opportunity.identity, from: "running", to });
+    let configurationRefreshRequired = loaded.state.configurationRefreshRequired === true;
+    try {
+      const inventory = await buildProgrammaticInventory(root, { operations: options.inventoryOperations });
+      configurationRefreshRequired ||= inventory.inventory.configurationFingerprint.sha256 !== fingerprint.sha256;
+    } catch {
+      // Unreadable/unsafe configuration cannot prevent cleanup, but must prevent future dispatch.
+      configurationRefreshRequired = true;
+    }
+    const { runId: _owner, ...lifecycle } = record.lifecycle;
+    const state = programmaticLifecycleStateV1Schema.parse({
+      ...loaded.state,
+      ...(configurationRefreshRequired ? { configurationRefreshRequired: true } : {}),
+      records: loaded.state.records.map((item) => item === record ? { ...item, lifecycle: { ...lifecycle, state: to } } : item),
+    });
+    const revalidate = async () => {
+      await rejectLinks(root, ".gg/programmatic");
+      const current = await readStateCandidate(sourcePath, operations);
+      if (current.status !== "valid" || !current.bytes.equals(loaded.bytes)) {
+        throw stateChanged;
+      }
+      if (sourcePath !== statePath && (await readStateCandidate(statePath, operations)).status === "valid") {
+        throw stateChanged;
+      }
+    };
+    // Re-read under the existing lock and replace only the owned lifecycle, preserving newer data.
+    // No profile writes or fingerprint promotion: external drift is never treated as consent.
+    if (primary.status === "valid") {
+      await replaceStateFile(root, PROGRAMMATIC_PREVIOUS_STATE_PATH, PREVIOUS_STATE_TEMPORARY_PATH,
+        loaded.state, operations, options, revalidate);
+    }
+    await replaceStateFile(root, PROGRAMMATIC_STATE_PATH, STATE_TEMPORARY_PATH,
+      state, operations, options, revalidate);
+    return { configurationRefreshRequired };
+  };
+  return withFileLock(statePath, async () => {
+    // Merge a racing writer's latest validated state; sustained contention retains ownership.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await settle();
+      } catch (error) {
+        if (error !== stateChanged || attempt >= 2) throw error;
+      }
+    }
   });
 }
 

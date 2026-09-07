@@ -9,7 +9,7 @@ import { createSteroidsTool } from "../../tools/steroids.js";
 import { findSteroidsBinary } from "../steroids.js";
 import { TauriPackageParams } from "../../tools/tauri-package.js";
 import { canonicalRepositoryRoot } from "../tauri-package/paths.js";
-import { accessProgrammaticExecutionRecord } from "./lifecycle.js";
+import { accessProgrammaticExecutionRecord, settleProgrammaticExecutionRecord } from "./lifecycle.js";
 import { resolveProgrammaticSpecialist, type ResolvedSpecialist } from "./routes.js";
 import { executionResultV1Schema } from "./contracts.js";
 
@@ -121,7 +121,8 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
   let session: AgentSession | undefined;
   let operation: Promise<void> | undefined;
   let running = false;
-  let approvedSelection: Awaited<ReturnType<typeof accessProgrammaticExecutionRecord>> | undefined;
+  const runId = randomUUID();
+  let configurationRefreshRequired = false;
   let settled = false;
   let cleanupOk = true;
   let reason = "preflight-rejected";
@@ -131,7 +132,12 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
   const observed = new Map<string, string>();
   const calls = new Map<string, string>();
   const listeners: (() => void)[] = [];
-  const ask = (request: AskUserRequest) => bounded(options.ask(request), signal);
+  const ask = async (request: AskUserRequest) => {
+    signal.throwIfAborted();
+    const answer = await bounded(options.ask(request), signal);
+    signal.throwIfAborted();
+    return answer;
+  };
   try {
     signal.throwIfAborted();
     const record = await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint);
@@ -159,12 +165,11 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
       reason = "route-changed";
       throw new Error("Select and approve the changed route again.");
     }
-    approvedSelection = current;
     const expected = { expectedOpportunity: current.opportunity, expectedProfileSha256: current.approvalSha256 };
     if (current.lifecycle.state === "discovered") {
       await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint, { from: "discovered", to: "queued", ...expected });
     }
-    await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint, { from: "queued", to: "running", ...expected });
+    await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint, { from: "queued", to: "running", ...expected, runId });
     running = true;
     signal.throwIfAborted();
     const resultParameters = z.strictObject({ summary: z.string().min(1).max(4000), successCondition: z.string().min(1).max(4000), toolCallIds: z.array(z.string().min(1).max(256)).min(1).max(16) });
@@ -208,7 +213,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
       additionalTools: [createAskUserTool(ask), resultTool, ...(corpus ? [createResearchCorpusTool(corpus)] : []),
         ...(capabilities.discovery.length ? [createSpecialistDiscoveryTool(capabilities.discovery, () => session!)] : [])],
       approveToolExecution: async (name, args) => {
-        if (completed) return false;
+        if (completed || settled || signal.aborted) return false;
         if (name === "tauri_package") {
           const parsed = TauriPackageParams.safeParse(args);
           if (!capabilities.discovery.some((approved) => approved === name) || !parsed.success) return false;
@@ -279,23 +284,22 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
       try {
         if (operation) await bounded(operation.catch(() => {}), cleanupSignal);
         disposalStarted = true;
-        await bounded(session.dispose(), cleanupSignal);
+        await bounded(session.dispose(undefined, true), cleanupSignal);
       } catch {
         cleanupOk = false;
         reason = "cleanup-unresolved";
         // Keep ownership; delayed initialization must still dispose its resources when it settles.
         if (!disposalStarted && operation) {
-          void operation.catch(() => {}).then(() => session!.dispose()).catch(() => {});
+          void operation.catch(() => {}).then(() => session!.dispose(undefined, true)).catch(() => {});
         }
       }
     }
     if (running && cleanupOk) {
       try {
-        await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint, {
-          from: "running", to: reason === "specialist-completed" ? "completed" : "queued",
-          expectedOpportunity: approvedSelection!.opportunity,
-          expectedProfileSha256: approvedSelection!.approvalSha256,
-        });
+        ({ configurationRefreshRequired } = await settleProgrammaticExecutionRecord(
+          root, options.opportunityId, runId, fingerprint,
+          reason === "specialist-completed" ? "completed" : "queued",
+        ));
       } catch { cleanupOk = false; reason = "lifecycle-recovery-required"; }
     }
     if (cleanupOk) projectClaims.delete(root);
@@ -307,6 +311,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
     status: success ? "succeeded" : reason === "cancelled" ? "cancelled" : "failed",
     summary: success ? completed!.summary : `Execution did not complete: ${reason}. Any partial file changes remain; no automatic retry or rollback.`,
     evidence: { version: 1, items: [
+      ...(configurationRefreshRequired ? [{ basis: "observed", source: "programmatic-execution", code: "configuration-refresh-required", severity: "warning", message: "Configuration changed or could not be inventoried. Refresh inventory, approve the current profile and scan again before future execution. This settlement grants no approval to configuration changes." }] : []),
       { basis: "inferred", source: "programmatic-execution", code: reason, severity: success ? "info" : "warning", message: success ? "Specialist claims the selected success condition was verified; host observed the referenced tool calls, not independent semantic verification." : "Execution did not produce a verified, cleanly settled result." },
       ...(success ? completed!.toolCallIds : [...observed.keys()].slice(0, 16)).map((id) => ({ basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: `Tool ${observed.get(id)} completed (${id}).` })),
     ] },

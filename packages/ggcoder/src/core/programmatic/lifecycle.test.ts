@@ -1,5 +1,6 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
@@ -18,6 +19,7 @@ import {
   reconcileProgrammaticLifecycle,
   runProgrammaticScan,
   accessProgrammaticExecutionRecord,
+  settleProgrammaticExecutionRecord,
 } from "./lifecycle.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./profile.js";
 
@@ -144,6 +146,145 @@ it("does not replace primary state after a failed execution write", async () => 
       operations: { rename: async () => { throw new Error("fixture rename failure"); } },
     })).rejects.toThrow("fixture rename failure");
   expect(await persistedState(root)).toEqual(initial);
+});
+
+async function startOwnedRun(root: string) {
+  await runProgrammaticScan(root);
+  const initial = await persistedState(root);
+  const id = initial.records[0]!.opportunity.identity.id;
+  const fp = initial.configurationFingerprint;
+  const runId = randomUUID();
+  await accessProgrammaticExecutionRecord(root, id, fp, { from: "discovered", to: "queued" });
+  await accessProgrammaticExecutionRecord(root, id, fp, { from: "queued", to: "running", runId });
+  return { id, fp, runId };
+}
+
+it("settles the old owner without replacing newer profile, opportunity evidence or unrelated records", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  await writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+  await approveProfile(root);
+  expect((await runProgrammaticScan(root)).ok).toBe(true);
+  const current = await persistedState(root);
+  expect(current.configurationFingerprint).not.toEqual(fp);
+  current.records[0]!.opportunity.currentProcess = "Newer opportunity evidence";
+  current.records[0]!.presence = "disappeared";
+  const unrelated = opportunity("f".repeat(64));
+  current.records.push({ version: 1, opportunity: unrelated, lifecycle: { version: 1, opportunity: unrelated.identity, state: "dismissed" }, presence: "present" });
+  await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(current));
+  const profilePath = path.join(root, ".gg/programmatic/profile.json");
+  const profileBytes = await readFile(profilePath);
+  await settleProgrammaticExecutionRecord(root, id, runId, fp, "completed");
+  const settled = await persistedState(root);
+  expect(settled).toEqual({ ...current, configurationRefreshRequired: true, records: current.records.map((record) => record.opportunity.identity.id === id ? { ...record, lifecycle: { version: 1, opportunity: record.lifecycle.opportunity, state: "completed" } } : record) });
+  expect(await readFile(profilePath)).toEqual(profileBytes);
+  await expect(accessProgrammaticExecutionRecord(root, unrelated.identity.id, current.configurationFingerprint)).rejects.toThrow("Refresh inventory");
+});
+
+it("does not treat unrelated external configuration drift as approval", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  await writeFile(path.join(root, "tsconfig.json"), '{"compilerOptions":{"strict":false}}');
+  expect(await settleProgrammaticExecutionRecord(root, id, runId, fp, "queued")).toEqual({ configurationRefreshRequired: true });
+  expect((await persistedState(root)).configurationFingerprint).toEqual(fp);
+  await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("configuration changed");
+  expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
+});
+
+it.each(["profile", "state", "owner"])("preserves concurrent %s changes at settlement commit", async (kind) => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  let changed: ProgrammaticLifecycleStateV1 | undefined;
+  let injected = false;
+  const profilePath = path.join(root, ".gg/programmatic/profile.json");
+  const changedProfile = JSON.stringify({ version: 1, configurationFingerprint: fp, profile: { version: 1, scanners: [] } });
+  const settlement = settleProgrammaticExecutionRecord(root, id, runId, fp, "queued", {
+    onPreFileMutation: async (file) => {
+      if (file !== PROGRAMMATIC_STATE_PATH || injected) return;
+      injected = true;
+      if (kind === "profile") { await writeFile(profilePath, changedProfile); return; }
+      changed = await persistedState(root);
+      if (kind === "owner") changed.records[0]!.lifecycle.runId = randomUUID();
+      else {
+        const unrelated = opportunity("f".repeat(64));
+        changed.records.push({ version: 1, opportunity: unrelated, lifecycle: { version: 1, opportunity: unrelated.identity, state: "discovered" }, presence: "present" });
+      }
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(changed));
+    },
+  });
+  if (kind === "profile") {
+    await expect(settlement).resolves.toEqual({ configurationRefreshRequired: false });
+    expect(await readFile(profilePath, "utf8")).toBe(changedProfile);
+    await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("not approved");
+  } else if (kind === "state") {
+    await expect(settlement).resolves.toEqual({ configurationRefreshRequired: false });
+    const settled = await persistedState(root);
+    expect(settled.records[0]!.lifecycle.state).toBe("queued");
+    expect(settled.records.at(-1)).toEqual(changed!.records.at(-1));
+  } else {
+    await expect(settlement).rejects.toThrow("ownership changed");
+    expect(await persistedState(root)).toEqual(changed);
+    await expect(settleProgrammaticExecutionRecord(root, id, runId, fp, "queued")).rejects.toThrow("ownership changed");
+  }
+});
+
+it("bounds persistent state contention without overwriting it or releasing ownership", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  let mutations = 0;
+  let latest = await persistedState(root);
+  await expect(settleProgrammaticExecutionRecord(root, id, runId, fp, "completed", {
+    onPreFileMutation: async (file) => {
+      if (file !== PROGRAMMATIC_STATE_PATH) return;
+      latest = await persistedState(root);
+      latest.records[0]!.opportunity.currentProcess = `Concurrent evidence ${++mutations}`;
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(latest));
+    },
+  })).rejects.toThrow("state changed during settlement");
+  expect(mutations).toBe(3);
+  expect(await persistedState(root)).toEqual(latest);
+  expect(latest.records[0]!.lifecycle).toMatchObject({ state: "running", runId });
+});
+
+it("requires owner settlement and rejects replay against a subsequent run", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  await expect(accessProgrammaticExecutionRecord(root, id, fp, { from: "running", to: "queued" })).rejects.toThrow("owner settlement");
+  await expect(settleProgrammaticExecutionRecord(root, id, randomUUID(), fp, "completed")).rejects.toThrow("ownership changed");
+  await settleProgrammaticExecutionRecord(root, id, runId, fp, "queued");
+  const newRunId = randomUUID();
+  await accessProgrammaticExecutionRecord(root, id, fp, { from: "queued", to: "running", runId: newRunId });
+  await expect(settleProgrammaticExecutionRecord(root, id, runId, fp, "completed")).rejects.toThrow("ownership changed");
+  expect((await persistedState(root)).records[0]!.lifecycle).toMatchObject({ state: "running", runId: newRunId });
+});
+
+it("settles with a refresh gate when inventory is unreadable and retains ownership on persistence failure", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  const before = await persistedState(root);
+  await expect(settleProgrammaticExecutionRecord(root, id, runId, fp, "queued", {
+    operations: { rename: async () => { throw new Error("fixture rename failure"); } },
+  })).rejects.toThrow("fixture rename failure");
+  expect(await persistedState(root)).toEqual(before);
+  await settleProgrammaticExecutionRecord(root, id, runId, fp, "queued", {
+    inventoryOperations: { readFile: async () => { throw new Error("fixture unreadable inventory"); } },
+  });
+  expect((await persistedState(root)).configurationRefreshRequired).toBe(true);
+  await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("Refresh inventory");
+  expect((await runProgrammaticScan(root)).ok).toBe(true);
+  expect((await persistedState(root)).configurationRefreshRequired).toBeUndefined();
+  expect(await accessProgrammaticExecutionRecord(root, id, fp)).toMatchObject({ lifecycle: { state: "queued" } });
+});
+
+it("recovers an owned running backup, but never a backup belonging to another run", async () => {
+  const root = await createRepository();
+  const { id, fp, runId } = await startOwnedRun(root);
+  const running = await persistedState(root);
+  await writeFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), JSON.stringify(running));
+  await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "broken primary");
+  await expect(settleProgrammaticExecutionRecord(root, id, randomUUID(), fp, "queued")).rejects.toThrow("ownership changed");
+  await settleProgrammaticExecutionRecord(root, id, runId, fp, "queued");
+  expect((await persistedState(root)).records[0]!.lifecycle.state).toBe("queued");
 });
 
 afterEach(async () => {

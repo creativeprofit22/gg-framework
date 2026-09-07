@@ -226,6 +226,9 @@ export const opportunityLifecycleV1Schema = z.strictObject({
   version: versionSchema,
   opportunity: opportunityIdentityV1Schema,
   state: lifecycleStateSchema,
+  runId: z.string().uuid().optional(),
+}).refine((value) => value.runId === undefined || value.state === "running", {
+  message: "Only a running lifecycle may hold execution ownership",
 });
 
 export const programmaticLifecycleRecordV1Schema = z
@@ -251,6 +254,7 @@ export const programmaticLifecycleStateV1Schema = z
   .strictObject({
     version: versionSchema,
     configurationFingerprint: configurationFingerprintV1Schema,
+    configurationRefreshRequired: z.literal(true).optional(),
     records: z.array(programmaticLifecycleRecordV1Schema).max(PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT),
   })
   .refine(

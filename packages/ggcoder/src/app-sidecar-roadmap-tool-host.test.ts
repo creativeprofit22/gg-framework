@@ -86,6 +86,7 @@ describe("AppSidecarRoadmapToolHost", () => {
   describe.each([false, true])("real ledger freshness (durable=%s)", (durableExecution) => {
     it.each([
       "in-flight edit", "later edit", "fresh", "cwd", "cwd casing", "repository", "environment", "snapshot",
+      "unavailable", "failed",
     ])("preserves %s evidence classification at the host boundary", async (scenario) => {
       const ledger = new SessionVerificationEvidenceLedger();
       const evidenceRevision = ledger.revision;
@@ -103,14 +104,22 @@ describe("AppSidecarRoadmapToolHost", () => {
           bashDiagnostics: {
             executionId: "execution-1", command: "pnpm test",
             cwd: scenario === "cwd" ? "/other-project" : scenario === "cwd casing" ? "/PROJECT" : "/project",
-            startedAt: 1000, reason: "completed", exitCode: 0,
+            startedAt: 1000,
+            ...(scenario === "unavailable" ? {} : {
+              reason: scenario === "failed" ? "nonZeroExit" : "completed",
+              exitCode: scenario === "failed" ? 1 : 0,
+            }),
           },
         },
       });
       if (scenario === "later edit") edit();
       const stale = scenario === "in-flight edit" || scenario === "later edit";
       expect(ledger.snapshot()[stale ? "staleEvidence" : "currentEvidence"]).toEqual([
-        expect.objectContaining({ executionId: "execution-1", status: "passed", workspace: verificationWorkspace }),
+        expect.objectContaining({
+          executionId: "execution-1",
+          status: scenario === "unavailable" || scenario === "failed" ? scenario : "passed",
+          workspace: verificationWorkspace,
+        }),
       ]);
       expect(ledger.snapshot()[stale ? "currentEvidence" : "staleEvidence"]).toEqual([]);
       const session = owningSession();
@@ -169,7 +178,11 @@ describe("AppSidecarRoadmapToolHost", () => {
       } else {
         expect(output).toMatchObject({
           result: "verification-incomplete",
-          unmetEvidenceCodes: expect.arrayContaining(["stale-evidence", "missing-approved-evidence"]),
+          unmetEvidenceCodes: [
+            scenario === "unavailable" ? "unavailable-evidence" :
+              scenario === "failed" ? "failed-evidence" : "stale-evidence",
+            "missing-approved-evidence",
+          ],
         });
         expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
         expect(onCompletionIntent).not.toHaveBeenCalled();

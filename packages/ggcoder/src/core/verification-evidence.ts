@@ -36,6 +36,7 @@ export type RoadmapVerificationEvidenceUnmetCode =
   | "rejected-evidence"
   | "unclassified-evidence"
   | "failed-evidence"
+  | "unavailable-evidence"
   | "stale-evidence"
   | "duplicate-evidence"
   | "criterion-evidence-mismatch"
@@ -1006,6 +1007,10 @@ export function evaluateRoadmapVerificationEvidence(input: {
     }
     if (!classification.accepted || candidate.status === "rejected") {
       unmet.add("rejected-evidence");
+      continue;
+    }
+    if (candidate.status === "unavailable") {
+      unmet.add("unavailable-evidence");
       continue;
     }
     if (candidate.status !== "passed") {

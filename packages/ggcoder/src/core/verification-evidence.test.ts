@@ -671,6 +671,37 @@ describe("evaluateRoadmapVerificationEvidence", () => {
     });
   });
 
+  it.each([undefined, "unknown"])("reports unavailable evidence for terminal reason %s", (reason) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    const command = "pnpm test";
+    const criterion = "Tests pass";
+    const executionId = "missing-terminal-metadata";
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      workspace: TEST_WORKSPACE,
+      details: {
+        bashDiagnostics: { executionId, command, cwd: "C:/project", startedAt: 1000, reason },
+      },
+    });
+    const currentLedgerEvidence = ledger.snapshot().currentEvidence;
+    expect(currentLedgerEvidence).toEqual([
+      expect.objectContaining({ executionId, status: "unavailable" }),
+    ]);
+    expect(evaluateRoadmapVerificationEvidence({
+      doneWhen: [criterion],
+      evidence: [command],
+      verificationBindings: [{ criterionId: roadmapCriterionId(1, criterion), executionId }],
+      expectedRevision: 15,
+      currentMessages: [],
+      currentLedgerEvidence,
+    })).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["unavailable-evidence", "missing-approved-evidence"],
+    });
+  });
+
   it("keeps an explicitly selected passing execution when a later rerun fails", () => {
     const command = "vitest run current-phase.test.ts";
     expect(

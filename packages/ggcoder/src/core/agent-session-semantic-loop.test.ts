@@ -98,6 +98,7 @@ describe("AgentSession semantic loop check", () => {
           new StreamResult(
             (async function* () {
               const content = await pending;
+              yield { type: "text_delta", text: content };
               return {
                 message: { role: "assistant", content },
                 stopReason: "end_turn",
@@ -162,13 +163,15 @@ describe("AgentSession semantic loop check", () => {
       () =>
         new StreamResult(
           (async function* () {
+            const text = '{"loop":true,"reason":"same failures","advice":"inspect first"}';
+            yield { type: "text_delta", text };
             return {
               message: {
                 role: "assistant",
                 content: [
                   {
                     type: "text",
-                    text: '{"loop":true,"reason":"same failures","advice":"inspect first"}',
+                    text,
                   },
                 ],
               },

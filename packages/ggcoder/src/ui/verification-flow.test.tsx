@@ -1,8 +1,10 @@
 import React from "react";
 import { renderToString } from "ink";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as AgentModule from "@kenkaiiii/gg-agent";
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
+import type * as AgentLoopModule from "./hooks/useAgentLoop.js";
 import type { useAgentLoop } from "./hooks/useAgentLoop.js";
 
 // Drive the real hook and App callbacks; replace only the agent event source
@@ -15,7 +17,7 @@ const flow = vi.hoisted(() => ({
   loop: undefined as ReturnType<typeof useAgentLoop> | undefined,
 }));
 vi.mock("@kenkaiiii/gg-agent", async (original) => ({
-  ...(await original<typeof import("@kenkaiiii/gg-agent")>()),
+  ...(await original<typeof AgentModule>()),
   agentLoop: async function* (
     _messages: Message[],
     options: { getFollowUpMessages?: () => Promise<Message[] | null> },
@@ -27,7 +29,7 @@ vi.mock("@kenkaiiii/gg-agent", async (original) => ({
   },
 }));
 vi.mock("./hooks/useAgentLoop.js", async (original) => {
-  const actual = await original<typeof import("./hooks/useAgentLoop.js")>();
+  const actual = await original<typeof AgentLoopModule>();
   return {
     ...actual,
     useAgentLoop: (...args: Parameters<typeof useAgentLoop>) => {

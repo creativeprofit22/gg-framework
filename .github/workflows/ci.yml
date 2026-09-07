@@ -153,6 +153,7 @@ jobs:
 
       - name: Linux system deps (tauri)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf libayatana-appindicator3-dev
@@ -194,9 +195,9 @@ jobs:
         run: node bench/size-gate.mjs --only sidecar
         shell: bash
 
+      # Workspace zoom tests load an extension through full Chromium on every OS.
       - name: Install Playwright browser
-        if: runner.os == 'Windows'
-        run: pnpm exec playwright install chromium --only-shell
+        run: pnpm exec playwright install --with-deps chromium
 
       - name: Roadmap reliability native smoke
         id: roadmap_reliability_smoke
@@ -260,6 +261,7 @@ jobs:
   release-gate:
     name: Release CI gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [test, app]
     if: always()
     steps:

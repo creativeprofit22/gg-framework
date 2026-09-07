@@ -100,6 +100,16 @@ test("roadmap reliability native smoke remains an isolated Windows app gate", ()
   assert.match(workflow, /uses: actions\/upload-artifact@v7/);
 });
 
+test("desktop CI installs full Chromium on every OS for workspace extension tests", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const installStep = workflow.match(
+    /      - name: Install Playwright browser\r?\n[\s\S]*?(?=\r?\n      - name:)/,
+  )?.[0];
+  assert.ok(installStep);
+  assert.match(installStep, /run: pnpm exec playwright install --with-deps chromium/);
+  assert.doesNotMatch(installStep, /--only-shell|\bif:/);
+});
+
 test("release workflow wires the exact-SHA verifier ahead of protected preflight", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/release.yml", import.meta.url),

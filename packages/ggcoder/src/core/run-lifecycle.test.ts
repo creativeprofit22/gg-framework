@@ -1,9 +1,49 @@
 import { describe, expect, it, vi } from "vitest";
 import { RunBusyError, RunLifecycle } from "./run-lifecycle.js";
+import { createRunEndPayload, type RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("RunLifecycle", () => {
+  it.each<RunOutcome>(["completed", "failed", "aborted", "unverified"])(
+    "projects journal outcome %s into the terminal transport without conflating failure and verification",
+    (outcome) => {
+      const journal = { started: vi.fn(), finished: vi.fn() };
+      const lifecycle = new RunLifecycle(undefined, journal);
+      const { generation } = lifecycle.begin(() => {});
+      lifecycle.settle(generation, outcome);
+      expect(journal.finished).toHaveBeenCalledWith(generation, outcome);
+      expect(createRunEndPayload(outcome, lifecycle.state)).toEqual({
+        outcome: outcome === "aborted" ? "cancelled" : outcome,
+        ...(outcome === "aborted" ? { cancelled: true } : {}),
+        ...(outcome === "unverified" ? { unverified: true } : {}),
+        runState: "idle",
+      });
+    },
+  );
+
+  it("retains an injected round's failure when the outer cycle settles successfully", () => {
+    const journal = { started: vi.fn(), finished: vi.fn() };
+    const lifecycle = new RunLifecycle(undefined, journal);
+    const { generation } = lifecycle.begin(() => {});
+    lifecycle.recordOutcome(generation + 1, "aborted");
+    lifecycle.recordOutcome(generation, "failed");
+    lifecycle.recordOutcome(generation, "completed");
+    lifecycle.settle(generation, "unverified");
+    expect(journal.finished).toHaveBeenCalledWith(generation, "failed");
+  });
+
+  it("lets outer cancellation override an injected failure", async () => {
+    const journal = { started: vi.fn(), finished: vi.fn() };
+    const lifecycle = new RunLifecycle(undefined, journal);
+    const { generation } = lifecycle.begin(() => {});
+    lifecycle.recordOutcome(generation, "failed");
+    const cancelled = lifecycle.cancel(1000);
+    lifecycle.settle(generation);
+    await expect(cancelled).resolves.toMatchObject({ status: "cancelled" });
+    expect(journal.finished).toHaveBeenCalledWith(generation, "aborted");
+    expect(createRunEndPayload("aborted", lifecycle.state)).toEqual({ outcome: "cancelled", cancelled: true, runState: "idle" });
+  });
   it("waits for provider-backed ownership to settle before acknowledging cancel", async () => {
     const abort = vi.fn();
     const lifecycle = new RunLifecycle();

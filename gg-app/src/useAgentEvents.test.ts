@@ -24,6 +24,9 @@ vi.mock("./agent", async (importOriginal) => ({
 }));
 
 import { listModels } from "./agent";
+import { playSound } from "./sounds";
+import { createRunEndPayload, type RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { useAutopilot } from "./useAutopilot";
 import { useKenMentor } from "./useKenMentor";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
@@ -159,6 +162,64 @@ describe("useAgentEvents", () => {
     expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Unverified /));
     expect(deps.planTotalRef.current).toBe(2);
     expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
+  it("renders a failed terminal outcome after an error without completing the plan or playing success audio", () => {
+    const { hook, deps, getItems } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_start")));
+    deps.planTotalRef.current = 1;
+    deps.planDoneRef.current = new Set([1]);
+    act(() => {
+      hook.result.current.handleEvent(ev("error", { headline: "run failed", message: "provider unavailable" }));
+      hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload("failed", "idle") }));
+    });
+    expect(getItems()).toContainEqual(expect.objectContaining({ kind: "error", headline: "run failed" }));
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
+    expect(deps.planTotalRef.current).toBe(1);
+    expect(deps.planDoneRef.current).toEqual(new Set([1]));
+    expect(playSound).not.toHaveBeenCalledWith("done");
+  });
+
+  it.each<RunOutcome>(["completed", "failed", "aborted", "unverified"])(
+    "handles authoritative %s without deriving failure from error text",
+    (outcome) => {
+      const { hook, deps } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start")));
+      deps.planTotalRef.current = 1;
+      deps.planDoneRef.current = new Set([1]);
+      act(() => {
+        hook.result.current.handleEvent(ev("error", { message: "a recoverable tool error" }));
+        hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
+      });
+      expect(deps.planTotalRef.current).toBe(outcome === "completed" ? 0 : 1);
+      expect(deps.planDoneRef.current).toEqual(outcome === "completed" ? new Set() : new Set([1]));
+      if (outcome === "completed") expect(playSound).toHaveBeenCalledWith("done");
+      else expect(playSound).not.toHaveBeenCalledWith("done");
+      if (outcome === "aborted") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+      if (outcome === "failed" || outcome === "unverified") {
+        expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(outcome === "failed" ? /^Failed / : /^Unverified /));
+      }
+    },
+  );
+
+  it.each([
+    { outcome: "failed", unverified: true, cancelled: true },
+    { outcome: "unknown" },
+  ])("never turns an explicit failure or unknown outcome into success: %j", (data) => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_end", data)));
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
+    expect(playSound).not.toHaveBeenCalledWith("done");
+  });
+
+  it("keeps autopilot review alive across injected failures and settles explicit cancellation", () => {
+    const { result } = renderHook(() => useAutopilot({ setItems: vi.fn(), nextId: () => 1 }));
+    act(() => result.current.handleAutopilotEvent(ev("autopilot_review_start")));
+    expect(result.current.autopilotReviewing).toBe(true);
+    act(() => result.current.handleAutopilotEvent(ev("run_end", { ...createRunEndPayload("failed", "running") })));
+    expect(result.current.autopilotReviewing).toBe(true);
+    act(() => result.current.handleAutopilotEvent(ev("run_end", { outcome: "cancelled", runState: "idle" })));
+    expect(result.current.autopilotReviewing).toBe(false);
   });
 
   beforeEach(() => vi.clearAllMocks());

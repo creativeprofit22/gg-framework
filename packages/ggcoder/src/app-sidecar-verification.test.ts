@@ -14,6 +14,11 @@ describe("desktop verification settlement", () => {
     expect(settlement).not.toContain("broadcastError(");
     expect(settlement).toContain('log("WARN", "app-sidecar", "verification incomplete"');
     expect(settlement).toContain('verificationProblem ? "unverified"');
-    expect(settlement).toContain("unverified: true");
+    expect(settlement).toContain("...createRunEndPayload(outcome, runLifecycle.state)");
+    expect(settlement).toContain('!runSucceeded ? "failed" : verificationProblem ? "unverified" : "completed"');
+    expect(settlement).toContain("runLifecycle.recordOutcome(generation, outcome)");
+    expect(settlement).toContain("finishOwnedGeneration(\n          generation,\n          false,\n          outcome,");
+    expect(source).toContain('broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state))');
+    expect(settlement).toContain("if (!(cancelled && !ownsGeneration))");
   });
 });

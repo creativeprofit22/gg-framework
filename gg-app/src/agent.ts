@@ -133,6 +133,11 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export interface RunEndEvent extends SidecarEvent {
+  type: "run_end";
+  data: import("@kenkaiiii/gg-core/desktop-session-ux").RunEndPayload;
+}
+
 export interface ContextProfileChangeEvent extends SidecarEvent {
   type: "context_profile_change";
   data: ContextProfileSelection;

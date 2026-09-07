@@ -49,6 +49,7 @@ import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-rou
 import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
+import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
@@ -3695,7 +3696,7 @@ async function createSession(
     installFreshRunControllers();
     if (cancelled && emitCancelledFallback && !cancelledRunEndGenerations.has(generation)) {
       cancelledRunEndGenerations.add(generation);
-      broadcast("run_end", { cancelled: true, runState: runLifecycle.state });
+      broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state));
     }
     return cancelled;
   }
@@ -3758,11 +3759,13 @@ async function createSession(
       }
     } finally {
       const completionIntentFinalizer = roadmapCompletionIntents.finalizeRun(completionIntentRun);
-      const cancelled = runLifecycle.isCancellationRequested(generation) || programmaticSettlement?.cancelled === true;
+      let cancelled = runLifecycle.isCancellationRequested(generation) || programmaticSettlement?.cancelled === true;
       // The isolated specialist has its own verification; parent gates may be stale.
       const verificationProblem = cancelled ? null : programmaticSettlement
         ? (programmaticSettlement.succeeded ? null : "Specialist execution did not complete.")
         : session.getVerificationProblem();
+      let outcome: RunOutcome = cancelled ? "aborted" : programmaticSettlement?.journalOutcome ??
+        (!runSucceeded ? "failed" : verificationProblem ? "unverified" : "completed");
       if (runSucceeded && verificationProblem && ownsGeneration) {
         // Expected control outcome: run_end and the journal already carry Unverified.
         // Do not format it as a crash or persist a misleading error marker.
@@ -3789,12 +3792,16 @@ async function createSession(
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
       void ciPoll.refresh();
+      // Cancellation may have arrived during the workspace refresh above.
+      cancelled ||= runLifecycle.isCancellationRequested(generation);
+      if (cancelled) outcome = "aborted";
+      runLifecycle.recordOutcome(generation, outcome);
       // Settle and fsync the owning run journal before consuming durable completion intent.
       if (ownsGeneration) {
         finishOwnedGeneration(
           generation,
           false,
-          programmaticSettlement?.journalOutcome ?? (verificationProblem ? "unverified" : runSucceeded ? "completed" : "failed"),
+          outcome,
         );
         await runJournalPersistence;
         if (!(await settleDeferredPhaseLeaseRelease())) {
@@ -3863,13 +3870,13 @@ async function createSession(
       }
       // A cancelled injected run is still owned by the surrounding autopilot
       // cycle; its outer finalizer emits the one terminal cancelled run_end.
+      cancelled ||= runLifecycle.isCancellationRequested(generation);
+      if (cancelled) outcome = "aborted";
       if (!(cancelled && !ownsGeneration)) {
         if (cancelled) cancelledRunEndGenerations.add(generation);
         broadcast("run_end", {
           ...programmaticSettlement?.event,
-          ...(cancelled ? { cancelled: true } : {}),
-          ...(verificationProblem ? { unverified: true } : {}),
-          runState: runLifecycle.state,
+          ...createRunEndPayload(outcome, runLifecycle.state),
         });
       }
       // Autopilot's review loop is driven explicitly from POST /prompt (see

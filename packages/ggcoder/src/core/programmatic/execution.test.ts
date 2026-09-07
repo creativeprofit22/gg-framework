@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { handleAppSidecarProgrammaticExecution, settleProgrammaticRun } from "../../app-sidecar-programmatic-execution.js";
 import { RunLifecycle } from "../run-lifecycle.js";
+import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { ProgrammaticExecutionOutcome } from "./execution.js";
 import { ProcessManager } from "../process-manager.js";
 import os from "node:os";
@@ -61,7 +62,7 @@ async function executeThroughApp(input: ProgrammaticExecutionOptions, expectedSt
       result = await run();
       const settlement = settleProgrammaticRun(result)!;
       lifecycle.settle(generation, settlement.journalOutcome);
-      broadcast("run_end", { ...settlement.event, runState: lifecycle.state });
+      broadcast("run_end", { ...settlement.event, ...createRunEndPayload(settlement.journalOutcome, lifecycle.state) });
     },
   });
   expect(result?.status).toBe(expectedStatus);
@@ -69,7 +70,8 @@ async function executeThroughApp(input: ProgrammaticExecutionOptions, expectedSt
   const succeeded = expectedStatus === "succeeded";
   expect(journal.finished).toHaveBeenCalledExactlyOnceWith(1, cancelled ? "aborted" : succeeded ? "completed" : expectedStatus === "blocked" ? "unverified" : "failed");
   expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", {
-    ...(cancelled ? { cancelled: true } : !succeeded ? { unverified: true } : {}),
+    ...(cancelled ? { cancelled: true } : expectedStatus === "blocked" ? { unverified: true } : {}),
+    outcome: cancelled ? "cancelled" : succeeded ? "completed" : expectedStatus === "blocked" ? "unverified" : "failed",
     runState: "idle", programmaticResult: expect.objectContaining({ status: expectedStatus }),
   });
   expect(JSON.stringify(broadcast.mock.calls)).not.toContain("fixture-provider-failure");

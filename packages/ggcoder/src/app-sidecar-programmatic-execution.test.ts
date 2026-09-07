@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { RunLifecycle } from "./core/run-lifecycle.js";
+import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
 import { executionResultV1Schema } from "./core/programmatic/contracts.js";
 import { handleAppSidecarProgrammaticExecution, parseProgrammaticRunSelection, settleProgrammaticRun } from "./app-sidecar-programmatic-execution.js";
@@ -48,7 +49,7 @@ describe("explicit single-opportunity app command", () => {
   });
   it.each([
     ["succeeded", "completed", {}],
-    ["failed", "failed", { unverified: true }],
+    ["failed", "failed", {}],
     ["blocked", "unverified", { unverified: true }],
     ["cancelled", "aborted", { cancelled: true }],
     ["rejected", "aborted", { cancelled: true }],
@@ -64,12 +65,12 @@ describe("explicit single-opportunity app command", () => {
       const settlement = settleProgrammaticRun(await run())!;
       expect(settlement.succeeded).toBe(status === "succeeded");
       lifecycle.settle(generation, settlement.journalOutcome);
-      broadcast("run_end", { ...settlement.event, runState: lifecycle.state });
+      broadcast("run_end", { ...settlement.event, ...createRunEndPayload(settlement.journalOutcome, lifecycle.state) });
     });
     await handleAppSidecarProgrammaticExecution(options);
     expect(journal.finished).toHaveBeenCalledExactlyOnceWith(1, journalOutcome);
     const { route: _route, ...bounded } = "route" in result ? result : { ...result, route: undefined };
-    expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", { ...flags, programmaticResult: bounded, runState: "idle" });
+    expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", { ...flags, outcome: journalOutcome === "aborted" ? "cancelled" : journalOutcome, programmaticResult: bounded, runState: "idle" });
   });
   it.each(["succeeded", "failed", "blocked"] as const)("cancellation after a %s result still journals aborted", async (status) => {
     const journal = { started: vi.fn(), finished: vi.fn() };

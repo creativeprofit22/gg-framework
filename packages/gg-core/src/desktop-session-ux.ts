@@ -1,3 +1,42 @@
+/** Durable run-journal vocabulary, shared by terminal transports. */
+export type RunOutcome = "completed" | "failed" | "aborted" | "unverified";
+export type RunEndOutcome = Exclude<RunOutcome, "aborted"> | "cancelled";
+
+export interface RunEndPayload {
+  outcome: RunEndOutcome;
+  runState: "idle" | "running" | "cancelling";
+  cancelled?: true;
+  unverified?: true;
+}
+
+/** Keep old clients compatible without labelling provider failures Unverified. */
+export function createRunEndPayload(
+  outcome: RunOutcome,
+  runState: RunEndPayload["runState"],
+): RunEndPayload {
+  return {
+    outcome: outcome === "aborted" ? "cancelled" : outcome,
+    ...(outcome === "aborted" ? { cancelled: true as const } : {}),
+    ...(outcome === "unverified" ? { unverified: true as const } : {}),
+    runState,
+  };
+}
+
+/** Explicit outcomes win; only absent outcomes use the legacy flags. */
+export function resolveRunEndOutcome(data: Record<string, unknown>): RunEndOutcome {
+  switch (data.outcome) {
+    case "completed":
+    case "failed":
+    case "cancelled":
+    case "unverified":
+      return data.outcome;
+    case undefined:
+      return data.cancelled === true ? "cancelled" : data.unverified === true ? "unverified" : "completed";
+    default:
+      return "failed";
+  }
+}
+
 /** Host settlement of one question, independent of parent run boundaries. */
 export interface AskUserSettledEvent {
   id: string;

@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
+import { resolveRunEndOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { Item } from "./App";
 
 /**
@@ -106,7 +107,7 @@ export function useAutopilot(opts: {
         // stuck "Ken reviewing…" spinner, then return false so the build handler
         // still processes run_end normally.
         case "run_end":
-          if (d.cancelled === true) setAutopilotReviewing(false);
+          if (resolveRunEndOutcome(d) === "cancelled") setAutopilotReviewing(false);
           return false;
         case "autopilot_error": {
           setAutopilotReviewing(false);

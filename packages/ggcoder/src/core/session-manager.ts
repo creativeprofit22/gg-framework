@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -303,7 +304,7 @@ function parseApprovedPlanConsumption(value: unknown): ApprovedPlanConsumptionRe
   return payload as ApprovedPlanConsumptionRecord;
 }
 
-export type RunOutcome = "completed" | "failed" | "aborted" | "unverified";
+export type { RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export interface RunStartedPayload {
   version: 1;

@@ -1,4 +1,4 @@
-import type { RunOutcome } from "./session-manager.js";
+import type { RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export type RunState = "idle" | "running" | "cancelling";
 
@@ -28,6 +28,7 @@ interface ActiveRun {
   generation: number;
   abort: () => void;
   cancelRequested: boolean;
+  outcome: RunOutcome;
   settlement: Promise<void>;
   resolveSettlement: () => void;
   cancelPromise?: Promise<CancelResult>;
@@ -74,6 +75,7 @@ export class RunLifecycle {
       generation,
       abort,
       cancelRequested: false,
+      outcome: "completed",
       settlement,
       resolveSettlement,
     };
@@ -84,6 +86,15 @@ export class RunLifecycle {
 
   isCancellationRequested(generation: number): boolean {
     return this.active?.generation === generation && this.active.cancelRequested;
+  }
+
+  /** Injected rounds share ownership; later success must not erase their failure. */
+  recordOutcome(generation: number, outcome: RunOutcome): void {
+    const active = this.active;
+    if (!active || active.generation !== generation) return;
+    if (active.outcome === "aborted" || outcome === "completed") return;
+    if (active.outcome === "failed" && outcome === "unverified") return;
+    active.outcome = outcome;
   }
 
   /**
@@ -101,10 +112,11 @@ export class RunLifecycle {
       return { settled: false, cancelled: false };
     }
     const cancelled = active.cancelRequested;
+    this.recordOutcome(generation, outcome);
     this.active = undefined;
     this.setState("idle");
     active.resolveSettlement();
-    this.journal?.finished(generation, cancelled ? "aborted" : outcome);
+    this.journal?.finished(generation, cancelled ? "aborted" : active.outcome);
     return { settled: true, cancelled };
   }
 

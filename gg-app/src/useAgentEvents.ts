@@ -21,7 +21,7 @@ import {
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { isAskUserPrompt } from "./ask-user";
-import { isAskUserSettledEvent } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { isAskUserSettledEvent, resolveRunEndOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -1052,7 +1052,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // parked tool call is still waiting, so closing here would kill a
           // question the user can still answer and strand the agent until it
           // timed out ten minutes later.
-          const runCancelled = d.cancelled === true;
+          const outcome = resolveRunEndOutcome(d);
+          const runCancelled = outcome === "cancelled";
+          const runFailed = outcome === "failed";
           setItems((prev) =>
             prev.map((it) => {
               if (it.kind === "user" && it.queued) return { ...it, queued: false };
@@ -1075,10 +1077,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 it.kind === "subagent_group" && it.id === saGroupId
                   ? {
                       ...it,
-                      aborted: d.cancelled ? true : it.aborted,
+                      aborted: runCancelled ? true : it.aborted,
                       agents: it.agents.map((a) =>
                         a.status === "running" && !a.async
-                          ? { ...a, status: d.cancelled ? ("error" as const) : ("done" as const) }
+                          ? { ...a, status: runCancelled || runFailed ? ("error" as const) : ("done" as const) }
                           : a,
                       ),
                     }
@@ -1086,12 +1088,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               ),
             );
           }
-          if (d.cancelled) {
+          if (runCancelled) {
             setDoneStatus(null);
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = d.unverified === true ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
+            const verb = runFailed ? "Failed" : outcome === "unverified" ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);
@@ -1103,13 +1105,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
                 planDoneRef.current.has(step),
               );
-            if (completedPlan && d.unverified !== true) {
+            if (completedPlan && outcome === "completed") {
               planTotalRef.current = 0;
               planDoneRef.current = new Set();
               setPlanTotal(0);
               setPlanDone(new Set());
             }
-            if (d.unverified !== true) playSound("done");
+            if (outcome === "completed") playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.

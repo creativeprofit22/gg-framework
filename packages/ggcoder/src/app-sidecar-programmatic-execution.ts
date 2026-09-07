@@ -12,7 +12,7 @@ export function settleProgrammaticRun(result: ProgrammaticExecutionOutcome | voi
     cancelled,
     journalOutcome,
     event: {
-      ...(cancelled ? { cancelled: true } : !succeeded ? { unverified: true } : {}),
+      ...(cancelled ? { cancelled: true } : journalOutcome === "unverified" ? { unverified: true } : {}),
       programmaticResult: result.status === "rejected"
         ? { version: result.version, status: result.status, reason: result.reason }
         : { version: result.version, status: result.status, summary: result.summary, evidence: result.evidence },

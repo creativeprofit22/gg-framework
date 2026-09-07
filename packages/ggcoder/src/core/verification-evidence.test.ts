@@ -349,6 +349,24 @@ describe("classifyVerificationCommand", () => {
     // Output redirection into the pipe stage is not a pure limiter either.
     expect(classifyVerificationCommand("pnpm test | tail -f log.txt").accepted).toBe(false);
   });
+
+  it("marks file-rewriting rejections mayMutate, plain unrecognized checks not", () => {
+    // The gate bumps its mutation revision when a mayMutate check STARTS (the
+    // command can rewrite files). A green `make test` — a real check the
+    // classifier just cannot vouch for — must not poison the revision and
+    // re-arm the gate into every later question turn.
+    expect(classifyVerificationCommand("pnpm lint:fix").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm build").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm eslint --fix src/foo.ts").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("tsc -p .").mayMutate).toBe(true); // emits JS files
+    expect(classifyVerificationCommand("cargo build").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm build 2>&1 | tail -5").mayMutate).toBe(true);
+    // Non-mutating shapes: unrecognized runners and pure checks.
+    expect(classifyVerificationCommand("make test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("deno test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("pnpm test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | grep -q ok").mayMutate).toBe(false);
+  });
 });
 
 function bashExchange(

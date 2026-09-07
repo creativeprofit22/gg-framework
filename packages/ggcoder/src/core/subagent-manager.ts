@@ -342,7 +342,15 @@ export class SubAgentManager {
     await this.persistQueue;
   }
 
-  async spawn(taskName: string, task: string, agentName?: string): Promise<SubAgentSnapshot> {
+  /** Explicit per-spawn overrides. Used by harness-owned children (the
+   * independent Ideal reviewer): a read-only tool list and/or a forced model —
+   * bypassing agent-definition routing entirely. */
+  async spawn(
+    taskName: string,
+    task: string,
+    agentName?: string,
+    overrides?: { model?: string; tools?: readonly string[] },
+  ): Promise<SubAgentSnapshot> {
     this.assertAvailable();
     if (!taskName.trim()) throw new Error("task_name is required");
     if ([...this.workers.values()].some((worker) => worker.task_name === taskName)) {
@@ -354,7 +362,14 @@ export class SubAgentManager {
     this.reapExcessIdle();
     const provider = this.options.getProvider();
     const parentModel = this.options.getModel();
-    const selection = selectSubAgent(this.options.agents, agentName, provider, parentModel);
+    const base = selectSubAgent(this.options.agents, agentName, provider, parentModel);
+    const selection = {
+      agentDef: base.agentDef,
+      provider: base.provider,
+      parentModel: base.parentModel,
+      model: overrides?.model ?? base.model,
+      tools: overrides?.tools ?? base.agentDef?.tools ?? [],
+    };
     if (agentName && !selection.agentDef) {
       // Name the real roster: an unqualified "unknown agent" gives the model
       // nothing to correct against, so it re-guesses the same wrong name.
@@ -405,11 +420,11 @@ export class SubAgentManager {
           agentPrompt: selection.agentDef?.systemPrompt,
           agentContext: selection.agentDef?.context,
           thinkingLevel: childThinkingLevel(this.options.getThinkingLevel()),
-          allowedTools: selection.agentDef?.tools.length ? selection.agentDef.tools : undefined,
+          allowedTools: selection.tools.length ? [...selection.tools] : undefined,
           // Without this, an allow-listed child connects NO MCP servers — even
           // when its `tools:` frontmatter names `mcp__<server>__<tool>`.
-          allowedMcpServers: selection.agentDef?.tools.length
-            ? mcpServersForAgent(selection.agentDef.tools)
+          allowedMcpServers: selection.tools.length
+            ? mcpServersForAgent([...selection.tools])
             : undefined,
           promptCacheKey: subAgentCacheKey(
             this.options.getCacheKey?.(),

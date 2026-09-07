@@ -13,6 +13,12 @@ export interface VerificationCommandClassification {
   accepted: boolean;
   /** False for ordinary shell work that was never plausibly a verification attempt. */
   candidate: boolean;
+  /** True when the command can rewrite files (fixers, builders, emitters): the
+   *  verification gate bumps its mutation revision when such a check STARTS,
+   *  because earlier in-flight evidence cannot cover files it may change. A
+   *  rejected-but-non-mutating check (an unrecognized runner like `make test`)
+   * must NOT poison the revision — its green output is merely not evidence. */
+  mayMutate: boolean;
   reason: string;
 }
 
@@ -151,22 +157,29 @@ function hasFlag(flags: ReadonlySet<string>, denied: ReadonlySet<string>): boole
   return false;
 }
 
-function rejected(candidate: boolean, reason: string): VerificationCommandClassification {
-  return { accepted: false, candidate, reason };
+function rejected(
+  candidate: boolean,
+  reason: string,
+  mayMutate = false,
+): VerificationCommandClassification {
+  return { accepted: false, candidate, reason, mayMutate };
 }
 
 function accepted(reason: string): VerificationCommandClassification {
-  return { accepted: true, candidate: true, reason };
+  return { accepted: true, candidate: true, reason, mayMutate: false };
 }
 
 function classifyTsc(tokens: readonly string[]): VerificationCommandClassification {
   const flags = lowerFlags(tokens);
   if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running watch/debug mode");
-  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating or artifact-producing mode");
+  if (hasFlag(flags, MUTATING_FLAGS))
+    return rejected(true, "mutating or artifact-producing mode", true);
   if (hasFlag(flags, AMBIGUOUS_FLAGS) || flags.has("-v")) {
     return rejected(true, "does not prove type correctness");
   }
-  if (!flags.has("--noemit")) return rejected(true, "tsc must explicitly use --noEmit");
+  if (!flags.has("--noemit"))
+    // Without --noEmit tsc EMITS files, so it is both unproven and rewriting.
+    return rejected(true, "tsc must explicitly use --noEmit", true);
   return accepted("bounded TypeScript no-emit check");
 }
 
@@ -178,7 +191,7 @@ function classifyTestRunner(
   if (hasFlag(flags, LONG_RUNNING_FLAGS) || flags.has("--watch=false")) {
     return rejected(true, "long-running or interactive test mode");
   }
-  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating test/update mode");
+  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating test/update mode", true);
   if (hasFlag(flags, AMBIGUOUS_FLAGS)) return rejected(true, "does not execute the test suite");
   if (executable === "vitest") {
     const positional = tokens.slice(1).filter((token) => !token.startsWith("-"));
@@ -216,7 +229,8 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
   const flags = lowerFlags(tokens);
   if (["eslint", "prettier", "ruff"].includes(executable)) {
     if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running mode");
-    if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating formatter/linter mode");
+    if (hasFlag(flags, MUTATING_FLAGS))
+      return rejected(true, "mutating formatter/linter mode", true);
     if (hasFlag(flags, AMBIGUOUS_FLAGS)) return rejected(true, "does not execute a static check");
     if (executable === "prettier" && !flags.has("--check")) {
       return rejected(true, "prettier must explicitly use --check");
@@ -234,10 +248,10 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
   if (executable === "cargo") {
     const subcommand = tokens[1]?.toLowerCase();
     if (subcommand === "build" || subcommand === "clean" || subcommand === "run") {
-      return rejected(true, "artifact-producing Cargo command");
+      return rejected(true, "artifact-producing Cargo command", true);
     }
     if (subcommand === "fmt" && !flags.has("--check")) {
-      return rejected(true, "cargo fmt must explicitly use --check");
+      return rejected(true, "cargo fmt must explicitly use --check", true);
     }
     return ["check", "clippy", "test", "fmt"].includes(subcommand)
       ? accepted("bounded Cargo check")
@@ -247,7 +261,11 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
     const subcommand = tokens[1]?.toLowerCase();
     return subcommand === "test" || subcommand === "vet"
       ? accepted("bounded Go check")
-      : rejected(subcommand === "build" || subcommand === "clean", "not a bounded Go check");
+      : rejected(
+          subcommand === "build" || subcommand === "clean",
+          "not a bounded Go check",
+          subcommand === "build", // go build writes artifacts; clean removes them
+        );
   }
   return rejected(hasVerifierExecutable(tokens.join(" ")), "not a recognized verification command");
 }
@@ -281,7 +299,7 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
   const script = tokens[scriptIndex]?.toLowerCase();
   if (!script) return rejected(false, "package runner has no script");
   if (UNSAFE_PACKAGE_SCRIPTS.test(script)) {
-    return rejected(true, "mutating, artifact-producing, or long-running package script");
+    return rejected(true, "mutating, artifact-producing, or long-running package script", true);
   }
   if (!SAFE_PACKAGE_SCRIPTS.test(script)) {
     // pnpm permits omitting exec for installed binaries, e.g. pnpm vitest run.
@@ -337,7 +355,7 @@ export function classifyVerificationCommand(command: string): VerificationComman
     const head = classifyVerificationCommand(check);
     return head.accepted
       ? accepted("piped check with output limiter (pipefail)")
-      : rejected(head.candidate || candidate, head.reason);
+      : rejected(head.candidate || candidate, head.reason, head.mayMutate);
   }
   const segments = splitShellCommandSegments(command);
   if (segments.length === 0) return rejected(false, "empty command");
@@ -366,6 +384,7 @@ export function classifyVerificationCommand(command: string): VerificationComman
     return rejected(
       results.some((result) => result.candidate),
       firstRejected.reason,
+      firstRejected.mayMutate,
     );
   }
   return accepted(segments.length === 1 ? results[0].reason : "bounded verification command chain");

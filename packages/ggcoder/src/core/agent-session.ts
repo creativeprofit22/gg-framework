@@ -8,6 +8,7 @@ import {
 } from "@kenkaiiii/gg-agent";
 import {
   ProviderError,
+  stream,
   type Message,
   type MessageProvenance,
   type Provider,
@@ -94,7 +95,11 @@ import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
-import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
+import {
+  buildSubAgentCompletionFollowUp,
+  type SubAgentManager,
+  type SubAgentState,
+} from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { z } from "zod";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
@@ -126,6 +131,7 @@ import { discoverAgents } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectProjectStack } from "./language-detector.js";
 import {
+  type IdealReviewDecision,
   type IdealReviewStats,
   evaluateIdealReview,
   buildIdealReviewMessage,
@@ -145,6 +151,25 @@ import {
   type CycleDetection,
 } from "./loop-breaker.js";
 import { buildRegroundingMessage } from "./regrounding.js";
+import {
+  buildSemanticLoopJudgePrompt,
+  buildSemanticLoopMessage,
+  MAX_SEMANTIC_LOOP_CALLS,
+  parseSemanticLoopVerdict,
+  shouldRunSemanticLoopCheck,
+  SEMANTIC_LOOP_JUDGE_TIMEOUT_MS,
+  withJudgeTimeout,
+  type SemanticCallDigest,
+  type SemanticLoopVerdict,
+} from "./semantic-loop-check.js";
+import {
+  buildIndependentReviewMessage,
+  buildReviewerTask,
+  INDEPENDENT_REVIEW_SCORE_THRESHOLD,
+  parseReviewerFindings,
+  REVIEWER_TOOLS,
+  REVIEWER_WAIT_MS,
+} from "./ideal-review-subagent.js";
 import { buildEnvDeltaMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
@@ -204,6 +229,17 @@ export interface SessionAttachment {
   data: string;
   name: string;
   path?: string;
+}
+
+/** Terminal subagent states — mirrors SubAgentManager's private isTerminal. */
+function isTerminalSubAgentState(state: SubAgentState): boolean {
+  return (
+    state === "completed" ||
+    state === "failed" ||
+    state === "interrupted" ||
+    state === "closed" ||
+    state === "reaped"
+  );
 }
 
 export interface AgentSessionOptions {
@@ -342,6 +378,10 @@ export interface AgentSessionOptions {
   coderSlashCommands?: boolean;
   /** Enable loop-break, re-grounding, and Ideal review hooks. Defaults to true. */
   selfCorrectionHooks?: boolean;
+  /** Override the semantic-loop judge LLM call (tests). Receives the finished
+   *  prompt, returns the model's raw reply. Default: one-shot `stream()` call
+   *  on the session's ACTIVE model. */
+  semanticLoopJudge?: (prompt: string) => Promise<string>;
   /** Load project skills/agents and create local .gg directories. Defaults to true. */
   projectCustomization?: boolean;
   /** Register global + bundled subagents without loading project customization. */
@@ -512,6 +552,20 @@ export class AgentSession {
   /** 0 = none; 1 = first nudge sent; 2 = final stop-and-report injected. */
   private loopBreakInjected: 0 | 1 | 2 = 0;
   private regroundingInjected = false;
+  /** Recent tool-call digests for the semantic loop judge — bounded ring. */
+  private hookRecentCalls: SemanticCallDigest[] = [];
+  /** LLM-judged loop detection state. `verdict` holds a LOOP verdict awaiting
+   *  injection at the next steering poll; judge failures fail open (no
+   *  injection) and still consume budget + cooldown. */
+  private semanticLoop: {
+    checksUsed: number;
+    lastCheckTurn: number;
+    pending: boolean;
+    verdict: SemanticLoopVerdict | null;
+    injected: boolean;
+  } = { checksUsed: 0, lastCheckTurn: 0, pending: false, verdict: null, injected: false };
+  /** Independent Ideal reviewer spawned once per run (score-gated). */
+  private independentReviewStarted = false;
   /**
    * The environment as the cached system prompt currently describes it.
    * Re-recorded on every prompt build, so a rebuild (e.g. `/add-dir`) needs no
@@ -1659,6 +1713,15 @@ export class AgentSession {
     this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
+    this.hookRecentCalls = [];
+    this.semanticLoop = {
+      checksUsed: 0,
+      lastCheckTurn: 0,
+      pending: false,
+      verdict: null,
+      injected: false,
+    };
+    this.independentReviewStarted = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
     this.verificationGate.beginRun();
@@ -1716,10 +1779,16 @@ export class AgentSession {
           (isVerificationCommand(event.args.command) ||
             classifyVerificationCommand(event.args.command).candidate)
         ) {
-          // A rejected check may rewrite files (--fix, build scripts, shell
-          // wrappers). Earlier in-flight checks cannot validate those changes.
+          // A check that can rewrite files (--fix, build scripts, emitters)
+          // invalidates earlier in-flight evidence AND marks the run as
+          // touched. A check that is merely UNRECOGNIZED (`make test`, `deno
+          // test`) rewrites nothing we can point to: bumping the revision for
+          // it poisoned the gate on green output and re-armed the hook into
+          // every later question turn.
+          const classification = classifyVerificationCommand(event.args.command);
           this.verificationGate.requireFreshVerification(
-            !classifyVerificationCommand(event.args.command).accepted,
+            !classification.accepted && classification.mayMutate,
+            event.args.command,
           );
           await this.persistVerificationState();
         }
@@ -1764,6 +1833,19 @@ export class AgentSession {
           event.result,
           event.isError,
         );
+        // Semantic-loop judge input: a bounded digest of WHAT was attempted and
+        // HOW it came out. Args/results are sliced AT RECORD TIME — a write with
+        // a 50 KiB payload or a bash dump must never inflate the ring, and the
+        // judge needs shapes, not payloads.
+        this.hookRecentCalls.push({
+          tool: name,
+          args: args === undefined ? "" : JSON.stringify(args).slice(0, 300),
+          ok: !event.isError,
+          result: event.result.slice(0, 400),
+        });
+        if (this.hookRecentCalls.length > MAX_SEMANTIC_LOOP_CALLS) {
+          this.hookRecentCalls.splice(0, this.hookRecentCalls.length - MAX_SEMANTIC_LOOP_CALLS);
+        }
         if (name === "edit" && !event.isError) {
           const diff = (event.details as { diff?: string } | undefined)?.diff ?? event.result;
           const added = (diff.match(/^\+[^+]/gm) ?? []).length;
@@ -1796,16 +1878,21 @@ export class AgentSession {
           const diagnostics = (event.details as {
             bashDiagnostics?: { reason?: unknown; exitCode?: unknown };
           } | undefined)?.bashDiagnostics;
-          if (classifyVerificationCommand(command).accepted) {
+          const classification = classifyVerificationCommand(command);
+          if (classification.accepted) {
             if (args.run_in_background === true && !event.isError && args.persist !== true) {
               const id = /^ID:\s*(\S+)/m.exec(event.result)?.[1];
+              // No parseable ID means the check cannot be tracked to a real exit
+              // code — no evidence either way. Recording a FAILURE here made
+              // every later green run of a different spelling look owed.
               if (id) this.backgroundVerification.set(id, { revision: call.revision, command });
-              else this.verificationGate.recordFailedVerification(command, call.revision);
-              verificationChanged = true;
+            } else if (args.persist === true) {
+              // Persistent-shell checks are not bounded evidence (steering can
+              // interleave): neither a pass nor a failure. A recorded failure
+              // here blocked approval for sessions that prefer the shell.
             } else {
               if (
                 !event.isError &&
-                args.persist !== true &&
                 (diagnostics !== undefined
                   ? diagnostics.reason === "completed" && diagnostics.exitCode === 0
                   : /^Exit code:\s*0(?:\s|$)/i.test(event.result.trim()))
@@ -1816,6 +1903,10 @@ export class AgentSession {
               }
               verificationChanged = true;
             }
+          } else if (classification.candidate) {
+            // Green but untrusted: remember WHY so the demand can tell the
+            // agent which command shape actually clears the gate.
+            this.verificationGate.recordRejectedCheck(command, classification.reason);
           }
         }
         if (!event.isError && args && name === "task_output" && typeof args.id === "string") {
@@ -1986,16 +2077,21 @@ export class AgentSession {
     }
     if (this.opts.selfCorrectionHooks === false) return null;
     if (!this.settingsManager.get("idealReviewEnabled")) return null;
+    // Deterministic stuck verdict, computed once and shared: the semantic
+    // judge must not spend tokens on a burst the deterministic breaker is
+    // about to correct itself.
+    const deterministicDecision = evaluateLoopBreak({
+      consecutiveFailures: this.hookConsecutiveFailures,
+      repeatedNoProgressCalls: this.hookRepeatedNoProgressCalls,
+      textRepetitionDetected: detectTextRepetition(this.hookText),
+      ...(this.hookCyclicPattern ? { cyclicPattern: this.hookCyclicPattern } : {}),
+    });
+    this.maybeStartSemanticLoopCheck(deterministicDecision.shouldBreak);
     // Two-stage loop-breaker: stage 1 nudges; a FRESH detection after that
     // injects the harsher final stop-and-report prompt. Signals reset after
     // each injection so stage 2 only fires on new evidence.
     if (this.loopBreakInjected < 2) {
-      const decision = evaluateLoopBreak({
-        consecutiveFailures: this.hookConsecutiveFailures,
-        repeatedNoProgressCalls: this.hookRepeatedNoProgressCalls,
-        textRepetitionDetected: detectTextRepetition(this.hookText),
-        ...(this.hookCyclicPattern ? { cyclicPattern: this.hookCyclicPattern } : {}),
-      });
+      const decision = deterministicDecision;
       if (decision.shouldBreak) {
         const stage = this.loopBreakInjected === 0 ? (1 as const) : (2 as const);
         this.loopBreakInjected = stage;
@@ -2004,6 +2100,9 @@ export class AgentSession {
         this.hookCyclicPattern = null;
         this.hookConsecutiveFailures = 0;
         this.hookRepeatedNoProgressCalls = 0;
+        // The deterministic breaker owns this burst — a semantic verdict from
+        // the same burst must not double-correct on the next poll.
+        this.semanticLoop.verdict = null;
         // Clear the text buffer too — otherwise a stage-1 text-repetition
         // trigger still sees the same repeated tail on the next check and
         // escalates to stage 2 on stale evidence.
@@ -2016,12 +2115,177 @@ export class AgentSession {
         return [buildLoopBreakMessage(decision.reasons, stage === 2)];
       }
     }
+    // Semantic loop-break: an LLM verdict (started by maybeStartSemanticLoopCheck
+    // on a suspicious-but-syntactically-quiet burst) is consumed here, exactly
+    // once, with the deterministic breaker getting priority above. Fail-open:
+    // no verdict or no-loop verdict injects nothing.
+    if (this.semanticLoop.verdict && !this.semanticLoop.injected) {
+      const verdict = this.semanticLoop.verdict;
+      this.semanticLoop.injected = true;
+      this.semanticLoop.verdict = null;
+      // The judged burst has been addressed; a fresh burst must re-accumulate.
+      this.hookConsecutiveFailures = 0;
+      log("INFO", "loop-break", "Injecting semantic loop-break steering", {
+        reason: verdict.reason,
+      });
+      this.eventBus.emit("hook", { kind: "loop_break" });
+      return [buildSemanticLoopMessage(verdict)];
+    }
     if (!this.regroundingInjected && this.compactionOccurred) {
       this.regroundingInjected = true;
       this.eventBus.emit("hook", { kind: "regrounding" });
       return [buildRegroundingMessage(this.originalRequest)];
     }
     return null;
+  }
+
+  /** Fire the semantic loop judge when deterministic evidence is suspicious but
+   *  the deterministic breaker stayed quiet — the syntactic blind spot where
+   *  every retry differs slightly and the run still makes no progress.
+   *  Fire-and-forget: the call runs while the next turn streams, and a finished
+   *  verdict is consumed by the NEXT steering poll — never blocking a turn. */
+  private maybeStartSemanticLoopCheck(deterministicBreak: boolean): void {
+    if (
+      !shouldRunSemanticLoopCheck({
+        consecutiveFailures: this.hookConsecutiveFailures,
+        totalFailures: this.hookStats.toolFailures,
+        turns: this.hookStats.turns,
+        lastCheckTurn: this.semanticLoop.lastCheckTurn,
+        checksUsed: this.semanticLoop.checksUsed,
+        checkPending: this.semanticLoop.pending,
+        deterministicBreak,
+      })
+    ) {
+      return;
+    }
+    // resetHookState replaces this object on every prompt. A late judge must
+    // not publish a verdict or consume the next run's budget/cooldown.
+    const runState = this.semanticLoop;
+    runState.pending = true;
+    log("INFO", "loop-break", "Starting semantic loop judge", {
+      turn: String(this.hookStats.turns),
+      consecutiveFailures: String(this.hookConsecutiveFailures),
+      recentCalls: String(this.hookRecentCalls.length),
+    });
+    void (async () => {
+      try {
+        const prompt = buildSemanticLoopJudgePrompt(this.hookRecentCalls, this.originalRequest);
+        const raw = await (this.opts.semanticLoopJudge?.(prompt) ??
+          this.callSemanticLoopJudge(prompt));
+        const verdict = parseSemanticLoopVerdict(raw);
+        if (this.semanticLoop === runState && verdict?.loop) runState.verdict = verdict;
+      } catch (error) {
+        // Fail open: judge errors never stop a run. Budget and cooldown are
+        // still consumed in `finally` so a flaky judge cannot retry-loop.
+        log("WARN", "loop-break", "Semantic loop judge failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (this.semanticLoop === runState) {
+          runState.pending = false;
+          runState.checksUsed += 1;
+          runState.lastCheckTurn = this.hookStats.turns;
+        }
+      }
+    })();
+  }
+
+  /** One-shot judge call on the session's ACTIVE model — deliberately not a
+   *  cheaper routing: judging a model's own failure patterns with a weaker
+   *  model swaps false negatives for false positives. */
+  private async callSemanticLoopJudge(prompt: string): Promise<string> {
+    const creds = await this.authStorage.resolveCredentials(this.provider, {
+      storageKeys: this.currentAuthStorageKeys(),
+    });
+    const result = stream({
+      provider: this.provider,
+      model: this.model,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 500,
+      apiKey: creds.accessToken,
+      accountId: creds.accountId,
+      projectId: creds.projectId,
+      baseUrl: this.baseUrl ?? creds.baseUrl,
+      signal: this.opts.signal,
+    });
+    const response = await withJudgeTimeout(result.response, SEMANTIC_LOOP_JUDGE_TIMEOUT_MS);
+    // Providers differ in reply shape: some return a bare string, others an
+    // array of parts (glm-5.3 among them) — joining text parts covers both,
+    // where the string-only branch silently dropped the whole verdict.
+    const content = response.message.content;
+    if (typeof content === "string") return content;
+    return Array.isArray(content)
+      ? content
+          .filter((part): part is { type: "text"; text: string } => part.type === "text")
+          .map((part) => part.text)
+          .join("\n")
+      : "";
+  }
+
+  /** Independent fresh-context review of the finished work (Codex Guardian
+   *  pattern). Spawns a READ-ONLY child on the ACTIVE model, waits bounded,
+   * and returns findings for the acting agent to address — or nothing when
+   *  the review passes, is unavailable, or fails (in-thread review remains the
+   *  fallback; the feature degrades, never blocks).
+   *
+   *  Runs inside the pre-stop poll, so the candidate final answer is already
+   *  held by arming and this wait cannot race a streamed answer. */
+  private async runIndependentReview(decision: IdealReviewDecision): Promise<Message[]> {
+    if (!this.subAgentManager) return [];
+    if (this.independentReviewStarted) return [];
+    // An allow-listed session (a subagent worker itself) must not spawn
+    // harness-owned grandchildren the tool policy never granted.
+    if (this.opts.allowedTools && !this.opts.allowedTools.includes("spawn_agent")) return [];
+    if (decision.score < INDEPENDENT_REVIEW_SCORE_THRESHOLD) return [];
+    this.independentReviewStarted = true;
+
+    const taskName = `ideal-reviewer-${Math.random().toString(36).slice(2, 8)}`;
+    let agentId: string | undefined;
+    try {
+      const task = buildReviewerTask({
+        originalRequest: this.originalRequest,
+        changedFiles: [...this.hookFileEditCounts.keys()],
+        stats: this.hookStats,
+        triggerReasons: decision.reasons,
+      });
+      // Active model forced at spawn time — never routed to a fast/review model.
+      const snapshot = await this.subAgentManager.spawn(taskName, task, undefined, {
+        model: this.model,
+        tools: REVIEWER_TOOLS,
+      });
+      agentId = snapshot.agent_id;
+      const waited = await this.subAgentManager.wait([agentId], "all", REVIEWER_WAIT_MS);
+      const agent = waited.agents[0];
+      if (!agent || !isTerminalSubAgentState(agent.state)) {
+        // Timeout: collect the straggler so the completion gate cannot fire on
+        // it later, then fall back to the in-thread review.
+        await this.subAgentManager.interrupt(agentId, true).catch(() => {});
+        log("WARN", "ideal", "Independent reviewer timed out; falling back to in-thread review", {
+          agentId,
+        });
+        return [];
+      }
+      const findings = parseReviewerFindings(agent.output ?? "");
+      if (!findings) {
+        log("WARN", "ideal", "Independent reviewer output unparseable; falling back", { agentId });
+        return [];
+      }
+      if (findings.clean) {
+        log("INFO", "ideal", "Independent reviewer verdict: clean", { agentId });
+        return [];
+      }
+      log("INFO", "ideal", "Independent reviewer flagged findings", {
+        agentId,
+        count: String(findings.findings.length),
+      });
+      return [buildIndependentReviewMessage(findings.findings)];
+    } catch (error) {
+      if (agentId) await this.subAgentManager.interrupt(agentId, true).catch(() => {});
+      log("WARN", "ideal", "Independent reviewer failed; falling back to in-thread review", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
   }
 
   /**
@@ -2147,7 +2411,7 @@ export class AgentSession {
    * Pre-stop Ideal review phase machine. Once review starts, completion is
    * blocked until harness-owned post-injection reads cover every changed file.
    */
-  private getHookFollowUpMessages(): Message[] | null {
+  private async getHookFollowUpMessages(): Promise<Message[] | null> {
     const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager);
     if (childCompletionFollowUp) return childCompletionFollowUp;
 
@@ -2263,6 +2527,11 @@ export class AgentSession {
     const driftedFiles = detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).slice(0, 5);
     if (!decision.shouldReview && driftedFiles.length === 0) return phaseVerificationFollowUp();
 
+    // Independent reviewer first (async, bounded): its findings ride in the
+    // SAME follow-up batch as the in-thread review + coverage requirements, so
+    // addressing everything still costs one extra turn.
+    const independentMessages = await this.runIndependentReview(decision);
+
     this.reviewCoverage.start(this.hookFileEditCounts.keys());
     this.idealReviewPhase = "reviewing";
     const coverage = this.reviewCoverage.evidence();
@@ -2286,6 +2555,7 @@ export class AgentSession {
       lspMissing: lspEvidence.missing,
     });
     return [
+      ...independentMessages,
       this.withReviewLspEvidence(
         withReviewCoverageRequirements(
           buildIdealReviewMessage(decision.reasons, driftedFiles),

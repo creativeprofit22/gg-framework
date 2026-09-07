@@ -77,6 +77,32 @@ afterEach(async () => {
 });
 
 describe("SubAgentManager", () => {
+  it("applies explicit spawn overrides for harness-owned children", async () => {
+    const instance = manager();
+    const requestSpy = vi.spyOn(
+      instance as unknown as {
+        request: (...args: unknown[]) => Promise<unknown>;
+      },
+      "request",
+    );
+
+    // The independent Ideal reviewer: read-only tools, forced ACTIVE model —
+    // agent-definition routing ("fake" would use the fast model) is bypassed.
+    await instance.spawn("reviewer", "review the work", undefined, {
+      model: "gpt-5.6-sol",
+      tools: ["read", "grep", "find", "ls"],
+    });
+
+    const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
+    expect(initializeCall?.[2]).toMatchObject({
+      options: {
+        model: "gpt-5.6-sol",
+        allowedTools: ["read", "grep", "find", "ls"],
+        promptCacheKey: "parent-cache:subagent:gpt-5.6-sol:default",
+      },
+    });
+  });
+
   it("partitions the worker cache key by selected model and agent family", async () => {
     const instance = manager();
     const requestSpy = vi.spyOn(

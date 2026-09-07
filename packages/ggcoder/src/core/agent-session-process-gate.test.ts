@@ -11,7 +11,7 @@ interface GateInternals {
   runStartedAt: number;
   processGateInjected: number;
   subAgentManager?: { completionGateMessage(): string | undefined };
-  getHookFollowUpMessages(): Message[] | null;
+  getHookFollowUpMessages(): Promise<Message[] | null>;
 }
 
 function makeSession(): { session: AgentSession; internal: GateInternals } {
@@ -61,7 +61,7 @@ describe("AgentSession background-process completion gate", () => {
 
     const started = await manager.start("echo gate-probe; sleep 30", process.cwd());
 
-    const first = internal.getHookFollowUpMessages();
+    const first = await internal.getHookFollowUpMessages();
     expect(first?.[0]?.role).toBe("user");
     expect(first?.[0]?.content).toContain(started.id);
     expect(internal.processGateInjected).toBe(1);
@@ -69,7 +69,7 @@ describe("AgentSession background-process completion gate", () => {
     // The agent does what the gate asked: reads the output.
     expect(await waitForOutput(manager, started.id)).toContain("gate-probe");
 
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(internal.processGateInjected).toBe(1);
   });
 
@@ -82,7 +82,7 @@ describe("AgentSession background-process completion gate", () => {
     // Run started after the process — a deliberately long-lived dev server.
     internal.runStartedAt = Date.now() + 1_000;
 
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(internal.processGateInjected).toBe(0);
   });
 
@@ -94,9 +94,9 @@ describe("AgentSession background-process completion gate", () => {
 
     await manager.start("sleep 30", process.cwd());
 
-    expect(internal.getHookFollowUpMessages()).not.toBeNull();
-    expect(internal.getHookFollowUpMessages()).not.toBeNull();
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).not.toBeNull();
+    expect(await internal.getHookFollowUpMessages()).not.toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(internal.processGateInjected).toBe(2);
   });
 
@@ -111,7 +111,7 @@ describe("AgentSession background-process completion gate", () => {
 
     await manager.start("sleep 30", process.cwd());
 
-    expect(internal.getHookFollowUpMessages()).toEqual([
+    expect(await internal.getHookFollowUpMessages()).toEqual([
       {
         role: "user",
         content: "Collect child agent recovered-child before finishing.",

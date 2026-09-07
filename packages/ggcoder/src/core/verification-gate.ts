@@ -396,29 +396,56 @@ export function buildTamperDisclosureMessage(suspects: readonly SuspectMutation[
       "user asked for), say so plainly in your final response and state why the fix stands " +
       "without them. If instead the check was weakened, skipped, narrowed or silenced to get " +
       "a green result, revert that now and fix the underlying code. This is the only time you " +
-      "will be asked — do not describe the change as verified without addressing this.",
+      "will be asked — do not describe the change as verified without addressing this. " +
+      // A disclosure is not an answer: the user's pending question still needs
+      // a direct reply, or the turn spends itself on the gate alone.
+      "Whatever the user last asked still needs a direct answer in your final response — " +
+      "never reply with the disclosure alone.",
   };
 }
 
 export function buildVerificationFollowUpMessage(
   files: readonly string[],
   recheck = false,
+  rejectedCheck?: { command: string; reason: string } | null,
+  invalidationCause?: string | null,
 ): Message {
+  const noFiles = files.length === 0;
   return {
     role: "user",
     provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
     content:
       (recheck
-        ? "Verification gate: code changed again after the earlier verification:\n"
+        ? noFiles
+          ? "Verification gate: a command that can rewrite files" +
+            (invalidationCause ? ` (\`${invalidationCause}\`)` : "") +
+            " ran after the earlier verification, so its green check no longer proves the current state:\n"
+          : "Verification gate: code changed again after the earlier verification:\n"
         : "Verification gate: current successful verification is missing for this run:\n") +
       files.map((filePath) => `- ${filePath}`).join("\n") +
+      (noFiles ? "" : "\n") +
       (recheck
-        ? "\nRe-run the affected checks against these changes and address any failures. "
-        : "\nRun the project's verification now (its test command, or the closest equivalent) and " +
+        ? noFiles
+          ? "Re-run the project's checks against the current state and address any failures. "
+          : "Re-run the affected checks against these changes and address any failures. "
+        : "Run the project's verification now (its test command, or the closest equivalent) and " +
           "address any failures. ") +
       "Do not describe the change as tested or working without having run it. " +
       "There is no repeated reminder for unchanged code: if you cannot run it, say plainly in your final " +
       "response which of these changes went unverified and why, so the user can check them." +
+      // Why a green run already in the transcript did not count. Without this,
+      // the agent re-ran the same untrusted command shape every turn and the
+      // gate never cleared — the user got verification status instead of
+      // answers on every prompt.
+      (rejectedCheck
+        ? `\nA check you ran did not count as verification evidence: \`${rejectedCheck.command}\` — ${rejectedCheck.reason}. ` +
+          "Green output from that command shape cannot clear this gate; run a bounded check instead " +
+          "(the project's test script via pnpm/npm/yarn test, vitest run, jest, pytest, or tsc --noEmit)."
+        : "") +
+      // The hijacked turn owes the user their answer too: verification status
+      // alone is not a reply.
+      " Whatever the user last asked still needs a direct answer in your final response — " +
+      "never reply with verification status alone." +
       // Recheck-only: without this, the post-recheck answer re-prints the earlier
       // turn's full checklist nearly verbatim — the "duplicate response" pattern
       // (measured in experiments/prompt-bench/duplicate-summary-sim.ts).
@@ -450,6 +477,20 @@ export class VerificationGate {
   private failedChecks = new Map<string, number>(); // checkKey → mutation revision at failure
   private passedChecks = new Map<string, number>();
   private unknownVerification = false;
+  /** A check the evidence classifier refused to vouch for, kept so the demand
+   *  can explain WHY a green run in the transcript did not clear the gate. */
+  private lastRejectedCheck: { command: string; reason: string } | null = null;
+  /** The file-rewriting command that last invalidated evidence, if any — named
+   *  in a recheck demand that has no tracked file edits to list instead. */
+  private lastInvalidationCause: string | null = null;
+  /**
+   * Did THIS run touch what the gate guards — a code mutation, or a check that
+   * may have rewritten files? Inherited debt alone never re-arms the gate: a
+   * run that edited nothing is a question or review turn, and hijacking it
+   * with a verification demand answered the user's prompt with verification
+   * status instead of an answer, on every prompt, forever.
+   */
+  private runTouched = false;
   /** Code files mutated since the last verification — the gate's file list. */
   private mutatedFiles = new Set<string>();
   /**
@@ -467,6 +508,7 @@ export class VerificationGate {
    */
   recordMutation(filePath: string, addedText?: string): void {
     this.lastMutationSeq = ++this.seq;
+    this.runTouched = true;
     this.passedChecks.clear();
     this.mutatedFiles.add(filePath);
 
@@ -519,12 +561,24 @@ export class VerificationGate {
     this.failedChecks.set(key, revision);
   }
 
-  requireFreshVerification(invalidateRevision = false): void {
+  requireFreshVerification(invalidateRevision = false, cause?: string): void {
     this.unknownVerification = true;
     if (invalidateRevision) {
       this.lastMutationSeq = ++this.seq;
       this.passedChecks.clear();
+      this.runTouched = true; // the command may have rewritten files
+      this.lastInvalidationCause = cause?.trim().slice(0, 200) || null;
     }
+  }
+
+  /** Remember a check shape the evidence classifier refused, for the demand's
+   *  explanation. Command text is model-authored: capped, never executed. */
+  recordRejectedCheck(command: string, reason: string): void {
+    if (!command.trim() || !reason.trim()) return;
+    this.lastRejectedCheck = {
+      command: command.trim().slice(0, 200),
+      reason: reason.trim().slice(0, 200),
+    };
   }
 
   verificationProblem(): string | null {
@@ -585,6 +639,9 @@ export class VerificationGate {
     this.lastDemandedMutationSeq = 0;
     this.tamperInjections = 0;
     this.suspects.clear();
+    this.runTouched = false;
+    this.lastRejectedCheck = null;
+    this.lastInvalidationCause = null;
   }
 
   isOwed(): boolean {
@@ -621,6 +678,12 @@ export class VerificationGate {
   }
 
   pendingReason(): "initial" | "recheck" | "tamper" | null {
+    // A run that neither edited code nor started a file-rewriting command
+    // cannot owe a NEW demand: inherited debt already had its turns, and
+    // re-arming here is what turned every later question prompt into a
+    // "Hook engaged" hijack. The debt itself stays recorded — the next run
+    // that edits code re-arms the demand as usual.
+    if (!this.runTouched) return null;
     if (this.isOwed()) {
       if (this.injections < MAX_VERIFICATION_INJECTIONS) {
         return this.lastVerificationSeq > 0 && this.lastMutationSeq > this.lastVerificationSeq
@@ -654,7 +717,12 @@ export class VerificationGate {
       if (reason === "recheck") this.recheckInjections += 1;
       this.lastDemandedMutationSeq = this.lastMutationSeq;
       return [
-        buildVerificationFollowUpMessage([...this.mutatedFiles].sort(), reason === "recheck"),
+        buildVerificationFollowUpMessage(
+          [...this.mutatedFiles].sort(),
+          reason === "recheck",
+          this.lastRejectedCheck,
+          this.lastInvalidationCause,
+        ),
       ];
     }
     if (reason === "tamper") {
@@ -677,5 +745,8 @@ export class VerificationGate {
     this.failedChecks.clear();
     this.passedChecks.clear();
     this.unknownVerification = false;
+    this.runTouched = false;
+    this.lastRejectedCheck = null;
+    this.lastInvalidationCause = null;
   }
 }

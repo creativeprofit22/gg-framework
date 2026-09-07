@@ -339,6 +339,76 @@ describe("VerificationGate", () => {
     expect(gate.pendingReason()).toBe("initial");
   });
 
+  it("never demands on a later run that edited nothing — a question turn is answered, not hijacked", () => {
+    // The live incident: debt inherited from an earlier run re-armed on EVERY
+    // new user prompt (beginRun resets the injection budgets), so each
+    // question turn was hijacked by "Hook engaged" and answered with a
+    // verification status instead of the user's actual question.
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.followUp(); // budget spent; the model stopped without verifying
+    expect(gate.isOwed()).toBe(true);
+    gate.beginRun(); // the next user prompt, no edits in it
+    expect(gate.willInject()).toBe(false);
+    expect(gate.followUp()).toBeNull();
+    gate.beginRun(); // and the one after that
+    expect(gate.followUp()).toBeNull();
+    // New edits in a run re-arm the demand as usual.
+    gate.recordMutation("b.ts");
+    expect(gate.pendingReason()).not.toBeNull();
+  });
+
+  it("still demands in the run whose check invalidated evidence by rewriting files", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordVerification(gate.revision, "pnpm test");
+    gate.beginRun();
+    // e.g. `pnpm lint:fix` started: it may have rewritten files, so the run
+    // owes proof even though no edit/write tool call happened.
+    gate.requireFreshVerification(true);
+    expect(gate.willInject()).toBe(true);
+  });
+
+  it("does not count a rejected-shape check as run-touching on its own", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordVerification(gate.revision, "pnpm test");
+    gate.beginRun();
+    // A green `make test` (broad shape yes, evidence no) must not re-arm the
+    // gate into a question turn.
+    gate.requireFreshVerification(false);
+    expect(gate.willInject()).toBe(false);
+  });
+
+  it("names the file-rewriting command when a recheck has no tracked file edits", () => {
+    // The live incident's incoherent demand: "code changed again" with an
+    // EMPTY file list, then "re-run the affected checks against these
+    // changes" — changes that named nothing.
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordVerification(gate.revision, "pnpm test");
+    gate.requireFreshVerification(true, "pnpm build");
+    expect(gate.pendingReason()).toBe("recheck");
+    const demand = String(gate.followUp()![0]!.content);
+    expect(demand).toContain("pnpm build");
+    expect(demand).toContain("rewrite files");
+    expect(demand).not.toContain("against these changes");
+    expect(demand).toContain("current state");
+    expect(demand).toContain("direct answer");
+  });
+
+  it("explains why the habitual check did not count, and requires answering the user", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordRejectedCheck("make test", "not a recognized verification command");
+    const demand = String(gate.followUp()![0]!.content);
+    expect(demand).toContain("make test");
+    expect(demand).toContain("not a recognized verification command");
+    expect(demand).toContain("bounded check");
+    // The hijacked turn must still answer what the user actually asked.
+    expect(demand).toContain("direct answer");
+  });
+
   it("asks the recheck reply to be a delta, not a repeat of the earlier checklist", () => {
     const gate = new VerificationGate();
     gate.recordMutation("a.ts");
@@ -376,7 +446,10 @@ describe("VerificationGate", () => {
     gate.followUp();
     gate.recordVerification();
     expect(gate.pendingReason()).toBe("tamper");
-    expect(String(gate.followUp()![0]!.content)).toContain("does not prove the code works");
+    const tamperDemand = String(gate.followUp()![0]!.content);
+    expect(tamperDemand).toContain("does not prove the code works");
+    // Disclosure alone is not a reply: the user's question must still be answered.
+    expect(tamperDemand).toContain("direct answer");
     expect(gate.followUp()).toBeNull();
   });
 

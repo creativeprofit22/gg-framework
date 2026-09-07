@@ -17,7 +17,7 @@ import { ProcessManager } from "./process-manager.js";
 interface GateInternals {
   processManager?: ProcessManager;
   runStartedAt: number;
-  getHookFollowUpMessages(): Message[] | null;
+  getHookFollowUpMessages(): Promise<Message[] | null>;
   trackHookEvent(event: AgentEvent): Promise<void>;
   verificationGate: {
     recordMutation(): void;
@@ -135,7 +135,7 @@ describe("AgentSession verification gate", () => {
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
     await simulateToolCall(internal, "bash", { command: "cat src/a.ts" });
 
-    const followUp = internal.getHookFollowUpMessages();
+    const followUp = await internal.getHookFollowUpMessages();
     expect(followUp).not.toBeNull();
     expect(String(followUp![0]!.content)).toContain("src/a.ts");
     expect(String(followUp![0]!.content)).toContain("Run the project's verification");
@@ -155,7 +155,7 @@ describe("AgentSession verification gate", () => {
     );
 
     expect(internal.verificationGate.isOwed()).toBe(false);
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
   it("does not count a failed foreground verification command", async () => {
@@ -187,14 +187,14 @@ describe("AgentSession verification gate", () => {
     const internal = await makeSession();
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    const demand = internal.getHookFollowUpMessages()!;
+    const demand = (await internal.getHookFollowUpMessages())!;
     expect(String(demand[0]!.content)).toContain("Run the project's verification");
 
     // Second stop, still unverified: no further follow-up, so the run ends on
     // the model's next final answer rather than a third restated one.
     expect(internal.verificationGate.isOwed()).toBe(true);
-    expect(internal.getHookFollowUpMessages()).toBeNull();
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
   it("does not count reading a failed background verification run", async () => {
@@ -245,6 +245,6 @@ describe("AgentSession verification gate", () => {
     await internal.settingsManager.set("verificationGateEnabled", false);
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { relative } from "node:path";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type {
@@ -106,10 +107,14 @@ function partitionLedgerEvidenceForWorkspace(
   ledger: SessionVerificationEvidenceLedgerSnapshot | undefined,
   workspace: NotesWorkspaceSnapshotV1,
   safeToolEnvironmentDigest: string,
+  cwd: string,
 ): SessionVerificationEvidenceLedgerSnapshot {
-  const allEvidence = [...(ledger?.currentEvidence ?? []), ...(ledger?.staleEvidence ?? [])];
-  const currentEvidence = allEvidence.filter(
+  const candidates = ledger?.currentEvidence ?? [];
+  // Snapshot equality cannot undo start/end generation invalidation in the ledger.
+  const currentEvidence = candidates.filter(
     (item) =>
+      item.cwd &&
+      relative(cwd, item.cwd) === "" &&
       item.workspace &&
       item.safeToolEnvironmentDigest &&
       item.classifierVersion === ROADMAP_VERIFICATION_CLASSIFIER_VERSION &&
@@ -123,7 +128,10 @@ function partitionLedgerEvidenceForWorkspace(
   );
   return {
     currentEvidence,
-    staleEvidence: allEvidence.filter((item) => !currentEvidence.includes(item)),
+    staleEvidence: [
+      ...(ledger?.staleEvidence ?? []),
+      ...candidates.filter((item) => !currentEvidence.includes(item)),
+    ],
   };
 }
 
@@ -375,6 +383,7 @@ export class AppSidecarRoadmapToolHost {
         owningSession.getVerificationEvidenceLedgerSnapshot?.(),
         workspace,
         currentEnvironmentDigest,
+        this.dependencies.cwd,
       );
       const transient = evaluateRoadmapVerificationEvidence({
         doneWhen: activePhase.doneWhen,
@@ -540,6 +549,7 @@ export class AppSidecarRoadmapToolHost {
             owningSession.getVerificationEvidenceLedgerSnapshot?.(),
             workspace,
             currentEnvironmentDigest,
+            cwd,
           );
           const partition = partitionVerificationMessagesForWorkspaceMutation(
             owningSession.getMessages(),

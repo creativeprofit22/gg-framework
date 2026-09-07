@@ -8,6 +8,7 @@ import {
 } from "./app-sidecar-roadmap-tool-host.js";
 import {
   ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+  SessionVerificationEvidenceLedger,
   roadmapCriterionId,
   safeToolEnvironmentDigest,
 } from "./core/verification-evidence.js";
@@ -82,6 +83,102 @@ function doneInput(evidence = "pnpm test exited successfully", expectedRevision 
 }
 
 describe("AppSidecarRoadmapToolHost", () => {
+  describe.each([false, true])("real ledger freshness (durable=%s)", (durableExecution) => {
+    it.each([
+      "in-flight edit", "later edit", "fresh", "cwd", "cwd casing", "repository", "environment", "snapshot",
+    ])("preserves %s evidence classification at the host boundary", async (scenario) => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      const evidenceRevision = ledger.revision;
+      const edit = () => ledger.recordToolResult({
+        name: "edit", args: { file_path: "src/example.ts" }, isError: false,
+      });
+      if (scenario === "in-flight edit") edit();
+      ledger.recordToolResult({
+        name: "bash",
+        args: { command: "pnpm test" },
+        isError: false,
+        evidenceRevision,
+        workspace: verificationWorkspace,
+        details: {
+          bashDiagnostics: {
+            executionId: "execution-1", command: "pnpm test",
+            cwd: scenario === "cwd" ? "/other-project" : scenario === "cwd casing" ? "/PROJECT" : "/project",
+            startedAt: 1000, reason: "completed", exitCode: 0,
+          },
+        },
+      });
+      if (scenario === "later edit") edit();
+      const stale = scenario === "in-flight edit" || scenario === "later edit";
+      expect(ledger.snapshot()[stale ? "staleEvidence" : "currentEvidence"]).toEqual([
+        expect.objectContaining({ executionId: "execution-1", status: "passed", workspace: verificationWorkspace }),
+      ]);
+      expect(ledger.snapshot()[stale ? "currentEvidence" : "staleEvidence"]).toEqual([]);
+      const session = owningSession();
+      session.getVerificationEvidenceLedgerSnapshot = () => ledger.snapshot();
+      const workspace = structuredClone(verificationWorkspace);
+      if (scenario === "repository") workspace.repository.identityHash = "9".repeat(64);
+      if (scenario === "snapshot") workspace.worktreeDigest = "9".repeat(64);
+      const phase = {
+        id: "phase-1",
+        execution: {
+          plan: { contentHash: "5".repeat(64), steps: [{ state: "completed" }] },
+          evidence: [],
+        },
+      };
+      const recordPhaseExecutionEvidence = vi.fn();
+      const recordRoadmapStatusUpdate = vi.fn(async () => ({
+        status: "duplicate" as const, revision: 5, phaseId: "phase-1",
+        phase: phase as never, statusOutcome: "completion-pending" as const, proposals: [],
+      }));
+      const onCompletionIntent = vi.fn();
+      const broadcastNotesSnapshot = vi.fn();
+      const host = new AppSidecarRoadmapToolHost({
+        cwd: "/project",
+        durableExecution,
+        repository: {
+          load: async () => ({
+            status: "ok" as const,
+            snapshot: { revision: 4, document: { phases: [phase] } } as never,
+            recoveredFromBackup: false,
+          }),
+          recordPhaseExecutionEvidence,
+          recordRoadmapStatusUpdate,
+        },
+        reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+        projectAutopilot: { isEnabled: () => false },
+        resolvePlanProgress: () => ({ total: 1, completed: [1] }),
+        captureWorkspaceSnapshot: async () => workspace,
+        captureVerificationWorkspace: async () => workspace,
+        captureSafeToolEnvironmentDigest: () => scenario === "environment" ? "9".repeat(64) : safeToolEnvironmentDigest(),
+        getRunGeneration: () => 1,
+        broadcastNotesSnapshot,
+        onCompletionIntent,
+      });
+      const output = JSON.parse(String(await host.createSessionTools("coding", () => session)[0]!
+        .execute(doneInput(), {} as never)));
+      if (scenario === "fresh" || (scenario === "cwd casing" && process.platform === "win32")) {
+        expect(output).toMatchObject({ result: "duplicate", statusOutcome: "completion-pending" });
+        expect(recordRoadmapStatusUpdate).toHaveBeenCalledOnce();
+        if (durableExecution) {
+          expect(recordRoadmapStatusUpdate).toHaveBeenCalledWith("/project", expect.objectContaining({
+            durableCompletion: expect.objectContaining({
+              verificationEvidence: [expect.objectContaining({ version: 2, executionId: "execution-1" })],
+            }),
+          }));
+        }
+      } else {
+        expect(output).toMatchObject({
+          result: "verification-incomplete",
+          unmetEvidenceCodes: expect.arrayContaining(["stale-evidence", "missing-approved-evidence"]),
+        });
+        expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+        expect(onCompletionIntent).not.toHaveBeenCalled();
+        expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+      }
+      expect(recordPhaseExecutionEvidence).not.toHaveBeenCalled();
+    });
+  });
+
   it("never gives Ken or Autopilot Ken a Roadmap mutation tool", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",

@@ -154,6 +154,39 @@ describe("verification gate flow", () => {
     expect(internal.getHookFollowUpMessages()).toBeNull();
   });
 
+  it("counts a check piped through a tail limiter, so a question turn is never hijacked", async () => {
+    const { internal, events } = await makeSession();
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    // The agent-habit shape that caused the real-world incident: green suite,
+    // output piped through tail. Pre-pipefail this was rejected as evidence,
+    // the gate stayed armed past the turn, and the NEXT turn — a plain user
+    // question — had its draft held, discarded, and replaced by the hook
+    // notice. With pipefail + the limiter rule it is ordinary passing evidence.
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command: "pnpm test 2>&1 | tail -6" },
+      "Exit code: 0\n3 passing",
+    );
+
+    expect(internal.getVerificationProblem()).toBeNull();
+    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(events).toEqual(["hook_armed:verification:true", "hook_armed:verification:false"]);
+  });
+
+  it("still rejects piped checks whose stages can transform results", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command: "pnpm test | grep -q 'all passed'" },
+      "Exit code: 0",
+    );
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+  });
+
   it("does not treat a nonzero bash exit as passing merely because the tool returned normally", async () => {
     const { internal } = await makeSession();
     await simulateToolCall(internal, "edit", { file_path: "src/foo.ts" });

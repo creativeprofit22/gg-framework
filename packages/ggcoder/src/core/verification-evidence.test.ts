@@ -293,7 +293,7 @@ describe("classifyVerificationCommand", () => {
     ["tsc --noEmit --generateTrace trace", "does not prove"],
     ["tsc --noEmit --generateCpuProfile cpu.cpuprofile", "does not prove"],
     ["tsc --noEmit > result.txt", "unsafe shell"],
-    ["tsc --noEmit | cat", "control operator"],
+    ["tsc --noEmit | cat", "pipe stage"],
     ["tsc --noEmit || echo ignored", "control operator"],
     ["tsc --noEmit; echo ignored", "control operator"],
     ["tsc --noEmit && npm run clean", "mutating"],
@@ -324,6 +324,30 @@ describe("classifyVerificationCommand", () => {
       accepted: false,
       candidate: false,
     });
+  });
+
+  it("accepts checks piped through pure output limiters (pipefail keeps the status)", () => {
+    expect(classifyVerificationCommand("pnpm vitest run src/a.test.ts | tail -20")).toMatchObject({
+      accepted: true,
+    });
+    expect(
+      classifyVerificationCommand("cd packages/ggcoder && pnpm test 2>&1 | tail -5"),
+    ).toMatchObject({ accepted: true });
+    expect(classifyVerificationCommand("npm test | head -3")).toMatchObject({
+      accepted: true,
+    });
+  });
+
+  it("rejects pipes whose stages can transform check results", () => {
+    // grep/tee/wc can filter, redirect, or replace what the check proved.
+    expect(classifyVerificationCommand("pnpm test | grep -q 'all passed'").accepted).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | tee results.log").accepted).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | wc -l").accepted).toBe(false);
+    // A limiter joined by && (not a pipe) runs AFTER the check and its own 0
+    // would mask the check's status — the pipe allowance must not leak to it.
+    expect(classifyVerificationCommand("pnpm test && tail -5").accepted).toBe(false);
+    // Output redirection into the pipe stage is not a pure limiter either.
+    expect(classifyVerificationCommand("pnpm test | tail -f log.txt").accepted).toBe(false);
   });
 });
 

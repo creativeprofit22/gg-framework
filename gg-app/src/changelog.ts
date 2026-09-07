@@ -22,6 +22,16 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.61.2",
+    date: "2026-09-07",
+    items: [
+      "I killed the phantom `Hook engaged` interruptions. Ask a plain question right after opening the app and your answer now streams untouched, because verified work stays verified and checks piped through `tail` finally count as proof.",
+      "A red test suite can never dress up as green again. Every command now runs with `pipefail`, so piping tests through `tail` still surfaces the failure and the agent has to actually fix it.",
+      "No more endless `a check failed` loops. One stale failure no longer blocks every later green run: any fresh passing check on newer code clears the slate.",
+      "Follow-up re-checks now answer in `one line`, not a wall. After a tiny change the agent confirms with a short delta instead of re-printing the whole checklist you already read.",
+    ],
+  },
+  {
     version: "0.61.1",
     date: "2026-09-06",
     items: [

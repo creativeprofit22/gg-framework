@@ -185,7 +185,7 @@ describe("VerificationGate", () => {
     expect(gate.verificationProblem()).toBeNull();
   });
 
-  it("requires fresh evidence on resume and never persists raw check commands", () => {
+  it("keeps a verified session verified across resume, and an owed one owed", () => {
     const original = new VerificationGate();
     original.recordMutation("a.ts");
     original.recordFailedVerification("pnpm test");
@@ -196,10 +196,17 @@ describe("VerificationGate", () => {
     expect(restored.verificationProblem()).toContain("failed");
     restored.recordVerification(restored.revision, "pnpm test");
     expect(restored.verificationProblem()).toBeNull();
+    // Resume of a VERIFIED snapshot stays clean: forcing re-verification here
+    // hijacked the first question turn of every restarted app session (the
+    // "Hook engaged" mid-answer cut users saw on app relaunch).
     const checked = restored.snapshot();
     restored.restore(checked);
+    expect(restored.verificationProblem()).toBeNull();
+    // Genuinely unverified work still restores owed, and a post-resume edit
+    // demands re-verification as usual.
+    restored.recordMutation("b.ts");
     expect(restored.verificationProblem()).toContain("Unverified");
-    restored.recordVerification();
+    restored.recordVerification(restored.revision, "pnpm test");
     expect(restored.verificationProblem()).toBeNull();
   });
 
@@ -221,6 +228,40 @@ describe("VerificationGate", () => {
     gate.restore(saved);
     expect(gate.verificationProblem()).toContain("Unverified");
     gate.recordVerification();
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("supersedes a stale failure with any green check at a newer revision", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.recordFailedVerification("cd pkg && pnpm exec vitest run --silent");
+    expect(gate.verificationProblem()).toContain("check failed");
+    // The agent re-verifies with a DIFFERENT command spelling at the same
+    // revision: the failure still stands — it describes the same code.
+    gate.recordVerification(gate.revision, "cd pkg && pnpm exec vitest run src/a.test.ts");
+    expect(gate.verificationProblem()).toContain("check failed");
+    // One more edit (revision advances), then ANY green check: the stale
+    // failure described older code and must not block approval forever —
+    // the endless "a check failed" recheck loop.
+    gate.recordMutation("b.ts");
+    gate.recordVerification(gate.revision, "cd pkg && pnpm exec vitest run src/b.test.ts");
+    expect(gate.verificationProblem()).toBeNull();
+  });
+
+  it("restores legacy bare-hash failures as ancient so one green pass clears them", () => {
+    const gate = new VerificationGate();
+    const legacy = {
+      version: 1 as const,
+      seq: 7,
+      mutation: 7,
+      verified: 3,
+      files: ["a.ts"],
+      failedChecks: ["f".repeat(64)],
+      unknown: true,
+    };
+    gate.restore(legacy);
+    expect(gate.verificationProblem()).toContain("check failed");
+    gate.recordVerification(gate.revision, "pnpm test");
     expect(gate.verificationProblem()).toBeNull();
   });
 
@@ -296,6 +337,22 @@ describe("VerificationGate", () => {
     gate.reset();
     gate.recordMutation("d.ts");
     expect(gate.pendingReason()).toBe("initial");
+  });
+
+  it("asks the recheck reply to be a delta, not a repeat of the earlier checklist", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("a.ts");
+    gate.followUp();
+    gate.recordVerification();
+    gate.recordMutation("b.ts");
+    const recheck = String(gate.followUp()![0]!.content);
+    expect(recheck).toContain("reply briefly as a delta");
+    expect(recheck).toContain("Do not repeat that summary");
+    // Initial demands keep the plain instruction — no earlier summary exists to delta against.
+    gate.reset();
+    gate.recordMutation("a.ts");
+    const initial = String(gate.followUp()![0]!.content);
+    expect(initial).not.toContain("reply briefly as a delta");
   });
 
   it("does not spend a recheck on ignored verification, even with more edits", () => {

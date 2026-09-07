@@ -94,7 +94,9 @@ export class PersistentShell {
     // Fresh session: use the prepared sandbox launch when provided; otherwise
     // use the same resolved shell as one-shot execution without user rc files.
     const resolved = this.launch ?? resolveShell("", this.shellOpts);
-    const args = this.launch ? resolved.args : ["--norc", "--noprofile"];
+    // -o pipefail mirrors the one-shot path: pipelines keep the failing
+    // stage's exit status instead of the trailing limiter's 0.
+    const args = this.launch ? resolved.args : ["--norc", "--noprofile", "-o", "pipefail"];
     const child = this.lifecycle.spawn(resolved.file, args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],

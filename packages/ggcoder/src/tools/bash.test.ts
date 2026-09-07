@@ -261,6 +261,25 @@ describe("network allowlist guard", () => {
  * at a file that doesn't exist (the bare-`bash` ENOENT class of bug) or arg
  * quoting that the shell rejects.
  */
+describe.skipIf(process.platform === "win32")("createBashTool on a real POSIX shell", () => {
+  const ctx = (id: string) => ({ signal: new AbortController().signal, toolCallId: id });
+
+  // pipefail is what lets the verification gate count `check | tail` as
+  // evidence: without it a red suite piped through tail exits 0 and reads green.
+  it("reports the failing pipeline stage's exit code, not the limiter's", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = String(await tool.execute({ command: "false | tail -1" }, ctx("posix-pipefail")));
+    expect(out).toContain("Exit code: 1");
+  });
+
+  it("still exits 0 for a passing command piped through a limiter", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = String(await tool.execute({ command: "echo ok | tail -1" }, ctx("posix-pipe-ok")));
+    expect(out).toContain("ok");
+    expect(out).toContain("Exit code: 0");
+  });
+});
+
 describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", () => {
   const ctx = (id: string) => ({ signal: new AbortController().signal, toolCallId: id });
 

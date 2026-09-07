@@ -41,7 +41,16 @@ const verificationStateSchema = z.object({
   mutation: z.number().int().nonnegative().safe(),
   verified: z.number().int().nonnegative().safe(),
   files: z.array(z.string()).max(10_000),
-  failedChecks: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(10_000),
+  // Legacy snapshots carry bare check-key hashes; new ones carry [key, revision]
+  // pairs so a failure can be superseded by later evidence.
+  failedChecks: z
+    .array(
+      z.union([
+        z.string().regex(/^[a-f0-9]{64}$/),
+        z.tuple([z.string().regex(/^[a-f0-9]{64}$/), z.number().int().nonnegative().safe()]),
+      ]),
+    )
+    .max(10_000),
   unknown: z.boolean(),
 });
 const checkKey = (command: string) => createHash("sha256").update(command.trim()).digest("hex");
@@ -409,7 +418,18 @@ export function buildVerificationFollowUpMessage(
           "address any failures. ") +
       "Do not describe the change as tested or working without having run it. " +
       "There is no repeated reminder for unchanged code: if you cannot run it, say plainly in your final " +
-      "response which of these changes went unverified and why, so the user can check them.",
+      "response which of these changes went unverified and why, so the user can check them." +
+      // Recheck-only: without this, the post-recheck answer re-prints the earlier
+      // turn's full checklist nearly verbatim — the "duplicate response" pattern
+      // (measured in experiments/prompt-bench/duplicate-summary-sim.ts).
+      (recheck
+        ? " This is a re-verification after a follow-up change, not a new report: the full " +
+          "checklist was already summarized earlier in this conversation. Do not repeat that " +
+          "summary or its structure. Once the affected checks pass again, reply briefly as a " +
+          "delta — name only the change that was just re-verified and confirm the checks still " +
+          'pass (for example: "Re-verified <change> — the affected checks still pass."). ' +
+          "Repeat the full checklist only if something actually broke."
+        : ""),
   };
 }
 
@@ -427,7 +447,7 @@ export class VerificationGate {
   private recheckInjections = 0;
   private lastDemandedMutationSeq = 0;
   private tamperInjections = 0;
-  private failedChecks = new Set<string>();
+  private failedChecks = new Map<string, number>(); // checkKey → mutation revision at failure
   private passedChecks = new Map<string, number>();
   private unknownVerification = false;
   /** Code files mutated since the last verification — the gate's file list. */
@@ -475,6 +495,14 @@ export class VerificationGate {
       if (oldest !== undefined) this.passedChecks.delete(oldest);
     }
     this.failedChecks.delete(key);
+    // A pass against the current file revision supersedes failures recorded
+    // against OLDER code. Exact-command-only clearing let one stale failure —
+    // a check that failed once and was never re-run byte-identically — block
+    // every later green run: verified never advanced and the gate re-injected
+    // "a check failed" on every turn, the endless recheck loop.
+    for (const [staleKey, failedAt] of this.failedChecks) {
+      if (failedAt < revision) this.failedChecks.delete(staleKey);
+    }
     if (this.failedChecks.size > 0) return;
     this.lastVerificationSeq = ++this.seq;
     this.unknownVerification = false;
@@ -484,11 +512,11 @@ export class VerificationGate {
   recordFailedVerification(command: string, revision = this.revision): void {
     const key = checkKey(command);
     // A failure remains outstanding unless this SAME check already passed on
-    // a newer revision. An unrelated successful lint/build cannot erase it.
+    // a newer revision. An unrelated successful lint/build cannot erase it at
+    // the same revision — but a pass at a NEWER revision supersedes it in
+    // recordVerification, because it verified newer code.
     if ((this.passedChecks.get(key) ?? -1) > revision) return;
-    // simplification: exact command identity; an alias cannot clear another
-    // check's failure. Upgrade to runner-aware identities if aliases are needed.
-    this.failedChecks.add(key);
+    this.failedChecks.set(key, revision);
   }
 
   requireFreshVerification(invalidateRevision = false): void {
@@ -535,10 +563,20 @@ export class VerificationGate {
     this.lastMutationSeq = state.mutation;
     this.lastVerificationSeq = state.verified;
     this.mutatedFiles = new Set(state.files);
-    this.failedChecks = new Set(state.failedChecks);
-    // Files may have changed while the session was closed. A saved success is
-    // not live evidence: require one fresh check after resuming edited work.
-    this.unknownVerification = state.unknown || state.mutation > 0;
+    // Legacy bare-hash entries restore as revision 0 (ancient): any current
+    // green pass supersedes them, unblocking sessions poisoned by the old
+    // exact-command-only clearing.
+    this.failedChecks = new Map(
+      state.failedChecks.map((entry) => (Array.isArray(entry) ? entry : [entry, 0])),
+    );
+    // Only an OWED snapshot restores as owed. The old `|| state.mutation > 0`
+    // forced every restart of an edited session to re-verify before any final
+    // answer — so reopening the app and asking a plain question hijacked the
+    // turn with a hook notice mid-stream. A session that was verified when it
+    // closed stays verified: genuinely unverified work still restores owed
+    // (mutation > verified), and any NEW edit in the resumed run bumps
+    // mutation above verified and demands re-verification as usual.
+    this.unknownVerification = state.unknown;
   }
 
   beginRun(): void {

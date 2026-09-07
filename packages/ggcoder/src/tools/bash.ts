@@ -655,6 +655,8 @@ export function createBashTool(
     : "Execute a bash command. The shell's working directory is already set to the project root — " +
       "don't cd into it redundantly. Use cd only when you need a different directory. " +
       "Returns exit code and combined stdout/stderr. " +
+      "Pipelines run with pipefail — a piped command reports the failing stage's exit " +
+      "code, so piping tests through tail/head cannot mask a failure. " +
       "Commands run in a non-interactive bash shell with TERM=dumb. " +
       "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
       "for final status under the default 120000ms timeout. Long output is truncated (tail kept). " +
@@ -747,7 +749,7 @@ export function createBashTool(
             const resolved = resolveShell("", shellOpts);
             const launch = await prepareLaunch({
               ...resolved,
-              args: ["--norc", "--noprofile"],
+              args: ["--norc", "--noprofile", "-o", "pipefail"],
             });
             const shell = new PersistentShell(
               cwd,

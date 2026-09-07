@@ -310,19 +310,34 @@ function classifySegment(segment: string): VerificationCommandClassification {
   return classifyDirect(tokens);
 }
 
+/** tail/head with at most a line-count argument: pure output limiters. They
+ * cannot rewrite, filter, or otherwise transform what the check proved — the
+ * exit status (pipefail-protected) and the kept tail are the full evidence. */
+const PIPE_LIMITER = /^(?:tail|head)(?:\s+(?:-[1-9]\d*|-n\s*\d+|--lines(?:=|\s+)\d+))?\s*$/;
+
 /** Fail-closed classifier: bounded checks with narrowly allowed non-check preludes. */
 export function classifyVerificationCommand(command: string): VerificationCommandClassification {
   const candidate =
     hasVerifierExecutable(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
-  // Only && preserves fail-closed evidence across a chain. Pipes, OR, semicolons,
-  // and newlines can hide a failed check behind a later zero exit status.
-  if (
-    command.includes("||") ||
-    command.includes(";") ||
-    command.includes("\n") ||
-    /(^|[^|])\|([^|]|$)/.test(command)
-  ) {
+  // Only && preserves fail-closed evidence across a chain. OR, semicolons, and
+  // newlines can still hide a failed check behind a later zero exit status.
+  if (command.includes("||") || command.includes(";") || command.includes("\n")) {
     return rejected(candidate, "shell control operator can hide a failed check");
+  }
+  // Pipes are evidence ONLY as `check | tail/head`: the agent shell runs with
+  // pipefail, so the pipeline reports the check's own status, and a limiter
+  // cannot transform results. Any other pipe stage can (grep, tee, wc…) — rejected.
+  if (/(^|[^|])\|([^|]|$)/.test(command)) {
+    const stages = command.split("|");
+    const check = stages[0]!.replace(/\s*2>&1\s*$/, "").trim();
+    const limitersOk = stages.slice(1).every((stage) => PIPE_LIMITER.test(stage.trim()));
+    if (!limitersOk || !check) {
+      return rejected(candidate, "pipe stage can transform check results");
+    }
+    const head = classifyVerificationCommand(check);
+    return head.accepted
+      ? accepted("piped check with output limiter (pipefail)")
+      : rejected(head.candidate || candidate, head.reason);
   }
   const segments = splitShellCommandSegments(command);
   if (segments.length === 0) return rejected(false, "empty command");

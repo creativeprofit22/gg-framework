@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.57.2
+
+### Patch Changes
+
+- Fix verification-gate false alarms: bash shells now run with pipefail so piped checks report the failing stage's exit code, `check | tail` pipelines count as verification evidence, stale failed checks are superseded by green runs at newer revisions, and verified sessions stay verified across resume.
+  - @kenkaiiii/gg-ai@5.57.2
+  - @kenkaiiii/gg-agent@5.57.2
+  - @kenkaiiii/gg-core@5.57.2
+
 ## 5.57.1
 
 ### Patch Changes

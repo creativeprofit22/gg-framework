@@ -249,6 +249,7 @@ export function useAgentLoop(
   messages: React.MutableRefObject<Message[]>,
   options: AgentLoopOptions,
   callbacks?: {
+    onRunStart?: (startedAt: number) => void;
     onComplete?: (newMessages: Message[]) => void;
     onTurnText?: (text: string, thinking: string, thinkingMs: number) => void;
     onToolStart?: (
@@ -308,6 +309,7 @@ export function useAgentLoop(
     getFollowUpMessages?: () => Message[] | null;
   },
 ): UseAgentLoopReturn {
+  const onRunStart = callbacks?.onRunStart;
   const onComplete = callbacks?.onComplete;
   const onTurnText = callbacks?.onTurnText;
   const onToolStart = callbacks?.onToolStart;
@@ -544,6 +546,7 @@ export function useAgentLoop(
         thinkingBufferRef.current = "";
         thinkingVisibleRef.current = "";
         runStartRef.current = Date.now();
+        onRunStart?.(runStartRef.current);
         log("INFO", "ui", "run_start", {
           provider: options.provider,
           model: options.model,
@@ -1309,6 +1312,7 @@ export function useAgentLoop(
     [
       messages,
       options,
+      onRunStart,
       onComplete,
       onTurnText,
       onToolStart,

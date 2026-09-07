@@ -35,8 +35,11 @@ import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
 import {
   VerificationGate,
   isCodeFilePath,
+  isCheckOwnFile,
+  extractAddedLines,
   isVerificationCommand,
 } from "../core/verification-gate.js";
+import { classifyVerificationCommand } from "../core/verification-evidence.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -560,6 +563,10 @@ export function App(props: AppProps) {
   const idealReviewEnabledRef = useRef(idealReviewEnabled);
   /** Pre-stop verification gate: code edited this run, nothing proved it since. */
   const verificationGateRef = useRef(new VerificationGate());
+  const verificationStartsRef = useRef(new Map<string, number>());
+  const backgroundVerificationRef = useRef(
+    new Map<string, { revision: number; command: string }>(),
+  );
   const verificationGateEnabledRef = useRef(
     props.sessionStore?.verificationGateEnabled ?? props.verificationGateEnabled ?? true,
   );
@@ -1173,6 +1180,24 @@ export function App(props: AppProps) {
         },
         [queueFlush],
       ),
+      onRunStart: useCallback(
+        (startedAt: number) => {
+          processGateRef.current = { runStartedAt: startedAt, injected: 0 };
+          verificationGateRef.current.beginRun();
+          verificationStartsRef.current.clear();
+          const processes = new Set(props.processManager?.list().map((p) => p.id) ?? []);
+          for (const [id, started] of backgroundVerificationRef.current) {
+            if (!processes.has(id)) {
+              verificationGateRef.current.recordFailedVerification(
+                started.command,
+                started.revision,
+              );
+              backgroundVerificationRef.current.delete(id);
+            }
+          }
+        },
+        [props.processManager],
+      ),
       onToolStart: useCallback(
         (
           toolCallId: string,
@@ -1180,6 +1205,16 @@ export function App(props: AppProps) {
           args: Record<string, unknown>,
           stream: StreamSnapshot,
         ) => {
+          verificationStartsRef.current.set(toolCallId, verificationGateRef.current.revision);
+          if (name === "bash" && typeof args.command === "string") {
+            const classification = classifyVerificationCommand(args.command);
+            if (classification.candidate || isVerificationCommand(args.command)) {
+              verificationGateRef.current.requireFreshVerification(
+                !classification.accepted && classification.mayMutate,
+                args.command,
+              );
+            }
+          }
           log("INFO", "tool", `Tool call started: ${name}`, { id: toolCallId });
           const startedAt = Date.now();
           const animateUntil = startedAt + RUNNING_INDICATOR_ANIMATION_MS;
@@ -1334,26 +1369,62 @@ export function App(props: AppProps) {
           details?: unknown,
           args?: Record<string, unknown>,
         ) => {
-          // Verification-gate bookkeeping, mirroring AgentSession.trackHookEvent:
-          // successful code mutations vs completed foreground verification runs.
-          if (!isError && args) {
+          const revision = verificationStartsRef.current.get(toolCallId);
+          verificationStartsRef.current.delete(toolCallId);
+          // Fold host callbacks into the shared gate; output prose is not proof.
+          if (args && revision !== undefined) {
             const filePath = String(args.file_path ?? "");
-            if ((name === "edit" || name === "write") && isCodeFilePath(filePath)) {
-              verificationGateRef.current.recordMutation(filePath);
-            }
             if (
-              name === "bash" &&
-              !args.run_in_background &&
-              isVerificationCommand(String(args.command ?? ""))
+              !isError &&
+              (name === "edit" || name === "write") &&
+              (isCodeFilePath(filePath) || isCheckOwnFile(filePath))
             ) {
-              verificationGateRef.current.recordVerification();
+              const addedText =
+                name === "write"
+                  ? String(args.content ?? "")
+                  : extractAddedLines((details as { diff?: string } | undefined)?.diff ?? result);
+              verificationGateRef.current.recordMutation(filePath, addedText);
             }
-            // Reading the final output of an EXITED background verification run
-            // counts as verification — mirrors AgentSession.trackHookEvent.
-            if (name === "task_output") {
+            if (name === "bash") {
+              const command = typeof args.command === "string" ? args.command : "";
+              const classification = classifyVerificationCommand(command);
+              const diagnostics = (
+                details as
+                  | {
+                      bashDiagnostics?: { reason?: unknown; exitCode?: unknown };
+                    }
+                  | undefined
+              )?.bashDiagnostics;
+              if (classification.accepted && args.persist !== true) {
+                if (args.run_in_background === true && !isError) {
+                  const id = /^ID:\s*(\S+)/m.exec(result)?.[1];
+                  if (id) backgroundVerificationRef.current.set(id, { revision, command });
+                } else if (
+                  !isError &&
+                  diagnostics?.reason === "completed" &&
+                  diagnostics.exitCode === 0
+                ) {
+                  verificationGateRef.current.recordVerification(revision, command);
+                } else {
+                  verificationGateRef.current.recordFailedVerification(command, revision);
+                }
+              } else if (classification.candidate && !classification.accepted) {
+                verificationGateRef.current.recordRejectedCheck(command, classification.reason);
+              }
+            }
+            if (!isError && name === "task_output" && typeof args.id === "string") {
+              const started = backgroundVerificationRef.current.get(args.id);
               const proc = props.processManager?.list().find((p) => p.id === args.id);
-              if (proc && proc.exitCode !== null && isVerificationCommand(proc.command)) {
-                verificationGateRef.current.recordVerification();
+              if (started && proc && proc.exitCode !== null) {
+                if (proc.exitCode === 0) {
+                  verificationGateRef.current.recordVerification(started.revision, started.command);
+                } else {
+                  verificationGateRef.current.recordFailedVerification(
+                    started.command,
+                    started.revision,
+                  );
+                }
+                backgroundVerificationRef.current.delete(args.id);
               }
             }
           }
@@ -1815,11 +1886,6 @@ export function App(props: AppProps) {
         // the steering path, which a run about to stop never reaches.
         const runStartedAt = agentLoopRef.current?.runStartRef.current ?? 0;
         const gate = processGateRef.current;
-        if (gate.runStartedAt !== runStartedAt) {
-          gate.runStartedAt = runStartedAt;
-          gate.injected = 0;
-          verificationGateRef.current.reset();
-        }
         const processFollowUp = buildProcessCompletionFollowUp(
           props.processManager?.list() ?? [],
           runStartedAt,

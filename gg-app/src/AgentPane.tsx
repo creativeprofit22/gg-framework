@@ -2580,20 +2580,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (disposition === "ignore") return;
     const queued = disposition === "queue";
     const supersedesQuestion = hasOpenAsk();
-    if (supersedesQuestion) {
-      dismissOpenAsks();
-      if (queued) noteSupersedingSend(trimmed);
-    }
-    // A user send always re-pins to the bottom — they want to see their message.
-    stickToBottomRef.current = true;
-    pushItem({
+    // Keep approval controls and queue state unchanged until the host accepts.
+    const userItem: Item = {
       kind: "user",
       id: nextId(),
       text: trimmed,
       command: label !== undefined || isWorkflowCommand(trimmed),
       ...(label !== undefined ? { label } : {}),
-      ...(showsQueuedBubble(disposition, supersedesQuestion) ? { queued: true } : {}),
-    });
+    };
     if (!opts?.keepInput) {
       setInput("");
       setSlashIndex(0);
@@ -2601,6 +2595,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!queued) endStreamingText();
     void sendPrompt(trimmed)
       .then((submission) => {
+        if (supersedesQuestion) {
+          dismissOpenAsks();
+          if (submission.queued) noteSupersedingSend(trimmed);
+        }
+        stickToBottomRef.current = true;
+        pushItem({
+          ...userItem,
+          queued: showsQueuedBubble(submission.queued ? "queue" : "send", supersedesQuestion),
+        });
         if (!submission.queued) planResumePromptRef.current = trimmed;
       })
       .catch(reportPromptFailure);
@@ -2621,9 +2624,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, [items]);
 
   const dismissOpenAsks = useCallback((): void => {
-    setItems(dropSupersededAsks);
-    typingAskRef.current = null;
-  }, [setItems]);
+    // Acknowledgement may arrive after the next approval; retire only captured cards.
+    const capturedIds = new Set(items.filter((item) => item.kind === "ask").map((item) => item.id));
+    setItems((current) =>
+      current.flatMap((item) => (capturedIds.has(item.id) ? dropSupersededAsks([item]) : [item])),
+    );
+    if (typingAskRef.current && capturedIds.has(typingAskRef.current.itemId))
+      typingAskRef.current = null;
+  }, [items, setItems]);
 
   const supersedingTextRef = useRef<string | null>(null);
   const [supersedingText, setSupersedingText] = useState<string | null>(null);
@@ -2898,8 +2906,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         kenPromptActionLockRef.current = true;
         try {
           const supersedesQuestion = hasOpenAsk();
-          if (supersedesQuestion) dismissOpenAsks();
           const submission = await sendPrompt(prompt, [], { kenSent: true });
+          if (supersedesQuestion) dismissOpenAsks();
           if (supersedesQuestion && submission.queued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
@@ -3372,13 +3380,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // dimmed until run_end clears the flag.
     if (running) {
       const supersedesQuestion = hasOpenAsk();
-      if (supersedesQuestion) {
-        dismissOpenAsks();
-        noteSupersedingSend(prompt);
-      }
       const queuedWire = attachments.map(toWire);
       const queuedImgs = attachments.filter((a) => a.previewUrl).map((a) => a.previewUrl!);
-      pushItem({
+      const userItem: Item = {
         kind: "user",
         id: nextId(),
         text: trimmed,
@@ -3386,8 +3390,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         images: queuedImgs.length > 0 ? queuedImgs : undefined,
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
-        queued: showsQueuedBubble("queue", supersedesQuestion),
-      });
+      };
       setInput("");
       setAttachments([]);
       setSlashIndex(0);
@@ -3398,7 +3401,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         prompt,
         queuedWire,
         sentEnhancements ? { enhancements: sentEnhancements } : undefined,
-      ).catch(reportPromptFailure);
+      )
+        .then((submission) => {
+          if (supersedesQuestion) {
+            dismissOpenAsks();
+            if (submission.queued) noteSupersedingSend(prompt);
+          }
+          pushItem({
+            ...userItem,
+            queued: showsQueuedBubble(submission.queued ? "queue" : "send", supersedesQuestion),
+          });
+          if (!submission.queued) planResumePromptRef.current = prompt;
+        })
+        .catch(reportPromptFailure);
       return;
     }
     const wire = attachments.map(toWire);

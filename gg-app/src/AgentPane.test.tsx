@@ -590,6 +590,94 @@ describe("AgentPane question acknowledgement", () => {
     await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
   });
 
+  it.each([
+    ["typed", false],
+    ["toolbar", false],
+    ["typed", true],
+    ["toolbar", true],
+  ] as const)(
+    "settles live approval only after %s send acceptance=%s",
+    async (source, accepted) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`ask-rejected-${source}`, 1);
+      const emit = liveEvents(pane);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      // Toolbar sends can race the running-state event from the host.
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running: source === "typed",
+        runState: source === "typed" ? "running" : "idle",
+      });
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name: "commit",
+          aliases: [],
+          description: "Commit changes",
+          source: "built-in",
+          input: { text: "optional", references: "optional", attachments: "optional" },
+        },
+      ]);
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+      await screen.findByRole("button", { name: /Allow action/ });
+      if (source === "typed") {
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "Change direction" } });
+        fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      } else {
+        fireEvent.click(await screen.findByTitle("Run /commit"));
+      }
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+      expect(container.querySelector(".user-msg")).toBeNull();
+      if (accepted) {
+        act(() =>
+          emit("ask_user", {
+            id: "ask-2",
+            questions: [{ ...question, options: [{ label: "Allow next action" }] }],
+          }),
+        );
+        await act(async () => submission.resolve({ queued: true, count: 1 }));
+        expect(screen.getByRole("button", { name: /Allow next action/ })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+        expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+        expect(container.querySelector(".queued-pill")).toBeNull();
+        expect(pane.answerAskUser).not.toHaveBeenCalled();
+        return;
+      }
+      await act(async () => submission.reject(new Error("HTTP 409: programmatic_execution_busy")));
+      expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+      expect(container.querySelector(".queued-pill")).toBeNull();
+      expect(container.querySelector(".user-msg")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+      await waitFor(() =>
+        expect(pane.answerAskUser).toHaveBeenCalledWith("ask-1", "answer", { approval: "allow" }),
+      );
+      await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
+    },
+  );
+
+  it("preserves live approval when Ken's Continue here send is rejected", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-rejected-ken", 1);
+    const emit = liveEvents(pane);
+    const submission = deferred<AgentModule.PromptSubmissionResult>();
+    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+    const sendButton = await renderKenPromptPane(pane, true);
+    act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+    await act(async () => submission.reject(new Error("HTTP 409: programmatic_execution_busy")));
+    expect(document.querySelector(".user-ken-sent")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    await waitFor(() =>
+      expect(pane.answerAskUser).toHaveBeenCalledWith("ask-1", "answer", { approval: "allow" }),
+    );
+    await waitFor(() => expect(document.querySelector(".ask-band.is-done")).not.toBeNull());
+  });
+
   it("host expiry closes only its card and disables click and keyboard answers", async () => {
     nativeMocks.realMentor = true;
     const pane = client("ask-expiry", 1);

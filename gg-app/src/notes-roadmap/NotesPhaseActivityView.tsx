@@ -10,6 +10,7 @@ import {
   roadmapActorLabel,
   roadmapReviewerLabel,
   statusLabel,
+  statusOutcomeLabel,
   verificationLabel,
 } from "./roadmap-presentation";
 
@@ -131,7 +132,7 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       <>
         <strong>{roadmapActorLabel(event.actor)}</strong> {timestamp}
         <p>
-          {event.progress} Status outcome: {event.statusOutcome}.
+          {event.progress} Status outcome: {statusOutcomeLabel(event.statusOutcome)}.
         </p>
         {event.blocker && (
           <>

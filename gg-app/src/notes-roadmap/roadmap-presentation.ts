@@ -31,6 +31,16 @@ const STATUS_LABELS = {
   cancelled: "Cancelled",
 } as const satisfies Record<NotesPhaseStatus, string>;
 
+const STATUS_OUTCOME_LABELS = {
+  applied: "Status updated",
+  "same-status": "Status unchanged",
+  "evidence-only": "Evidence recorded only",
+  // Both legacy pending intents and atomic Done reports use this stored outcome.
+  "completion-pending": "Done reported",
+  "manual-override": "Protected by manual override",
+  "done-terminal": "Done status preserved",
+} as const satisfies Record<NotesRoadmapStatusUpdate["statusOutcome"], string>;
+
 const ROADMAP_ACTOR_LABELS = {
   "gg-coder": PRODUCT_DISPLAY_NAME,
   ken: MENTOR_DISPLAY_NAME,
@@ -229,6 +239,10 @@ export type PhasePrimaryAction = "Start" | "Resume" | "Recover" | "Review";
 
 export function statusLabel(status: NotesPhaseStatus): string {
   return STATUS_LABELS[status];
+}
+
+export function statusOutcomeLabel(outcome: NotesRoadmapStatusUpdate["statusOutcome"]): string {
+  return STATUS_OUTCOME_LABELS[outcome];
 }
 
 export function phaseActionLabel(

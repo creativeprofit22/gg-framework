@@ -1633,7 +1633,7 @@ describe("ProjectNotes", () => {
 
     selectPhaseView("Activity");
     fireEvent.click(screen.getByText(/Activity history/));
-    expect(screen.getByText(/Status outcome: manual-override/)).toBeTruthy();
+    expect(screen.getByText(/Status outcome: Protected by manual override\./)).toBeTruthy();
     expect(screen.getByText("Reference proposal accepted.")).toBeTruthy();
   });
 
@@ -1758,6 +1758,52 @@ describe("ProjectNotes", () => {
     expect(selectedDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Accept" })).toBeTruthy();
   });
+
+  it.each(["done", "in-progress"] as const)(
+    "describes compatible Done history neutrally when the phase is %s",
+    async (status) => {
+      const cwd = `/work/roadmap-done-history-${status}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const document = notes("compatible Done history");
+      const selected = phase("done-history", status);
+      selected.title = "Compatible Done history";
+      selected.roadmapEvents = [
+        { ...verificationReport("failed"), timestamp: NOW },
+        {
+          ...verificationReport("passed"),
+          transition: "done",
+          statusOutcome: "completion-pending",
+        },
+      ];
+      document.phases = [selected];
+      client.seed(cwd, document);
+      render(<ProjectNotes cwd={cwd} client={client} />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+      selectNotesTab("Roadmap");
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: `${status === "done" ? "Review" : "Inspect"} phase: Compatible Done history`,
+        }),
+      );
+      selectPhaseView("Activity");
+      fireEvent.click(screen.getByText(/Activity history/));
+
+      const history = screen.getByText(/Activity history/).closest("details");
+      expect(history?.textContent).toContain("Status outcome: Done reported.");
+      expect(history?.textContent).toContain("Verification: Failed: Verification needs review.");
+      expect(history?.textContent).toContain("Required action: Review the verification failure");
+      expect(history?.textContent).not.toMatch(/completion-pending|settlement|completed/i);
+      expect(selected.roadmapEvents[1]).toMatchObject({ statusOutcome: "completion-pending" });
+      selectPhaseView("Completion");
+      const completion = screen
+        .getByRole("heading", { name: "Status and last report" })
+        .closest("section");
+      expect(completion?.querySelector("p")?.textContent).toBe(
+        status === "done" ? "Done" : "in progress",
+      );
+    },
+  );
 
   it("explains a done-terminal latest report without requiring history expansion", async () => {
     const cwd = "/work/roadmap-done-terminal";

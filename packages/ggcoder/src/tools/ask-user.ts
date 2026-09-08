@@ -177,6 +177,12 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       if (missing) {
         return `Error: question "${missing.id}" is kind "${missing.kind}" and needs at least 2 options.`;
       }
+      const overRecommended = questions.find(
+        (q) => (q.options?.filter((option) => option.recommended === true).length ?? 0) > 1,
+      );
+      if (overRecommended) {
+        return `Error: question "${overRecommended.id}" has multiple recommended options. Select at most one recommendation.`;
+      }
       const deferring = questions.flatMap((q) => q.options ?? []).find(defersBack);
       if (deferring) {
         return (

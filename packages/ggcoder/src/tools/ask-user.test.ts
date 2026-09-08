@@ -133,6 +133,7 @@ describe("ask_user", () => {
     });
     const asked = await prompt();
     expect(asked.questions).toHaveLength(2);
+    expect(asked.questions.map((q) => q.options?.filter((o) => o.recommended).length)).toEqual([1, 1]);
     bridge.settle(asked.id, {
       action: "answer",
       answers: { trial: "14 days", proration: "Prorate" },
@@ -188,6 +189,58 @@ describe("ask_user", () => {
     ).resolves.toContain("unique `id`");
     expect(broadcast).not.toHaveBeenCalled();
   });
+
+  it.each(["choice", "multi", "confirm", "text"] as const)(
+    "rejects multiple recommendations in a %s question before calling the handler",
+    async (kind) => {
+      const ask = vi.fn(async () => ({ action: "cancel" as const }));
+      const tool = createAskUserTool(ask);
+      const parsed = tool.parameters.parse({
+        questions: [
+          { id: "first", question: "Continue?", kind: "confirm" },
+          {
+            id: "history",
+            question: "Choose the storage policy",
+            kind,
+            options: [
+              { label: "Keep bounded history", recommended: true },
+              { label: "Keep unlimited history", recommended: true },
+            ],
+          },
+        ],
+      });
+      await expect(tool.execute(parsed, {} as never)).resolves.toBe(
+        'Error: question "history" has multiple recommended options. Select at most one recommendation.',
+      );
+      expect(ask).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["choice", "multi"] as const)(
+    "preserves zero or one recommendation and false/undefined flags for %s",
+    async (kind) => {
+      for (const recommended of [undefined, false, true]) {
+        const ask = vi.fn(async () => ({ action: "cancel" as const }));
+        const tool = createAskUserTool(ask);
+        const parsed = tool.parameters.parse({
+          questions: [
+            {
+              id: "history",
+              question: "Choose the storage policy",
+              kind,
+              options: [
+                { label: "Keep bounded history", recommended },
+                { label: "Keep unlimited history", recommended: false },
+                { label: "Disable history" },
+              ],
+            },
+          ],
+        });
+        await expect(tool.execute(parsed, {} as never)).resolves.toContain("did not answer");
+        expect(ask).toHaveBeenCalledExactlyOnceWith(parsed);
+      }
+    },
+  );
 
   it("times out rather than blocking the turn forever", async () => {
     vi.useFakeTimers();

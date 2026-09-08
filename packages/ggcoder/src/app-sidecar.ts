@@ -3752,9 +3752,8 @@ async function createSession(
       try {
         await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
           await commitActivePhaseImplementationStart();
-          const implementationPrompt = await currentImplementationPlanPrompt();
           await session.runApprovedPlanImplementation(
-            implementationPrompt,
+            IMPLEMENT_PLAN_PROMPT,
             runLifecycle.generation,
           );
         });
@@ -3919,27 +3918,8 @@ async function createSession(
   }
 
   // Keep this base prompt aligned with the webview's manual Accept copy.
-  // Durable execution appends canonical checkpoint coordinates server-side.
   const IMPLEMENT_PLAN_PROMPT =
     "The plan has been approved. Implement it now, following each step in order.";
-
-  async function currentImplementationPlanPrompt(): Promise<string> {
-    if (!durableRoadmapExecution) return IMPLEMENT_PLAN_PROMPT;
-    const activePhase = session.getActivePhaseContext();
-    if (!activePhase) return IMPLEMENT_PLAN_PROMPT;
-    const loaded = await notesRepository.load(cwd);
-    if (loaded.status !== "ok") return IMPLEMENT_PLAN_PROMPT;
-    const plan = loaded.snapshot.document.phases.find((phase) => phase.id === activePhase.phase.id)
-      ?.execution?.plan;
-    if (!plan) return IMPLEMENT_PLAN_PROMPT;
-    const checkpoints = plan.steps
-      .map((step) => `- Step ${step.index}: step_id=${step.id}`)
-      .join("\n");
-    return `${IMPLEMENT_PLAN_PROMPT}
-
-After completing each step, call roadmap_checkpoint before continuing. Use phase_id=${activePhase.phase.id}, plan_hash=${plan.contentHash}, and initially expected_revision=${loaded.snapshot.revision}; after any stale-revision result, retry with its returned revision, then use each successful call's returned revision for the next call.
-${checkpoints}`;
-  }
 
   async function startRoadmapPhase(
     phaseId: string,

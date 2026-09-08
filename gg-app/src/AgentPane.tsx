@@ -130,7 +130,7 @@ import { TitleUsageMeter } from "./TitleUsageMeter";
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
 import { LoginScreen } from "./LoginScreen";
-import { KenPromptActionProvider, Markdown } from "./Markdown";
+import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";

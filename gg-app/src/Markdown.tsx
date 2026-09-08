@@ -14,11 +14,11 @@ import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, CornerDownLeft, FilePlus2, Plus } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
+import { KenPromptActionContext } from "./ken-prompt-context";
 import {
   KEN_PROMPT_TITLE_MAX_LENGTH,
   normalizeKenPrompt,
   type KenPromptAction,
-  type KenPromptActionDispatcher,
   type KenPromptActionResult,
   type KenPromptSavePreview,
 } from "./ken-prompt-actions";
@@ -135,8 +135,6 @@ function selectWordAtPoint(x: number, y: number): boolean {
  * always show the button. Provided by Markdown; consumed by PromptBlock.
  */
 const PromptReadyContext = createContext(true);
-
-const KenPromptActionContext = createContext<KenPromptActionDispatcher | null>(null);
 
 type PendingPromptAction = KenPromptAction["type"];
 type SaveDestinationKind = "new-draft" | "existing-phase";
@@ -791,4 +789,4 @@ export const Markdown = memo(function Markdown({
 });
 
 /** Typed action boundary for every completed Ken prompt fence. */
-export const KenPromptActionProvider = KenPromptActionContext.Provider;
+export { KenPromptActionProvider } from "./ken-prompt-context";

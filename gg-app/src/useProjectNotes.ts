@@ -184,7 +184,9 @@ export function useProjectNotes(
   const inFlightMutationIdRef = useRef<number | null>(null);
   const nextMutationIdRef = useRef(0);
   const processQueueRef = useRef<() => void>(() => undefined);
-  const readAuthoritativeNotesRef = useRef<() => Promise<void>>(async () => undefined);
+  const readAuthoritativeNotesRef = useRef<(confirmRecovery?: boolean) => Promise<void>>(
+    async () => undefined,
+  );
 
   const showDocument = useCallback((next: NotesDocumentV3) => {
     documentRef.current = next;
@@ -206,7 +208,7 @@ export function useProjectNotes(
       snapshot: ProjectNotesSnapshot,
       expectedProjectKey: string,
       epoch: number,
-      authoritativeResponse = false,
+      recoveryBase?: ProjectNotesSnapshot | null,
     ): boolean => {
       if (
         epoch !== epochRef.current ||
@@ -216,7 +218,8 @@ export function useProjectNotes(
         return false;
       }
       const current = authoritativeRef.current;
-      if (!authoritativeResponse && current && snapshot.revision <= current.revision) return false;
+      // Recovery may replace only the snapshot observed before its confirming read.
+      if (current && snapshot.revision <= current.revision && recoveryBase !== current) return false;
       authoritativeRef.current = snapshot;
       modeRef.current = "sidecar";
       setAuthorityReady(true);
@@ -324,8 +327,9 @@ export function useProjectNotes(
     }
 
     let readGeneration = 0;
-    const readAuthoritativeNotes = async (): Promise<void> => {
+    const readAuthoritativeNotes = async (confirmRecovery = false): Promise<void> => {
       const requestGeneration = ++readGeneration;
+      const requestBase = authoritativeRef.current;
       try {
         const opened = await client.getNotes();
         if (
@@ -355,14 +359,18 @@ export function useProjectNotes(
             return;
           }
 
+          const recovering =
+            opened.recoveredFromBackup || confirmRecovery || modeRef.current === "unsupported";
+          const current = authoritativeRef.current;
           if (
-            opened.recoveredFromBackup ||
-            modeRef.current === "unsupported" ||
-            !authoritativeRef.current ||
-            opened.snapshot.revision > authoritativeRef.current.revision
+            recovering && current &&
+            opened.snapshot.revision <= current.revision && current !== requestBase
           ) {
-            adoptSnapshot(opened.snapshot, projectKey, epoch, opened.recoveredFromBackup || modeRef.current === "unsupported");
+            // Backup provenance is not a rollback event. Re-read after intervening observations.
+            void readAuthoritativeNotes(confirmRecovery);
+            return;
           }
+          adoptSnapshot(opened.snapshot, projectKey, epoch, recovering ? requestBase : undefined);
           processQueueRef.current();
           return;
         }
@@ -570,7 +578,16 @@ export function useProjectNotes(
         }
         if (outcome.status === "conflict") {
           mutation.cachedEvaluation = undefined;
-          adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch, true);
+          const adopted = adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch);
+          if (
+            !adopted && authoritativeRef.current === authoritative &&
+            outcome.snapshot.revision < authoritative.revision
+          ) {
+            // Confirm a possible storage rollback before rebasing onto a lower conflict snapshot.
+            void readAuthoritativeNotesRef.current(true);
+            return;
+          }
+          renderSidecarState();
           queueMicrotask(() => processQueueRef.current());
           return;
         }

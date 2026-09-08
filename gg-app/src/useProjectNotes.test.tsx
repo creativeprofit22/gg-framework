@@ -709,6 +709,7 @@ describe("useProjectNotes sidecar authority", () => {
     await waitFor(() => expect(server.snapshots.get(cwd)?.document.reference).toBe("rebased edit"));
     expect(server.snapshots.get(cwd)?.revision).toBe(5);
     expect(client.saveCalls.map((call) => call.expectedRevision)).toEqual([5, 4]);
+    expect(client.getCalls).toBe(2);
     await Promise.resolve();
     expect(client.saveCalls).toHaveLength(2);
   });
@@ -1198,7 +1199,7 @@ describe("useProjectNotes sidecar authority", () => {
     expect(secondClient.saveCalls).toHaveLength(1);
   });
 
-  it("accepts a lower authoritative snapshot from a backup-recovery read", async () => {
+  it("accepts genuine lower backup recovery after a fresh read confirms it", async () => {
     const cwd = "/work/project";
     const server = new FakeNotesServer();
     const client = server.connect(cwd);
@@ -1220,8 +1221,15 @@ describe("useProjectNotes sidecar authority", () => {
       revision: 4,
       document: notes("recovered backup revision 4"),
     };
+    // Unlike a delayed projection, this fixture represents actual storage recovery.
     server.snapshots.set(cwd, recovered);
-    act(() => opened.resolve({ status: "ok", snapshot: recovered, recoveredFromBackup: true }));
+    const confirmed = deferred<ProjectNotesReadOutcome>();
+    client.getOverride = () => confirmed.promise;
+    await act(async () => opened.resolve({ status: "ok", snapshot: recovered, recoveredFromBackup: true }));
+    expect(client.getCalls).toBe(2);
+    expect(hook.result.current.revision).toBe(5);
+    expect(hook.result.current.document.reference).toBe("primary revision 5");
+    act(() => confirmed.resolve({ status: "ok", snapshot: recovered, recoveredFromBackup: true }));
 
     await waitFor(() =>
       expect(hook.result.current.document.reference).toBe("recovered backup revision 4"),
@@ -1231,7 +1239,82 @@ describe("useProjectNotes sidecar authority", () => {
       expect(server.snapshots.get(cwd)?.document.reference).toBe("edit after recovery"),
     );
     expect(client.saveCalls.map((call) => call.expectedRevision)).toEqual([4]);
+    expect(client.getCalls).toBe(2);
   });
+
+  it.each(["backup read", "conflict"] as const)(
+    "preserves Done and rebases queued edits after a late %s response",
+    async (response) => {
+      const cwd = "/work/project";
+      const server = new FakeNotesServer();
+      const initial = notes("revision 3");
+      initial.phases = [phase("current", 0)];
+      server.snapshots.set(cwd, { projectKey: cwd, revision: 3, document: initial });
+      const client = server.connect(cwd);
+      const storage = new MemoryStorage();
+      const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+      await waitFor(() => expect(hook.result.current.revision).toBe(3));
+      client.deferSaves = true;
+      const opened = deferred<ProjectNotesReadOutcome>();
+      const stale = { projectKey: cwd, revision: 4, document: { ...initial, reference: "backup 4" } };
+      if (response === "backup read") {
+        client.getOverride = () => opened.promise;
+        act(() => hook.result.current.refresh());
+      }
+      act(() => {
+        hook.result.current.changeCurrentFocus("queued focus");
+        hook.result.current.changeHandoff("queued handoff");
+      });
+      const pending = client.pendingSaves.shift()!;
+      const latest = {
+        projectKey: cwd,
+        revision: 5,
+        document: {
+          ...initial,
+          reference: "persisted revision 5",
+          phases: [{ ...phase("current", 0), status: "done" as const, completedAt: LATER }],
+        },
+      };
+      server.snapshots.set(cwd, latest);
+      act(() => server.emit(cwd, latest));
+      expect(hook.result.current.revision).toBe(5);
+      expect(hook.result.current.document.phases[0]?.status).toBe("done");
+      client.getOverride = null;
+      await act(async () => {
+        if (response === "backup read") {
+          opened.resolve({ status: "ok", snapshot: stale, recoveredFromBackup: true });
+        } else {
+          pending.resolve({ status: "conflict", snapshot: stale });
+        }
+      });
+      expect(server.snapshots.get(cwd)).toEqual(latest);
+      expect(hook.result.current.revision).toBe(5);
+      expect(hook.result.current.document).toMatchObject({
+        reference: "persisted revision 5",
+        currentFocus: "queued focus",
+        handoff: { text: "queued handoff" },
+        phases: [{ status: "done", completedAt: LATER }],
+      });
+      if (response === "backup read") {
+        expect(client.getCalls).toBe(3);
+        await act(async () => pending.resolve({ status: "conflict", snapshot: latest }));
+      }
+      await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+      expect(client.pendingSaves[0]).toMatchObject({
+        expectedRevision: 5,
+        document: { reference: latest.document.reference, phases: [{ status: "done" }] },
+      });
+      act(() => client.flushNextSave());
+      await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+      act(() => client.flushNextSave());
+      await waitFor(() => expect(hook.result.current.revision).toBe(7));
+      expect(client.saveCalls.map((call) => call.expectedRevision)).toEqual([3, 5, 6]);
+      expect(hook.result.current.document).toEqual(server.snapshots.get(cwd)?.document);
+      expect(hook.result.current.document.phases[0]?.status).toBe("done");
+      expect(hook.result.current.document.currentFocus).toBe("queued focus");
+      expect(hook.result.current.document.handoff.text).toBe("queued handoff");
+    },
+  );
 
   it("applies only newer same-project events", async () => {
     const cwd = "/work/project";

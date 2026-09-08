@@ -310,7 +310,7 @@ export function createAppSidecarPhaseBindingService(
           },
           operation,
         );
-        return result.status === "executed" ? result : { status: result.status };
+        if (result.status !== "phase-lease-lost") return result;
       }
       const loaded = await options.repository.load(state.cwd);
       if (loaded.status !== "ok")
@@ -338,14 +338,24 @@ export function createAppSidecarPhaseBindingService(
         takeoverReason: null,
         predecessorProof: null,
       };
-      const acquired = await leases.execute({
-        cwd: state.cwd,
-        request,
-        context,
-        holder,
-        runState: "idle",
-      });
-      if (!("lease" in acquired) || !acquired.lease || acquired.status !== "acquired") {
+      const input = { cwd: state.cwd, request, context, holder, runState: "idle" as const };
+      // Renewal authenticates the full holder and marker under the repository lock.
+      // Failed renewal may only fall back to acquisition's absent/dead-owner rules.
+      let acquired = await leases.execute(
+        marker?.phaseId === phaseId
+          ? {
+              ...input,
+              request: {
+                ...request,
+                action: "renew",
+                operationId: randomUUID(),
+                lease: { leaseId: marker.leaseId, fence: marker.fence },
+              },
+            }
+          : input,
+      );
+      if (acquired.status === "phase-lease-lost") acquired = await leases.execute(input);
+      if ((acquired.status !== "acquired" && acquired.status !== "renewed") || !acquired.lease) {
         return { status: acquired.status === "corrupt" ? "corrupt" : "phase-lease-lost" };
       }
       const token = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
@@ -687,6 +697,7 @@ async function persistLeaseContextFromLatestNotes(
   options: AppSidecarPhaseBindingOptions,
   session: PhaseBindingSession,
   lease: PhaseLeaseV1,
+  renewing = false,
 ): Promise<boolean> {
   const state = session.getState();
   const latest = await options.repository.load(state.cwd);
@@ -695,13 +706,15 @@ async function persistLeaseContextFromLatestNotes(
   if (
     !phase ||
     phase.archivedAt !== null ||
-    phase.status === "done" ||
     lease.projectKey !== latest.snapshot.projectKey ||
     !notesSessionLinksEqual(phase.session, state) ||
     lease.planId !== (phase.execution?.plan?.planId ?? null)
   ) {
     return false;
   }
+  // A fenced owner may finish teardown after explicit Done, but must not
+  // reconstruct active execution on a terminal phase.
+  if (phase.status === "done") return renewing;
   const active = session.getActivePhaseContext();
   const samePhase =
     active?.projectKey === latest.snapshot.projectKey && active.phase.id === phase.id;
@@ -797,7 +810,12 @@ async function executePhaseLease(
     outcome.lease &&
     publicHolderMatches(outcome.lease.holder, input.holder)
   ) {
-    const restored = await persistLeaseContextFromLatestNotes(options, session, outcome.lease);
+    const restored = await persistLeaseContextFromLatestNotes(
+      options,
+      session,
+      outcome.lease,
+      request.action === "renew",
+    );
     if (!restored) {
       const latest = await options.repository.load(state.cwd);
       if (latest.status !== "ok") return latest;

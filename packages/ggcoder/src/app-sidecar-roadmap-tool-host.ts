@@ -216,10 +216,12 @@ export class AppSidecarRoadmapToolHost {
       );
       if (statusMutation.status !== "executed") {
         return {
-          result: "phase-lease-lost",
+          result: statusMutation.status === "corrupt" ? "notes-corrupt" : statusMutation.status,
           phaseId: input.phase_id,
           revision: expectedRevision,
-          message: "Roadmap status was not saved because this session lost its phase lease.",
+          ...(statusMutation.status === "phase-lease-lost"
+            ? { message: "Roadmap status was not saved because this session lost its phase lease." }
+            : {}),
         };
       }
       const outcome = statusMutation.value;

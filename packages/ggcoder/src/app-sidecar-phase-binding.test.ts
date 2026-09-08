@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
+import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalProjectKey,
@@ -108,6 +110,119 @@ async function setup(name: string, previousSession = sessionA) {
 }
 
 describe("transparent status leases", () => {
+  it.each([
+    "expired-owner",
+    "released",
+    "dead-predecessor",
+    "live-competitor",
+    "unknown-competitor",
+    "wrong-process-token",
+    "stale-fence",
+  ] as const)("reconciles retained status markers: %s", async (scenario) => {
+    const { cwd, repository, agentDir } = await setup(`status-retained-${scenario}`);
+    let clock = new Date("2026-09-07T00:00:00.000Z");
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => clock,
+      processLiveness: async () =>
+        scenario === "dead-predecessor"
+          ? "dead"
+          : scenario === "unknown-competitor"
+            ? "unknown"
+            : "alive",
+    });
+    const options = {
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "status-daemon",
+      processId: process.pid,
+      processStartToken: "status-start",
+    };
+    const original = createAppSidecarPhaseBindingService(options);
+    const owner = new FakeSession(cwd, sessionA);
+    const acquired = await original.lease(leaseRequest(cwd, "acquire"), owner);
+    if (acquired.status !== "acquired") throw new Error("Expected lease");
+    const marker = structuredClone(owner.leaseMarker!);
+    if (scenario === "released") {
+      expect(await original.releaseCurrent("release", owner)).toMatchObject({ status: "released" });
+    }
+    clock = new Date(clock.getTime() + PHASE_LEASE_TTL_MS + 1);
+    const competing = scenario.endsWith("competitor") || scenario === "dead-predecessor";
+    const reopened = new FakeSession(cwd, competing ? sessionB : sessionA);
+    reopened.leaseMarker = structuredClone(marker);
+    if (scenario === "stale-fence") reopened.leaseMarker.fence += 1;
+    const retained = structuredClone(reopened.leaseMarker);
+    const service = createAppSidecarPhaseBindingService({
+      ...options,
+      ...(competing ? { daemonInstanceId: "reopened-daemon" } : {}),
+      ...(scenario === "wrong-process-token" ? { processStartToken: "different-start" } : {}),
+    });
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("Expected Notes");
+    const operation = vi.fn(() =>
+      repository.recordRoadmapStatusUpdate(cwd, {
+        updateId: "reopened-status",
+        phaseId: "phase-1",
+        expectedRevision: before.snapshot.revision,
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Recorded progress from reopened session",
+        verification: null,
+        evidence: [],
+        blocker: null,
+        requiredExternalAction: null,
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: clock.toISOString(),
+        autopilotEnabled: false,
+      }),
+    );
+    const allowed = ["expired-owner", "released", "dead-predecessor"].includes(scenario);
+    const result = await service.withStatusLease(reopened, "phase-1", operation);
+    expect(result).toMatchObject(
+      allowed
+        ? { status: "executed", value: { status: "committed" } }
+        : { status: "phase-lease-lost" },
+    );
+    expect(operation).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    const after = await repository.load(cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]?.session).toEqual(
+      before.snapshot.document.phases[0]?.session,
+    );
+    expect(after.snapshot.document.phases[0]?.execution).toEqual(
+      before.snapshot.document.phases[0]?.execution,
+    );
+    if (!allowed) expect(after).toEqual(before);
+    expect(reopened.leaseMarker).toEqual(retained);
+    expect(reopened.setCalls).toEqual([]);
+    expect(reopened.clearReasons).toEqual([]);
+    const inspected = await leases.execute({
+      cwd,
+      request: {
+        ...leaseRequest(cwd, "inspect"),
+        action: "inspect",
+        expectedRevision: after.snapshot.revision,
+      },
+      holder: {
+        daemonInstanceId: options.daemonInstanceId,
+        processId: options.processId,
+        processStartToken: options.processStartToken,
+        ...sessionA,
+      },
+      context: {
+        projectKey: after.snapshot.projectKey,
+        roadmapRevision: after.snapshot.revision,
+        phaseId: "phase-1",
+        phaseStatus: "in-progress",
+        planId: null,
+      },
+    });
+    expect(inspected).toMatchObject({
+      status: "inspected",
+      lease: allowed ? null : acquired.lease,
+    });
+  });
+
   it("lets a fresh host record Done and replay without changing historical session or execution", async () => {
     const { cwd, repository, agentDir } = await setup("status-fresh");
     const service = createAppSidecarPhaseBindingService({
@@ -166,6 +281,186 @@ describe("transparent status leases", () => {
       ),
     ).toEqual({ status: "phase-terminal" });
   });
+
+  it.each(["heartbeat", "run-finally"])(
+    "keeps an acquired owner renewable after Done during %s",
+    async (pathUnderTest) => {
+      const { cwd, repository, agentDir } = await setup(`status-owner-${pathUnderTest}`);
+      const service = createAppSidecarPhaseBindingService({
+        repository,
+        leaseRepository: new RoadmapPhaseLeaseRepository(agentDir),
+        daemonInstanceId: "status-daemon",
+        processId: process.pid,
+        processStartToken: "status-start",
+      });
+      const owner = new FakeSession(cwd, sessionA);
+      expect(await service.lease(leaseRequest(cwd, "owner-acquire"), owner)).toMatchObject({
+        status: "acquired",
+      });
+      const marker = owner.leaseMarker!;
+      const before = await repository.load(cwd);
+      if (before.status !== "ok") throw new Error("Expected Notes");
+      const finish = async () => {
+        const result = await service.withStatusLease(owner, "phase-1", () =>
+          repository.recordRoadmapStatusUpdate(cwd, {
+            updateId: "owner-done",
+            phaseId: "phase-1",
+            expectedRevision: before.snapshot.revision,
+            actor: "gg-coder",
+            transition: "done",
+            progress: "Checked the requested behavior",
+            verification: "passed",
+            evidence: ["Focused checks passed"],
+            blocker: null,
+            requiredExternalAction: null,
+            verificationReason: null,
+            proposedReferences: [],
+            timestamp: "2026-09-07T00:00:00.000Z",
+            autopilotEnabled: false,
+          }),
+        );
+        expect(result).toMatchObject({ status: "executed", value: { status: "committed" } });
+      };
+      const renewCurrent = async (operationId: string) => {
+        const loaded = await repository.load(cwd);
+        if (loaded.status !== "ok") throw new Error("Expected Notes");
+        const result = await service.lease(
+          {
+            ...leaseRequest(cwd, operationId),
+            action: "renew",
+            expectedRevision: loaded.snapshot.revision,
+            planId: marker.planId,
+            lease: { leaseId: marker.leaseId, fence: marker.fence },
+          },
+          owner,
+        );
+        if (result.status !== "renewed") throw new Error(`Renewal failed: ${result.status}`);
+      };
+      if (pathUnderTest === "heartbeat") {
+        await finish();
+        const setCalls = owner.setCalls.length;
+        await expect(renewCurrent("heartbeat")).resolves.toBeUndefined();
+        expect(owner.setCalls).toHaveLength(setCalls);
+      } else {
+        // Execute the actual sidecar bracket without launching a daemon or provider.
+        const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
+        const start = source.indexOf("  async function runAgent(");
+        const end = source.indexOf("  const planHandoff =", start);
+        expect(start).toBeGreaterThan(0);
+        expect(end).toBeGreaterThan(start);
+        const observed: string[] = [];
+        const context = {
+          runLifecycle: {
+            running: false,
+            generation: 1,
+            state: "idle",
+            begin: () => ({ generation: 1 }),
+            isCancellationRequested: () => false,
+            recordOutcome: (_generation: number, outcome: string) =>
+              observed.push(`outcome:${outcome}`),
+          },
+          abortOwnedWork: () => {},
+          pendingCancelDrain: null,
+          cancelGeneration: 0,
+          session: {
+            getMessages: () => [],
+            getActivePhaseContext: () => owner.active,
+            getQueuedCount: () => 0,
+            listQueuedMessages: () => [],
+          },
+          countAssistantMessages: () => 0,
+          settleProgrammaticRun: () => undefined,
+          broadcast: (event: string) => observed.push(event),
+          broadcastError: vi.fn(),
+          renewCurrentPhaseLease: renewCurrent,
+          getGitBranch: async () => null,
+          isGitRepo: async () => false,
+          getGitDirtyFileCount: async () => 0,
+          gitBranch: null,
+          gitIsRepo: false,
+          gitDirtyFileCount: 0,
+          cwd,
+          refreshGitHubCounts: async () => {},
+          ciPoll: { refresh: async () => {} },
+          finishOwnedGeneration: () => observed.push("cleanup"),
+          runJournalPersistence: {
+            then: (resolve: () => void) => {
+              observed.push("journal-settled");
+              resolve();
+            },
+          },
+          settleDeferredPhaseLeaseRelease: async () => false,
+          planGate: { pending: () => false },
+          approvedPlanPath: null,
+          createRunEndPayload: (outcome: string) => ({ outcome }),
+          pruneDoneTasksSync: () => [],
+          footerExtras: () => ({}),
+        };
+        const code = ts.transpileModule(`${source.slice(start, end)}\nrunAgent;`, {
+          compilerOptions: { target: ts.ScriptTarget.ES2022 },
+        }).outputText;
+        const runAgent = vm.runInNewContext(code, context) as (
+          label: string,
+          run: () => Promise<void>,
+        ) => Promise<void>;
+        await expect(runAgent("Done while running", finish)).resolves.toBeUndefined();
+        expect(context.broadcastError).not.toHaveBeenCalled();
+        expect(observed).toEqual([
+          "run_start",
+          "outcome:completed",
+          "cleanup",
+          "journal-settled",
+          "run_end",
+          "tasks_list",
+          "queued",
+          "extras",
+        ]);
+      }
+      expect(owner.leaseMarker).toEqual(marker);
+      const terminal = await repository.load(cwd);
+      if (terminal.status !== "ok") throw new Error("Expected Notes");
+      const renewal: PhaseLeaseRequestV2 = {
+        ...leaseRequest(cwd, "unauthorized-renew"),
+        action: "renew",
+        expectedRevision: terminal.snapshot.revision,
+        planId: marker.planId,
+        lease: { leaseId: marker.leaseId, fence: marker.fence },
+      };
+      expect(await service.lease(renewal, new FakeSession(cwd, sessionB))).toMatchObject({
+        status: "phase-lease-lost",
+      });
+      expect(
+        await service.lease(
+          {
+            ...renewal,
+            operationId: "stale-fence-renew",
+            lease: { leaseId: marker.leaseId, fence: marker.fence + 1 },
+          },
+          owner,
+        ),
+      ).toMatchObject({ status: "phase-lease-lost" });
+      expect(await service.releaseCurrent("owner-release", owner)).toMatchObject({
+        status: "released",
+      });
+      expect(owner.leaseMarker).toBeUndefined();
+      expect(owner.active).toBeUndefined();
+      const after = await new ProjectNotesRepository(agentDir).load(cwd);
+      if (after.status !== "ok") throw new Error("Expected durable Notes");
+      expect(after.snapshot.document.phases[0]?.status).toBe("done");
+      expect(after.snapshot.document.phases[0]?.execution).toEqual(
+        before.snapshot.document.phases[0]?.execution,
+      );
+      expect(
+        await service.lease(
+          {
+            ...leaseRequest(cwd, "new-owner"),
+            expectedRevision: after.snapshot.revision,
+          },
+          new FakeSession(cwd, sessionB),
+        ),
+      ).toEqual({ status: "phase-terminal" });
+    },
+  );
 
   it("reports a missing phase without invoking a mutation or inventing a lease conflict", async () => {
     const { cwd, repository, agentDir } = await setup("status-missing-phase");

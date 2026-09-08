@@ -95,10 +95,15 @@ it.each(["reload", "checkpoint"] as const)("projects historical checks through a
         }), () => true))!);
       }
       for (const digest of digests) {
-        expect(digest).toContain(`STALE ${retained === "complete" ? "PASSED" : "UNAVAILABLE"}: \`${command}\``);
+        expect(digest).toContain(`HISTORICAL ${retained === "complete" ? "PASSED" : "UNAVAILABLE"}: \`${command}\``);
         expect(digest).toContain("legacy transcript; current scope unavailable");
         expect(digest).not.toContain("execution host-check");
         expect(digest).not.toMatch(/^- PASSED:/m);
+        expect(digest).not.toMatch(/^- OBSERVED /m);
+        if (retained !== "complete") {
+          expect(digest).toContain("execution outcome unavailable from retained transcript");
+          expect(digest).not.toContain(`PASSED: \`${command}\``);
+        }
       }
     }
   });

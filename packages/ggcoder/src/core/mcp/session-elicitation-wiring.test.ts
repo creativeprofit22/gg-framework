@@ -86,12 +86,21 @@ describe("app-sidecar wires every window session for elicitation", () => {
   it("wires Ken chat and Ken autopilot specifically, not just the coding agent", async () => {
     const source = await fs.readFile(APP_SIDECAR, "utf8");
 
-    for (const factory of ["ensureKenSession", "ensureKenAutoSession"]) {
-      const start = source.indexOf(`async function ${factory}(`);
+    // Interactive Ken allocates through the initializer, not in ensureKenSession itself.
+    expect(source).toMatch(
+      /const ensureKenSession = createKenSessionInitializer\(\{\s*create: createKenSession,/,
+    );
+
+    for (const factory of ["createKenSession", "ensureKenAutoSession"]) {
+      const start = source.indexOf(`  async function ${factory}(`);
       expect(start, `${factory} should exist`).toBeGreaterThan(-1);
-      const [options] = agentSessionOptionBlocks(source.slice(start));
-      expect(options, `${factory} should construct an AgentSession`).toBeDefined();
-      expect(options).toContain("onMcpElicit");
+      // Stop at this factory's closing brace (two-space sidecar scope), so a
+      // missing constructor cannot borrow the next factory's wired session.
+      const end = source.indexOf("\n  }", start);
+      expect(end, `${factory} should have a closing brace`).toBeGreaterThan(start);
+      const blocks = agentSessionOptionBlocks(source.slice(start, end));
+      expect(blocks, `${factory} should construct exactly one AgentSession`).toHaveLength(1);
+      expect(blocks[0]).toContain("onMcpElicit: elicitations.onElicit,");
     }
   });
 

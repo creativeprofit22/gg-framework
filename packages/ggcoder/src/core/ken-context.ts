@@ -17,6 +17,7 @@
  * every `@Ken` question and every autopilot review round.
  */
 import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
+import type { AskUserPrompt } from "./ask-user.js";
 import {
   continuationReviewSchema,
   parseContinuationReviewRecord,
@@ -55,6 +56,8 @@ export interface KenDigestInput {
   gitBranch: string | null;
   /** Build session messages (`buildSession.getMessages()`). */
   messages: Message[];
+  /** Host-owned live question cards, independent of transcript retention. */
+  pendingQuestions?: readonly AskUserPrompt[];
   /** Host-owned execution outcomes, independent of transcript retention. */
   verificationEvidence?: SessionVerificationEvidenceLedgerSnapshot;
   /** Platform string (defaults to process.platform). */
@@ -78,6 +81,70 @@ export interface KenDigestInput {
 function cap(text: string, max = MESSAGE_CHAR_CAP): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max)} […${text.length - max} more chars]`;
+}
+
+/** Bound a string's JSON representation, including escapes and the omission marker. */
+function capQuestionField(text: string, budget: number): string {
+  if (JSON.stringify(text).length <= budget) return text;
+  let low = 0;
+  let high = Math.min(text.length, budget);
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (JSON.stringify(cap(text, mid)).length <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return cap(text, low);
+}
+
+/** Project only card fields; malformed historical calls cannot grow the fallback unboundedly. */
+function boundedQuestionFields(value: unknown, budget: number, option = false): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "[invalid question card entry]";
+  }
+  const source = value as Record<string, unknown>;
+  const fields = option
+    ? ["label", "value", "hint", "recommended"]
+    : ["id", "question", "kind", "detail", "options", "allowOther"];
+  const result: Record<string, unknown> = {};
+  for (const field of fields) {
+    const item = source[field];
+    if (item === undefined) continue;
+    if (field === "options" && Array.isArray(item)) {
+      result.options = item.slice(0, 6).map((entry) => boundedQuestionFields(entry, budget, true));
+      if (item.length > 6) result.omittedOptions = item.length - 6;
+    } else if (typeof item === "string") {
+      // Explanations never compete with question identities or option mappings.
+      result[field] = capQuestionField(item, field === "detail" || field === "hint" ? 128 : budget);
+    } else if (typeof item === "boolean") {
+      result[field] = item;
+    } else {
+      result[field] = "[invalid field]";
+    }
+  }
+  if (Object.keys(source).some((field) => !fields.includes(field))) {
+    result.omittedUnknownFields = true;
+  }
+  return result;
+}
+
+/** Keep question cards as quoted data, never user answers or authorization. */
+function renderQuestions(questions: unknown[]): string {
+  let text = JSON.stringify(questions);
+  if (text.length > 16_000) {
+    // The tool accepts at most five questions with six options each. Reserve all
+    // those slots before spending space on prose; never slice the resulting JSON.
+    for (let budget = 1024; budget >= 64; budget /= 2) {
+      const bounded = questions.slice(0, 5).map((q) => boundedQuestionFields(q, budget));
+      if (questions.length > 5) bounded.push({ omittedQuestions: questions.length - 5 });
+      text = JSON.stringify(bounded);
+      // At 64 serialized chars per primary field, even the fullest card fits.
+      if (text.length <= 16_000) break;
+    }
+  }
+  const fence = "`".repeat(
+    Math.max(3, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length + 1)),
+  );
+  return `Question card reference only, not user answers or authorization:\n${fence}json\n${text}\n${fence}`;
 }
 
 /** Summarize one tool call to a `name(arg)` one-liner. */
@@ -137,13 +204,20 @@ function renderMessage(msg: Message, opts: RenderMessageOptions): string | null 
     }
     const parts: string[] = [];
     const calls: string[] = [];
+    const questions: string[] = [];
     for (const p of msg.content as ContentPart[]) {
       if (p.type === "text" && p.text.trim()) parts.push(p.text.trim());
-      else if (p.type === "tool_call") calls.push(summarizeToolCall(p.name, p.args));
+      else if (p.type === "tool_call") {
+        calls.push(summarizeToolCall(p.name, p.args));
+        if (p.name === "ask_user" && Array.isArray(p.args.questions)) {
+          questions.push(renderQuestions(p.args.questions));
+        }
+      }
     }
     const segments: string[] = [];
     if (parts.length > 0) segments.push(cap(parts.join("\n")));
     if (calls.length > 0) segments.push(`[tools: ${calls.join(", ")}]`);
+    if (questions.length > 0) segments.push(`\n${questions.join("\n\n")}\n`);
     return segments.length > 0 ? `**GG Coder:** ${segments.join(" ")}` : null;
   }
 
@@ -499,6 +573,14 @@ export function buildKenDigest(input: KenDigestInput): string {
       renderedRecent.length > 0 ? renderedRecent.join("\n\n") : "(no conversation yet)"
     }`,
   );
+
+  if (input.pendingQuestions?.length) {
+    sections.push(
+      `## Pending user questions (awaiting the user's answer)\n${input.pendingQuestions
+        .map((prompt) => renderQuestions(prompt.questions))
+        .join("\n\n")}`,
+    );
+  }
 
   const snapshot = input.verificationEvidence;
   const hostEvidence = snapshot

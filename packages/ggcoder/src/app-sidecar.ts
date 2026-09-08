@@ -235,7 +235,7 @@ import {
   type MCPServerConfig,
 } from "./core/mcp/index.js";
 import type { ElicitResult } from "@modelcontextprotocol/client";
-import { createAskUserBridge, type AskUserResult } from "./core/ask-user.js";
+import { createAskUserBridge, type AskUserResult, type AskUserPrompt } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
@@ -1773,6 +1773,7 @@ function buildKenContext(
   question: string,
   workflowCommands: readonly WorkflowCommandSpec[],
   injectedPrompts: readonly string[],
+  pendingQuestions: readonly AskUserPrompt[],
 ): string {
   return buildKenInteractiveSessionContext(buildSession, {
     question,
@@ -1780,6 +1781,7 @@ function buildKenContext(
     gitBranch,
     workflowCommands,
     injectedPrompts,
+    pendingQuestions,
   });
 }
 
@@ -3223,6 +3225,7 @@ async function createSession(
         text,
         await loadWorkflowCommandSpecs(),
         injectedAutopilotPrompts,
+        asks.pendingRequests,
       ),
     replyText: (ken) => lastAssistantText(ken.getMessages()),
     listen: (ken, publish) => {

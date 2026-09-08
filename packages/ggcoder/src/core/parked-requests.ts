@@ -23,6 +23,8 @@ export interface ParkedRequests<Req, Res> {
   cancelAll: (result?: Res) => void;
   /** How many requests are currently awaiting the user. */
   readonly pendingCount: number;
+  /** Detached snapshots of live prompts; settled requests are never included. */
+  readonly pendingRequests: (Req & { id: string })[];
 }
 
 export interface ParkedRequestsOptions<Req, Res> {
@@ -45,7 +47,11 @@ export function createParkedRequests<Req extends object, Res>(
 ): ParkedRequests<Req, Res> {
   const pending = new Map<
     string,
-    { resolve: (result: Res) => void; timer: ReturnType<typeof setTimeout> }
+    {
+      prompt: Req & { id: string };
+      resolve: (result: Res) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >();
   let seq = 0;
 
@@ -68,7 +74,7 @@ export function createParkedRequests<Req extends object, Res>(
           settle(prompt.id, opts.cancelValue());
         }, opts.timeoutMs);
         timer.unref?.();
-        pending.set(prompt.id, { resolve, timer });
+        pending.set(prompt.id, { prompt, resolve, timer });
         opts.broadcast(prompt);
       }),
     settle,
@@ -77,6 +83,9 @@ export function createParkedRequests<Req extends object, Res>(
     },
     get pendingCount() {
       return pending.size;
+    },
+    get pendingRequests() {
+      return structuredClone([...pending.values()].map(({ prompt }) => prompt));
     },
   };
 }

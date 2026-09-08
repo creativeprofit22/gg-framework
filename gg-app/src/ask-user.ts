@@ -29,6 +29,9 @@ export interface AskUserPrompt {
 
 export type AskAnswers = Record<string, string | string[]>;
 
+/** Local edits only: undefined reopens a question and is never sent as an answer. */
+export type AskAnswerDelta = Record<string, string | string[] | undefined>;
+
 /**
  * Merge newly answered questions into a band's answers, and report whether the
  * band is now complete.
@@ -40,11 +43,23 @@ export type AskAnswers = Record<string, string | string[]>;
  */
 export function mergeAskAnswers(
   current: AskAnswers | undefined,
-  delta: AskAnswers,
+  delta: AskAnswerDelta,
   questions: readonly AskQuestion[],
 ): { answers: AskAnswers; complete: boolean } {
-  const answers = { ...current, ...delta };
-  return { answers, complete: questions.every((q) => answers[q.id] !== undefined) };
+  const answers: AskAnswers = Object.fromEntries(
+    Object.entries({ ...current, ...delta }).filter(
+      (entry): entry is [string, string | string[]] => {
+        const value = entry[1];
+        return typeof value === "string"
+          ? value.trim().length > 0
+          : value !== undefined && value.length > 0 && value.every((pick) => pick.trim().length > 0);
+      },
+    ),
+  );
+  return {
+    answers,
+    complete: questions.every((q) => Object.prototype.hasOwnProperty.call(answers, q.id)),
+  };
 }
 
 /**

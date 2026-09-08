@@ -147,7 +147,7 @@ import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps"
 import { ArrowUp, Paperclip, AtSign, GitBranch, Square } from "lucide-react";
 import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
-import { dropSupersededAsks, mergeAskAnswers } from "./ask-user";
+import { dropSupersededAsks, mergeAskAnswers, type AskAnswerDelta } from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
@@ -2664,7 +2664,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const pendingAskAnswers = useRef(new Set<number>());
   const handleAskAnswer = useCallback(
-    (itemId: number, promptId: string, delta: Record<string, string | string[]>): void => {
+    (itemId: number, promptId: string, delta: AskAnswerDelta): void => {
       const item = items.find((candidate) => candidate.id === itemId);
       if (
         !item ||
@@ -4860,7 +4860,7 @@ const TranscriptRow = memo(function TranscriptRow({
   onAskAnswer?: (
     itemId: number,
     promptId: string,
-    delta: Record<string, string | string[]>,
+    delta: AskAnswerDelta,
   ) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
 }): React.ReactElement | null {

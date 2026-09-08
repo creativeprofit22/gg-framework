@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "./Badge";
 import { theme } from "./theme";
-import type { AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
+import type { AskAnswerDelta, AskAnswers, AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
 
 /**
  * The in-thread question band (design-lab: ask-band-resolved.html).
@@ -47,8 +47,6 @@ const valueOf = (option: AskOption): string => option.value ?? option.label;
  */
 const allowsText = (q: AskQuestion): boolean => q.kind === "text" || q.allowOther !== false;
 
-type Answers = Record<string, string | string[]>;
-
 /**
  * An answered question, collapsed. Reuses the transcript's shimmer label (the
  * same treatment as the "ideal?" hook) so a resolved ask reads as one of the
@@ -78,7 +76,7 @@ function Question({
   index: number;
   numbered: boolean;
   answer: string | string[] | undefined;
-  onAnswer: (value: string | string[]) => void;
+  onAnswer: (value: string | string[] | undefined) => void;
   onTypeInstead: () => void;
 }): React.ReactElement {
   const options = question.options ?? [];
@@ -114,7 +112,7 @@ function Question({
     // Already confirmed once: keep the committed answer in step with what is on
     // screen, or a later question's answer would commit the band with the stale
     // selection while the rows show the new one.
-    if (answer !== undefined && next.length > 0) onAnswer(next);
+    if (answer !== undefined) onAnswer(next.length > 0 ? next : undefined);
   };
 
   // Every option is the app's standard pill: ghost by default, primary only
@@ -224,13 +222,13 @@ export function AskBand({
    * answer arrives from the composer, outside this component, so local state
    * here would fork from the real one.
    */
-  answers?: Answers;
+  answers?: AskAnswers;
   /** The answers have been sent to the blocked tool call — collapse the band. */
   sent?: boolean;
   /** The run ended without an answer — the question is dead, say so quietly. */
   cancelled?: boolean;
   /** Report answered questions. App merges, then settles once none are left. */
-  onAnswer: (delta: Answers) => void;
+  onAnswer: (delta: AskAnswerDelta) => void;
   /** The user wants to write their own answer: focus the composer, seeded. */
   onTypeInstead: (questionId: string, seed?: string) => void;
 }): React.ReactElement {

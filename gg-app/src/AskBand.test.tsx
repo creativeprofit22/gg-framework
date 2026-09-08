@@ -458,6 +458,59 @@ describe("AskBand", () => {
     expect(onAnswer).toHaveBeenCalledWith({ checks: ["Typecheck", "Tests"] });
   });
 
+  it("reopens a cleared multi-select and submits only reconfirmed visible answers", () => {
+    const submit = vi.fn();
+    let retained: Record<string, string | string[]> = {};
+    const p = prompt(
+      {
+        id: "checks",
+        question: "Which checks?",
+        kind: "multi",
+        options: [{ label: "Typecheck" }, { label: "Tests" }],
+      },
+      {
+        id: "then",
+        question: "Then what?",
+        kind: "choice",
+        options: [{ label: "Continue" }, { label: "Stop" }],
+      },
+    );
+    function Controlled(): React.ReactElement {
+      const [answers, setAnswers] = useState(retained);
+      return (
+        <AskBand
+          prompt={p}
+          answers={answers}
+          onAnswer={(delta) => {
+            const merged = mergeAskAnswers(answers, delta, p.questions);
+            retained = merged.answers;
+            setAnswers(merged.answers);
+            if (merged.complete) submit(merged.answers);
+          }}
+          onTypeInstead={onTypeInstead}
+        />
+      );
+    }
+    render(<Controlled />);
+    fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+    expect(retained).toEqual({ checks: ["Typecheck"] });
+    fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
+    expect(screen.getByRole("button", { name: "Typecheck" })).toHaveProperty("ariaPressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    expect(submit).not.toHaveBeenCalled();
+    expect(retained).toEqual({ then: "Continue" });
+    expect(screen.getByRole("button", { name: "Choose at least one" })).toHaveProperty("disabled", true);
+    fireEvent.keyDown(document, { key: "m" });
+    expect(onTypeInstead).toHaveBeenLastCalledWith("checks", "m");
+    fireEvent.keyDown(document, { key: "2" });
+    expect(retained).toEqual({ then: "Continue" });
+    fireEvent.click(screen.getByRole("button", { name: "Tests" }));
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+    expect(submit).toHaveBeenCalledExactlyOnceWith({ checks: ["Tests"], then: "Continue" });
+  });
+
   it("shows a typed answer for a question that has no options at all", () => {
     // A `text` question is optionless, so guarding the row stack on options
     // alone left it displaying nothing but its heading once answered.
@@ -614,6 +667,20 @@ describe("mergeAskAnswers", () => {
     expect(mergeAskAnswers(first.answers, { b: "no" }, questions)).toEqual({
       answers: { a: "yes", b: "no" },
       complete: true,
+    });
+  });
+
+  it.each([undefined, [], "", "   ", [""]])("removes cleared or empty answers (%j) locally", (value) => {
+    const current = { a: ["Typecheck"], b: "Continue" };
+    const merged = mergeAskAnswers(current, { a: value }, questions);
+    expect(merged).toEqual({ answers: { b: "Continue" }, complete: false });
+    expect(Object.keys(merged.answers)).toEqual(["b"]);
+    expect(current).toEqual({ a: ["Typecheck"], b: "Continue" });
+  });
+
+  it("does not complete a retained empty multi-select", () => {
+    expect(mergeAskAnswers({ a: [] }, { b: "Continue" }, questions)).toEqual({
+      answers: { b: "Continue" }, complete: false,
     });
   });
 

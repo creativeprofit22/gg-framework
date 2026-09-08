@@ -754,6 +754,57 @@ describe("AgentPane question acknowledgement", () => {
     options: [{ label: "Allow action", value: "allow" }],
   };
 
+  it.each(["click", "typed"] as const)(
+    "does not submit a cleared multi-select when the next answer arrives by %s",
+    async (source) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`ask-clear-${source}`, 1);
+      const emit = liveEvents(pane);
+      const acknowledgement = deferred<void>();
+      vi.mocked(pane.answerAskUser).mockReturnValueOnce(acknowledgement.promise);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+      act(() => emit("ask_user", {
+        id: "ask-clear",
+        questions: [
+          {
+            id: "checks", kind: "multi", question: "Which checks?",
+            options: [{ label: "Typecheck" }, { label: "Tests" }],
+          },
+          {
+            id: "then", kind: "choice", question: "Then what?",
+            options: [{ label: "Continue" }, { label: "Stop" }],
+          },
+        ],
+      }));
+      fireEvent.click(await screen.findByRole("button", { name: "Typecheck" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+      // Capture the second question's composer target before reopening the first.
+      if (source === "typed") fireEvent.keyDown(document, { key: "C" });
+      fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
+      if (source === "typed") {
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue" } });
+        fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+      }
+      expect(pane.answerAskUser).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-ask-question="checks"]')?.hasAttribute("data-ask-answered")).toBe(false);
+      expect(screen.getByRole("button", { name: /Continue/ })).toHaveProperty("ariaPressed", "true");
+      fireEvent.click(screen.getByRole("button", { name: "Tests" }));
+      expect(pane.answerAskUser).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+      expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-clear", "answer", {
+        checks: ["Tests"], then: "Continue",
+      });
+      expect(container.querySelector(".ask-band.is-done")).toBeNull();
+      await act(async () => acknowledgement.resolve());
+      expect(container.querySelector(".ask-band.is-done")).not.toBeNull();
+    },
+  );
+
   it("does not show sent until acknowledged, and leaves refusal unsent", async () => {
     nativeMocks.realMentor = true;
     const pane = client("ask-ack", 1);

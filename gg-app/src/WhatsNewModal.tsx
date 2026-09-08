@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { error as logError } from "@tauri-apps/plugin-log";
 import { windowLabel, openWhatsNewWindow } from "./agent";
 import { appBuildInfo } from "./build-info";
-import { getWhatsNewStatus } from "./whats-new";
 
 /**
  * Invisible post-update trigger. Only the main window checks bundled feed heads;
@@ -19,11 +18,20 @@ export function WhatsNewModal(): null {
       return;
     }
 
-    const status = getWhatsNewStatus(localStorage, appBuildInfo.localPatched);
-    if (status.unreadFeedIds.length === 0) return;
-    void openWhatsNewWindow().catch((error) =>
-      logError(`What's-new window failed to open: ${String(error)}`),
-    );
+    let cancelled = false;
+    void import("./whats-new")
+      .then(({ getWhatsNewStatus }) => {
+        if (cancelled) return;
+        const status = getWhatsNewStatus(localStorage, appBuildInfo.localPatched);
+        if (status.unreadFeedIds.length === 0) return;
+        return openWhatsNewWindow();
+      })
+      .catch((error) => {
+        if (!cancelled) void logError(`What's-new check or window open failed: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return null;

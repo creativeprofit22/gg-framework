@@ -103,6 +103,7 @@ export function rejectBrowserNodeBuiltins(): Plugin {
 export default defineConfig(async () => ({
   plugins: [react()],
   define: buildEnvDefines(),
+  build: { manifest: true }, // Lets CI budget initial JS separately from lazy chunks.
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

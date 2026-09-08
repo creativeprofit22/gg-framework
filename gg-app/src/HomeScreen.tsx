@@ -36,7 +36,8 @@ import {
   shouldConfirmLocalUpdate,
 } from "./local-update-confirmation";
 import { toast } from "./toast";
-import { WHATS_NEW_STORAGE_KEY, getWhatsNewStatus, type WhatsNewFeedId } from "./whats-new";
+import type { WhatsNewFeedId } from "./whats-new";
+import { error as logError } from "@tauri-apps/plugin-log";
 
 interface Props {
   onProjects: () => void;
@@ -136,18 +137,31 @@ export function HomeScreen({
   }, [refreshSignal]);
 
   useEffect(() => {
-    const refreshUnread = (): void => {
-      setUnreadWhatsNew(getWhatsNewStatus(localStorage, appUpdate.localPatched).unreadFeedIds);
-    };
-    const onStorage = (event: StorageEvent): void => {
-      if (event.key === null || event.key === WHATS_NEW_STORAGE_KEY) refreshUnread();
-    };
-    refreshUnread();
-    window.addEventListener("focus", refreshUnread);
-    window.addEventListener("storage", onStorage);
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    void import("./whats-new")
+      .then(({ getWhatsNewStatus, WHATS_NEW_STORAGE_KEY }) => {
+        if (cancelled) return;
+        const refreshUnread = (): void => {
+          setUnreadWhatsNew(getWhatsNewStatus(localStorage, appUpdate.localPatched).unreadFeedIds);
+        };
+        const onStorage = (event: StorageEvent): void => {
+          if (event.key === null || event.key === WHATS_NEW_STORAGE_KEY) refreshUnread();
+        };
+        refreshUnread();
+        window.addEventListener("focus", refreshUnread);
+        window.addEventListener("storage", onStorage);
+        cleanup = () => {
+          window.removeEventListener("focus", refreshUnread);
+          window.removeEventListener("storage", onStorage);
+        };
+      })
+      .catch((error) => {
+        if (!cancelled) void logError(`What's-new status failed: ${String(error)}`);
+      });
     return () => {
-      window.removeEventListener("focus", refreshUnread);
-      window.removeEventListener("storage", onStorage);
+      cancelled = true;
+      cleanup?.();
     };
   }, [appUpdate.localPatched]);
 

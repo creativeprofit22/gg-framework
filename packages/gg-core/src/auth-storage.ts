@@ -210,7 +210,8 @@ export class AuthStorage {
   private filePath: string;
   private loaded = false;
   /**
-   * mtime+size of the file as of the cached snapshot (`size: -1` = no file).
+   * inode+mtime+size of the cached file (`size: -1` = no file). The inode
+   * detects atomic replacements with equal size within one filesystem clock tick.
    * auth.json is shared: the desktop app writes API keys and disconnects
    * NATIVELY (so they work with no daemon running), and every window/process has
    * its own AuthStorage. A load-once cache therefore goes stale — the sidecar
@@ -219,6 +220,7 @@ export class AuthStorage {
    */
   private snapshotMtimeMs = 0;
   private snapshotSize = -1;
+  private snapshotIno = 0;
   /** Per-provider lock to serialize concurrent refresh calls. */
   private refreshLocks = new Map<string, Promise<OAuthCredentials>>();
 
@@ -391,7 +393,10 @@ export class AuthStorage {
     let changed: boolean;
     try {
       const stat = await fs.stat(this.filePath);
-      changed = stat.mtimeMs !== this.snapshotMtimeMs || stat.size !== this.snapshotSize;
+      changed =
+        stat.ino !== this.snapshotIno ||
+        stat.mtimeMs !== this.snapshotMtimeMs ||
+        stat.size !== this.snapshotSize;
     } catch {
       // File is gone (logged out everywhere) — reload only if we still hold one.
       changed = this.snapshotSize !== -1;
@@ -408,9 +413,11 @@ export class AuthStorage {
       const stat = await fs.stat(this.filePath);
       this.snapshotMtimeMs = stat.mtimeMs;
       this.snapshotSize = stat.size;
+      this.snapshotIno = stat.ino;
     } catch {
       this.snapshotMtimeMs = 0;
       this.snapshotSize = -1;
+      this.snapshotIno = 0;
     }
   }
 

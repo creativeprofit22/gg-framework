@@ -211,6 +211,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Frontend build + initial JavaScript size gate
+        shell: bash
+        run: |
+          pnpm --filter gg-app build
+          node bench/size-gate.mjs --only frontend:initial
+
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
 

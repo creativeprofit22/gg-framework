@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.58.1
+
+### Patch Changes
+
+- Fix stale login credentials when another session replaces the shared auth file with the same size and timestamp.
+  - @kenkaiiii/gg-ai@5.58.1
+  - @kenkaiiii/gg-agent@5.58.1
+  - @kenkaiiii/gg-core@5.58.1
+
 ## 5.58.0
 
 ### Minor Changes

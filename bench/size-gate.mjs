@@ -2,6 +2,7 @@
 // size-gate — deterministic bundle-size regression gate (fx-pattern CI ratchet).
 // Artifacts:
 //   dist:ggcoder — total bytes of packages/ggcoder/dist (the shipped CLI).
+//   frontend:initial — entry JS + static imports, excluding on-demand chunks.
 //   sidecar      — app-sidecar.mjs + bundled skills bytes (gg-app/src-tauri/sidecar).
 //                  Deliberately EXCLUDES node_modules: it carries platform-
 //                  conditional binaries (sharp, onnxruntime), so one baseline
@@ -11,7 +12,8 @@
 //   node bench/size-gate.mjs                 # check all artifacts against baseline
 //   node bench/size-gate.mjs --only sidecar  # check one artifact
 //   node bench/size-gate.mjs --update        # re-baseline after an intentional change
-// Fail rule: current > baseline + max(2%, 100KB). Shrinks pass and print a hint.
+// Fail rule: current > baseline + max(2%, 100KB; 10KB for initial frontend JS).
+// Shrinks pass and print a hint.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -31,8 +33,27 @@ function dirBytes(target) {
   );
 }
 
+function initialFrontendBytes() {
+  const dist = path.join(REPO_ROOT, "gg-app/dist");
+  const manifest = JSON.parse(readFileSync(path.join(dist, ".vite/manifest.json"), "utf8"));
+  const entries = Object.keys(manifest).filter((key) => manifest[key].isEntry);
+  if (entries.length === 0) throw new Error("Frontend manifest has no entry points");
+  const seen = new Set();
+  function visit(key) {
+    if (seen.has(key)) return 0;
+    seen.add(key);
+    const chunk = manifest[key];
+    return (
+      statSync(path.join(dist, chunk.file)).size +
+      (chunk.imports ?? []).reduce((sum, key) => sum + visit(key), 0)
+    );
+  }
+  return entries.reduce((sum, key) => sum + visit(key), 0);
+}
+
 const ARTIFACTS = {
   "dist:ggcoder": () => dirBytes(path.join(REPO_ROOT, "packages/ggcoder/dist")),
+  "frontend:initial": initialFrontendBytes,
   sidecar: () =>
     dirBytes(path.join(REPO_ROOT, "gg-app/src-tauri/sidecar/app-sidecar.mjs")) +
     dirBytes(path.join(REPO_ROOT, "gg-app/src-tauri/sidecar/skills")),
@@ -73,7 +94,8 @@ for (const [name, measure] of Object.entries(ARTIFACTS)) {
     rows.push([name, "—", fmt(bytes), "new baseline"]);
     continue;
   }
-  const allowed = entry.bytes + Math.max(entry.bytes * TOLERANCE.relative, TOLERANCE.absoluteBytes);
+  const absoluteTolerance = name === "frontend:initial" ? 10 * 1024 : TOLERANCE.absoluteBytes;
+  const allowed = entry.bytes + Math.max(entry.bytes * TOLERANCE.relative, absoluteTolerance);
   const delta = bytes - entry.bytes;
   const verdict = bytes > allowed ? "FAIL" : delta < 0 ? "ok (ratchet down available)" : "ok";
   if (bytes > allowed) failed = true;

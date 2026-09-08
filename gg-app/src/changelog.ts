@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.62.1",
+    date: "2026-09-08",
+    items: [
+      "Stay in your flow across windows and the `CLI`. I fixed a sneaky login glitch that could leave one session using an old login after another refreshed it, so you get fewer surprise interruptions.",
+      "A little less baggage every time you open `GG Coder`. I moved `What's new` out of your workspace's startup load and stopped hidden input animations from ticking away, so the app does less busywork while you focus elsewhere.",
+    ],
+  },
+  {
     version: "0.62.0",
     date: "2026-09-07",
     items: [

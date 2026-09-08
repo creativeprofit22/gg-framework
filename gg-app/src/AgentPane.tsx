@@ -1346,6 +1346,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     stateRef.current = state;
   }, [state]);
 
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  // Cosmetic work only belongs to a focused, visible, empty code composer.
+  const animatePlaceholder =
+    windowFocused &&
+    props.windowFocused !== false &&
+    props.focused !== false &&
+    !needsProject &&
+    !showPicker &&
+    workspaceMode === "code" &&
+    input.length === 0;
   const inputPlaceholder = running
     ? RUNNING_INPUT_PLACEHOLDERS[placeholderIndex % RUNNING_INPUT_PLACEHOLDERS.length]
     : INPUT_PLACEHOLDERS[placeholderIndex % INPUT_PLACEHOLDERS.length];
@@ -1354,14 +1364,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setDisplayPlaceholder(text);
   }, []);
   useEffect(() => {
-    if (input.length > 0) return;
+    if (!animatePlaceholder) return;
     const id = window.setInterval(() => {
       setPlaceholderIndex((i) => i + 1);
     }, INPUT_PLACEHOLDER_INTERVAL_MS);
     return () => window.clearInterval(id);
-  }, [input.length]);
+  }, [animatePlaceholder]);
   useEffect(() => {
-    if (input.length > 0) {
+    if (!animatePlaceholder) {
       setAnimatedPlaceholder(inputPlaceholder);
       return;
     }
@@ -1378,7 +1388,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (frame >= PLACEHOLDER_SHUFFLE_FRAMES) window.clearInterval(id);
     }, PLACEHOLDER_SHUFFLE_FRAME_MS);
     return () => window.clearInterval(id);
-  }, [input.length, inputPlaceholder, setAnimatedPlaceholder]);
+  }, [animatePlaceholder, inputPlaceholder, setAnimatedPlaceholder]);
 
   // Stop the browser from navigating to / opening a file dropped anywhere
   // (which would replace the whole UI with the raw file). The active chat view
@@ -1544,10 +1554,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [ownsWindowGlobals]);
-
-  // Track whether THIS window holds OS focus (for the prominent input border).
-  // The webview's own focus/blur events are instant — no IPC round-trip.
-  const [windowFocused, setWindowFocused] = useState(true);
 
   // Position in the multi-window reading order (e.g. window 2 of 4), plus
   // whether this window is the focused one. Driven by the Rust `window-order`

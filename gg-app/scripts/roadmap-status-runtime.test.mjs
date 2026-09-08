@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+const { test } = process.env.VITEST ? await import("vitest") : await import("node:test");
 import { AppSidecarRoadmapToolHost } from "../../packages/ggcoder/dist/app-sidecar-roadmap-tool-host.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "../../packages/ggcoder/dist/app-sidecar-roadmap-reconciliation.js";
 import { createAppSidecarPhaseBindingService } from "../../packages/ggcoder/dist/app-sidecar-phase-binding.js";

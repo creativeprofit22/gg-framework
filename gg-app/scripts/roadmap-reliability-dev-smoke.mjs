@@ -59,10 +59,10 @@ function fixturePhase() {
   return {
     id: fixturePhaseId,
     title: "Roadmap reliability fixture",
-    goal: "Verify identity, phase authority, and evidence-gated completion",
+    goal: "Verify identity, phase authority, and immediate Done",
     doneWhen: ["The isolated developer-app path passes"],
     order: 0,
-    status: "review",
+    status: "in-progress",
     sourcePrompt: "Synthetic local fixture only",
     referenceIds: [],
     session: null,
@@ -88,7 +88,16 @@ function fixtureDocument() {
     handoff: { text: "", updatedAt: null, readAt: null },
     updatedAt: "2026-08-27T20:02:00.000Z",
     legacyImportedAt: null,
-    phases: [fixturePhase()],
+    phases: [
+      fixturePhase(),
+      {
+        ...fixturePhase(),
+        id: "unrelated-phase",
+        title: "Unrelated pending phase",
+        order: 1,
+        status: "not-started",
+      },
+    ],
     references: [],
   };
 }
@@ -108,11 +117,9 @@ export function createRoadmapReliabilityFixtureState({
     seeded: false,
     sessions: new Map(),
     nextSession: 1,
-    nonces: new Map(),
-    phaseLease: null,
-    leaseRevision: 0,
-    scheduler: { attempts: 0, outcome: null },
-    approvals: 0,
+    runtime: null,
+    statusUpdates: 0,
+    broadcasts: [],
   };
 }
 
@@ -128,254 +135,155 @@ function currentPhase(state) {
   return state.document.phases[0];
 }
 
-export function seedRoadmapReliabilityFixture(state) {
-  if (state.seeded) return { status: "duplicate", snapshot: snapshot(state) };
+// Use production status, persistence, and lease boundaries; only the transport is a fixture.
+async function fixtureRuntime(state) {
+  if (!state.runtime) {
+    state.runtime = (async () => {
+      const runtimeRoot = new URL("../../packages/ggcoder/dist/", import.meta.url);
+      const [notes, leases, binding, host, reconciliation, status] = await Promise.all([
+        import(new URL("project-notes-repository.js", runtimeRoot)),
+        import(new URL("roadmap-phase-lease-repository.js", runtimeRoot)),
+        import(new URL("app-sidecar-phase-binding.js", runtimeRoot)),
+        import(new URL("app-sidecar-roadmap-tool-host.js", runtimeRoot)),
+        import(new URL("app-sidecar-roadmap-reconciliation.js", runtimeRoot)),
+        import(new URL("tools/roadmap-status.js", runtimeRoot)),
+      ]);
+      const repository = new notes.ProjectNotesRepository(state.root);
+      state.notesPaths = repository.paths(state.project);
+      return {
+        repository,
+        binding: binding.createAppSidecarPhaseBindingService({
+          repository,
+          leaseRepository: new leases.RoadmapPhaseLeaseRepository(state.root),
+          daemonInstanceId: "fixture-daemon",
+          processId: process.pid,
+          processStartToken: "fixture-process",
+        }),
+        Host: host.AppSidecarRoadmapToolHost,
+        reconciliations: new reconciliation.AppSidecarRoadmapReconciliationCoordinator(),
+        params: status.RoadmapStatusParams,
+      };
+    })();
+  }
+  return state.runtime;
+}
+
+export async function readFixtureRepository(state) {
+  const { repository } = await fixtureRuntime(state);
+  const loaded = await repository.load(state.project);
+  if (loaded.status !== "ok") throw new Error(`Fixture repository read: ${loaded.status}`);
+  state.document = loaded.snapshot.document;
+  state.revision = loaded.snapshot.revision;
+  state.projectKey = loaded.snapshot.projectKey;
+  return loaded.snapshot;
+}
+
+export async function seedRoadmapReliabilityFixture(state) {
+  if (state.seeded) return { status: "duplicate", snapshot: await readFixtureRepository(state) };
+  const { repository } = await fixtureRuntime(state);
+  const result = await repository.migrate(state.project, state.document);
+  if (result.status !== "ok") throw new Error(`Fixture seed: ${JSON.stringify(result)}`);
+  await readFixtureRepository(state);
   state.seeded = true;
-  state.scheduler.attempts = 2;
-  state.scheduler.outcome = "committed-after-retry";
   return { status: "seeded", snapshot: snapshot(state) };
 }
 
-function addFreshEvidence(state, link) {
-  const phase = currentPhase(state);
-  phase.roadmapEvents = [
-    {
-      type: "implementation-checkpoint",
-      id: "fixture-implementation",
-      session: structuredClone(link),
-      planStepTotal: 1,
-      completedPlanSteps: [1],
-      runOutcome: "succeeded",
-      timestamp: "2026-08-27T20:01:00.000Z",
-    },
-    {
-      type: "status-update",
-      id: "fixture-verification",
-      actor: "gg-coder",
-      transition: "review",
-      progress: "Deterministic fixture verification passed",
-      blocker: null,
-      requiredExternalAction: null,
-      evidence: ["node --test roadmap-reliability-dev-smoke.test.mjs"],
-      verification: "passed",
-      verificationReason: null,
-      verificationSession: structuredClone(link),
-      statusOutcome: "applied",
-      proposedReferences: [],
-      timestamp: "2026-08-27T20:02:00.000Z",
-    },
-  ];
-}
-
-export function bindFixturePhase(state, sessionId, request) {
-  const phase = currentPhase(state);
-  const previousSession = phase.session ? structuredClone(phase.session) : null;
-  const destination = sessionLink(state, sessionId);
-  if (!state.sessions.has(sessionId)) return { status: "phase-not-found" };
-  if (request.expectedRevision !== state.revision) {
-    return { status: "stale-revision", revision: state.revision };
-  }
-  if (request.expectedProjectKey !== state.projectKey) {
-    return {
-      status: "project-mismatch",
-      revision: state.revision,
-      currentProjectKey: state.projectKey,
-    };
-  }
-  if (request.action === "rebind-current") {
-    if (!request.confirmRebind) return { status: "phase-not-found" };
-    if (
-      !phase.session ||
-      phase.session.sessionId !== request.expectedPreviousSession?.sessionId ||
-      phase.session.sessionPath !== request.expectedPreviousSession?.sessionPath
-    ) {
-      return {
-        status: "stale-previous-session",
-        revision: state.revision,
-        currentSession: previousSession,
-      };
-    }
-  } else if (phase.session && phase.session.sessionId !== sessionId) {
-    return {
-      status: "already-bound",
-      revision: state.revision,
-      phaseId: phase.id,
-      session: previousSession,
-    };
-  }
-  phase.session = destination;
-  addFreshEvidence(state, destination);
-  state.revision += 1;
-  state.leaseRevision += 1;
-  state.phaseLease = fixturePhaseLease(
-    state,
-    sessionId,
-    request.operationId,
-    state.phaseLease?.fence + 1 || 1,
-  );
-  phase.updatedAt = new Date().toISOString();
+function codingSession(state, sessionId) {
+  const session = state.sessions.get(sessionId);
+  if (!session) throw new Error("Unknown fixture session");
   return {
-    status: "committed",
-    revision: state.revision,
-    phaseId: phase.id,
-    previousSession,
-    session: structuredClone(destination),
-  };
-}
-
-function fixturePhaseLease(state, sessionId, operationId, fence) {
-  const timestamp = new Date().toISOString();
-  return {
-    version: 1,
-    projectKey: state.projectKey,
-    phaseId: currentPhase(state).id,
-    planId: null,
-    leaseId: state.phaseLease?.leaseId ?? "fixture-phase-lease",
-    fence,
-    holder: {
-      daemonInstanceId: "fixture-daemon",
-      sessionId,
-      sessionPath: sessionLink(state, sessionId).sessionPath,
-      processId: process.pid,
+    getState: () => ({ cwd: state.project, ...sessionLink(state, sessionId) }),
+    getMessages: () => [],
+    getActivePhaseContext: () => session.context,
+    setActivePhaseContext: async (context) => {
+      session.context = context;
     },
-    runState: "idle",
-    acquiredAt: state.phaseLease?.acquiredAt ?? timestamp,
-    renewedAt: timestamp,
-    expiresAt: "2099-01-01T00:00:00.000Z",
-    operationId,
+    getRoadmapPhaseLeaseMarker: () => session.marker,
+    setRoadmapPhaseLeaseMarker: async (marker) => {
+      session.marker = marker;
+    },
+    getPhaseLeaseRunState: () => "idle",
   };
 }
 
-export function mutateFixturePhaseLease(state, sessionId, request) {
-  const phase = currentPhase(state);
-  if (request.expectedRevision !== state.revision) {
-    return { status: "stale-revision", revision: state.revision };
-  }
-  if (request.expectedProjectKey !== state.projectKey) {
-    return { status: "project-mismatch", currentProjectKey: state.projectKey };
-  }
-  if (request.action === "inspect") {
-    return {
-      status: "inspected",
-      roadmapRevision: state.revision,
-      leaseRevision: state.leaseRevision,
-      phaseId: phase.id,
-      lease: structuredClone(state.phaseLease),
-    };
-  }
-  if (request.action !== "takeover" || !request.confirmTakeover || !state.phaseLease) {
-    return { status: "phase-lease-held", currentLease: structuredClone(state.phaseLease) };
-  }
-  if (
-    request.lease?.leaseId !== state.phaseLease.leaseId ||
-    request.lease?.fence !== state.phaseLease.fence
-  ) {
-    return { status: "phase-lease-lost", currentLease: structuredClone(state.phaseLease) };
-  }
-  const destination = sessionLink(state, sessionId);
-  state.leaseRevision += 1;
-  state.phaseLease = fixturePhaseLease(
-    state,
-    sessionId,
-    request.operationId,
-    state.phaseLease.fence + 1,
-  );
-  phase.session = destination;
-  addFreshEvidence(state, destination);
-  state.revision += 1;
-  phase.updatedAt = new Date().toISOString();
-  return {
-    status: "acquired",
-    roadmapRevision: state.revision,
-    leaseRevision: state.leaseRevision,
-    phaseId: phase.id,
-    lease: structuredClone(state.phaseLease),
-  };
+export async function bindFixturePhase(state, sessionId, request) {
+  const { binding } = await fixtureRuntime(state);
+  const outcome = await binding.bind(request, codingSession(state, sessionId));
+  await readFixtureRepository(state);
+  return outcome;
 }
 
-export function previewFixtureCompletion(state, sessionId, request, idFactory = randomUUID) {
-  const phase = currentPhase(state);
-  if (request.expectedRevision !== state.revision) {
-    return { status: "stale-revision", revision: state.revision };
-  }
-  if (phase.status !== "review") return { status: "phase-terminal", revision: state.revision };
-  if (phase.session?.sessionId !== sessionId) {
-    return { status: "unmet-gate", revision: state.revision, code: "stale-session" };
-  }
-  const nonce = idFactory();
-  const checkpoint = {
-    nonce,
-    projectKey: state.projectKey,
-    phaseId: phase.id,
-    revision: state.revision,
-    session: structuredClone(phase.session),
-    implementationCheckpointId: "fixture-implementation",
-    verificationStatusUpdateId: "fixture-verification",
-    expiresAt: "2099-01-01T00:00:00.000Z",
-  };
-  state.nonces.set(nonce, checkpoint);
-  return { status: "ready", checkpoint };
+export async function mutateFixturePhaseLease(state, sessionId, request) {
+  const { binding } = await fixtureRuntime(state);
+  const outcome = await binding.lease(request, codingSession(state, sessionId));
+  await readFixtureRepository(state);
+  return outcome;
 }
 
-export function advanceFixtureRevision(state) {
-  state.revision += 1;
-  state.document.reference = `Synthetic harmless revision ${state.revision}`;
-  state.document.updatedAt = new Date().toISOString();
+export async function advanceFixtureRevision(state) {
+  const { repository } = await fixtureRuntime(state);
+  const current = await readFixtureRepository(state);
+  const document = structuredClone(current.document);
+  document.reference = `Synthetic harmless revision ${current.revision + 1}`;
+  const result = await repository.save(state.project, current.revision, document);
+  if (result.status !== "ok") throw new Error(`Fixture revision: ${result.status}`);
+  await readFixtureRepository(state);
   return { status: "advanced", revision: state.revision };
 }
 
-export function commitFixtureCompletion(state, nonce) {
-  const checkpoint = state.nonces.get(nonce);
-  if (!checkpoint) return { status: "nonce-not-found" };
-  state.nonces.delete(nonce);
-  if (checkpoint.revision !== state.revision) {
-    return { status: "stale-revision", revision: state.revision };
-  }
-  const phase = currentPhase(state);
-  if (phase.status === "done") return { status: "duplicate", revision: state.revision };
-  phase.roadmapEvents.push({
-    type: "manual-completion-approval",
-    id: `manual-approval-${nonce}`,
-    authority: "native-user",
-    session: structuredClone(checkpoint.session),
-    implementationCheckpointId: checkpoint.implementationCheckpointId,
-    verificationStatusUpdateId: checkpoint.verificationStatusUpdateId,
-    timestamp: new Date().toISOString(),
-  });
-  phase.status = "done";
-  phase.completedAt = new Date().toISOString();
-  phase.updatedAt = phase.completedAt;
-  state.revision += 1;
-  state.approvals += 1;
+export function fixtureDoneRequest(state, updateId = randomUUID()) {
   return {
-    status: "committed",
-    revision: state.revision,
-    phaseId: phase.id,
-    approvalId: `manual-approval-${nonce}`,
+    update_id: updateId,
+    phase_id: fixturePhaseId,
+    expected_revision: state.revision,
+    progress: "Completed the isolated immediate-Done scenario",
+    evidence: ["Disposable fixture: owner transfer and stale status rejection checked"],
+    verification: { result: "passed", reason: null },
+    verification_bindings: null,
+    proposed_references: null,
+    transition: "done",
+    blocker: null,
+    required_external_action: null,
   };
+}
+
+export async function executeFixtureStatus(state, sessionId, request, broadcast = () => {}) {
+  const runtime = await fixtureRuntime(state);
+  const session = codingSession(state, sessionId);
+  const host = new runtime.Host({
+    cwd: state.project,
+    repository: runtime.repository,
+    durableExecution: true,
+    reconciliations: runtime.reconciliations,
+    projectAutopilot: { isEnabled: () => false },
+    resolvePlanProgress: () => null,
+    broadcastNotesSnapshot: (committed) => {
+      state.broadcasts.push(structuredClone(committed));
+      broadcast(committed);
+    },
+    mutateStatusWithLeaseFence: (phaseId, operation) =>
+      runtime.binding.withStatusLease(session, phaseId, operation),
+  });
+  const tool = host
+    .createSessionTools("coding", () => session)
+    .find((item) => item.name === "roadmap_status");
+  if (!tool) throw new Error("Runtime did not register roadmap_status");
+  const result = JSON.parse(
+    String(
+      await tool.execute(runtime.params.parse(request), {
+        signal: new AbortController().signal,
+        toolCallId: randomUUID(),
+      }),
+    ),
+  );
+  await readFixtureRepository(state);
+  if (result.result === "committed") state.statusUpdates += 1;
+  return result;
 }
 
 function json(response, status, value) {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
-}
-
-function manualApprovalStatus(outcome) {
-  switch (outcome.status) {
-    case "ready":
-    case "committed":
-    case "duplicate":
-      return 200;
-    case "missing":
-    case "nonce-not-found":
-      return 404;
-    case "nonce-expired":
-      return 410;
-    case "corrupt":
-      return 500;
-    default:
-      return 409;
-  }
 }
 
 function readBody(request) {
@@ -433,7 +341,7 @@ export function fixtureDiagnostics(state, sessionId) {
     : phase.session.sessionId === sessionId
       ? "consistent"
       : "bound-to-other-session";
-  const storeRoot = join(state.root, "agent", "project-notes");
+  if (!state.notesPaths) throw new Error("Fixture repository is not initialized");
   return {
     version: 1,
     applicationIdentity: state.identity,
@@ -442,8 +350,8 @@ export function fixtureDiagnostics(state, sessionId) {
     canonicalCwd: state.projectKey,
     projectKey: state.projectKey,
     projectNotesStore: {
-      primaryPath: join(storeRoot, "fixture.json"),
-      backupPath: join(storeRoot, "fixture.backup.json"),
+      primaryPath: state.notesPaths.primary,
+      backupPath: state.notesPaths.backup,
     },
     logicalSessionId: sessionId,
     currentSession: current,
@@ -478,34 +386,88 @@ export function createRoadmapReliabilityFixtureServer({
         }
         const body = await readBody(request);
         if (request.method === "POST" && url.pathname === "/fixture/seed") {
-          const result = seedRoadmapReliabilityFixture(state);
+          const result = await seedRoadmapReliabilityFixture(state);
           audit({ action: "seed", status: result.status });
           json(response, 200, result);
           return;
         }
         if (request.method === "POST" && url.pathname === "/fixture/advance") {
-          const result = advanceFixtureRevision(state);
+          const result = await advanceFixtureRevision(state);
           audit({ action: "harmless-revision", revision: result.revision });
           json(response, 200, result);
           return;
         }
+        if (request.method === "POST" && url.pathname === "/fixture/status") {
+          if (!state.sessions.has(body.sessionId)) {
+            json(response, 401, { status: "unknown-session" });
+            return;
+          }
+          const result = await executeFixtureStatus(
+            state,
+            body.sessionId,
+            body.request,
+            (committed) => {
+              for (const [sessionId, responses] of clients) {
+                for (const stream of responses) {
+                  stream.write(
+                    `data: ${JSON.stringify({ sessionId, type: "notes_change", data: committed })}\n\n`,
+                  );
+                  audit({ action: "notes-change", sessionId, revision: committed.revision });
+                }
+              }
+            },
+          );
+          audit({
+            action: "status-update",
+            sessionId: body.sessionId,
+            status: result.result,
+            revision: state.revision,
+          });
+          json(
+            response,
+            result.result === "committed" || result.result === "duplicate" ? 200 : 409,
+            result,
+          );
+          return;
+        }
         if (request.method === "GET" && url.pathname === "/fixture/state") {
+          await readFixtureRepository(state);
           json(response, 200, {
             revision: state.revision,
             phase: currentPhase(state),
+            phases: state.document.phases,
+            tasks: state.document.tasks,
             sessions: [...state.sessions.keys()],
-            scheduler: state.scheduler,
-            approvals: state.approvals,
+            statusUpdates: state.statusUpdates,
           });
           return;
         }
-        json(response, 404, { status: "not-found", body });
+        const fixtureSession = request.headers["x-gg-session"];
+        if (url.pathname === "/fixture/bind" || url.pathname === "/fixture/diagnostics") {
+          if (typeof fixtureSession !== "string" || !state.sessions.has(fixtureSession)) {
+            json(response, 401, { status: "unknown-session" });
+            return;
+          }
+          if (request.method === "POST" && url.pathname === "/fixture/bind") {
+            const result = await bindFixturePhase(state, fixtureSession, body);
+            audit({
+              action: "phase-binding",
+              sessionId: fixtureSession,
+              status: result.status,
+              revision: state.revision,
+            });
+            json(response, 200, result);
+            return;
+          }
+          if (request.method === "GET" && url.pathname === "/fixture/diagnostics") {
+            json(response, 200, fixtureDiagnostics(state, fixtureSession));
+            return;
+          }
+        }
+        json(response, 404, { status: "not-found" });
         return;
       }
-      if (
-        (!launchToken || request.headers["x-gg-token"] !== launchToken) &&
-        request.headers["x-fixture-token"] !== fixtureToken
-      ) {
+      if (!launchToken || request.headers["x-gg-token"] !== launchToken) {
         json(response, 401, { status: "unauthorized" });
         return;
       }
@@ -550,6 +512,7 @@ export function createRoadmapReliabilityFixtureServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/notes") {
+        await readFixtureRepository(state);
         audit({ action: "notes-read", sessionId, revision: state.revision });
         json(response, 200, {
           status: "ok",
@@ -568,8 +531,8 @@ export function createRoadmapReliabilityFixtureServer({
         const body = await readBody(request);
         const leaseRequest = body.version === 2;
         const result = leaseRequest
-          ? mutateFixturePhaseLease(state, sessionId, body)
-          : bindFixturePhase(state, sessionId, body);
+          ? await mutateFixturePhaseLease(state, sessionId, body)
+          : await bindFixturePhase(state, sessionId, body);
         audit({
           action: leaseRequest ? "phase-lease" : "phase-binding",
           sessionId,
@@ -579,33 +542,21 @@ export function createRoadmapReliabilityFixtureServer({
         json(response, 200, result);
         return;
       }
-      if (
-        request.method === "POST" &&
-        url.pathname === "/notes/roadmap/completion-approval/preview"
-      ) {
-        const result = previewFixtureCompletion(state, sessionId, await readBody(request));
-        audit({
-          action: "approval-preview",
-          sessionId,
-          status: result.status,
-          revision: state.revision,
-        });
-        json(response, manualApprovalStatus(result), result);
+      // Inactive optional services, matching the daemon's current GET contracts.
+      if (request.method === "GET" && url.pathname === "/serve") {
+        json(response, 200, { running: false, configured: false });
         return;
       }
-      if (
-        request.method === "POST" &&
-        url.pathname === "/notes/roadmap/completion-approval/commit"
-      ) {
-        const body = await readBody(request);
-        const result = commitFixtureCompletion(state, body.nonce);
-        audit({
-          action: "approval-commit",
-          sessionId,
-          status: result.status,
-          revision: state.revision,
-        });
-        json(response, manualApprovalStatus(result), result);
+      if (request.method === "GET" && url.pathname === "/steroids") {
+        json(response, 200, { installed: false, connected: false });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/radio") {
+        json(response, 200, { stations: [], current: null, volume: 0 });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/roadmap/phase-drafts/pending") {
+        json(response, 200, { status: "ok", draft: null });
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
@@ -637,7 +588,8 @@ export function createRoadmapReliabilityFixtureServer({
         json(response, 200, { ok: true });
         return;
       }
-      json(response, 200, {});
+      audit({ action: "unexpected-route", method: request.method, path: url.pathname });
+      json(response, 404, { status: "not-found" });
     } catch (error) {
       audit({
         action: "fixture-error",
@@ -678,7 +630,7 @@ async function waitFor(label, check, { timeoutMs = 120_000, intervalMs = 100 } =
   );
 }
 
-async function fixtureFetch(port, fixtureToken, path, init = {}) {
+async function fixtureFetch(port, fixtureToken, path, init = {}, expectedStatus = 200) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     ...init,
     headers: {
@@ -688,7 +640,8 @@ async function fixtureFetch(port, fixtureToken, path, init = {}) {
     },
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(`Fixture ${path} failed: ${response.status}`);
+  if (response.status !== expectedStatus)
+    throw new Error(`Fixture ${path} failed: ${response.status}: ${JSON.stringify(body)}`);
   return body;
 }
 
@@ -793,7 +746,15 @@ export function validateRoadmapReliabilityAudit(entries) {
   const sessions = entries.filter((entry) => entry.action === "authenticated-session");
   const bindings = entries.filter((entry) => entry.action === "phase-binding");
   const leases = entries.filter((entry) => entry.action === "phase-lease");
-  const commits = entries.filter((entry) => entry.action === "approval-commit");
+  const commits = entries.filter((entry) => entry.action === "status-update");
+  if (
+    entries.some((entry) => entry.action === "unexpected-route" || entry.action === "fixture-error")
+  ) {
+    throw new Error("Fixture encountered an unsupported route or runtime error");
+  }
+  if (!entries.some((entry) => entry.action === "notes-change")) {
+    throw new Error("Immediate Done did not broadcast notes_change");
+  }
   if (sessions.length < 2) throw new Error("Fixture did not create two pane sessions");
   if (bindings.map((entry) => entry.status).join(",") !== "committed") {
     throw new Error("Fixture did not bind the initial phase exactly once");
@@ -801,8 +762,10 @@ export function validateRoadmapReliabilityAudit(entries) {
   if (leases.map((entry) => entry.status).join(",") !== "inspected,acquired") {
     throw new Error("Fixture did not inspect then take over the phase lease exactly once");
   }
-  if (commits.map((entry) => entry.status).join(",") !== "stale-revision,committed") {
-    throw new Error("Fixture did not reject stale approval before one commit");
+  if (
+    commits.map((entry) => entry.status).join(",") !== "phase-lease-lost,stale-revision,committed"
+  ) {
+    throw new Error("Fixture did not reject competing and stale status updates before one commit");
   }
   return {
     sessions: sessions.slice(-2).map((entry) => entry.sessionId),
@@ -938,23 +901,17 @@ export async function runRoadmapReliabilityDevSmoke(options) {
     });
     const [sessionA, sessionB] = paneSessions;
     const seeded = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-    const bound = await sessionFetch(
-      sidecarPort,
-      fixtureToken,
-      sessionA,
-      "/notes/roadmap/phase-binding",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          version: 1,
-          action: "bind-current",
-          phaseId: fixturePhaseId,
-          expectedProjectKey: canonicalProjectKey(paths.project),
-          expectedRevision: seeded.revision,
-          operationId: "fixture-bind-a",
-        }),
-      },
-    );
+    const bound = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/fixture/bind", {
+      method: "POST",
+      body: JSON.stringify({
+        version: 1,
+        action: "bind-current",
+        phaseId: fixturePhaseId,
+        expectedProjectKey: canonicalProjectKey(paths.project),
+        expectedRevision: seeded.revision,
+        operationId: "fixture-bind-a",
+      }),
+    });
     if (bound.status !== "committed") throw new Error(`Pane A bind failed: ${bound.status}`);
     await client.evaluate(`(() => {
       const key = "gg-workspace-layout-recursive:main";
@@ -1004,9 +961,9 @@ export async function runRoadmapReliabilityDevSmoke(options) {
     );
     await waitFor("rebind completion", async () => {
       const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-      return state.phase.session?.sessionId === sessionB && state.revision === 3;
+      return state.phase.session?.sessionId === sessionB && state.revision === bound.revision + 1;
     });
-    const staleA = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/notes/diagnostics");
+    const staleA = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/fixture/diagnostics");
     if (staleA.consistency !== "bound-to-other-session")
       throw new Error("Pane A remained authoritative after rebind");
     await waitFor("rebound Notes refresh", async () => {
@@ -1018,68 +975,59 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
     );
     await openFixturePhase(client, 1);
-    await client.evaluate(
-      clickByTextExpression(
-        "Review completion evidence",
-        "document.querySelector('.notes-phase-detail')",
-      ),
-    );
-    const previewResult = await waitFor("manual approval preview", () =>
-      client.evaluate(`(() => {
-        if (document.querySelector('[aria-label="Confirm manual completion"]')) return "ready";
-        return document.querySelector('.notes-manual-completion .notes-phase-action-feedback')?.textContent ?? null;
-      })()`),
-    );
-    if (previewResult !== "ready")
-      throw new Error(`Manual approval preview failed: ${previewResult}`);
+    const beforeDone = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+    const unrelatedBefore = beforeDone.phases.find((phase) => phase.id === "unrelated-phase");
+    const submit = (sessionId, request, expectedStatus) =>
+      fixtureFetch(
+        sidecarPort,
+        fixtureToken,
+        "/fixture/status",
+        { method: "POST", body: JSON.stringify({ sessionId, request }) },
+        expectedStatus,
+      );
+    const competing = await submit(sessionA, fixtureDoneRequest(beforeDone), 409);
+    if (competing.result !== "phase-lease-lost")
+      throw new Error("Competing runner was not rejected");
+    const staleRequest = fixtureDoneRequest(beforeDone);
     await fixtureFetch(sidecarPort, fixtureToken, "/fixture/advance", {
       method: "POST",
       body: "{}",
     });
-    await client.evaluate(
-      clickByTextExpression("Confirm completion", "document.querySelector('.notes-phase-detail')"),
-    );
-    await waitFor("stale approval rejection", () =>
-      readAudit(auditFile).find(
-        (entry) => entry.action === "approval-commit" && entry.status === "stale-revision",
-      ),
-    );
-    await waitFor("stale approval refresh", () =>
-      readAudit(auditFile).find(
-        (entry) =>
-          entry.action === "notes-read" && entry.sessionId === sessionB && entry.revision === 4,
-      ),
-    );
-    if (!(await client.evaluate("Boolean(document.querySelector('.notes-phase-detail'))"))) {
-      await openFixturePhase(client, 1);
+    const stale = await submit(sessionB, staleRequest, 409);
+    if (stale.result !== "stale-revision") throw new Error("Stale status was not rejected");
+    const refreshed = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+    if (refreshed.phase.status !== "in-progress" || refreshed.statusUpdates !== 0) {
+      throw new Error("Rejected status update mutated the phase");
     }
-    await client.evaluate(
-      clickByTextExpression(
-        "Review completion evidence",
-        "document.querySelector('.notes-phase-detail')",
-      ),
-    );
-    await waitFor("refreshed approval confirmation", () =>
-      client.evaluate(
-        "Boolean(document.querySelector('[aria-label=\"Confirm manual completion\"]'))",
-      ),
-    );
+    const committed = await submit(sessionB, fixtureDoneRequest(refreshed), 200);
+    if (committed.result !== "committed" || committed.statusOutcome !== "applied") {
+      throw new Error(`Immediate Done failed: ${JSON.stringify(committed)}`);
+    }
+    const doneVisible = `document.querySelector('#notes-phase-overview-${fixturePhaseId}')?.textContent === 'Done'`;
+    // Do not reload: this observation must come from the production host's notes_change.
+    await waitFor("immediate Done rendered from notes_change", () => client.evaluate(doneVisible));
     await captureScreenshot(client, options.screenshot);
-    await client.evaluate(
-      clickByTextExpression("Confirm completion", "document.querySelector('.notes-phase-detail')"),
+    const finalState = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+    if (
+      finalState.phase.status !== "done" ||
+      finalState.statusUpdates !== 1 ||
+      finalState.phases.length !== 2 ||
+      finalState.tasks.length !== 0 ||
+      JSON.stringify(finalState.sessions) !== JSON.stringify(beforeDone.sessions) ||
+      JSON.stringify(finalState.phases.find((phase) => phase.id === "unrelated-phase")) !==
+        JSON.stringify(unrelatedBefore) ||
+      finalState.phase.roadmapEvents.some((event) => event.type === "manual-completion-approval")
+    ) {
+      throw new Error("Immediate Done changed unrelated work or required manual approval");
+    }
+    await client.evaluate("location.reload(); true");
+    await waitFor("restarted panes", () =>
+      client.evaluate(`document.querySelectorAll('.agent-pane').length === 2`),
     );
-    const finalState = await waitFor("single manual approval", async () => {
-      const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-      return state.approvals === 1 && state.phase.status === "done" ? state : null;
-    });
+    await openFixturePhase(client, 1);
+    await waitFor("Done preserved after restart/read", () => client.evaluate(doneVisible));
     const audit = readAudit(auditFile);
     const validation = validateRoadmapReliabilityAudit(audit);
-    if (
-      finalState.scheduler.attempts !== 2 ||
-      finalState.scheduler.outcome !== "committed-after-retry"
-    ) {
-      throw new Error("Deterministic fake review retry did not settle");
-    }
     const tree = processTreeSnapshot(await readProcessTable(), child.pid);
     observedIdentities = tree.identities;
     result = {
@@ -1089,9 +1037,16 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       diagnosticsDisplayed: displayed.includes(localForkIdentity),
       paneSessions: validation.sessions,
       stalePaneConsistency: staleA.consistency,
-      scheduler: finalState.scheduler,
-      staleApprovalRejected: validation.commits[0].status === "stale-revision",
-      approvals: finalState.approvals,
+      competingRunnerRejected: competing.result === "phase-lease-lost",
+      staleStatusRejected: stale.result === "stale-revision",
+      statusUpdates: finalState.statusUpdates,
+      immediateDoneRendered: true,
+      webviewReloadPreserved: true,
+      unrelatedPhaseUnchanged: true,
+      fixtureAudit: audit,
+      finalSnapshot: finalState,
+      packagedRuntimeVerified: false,
+      installerVerified: false,
       screenshot: options.screenshot,
       fixturePids: observedIdentities.map(({ pid }) => pid),
     };
@@ -1120,13 +1075,16 @@ export async function runRoadmapReliabilityDevSmoke(options) {
     }
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
-  const outcome = result ?? {
-    status: "failed",
-    identity: options.identity,
-    error: failure instanceof Error ? failure.message : String(failure),
-    fixtureAudit: failureAudit,
-    developerLogTail: failureLogTail,
-  };
+  const outcome =
+    !failure && result
+      ? result
+      : {
+          status: "failed",
+          identity: options.identity,
+          error: failure instanceof Error ? failure.message : String(failure),
+          fixtureAudit: failureAudit,
+          developerLogTail: failureLogTail,
+        };
   writeFileSync(options.outcome, `${JSON.stringify(outcome, null, 2)}\n`);
   if (failure) throw failure;
   process.stdout.write(`ROADMAP RELIABILITY DEV SMOKE PASS: ${options.outcome}\n`);
@@ -1143,6 +1101,7 @@ async function runFixtureSidecar() {
     throw new Error("Roadmap reliability fixture environment is incomplete");
   }
   const state = createRoadmapReliabilityFixtureState({ root, project });
+  await seedRoadmapReliabilityFixture(state);
   const fixture = createRoadmapReliabilityFixtureServer({
     state,
     auditFile,

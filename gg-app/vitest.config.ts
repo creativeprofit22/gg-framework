@@ -1,6 +1,8 @@
 import { defineConfig } from "vitest/config";
+import { whatsNewHeadDefines } from "./scripts/whats-new-heads";
 
 export default defineConfig({
+  define: whatsNewHeadDefines,
   test: {
     globals: true,
     // `scripts/**` covers the pure helpers of the packaged Windows smoke: the

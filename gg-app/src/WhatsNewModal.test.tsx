@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
-import { WHATS_NEW_STORAGE_KEY } from "./whats-new";
+import { WHATS_NEW_STORAGE_KEY } from "./whats-new-status";
 import { WhatsNewModal } from "./WhatsNewModal";
 
 const mocks = vi.hoisted(() => ({
@@ -76,7 +76,7 @@ describe("WhatsNewModal", () => {
     await waitFor(() => expect(mocks.openWhatsNewWindow).toHaveBeenCalledTimes(2));
   });
 
-  it("ignores a late history load after unmount", async () => {
+  it("ignores a late status load after unmount", async () => {
     await act(async () => {
       const view = render(<WhatsNewModal />);
       view.unmount();

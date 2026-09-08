@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { whatsNewHeadDefines } from "./scripts/whats-new-heads";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(configDir, "..");
@@ -102,7 +103,7 @@ export function rejectBrowserNodeBuiltins(): Plugin {
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
-  define: buildEnvDefines(),
+  define: { ...buildEnvDefines(), ...whatsNewHeadDefines },
   build: { manifest: true }, // Lets CI budget initial JS separately from lazy chunks.
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

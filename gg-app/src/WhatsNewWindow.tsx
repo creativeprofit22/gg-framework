@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { appBuildInfo } from "./build-info";
 import { theme } from "./theme";
@@ -8,13 +9,12 @@ import { ShimmerText } from "./ShimmerText";
 import { Badge } from "./Badge";
 import type { VerifiedDecisionRecord } from "./agent";
 import {
-  availableWhatsNewFeeds,
   getWhatsNewStatus,
   markWhatsNewFeedSeen,
-  type WhatsNewEntry,
   type WhatsNewFeedId,
   type WhatsNewStatus,
-} from "./whats-new";
+} from "./whats-new-status";
+import { availableWhatsNewFeeds, type WhatsNewEntry } from "./whats-new";
 
 /**
  * Body of the dedicated, screen-centered "What's new" window built by Rust
@@ -146,16 +146,48 @@ async function loadVerifiedDecisions(sourceRoot: string): Promise<VerifiedDecisi
   return (await import("./agent")).getVerifiedDecisions(sourceRoot);
 }
 
-function DecisionsFeed({ records }: { records: VerifiedDecisionRecord[] }): React.ReactElement {
-  if (records.length === 0) {
+type DecisionsState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "loaded"; records: VerifiedDecisionRecord[] };
+
+function DecisionsFeed({
+  state,
+  retry,
+}: {
+  state: DecisionsState;
+  retry: () => void;
+}): React.ReactElement {
+  if (state.status === "loading") {
+    return (
+      <p className="whatsnew-empty" role="status">
+        Loading verified decisions…
+      </p>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <>
+        <p className="whatsnew-empty" role="alert">
+          We couldn’t load verified decisions. Please try again.
+        </p>
+        <button className="modal-btn" type="button" onClick={retry}>
+          Retry
+        </button>
+      </>
+    );
+  }
+  if (state.records.length === 0) {
     return <p className="whatsnew-empty">No verified decisions yet.</p>;
   }
-  return <ReleaseFeed entries={decisionEntries(records)} />;
+  return <ReleaseFeed entries={decisionEntries(state.records)} />;
 }
 
-function initialStatus(localPatched: boolean, storage?: Storage): WhatsNewStatus {
-  if (storage) return getWhatsNewStatus(storage, localPatched);
-  return { feeds: availableWhatsNewFeeds(localPatched), seenHeads: {}, unreadFeedIds: [] };
+function initialStatus(localPatched: boolean, storage?: Storage) {
+  const status: Pick<WhatsNewStatus, "seenHeads" | "unreadFeedIds"> = storage
+    ? getWhatsNewStatus(storage, localPatched)
+    : { seenHeads: {}, unreadFeedIds: [] };
+  return { ...status, feeds: availableWhatsNewFeeds(localPatched) };
 }
 
 type WhatsNewTabId = WhatsNewFeedId | "decisions";
@@ -175,7 +207,8 @@ export function WhatsNewWindow({
   loadDecisions = loadVerifiedDecisions,
 }: WhatsNewWindowProps = {}): React.ReactElement {
   const [status] = useState(() => initialStatus(localPatched, storage));
-  const [decisions, setDecisions] = useState<VerifiedDecisionRecord[]>([]);
+  const [decisions, setDecisions] = useState<DecisionsState>({ status: "loading" });
+  const [decisionsAttempt, setDecisionsAttempt] = useState(0);
   const tabs: Array<{ id: WhatsNewTabId; label: string }> = [
     ...status.feeds.map(({ id, label }) => ({ id, label })),
     ...(localPatched ? [{ id: "decisions" as const, label: "Decisions" }] : []),
@@ -203,17 +236,34 @@ export function WhatsNewWindow({
   useEffect(() => {
     if (!localPatched) return;
     let active = true;
-    void loadDecisions(sourceRoot)
-      .then((records) => {
-        if (active && records.length > 0) setDecisions(records);
+    let request = 0;
+    let unlisten: SafeTauriUnlisten | undefined;
+    async function load(): Promise<void> {
+      if (!active) return;
+      const currentRequest = ++request;
+      setDecisions({ status: "loading" });
+      try {
+        const records = await loadDecisions(sourceRoot);
+        if (active && currentRequest === request) setDecisions({ status: "loaded", records });
+      } catch {
+        if (active && currentRequest === request) setDecisions({ status: "error" });
+      }
+    }
+    // Refocus also catches source-only CLI updates, which emit no desktop update event.
+    void getCurrentWebviewWindow()
+      .listen("tauri://focus", () => void load())
+      .then((off) => {
+        const stop = createSafeTauriUnlisten(off, "whatsnew-focus");
+        if (active) unlisten = stop;
+        else void stop();
       })
-      .catch(() => {
-        if (active) setDecisions([]);
-      });
+      .catch(() => {});
+    void load();
     return () => {
       active = false;
+      void unlisten?.();
     };
-  }, [loadDecisions, localPatched, sourceRoot]);
+  }, [decisionsAttempt, loadDecisions, localPatched, sourceRoot]);
 
   function selectTabFromKey(event: React.KeyboardEvent, currentIndex: number): void {
     let nextIndex: number | undefined;
@@ -308,7 +358,10 @@ export function WhatsNewWindow({
             aria-labelledby={tabId("decisions")}
             hidden={selectedFeedId !== "decisions"}
           >
-            <DecisionsFeed records={decisions} />
+            <DecisionsFeed
+              state={decisions}
+              retry={() => setDecisionsAttempt((attempt) => attempt + 1)}
+            />
           </div>
         )}
       </div>

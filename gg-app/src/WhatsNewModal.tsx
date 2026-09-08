@@ -19,7 +19,7 @@ export function WhatsNewModal(): null {
     }
 
     let cancelled = false;
-    void import("./whats-new")
+    void import("./whats-new-status")
       .then(({ getWhatsNewStatus }) => {
         if (cancelled) return;
         const status = getWhatsNewStatus(localStorage, appBuildInfo.localPatched);

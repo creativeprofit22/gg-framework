@@ -36,7 +36,7 @@ import {
   shouldConfirmLocalUpdate,
 } from "./local-update-confirmation";
 import { toast } from "./toast";
-import type { WhatsNewFeedId } from "./whats-new";
+import type { WhatsNewFeedId } from "./whats-new-status";
 import { error as logError } from "@tauri-apps/plugin-log";
 
 interface Props {
@@ -139,7 +139,7 @@ export function HomeScreen({
   useEffect(() => {
     let cancelled = false;
     let cleanup: (() => void) | undefined;
-    void import("./whats-new")
+    void import("./whats-new-status")
       .then(({ getWhatsNewStatus, WHATS_NEW_STORAGE_KEY }) => {
         if (cancelled) return;
         const refreshUnread = (): void => {

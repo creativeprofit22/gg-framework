@@ -6,7 +6,7 @@ import { useAppUpdate } from "./update";
 import { HomeScreen } from "./HomeScreen";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
-import { WHATS_NEW_STORAGE_KEY } from "./whats-new";
+import { WHATS_NEW_STORAGE_KEY } from "./whats-new-status";
 
 const agentMocks = vi.hoisted(() => ({
   waitForReady: vi.fn().mockResolvedValue(undefined),
@@ -190,6 +190,26 @@ describe("HomeScreen What's New trigger", () => {
         name: "What's new, unread from Local Fork and Upstream",
       }),
     ).toBeTruthy();
+  });
+
+  it("refreshes on storage changes and removes status listeners on unmount", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    await renderHome();
+    localStorage.setItem(
+      WHATS_NEW_STORAGE_KEY,
+      JSON.stringify({ local: LOCAL_CHANGELOG[1].id, upstream: CHANGELOG[0].version }),
+    );
+    fireEvent(window, new StorageEvent("storage", { key: WHATS_NEW_STORAGE_KEY }));
+    expect(screen.getByRole("button", { name: "What's new, unread from Local Fork" })).toBeTruthy();
+    cleanup();
+    const read = vi.spyOn(Storage.prototype, "getItem");
+    try {
+      fireEvent(window, new Event("focus"));
+      fireEvent(window, new StorageEvent("storage", { key: WHATS_NEW_STORAGE_KEY }));
+      expect(read).not.toHaveBeenCalledWith(WHATS_NEW_STORAGE_KEY);
+    } finally {
+      read.mockRestore();
+    }
   });
 
   it("refreshes unread sources when the main window regains focus", async () => {

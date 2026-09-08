@@ -219,7 +219,8 @@ export function useProjectNotes(
       }
       const current = authoritativeRef.current;
       // Recovery may replace only the snapshot observed before its confirming read.
-      if (current && snapshot.revision <= current.revision && recoveryBase !== current) return false;
+      if (current && snapshot.revision <= current.revision && recoveryBase !== current)
+        return false;
       authoritativeRef.current = snapshot;
       modeRef.current = "sidecar";
       setAuthorityReady(true);
@@ -285,15 +286,18 @@ export function useProjectNotes(
     [addAuthorityDiagnostic, repository, showDocument],
   );
 
-  const blockUnsupported = useCallback((format: Extract<ProjectNotesSaveOutcome, { status: "unsupported" }>) => {
-    modeRef.current = "unsupported";
-    setAuthorityReady(false);
-    settlePendingMutations(queueRef.current, "unavailable");
-    queueRef.current = [];
-    inFlightMutationIdRef.current = null;
-    if (authoritativeRef.current) showDocument(authoritativeRef.current.document);
-    setAuthorityDiagnostics([{ kind: "sidecar-unsupported", format }]);
-  }, [showDocument]);
+  const blockUnsupported = useCallback(
+    (format: Extract<ProjectNotesSaveOutcome, { status: "unsupported" }>) => {
+      modeRef.current = "unsupported";
+      setAuthorityReady(false);
+      settlePendingMutations(queueRef.current, "unavailable");
+      queueRef.current = [];
+      inFlightMutationIdRef.current = null;
+      if (authoritativeRef.current) showDocument(authoritativeRef.current.document);
+      setAuthorityDiagnostics([{ kind: "sidecar-unsupported", format }]);
+    },
+    [showDocument],
+  );
 
   useEffect(() => {
     const epoch = epochRef.current + 1;
@@ -363,8 +367,10 @@ export function useProjectNotes(
             opened.recoveredFromBackup || confirmRecovery || modeRef.current === "unsupported";
           const current = authoritativeRef.current;
           if (
-            recovering && current &&
-            opened.snapshot.revision <= current.revision && current !== requestBase
+            recovering &&
+            current &&
+            opened.snapshot.revision <= current.revision &&
+            current !== requestBase
           ) {
             // Backup provenance is not a rollback event. Re-read after intervening observations.
             void readAuthoritativeNotes(confirmRecovery);
@@ -580,7 +586,8 @@ export function useProjectNotes(
           mutation.cachedEvaluation = undefined;
           const adopted = adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch);
           if (
-            !adopted && authoritativeRef.current === authoritative &&
+            !adopted &&
+            authoritativeRef.current === authoritative &&
             outcome.snapshot.revision < authoritative.revision
           ) {
             // Confirm a possible storage rollback before rebasing onto a lower conflict snapshot.

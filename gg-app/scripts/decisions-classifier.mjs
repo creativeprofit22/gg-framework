@@ -148,10 +148,7 @@ function verificationFacts(repoRoot, mergeOid) {
     if (!existsSync(path) || statSync(path).size > MAX_MANIFEST_BYTES) continue;
     try {
       const manifest = JSON.parse(readFileSync(path, "utf8"));
-      if (
-        manifest?.verified === true &&
-        (manifest?.mergedHead === mergeOid || manifest?.decisionMerge === mergeOid)
-      ) {
+      if (manifest?.mergedHead === mergeOid || manifest?.decisionMerge === mergeOid) {
         matches.push(manifest);
       }
     } catch {
@@ -162,11 +159,12 @@ function verificationFacts(repoRoot, mergeOid) {
   const latest = matches[0];
   if (!latest) return { workflowVerified: false, checks: "not-recorded", installer: null };
   return {
-    workflowVerified: true,
+    workflowVerified:
+      latest.verified === true && (!Object.hasOwn(latest, "checks") || latest.checks === "passed"),
     phase: latest.phase,
     recordedAt: latest.timestamp,
-    // Existing manifests do not record whether checks were enabled.
-    checks: "not-recorded",
+    // Absence is legacy evidence, never proof that checks ran.
+    checks: Object.hasOwn(latest, "checks") ? latest.checks : "not-recorded",
     installer: latest.installer
       ? { sha256: latest.installer.sha256, size: latest.installer.size }
       : null,
@@ -199,7 +197,12 @@ function boundedDiff(repoRoot, from, to, path) {
 }
 
 export function generateDecisionSummaryContext(repoRoot, record) {
-  if (!record?.verification?.workflowVerified || !record?.verification?.recordedAt) {
+  if (
+    record?.verification?.workflowVerified !== true ||
+    !record?.verification?.recordedAt ||
+    (Object.hasOwn(record.verification, "checks") &&
+      !["passed", "not-recorded"].includes(record.verification.checks))
+  ) {
     throw new Error("Decision summary context requires a verified Decision record.");
   }
   const { merge, base, localParent, upstreamParent } = record.evidence ?? {};

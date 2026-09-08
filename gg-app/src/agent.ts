@@ -210,7 +210,11 @@ export interface LocalPatchedUpdateEvent {
   line?: string;
   stream?: "stdout" | "stderr";
   exitCode?: number | null;
+  /** Windows completed events report the validated installer handoff outcome. */
+  disposition?: "install-scheduled" | "existing-and-verified";
+  /** Non-Windows completed events supply installerPath/opened instead of disposition. */
   installerPath?: string | null;
+  /** Non-Windows result: whether the installer, its folder, or neither was opened. */
   opened?: "installer" | "folder" | "none";
 }
 
@@ -226,7 +230,7 @@ export interface VerifiedDecisionRecord {
     source: "agent" | "fallback";
     generatedAt: string;
   };
-  verification: { workflowVerified: true };
+  verification: { workflowVerified: true; checks?: "passed" | "not-recorded" };
   decisions: Array<{
     area: string;
     outcome: DecisionOutcome;
@@ -266,6 +270,9 @@ function isVerifiedDecisionRecord(value: unknown): value is VerifiedDecisionReco
     validSummary &&
     /^\d{4}-\d{2}-\d{2}$/.test(record.date ?? "") &&
     record.verification?.workflowVerified === true &&
+    (!Object.prototype.hasOwnProperty.call(record.verification, "checks") ||
+      record.verification.checks === "passed" ||
+      record.verification.checks === "not-recorded") &&
     Array.isArray(record.decisions) &&
     record.decisions.every(
       (decision) =>

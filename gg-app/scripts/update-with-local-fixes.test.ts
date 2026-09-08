@@ -110,6 +110,80 @@ function writeIdentityFixture(repo: string): void {
   );
 }
 
+// Real package commands, Vitest and Cargo exercise a tiny workspace, not the real checkout.
+function writeCheckedWorkspace(repo: string): void {
+  write(join(repo, ".gitignore"), ".gg/\nnode_modules/\ngg-app/src-tauri/target/\n");
+  write(join(repo, "pnpm-workspace.yaml"), "packages:\n  - gg-app\n  - packages/*\n");
+  write(
+    join(repo, "assert-merge.cjs"),
+    [
+      'const assert = require("node:assert/strict");',
+      'const { readFileSync, appendFileSync } = require("node:fs");',
+      'const { join } = require("node:path");',
+      'const text = readFileSync(join(__dirname, "shared.txt"), "utf8");',
+      "assert.match(text, /local one/);",
+      "assert.match(text, /upstream eleven/);",
+      'appendFileSync(join(__dirname, ".gg/checks-run.log"), "passed\\n");',
+    ].join("\n"),
+  );
+  for (const name of ["gg-ai", "gg-agent", "gg-core", "ggcoder", "gg-app"]) {
+    const dir = name === "gg-app" ? name : `packages/${name}`;
+    const command = `node ${name === "gg-app" ? ".." : "../.."}/assert-merge.cjs`;
+    write(
+      join(repo, dir, "package.json"),
+      JSON.stringify({
+        name: name === "gg-app" ? name : `@kenkaiiii/${name}`,
+        version: "1.2.3",
+        scripts: Object.fromEntries(
+          ["build", "check", "lint", "format:check"].map((key) => [key, command]),
+        ),
+      }),
+    );
+  }
+  write(
+    join(repo, "gg-app/vitest.config.mjs"),
+    "export default { test: { globals: true, fileParallelism: false } };\n",
+  );
+  for (const path of GG_APP_TARGETED_VITEST_PATHS) {
+    write(
+      join(repo, "gg-app", path),
+      [
+        'import { readFileSync } from "node:fs";',
+        'it("checks the integrated source", () => {',
+        '  const text = readFileSync("../shared.txt", "utf8");',
+        '  expect(text).toContain("local one");',
+        '  expect(text).toContain("upstream eleven");',
+        "});",
+      ].join("\n"),
+    );
+  }
+  write(
+    join(repo, "gg-app/src-tauri/src/lib.rs"),
+    '#[test]\nfn integrated_source() { let text = include_str!("../../../shared.txt"); assert!(text.contains("local one") && text.contains("upstream eleven")); }\n',
+  );
+  write(
+    join(repo, "gg-app/src-tauri/Cargo.lock"),
+    'version = 4\n[[package]]\nname = "gg-app"\nversion = "1.2.3"\n',
+  );
+}
+
+function checkedEnvironment(fixture: Fixture): NodeJS.ProcessEnv {
+  const bin = join(fixture.root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const vitest = join(repoRoot, "gg-app/node_modules/vitest/vitest.mjs");
+  if (process.platform === "win32") {
+    write(
+      join(bin, "vitest.cmd"),
+      `@echo off\r\n"${process.execPath}" "${vitest}" %*\r\nexit /b %errorlevel%\r\n`,
+    );
+  } else {
+    const launcher = join(bin, "vitest");
+    write(launcher, `#!/bin/sh\nexec "${process.execPath}" "${vitest}" "$@"\n`);
+    chmodSync(launcher, 0o755);
+  }
+  return { PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}` };
+}
+
 interface Fixture {
   root: string;
   repo: string;
@@ -118,7 +192,11 @@ interface Fixture {
   initialDirtyStatus: string;
 }
 
-function createUpdateFixture(conflict = false, meaningfulOverlap = false): Fixture {
+function createUpdateFixture(
+  conflict = false,
+  meaningfulOverlap = false,
+  checked = false,
+): Fixture {
   const root = tempDir("gg-local-update-");
   const upstream = join(root, "upstream.git");
   const origin = join(root, "origin.git");
@@ -129,6 +207,7 @@ function createUpdateFixture(conflict = false, meaningfulOverlap = false): Fixtu
   git(repo, "init", "--initial-branch", "main");
   configureRepository(repo);
   writeIdentityFixture(repo);
+  if (checked) writeCheckedWorkspace(repo);
   write(
     join(repo, "shared.txt"),
     meaningfulOverlap
@@ -316,8 +395,9 @@ describe("local-fixes updater", () => {
     const result = runUpdater(fixture.repo, args);
     expect(result.status, result.stderr).toBe(0);
     const mergedHead = git(fixture.repo, "rev-parse", "HEAD");
-    expect(git(fixture.repo, "rev-list", "--parents", "-n", "1", "HEAD").split(" ").slice(1))
-      .toEqual([startingHead, pin]);
+    expect(
+      git(fixture.repo, "rev-list", "--parents", "-n", "1", "HEAD").split(" ").slice(1),
+    ).toEqual([startingHead, pin]);
     expect(git(fixture.repo, "rev-parse", "upstream/main")).toBe(newer);
     expect(existsSync(join(fixture.repo, "unreviewed.txt"))).toBe(false);
     const retry = runUpdater(fixture.repo, args);
@@ -328,49 +408,97 @@ describe("local-fixes updater", () => {
     expect(readdirSync(backupRoot)).toHaveLength(2);
     for (const dir of readdirSync(backupRoot)) {
       const manifest = JSON.parse(readFileSync(join(backupRoot, dir, "manifest.json"), "utf8"));
-      const decisions = JSON.parse(readFileSync(join(backupRoot, dir, "decisions.json"), "utf8"));
-      expect(manifest).toMatchObject({ sourceOid: pin, decisionMerge: mergedHead, verified: true });
+      expect(existsSync(join(backupRoot, dir, "decisions.json"))).toBe(false);
+      expect(manifest).toMatchObject({
+        sourceOid: pin,
+        decisionMerge: mergedHead,
+        verified: false,
+        checks: "skipped",
+        phase: "source-updated-unverified",
+      });
       expect(manifest.mergeBase).toBe(git(fixture.repo, "merge-base", manifest.startingHead, pin));
-      expect(decisions.evidence.merge).toBe(mergedHead);
       expect(manifest.installer).toBeNull();
     }
-    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+      fixture.initialDirtyStatus,
+    );
     expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
-    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe("dirty untracked\n");
+    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+      "dirty untracked\n",
+    );
     expect(git(fixture.repo, "stash", "list")).toBe("");
     expect(result.stdout).not.toContain("build:local-patched");
     expect(result.stdout).not.toMatch(/^> git push/m);
   }, 30_000);
 
-  it.each(["short", "missing", "blob", "unrelated"])("rejects a %s pin before disturbing dirty work", (kind) => {
-    const fixture = createUpdateFixture();
-    const head = git(fixture.repo, "rev-parse", "HEAD");
-    const pin = kind === "short" ? "abc123"
-      : kind === "missing" ? "f".repeat(40)
-      : kind === "blob" ? git(fixture.repo, "rev-parse", "HEAD:local-two.txt")
-      : head;
-    const beforeBranches = git(fixture.repo, "for-each-ref", "refs/heads", "--format=%(refname) %(objectname)");
-    const result = runUpdater(fixture.repo, ["--source-commit", pin, "--no-install", "--no-build"]);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(kind === "short" ? "full 40-character hex commit ID"
-      : kind === "unrelated" ? "must be an ancestor" : "existing commit");
-    expect(git(fixture.repo, "rev-parse", "HEAD")).toBe(head);
-    expect(git(fixture.repo, "for-each-ref", "refs/heads", "--format=%(refname) %(objectname)")).toBe(beforeBranches);
-    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
-    expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
-    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe("dirty untracked\n");
-    expect(git(fixture.repo, "stash", "list")).toBe("");
-    expect(existsSync(join(fixture.repo, ".gg"))).toBe(false);
-    expect(result.stdout).not.toMatch(/^> git (?:stash |merge |branch (?!--show-current))/m);
-  }, 30_000);
+  it.each(["short", "missing", "blob", "unrelated"])(
+    "rejects a %s pin before disturbing dirty work",
+    (kind) => {
+      const fixture = createUpdateFixture();
+      const head = git(fixture.repo, "rev-parse", "HEAD");
+      const pin =
+        kind === "short"
+          ? "abc123"
+          : kind === "missing"
+            ? "f".repeat(40)
+            : kind === "blob"
+              ? git(fixture.repo, "rev-parse", "HEAD:local-two.txt")
+              : head;
+      const beforeBranches = git(
+        fixture.repo,
+        "for-each-ref",
+        "refs/heads",
+        "--format=%(refname) %(objectname)",
+      );
+      const result = runUpdater(fixture.repo, [
+        "--source-commit",
+        pin,
+        "--no-install",
+        "--no-build",
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        kind === "short"
+          ? "full 40-character hex commit ID"
+          : kind === "unrelated"
+            ? "must be an ancestor"
+            : "existing commit",
+      );
+      expect(git(fixture.repo, "rev-parse", "HEAD")).toBe(head);
+      expect(
+        git(fixture.repo, "for-each-ref", "refs/heads", "--format=%(refname) %(objectname)"),
+      ).toBe(beforeBranches);
+      expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+        fixture.initialDirtyStatus,
+      );
+      expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe(
+        "two\ndirty tracked\n",
+      );
+      expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+        "dirty untracked\n",
+      );
+      expect(git(fixture.repo, "stash", "list")).toBe("");
+      expect(existsSync(join(fixture.repo, ".gg"))).toBe(false);
+      expect(result.stdout).not.toMatch(/^> git (?:stash |merge |branch (?!--show-current))/m);
+    },
+    30_000,
+  );
 
   it("dry-runs a pin without fetching or changing refs or dirty bytes", () => {
     const fixture = createUpdateFixture();
     const refs = git(fixture.repo, "show-ref");
-    const result = runUpdater(fixture.repo, ["--source-commit", git(fixture.repo, "rev-parse", "main"), "--dry-run", "--no-install", "--no-build"]);
+    const result = runUpdater(fixture.repo, [
+      "--source-commit",
+      git(fixture.repo, "rev-parse", "main"),
+      "--dry-run",
+      "--no-install",
+      "--no-build",
+    ]);
     expect(result.status, result.stderr).toBe(0);
     expect(git(fixture.repo, "show-ref")).toBe(refs);
-    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(fixture.initialDirtyStatus);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+      fixture.initialDirtyStatus,
+    );
     expect(existsSync(join(fixture.repo, ".gg"))).toBe(false);
   }, 30_000);
 
@@ -423,8 +551,9 @@ describe("local-fixes updater", () => {
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
     const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
     const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
-    expect(manifest.verified).toBe(true);
-    expect(manifest.phase).toBe("verified");
+    expect(manifest.verified).toBe(false);
+    expect(manifest.checks).toBe("skipped");
+    expect(manifest.phase).toBe("source-updated-unverified");
     expect(manifest.dirtyWorkApplied).toBe(true);
     expect(manifest.localCommits.map((commit: { subject: string }) => commit.subject)).toEqual([
       "local one",
@@ -435,16 +564,66 @@ describe("local-fixes updater", () => {
     expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
   }, 30_000);
 
-  it("stores meaningful decisions beside the verified sync manifest", () => {
-    const fixture = createUpdateFixture(false, true);
-    const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+  it.each([false, true])(
+    "keeps skipped-check source updates unverified (summary opt-in: %s)",
+    (summary) => {
+      const fixture = createUpdateFixture(false, true);
+      const result = runUpdater(fixture.repo, [
+        "--no-install",
+        "--no-build",
+        "--no-check",
+        ...(summary ? ["--decision-summary-context"] : []),
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      const backupRoot = join(fixture.repo, ".gg/local-fixes/backups");
+      const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+      const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
+      expect(manifest).toMatchObject({
+        verified: false,
+        checks: "skipped",
+        phase: "source-updated-unverified",
+        dirtyWorkApplied: true,
+      });
+      expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
+      expect(existsSync(join(syncDir, "decision-summary-context.json"))).toBe(false);
+      expect(result.stdout).toContain("checks skipped, outcome unverified");
+      expect(result.stdout).not.toContain("Verified local merge complete");
+      expect(result.stdout).not.toMatch(/^> git push/m);
+      expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+        fixture.initialDirtyStatus,
+      );
+      expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe(
+        "two\ndirty tracked\n",
+      );
+      expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+        "dirty untracked\n",
+      );
+      expect(git(fixture.repo, "stash", "list")).toBe("");
+      expect(git(fixture.repo, "rev-parse", manifest.backupBranch)).toBe(manifest.startingHead);
+    },
+    30_000,
+  );
+
+  it("stores meaningful decisions only after real workspace checks pass", () => {
+    const fixture = createUpdateFixture(false, true, true);
+    const result = runUpdater(
+      fixture.repo,
+      ["--no-install", "--no-build", "--check"],
+      checkedEnvironment(fixture),
+    );
 
     expect(result.status, result.stderr).toBe(0);
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
     const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
     const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
     const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
-    expect(manifest).toMatchObject({ verified: true, phase: "verified" });
+    expect(manifest).toMatchObject({ verified: true, phase: "verified", checks: "passed" });
+    expect(decisions.verification.checks).toBe("passed");
+    expect(
+      readFileSync(join(fixture.repo, ".gg/checks-run.log"), "utf8").trim().split("\n"),
+    ).toHaveLength(7);
+    expect(result.stdout).toContain("11 passed");
+    expect(result.stdout).toContain("test integrated_source ... ok");
     expect(manifest).not.toHaveProperty("mergeCreated");
     expect(manifest).not.toHaveProperty("decisionsPath");
     expect(decisions.decisions).toEqual([
@@ -464,13 +643,12 @@ describe("local-fixes updater", () => {
   }, 30_000);
 
   it("writes correlated summary context only after an opted-in verified overlap", () => {
-    const fixture = createUpdateFixture(false, true);
-    const result = runUpdater(fixture.repo, [
-      "--no-install",
-      "--no-build",
-      "--no-check",
-      "--decision-summary-context",
-    ]);
+    const fixture = createUpdateFixture(false, true, true);
+    const result = runUpdater(
+      fixture.repo,
+      ["--no-install", "--no-build", "--check", "--decision-summary-context"],
+      checkedEnvironment(fixture),
+    );
 
     expect(result.status, result.stderr).toBe(0);
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
@@ -547,19 +725,22 @@ describe("local-fixes updater", () => {
   }, 30_000);
 
   it("stops after a failed check without writing meaningful decisions", () => {
-    const fixture = createUpdateFixture(false, true);
-    const bin = join(fixture.root, "bin");
-    mkdirSync(bin);
-    if (process.platform === "win32") {
-      write(join(bin, "pnpm.cmd"), "@echo off\r\nexit /b 7\r\n");
-    } else {
-      const fakePnpm = join(bin, "pnpm");
-      write(fakePnpm, "#!/bin/sh\nexit 7\n");
-      chmodSync(fakePnpm, 0o755);
-    }
-    const result = runUpdater(fixture.repo, ["--source-commit", git(fixture.repo, "rev-parse", "main"), "--no-install", "--no-build"], {
-      PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
-    });
+    const fixture = createUpdateFixture(false, true, true);
+    const checkPath = join(fixture.repo, "assert-merge.cjs");
+    write(checkPath, `${readFileSync(checkPath, "utf8")}\nassert.fail("fixture check failure");\n`);
+    git(fixture.repo, "add", "assert-merge.cjs");
+    git(fixture.repo, "commit", "-m", "introduce failing fixture assertion");
+    const result = runUpdater(
+      fixture.repo,
+      [
+        "--source-commit",
+        git(fixture.repo, "rev-parse", "main"),
+        "--no-install",
+        "--no-build",
+        "--decision-summary-context",
+      ],
+      checkedEnvironment(fixture),
+    );
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("build failed");
@@ -572,6 +753,8 @@ describe("local-fixes updater", () => {
     const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
     expect(manifest.phase).toBe("source-verified");
     expect(manifest.verified).toBe(false);
+    expect(manifest.checks).toBe("failed");
+    expect(existsSync(join(syncDir, "decision-summary-context.json"))).toBe(false);
     expect(manifest).not.toHaveProperty("mergeCreated");
     expect(manifest).not.toHaveProperty("decisionsPath");
     expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
@@ -586,8 +769,8 @@ describe("local-fixes updater", () => {
   }, 30_000);
 
   it("records merge decisions when verification succeeds after remediation", () => {
-    const fixture = createUpdateFixture(false, true);
-    const bin = join(fixture.root, "bin");
+    const fixture = createUpdateFixture(false, true, true);
+    const bin = join(fixture.root, "failing-bin");
     mkdirSync(bin);
     if (process.platform === "win32") {
       write(join(bin, "pnpm.cmd"), "@echo off\r\nexit /b 7\r\n");
@@ -606,7 +789,11 @@ describe("local-fixes updater", () => {
     git(fixture.repo, "commit", "-m", "remediate verification");
     git(fixture.repo, "push", "origin", "custom/local-customizations");
 
-    const retry = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+    const retry = runUpdater(
+      fixture.repo,
+      ["--no-install", "--no-build", "--check"],
+      checkedEnvironment(fixture),
+    );
 
     expect(retry.status, retry.stderr).toBe(0);
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
@@ -621,8 +808,15 @@ describe("local-fixes updater", () => {
     expect(decisions.verification.workflowVerified).toBe(true);
   }, 30_000);
 
-  it("rejects push when checks or build are disabled", () => {
-    const result = runUpdater(repoRoot, ["--source-commit", "a".repeat(40), "--dry-run", "--push", "--no-build"]);
+  it.each(["--no-build", "--no-check"])("rejects push with %s", (disabled) => {
+    const fixture = createLocalOnlyFixture();
+    const result = runUpdater(fixture.repo, [
+      "--source-commit",
+      "a".repeat(40),
+      "--dry-run",
+      "--push",
+      disabled,
+    ]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("--push requires checks and installer build");
   });

@@ -59,7 +59,7 @@ Options:
   --no-install           Skip dependency refresh
   --no-build             Skip installer build (incompatible with --push)
   --check                Run required checks (default)
-  --no-check             Skip checks (incompatible with --push)
+  --no-check             Skip checks; unverified source update only (incompatible with --push)
   --decision-summary-context  Write bounded verified diff evidence for an opted-in summary
   --dry-run              Print the workflow without changing Git or files
   -h, --help             Show this help
@@ -559,6 +559,7 @@ async function main() {
     dirtyWorkApplied: false,
     phase: "initialized",
     verified: false,
+    checks: options.check ? "pending" : "skipped",
     manifestPath,
   };
   let mergeCreated = false;
@@ -579,7 +580,9 @@ async function main() {
   let sourceOid = options.sourceCommit ?? "<resolved-source-commit>";
   if (!options.dryRun) {
     const fetchedTip = capture("git", [
-      "rev-parse", "--verify", `refs/remotes/${remote}/${branch}^{commit}`,
+      "rev-parse",
+      "--verify",
+      `refs/remotes/${remote}/${branch}^{commit}`,
     ]).stdout.trim();
     sourceOid = options.sourceCommit ?? fetchedTip;
     if (options.sourceCommit) {
@@ -595,7 +598,9 @@ async function main() {
       );
     }
   } else {
-    console.log(`[dry-run] resolve immutable source OID${options.sourceCommit ? " and verify pinned commit ancestry" : ""}`);
+    console.log(
+      `[dry-run] resolve immutable source OID${options.sourceCommit ? " and verify pinned commit ancestry" : ""}`,
+    );
   }
   let originFetched = false;
   if (gitRemotes().includes(DEFAULT_PUSH_REMOTE)) {
@@ -703,8 +708,21 @@ async function main() {
       );
     }
     if (options.check) {
-      runWorkspaceChecks(options);
       if (!options.dryRun) {
+        manifest.checks = "running";
+        writeJson(manifestPath, manifest);
+      }
+      try {
+        runWorkspaceChecks(options);
+      } catch (error) {
+        if (!options.dryRun) {
+          manifest.checks = "failed";
+          writeJson(manifestPath, manifest);
+        }
+        throw error;
+      }
+      if (!options.dryRun) {
+        manifest.checks = "passed";
         manifest.phase = "checks-passed";
         writeJson(manifestPath, manifest);
       }
@@ -766,12 +784,12 @@ async function main() {
         `Dependency refresh, checks, or build changed preserved dirty files: ${changedPaths.join(", ")}.`,
       );
     }
-    manifest.verified = true;
-    manifest.phase = "verified";
+    manifest.verified = manifest.checks === "passed";
+    manifest.phase = manifest.verified ? "verified" : "source-updated-unverified";
     writeJson(manifestPath, manifest);
-    if (manifest.decisionMerge) {
+    if (manifest.verified && manifest.decisionMerge) {
       const decisions = generateDecisionRecord(repoRoot, manifest.decisionMerge);
-      if (decisions.decisions.length > 0) {
+      if (decisions.verification.workflowVerified && decisions.decisions.length > 0) {
         decisions.schemaVersion = 3;
         decisions.summary = {
           text: fallbackDecisionSummary(decisions.decisions),
@@ -821,13 +839,16 @@ async function main() {
     if (currentStash.status === 0 && currentStash.stdout.trim() === manifest.stashOid) {
       requireSuccess(
         run("git", ["stash", "drop", "stash@{0}"]),
-        "Verified update succeeded, but backup stash cleanup failed.",
+        "Source update succeeded, but backup stash cleanup failed.",
       );
     } else {
       console.log(`Retained dirty-work stash ${manifest.stashOid}; the stash stack changed.`);
     }
   }
-  console.log(`Verified local merge complete. Safety branch retained: ${backupBranch}`);
+  const outcome = options.check
+    ? "Verified local merge complete"
+    : "Source update complete; checks skipped, outcome unverified";
+  console.log(`${outcome}. Safety branch retained: ${backupBranch}`);
   if (!options.push) console.log("Push disabled. Review the manifest before any explicit push.");
 }
 

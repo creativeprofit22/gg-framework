@@ -12,33 +12,36 @@ import { getVerifiedDecisions, startLocalPatchedUpdate } from "./agent";
 beforeEach(() => invoke.mockReset());
 
 describe("decisions IPC bridge", () => {
-  it("loads verified decision records from the requested source checkout", async () => {
-    const records = [
-      {
-        id: "decision-abc",
-        date: "2026-08-24",
-        summary: {
-          text: "Your local behavior remains available after the protected update.",
-          source: "agent",
-          generatedAt: "2026-08-24T10:00:15.000Z",
-        },
-        verification: { workflowVerified: true },
-        decisions: [
-          {
-            area: "gg-app/src/WhatsNewWindow",
-            outcome: "combined",
-            files: [{ path: "gg-app/src/WhatsNewWindow.tsx" }],
+  it.each(["passed", "not-recorded", undefined])(
+    "loads %s verified provenance without inventing legacy checks",
+    async (checks) => {
+      const records = [
+        {
+          id: "decision-abc",
+          date: "2026-08-24",
+          summary: {
+            text: "Your local behavior remains available after the protected update.",
+            source: "agent",
+            generatedAt: "2026-08-24T10:00:15.000Z",
           },
-        ],
-      },
-    ];
-    invoke.mockResolvedValue(records);
+          verification: { workflowVerified: true, ...(checks === undefined ? {} : { checks }) },
+          decisions: [
+            {
+              area: "gg-app/src/WhatsNewWindow",
+              outcome: "combined",
+              files: [{ path: "gg-app/src/WhatsNewWindow.tsx" }],
+            },
+          ],
+        },
+      ];
+      invoke.mockResolvedValue(records);
 
-    await expect(getVerifiedDecisions("C:/source")).resolves.toEqual(records);
-    expect(invoke).toHaveBeenCalledWith("app_verified_decisions", {
-      repoRoot: "C:/source",
-    });
-  });
+      await expect(getVerifiedDecisions("C:/source")).resolves.toEqual(records);
+      expect(invoke).toHaveBeenCalledWith("app_verified_decisions", {
+        repoRoot: "C:/source",
+      });
+    },
+  );
 
   it("passes explicit summary consent through native IPC", async () => {
     invoke.mockResolvedValue({ started: true });
@@ -74,6 +77,26 @@ describe("decisions IPC bridge", () => {
     ]);
     await expect(getVerifiedDecisions("C:/source")).rejects.toThrow("invalid decisions response");
   });
+
+  it.each(["skipped", "failed", "pending", "running", "unknown", null, true])(
+    "rejects %s checks despite workflowVerified",
+    async (checks) => {
+      invoke.mockResolvedValue([
+        {
+          id: "decision-abc",
+          date: "2026-08-24",
+          summary: {
+            text: "Your local behavior remains available after the protected update.",
+            source: "fallback",
+            generatedAt: "2026-08-24T10:00:15.000Z",
+          },
+          verification: { workflowVerified: true, checks },
+          decisions: [],
+        },
+      ]);
+      await expect(getVerifiedDecisions("C:/source")).rejects.toThrow("invalid decisions response");
+    },
+  );
 
   it("rejects unverified or malformed native responses", async () => {
     invoke.mockResolvedValue([

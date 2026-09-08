@@ -55,6 +55,27 @@ struct DecisionEvidence {
 struct DecisionVerification {
     workflow_verified: bool,
     recorded_at: String,
+    #[serde(default)]
+    checks: CheckDisposition,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum CheckDisposition {
+    #[default]
+    NotRecorded,
+    Pending,
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+}
+
+fn explicit_checks<'de, D>(deserializer: D) -> Result<Option<CheckDisposition>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    CheckDisposition::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -118,6 +139,8 @@ enum DecisionSummarySource {
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
     verified: bool,
+    #[serde(default, deserialize_with = "explicit_checks")]
+    checks: Option<CheckDisposition>,
     merged_head: String,
     #[serde(default)]
     decision_merge: Option<String>,
@@ -233,6 +256,10 @@ fn valid_record(record: &DecisionRecord) -> bool {
         .into_iter()
         .all(|value| oid(value))
         && record.verification.workflow_verified
+        && matches!(
+            record.verification.checks,
+            CheckDisposition::Passed | CheckDisposition::NotRecorded
+        )
         && timestamp(&record.verification.recorded_at)
         && !record.decisions.is_empty()
         && record.decisions.len() <= MAX_RECORDS
@@ -381,6 +408,13 @@ pub fn initialize_project_decisions(repo_root: &Path) {
 
 fn correlated(manifest: &BackupManifest, record: &DecisionRecord) -> bool {
     manifest.verified
+        && match manifest.checks {
+            Some(CheckDisposition::Passed) => {
+                record.verification.checks == CheckDisposition::Passed
+            }
+            None => record.verification.checks == CheckDisposition::NotRecorded,
+            _ => false,
+        }
         && valid_record(record)
         && manifest
             .decision_merge
@@ -423,7 +457,17 @@ pub fn load_verified_decisions(repo_root: &Path) -> Vec<DecisionRecord> {
             records.push(with_fallback(record));
         }
     }
-    records.sort_by(|left, right| right.date.cmp(&left.date).then(left.id.cmp(&right.id)));
+    // Stable sorting preserves directory order when timestamp, date, and ID all tie.
+    records.sort_by_cached_key(|record| {
+        (
+            std::cmp::Reverse(
+                DateTime::parse_from_rfc3339(&record.verification.recorded_at)
+                    .expect("correlated records have validated timestamps"),
+            ),
+            std::cmp::Reverse(record.date.clone()),
+            record.id.clone(),
+        )
+    });
     let mut seen_ids = HashSet::new();
     let mut seen_merges = HashSet::new();
     records.retain(|record| {
@@ -665,6 +709,100 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[test]
+    fn decisions_and_summary_context_require_correlated_check_dispositions() {
+        let dispositions = [
+            None,
+            Some(serde_json::json!("not-recorded")),
+            Some(serde_json::json!("passed")),
+            Some(serde_json::json!("skipped")),
+            Some(serde_json::json!("failed")),
+            Some(serde_json::json!("pending")),
+            Some(serde_json::json!("running")),
+            Some(serde_json::json!("unknown")),
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(true)),
+        ];
+        for manifest_checks in &dispositions {
+            for record_checks in &dispositions {
+                let root = root();
+                let mut record = fixture("provenance", "2026-08-24", 'a', 3);
+                record["verification"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("checks");
+                if let Some(checks) = record_checks {
+                    record["verification"]["checks"] = checks.clone();
+                }
+                let dir = write_backup(&root, "update", record.clone(), true);
+                let manifest_path = dir.join("manifest.json");
+                let mut manifest: serde_json::Value = read_json(&manifest_path).unwrap();
+                if let Some(checks) = manifest_checks {
+                    manifest["checks"] = checks.clone();
+                }
+                let original_manifest = serde_json::to_vec(&manifest).unwrap();
+                fs::write(&manifest_path, &original_manifest).unwrap();
+                let original_record = fs::read(dir.join("decisions.json")).unwrap();
+                let passed = Some(serde_json::json!("passed"));
+                let legacy = Some(serde_json::json!("not-recorded"));
+                let expected = (manifest_checks == &passed && record_checks == &passed)
+                    || (manifest_checks.is_none()
+                        && (record_checks.is_none() || record_checks == &legacy));
+                assert_eq!(
+                    load_verified_decisions(&root).len(),
+                    usize::from(expected),
+                    "manifest={manifest_checks:?}, record={record_checks:?}"
+                );
+                write_context(&dir, &record);
+                let pending = load_pending_decision_summary(&root);
+                assert_eq!(
+                    pending.is_ok(),
+                    expected,
+                    "summary manifest={manifest_checks:?}, record={record_checks:?}"
+                );
+                if expected {
+                    assert!(pending.unwrap().is_some());
+                }
+                assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
+                assert_eq!(
+                    fs::read(dir.join("decisions.json")).unwrap(),
+                    original_record
+                );
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn summary_completion_rechecks_checks_and_preserves_checked_provenance() {
+        for skip_before_completion in [false, true] {
+            let root = root();
+            let mut record = fixture("checked", "2026-08-24", 'a', 3);
+            record["verification"]["checks"] = serde_json::json!("passed");
+            let dir = write_backup(&root, "update", record.clone(), true);
+            let path = dir.join("manifest.json");
+            let mut manifest: serde_json::Value = read_json(&path).unwrap();
+            manifest["checks"] = serde_json::json!("passed");
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            write_context(&dir, &record);
+            let pending = load_pending_decision_summary(&root).unwrap().unwrap();
+            if skip_before_completion {
+                manifest["checks"] = serde_json::json!("skipped");
+                fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+            let original = fs::read(dir.join("decisions.json")).unwrap();
+            let result = complete_pending_decision_summary(pending, Some(FALLBACK_SUMMARY));
+            assert_eq!(result.is_ok(), !skip_before_completion);
+            if skip_before_completion {
+                assert_eq!(fs::read(dir.join("decisions.json")).unwrap(), original);
+            } else {
+                let saved: serde_json::Value = read_json(&dir.join("decisions.json")).unwrap();
+                assert_eq!(saved["verification"]["checks"], "passed");
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -1194,6 +1332,100 @@ mod tests {
         );
         assert_eq!(load_verified_decisions(&root).len(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_decisions_order_by_instant_before_date_and_id() {
+        let root = root();
+        for (id, date, merge, schema, recorded_at) in [
+            (
+                "decision-a",
+                "2026-08-24",
+                'a',
+                3,
+                "2026-08-24T12:00:00+02:00",
+            ),
+            ("decision-f", "2026-08-24", 'f', 3, "2026-08-24T11:00:00Z"),
+            (
+                "decision-b",
+                "2026-08-20",
+                'b',
+                2,
+                "2026-08-24T11:00:00.001Z",
+            ),
+        ] {
+            let mut record = fixture(id, date, merge, schema);
+            record["verification"]["recordedAt"] = serde_json::json!(recorded_at);
+            write_backup(&root, id, record, true);
+        }
+        let records = load_verified_decisions(&root);
+        assert_eq!(
+            records.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(),
+            ["decision-b", "decision-f", "decision-a"]
+        );
+        assert_eq!(records[0].date, "2026-08-20");
+        assert_eq!(records[0].summary.as_ref().unwrap().text, FALLBACK_SUMMARY);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_decisions_equal_instants_preserve_id_and_directory_ties() {
+        let root = root();
+        let mut first = fixture("decision-a", "2026-08-24", 'a', 3);
+        first["verification"]["recordedAt"] = serde_json::json!("2026-08-24T10:00:00Z");
+        let mut second = first.clone();
+        second["verification"]["recordedAt"] = serde_json::json!("2026-08-24T12:00:00+02:00");
+        second["summary"]["text"] = serde_json::json!(
+            "Your later directory must not replace the first record at the same instant."
+        );
+        write_backup(&root, "a-first", first, true);
+        write_backup(&root, "b-second", second.clone(), true);
+        second["id"] = serde_json::json!("decision-f");
+        second["evidence"]["merge"] = serde_json::json!("f".repeat(40));
+        write_backup(&root, "0-other-merge", second, true);
+
+        let records = load_verified_decisions(&root);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, "decision-a");
+        assert_eq!(records[0].summary.as_ref().unwrap().text, FALLBACK_SUMMARY);
+        assert_eq!(records[1].id, "decision-f");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_decisions_keep_freshest_duplicate_without_changing_evidence() {
+        for (new_id, new_merge) in
+            [("decision-a", 'a'), ("decision-f", 'a'), ("decision-a", 'f')]
+        {
+            let root = root();
+            let mut old = fixture("decision-a", "2026-08-24", 'a', 3);
+            old["verification"]["recordedAt"] = serde_json::json!("2026-08-24T12:00:00+02:00");
+            let mut new = fixture(new_id, "2026-08-24", new_merge, 3);
+            new["verification"]["recordedAt"] = serde_json::json!("2026-08-24T11:00:00Z");
+            let summary = "Your latest protected update keeps your settings and includes the newest improvements.";
+            new["summary"]["text"] = serde_json::json!(summary);
+            let old_dir = write_backup(&root, "2026-08-24T10-00-00Z", old, true);
+            let new_dir = write_backup(&root, "2026-08-24T11-00-00Z", new, true);
+            let evidence: Vec<_> = [old_dir, new_dir]
+                .into_iter()
+                .flat_map(|dir| [dir.join("manifest.json"), dir.join("decisions.json")])
+                .map(|path| {
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+
+            let records = load_verified_decisions(&root);
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].id, new_id);
+            assert_eq!(records[0].date, "2026-08-24");
+            assert_eq!(records[0].verification.recorded_at, "2026-08-24T11:00:00Z");
+            assert_eq!(records[0].summary.as_ref().unwrap().text, summary);
+            for (path, bytes) in evidence {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { useState } from "react";
+import type { LocalPatchedUpdateEvent } from "./agent";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -97,8 +98,29 @@ describe("useAppUpdate local-fork isolation", () => {
     expect(mocks.check).not.toHaveBeenCalled();
   });
 
-  it("preserves installing and completed phases across poll results", async () => {
-    let listener: ((event: { type: string; installerPath?: string }) => void) | undefined;
+  it.each<LocalPatchedUpdateEvent>([
+    {
+      type: "completed",
+      exitCode: 0,
+      disposition: "install-scheduled",
+      message: "Verified replacement scheduled. GG Coder will close and restart after installation.",
+    },
+    {
+      type: "completed",
+      exitCode: 0,
+      disposition: "existing-and-verified",
+      message: "Patched installer built under gg-app/src-tauri/target/release/bundle.",
+    },
+    {
+      type: "completed",
+      exitCode: 0,
+      installerPath: "/tmp/LocalFork.dmg",
+      opened: "installer",
+      message: "Patched installer built and opened. Finish installation to update the app.",
+    },
+    { type: "completed", installerPath: "C:/installer.exe" },
+  ])("preserves completion and messages for %j", async (completion) => {
+    let listener: ((event: LocalPatchedUpdateEvent) => void) | undefined;
     mocks.listenLocal.mockImplementation(async (callback: typeof listener) => {
       listener = callback;
       return vi.fn();
@@ -107,9 +129,11 @@ describe("useAppUpdate local-fork isolation", () => {
     await waitFor(() => expect(listener).toBeDefined());
     act(() => listener?.({ type: "started" }));
     await waitFor(() => expect(result.current.phase).toBe("installing"));
-    act(() => listener?.({ type: "completed", installerPath: "C:/installer.exe" }));
+    expect(result.current.statusMessage).toBe("Starting protected source merge…");
+    act(() => listener?.(completion));
     expect(result.current.phase).toBe("completed");
-    expect(result.current.installerPath).toBe("C:/installer.exe");
+    expect(result.current.installerPath).toBe(completion.installerPath ?? null);
+    expect(result.current.statusMessage).toBe(completion.message ?? "Patched installer built.");
   });
 
   it("waits for local listener readiness before starting exactly once", async () => {

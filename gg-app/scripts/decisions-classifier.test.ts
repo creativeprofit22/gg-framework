@@ -1,14 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   DECISION_SUMMARY_CONTEXT_MAX_BYTES,
   DECISION_SUMMARY_DIFF_MAX_BYTES,
   classifyBlobOutcome,
   fallbackDecisionSummary,
   generateDecisionSummaryContext,
+  generateDecisionRecord,
   groupDecisionAreas,
   isDecisionNoise,
 } from "./decisions-classifier.mjs";
@@ -104,6 +105,71 @@ describe("fallbackDecisionSummary", () => {
   });
 });
 
+describe("verification provenance", () => {
+  const recordedAt = "2026-08-24T10:00:15.000Z";
+  function manifest(checks: unknown, verified = true, name = "update", timestamp = recordedAt) {
+    const directory = join(fixtureRoot, ".gg/local-fixes/backups", name);
+    mkdirSync(directory, { recursive: true });
+    const path = join(directory, "manifest.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        verified,
+        mergedHead: fixtureEvidence.merge,
+        timestamp,
+        phase: "verified",
+        ...(checks === undefined ? {} : { checks }),
+      }),
+    );
+    return path;
+  }
+  afterEach(() => rmSync(join(fixtureRoot, ".gg"), { recursive: true, force: true }));
+
+  it.each(["passed", undefined])(
+    "preserves %s evidence without inventing legacy checks",
+    (checks) => {
+      const path = manifest(checks);
+      const before = readFileSync(path);
+      const record = generateDecisionRecord(fixtureRoot, fixtureEvidence.merge);
+      expect(record.verification).toMatchObject({
+        workflowVerified: true,
+        checks: checks ?? "not-recorded",
+        recordedAt,
+      });
+      expect(readFileSync(path)).toEqual(before);
+    },
+  );
+
+  it.each(["skipped", "failed", "pending", "running", "not-recorded", "unknown", null, true])(
+    "does not promote explicit %s checks even when verified is true",
+    (checks) => {
+      manifest(checks);
+      const record = generateDecisionRecord(fixtureRoot, fixtureEvidence.merge);
+      expect(record.verification).toMatchObject({ workflowVerified: false, checks });
+      expect(() => generateDecisionSummaryContext(fixtureRoot, record)).toThrow(
+        "requires a verified Decision record",
+      );
+    },
+  );
+
+  it("does not reuse an older checked run for a newer skipped run", () => {
+    manifest("passed", true, "older");
+    manifest("skipped", false, "newer", "2026-08-25T10:00:15.000Z");
+    expect(generateDecisionRecord(fixtureRoot, fixtureEvidence.merge).verification).toMatchObject({
+      workflowVerified: false,
+      checks: "skipped",
+      recordedAt: "2026-08-25T10:00:15.000Z",
+    });
+  });
+
+  it("does not promote passed checks when the rest of the workflow failed", () => {
+    manifest("passed", false);
+    expect(
+      generateDecisionRecord(fixtureRoot, fixtureEvidence.merge).verification.workflowVerified,
+    ).toBe(false);
+  });
+});
+
 describe("decision summary context", () => {
   function record() {
     return {
@@ -123,6 +189,19 @@ describe("decision summary context", () => {
       ],
     };
   }
+
+  it.each(["skipped", "failed", "pending", "running", "unknown", null, true])(
+    "rejects %s checks even on a record claiming workflow verification",
+    (checks) => {
+      const value = record();
+      expect(() =>
+        generateDecisionSummaryContext(fixtureRoot, {
+          ...value,
+          verification: { ...value.verification, checks },
+        }),
+      ).toThrow("requires a verified Decision record");
+    },
+  );
 
   it("includes every Decision with argv-safe, bounded, explicitly truncated diffs", () => {
     const context = generateDecisionSummaryContext(fixtureRoot, record());

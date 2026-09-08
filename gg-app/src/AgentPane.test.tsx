@@ -8,6 +8,7 @@ import type * as EventsModule from "./useAgentEvents";
 import type * as ToastModule from "./toast";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
+import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
 
 HTMLElement.prototype.scrollTo = vi.fn();
 Element.prototype.scrollIntoView = vi.fn();
@@ -338,7 +339,6 @@ function liveEvents(pane: PaneAgentClient) {
 }
 
 function client(paneId: string, generation: number): PaneAgentClient {
-  const empty = vi.fn(async () => []);
   return {
     paneId,
     create: vi.fn(async () => generation),
@@ -384,10 +384,10 @@ function client(paneId: string, generation: number): PaneAgentClient {
     getRoadmapPhaseDraft: vi.fn(async () => null),
     approveRoadmapPhaseDraft: vi.fn(),
     rejectRoadmapPhaseDraft: vi.fn(),
-    listModels: empty,
-    listCommands: empty,
-    listTasks: empty,
-    listHistory: empty,
+    listModels: vi.fn(async () => []),
+    listCommands: vi.fn(async () => []),
+    listTasks: vi.fn(async () => []),
+    listHistory: vi.fn(async () => []),
     getProgress: vi.fn(async () => null),
     listMemories: vi.fn(),
     deleteMemory: vi.fn(),
@@ -487,6 +487,196 @@ afterEach(() => {
   nativeMocks.appUpdate.localPatched = true;
   nativeMocks.appUpdate.install.mockReset();
   vi.useRealTimers();
+});
+
+describe("completed verification task (mocked native transport)", () => {
+  it.each(["agent_done", "run_end"])(
+    "renders the held final answer after %s and after reloading saved history",
+    async (completion) => {
+      nativeMocks.realMentor = true;
+      const pane = client("completed-verification-task", 1);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      const history = completedVerificationTask.history as AgentModule.HistoryEntry[];
+      vi.mocked(pane.listHistory).mockResolvedValue(history.slice(0, 2));
+      const view = render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      await screen.findByText("Preserve existing changes and update only the sample window.");
+
+      await act(async () => {
+        for (const event of completedVerificationTask.events) {
+          if (event.type !== "agent_done" && event.type !== "run_end") emit(event.type, event.data);
+        }
+      });
+      expect(screen.queryByText(completedVerificationTask.finalAnswer)).toBeNull();
+      await act(async () => {
+        emit(completion, { outcome: "completed", cancelled: false });
+      });
+      expect(
+        screen.getByText(completedVerificationTask.finalAnswer).closest(".assistant-msg"),
+      ).not.toBeNull();
+      await act(async () => {
+        emit("run_end", { outcome: "completed", cancelled: false });
+      });
+      expect(screen.getAllByText(completedVerificationTask.finalAnswer)).toHaveLength(1);
+      expect(screen.queryByText("Initial implementation draft.")).toBeNull();
+      expect(screen.queryByText("Verification completed draft.")).toBeNull();
+      expect(screen.getAllByText(/Hook engaged/)).toHaveLength(2);
+
+      view.unmount();
+      vi.mocked(pane.listHistory).mockResolvedValue(history);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      expect(
+        (await screen.findByText(completedVerificationTask.finalAnswer)).closest(".assistant-msg"),
+      ).not.toBeNull();
+      expect(screen.getByText("Update sample window")).toBeTruthy();
+    },
+  );
+});
+
+describe("enhancement composer outcomes (mocked native transport)", () => {
+  const draft = "Make search wait 300 ms after typing in SearchBox.tsx";
+  const enhanced = "Debounce search by 300 ms after typing in SearchBox.tsx";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([false, true])(
+    "keeps successful output editable without sending (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: reduced && query === "(prefers-reduced-motion: reduce)",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-success", 1);
+      vi.mocked(pane.enhancePrompt).mockResolvedValue({
+        enhanced,
+        segments: [
+          {
+            kind: "term",
+            text: "Debounce",
+            original: "Make search wait",
+            note: "Delay until typing pauses",
+          },
+          { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
+        ],
+      });
+      await renderKenPromptPane(pane, true);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: draft } });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      // Flush each React phase before advancing the next phase's RAF clock.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(32);
+      });
+      expect(pane.enhancePrompt).toHaveBeenCalledWith(draft);
+      expect(input.value).toBe(enhanced);
+      expect(document.activeElement).toBe(input);
+      expect(input.disabled).toBe(false);
+      expect(input.readOnly).toBe(false);
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      fireEvent.change(input, { target: { value: `${enhanced} and keep it cancellable` } });
+      expect(input.value).toBe(`${enhanced} and keep it cancellable`);
+    },
+  );
+
+  it.each([false, true])(
+    "preserves rejected drafts and permits retry (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", () => ({
+        matches: reduced,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-failure", 1);
+      vi.mocked(pane.enhancePrompt).mockRejectedValue(new Error("Invalid enhancement response"));
+      await renderKenPromptPane(pane);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: draft } });
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      await waitFor(() =>
+        expect(nativeMocks.toast).toHaveBeenCalledWith("Couldn't enhance the prompt", "error"),
+      );
+      expect(input.value).toBe(draft);
+      expect(input.disabled).toBe(false);
+      expect(document.querySelector(".enh-diss")).toBeNull();
+      fireEvent.click(await screen.findByRole("button", { name: "Enhance?" }));
+      await waitFor(() => expect(pane.enhancePrompt).toHaveBeenCalledTimes(2));
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it("renders corrected terms when the user explicitly sends the enhanced draft", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    const pane = client("enhance-segments", 1);
+    const segments: AgentModule.PromptSegment[] = [
+      {
+        kind: "term",
+        text: "Debounce",
+        original: "Make search wait",
+        note: "Delay until typing pauses",
+      },
+      { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
+    ];
+    vi.mocked(pane.enhancePrompt).mockResolvedValue({ enhanced, segments });
+    await renderKenPromptPane(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+    await waitFor(() => expect(input.value).toBe(enhanced));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    // Corrected terms render in the sent bubble, not inside the plain textarea.
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(enhanced, [], { enhancements: segments }),
+    );
+    expect(screen.getByText("Debounce")).toBeTruthy();
+  });
+
+  it("never offers enhancement for schedule drafts", async () => {
+    const pane = client("enhance-schedule", 1);
+    await renderKenPromptPane(pane);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "/schedule Check search | 15m" },
+    });
+    expect(screen.queryByRole("button", { name: "Enhance?" })).toBeNull();
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+  });
+
+  it("stops and resumes placeholder timers across blur and typed drafts", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const interval = vi.spyOn(window, "setInterval");
+    const clear = vi.spyOn(window, "clearInterval");
+    await renderKenPromptPane(client("placeholder-focus", 1));
+    const timer = interval.mock.calls.findIndex(([, delay]) => delay === 12000);
+    expect(timer).toBeGreaterThanOrEqual(0);
+    const id = interval.mock.results[timer].value;
+    fireEvent.blur(window);
+    expect(clear).toHaveBeenCalledWith(id);
+    interval.mockClear();
+    fireEvent.focus(window);
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000)).toBe(true);
+    interval.mockClear();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: draft } });
+    fireEvent.blur(window);
+    fireEvent.focus(window);
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000 || delay === 24)).toBe(false);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000)).toBe(true);
+  });
 });
 
 describe("preferredRoadmapPhaseSession", () => {

@@ -447,7 +447,7 @@ Merge the results, drop anything already indexed, and rank by fit with this proj
 
 ## Phase 2: Present and ask
 
-FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?") with these options, each with a one-line hint on disk/time cost:
+FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. In every repo cell, make the repository name a clickable Markdown link: [owner/name](https://github.com/owner/name). Do not use plain text, inline code, or a separate URL column for repository names. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?") with these options, each with a one-line hint on disk/time cost:
 
 - All of them
 - Top 10

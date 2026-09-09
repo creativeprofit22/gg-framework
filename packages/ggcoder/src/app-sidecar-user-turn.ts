@@ -1,15 +1,19 @@
 import type { Message } from "@kenkaiiii/gg-ai";
+import type { AutopilotCycleOutcome } from "./core/autopilot-cycle.js";
+
 import {
   countAssistantMessages, extractTurnToolCalls, isMechanicalOnlyTurn,
   shouldStartAutopilotCycle, type AutopilotGateInput,
 } from "./core/autopilot-gate.js";
+
+export type UserTurnOutcome = AutopilotCycleOutcome | "no-review";
 
 export interface UserTurnDeps {
   runAgent: (text: string, run: () => Promise<void>) => Promise<void>;
   getMessages: () => Message[];
   clearCancelled: () => void;
   gateState: () => Pick<AutopilotGateInput, "enabled" | "cancelled" | "planMode" | "planPending">;
-  review: (text: string) => Promise<void>;
+  review: (text: string) => Promise<UserTurnOutcome>;
   drainQueue: () => Promise<void>;
   decision: (decision: ReturnType<typeof shouldStartAutopilotCycle>) => void;
 }
@@ -18,7 +22,7 @@ export interface UserTurnDeps {
 export async function runUserTurn(
   deps: UserTurnDeps, text: string, run: () => Promise<void>,
   workflowCommand: boolean, onSettled?: () => void,
-): Promise<void> {
+): Promise<UserTurnOutcome> {
   deps.clearCancelled();
   const assistantsBefore = countAssistantMessages(deps.getMessages());
   const messagesBefore = deps.getMessages().length;
@@ -37,7 +41,12 @@ export async function runUserTurn(
   }) : { start: false as const, reason: "no-assistant-output" as const };
   deps.decision(decision);
   try {
-    if (decision.start) await deps.review(text);
+    const outcome = decision.start ? await deps.review(text) : "no-review";
+    const state = deps.gateState();
+    if (state.cancelled) return "cancelled";
+    if (!completed) return "run-failed";
+    if (state.planMode || state.planPending) return "plan-pending";
+    return outcome;
   } finally {
     await deps.drainQueue();
   }
@@ -61,7 +70,8 @@ export function createContinuationPromptAdapter(deps: {
   userTurn: UserTurnDeps;
   workflowCommand: (text: string) => Promise<boolean>;
 }) {
-  return async (text: string, onAccepted: () => Promise<void>): Promise<void> =>
-    runUserTurn(deps.userTurn, text, () => deps.prompt(text, onAccepted),
+  return async (text: string, onAccepted: () => Promise<void>): Promise<void> => {
+    await runUserTurn(deps.userTurn, text, () => deps.prompt(text, onAccepted),
       await deps.workflowCommand(text));
+  };
 }

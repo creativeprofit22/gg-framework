@@ -11,6 +11,8 @@ export interface TaskRecord extends ProjectTask {
   /** @deprecated Old field — migrated to title+prompt on load. */
   text?: string;
   details?: string;
+  /** Desktop task completion is provisional until its user-turn/review settles. */
+  completionPending?: boolean;
 }
 
 export interface RunnableTaskInfo {
@@ -102,16 +104,26 @@ export function getNextRunnableTask(cwd: string): RunnableTaskInfo | null {
  */
 export function pruneDoneTasksSync(cwd: string): TaskRecord[] {
   const tasks = loadTasksSync(cwd);
-  const remaining = tasks.filter((task) => task.status !== "done");
+  const remaining = tasks.filter((task) => task.status !== "done" || task.completionPending);
   if (remaining.length !== tasks.length) saveTasksSync(cwd, remaining);
   return remaining;
 }
 
-export function markTaskInProgress(cwd: string, taskId: string): void {
+export function markTaskInProgress(cwd: string, taskId: string, completionPending = false): void {
   const tasks = loadTasksSync(cwd);
   if (tasks.length === 0) return;
   const updated = tasks.map((task) =>
-    task.id === taskId ? { ...task, status: "in-progress" as const } : task,
+    task.id === taskId ? { ...task, status: "in-progress" as const, completionPending } : task,
   );
   saveTasksSync(cwd, updated);
+}
+
+/** Release provisional completion only after orchestration has explicitly settled. */
+export function finalizeTaskRun(cwd: string, taskId: string, succeeded: boolean): void {
+  const tasks = loadTasksSync(cwd);
+  const task = tasks.find((candidate) => candidate.id === taskId);
+  if (!task) return; // Respect an explicit removal during the run.
+  if (!succeeded) task.status = "blocked";
+  delete task.completionPending;
+  saveTasksSync(cwd, tasks);
 }

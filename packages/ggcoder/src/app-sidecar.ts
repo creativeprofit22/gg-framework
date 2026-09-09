@@ -84,6 +84,7 @@ import {
   createStrandedQueueDrain,
   runUserTurn,
   type UserTurnDeps,
+  type UserTurnOutcome,
 } from "./app-sidecar-user-turn.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
@@ -206,6 +207,7 @@ import {
   pruneDoneTasksSync,
   getNextRunnableTask,
   markTaskInProgress,
+  finalizeTaskRun,
 } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
@@ -356,6 +358,8 @@ import {
 } from "./app-sidecar-roadmap-draft-route.js";
 import {
   AppSidecarSessionMutationCoordinator,
+  isAppSidecarSessionBusy,
+  appSidecarSessionBusyConflictBody,
   runAppSidecarNewSessionMutation,
   runAppSidecarPromptStartup,
   type SessionMutationOwner,
@@ -2156,8 +2160,11 @@ async function createSession(
     type: "error" | "ken_error" | "autopilot_error",
     logLabel: string,
     err: unknown,
+    display?: { headline: string; message: string; guidance: string },
   ): void {
     const formatted = formatSidecarError(err, desktopGuidance, sidecarErrorSecrets);
+    // Fixed task guidance keeps local setup paths and task prompts out of the UI.
+    if (display) formatted.event = display;
     captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
       scope: type,
     });
@@ -3023,6 +3030,8 @@ async function createSession(
   // flipping `running` — that stretch awaits, so Node yields inside it. See
   // RunClaim.
   const runClaim = new RunClaim();
+  // Separate from provider claims: held across task resets, reviews, cadence and queue drain.
+  const taskSweepClaim = new RunClaim();
   let runJournalPersistence: Promise<void> = Promise.resolve();
   const runLifecycle = new RunLifecycle(
     (runState) => {
@@ -3131,9 +3140,8 @@ async function createSession(
   // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
   // and drives the review→prompt→review loop. Ken is the sole verification
   // owner in this mode, so suppress the build session's redundant Ideal hook.
-  let autopilot =
-    mode === "code" && (await projectAutopilot.initialize(cwd, () => loadAutopilot(cwd)));
-  session.setIdealReviewSuppressed(autopilot);
+  if (mode === "code") await projectAutopilot.initialize(cwd, () => loadAutopilot(cwd));
+  const isAutopilotEnabled = () => mode === "code" && projectAutopilot.isEnabled(cwd);
   // True while an autopilot review is in flight (used to defer kenAuto model
   // switches, like kenRunning does for chat Ken, and to drive the spinner).
   let autopilotReviewing = false;
@@ -3143,8 +3151,17 @@ async function createSession(
   // of starting a run that would collide with an injected one on the same
   // session (AgentSession.prompt has no concurrency guard).
   let autopilotActive = false;
+  const unsubscribeAutopilot = mode === "code"
+    ? projectAutopilot.subscribe(cwd, (enabled) => {
+        // Finish the active cycle before restoring Ideal, even after a remote toggle-off.
+        session.setIdealReviewSuppressed(enabled || autopilotActive);
+        broadcast("autopilot", { autopilot: enabled });
+      })
+    : () => {};
+  // Subscribe and read synchronously after loading: no mutation can be lost between them.
+  session.setIdealReviewSuppressed(isAutopilotEnabled());
   const sessionBusyState = () => ({
-    running,
+    running: running || runClaim.active || taskSweepClaim.active,
     autopilotActive,
     runLifecycleRunning: runLifecycle.running,
   });
@@ -3987,6 +4004,7 @@ async function createSession(
         },
         replaceSession: (replacement) => {
           session = replacement;
+          session.setIdealReviewSuppressed(isAutopilotEnabled() || autopilotActive);
           bindKenTransitions(replacement);
           planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
         },
@@ -4026,20 +4044,22 @@ async function createSession(
 
   // Drive the review→prompt→review loop for one finished user turn. Only ever
   // called after shouldStartAutopilotCycle approves the turn (POST /prompt or
-  // the stranded-queue drain) — never from the task runner, resume, /ken, or
+  // the task user-turn or stranded-queue drain) — never from resume, /ken, or
   // error paths, so there's no recursion and no guard tangle. The loop's
   // control flow lives in driveAutopilotCycle (core/autopilot-cycle.ts) so
   // every exit path is unit-tested; this only wires the real dependencies.
 
-  async function runAutopilotCycle(originalRequest: string): Promise<void> {
-    if (!autopilot || autopilotCancelled) return;
+  async function runAutopilotCycle(originalRequest: string): Promise<UserTurnOutcome> {
+    if (autopilotCancelled) return "cancelled";
+    if (!isAutopilotEnabled()) return "no-review";
     const generation = runLifecycle.begin(abortOwnedWork).generation;
     pendingCancelDrain = null;
     autopilotActive = true;
     session.setIdealReviewSuppressed(true);
     let planReviewIdentity: { checkpointId: string; generation: number } | null = null;
+    let outcome: UserTurnOutcome = "review-failed";
     try {
-      await driveAutopilotCycle({
+      outcome = await driveAutopilotCycle({
         maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
         // An injected run entering plan mode WITHOUT submitting (enter_plan,
@@ -4104,10 +4124,14 @@ async function createSession(
         },
         // Autopilot-injected run: GG Coder receives the framed prompt (no human
         // is watching this turn) while run_start keeps the clean label.
-        runPrompt: (body) =>
-          runAgent(body, () =>
-            promptActiveSession(frameAutopilotInjection(body), AUTOMATION_PROVENANCE),
-          ),
+        runPrompt: async (body) => {
+          let completed = false;
+          await runAgent(body, async () => {
+            await promptActiveSession(frameAutopilotInjection(body), AUTOMATION_PROVENANCE);
+            completed = true;
+          });
+          return completed;
+        },
         emit: (event) => {
           // Persist the terminal verdict marker so a resumed session renders the
           // same Ken bubble the live run showed instead of dropping it or
@@ -4137,10 +4161,22 @@ async function createSession(
           // autopilot_ignored renders nothing live, so nothing is persisted either.
         },
       });
+      return outcome;
+    } catch (error) {
+      broadcastError("autopilot_error", "autopilot cycle failed", error);
+      return outcome;
     } finally {
       autopilotActive = false;
-      session.setIdealReviewSuppressed(autopilot);
-      finishOwnedGeneration(generation, true, "completed");
+      session.setIdealReviewSuppressed(isAutopilotEnabled());
+      finishOwnedGeneration(
+        generation,
+        true,
+        autopilotCancelled
+          ? "aborted"
+          : outcome === "review-failed" || outcome === "run-failed"
+            ? "failed"
+            : "completed",
+      );
       queueMicrotask(() => {
         void runStrandedQueue();
       });
@@ -4157,7 +4193,7 @@ async function createSession(
   // gated review). Also covers the non-autopilot tail window: a message queued
   // after the run's last steering drain but before run_end.
   const runStrandedQueue = createStrandedQueueDrain(
-    () => planGate.pending() !== null,
+    () => taskTurnActive || planGate.pending() !== null,
     async () => {
       for (;;) {
         if (running || autopilotActive) return;
@@ -4181,7 +4217,7 @@ async function createSession(
           }
         });
         const decision = shouldStartAutopilotCycle({
-          enabled: autopilot,
+          enabled: isAutopilotEnabled(),
           cancelled: autopilotCancelled,
           planMode: session.getPlanMode(),
           // A submitted plan (exit_plan fired) routes into the PLAN review
@@ -4202,7 +4238,7 @@ async function createSession(
             kind: decision.kind,
           });
           await runAutopilotCycle(next.text);
-        } else if (autopilot) {
+        } else if (isAutopilotEnabled()) {
           log("INFO", "app-sidecar", "autopilot skipped (queued turn)", {
             reason: decision.reason,
           });
@@ -4214,19 +4250,25 @@ async function createSession(
   // ── Task runner (project task list → sessions) ──────────────
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
   // completion hint instructing the agent to mark the task done via the tasks
-  // tool. Run-all advances to the next runnable task after each run finishes.
+  // tool. Run-all advances only after an explicit successful terminal outcome.
   let taskRunAll = false;
+  let taskTurnActive = false;
 
   async function runTaskById(taskId: string): Promise<boolean> {
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
-    if (!task || !isManuallyRunnableTaskStatus(task.status)) return false;
+    if (
+      !task || !isManuallyRunnableTaskStatus(task.status) ||
+      running || autopilotActive || session.getQueuedCount() > 0 ||
+      session.getPlanMode() || planGateConflict() !== null
+    ) return false;
     // Fresh session per task so one task's context never bleeds into the next.
     await session.newSession();
+    if (autopilotCancelled) return false;
     deactivateApprovedPlan();
     injectedAutopilotPrompts = [];
     planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
     broadcast("session_reset", {});
-    markTaskInProgress(cwd, task.id);
+    markTaskInProgress(cwd, task.id, true);
     broadcast("tasks_list", { tasks: loadTasksSync(cwd) });
     broadcast("task_start", { id: task.id, title: task.title });
     // Persist the task header so a resumed task session shows what ran.
@@ -4235,28 +4277,50 @@ async function createSession(
     const completionHint =
       `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
       `tasks({ action: "done", id: "${shortId}" })`;
-    await runAgent(task.title, () =>
-      promptActiveSession(task.prompt + completionHint, AUTOMATION_PROVENANCE),
-    );
-    // The agent typically marks the task done via the tasks tool during the run;
-    // prune completed tasks and push the refreshed list so the modal drops them.
-    broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
-    return true;
+    let succeeded = false;
+    taskTurnActive = true;
+    try {
+      const outcome = await runUserTurn(
+        userTurnDeps,
+        task.prompt,
+        () => promptActiveSession(task.prompt + completionHint, AUTOMATION_PROVENANCE),
+        isWorkflowCommandText(task.prompt, await loadWorkflowCommandSpecs()),
+      );
+      succeeded =
+        (outcome === "all-clear" || outcome === "ignored" || outcome === "no-review") &&
+        !autopilotCancelled &&
+        !session.getPlanMode() &&
+        planGateConflict() === null &&
+        session.getQueuedCount() === 0;
+      return succeeded;
+    } finally {
+      taskTurnActive = false;
+      // Agent-marked completion stays provisional through work AND review.
+      // Unresolved work remains retryable rather than disappearing on /tasks.
+      finalizeTaskRun(cwd, task.id, succeeded);
+      broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
+    }
   }
 
   async function runTasks(startId: string | null, all: boolean): Promise<void> {
+    autopilotCancelled = false;
     taskRunAll = all;
-    let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
-    while (currentId) {
-      const ran = await runTaskById(currentId);
-      if (!ran || !taskRunAll) break;
-      const next = getNextRunnableTask(cwd);
-      currentId = next ? next.id : null;
-      // Brief pause between tasks (mirrors the CLI cadence).
-      if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
+      while (currentId) {
+        const ran = await runTaskById(currentId);
+        if (!ran || !taskRunAll) break;
+        const next = getNextRunnableTask(cwd);
+        currentId = next ? next.id : null;
+        // Cancellation during the cadence must not start a fresh task/clear its flag.
+        if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!taskRunAll || autopilotCancelled) break;
+      }
+    } finally {
+      taskRunAll = false;
+      broadcast("tasks_run_done", {});
+      await runStrandedQueue();
     }
-    taskRunAll = false;
-    broadcast("tasks_run_done", {});
   }
 
   // ── Provider auth (login) bridge ───────────────────────────
@@ -4444,7 +4508,7 @@ async function createSession(
       autopilotCancelled = false;
     },
     gateState: () => ({
-      enabled: autopilot,
+      enabled: isAutopilotEnabled(),
       cancelled: autopilotCancelled,
       planMode: session.getPlanMode(),
       planPending: planGate.pending() !== null,
@@ -4454,7 +4518,7 @@ async function createSession(
     decision: (decision) => {
       if (decision.start) {
         log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
-      } else if (autopilot) {
+      } else if (isAutopilotEnabled()) {
         log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
       }
     },
@@ -4463,7 +4527,7 @@ async function createSession(
     session,
     mutations: sessionMutations,
     runClaim,
-    busy: () => running || autopilotActive || runLifecycle.running || planGateConflict() !== null,
+    busy: () => isAppSidecarSessionBusy(sessionBusyState()) || planGateConflict() !== null,
     prepare: (instruction) => continuationHandoffService.prepare(session, instruction),
     reset: resetBuildSession,
     prompt: createContinuationPromptAdapter({
@@ -4498,7 +4562,7 @@ async function createSession(
   > {
     // A task/autopilot sweep remains an active operation between provider runs,
     // even though RunLifecycle is briefly idle during that gap.
-    const operationWasActive = running || autopilotActive || runLifecycle.running;
+    const operationWasActive = isAppSidecarSessionBusy(sessionBusyState());
     // Even between task runs, cancellation stops the sweep. Active provider
     // ownership invokes the full abort hook exactly once through lifecycle.
     taskRunAll = false;
@@ -4552,7 +4616,7 @@ async function createSession(
       thinkingLevel: session.getThinkingLevel() ?? null,
       supportedThinkingLevels: getSupportedThinkingLevels(state.provider, state.model),
       supportsVideo: getModel(state.model)?.supportsVideo ?? false,
-      autopilot,
+      autopilot: isAutopilotEnabled(),
       ...kenStatePayload(),
       ...footerExtras(),
       pendingPlanReview: planGate.pending(),
@@ -5553,7 +5617,7 @@ async function createSession(
               const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
                 text,
                 attachmentCount: attachments.length,
-                busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+                busy: isAppSidecarSessionBusy(sessionBusyState()),
                 automated: meta?.kenSent === true,
                 codeMode: mode !== "chat",
                 claimStart: () => {
@@ -5596,7 +5660,7 @@ async function createSession(
                 mode,
                 text,
                 attachmentCount: attachments.length,
-                busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+                busy: isAppSidecarSessionBusy(sessionBusyState()),
               });
               const handledResearch = await handleAppSidecarChatResearchPrompt({
                 route: researchRoute,
@@ -5652,7 +5716,7 @@ async function createSession(
               }
               // `runClaim` covers the gap before `runAgent` flips `running`: a
               // prompt arriving in that window must queue, not start a second run.
-              if (running || runClaim.active || autopilotActive) {
+              if (isAppSidecarSessionBusy(sessionBusyState())) {
                 // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
                 // an autopilot cycle is active but between injected runs (build idle,
                 // Ken reviewing) so the message never starts a run that collides with
@@ -5842,15 +5906,10 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        autopilot = enabled;
         projectAutopilot.set(cwd, enabled);
-        // A toggle-off during an active cycle takes effect after Ken finishes;
-        // until then, injected build runs must not re-enable Ideal self-review.
-        session.setIdealReviewSuppressed(enabled || autopilotActive);
         await saveAutopilot(cwd, enabled);
         log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
-        broadcast("autopilot", { autopilot: enabled });
-        json(res, 200, { autopilot: enabled });
+        json(res, 200, { autopilot: projectAutopilot.isEnabled(cwd) });
       });
       return;
     }
@@ -5969,23 +6028,42 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (running) {
-          json(res, 409, { error: "cannot run a task while the agent is running" });
+        const busy = sessionBusyState();
+        if (isAppSidecarSessionBusy(busy)) {
+          json(res, 409, appSidecarSessionBusyConflictBody(busy));
+          return;
+        }
+        if (sessionMutations.owner) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
+        // No await between admission and claiming ownership. Internal review/plan
+        // transitions still use sessionMutations; the sweep owns their outer lifetime.
+        if (!taskSweepClaim.claim()) {
+          json(res, 409, appSidecarSessionBusyConflictBody(sessionBusyState()));
           return;
         }
         const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
         if (!releaseOperation) {
+          taskSweepClaim.release();
           json(res, 409, { error: "configuration refresh in progress" });
           return;
         }
         json(res, 202, { accepted: true });
         void runTasks(id, all)
           .catch((error) => {
-            log("ERROR", "app-sidecar", "accepted task continuation failed", {
-              message: error instanceof Error ? error.message : String(error),
+            // Provider failures are reported and swallowed by runAgent; this is
+            // the remaining accepted orchestration rejection, not a provider run.
+            broadcastError("error", "accepted task continuation failed", error, {
+              headline: all ? "Run All stopped" : "Task run stopped",
+              message: "Task setup or execution could not finish.",
+              guidance: "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
             });
           })
-          .finally(releaseOperation);
+          .finally(() => {
+            taskSweepClaim.release();
+            releaseOperation();
+          });
       });
       return;
     }
@@ -6131,7 +6209,7 @@ async function createSession(
         const result = await runContextProfileRequest({
           body,
           state: session.getState(),
-          running: running || runClaim.active || autopilotActive || runLifecycle.running,
+          running: isAppSidecarSessionBusy(sessionBusyState()),
           activeUsage: session.getContextUsage().used,
           mutations: sessionMutations,
           switchProfile: (nextProfile) => session.switchOpenAICodexContextProfile(nextProfile),
@@ -6158,7 +6236,7 @@ async function createSession(
         const result = await runOpenAICodexFastRequest({
           body,
           state: session.getState(),
-          running: running || runClaim.active || autopilotActive || runLifecycle.running,
+          running: isAppSidecarSessionBusy(sessionBusyState()),
           mutations: sessionMutations,
           switchFast: (enabled) => session.switchOpenAICodexFast(enabled),
         });
@@ -6478,7 +6556,7 @@ async function createSession(
           json(res, 400, { error: "invalid plan approval body" } satisfies PlanMutationFailure);
           return;
         }
-        if (running || runClaim.active || autopilotActive || runLifecycle.running) {
+        if (isAppSidecarSessionBusy(sessionBusyState())) {
           json(res, 409, {
             error: "cannot accept a plan while the agent is running",
           } satisfies PlanMutationFailure);
@@ -7412,6 +7490,7 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    unsubscribeAutopilot();
     reminderCoordinator.unwatchSession(opts.id);
     await phaseCandidates.dispose();
     elicitations.cancelAll();
@@ -7461,7 +7540,7 @@ async function createSession(
     cancelActiveOperation,
     handle,
     dispose,
-    isRunning: () => running || autopilotActive || runLifecycle.running,
+    isRunning: () => isAppSidecarSessionBusy(sessionBusyState()),
   };
 }
 

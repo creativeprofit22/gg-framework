@@ -327,7 +327,7 @@ describe("production continuation reviewer context persistence (B)", () => {
           throw new Error("deterministic fallback; no synthesis provider");
         },
       });
-      const automaticReview = vi.fn(async () => {});
+      const automaticReview = vi.fn(async () => "all-clear" as const);
       const accepted = vi.fn();
       const runClaim = new RunClaim();
       const adapter = createContinuationPromptAdapter({

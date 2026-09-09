@@ -83,6 +83,17 @@ export type AutopilotCycleEmit =
   | { type: "autopilot_capped"; data: { rounds: number } }
   | { type: "autopilot_plan_ready"; data: AutopilotPlanReviewIdentity & { reason?: string } };
 
+/** Only work all-clear/ignore authorize automatic task advancement. */
+export type AutopilotCycleOutcome =
+  | "all-clear"
+  | "ignored"
+  | "human"
+  | "capped"
+  | "review-failed"
+  | "plan-pending"
+  | "cancelled"
+  | "run-failed";
+
 export interface AutopilotCycleDeps {
   /** Hard cap on review→prompt rounds per user turn (loop safety). */
   maxRounds: number;
@@ -105,8 +116,8 @@ export interface AutopilotCycleDeps {
   markPlanReady: (reason?: string) => Promise<AutopilotPlanReviewIdentity | null>;
   /** Compare-and-swap the reviewed generation into revision-requested. */
   requestPlanRevision: (feedback: string) => Promise<boolean>;
-  /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
-  runPrompt: (body: string) => Promise<void>;
+  /** Feed a PROMPT verdict to GG Coder; true only when the injected work completes. */
+  runPrompt: (body: string) => Promise<boolean>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
    *  broadcast the autopilot_prompted marker. */
   onInjected: (body: string, round: number) => void;
@@ -126,30 +137,33 @@ export interface AutopilotCycleDeps {
  *  - HUMAN                     → autopilot_human
  *  - rounds exhausted          → autopilot_capped
  */
-export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<void> {
-  if (deps.isCancelled()) return;
+export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<AutopilotCycleOutcome> {
+  if (deps.isCancelled()) return "cancelled";
   await deps.resetReviewer();
   let remediationRounds = 0;
   for (;;) {
-    if (deps.isCancelled()) return;
+    if (deps.isCancelled()) return "cancelled";
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
-      if (!verdict || deps.isCancelled()) return;
+      if (deps.isCancelled()) return "cancelled";
+      if (!verdict) return "review-failed";
       if (verdict.kind === "human") {
         deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
-        return;
+        return "human";
       }
       if (verdict.kind === "prompt") {
         if (remediationRounds >= deps.maxRounds) {
           deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
-          return;
+          return "capped";
         }
         const revisionRequested = await deps.requestPlanRevision(verdict.body);
-        if (!revisionRequested) return;
+        if (!revisionRequested) return "plan-pending";
         remediationRounds += 1;
         const body = buildPlanRevisionPrompt(verdict.body);
         deps.onInjected(body, remediationRounds);
-        await deps.runPrompt(body);
+        if ((await deps.runPrompt(body)) !== true) {
+          return deps.isCancelled() ? "cancelled" : "run-failed";
+        }
         continue;
       }
       // ALL_CLEAR and IGNORE mean Ken found no objection. Persist readiness,
@@ -159,44 +173,48 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
           ? CORPUS_UNVERIFIED_REASON
           : undefined;
       const readyIdentity = await deps.markPlanReady(reason);
-      if (!readyIdentity || deps.isCancelled()) return;
+      if (deps.isCancelled()) return "cancelled";
+      if (!readyIdentity) return "plan-pending";
       deps.emit({
         type: "autopilot_plan_ready",
         data: { ...readyIdentity, ...(reason ? { reason } : {}) },
       });
-      return;
+      return "plan-pending";
     }
     // The gate blocks a still-in-plan-mode turn up front, so hitting this
     // means an injected run entered plan mode mid-cycle WITHOUT submitting a
     // plan: halt — Ken can't prompt a read-only session.
     if (deps.isPlanMode()) {
       deps.emit({ type: "autopilot_human", data: { reason: AUTOPILOT_PLAN_DRAFTING_REASON } });
-      return;
+      return "plan-pending";
     }
     const verdict = await deps.review();
-    if (!verdict || deps.isCancelled()) return;
+    if (deps.isCancelled()) return "cancelled";
+    if (!verdict) return "review-failed";
     if (verdict.kind === "all_clear") {
       deps.emit({
         type: "autopilot_done",
         data: verdict.evidenceLimitation ? { reason: CORPUS_UNVERIFIED_REASON } : {},
       });
-      return;
+      return "all-clear";
     }
     if (verdict.kind === "ignore") {
       deps.emit({ type: "autopilot_ignored", data: {} });
-      return;
+      return "ignored";
     }
     if (verdict.kind === "human") {
       deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
-      return;
+      return "human";
     }
     if (remediationRounds >= deps.maxRounds) {
       deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
-      return;
+      return "capped";
     }
     remediationRounds += 1;
     deps.onInjected(verdict.body, remediationRounds);
-    await deps.runPrompt(verdict.body);
-    if (deps.isCancelled()) return;
+    if ((await deps.runPrompt(verdict.body)) !== true) {
+      return deps.isCancelled() ? "cancelled" : "run-failed";
+    }
+    if (deps.isCancelled()) return "cancelled";
   }
 }

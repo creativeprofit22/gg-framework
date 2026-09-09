@@ -433,10 +433,19 @@ function hasUnresolvedToolCalls(message: Message): boolean {
 
 // ── State ──────────────────────────────────────────────────
 
-import type {
-  ContinuationSourceRevision,
-  OpenAICodexContextProfileEligibility,
+import {
+  normalizePromptMeta,
+  type PromptMeta,
+  type ContinuationSourceRevision,
+  type OpenAICodexContextProfileEligibility,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
+
+interface QueuedPrompt {
+  id: string;
+  text: string;
+  attachments: SessionAttachment[];
+  meta?: PromptMeta;
+}
 
 export interface AgentSessionState {
   provider: Provider;
@@ -586,7 +595,10 @@ export class AgentSession {
   // message by identity. Index-based removal would race: the queue drains at
   // every turn boundary, so an index captured by the UI can point at a
   // different message (or past the end) by the time the cancel arrives.
-  private userQueue: Array<{ id: string; text: string; attachments: SessionAttachment[] }> = [];
+  private userQueue: QueuedPrompt[] = [];
+  // Associate hints with the exact consumed object, never with enqueue-time offsets
+  // or model-visible fields. Weak keys also release abandoned run messages.
+  private promptHints = new WeakMap<Message, PromptMeta>();
   private queueSeq = 0;
   private processManager?: ProcessManager;
   private lspManager?: LspManager;
@@ -1490,12 +1502,14 @@ export class AgentSession {
   private async acceptPromptTemplate(
     content: string,
     provenance: MessageProvenance,
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void> } = {},
+    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta } = {},
   ): Promise<void> {
     await this.ensureActivePhaseSessionMetadata();
     const userMessage: Message = { role: "user", content, provenance };
     this.contextProfileLocked = true;
     this.messages.push(userMessage);
+    const meta = normalizePromptMeta(options.meta);
+    if (meta) this.promptHints.set(userMessage, meta);
     await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
     await options.onAccepted?.();
@@ -1527,7 +1541,7 @@ export class AgentSession {
       kind: "prompt",
       visibility: "transcript",
     },
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void> } = {},
+    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta } = {},
   ): Promise<void> {
     if (!content.trim()) return;
     await this.adoptDeferredCheckpointBeforePrompt();
@@ -1552,6 +1566,8 @@ export class AgentSession {
     this.contextProfileLocked = true;
     this.messages.push(userMessage);
     // Daemon startup must not release its lease on a best-effort append failure.
+    const meta = normalizePromptMeta(options.meta);
+    if (meta) this.promptHints.set(userMessage, meta);
     await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
     await options.onAccepted?.();
@@ -1569,7 +1585,7 @@ export class AgentSession {
   async promptWithAttachments(
     text: string,
     attachments: SessionAttachment[],
-    options: { onAccepted?: () => void | Promise<void> } = {},
+    options: { onAccepted?: () => void | Promise<void>; meta?: PromptMeta } = {},
   ): Promise<void> {
     if (attachments.length === 0) {
       await this.prompt(text, undefined, options);
@@ -1580,10 +1596,10 @@ export class AgentSession {
       this.eventBus.emit("text_delta", { text: inputPolicyError + "\n" });
       return;
     }
+    const parts = this.buildAttachmentParts(text, attachments);
+    if (parts.length === 0) throw new Error("Attachments produced no usable content. Nothing was sent.");
     await this.adoptDeferredCheckpointBeforePrompt();
     await this.ensureActivePhaseSessionMetadata();
-    const parts = this.buildAttachmentParts(text, attachments);
-    if (parts.length === 0) return;
     const userMessage: Message = {
       role: "user",
       content: parts,
@@ -1591,6 +1607,8 @@ export class AgentSession {
     };
     this.contextProfileLocked = true;
     this.messages.push(userMessage);
+    const meta = normalizePromptMeta(options.meta);
+    if (meta) this.promptHints.set(userMessage, meta);
     await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
     await options.onAccepted?.();
@@ -1616,6 +1634,9 @@ export class AgentSession {
     // blank into a placeholder. Every other provider keeps inline images.
     const glmImageHint = this.provider === "glm" && modelInfo?.supportsImages === false;
     for (const a of attachments) {
+      if (!a.path && (a.kind !== "image" || glmImageHint || !a.data)) {
+        throw new Error(`Attachment "${a.name}" is unavailable for analysis. Nothing was sent; retry the attachment.`);
+      }
       if (a.kind === "image") {
         if (glmImageHint && a.path) {
           parts.push({
@@ -1945,7 +1966,9 @@ export class AgentSession {
           visibility: "transcript",
         };
         if (m.attachments.length === 0) {
-          return { role: "user", content: wrapSteeringText(m.text), provenance };
+          const message: Message = { role: "user", content: wrapSteeringText(m.text), provenance };
+          if (m.meta) this.promptHints.set(message, m.meta);
+          return message;
         }
         // Queued attachments ride the same native-block path as a non-queued
         // attachment prompt, prefixed with the steering framing.
@@ -1953,7 +1976,9 @@ export class AgentSession {
           { type: "text", text: STEERING_PREFIX },
           ...this.buildAttachmentParts(m.text, m.attachments),
         ];
-        return { role: "user", content: parts, provenance };
+        const message: Message = { role: "user", content: parts, provenance };
+        if (m.meta) this.promptHints.set(message, m.meta);
+        return message;
       });
       return [
         ...(environmentDelta ? [environmentDelta] : []),
@@ -3669,12 +3694,15 @@ export class AgentSession {
   /** Queue a user message (optionally with attachments) to be injected mid-run
    *  as steering. Returns the new queue length. No-op semantics are the caller's
    *  concern. */
-  queueMessage(text: string, attachments: SessionAttachment[] = []): number {
+  queueMessage(text: string, attachments: SessionAttachment[] = [], meta?: PromptMeta): number {
     const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
     if (inputPolicyError) throw new Error(inputPolicyError);
+    if (attachments.length > 0) this.buildAttachmentParts(text, attachments);
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
-    this.userQueue.push({ id: `q${this.queueSeq}`, text, attachments });
+    const displayMeta = normalizePromptMeta(meta);
+    this.userQueue.push({ id: `q${this.queueSeq}`, text, attachments,
+      ...(displayMeta ? { meta: displayMeta } : {}) });
     return this.userQueue.length;
   }
 
@@ -3703,13 +3731,8 @@ export class AgentSession {
    *  Used by the sidecar to run a message that queued while autopilot was
    *  reviewing (no run in flight to steer it into) — unlike {@link drainQueue},
    *  attachments survive so queued media isn't silently dropped. */
-  takeNextQueuedMessage(): { text: string; attachments: SessionAttachment[] } | null {
-    const next = this.userQueue.shift();
-    if (next === undefined) return null;
-    // Strip the internal queue id: it exists only so clients can cancel a
-    // specific pending message, and callers here feed the result straight into
-    // a run.
-    return { text: next.text, attachments: next.attachments };
+  takeNextQueuedMessage(): QueuedPrompt | null {
+    return this.userQueue.shift() ?? null;
   }
 
   /** Clear the queue, returning the combined text (to restore to the composer).
@@ -5188,6 +5211,15 @@ export class AgentSession {
       await this.sessionManager.updateLeaf(this.sessionPath, entryId);
     }
     this.currentLeafId = entryId;
+    const meta = this.promptHints.get(message);
+    if (meta) {
+      const messages = this.activeLoopMessages ?? this.messages;
+      const index = messages.indexOf(message);
+      if (index < 0) throw new Error("Prompt hint message is not in the accepted transcript");
+      const afterMessageCount = messages.slice(0, index + 1).filter((m) => m.role !== "system").length;
+      await this.persistAppMarker("user_hint", { ...meta }, afterMessageCount - this.persistedTranscriptCount());
+      this.promptHints.delete(message);
+    }
   }
 
   private createSlashCommandContext(): SlashCommandContext {

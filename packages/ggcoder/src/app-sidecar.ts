@@ -52,7 +52,7 @@ import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-rou
 import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
-import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { createRunEndPayload, normalizePromptMeta, type PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
@@ -676,8 +676,13 @@ async function prepareAttachments(
     }
     try {
       await fs.writeFile(filePath, buf);
+      await fs.access(filePath, fs.constants.R_OK);
       out.push({ ...prepared, path: filePath });
     } catch {
+      // Only validated images retain usable inline bytes. Videos use the read tool.
+      if (prepared.kind !== "image") {
+        throw new Error(`Could not save attachment "${safe}" for reading. Nothing was sent; retry after checking the project upload folder.`);
+      }
       out.push({ ...prepared });
     }
   }
@@ -4170,9 +4175,9 @@ async function createSession(
         const messagesBefore = session.getMessages().length;
         await runAgent(next.text, async () => {
           if (next.attachments.length > 0) {
-            await promptActiveSessionWithAttachments(next.text, next.attachments);
+            await promptActiveSessionWithAttachments(next.text, next.attachments, { meta: next.meta });
           } else {
-            await promptActiveSession(next.text);
+            await promptActiveSession(next.text, undefined, { meta: next.meta });
           }
         });
         const decision = shouldStartAutopilotCycle({
@@ -5492,21 +5497,27 @@ async function createSession(
       // it. A bare release would let an early-returning request (bad JSON, or a
       // prompt that queued) clear a claim another request is still holding.
       let claimedStart = false;
+      const rejectUnaccepted = (error?: unknown) => {
+        if (!res.writableEnded) json(res, 500, {
+          error: "prompt_not_accepted",
+          message: error instanceof Error ? error.message : "Prompt was not accepted. Your draft can be retried.",
+        });
+      };
       void readBody(req, res)
         .then(async (raw) => {
           if (raw === null) return;
           let text: string;
           let attachments: AppAttachment[];
-          let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
+          let meta: PromptMeta | undefined;
           try {
             const body = JSON.parse(raw) as {
               text?: string;
               attachments?: AppAttachment[];
-              meta?: { kenSent?: boolean; enhancements?: unknown[] };
+              meta?: unknown;
             };
             text = body.text ?? "";
             attachments = Array.isArray(body.attachments) ? body.attachments : [];
-            meta = typeof body.meta === "object" && body.meta !== null ? body.meta : undefined;
+            meta = normalizePromptMeta(body.meta);
           } catch {
             json(res, 400, { error: "invalid JSON body" });
             return;
@@ -5524,6 +5535,13 @@ async function createSession(
             mutations: sessionMutations,
             conflict: (body) => json(res, 409, body),
             perform: async (onAccepted) => {
+              // Capture before any await: acceptance must not dismiss a newer question.
+              const supersededAskIds = asks.pendingRequests.map(({ id }) => id);
+              const supersedeCapturedAsks = () => {
+                for (const id of supersededAskIds) {
+                  asks.settle(id, { action: "cancel", superseded: true });
+                }
+              };
               if (programmaticExecutionActive) {
                 json(res, 409, {
                   error: "programmatic_execution_busy",
@@ -5540,11 +5558,13 @@ async function createSession(
                 codeMode: mode !== "chat",
                 claimStart: () => {
                   if (runClaim.active) return false;
-                  asks.cancelAll({ action: "cancel", superseded: true });
                   claimedStart = runClaim.claim();
                   return claimedStart;
                 },
-                respond: (status, body) => json(res, status, body),
+                respond: (status, body) => {
+                  if (status === 202) supersedeCapturedAsks();
+                  json(res, status, body);
+                },
                 runAgent,
                 execute: async (selection) => {
                   programmaticExecutionActive = true;
@@ -5570,11 +5590,6 @@ async function createSession(
                 },
               });
               if (handledProgrammatic) return;
-              // A typed prompt supersedes any question parked on the user: they
-              // answered with a message of their own. Release the blocked tool call
-              // before routing or steering this prompt.
-              asks.cancelAll({ action: "cancel", superseded: true });
-
               // Classify the raw, case-sensitive built-in token before any generic
               // workflow/custom-command lookup can expand a conflicting research.md.
               const researchRoute = resolveChatResearchCommandRoute({
@@ -5591,7 +5606,10 @@ async function createSession(
                   claimedStart = runClaim.claim();
                   return claimedStart;
                 },
-                respond: ({ status, body }) => json(res, status, body),
+                respond: ({ status, body }) => {
+                  if (status === 202) supersedeCapturedAsks();
+                  json(res, status, body);
+                },
                 runAgent,
                 operations: {
                   session,
@@ -5643,15 +5661,28 @@ async function createSession(
                 // path as a non-queued attachment prompt when it drains.
                 const prepared =
                   attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-                const count = session.queueMessage(text, prepared);
-                broadcast("queued", { count, messages: session.listQueuedMessages() });
-                json(res, 202, { queued: true, count });
+                const count = session.queueMessage(text, prepared, meta);
+                // Queue before releasing the blocked ask; awaiting the run would deadlock.
+                supersedeCapturedAsks();
+                const messages = session.listQueuedMessages();
+                const queueId = messages[count - 1]!.id;
+                broadcast("queued", { count, messages });
+                json(res, 202, { queued: true, count, queueId });
                 return;
               }
               // Claim the run NOW, synchronously. Everything below this line may
               // yield, and `running` does not flip until runAgent begins.
               claimedStart = runClaim.claim();
-              json(res, 202, { queued: false, count: 0 });
+              // Fail preparation before runAgent can swallow errors or record user hints.
+              const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+              const acceptFreshPrompt = () => {
+                supersedeCapturedAsks();
+                onAccepted();
+                if (!res.writableEnded) json(res, 202, { queued: false, count: 0 });
+              };
+              // Commands return without the persistence callback; only a successful
+              // non-generating command may use completion as its acceptance boundary.
+              const startsAgentRun = attachments.length > 0 || await session.willStartAgentRun(text);
               // Gate inputs captured around the run: whether this turn is a workflow
               // slash command (attachment prompts skip slash expansion entirely), and
               // how many assistant messages the run actually adds. Computed even when
@@ -5671,8 +5702,8 @@ async function createSession(
               // Webview display hint for this prompt's user bubble (kenSent shimmer
               // label / enhancer highlight segments / the `/name` a command was typed
               // as). Anchored +1 so it attaches to the user message the prompt below
-              // is about to push. Queued prompts skip this (their position in the run
-              // is unpredictable).
+              // is about to push. Queued hints instead travel with the queue entry
+              // and are anchored by AgentSession when the accepted message persists.
               //
               // Recording the invocation matters because the agent persists the
               // EXPANDED template as the user message. Resume used to recover
@@ -5707,21 +5738,30 @@ async function createSession(
                   if (attachments.length > 0) {
                     // Persist each attachment under .gg/uploads so files are inspectable
                     // by the agent's tools, then prompt with the media as native blocks.
-                    const prepared = await prepareAttachments(cwd, attachments);
-                    await promptActiveSessionWithAttachments(text, prepared, { onAccepted });
+                    await promptActiveSessionWithAttachments(text, prepared, { onAccepted: acceptFreshPrompt });
                   } else {
                     // Pass the raw text straight through. AgentSession.prompt() is the
                     // single source of truth for slash-command expansion (built-in +
                     // `.gg/commands/*.md` custom), so the agent gets the right body
                     // while the webview keeps showing the short `/name`.
-                    await promptActiveSession(text, undefined, { onAccepted });
+                    await promptActiveSession(text, undefined, { onAccepted: acceptFreshPrompt });
                   }
+                  if (!startsAgentRun) acceptFreshPrompt();
                 },
                 workflowCommand,
-                onAccepted,
+                () => {
+                  onAccepted();
+                  // runAgent swallows startup errors and can skip cancelled runs.
+                  // Never mistake settlement for durable acceptance.
+                  rejectUnaccepted();
+                },
               );
             },
           });
+        })
+        .catch((error) => {
+          rejectUnaccepted(error);
+          broadcastError("error", "prompt failed", error);
         })
         .finally(() => {
           if (claimedStart) runClaim.release();

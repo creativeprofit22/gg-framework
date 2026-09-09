@@ -87,6 +87,39 @@ function lastUserParts(session: { getMessages: () => { role: string; content: un
 }
 
 describe("AgentSession attachment routing (app/sidecar path)", () => {
+  it.each([false, true].flatMap((queued) => ["", "Read this"].map((text) => ({ queued, text }))))(
+    "rejects pathless files before acceptance (queued=$queued, text='$text')", async ({ queued, text }) => {
+      const session = await createSession("anthropic", "claude-test");
+      const onAccepted = vi.fn();
+      const attachments = [{ kind: "file" as const, name: "notes.txt", mediaType: "text/plain", data: "aGVsbG8=" }];
+      try {
+        const before = [...session.getMessages()];
+        if (queued) expect(() => session.queueMessage(text, attachments)).toThrow("notes.txt");
+        else await expect(session.promptWithAttachments(text, attachments, { onAccepted })).rejects.toThrow("notes.txt");
+        expect(onAccepted).not.toHaveBeenCalled();
+        expect(session.getMessages()).toEqual(before);
+        expect(session.listQueuedMessages()).toEqual([]);
+      } finally { await session.dispose(); }
+    }, 20_000,
+  );
+
+  it("retains pathless inline images but rejects media requiring a saved path", async () => {
+    const session = await createSession("anthropic", "claude-test");
+    const inline = { ...image, path: undefined };
+    try {
+      await session.promptWithAttachments("", [inline]);
+      expect(lastUserParts(session)).toContainEqual({ type: "image", mediaType: image.mediaType, data: image.data });
+      expect(session.queueMessage("", [inline])).toBe(1);
+      await expect(session.promptWithAttachments("", [{ ...inline, kind: "video" }])).rejects.toThrow("unavailable");
+    } finally { await session.dispose(); }
+    const glm = await createSession("glm", "glm-5.3");
+    try {
+      expect(() => glm.queueMessage("", [inline])).toThrow("unavailable");
+      await expect(glm.promptWithAttachments("", [inline])).rejects.toThrow("unavailable");
+      expect(glm.getMessages().some((message) => message.role === "user")).toBe(false);
+    } finally { await glm.dispose(); }
+  }, 20_000);
+
   it("routes GLM image attachments to the zai vision MCP tool, not inline pixels", async () => {
     const session = await createSession("glm", "glm-5.3");
     try {

@@ -32,13 +32,14 @@ export interface RealSidecarEvent {
 export async function withRealSidecar<T>(run: (fixture: {
   project: string;
   manager: FixtureSessions;
+  generation: { started: Promise<void>; release(): void };
   request: (route: string, sessionId?: string, body?: unknown) => Promise<Response>;
-  open: (sessionPath: string) => Promise<string>;
+  open: (sessionPath: string, mode?: "code" | "chat") => Promise<string>;
   subscribe: (sessionId: string, receive?: (event: RealSidecarEvent) => void) => Promise<{
     events: RealSidecarEvent[];
     waitFor: (type: string, count?: number) => Promise<RealSidecarEvent>;
   }>;
-}) => Promise<T>): Promise<T> {
+}) => Promise<T>, options: { parkQuestion?: boolean; queueDrain?: "steering" | "stranded" } = {}): Promise<T> {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-real-sidecar-"));
   let child: ChildProcess | undefined;
   let closed: Promise<void> | undefined;
@@ -66,6 +67,8 @@ export async function withRealSidecar<T>(run: (fixture: {
       XDG_DATA_HOME: path.join(home, "data"), GG_AGENT_DIR: agentDir, GG_APP_CWD: project,
       GG_APP_AUTH_TOKEN: nativeToken, GG_APP_TOKEN: token, GG_APP_PORT: "0",
       GG_DISABLE_TELEMETRY: "1", GG_APP_ORPHAN_CHECK_MS: "0",
+      GG_FIXTURE_PARK_QUESTION: options.parkQuestion ? "1" : "0",
+      GG_FIXTURE_QUEUE_DRAIN: options.queueDrain ?? "",
     });
     // Keep filesystem URLs out of Vite's browser asset URL transform in the UI harness.
     const moduleUrl = import.meta.url;
@@ -75,9 +78,15 @@ export async function withRealSidecar<T>(run: (fixture: {
       SessionManager: new (root: string) => FixtureSessions;
     };
     child = spawn(process.execPath, ["--import", pathToFileURL(require.resolve("tsx")).href,
-      fileURLToPath(new URL("../app-sidecar.ts", moduleUrl))], {
-      cwd: fileURLToPath(new URL("../../", moduleUrl)), env, stdio: ["pipe", "pipe", "pipe"],
+      fileURLToPath(new URL("./real-sidecar-entry.ts", moduleUrl))], {
+      cwd: fileURLToPath(new URL("../../", moduleUrl)), env, stdio: ["pipe", "pipe", "pipe", "ipc"],
     });
+    const generation = {
+      started: new Promise<void>((resolve) => {
+        child!.on("message", (message) => { if (message === "generation-started") resolve(); });
+      }),
+      release: () => { child!.send("release-generation"); },
+    };
     closed = new Promise<void>((resolve) => child!.once("close", () => resolve()));
     // Drain logs without retaining or printing launch credentials.
     child.stderr?.resume();
@@ -100,9 +109,9 @@ export async function withRealSidecar<T>(run: (fixture: {
       method: body === undefined ? "GET" : "POST", headers: headers(sessionId),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15_000),
     });
-    return await run({ project, manager: new SessionManager(path.join(agentDir, "sessions")), request,
-      async open(sessionPath) {
-        const response = await request("/session", undefined, { cwd: project, sessionPath });
+    return await run({ project, manager: new SessionManager(path.join(agentDir, "sessions")), request, generation,
+      async open(sessionPath, mode = "code") {
+        const response = await request("/session", undefined, { cwd: project, sessionPath, mode });
         if (!response.ok) throw new Error(`Session open failed: ${response.status}`);
         const body = await response.json() as { sessionId: string };
         if (typeof body.sessionId !== "string") throw new Error("Missing logical session ID");

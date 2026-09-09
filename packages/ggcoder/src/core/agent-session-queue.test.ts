@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { normalizePromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
 
@@ -77,6 +78,21 @@ async function makeSession() {
   return session;
 }
 
+describe("prompt display metadata validation", () => {
+  it("copies supported fields and discards model instructions and malformed segments", () => {
+    expect(normalizePromptMeta({ kenSent: true, instructions: "not display metadata",
+      enhancements: [{ kind: "text", text: "hello", extra: "ignored" }] }))
+      .toEqual({ kenSent: true, enhancements: [{ kind: "text", text: "hello" }] });
+    for (const enhancements of [[null], [{ kind: "term", text: "missing original" }],
+      [{ kind: "term", text: "term", original: "old", note: 42 }], "not segments"]) {
+      expect(normalizePromptMeta({ kenSent: true, enhancements })).toEqual({ kenSent: true });
+    }
+    expect(normalizePromptMeta({ kenSent: "true" })).toBeUndefined();
+    expect(normalizePromptMeta(null)).toBeUndefined();
+    expect(normalizePromptMeta([])).toBeUndefined();
+  });
+});
+
 describe("AgentSession queue — takeNextQueuedMessage", () => {
   it("returns queued messages FIFO with attachments preserved, then null", async () => {
     const session = await makeSession();
@@ -89,15 +105,21 @@ describe("AgentSession queue — takeNextQueuedMessage", () => {
         path: "/x.png",
       };
       expect(session.queueMessage("first")).toBe(1);
-      expect(session.queueMessage("second", [att])).toBe(2);
+      const meta = { kenSent: true, enhancements: [{ kind: "term" as const,
+        text: "second", original: "original second", note: "Display only" }] };
+      expect(session.queueMessage("second", [att], meta)).toBe(2);
+      meta.enhancements[0].note = "Changed after enqueue";
       expect(session.getQueuedCount()).toBe(2);
 
       const a = session.takeNextQueuedMessage();
-      expect(a).toEqual({ text: "first", attachments: [] });
+      expect(a).toEqual({ id: "q1", text: "first", attachments: [] });
       const b = session.takeNextQueuedMessage();
       expect(b?.text).toBe("second");
       // Attachments survive the take — drainQueue would have dropped them.
       expect(b?.attachments).toEqual([att]);
+      expect(b?.id).toBe("q2");
+      expect(b?.meta).toEqual({ kenSent: true, enhancements: [{ kind: "term",
+        text: "second", original: "original second", note: "Display only" }] });
 
       expect(session.getQueuedCount()).toBe(0);
       expect(session.takeNextQueuedMessage()).toBeNull();

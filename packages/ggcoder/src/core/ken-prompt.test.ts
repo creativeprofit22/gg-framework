@@ -50,10 +50,13 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("or repeat a completed comparison on every turn");
   });
 
-  it("trusts only harness-classified passed verification evidence", () => {
-    expect(prompt).toContain("trust only PASSED rows");
-    expect(prompt).toContain("FAILED or REJECTED rows");
-    expect(prompt).toContain("model-authored claims are not proof");
+  it("distinguishes observed outcomes from certification and missing evidence from failures", () => {
+    expect(prompt).toContain("Command observations report outcomes, not certification");
+    expect(prompt).toContain("Historical reports were not rerun");
+    expect(prompt).toContain("unclassified or unavailable results are not failed tests");
+    expect(prompt).toContain("Choose relevant checks, not one per criterion");
+    expect(prompt).toContain("Audits, approved planning and honest partial progress may stop without completing a phase");
+    expect(prompt).not.toContain("trust only PASSED rows");
   });
 
   it("makes Ken the plan reviewer (no automatic HUMAN on plan submissions)", () => {
@@ -109,8 +112,10 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
   it("limits structured approval warnings to corpus availability, not failed verification", () => {
     expect(prompt).toContain('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}');
     expect(prompt).toContain("Never append prose to ALL_CLEAR");
-    expect(prompt).toContain("never failed or missing verification");
-    expect(prompt).toContain("Those still require PROMPT to fix, or HUMAN");
+    expect(prompt).toContain("For otherwise approved work ONLY, if the corpus comparison was unavailable or declined");
+    expect(prompt).toContain("Report known failures and unavailable checks honestly");
+    expect(prompt).toContain("missing transcript evidence alone is not a failure");
+    expect(prompt).toContain("PROMPT only when something real is wrong or unfinished: a failing/absent test, a broken build");
   });
 
   it("tells Ken injected transcript lines are his own, not user asks", () => {

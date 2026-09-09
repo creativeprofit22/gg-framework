@@ -42,7 +42,10 @@ describe("explicit single-opportunity app command", () => {
     expect(sidecar).toContain("runSucceeded = programmaticSettlement?.succeeded ?? true");
     expect(sidecar).toContain("programmaticSettlement?.journalOutcome ??");
     expect(sidecar).toContain("...programmaticSettlement?.event,");
-    expect(sidecar).toContain('runOutcome: cancelled ? "cancelled" : runSucceeded && !verificationProblem ? "succeeded" : "failed"');
+    expect(sidecar).toContain('programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed")');
+    expect(sidecar).toContain('if (cancelled) outcome = "aborted"');
+    expect(sidecar).toContain("runLifecycle.recordOutcome(generation, outcome)");
+    expect(sidecar).toContain("...createRunEndPayload(outcome, runLifecycle.state)");
     const execute = sidecar.slice(sidecar.indexOf("execute: async (selection)"), sidecar.indexOf("if (handledProgrammatic) return"));
     expect(execute).toContain("return result;");
     expect(execute).toContain("cancelQuestions: () => asks.cancelAll()");

@@ -15,9 +15,9 @@ describe("durable Roadmap marker boundary", () => {
     expect(markerPath).not.toContain("checkpointPhaseExecutionStep");
     expect(source).not.toContain("persistDurableApprovedPlanMarkers");
     expect(source).not.toContain("notesRepository.checkpointPhaseExecutionStep");
-    expect(source).toMatch(
-      /currentPlanProgress:\s*durableRoadmapExecution\s*\?\s*\{ total: 0, completed: \[\] \}/,
-    );
+    // Run settlement no longer synthesizes canonical checkpoints from transcript markers.
+    expect(source).not.toContain("currentPlanProgress:");
+    expect(source).not.toContain("notesRepository.recordImplementationCheckpoint");
     expect(source).toMatch(
       /terminalPlanComplete = durableRoadmapExecution\s*\? await durableApprovedPlanComplete\(\)\s*: markerComplete/,
     );

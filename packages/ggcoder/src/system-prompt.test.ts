@@ -235,7 +235,9 @@ describe("buildSystemPrompt", () => {
     // gated by one stop list. How to Work owns it; How to Talk must defer to it
     // instead of publishing a second, drifting list of reasons to stop.
     expect(talk).toContain("When something in How to Work genuinely stops you");
-    expect(prompt).toContain("Stop only for user decisions, secrets/access, cost");
+    expect(prompt).toContain("Stop for user decisions, secrets/access, cost");
+    expect(prompt).toContain("Audits, planning and honest partial progress may stop without completing a task or phase");
+    expect(prompt).toContain("Report remaining gaps; never fabricate Done");
 
     // The blockquote is the ask and only the ask, so exactly one blockquote
     // template may exist anywhere in the prompt — a second one teaches the model
@@ -344,8 +346,9 @@ describe("buildSystemPrompt", () => {
       "ask only when a missing product or taste decision would materially change the result",
       "Keep edits small",
       "plan only complex/risky multi-file work",
-      "Stop only for user decisions, secrets/access, cost",
-      "otherwise continue through completion",
+      "Stop for user decisions, secrets/access, cost",
+      "Audits, planning and honest partial progress may stop without completing a task or phase",
+      "Report remaining gaps; never fabricate Done",
       "Preserve user work",
       "Rule precedence: project context files",
       "file/module patterns → applicable skill instructions",

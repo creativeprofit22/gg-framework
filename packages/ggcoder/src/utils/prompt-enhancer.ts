@@ -6,9 +6,8 @@ import { stream, type Message, type Provider, type TextContent } from "@kenkaiii
  * user's `original` phrasing (and an optional `note`) so the UI can teach the
  * difference via a tooltip.
  */
-export type PromptSegment =
-  | { kind: "text"; text: string }
-  | { kind: "term"; text: string; original: string; note?: string };
+export type { PromptSegment } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type { PromptSegment } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export interface EnhanceResult {
   /** The plain rewritten prompt — exactly what gets sent to the agent. */

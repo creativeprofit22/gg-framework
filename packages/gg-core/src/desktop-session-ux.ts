@@ -1,3 +1,35 @@
+/** Display-only prompt hints. Never put these fields in model messages. */
+export type PromptSegment =
+  | { kind: "text"; text: string }
+  | { kind: "term"; text: string; original: string; note?: string };
+
+export interface PromptMeta {
+  kenSent?: boolean;
+  enhancements?: PromptSegment[];
+}
+
+/** Copy only supported fields at the desktop boundary; malformed highlights are ignored. */
+export function normalizePromptMeta(value: unknown): PromptMeta | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const meta: PromptMeta = {};
+  if (input.kenSent === true) meta.kenSent = true;
+  if (Array.isArray(input.enhancements)) {
+    const segments: PromptSegment[] = [];
+    for (const value of input.enhancements) {
+      if (!value || typeof value !== "object" || typeof value.text !== "string") break;
+      if (value.kind === "text") segments.push({ kind: "text", text: value.text });
+      else if (value.kind === "term" && typeof value.original === "string" &&
+        (value.note === undefined || typeof value.note === "string")) {
+        segments.push({ kind: "term", text: value.text, original: value.original,
+          ...(value.note !== undefined ? { note: value.note } : {}) });
+      } else break;
+    }
+    if (segments.length === input.enhancements.length) meta.enhancements = segments;
+  }
+  return Object.keys(meta).length > 0 ? meta : undefined;
+}
+
 /** Durable run-journal vocabulary, shared by terminal transports. */
 export type RunOutcome = "completed" | "failed" | "aborted" | "unverified";
 export type RunEndOutcome = Exclude<RunOutcome, "aborted"> | "cancelled";

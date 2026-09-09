@@ -86,6 +86,12 @@ export type OpenAICodexContextProfileEligibility =
 /** Session UX authority carried by initial state and context extras. */
 export interface DesktopSessionUXState {
   openAICodexContextProfileEligibility: OpenAICodexContextProfileEligibility;
+  /** Last completed explicit reset; recovery must match both operation and current identity. */
+  lastNewSessionReset?: {
+    operationId: string;
+    conversationId: string;
+    sessionId: string;
+  };
 }
 
 export interface ContinuationSourceRevision {

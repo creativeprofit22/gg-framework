@@ -1192,6 +1192,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
   const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
+  const recoveredSessionResetOperationRef = useRef<string | null>(null);
+  // Authority survives the transient mutation lock, including an unavailable receipt.
+  const unresolvedSessionResetRef = useRef<{
+    generation: number | null | undefined;
+    operationId: string | null;
+  } | null>(null);
+  const blockUnconfirmedSession = useCallback((): boolean => {
+    if (!unresolvedSessionResetRef.current) return false;
+    toast(AMBIGUOUS_NEW_SESSION_MESSAGE, "error", 7_000);
+    return true;
+  }, []);
   const sessionResetOperationWaitersRef = useRef(
     new Map<
       string,
@@ -1669,6 +1680,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const conversationId =
       typeof data.conversationId === "string" ? data.conversationId : undefined;
     const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
+    if (operationId && recoveredSessionResetOperationRef.current === operationId) return false;
+    const unresolved = unresolvedSessionResetRef.current;
+    if (unresolved && (
+      unresolved.generation !== generationRef.current ||
+      (unresolved.operationId === null ? !sessionMutationLockRef.current : operationId !== unresolved.operationId) ||
+      !operationId || !conversationId || !sessionId || conversationId === stateRef.current?.conversationId
+    )) return false;
     if (operationId && continuationResetsRef.current.has(operationId)) return false;
     if (conversationId && retiredConversationIdsRef.current.has(conversationId)) return false;
     const attempt = continuationAttemptRef.current;
@@ -1755,6 +1773,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const onAuthoritativeSessionReset = useCallback((operationId?: string) => {
     if (!operationId) return;
+    const unresolved = unresolvedSessionResetRef.current;
+    if (unresolved?.operationId === operationId && unresolved.generation === generationRef.current) {
+      unresolvedSessionResetRef.current = null;
+    }
+    recoveredSessionResetOperationRef.current = operationId;
     const waiter = sessionResetOperationWaitersRef.current.get(operationId);
     if (waiter) {
       sessionResetOperationWaitersRef.current.delete(operationId);
@@ -1818,7 +1841,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setPlanReview,
     setQueuedCount,
     setQueuedMessages,
-    setAttachments,
+    setAttachments: (next) => {
+      if (!unresolvedSessionResetRef.current) setAttachments(next);
+    },
     setCommands,
     setModels,
     onAstraStateChange,
@@ -1838,12 +1863,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // models, and commands. Re-invoked after a project switch respawns the
   // sidecar (its port changes, so we re-wait for readiness).
   const hydrate = useCallback(async (): Promise<void> => {
+    const epoch = ++hydrateEpochRef.current;
+    const unresolved = unresolvedSessionResetRef.current;
     readyRef.current = false;
     setHydrated(false);
     setStatus("connecting to agent\u2026");
     try {
       await waitForReady();
       readyRef.current = true;
+      const generation = generationRef.current;
       const applyKenHydration = captureKenHydration();
       const st = await getState().catch(() => null);
       if (st) applyKenHydration(st.kenState);
@@ -1868,7 +1896,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
-      if (history.length > 0) {
+      if (!mountedRef.current || epoch !== hydrateEpochRef.current || generation !== generationRef.current || unresolvedSessionResetRef.current !== unresolved) return;
+      if (history.length > 0 || unresolved) {
         clearKenStream();
         // A freshly hydrated session lands at the bottom (newest message).
         stickToBottomRef.current = true;
@@ -1993,6 +2022,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             };
           }),
         );
+      }
+      if (st?.conversationId && st.sessionId && unresolvedSessionResetRef.current === unresolved) {
+        if (unresolved?.operationId) recoveredSessionResetOperationRef.current = unresolved.operationId;
+        unresolvedSessionResetRef.current = null;
+        stateRef.current = st;
       }
     } catch (err) {
       setStatus(`agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
@@ -2568,7 +2602,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // prompt firing on its interval. Those must NOT clear the composer, or a
   // schedule that comes due mid-sentence deletes what the user was typing.
   function submitText(text: string, label?: string, opts?: { keepInput?: boolean }): void {
-    if (sessionMutationLockRef.current) return;
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     // A pending plan is the only operation that can move this session forward.
     // Do not let toolbar commands or scheduled prompts silently clear its gate.
     if (planReview !== null) return;
@@ -2720,13 +2754,63 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (newSessionBusy || sessionMutationLockRef.current) {
       throw new LocalSessionMutationBusyError();
     }
+    if (unresolvedSessionResetRef.current) {
+      throw new SessionResetConfirmationTimeoutError(unresolvedSessionResetRef.current.operationId ?? "");
+    }
     sessionMutationLockRef.current = true;
     setNewSessionBusy(true);
+    const pending = { generation: generationRef.current, operationId: null as string | null };
+    unresolvedSessionResetRef.current = pending;
     try {
+      const generation = pending.generation;
       const { operationId } = await newSession();
+      pending.operationId = operationId;
       await waitForReady();
-      await registerSessionResetOperationWaiter(operationId);
+      try {
+        await registerSessionResetOperationWaiter(operationId);
+      } catch (error) {
+        if (!(error instanceof SessionResetConfirmationTimeoutError)) throw error;
+        // Recover only this completed operation, never retry the destructive reset.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const snapshot = await Promise.race([
+          getState().catch(() => null),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), SESSION_RESET_TIMEOUT_MS);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (generationRef.current !== generation) throw error;
+        // The real event may have arrived while the state read was in flight.
+        if (!observedSessionResetOperationsRef.current.delete(operationId)) {
+          const receipt = snapshot?.lastNewSessionReset;
+          if (
+            !snapshot ||
+            receipt?.operationId !== operationId ||
+            typeof receipt.conversationId !== "string" ||
+            !receipt.conversationId ||
+            typeof receipt.sessionId !== "string" ||
+            !receipt.sessionId ||
+            receipt.conversationId !== snapshot.conversationId ||
+            receipt.sessionId !== snapshot.sessionId ||
+            retiredConversationIdsRef.current.has(receipt.conversationId)
+          ) {
+            throw error;
+          }
+          handleEvent({ type: "session_reset", data: { ...receipt, kenState: snapshot.kenState } });
+          if (!observedSessionResetOperationsRef.current.delete(operationId)) throw error;
+          recoveredSessionResetOperationRef.current = operationId;
+          stateRef.current = snapshot;
+          setState(snapshot);
+        }
+      }
+      if (generationRef.current !== generation) throw new SessionResetConfirmationTimeoutError(operationId);
+      if (unresolvedSessionResetRef.current === pending) unresolvedSessionResetRef.current = null;
+      recoveredSessionResetOperationRef.current = operationId;
       return operationId;
+    } catch (error) {
+      if (error instanceof NewSessionError && error.kind === "creation-rejected" && unresolvedSessionResetRef.current === pending) {
+        unresolvedSessionResetRef.current = null;
+      }
+      throw error;
     } finally {
       sessionMutationLockRef.current = false;
       setNewSessionBusy(false);
@@ -2735,6 +2819,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     autopilotReviewing,
     newSession,
     newSessionBusy,
+    getState,
+    handleEvent,
     registerSessionResetOperationWaiter,
     running,
     waitForReady,
@@ -2751,7 +2837,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const commitPreparedContinuation = useCallback(
     async (ownsLock = false): Promise<KenPromptActionResult> => {
       const attempt = continuationAttemptRef.current;
-      if (!attempt || (!ownsLock && sessionMutationLockRef.current)) return { status: "cancelled" };
+      if (blockUnconfirmedSession() || !attempt || (!ownsLock && sessionMutationLockRef.current)) return { status: "cancelled" };
       sessionMutationLockRef.current = true;
       setNewSessionBusy(true);
       setContinuationConfirmation((current) =>
@@ -2865,6 +2951,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const dispatchKenPromptAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult> => {
       const prompt = action.prompt;
+      if ((action.type === "send-current" || action.type === "send-fresh") && blockUnconfirmedSession()) {
+        return { status: "failed", action: action.type, message: AMBIGUOUS_NEW_SESSION_MESSAGE };
+      }
       if (action.type === "send-fresh") {
         const message = continuationInstructionError(prompt);
         if (message)
@@ -2969,7 +3058,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           );
           continuationConfirmationRef.current = null;
           if (!choice) return { status: "cancelled" };
-          if (sessionMutationLockRef.current)
+          if (blockUnconfirmedSession() || sessionMutationLockRef.current)
             return {
               status: "failed",
               action: action.type,
@@ -3261,6 +3350,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   function sendToKen(question: string, addressedText: string, preserveComposer = false): void {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     const trimmedQuestion = question.trim();
     const trimmedAddressedText = addressedText.trim();
     if (!readyRef.current || planReview !== null || !trimmedQuestion || !trimmedAddressedText) {
@@ -3293,7 +3383,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Submit the current input together with any staged attachments. Images are
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
-    if (sessionMutationLockRef.current) return;
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     const trimmed = input.trim();
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
@@ -3532,6 +3622,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function acceptPlan(): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     // Capture the approved plan's step count BEFORE the IPC — accepting starts a
     // fresh session on the sidecar, whose session_reset broadcast nulls
     // planReview (and clears the transcript + counters) here.
@@ -3560,6 +3651,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function sendPlanFeedback(feedback: string): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     if (!planReview) return;
     setPlanGateBusy(true);
     try {
@@ -3580,6 +3672,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function retryPlanRevision(): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     if (!planReview || planReview.state !== "revision-requested" || !planReview.feedback) return;
     setPlanGateBusy(true);
     try {
@@ -3636,7 +3729,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     planDoneRef.current = new Set();
     setPlanTotal(0);
     setPlanDone(new Set());
-    setAttachments([]);
+    if (!unresolvedSessionResetRef.current) setAttachments([]);
     setQueuedCount(0);
     setQueuedMessages([]);
     setHydrated(false);
@@ -3685,7 +3778,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           message: "Roadmap phases can only start in coding mode.",
         };
       }
-      if (running || autopilotReviewing || newSessionBusy) {
+      if (blockUnconfirmedSession() || running || autopilotReviewing || newSessionBusy) {
         return {
           status: "failed",
           code: "session-busy",
@@ -4010,9 +4103,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 cwd={state?.cwd ?? null}
                 client={client}
                 onStartPhase={startRoadmapPhase}
-                onStartNextPhase={(checkpointId, nextPhaseId) =>
-                  client.startNextPhase(checkpointId, nextPhaseId)
-                }
+                onStartNextPhase={async (checkpointId, nextPhaseId) => {
+                  if (blockUnconfirmedSession()) {
+                    return { status: "failed", code: "session-busy", operationId: null, message: AMBIGUOUS_NEW_SESSION_MESSAGE };
+                  }
+                  return client.startNextPhase(checkpointId, nextPhaseId);
+                }}
                 commands={commands}
                 onRunCommand={(invocation) => submitText(invocation)}
                 onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}

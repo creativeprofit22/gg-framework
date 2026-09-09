@@ -34,7 +34,7 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
-import type { DesktopContextSnapshot } from "@kenkaiiii/gg-core";
+import type { DesktopContextSnapshot, DesktopSessionUXState } from "@kenkaiiii/gg-core";
 import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
 import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
@@ -4408,6 +4408,7 @@ async function createSession(
     createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
       new AgentSession(options),
   });
+  let lastNewSessionReset: DesktopSessionUXState["lastNewSessionReset"];
   // Shared reset bookkeeping: ordinary reset and continuation use the same owner/event path.
   async function resetBuildSession(mutation: SessionMutationOwner): Promise<void> {
     await session.newSession(false);
@@ -4416,6 +4417,9 @@ async function createSession(
     injectedAutopilotPrompts = [];
     planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
     const { conversationId, sessionId } = session.getConversationIdentity();
+    if (mutation.kind === "new-session") {
+      lastNewSessionReset = { operationId: mutation.operationId, conversationId, sessionId };
+    }
     log("INFO", "app-sidecar", "new session accepted", {
       logicalSessionId: opts.id,
       operationId: mutation.operationId,
@@ -4531,6 +4535,10 @@ async function createSession(
     const state = session.getState();
     return {
       ...state,
+      ...(lastNewSessionReset?.conversationId === state.conversationId &&
+      lastNewSessionReset?.sessionId === state.sessionId
+        ? { lastNewSessionReset }
+        : {}),
       mode,
       chatAgent,
       running,

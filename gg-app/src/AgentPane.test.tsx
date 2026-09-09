@@ -9,6 +9,7 @@ import type * as ToastModule from "./toast";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
+import { withRealSidecar } from "../../packages/ggcoder/src/test-support/real-sidecar";
 
 HTMLElement.prototype.scrollTo = vi.fn();
 Element.prototype.scrollIntoView = vi.fn();
@@ -3280,6 +3281,310 @@ describe("AgentPane lifecycle", () => {
     );
     expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
     expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["stable", "experimental"] as const)(
+    "recovers a withheld real source-daemon reset and ignores its late SSE notification (%s)",
+    async (profile) => {
+      vi.useRealTimers();
+      nativeMocks.realMentor = true;
+      await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
+        const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: profile });
+        await manager.appendRequiredMessage(saved.path, {
+          type: "message", id: "old-message", parentId: null, timestamp: new Date().toISOString(),
+          message: { role: "user", content: "Old real transcript" },
+        });
+        const logicalId = await open(saved.path);
+        const otherSaved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: profile });
+        const otherId = await open(otherSaved.path);
+        const readState = async (id: string): Promise<AgentState> => {
+          const response = await request("/state", id);
+          expect(response.status).toBe(200);
+          return response.json();
+        };
+        const original = await readState(logicalId);
+        const otherOriginal = await readState(otherId);
+        expect(original.openAICodexContextProfile).toBe(profile);
+        expect(otherOriginal.lastNewSessionReset).toBeUndefined();
+        const pane = client(logicalId, 1);
+        vi.mocked(pane.getState).mockImplementation(() => readState(logicalId));
+        vi.mocked(pane.listHistory).mockImplementation(async () => {
+          const response = await request("/history", logicalId);
+          expect(response.status).toBe(200);
+          const body = await response.json() as { history: Awaited<ReturnType<PaneAgentClient["listHistory"]>> };
+          return body.history;
+        });
+        vi.mocked(pane.newSession).mockImplementation(async () => {
+          const response = await request("/new-session", logicalId, {});
+          expect(response.status).toBe(200);
+          return response.json();
+        });
+        const emit = liveEvents(pane);
+        const stream = await subscribe(logicalId, (event) => {
+          // The sole dropped notification is captured unchanged for late delivery below.
+          if (event.type !== "session_reset") act(() => emit(event.type, event.data));
+        });
+        try {
+          render(<AgentPane client={pane} />);
+          fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+          fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+          expect(await screen.findByText("Old real transcript")).toBeTruthy();
+          const filesBefore = await manager.list(project);
+          vi.mocked(pane.getState).mockClear();
+          fireEvent.click(screen.getByTitle("Start a new session for this project"));
+          fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+          const late = await stream.waitFor("session_reset");
+          expect(late.sessionId).toBe(logicalId);
+          await waitFor(() => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull(), { timeout: 20_000 });
+          const current = await readState(logicalId);
+          expect(current.lastNewSessionReset).toMatchObject({ operationId: late.data.operationId,
+            conversationId: current.conversationId, sessionId: current.sessionId });
+          expect(pane.getState).toHaveBeenCalled();
+          expect(screen.queryByText("Old real transcript")).toBeNull();
+          expect(nativeMocks.kenStateRef?.current?.conversationId).toBe(current.conversationId);
+          expect(nativeMocks.kenStateRef?.current?.sessionId).toBe(current.sessionId);
+          expect(current.conversationId).not.toBe(original.conversationId);
+          expect(current.sessionId).not.toBe(original.sessionId);
+          expect(pane.newSession).toHaveBeenCalledOnce();
+          const filesAfter = await manager.list(project);
+          expect(filesAfter).toHaveLength(filesBefore.length + 1);
+          expect(filesAfter.filter((file) => !filesBefore.some((old) => old.id === file.id))).toHaveLength(1);
+          expect(nativeMocks.toast).not.toHaveBeenCalled();
+          const input = screen.getByRole("textbox");
+          fireEvent.change(input, { target: { value: "Keep this real recovery message" } });
+          fireEvent.keyDown(input, { key: "Enter" });
+          await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+          // Send remains mocked: no generation route or model invocation is allowed.
+          act(() => emit(late.type, late.data));
+          expect(screen.getByText("Keep this real recovery message")).toBeTruthy();
+          expect(pane.newSession).toHaveBeenCalledOnce();
+          expect(await manager.list(project)).toHaveLength(filesAfter.length);
+          const otherCurrent = await readState(otherId);
+          expect(otherCurrent.lastNewSessionReset).toBeUndefined();
+          expect(otherCurrent.conversationId).toBe(otherOriginal.conversationId);
+          expect(otherCurrent.sessionId).toBe(otherOriginal.sessionId);
+        } finally { cleanup(); }
+      });
+    },
+    90_000,
+  );
+
+  it.each(["stable", "experimental"] as const)(
+    "recovers a missing toolbar reset event in %s mode without creating another session",
+    async (profile) => {
+      nativeMocks.realMentor = true;
+      const pane = client("pane-reset-recovery", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        openAICodexContextProfile: profile,
+      });
+      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Old transcript" }]);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      expect(await screen.findByText("Old transcript")).toBeTruthy();
+      const snapshot: AgentState = {
+        ...agentState("azure:gpt-test"),
+        conversationId: "fresh-conversation",
+        sessionId: "fresh-session",
+        openAICodexContextProfile: profile,
+        lastNewSessionReset: {
+          operationId: "operation-1",
+          conversationId: "fresh-conversation",
+          sessionId: "fresh-session",
+        },
+      };
+      vi.mocked(pane.getState).mockResolvedValue(snapshot);
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByTitle("Start a new session for this project"));
+      fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_001); });
+      expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+      expect(nativeMocks.toast).not.toHaveBeenCalled();
+      expect(screen.queryByText("Old transcript")).toBeNull();
+      expect(nativeMocks.kenStateRef?.current?.conversationId).toBe("fresh-conversation");
+      expect(pane.newSession).toHaveBeenCalledOnce();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "Keep this new message" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(pane.sendPrompt).toHaveBeenCalledOnce();
+      const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+      act(() => emit({ type: "session_reset", data: snapshot.lastNewSessionReset! }));
+      expect(screen.getByText("Keep this new message")).toBeTruthy();
+    },
+  );
+
+  it.each((["stable", "experimental"] as const).flatMap((profile) =>
+    ["missing", "wrong-operation", "wrong-conversation", "wrong-session", "unavailable", "hung"].map((failure) => ({ profile, failure })),
+  ))(
+    "refuses sends in $profile when reset recovery is $failure",
+    async ({ profile, failure }) => {
+      nativeMocks.realMentor = true;
+      const pane = client("pane-reset-unconfirmed", 1);
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), openAICodexContextProfile: profile });
+      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Preserve old transcript" }]);
+      render(<AgentPane client={pane} registerInput={(_id, actions) => { actionsRef.current = actions; }} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      expect(await screen.findByText("Preserve old transcript")).toBeTruthy();
+      const snapshot: AgentState = {
+        ...agentState("azure:gpt-test"),
+        conversationId: "fresh-conversation",
+        sessionId: "fresh-session",
+        lastNewSessionReset: failure === "missing" ? undefined : {
+          operationId: failure === "wrong-operation" ? "other" : "operation-1",
+          conversationId: failure === "wrong-conversation" ? "other" : "fresh-conversation",
+          sessionId: failure === "wrong-session" ? "other" : "fresh-session",
+        },
+      };
+      vi.mocked(pane.getState).mockImplementation(() =>
+        failure === "unavailable" ? Promise.reject(new Error("disconnected")) :
+        failure === "hung" ? new Promise(() => {}) : Promise.resolve(snapshot),
+      );
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByTitle("Start a new session for this project"));
+      fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        expect.stringContaining("confirm which session is active"), "error", 7000,
+      );
+      expect(screen.getByText("Preserve old transcript")).toBeTruthy();
+      expect(pane.newSession).toHaveBeenCalledOnce();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "Keep my draft" } });
+      await act(async () => { actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]); });
+      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      fireEvent.keyDown(input, { key: "Enter" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
+      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+      act(() => emit({ type: "session_reset", data: { operationId: "other", conversationId: "other", sessionId: "other" } }));
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      const receipt = { operationId: "operation-1", conversationId: "fresh-conversation", sessionId: "fresh-session" };
+      act(() => emit({ type: "session_reset", data: receipt }));
+      expect(screen.queryByText("Preserve old transcript")).toBeNull();
+      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      fireEvent.keyDown(input, { key: "Enter" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(pane.sendPrompt).toHaveBeenCalledOnce();
+      act(() => emit({ type: "session_reset", data: receipt }));
+      expect(screen.getByText("Keep my draft")).toBeTruthy();
+    },
+  );
+
+  it("keeps other panes usable and only restores reset authority after successful reopen hydration", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("unresolved-reopen", 1);
+    const other = client("independent", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(other.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const first = render(<AgentPane client={pane} />);
+    fireEvent.click(await within(first.container).findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await within(first.container).findByRole("textbox");
+    const second = render(<AgentPane client={other} />);
+    fireEvent.click(await within(second.container).findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const otherInput = await within(second.container).findByRole("textbox");
+    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+    vi.useFakeTimers();
+    fireEvent.click(within(first.container).getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+    fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
+    fireEvent.keyDown(otherInput, { key: "Enter" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(other.sendPrompt).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    // A generation change alone and a failed state read cannot restore authority.
+    vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
+    vi.mocked(pane.waitForReady).mockResolvedValue({ ready: true, error: null, generation: 2, sessionId: pane.paneId });
+    fireEvent.click(within(first.container).getByRole("button", { name: /Back to this project's sessions/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    let input = await within(first.container).findByRole("textbox");
+    const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+    act(() => emit({ type: "session_reset", data: { operationId: "operation-1", conversationId: "late", sessionId: "late" } }));
+    fireEvent.change(input, { target: { value: "Recovered draft" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), conversationId: "reopened", sessionId: "reopened" });
+    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Authoritative reopened history" }]);
+    fireEvent.click(within(first.container).getByRole("button", { name: /Back to this project's sessions/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await within(first.container).findByText("Authoritative reopened history")).toBeTruthy();
+    input = within(first.container).getByRole("textbox");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    act(() => emit({ type: "session_reset", data: { operationId: "operation-1", conversationId: "late", sessionId: "late" } }));
+    expect(within(first.container).getByText("Recovered draft")).toBeTruthy();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(["stable", "experimental"] as const)("enforces the shared New Chat gate in %s mode", async (profile) => {
+    nativeMocks.realMentor = true;
+    const pane = client("unresolved-chat", 1);
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), mode: "chat", openAICodexContextProfile: profile });
+    render(<AgentPane client={pane} initialTarget={chatTarget} />);
+    const input = await screen.findByRole("textbox");
+    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle("Start a new chat"));
+    fireEvent.click(screen.getByRole("button", { name: "New Chat" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+    fireEvent.change(input, { target: { value: "Keep chat draft" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("Keep chat draft");
+    expect(pane.newSession).toHaveBeenCalledOnce();
+  });
+
+  it("blocks Ken current, fresh and quick sends after unresolved toolbar reset", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("unresolved-ken", 1);
+    const continueHere = await renderKenPromptPane(pane);
+    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+    fireEvent.click(continueHere);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.commitContinuation).not.toHaveBeenCalled();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not poison prompt authority after a rejected 409 reset", async () => {
+    nativeMocks.realMentor = true;
+    const { NewSessionError } = await vi.importActual<typeof AgentModule>("./agent");
+    const pane = client("rejected-reset", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.newSession).mockRejectedValue(new NewSessionError("creation-rejected", "HTTP 409: busy"));
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(expect.stringContaining("current session is unchanged"), "error"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.change(input, { target: { value: "Still usable" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
   });
 
   it("blocks fresh resets during Autopilot review and shares correlation with the toolbar modal", async () => {

@@ -14,6 +14,7 @@ import {
   type PendingPlanReview,
   type ProjectTask,
   type QueuedMessage,
+  type PromptSubmissionResult,
   type SlashCommand,
   type PaneAgentClient,
   isRoadmapPhaseDraftChangeEvent,
@@ -204,6 +205,12 @@ export interface AgentEvents {
   handleEvent: (e: SidecarEvent) => void;
   /** Append a finished transcript item (used by App's submit/etc. too). */
   pushItem: (item: Item) => void;
+  /** Insert or acknowledge a user row against the latest queue snapshot. */
+  acceptSubmission: (
+    item: Extract<Item, { kind: "user" }>,
+    receipt: PromptSubmissionResult,
+    hideQueued?: boolean,
+  ) => void;
   /** Flush buffered assistant text + end the streaming section (used by App too). */
   endStreamingText: () => void;
   /** Replace the durable approval gate and every private fallback mirror atomically. */
@@ -256,14 +263,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const streamingIdRef = useRef<number | null>(null);
   const pendingChunksRef = useRef<string>("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Retain acknowledged IDs through receipt delivery, even when enqueue and
+  // drain both precede the HTTP response. Unknown IDs still await their SSE ack.
+  const acknowledgedQueueRef = useRef<Map<string, boolean>>(new Map());
   // Transcript id of the active sub-agent group for this run (null until the
   // first subagent spawns). The per-agent map keeps late async lifecycle events
   // attached to their original transcript group after a newer run starts.
-  // Queued-message texts the sidecar has actually acknowledged, with the highest
-  // pending count seen for each. A bubble is marked queued optimistically before
-  // that ack arrives, and clearing the flag is one-way, so this gates the clear
-  // to messages we know really entered the queue.
-  const ackedQueueTextsRef = useRef<Map<string, number>>(new Map());
   const subagentGroupIdRef = useRef<number | null>(null);
   const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
   const liveToolByIdRef = useRef<Map<string, LiveToolEntry>>(new Map());
@@ -440,6 +445,27 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
         }
         return [...prev, item];
+      });
+    },
+    [setItems],
+  );
+
+  const acceptSubmission = useCallback(
+    (
+      item: Extract<Item, { kind: "user" }>,
+      receipt: PromptSubmissionResult,
+      hideQueued = false,
+    ) => {
+      setItems((previous) => {
+        const accepted = {
+          ...item,
+          queueId: receipt.queueId,
+          queued: receipt.queued && !hideQueued &&
+            (acknowledgedQueueRef.current.get(receipt.queueId) ?? true),
+        };
+        return previous.some((row) => row.id === item.id)
+          ? previous.map((row) => row.id === item.id ? accepted : row)
+          : [...previous, accepted];
       });
     },
     [setItems],
@@ -1043,8 +1069,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           endStreamingText();
           finalizeThinking();
-          // The queue drained into this run — un-dim any messages that were
-          // waiting, since the agent has now consumed them.
+          // Queue snapshots, not run boundaries, settle queued submissions:
+          // autopilot may finish a run with steering still pending.
           //
           // A run boundary closes question bands only on cancellation, when
           // the sidecar answers with `asks.cancelAll()`. A plain run_end must
@@ -1057,7 +1083,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const runFailed = outcome === "failed";
           setItems((prev) =>
             prev.map((it) => {
-              if (it.kind === "user" && it.queued) return { ...it, queued: false };
               if (runCancelled && it.kind === "ask" && !it.sent && !it.cancelled) {
                 return { ...it, cancelled: true };
               }
@@ -1310,57 +1335,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // row can offer an individual cancel.
           const list = Array.isArray(d.messages) ? (d.messages as QueuedMessage[]) : [];
           setQueuedMessages(list);
-          // This event also fires when the agent CONSUMES queued steering at a
-          // turn boundary (the sidecar re-broadcasts `queue_drained` here), so
-          // drop the pending affordance from bubbles that have left the queue.
-          // Waiting for run_end instead would keep a message marked "queued" for
-          // minutes after the agent already acted on it, which reads as though it
-          // were still waiting and prompts a needless cancel.
-          //
-          // Matching is by COUNT per text, not set membership, because bubbles
-          // carry no queue id: with two identical queued messages and one
-          // consumed, the text is still present and a set test would clear
-          // neither. Comparing counts clears exactly one.
-          const pendingByText = new Map<string, number>();
-          for (const m of list) pendingByText.set(m.text, (pendingByText.get(m.text) ?? 0) + 1);
-
-          // A bubble is marked queued optimistically, before the sidecar acks the
-          // enqueue. Clearing one that has never appeared in a pending list would
-          // be permanent (nothing ever re-sets the flag), so only texts we have
-          // actually seen queued are eligible.
-          for (const [text, count] of pendingByText) {
-            const seen = ackedQueueTextsRef.current.get(text) ?? 0;
-            if (count > seen) ackedQueueTextsRef.current.set(text, count);
+          const pendingIds = new Set(list.map((message) => message.id));
+          for (const id of acknowledgedQueueRef.current.keys()) {
+            acknowledgedQueueRef.current.set(id, pendingIds.has(id));
           }
-
-          setItems((prev) => {
-            // How many queued bubbles exist per text, so the number the agent has
-            // taken is (bubbles - still pending).
-            const bubbleCount = new Map<string, number>();
-            for (const it of prev) {
-              if (it.kind !== "user" || !it.queued) continue;
-              if (!ackedQueueTextsRef.current.has(it.text)) continue;
-              bubbleCount.set(it.text, (bubbleCount.get(it.text) ?? 0) + 1);
-            }
-            const toClear = new Map<string, number>();
-            for (const [text, bubbles] of bubbleCount) {
-              const consumed = bubbles - (pendingByText.get(text) ?? 0);
-              if (consumed > 0) toClear.set(text, consumed);
-            }
-            if (toClear.size === 0) return prev;
-
-            // Clear from the FRONT: the queue is FIFO, so the earliest matching
-            // bubble is the one the agent just consumed. `promoted` marks the
-            // bubble for one animation beat so it morphs into a normal one
-            // instead of snapping out of the dim/dashed queued look.
-            return prev.map((it) => {
-              if (it.kind !== "user" || !it.queued) return it;
-              const left = toClear.get(it.text) ?? 0;
-              if (left <= 0) return it;
-              toClear.set(it.text, left - 1);
-              return { ...it, queued: false, promoted: true };
-            });
-          });
+          for (const id of pendingIds) acknowledgedQueueRef.current.set(id, true);
+          setItems((previous) => previous.map((item) =>
+            item.kind === "user" && item.queued && item.queueId &&
+            acknowledgedQueueRef.current.get(item.queueId) === false
+              ? { ...item, queued: false, promoted: true }
+              : item,
+          ));
           schedulePromotionEnd();
           break;
         }
@@ -1421,9 +1406,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // Buffered sub-agent snapshots are dropped, not flushed: a late
           // flush would recreate a stale group in the fresh transcript.
           dropPendingSubagentSnapshots();
-          // The transcript is going away, so acked queue texts from the old
+          // The transcript is going away, so acknowledged queue IDs from the old
           // session must not gate clears in the new one.
-          ackedQueueTextsRef.current.clear();
+          acknowledgedQueueRef.current.clear();
           armedHooksRef.current.clear();
           heldTextRef.current = "";
           stickToBottomRef.current = true;
@@ -1588,5 +1573,5 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     ],
   );
 
-  return { handleEvent, pushItem, endStreamingText, replacePlanReview };
+  return { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview };
 }

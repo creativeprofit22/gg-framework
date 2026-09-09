@@ -119,7 +119,6 @@ import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import {
-  showsQueuedBubble,
   submitDisposition,
   withoutSupersedingMessage,
 } from "./submit-disposition";
@@ -133,7 +132,7 @@ import { useProgress } from "./useProgress";
 import { LoginScreen } from "./LoginScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
 import { PaneIdContext, PaneIdProvider } from "./pane-context";
-import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
+import { TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
 import { MENTOR_DISPLAY_NAME, MENTOR_HANDLE, PRODUCT_DISPLAY_NAME } from "./brand";
@@ -344,8 +343,9 @@ export type Item =
       // sent unedited straight after an enhance. Drives the highlighted bubble.
       enhancements?: PromptSegment[];
       // True while this message is still waiting in the mid-run steering queue.
-      // Rendered dimmed; cleared at run_end once the agent has consumed it.
+      // Rendered dimmed until an authoritative queue snapshot confirms delivery.
       queued?: boolean;
+      queueId?: string;
       promoted?: boolean;
       // True when this prompt was addressed to Ken (`@Ken …`). Renders the bubble
       // in Ken's color so the transcript shows it went to the mentor, not GG Coder.
@@ -889,6 +889,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Files referenced via `@`, tracked as chips (NOT left in the input text).
   // Their paths are appended to the prompt on submit.
   const [mentionedPaths, setMentionedPaths] = useState<string[]>([]);
+  const composerRef = useRef({ input, attachments, mentionedPaths, enhancement });
+  composerRef.current = { input, attachments, mentionedPaths, enhancement };
+  const promptSubmissionPendingRef = useRef<(() => boolean) | null>(null);
+  const kenCurrentSubmissionRef = useRef<(() => boolean) | null>(null);
+  const promptSessionResetEpochRef = useRef(0);
   const matchedSlashCommand = slashCommandForInput(input, commands)?.command ?? null;
   const noInputSlashCommand =
     matchedSlashCommand?.input.text === "none" ? matchedSlashCommand : null;
@@ -1772,6 +1777,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, []);
 
   const onAuthoritativeSessionReset = useCallback((operationId?: string) => {
+    // Resets can replace a conversation without changing the native generation
+    // or hydration epoch, and older reset events need not carry an operation id.
+    promptSessionResetEpochRef.current += 1;
+    promptSubmissionPendingRef.current = null;
+    kenCurrentSubmissionRef.current = null;
     if (!operationId) return;
     const unresolved = unresolvedSessionResetRef.current;
     if (unresolved?.operationId === operationId && unresolved.generation === generationRef.current) {
@@ -1817,7 +1827,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
-  const { handleEvent, pushItem, endStreamingText, replacePlanReview } = useAgentEvents({
+  const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } = useAgentEvents({
     client,
     setItems,
     nextId,
@@ -1859,44 +1869,69 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     onContinuationAccepted,
   });
 
+  const handleEventRef = useRef(handleEvent);
+  handleEventRef.current = handleEvent;
+  const hydrationEventsRef = useRef<{
+    epoch: number;
+    generation: typeof generationRef.current;
+    events: Parameters<typeof handleEvent>[0][];
+  } | null>(null);
+
   // Run the connect/ready flow against the current sidecar and hydrate state,
   // models, and commands. Re-invoked after a project switch respawns the
   // sidecar (its port changes, so we re-wait for readiness).
   const hydrate = useCallback(async (): Promise<void> => {
     const epoch = ++hydrateEpochRef.current;
     const unresolved = unresolvedSessionResetRef.current;
+    const lifecycle = lifecycleEpochRef.current;
+    const pending = { epoch, generation: generationRef.current, events: [] as Parameters<typeof handleEvent>[0][] };
+    hydrationEventsRef.current = pending;
+    const isCurrent = () => mountedRef.current && epoch === hydrateEpochRef.current &&
+      lifecycle === lifecycleEpochRef.current && pending.generation === generationRef.current;
+    const replayEvents = () => {
+      if (hydrationEventsRef.current !== pending) return;
+      hydrationEventsRef.current = null;
+      for (const event of pending.events) handleEventRef.current(event);
+    };
     readyRef.current = false;
     setHydrated(false);
     setStatus("connecting to agent\u2026");
     try {
-      await waitForReady();
-      readyRef.current = true;
+      const ready = await client.waitForReady();
+      if (!isCurrent()) return;
+      adoptGeneration(ready.generation);
+      pending.generation = ready.generation;
       const generation = generationRef.current;
       const applyKenHydration = captureKenHydration();
       const st = await getState().catch(() => null);
+      if (!isCurrent()) return;
       if (st) applyKenHydration(st.kenState);
       if (st) {
         setState(st);
         setRunning(st.running);
         setContextTokens(st.contextTokens);
         replacePlanReview(st.pendingPlanReview ?? null);
-        setStatus(st.runState === "cancelling" ? "cancelling..." : "ready");
       }
       const available = await listModels();
+      if (!isCurrent()) return;
       // null = the fetch failed; keep whatever the picker already had.
       if (available) setModels(available);
       const cmds = await listCommands();
+      if (!isCurrent()) return;
       if (cmds.length > 0) setCommands(cmds);
       // Project task list for the Tasks modal + nav button.
       try {
-        setProjectTasks(await listTasks());
+        const projectTasks = await listTasks();
+        if (!isCurrent()) return;
+        setProjectTasks(projectTasks);
       } catch (error) {
+        if (!isCurrent()) return;
         toast(taskErrorMessage(error), "error");
       }
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
-      if (!mountedRef.current || epoch !== hydrateEpochRef.current || generation !== generationRef.current || unresolvedSessionResetRef.current !== unresolved) return;
+      if (!isCurrent() || generation !== generationRef.current || unresolvedSessionResetRef.current !== unresolved) return;
       if (history.length > 0 || unresolved) {
         clearKenStream();
         // A freshly hydrated session lands at the bottom (newest message).
@@ -2028,14 +2063,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         unresolvedSessionResetRef.current = null;
         stateRef.current = st;
       }
-    } catch (err) {
-      setStatus(`agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      // Reveal the footer + chrome now that everything we know about the
-      // session is in hand — one fade-in, no staggered reflow.
+      setStatus(st?.runState === "cancelling" ? "cancelling..." : "ready");
+      // Apply the snapshot before live events, including their buffered stream
+      // writes. Never replace a transcript after opening the submission gate.
+      replayEvents();
+      readyRef.current = true;
       setHydrated(true);
+    } catch (err) {
+      if (!isCurrent()) return;
+      replayEvents();
+      setStatus(`agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      setHydrated(true);
+    } finally {
+      if (hydrationEventsRef.current === pending) hydrationEventsRef.current = null;
     }
   }, [
+    client,
+    adoptGeneration,
     getState,
     listCommands,
     listHistory,
@@ -2048,7 +2092,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   ]);
 
   useEffect(() => {
-    const unsub = subscribe(handleEvent);
+    const unsub = subscribe((event) => {
+      const pending = hydrationEventsRef.current;
+      if (pending) {
+        if (pending.epoch === hydrateEpochRef.current && pending.generation === generationRef.current) {
+          pending.events.push(event);
+        }
+        return;
+      }
+      handleEvent(event);
+    });
     return () => unsub();
   }, [handleEvent, subscribe]);
 
@@ -2583,6 +2636,45 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setMentionedPaths((prev) => prev.filter((x) => x !== p));
   }
 
+  const capturePromptSession = useCallback((): (() => boolean) => {
+    const generation = generationRef.current;
+    const hydration = hydrateEpochRef.current;
+    const reset = promptSessionResetEpochRef.current;
+    const conversationId = stateRef.current?.conversationId;
+    const sessionId = stateRef.current?.sessionId;
+    return () => mountedRef.current &&
+      generation === generationRef.current &&
+      hydration === hydrateEpochRef.current &&
+      reset === promptSessionResetEpochRef.current &&
+      conversationId === stateRef.current?.conversationId &&
+      sessionId === stateRef.current?.sessionId;
+  }, []);
+
+  // Keep the draft until acceptance. A late receipt must not clear newer edits
+  // or a different session's composer, including newly staged media/references.
+  function captureComposerAcceptance(clearMedia = true): () => void {
+    const sent = composerRef.current;
+    const isCurrent = capturePromptSession();
+    return () => {
+      const current = composerRef.current;
+      if (!isCurrent()) return;
+      if (
+        current.input !== sent.input ||
+        current.attachments !== sent.attachments ||
+        current.mentionedPaths !== sent.mentionedPaths ||
+        current.enhancement !== sent.enhancement
+      ) return;
+      setInput("");
+      setSlashIndex(0);
+      if (clearMedia) {
+        setAttachments([]);
+        setMention(null);
+        setMentionedPaths([]);
+        setEnhancement(null);
+      }
+    };
+  }
+
   function reportPromptFailure(error: unknown): void {
     pushItem({
       kind: "error",
@@ -2623,25 +2715,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       command: label !== undefined || isWorkflowCommand(trimmed),
       ...(label !== undefined ? { label } : {}),
     };
-    if (!opts?.keepInput) {
-      setInput("");
-      setSlashIndex(0);
-    }
+    const isCurrent = capturePromptSession();
+    const acceptComposer = opts?.keepInput ? () => {} : captureComposerAcceptance(false);
     if (!queued) endStreamingText();
     void sendPrompt(trimmed)
       .then((submission) => {
+        if (!isCurrent()) return;
+        acceptComposer();
         if (supersedesQuestion) {
           dismissOpenAsks();
           if (submission.queued) noteSupersedingSend(trimmed);
         }
         stickToBottomRef.current = true;
-        pushItem({
-          ...userItem,
-          queued: showsQueuedBubble(submission.queued ? "queue" : "send", supersedesQuestion),
-        });
+        acceptSubmission(userItem, submission, supersedesQuestion);
         if (!submission.queued) planResumePromptRef.current = trimmed;
       })
-      .catch(reportPromptFailure);
+      .catch((error) => {
+        if (isCurrent()) reportPromptFailure(error);
+      });
   }
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
@@ -2978,7 +3069,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             message: "A session change is already in progress.",
           };
         }
-        if (kenPromptActionLockRef.current) {
+        if (kenPromptActionLockRef.current || kenCurrentSubmissionRef.current?.()) {
           return {
             status: "failed",
             action: action.type,
@@ -2993,32 +3084,33 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             message: `${PRODUCT_DISPLAY_NAME} is still connecting. Try again in a moment.`,
           };
         }
-        kenPromptActionLockRef.current = true;
+        const isCurrent = capturePromptSession();
+        kenCurrentSubmissionRef.current = isCurrent;
         try {
           const supersedesQuestion = hasOpenAsk();
           const submission = await sendPrompt(prompt, [], { kenSent: true });
+          if (!isCurrent()) return { status: "cancelled" };
           if (supersedesQuestion) dismissOpenAsks();
           if (supersedesQuestion && submission.queued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
-          setQueuedCount(submission.count);
-          pushItem({
+          acceptSubmission({
             kind: "user",
             id: nextId(),
             text: prompt,
             kenSent: true,
-            queued: showsQueuedBubble(disposition, supersedesQuestion),
-          });
+          }, submission, supersedesQuestion);
           if (!submission.queued) endStreamingText();
           return { status: "sent", session: "current" };
         } catch {
+          if (!isCurrent()) return { status: "cancelled" };
           return {
             status: "failed",
             action: action.type,
             message: "Couldn’t send the prompt. Try again.",
           };
         } finally {
-          kenPromptActionLockRef.current = false;
+          if (kenCurrentSubmissionRef.current === isCurrent) kenCurrentSubmissionRef.current = null;
         }
       }
 
@@ -3037,7 +3129,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             message: "Wait for the current build to finish before starting a new session.",
           };
         }
-        if (kenPromptActionLockRef.current) {
+        if (kenPromptActionLockRef.current || kenCurrentSubmissionRef.current?.()) {
           return {
             status: "failed",
             action: action.type,
@@ -3149,6 +3241,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return notesPromptActionResult(saveResult, latestPreview);
     },
     [
+      acceptSubmission,
+      capturePromptSession,
       autopilotReviewing,
       commitPreparedContinuation,
       dismissOpenAsks,
@@ -3384,6 +3478,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
     if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    if (promptSubmissionPendingRef.current?.()) return;
+    if (!readyRef.current) return;
     const trimmed = input.trim();
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
@@ -3454,6 +3550,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return;
     }
 
+    const acceptComposer = captureComposerAcceptance();
+    const isCurrent = capturePromptSession();
+    promptSubmissionPendingRef.current = isCurrent;
+    const finishSubmission = () => {
+      if (promptSubmissionPendingRef.current === isCurrent) promptSubmissionPendingRef.current = null;
+    };
     recordHistory(trimmed);
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
@@ -3482,64 +3584,66 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
       };
-      setInput("");
-      setAttachments([]);
-      setSlashIndex(0);
-      setMention(null);
-      setMentionedPaths([]);
-      setEnhancement(null);
       void sendPrompt(
         prompt,
         queuedWire,
         sentEnhancements ? { enhancements: sentEnhancements } : undefined,
       )
         .then((submission) => {
+          if (!isCurrent()) return;
+          acceptComposer();
           if (supersedesQuestion) {
             dismissOpenAsks();
             if (submission.queued) noteSupersedingSend(prompt);
           }
-          pushItem({
-            ...userItem,
-            queued: showsQueuedBubble(submission.queued ? "queue" : "send", supersedesQuestion),
-          });
+          acceptSubmission(userItem, submission, supersedesQuestion);
           if (!submission.queued) planResumePromptRef.current = prompt;
         })
-        .catch(reportPromptFailure);
+        .catch((error) => {
+          if (isCurrent()) reportPromptFailure(error);
+        })
+        .finally(finishSubmission);
       return;
     }
     const wire = attachments.map(toWire);
     const imgPreviews = attachments.filter((a) => a.previewUrl).map((a) => a.previewUrl!);
-    pushItem({
+    const pendingUserId = nextId();
+    const pendingVideoWarningId = nextId();
+    const pendingUserItem: Extract<Item, { kind: "user" }> = {
       kind: "user",
-      id: nextId(),
+      id: pendingUserId,
       text: trimmed,
       command: isWorkflowCommand(trimmed),
       images: imgPreviews.length > 0 ? imgPreviews : undefined,
       files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
       enhancements: sentEnhancements,
-    });
+    };
+    pushItem(pendingUserItem);
     // Warn the user when a video attachment is sent to a model without native
     // video analysis — the agent can still use ffmpeg to extract frames/audio,
     // but can't watch the clip directly.
     if (wire.some((a) => a.kind === "video") && !(state?.supportsVideo ?? false)) {
       pushItem({
         kind: "info",
-        id: nextId(),
+        id: pendingVideoWarningId,
         text: VIDEO_CAPABILITY_WARNING,
       });
     }
-    setInput("");
-    setAttachments([]);
-    setSlashIndex(0);
-    setMention(null);
-    setMentionedPaths([]);
-    setEnhancement(null);
     endStreamingText();
     void sendPrompt(prompt, wire, sentEnhancements ? { enhancements: sentEnhancements } : undefined)
       .then((submission) => {
+        if (!isCurrent()) return;
+        acceptComposer();
+        acceptSubmission(pendingUserItem, submission);
         if (!submission.queued) planResumePromptRef.current = prompt;
       })
-      .catch(reportPromptFailure);
+      .catch((error) => {
+        if (!isCurrent()) return;
+        setItems((current) => current.filter((item) =>
+          item.id !== pendingUserId && item.id !== pendingVideoWarningId));
+        reportPromptFailure(error);
+      })
+      .finally(finishSubmission);
   }
 
   // ── Attachment intake (paste / attach button / whole-window drag-drop) ──
@@ -4527,8 +4631,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         className={`footer${workspaceMode === "chat" ? " footer-chat" : ""}`}
         style={{ color: theme.footerText }}
       >
-        {!hydrated ? (
-          <FooterSkeleton />
+        {!readyRef.current ? (
+          <span role="status" style={{ color: theme.textDim }}>{status}</span>
         ) : (
           <>
             {workspaceMode === "chat" ? (

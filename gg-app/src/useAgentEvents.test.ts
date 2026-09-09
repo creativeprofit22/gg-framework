@@ -139,8 +139,8 @@ function setup(
     hook,
     deps,
     getItems: () => items,
-    pushUserItem: (text: string, queued: boolean): void => {
-      setItems((prev) => [...prev, { kind: "user", id: nextId(), text, queued } as Item]);
+    pushUserItem: (text: string, queued: boolean, queueId = "a"): void => {
+      setItems((prev) => [...prev, { kind: "user", id: nextId(), text, queued, queueId }]);
     },
     getLiveToolFeed: () => liveToolFeed,
     getPlanReview: () => planReview,
@@ -456,11 +456,52 @@ describe("useAgentEvents", () => {
   });
 
   describe("queued pill lifecycle", () => {
+    it.each([false, true])("correlates references and duplicate receipts after drain, run ended=%s", (ended) => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 2, messages: [
+          { id: "q1", text: "same\n\nReferenced files:\n- src/a.ts" },
+          { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
+        ] }));
+        hook.result.current.handleEvent(ev("queued", { count: 1, messages: [
+          { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
+        ] }));
+        if (ended) hook.result.current.handleEvent(ev("run_end"));
+        // Receipts may complete in reverse order. Only q1 was consumed.
+        hook.result.current.acceptSubmission({ kind: "user", id: 2, text: "same", files: ["src/a.ts"] },
+          { queued: true, count: 2, queueId: "q2" });
+        hook.result.current.acceptSubmission({ kind: "user", id: 1, text: "same", files: ["src/a.ts"] },
+          { queued: true, count: 1, queueId: "q1" });
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ id: 2, queueId: "q2", queued: true, files: ["src/a.ts"] }),
+        expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
+      ]);
+    });
+
+    it("updates an existing idle bubble without duplicates and settles a referenced queue ID", () => {
+      const { hook, getItems } = setup();
+      const item = { kind: "user" as const, id: 1, text: "read", files: ["src/a.ts"] };
+      act(() => {
+        hook.result.current.pushItem(item);
+        hook.result.current.acceptSubmission(item, { queued: true, count: 1, queueId: "q1" });
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems()).toHaveLength(1);
+      expect(getItems()[0]).toMatchObject({ queued: true });
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 1, messages: [
+          { id: "q1", text: "read\n\nReferenced files:\n- src/a.ts" },
+        ] }));
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems()).toEqual([expect.objectContaining({ queued: false, promoted: true, files: ["src/a.ts"] })]);
+    });
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();
       act(() => setRunning(true));
       pushUserItem("first queued", true);
-      pushUserItem("second queued", true);
+      pushUserItem("second queued", true, "b");
 
       // The sidecar acknowledges both enqueues.
       act(() => {
@@ -519,7 +560,7 @@ describe("useAgentEvents", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();
       act(() => setRunning(true));
       pushUserItem("first queued", true);
-      pushUserItem("second queued", true);
+      pushUserItem("second queued", true, "b");
 
       act(() => {
         hook.result.current.handleEvent(
@@ -568,8 +609,8 @@ describe("useAgentEvents", () => {
       // the pending list, so nothing would ever clear until the queue emptied.
       const { hook, getItems, pushUserItem, setRunning } = setup();
       act(() => setRunning(true));
-      pushUserItem("same text", true);
-      pushUserItem("same text", true);
+      pushUserItem("same text", true, "a");
+      pushUserItem("same text", true, "b");
 
       // Both acknowledged as queued.
       act(() => {
@@ -609,7 +650,7 @@ describe("useAgentEvents", () => {
       });
 
       // User sends a second message; its bubble exists before the sidecar acks.
-      pushUserItem("second", true);
+      pushUserItem("second", true, "b");
       // A stale snapshot arrives listing only the first message.
       act(() => {
         hook.result.current.handleEvent(
@@ -621,7 +662,7 @@ describe("useAgentEvents", () => {
       expect(users[1]?.queued).toBe(true);
     });
 
-    it("forgets acknowledged queue texts on session reset", () => {
+    it("forgets acknowledged queue IDs on session reset", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();
       act(() => setRunning(true));
       pushUserItem("recycled", true);

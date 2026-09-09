@@ -3387,6 +3387,8 @@ async fn agent_usage(
 struct PromptSubmissionResult {
     queued: bool,
     count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_id: Option<String>,
 }
 
 fn parse_prompt_submission_response(
@@ -3398,7 +3400,17 @@ fn parse_prompt_submission_response(
     }
     let result: PromptSubmissionResult =
         serde_json::from_str(body).map_err(|_| "invalid prompt submission response".to_string())?;
-    if (result.queued && result.count == 0) || (!result.queued && result.count != 0) {
+    let has_queue_id = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid prompt submission response".to_string())?
+        .get("queueId").is_some();
+    let valid_queue_id = result.queue_id.as_deref().is_some_and(|id| {
+        let bytes = id.as_bytes();
+        bytes.len() >= 2 && bytes[0] == b'q' && (b'1'..=b'9').contains(&bytes[1])
+            && bytes[2..].iter().all(u8::is_ascii_digit)
+    });
+    if (result.queued && (result.count == 0 || !valid_queue_id))
+        || (!result.queued && (result.count != 0 || has_queue_id))
+    {
         return Err("invalid prompt submission response".into());
     }
     Ok(result)
@@ -11511,16 +11523,18 @@ mod tests {
             Ok(PromptSubmissionResult {
                 queued: false,
                 count: 0,
+                queue_id: None,
             })
         );
         assert_eq!(
             prompt_proxy_result(
                 reqwest::StatusCode::ACCEPTED,
-                r#"{"queued":true,"count":2}"#,
+                r#"{"queued":true,"count":2,"queueId":"q19"}"#,
             ),
             Ok(PromptSubmissionResult {
                 queued: true,
                 count: 2,
+                queue_id: Some("q19".to_string()),
             })
         );
     }
@@ -11531,6 +11545,16 @@ mod tests {
             r#"{"accepted":true}"#,
             r#"{"queued":true,"count":0}"#,
             r#"{"queued":false,"count":1}"#,
+            r#"{"queued":true,"count":1}"#,
+            r#"{"queued":true,"count":1,"queueId":""}"#,
+            r#"{"queued":true,"count":1,"queueId":"q0"}"#,
+            r#"{"queued":true,"count":1,"queueId":"q1\n"}"#,
+            r#"{"queued":true,"count":1,"queueId":1}"#,
+            r#"{"queued":true,"count":1,"queueId":null}"#,
+            r#"{"queued":true,"count":0,"queueId":"q1"}"#,
+            r#"{"queued":true,"count":1.5,"queueId":"q1"}"#,
+            r#"{"queued":false,"count":0,"queueId":"q1"}"#,
+            r#"{"queued":false,"count":0,"queueId":null}"#,
         ] {
             assert_eq!(
                 prompt_proxy_result(reqwest::StatusCode::ACCEPTED, body),

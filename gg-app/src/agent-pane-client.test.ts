@@ -21,6 +21,7 @@ import {
   createPaneAgentClient,
   answerAskUser,
   getState,
+  listHistory,
   isRoadmapPhaseDraftChangeEvent,
   PlanMutationError,
   sendPrompt,
@@ -44,6 +45,7 @@ describe("pane agent client", () => {
       if (command === "agent_switch_ken_model")
         return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
       if (command === "agent_prompt") return { queued: false, count: 0 };
+      if (command === "agent_history") return { history: [] };
       if (command === "agent_enhance_prompt") {
         return {
           enhanced: "Enhanced prompt",
@@ -74,6 +76,23 @@ describe("pane agent client", () => {
       }
       return {};
     });
+  });
+
+  it.each(["primary", "right"])("does not treat failed history reads as an empty session for %s", async (paneId) => {
+    const load = paneId === "primary" ? listHistory : createPaneAgentClient(paneId).listHistory;
+    const ready = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "agent_history") throw new Error("History unavailable");
+      return ready(command, args);
+    });
+    await expect(load()).rejects.toThrow("History unavailable");
+    for (const response of [{}, { history: null }, { history: "invalid" }]) {
+      invoke.mockImplementation(async (command, args) => command === "agent_history" ? response : ready(command, args));
+      await expect(load()).rejects.toThrow("Invalid history response");
+    }
+    invoke.mockImplementation(async (command, args) => command === "agent_history" ? { history: [] } : ready(command, args));
+    await expect(load()).resolves.toEqual([]);
+    expect(invoke).toHaveBeenCalledWith("agent_history", { paneId });
   });
 
   it.each(["primary", "right"])("requires an ask acknowledgement for %s", async (paneId) => {
@@ -522,6 +541,31 @@ describe("pane agent client", () => {
       await expect(client.prepareContinuationHandoff("next")).rejects.toThrow(
         "invalid continuation-handoff response",
       );
+    }
+  });
+
+  it.each(["primary", "right"])("preserves queue correlation through %s prompt IPC", async (paneId) => {
+    const receipt = { queued: true, count: 2, queueId: "q19" };
+    invoke.mockResolvedValueOnce(receipt);
+    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+    await expect(submit("read\n\nReferenced files:\n- src/a.ts")).resolves.toEqual(receipt);
+  });
+
+  it.each([
+    null, {}, { queued: true, count: 1 },
+    { queued: true, count: 1, queueId: "" },
+    { queued: true, count: 1, queueId: "q0" },
+    { queued: true, count: 1, queueId: "q1\n" },
+    { queued: true, count: 1, queueId: 1 },
+    { queued: true, count: 0, queueId: "q1" },
+    { queued: true, count: 1.5, queueId: "q1" },
+    { queued: false, count: 1 },
+    { queued: false, count: 0, queueId: "q1" },
+    { queued: false, count: 0, queueId: null },
+  ])("rejects malformed prompt receipts without losing validation: %j", async (receipt) => {
+    for (const submit of [sendPrompt, createPaneAgentClient("right").sendPrompt]) {
+      invoke.mockResolvedValueOnce(receipt);
+      await expect(submit("hello")).rejects.toThrow("invalid prompt submission response");
     }
   });
 

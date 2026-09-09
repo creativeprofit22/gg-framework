@@ -24,6 +24,8 @@ import type {
   KenRunIdentity,
   OpenAICodexContextProfileEligibility,
   RunEndPayload,
+  PromptMeta,
+  PromptSegment,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type {
@@ -851,9 +853,7 @@ export async function getSubscriptionUsage(
  * user's `original` phrasing (and an optional `note`) so the UI can teach the
  * difference via a tooltip. Mirrors the sidecar's PromptSegment.
  */
-export type PromptSegment =
-  | { kind: "text"; text: string }
-  | { kind: "term"; text: string; original: string; note?: string };
+export type { PromptSegment } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export interface EnhanceResult {
   /** The plain rewritten prompt — exactly what gets sent to the agent. */
@@ -998,10 +998,7 @@ export async function readDroppedFileAttachment(path: string): Promise<Attachmen
 /** Display hints for the user bubble this prompt creates — persisted by the
  *  sidecar so a resumed session re-renders the same bubble (Ken "Sent to GG
  *  Coder" label, enhancer term highlights). */
-export interface PromptMeta {
-  kenSent?: boolean;
-  enhancements?: PromptSegment[];
-}
+export type { PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export type ContinuationHandoffResponse = ContinuationPrepareResponse;
 export type {
@@ -1115,10 +1112,9 @@ export function requireContinuationCommitResponse(
 }
 
 /** Authoritative outcome of submitting one prompt to the sidecar. */
-export interface PromptSubmissionResult {
-  queued: boolean;
-  count: number;
-}
+export type PromptSubmissionResult =
+  | { queued: true; count: number; queueId: string }
+  | { queued: false; count: number; queueId?: never };
 
 export function requirePromptSubmissionResult(value: unknown): PromptSubmissionResult {
   if (typeof value !== "object" || value === null) {
@@ -1130,11 +1126,15 @@ export function requirePromptSubmissionResult(value: unknown): PromptSubmissionR
     typeof result.count !== "number" ||
     !Number.isSafeInteger(result.count) ||
     result.count < 0 ||
-    (result.queued ? result.count < 1 : result.count !== 0)
+    (result.queued
+      ? result.count < 1 || typeof result.queueId !== "string" || !/^q[1-9][0-9]*$/.test(result.queueId)
+      : result.count !== 0 || result.queueId !== undefined)
   ) {
     throw new Error("invalid prompt submission response");
   }
-  return { queued: result.queued, count: result.count };
+  return result.queued
+    ? { queued: true, count: result.count, queueId: result.queueId as string }
+    : { queued: false, count: result.count };
 }
 
 export async function sendPrompt(
@@ -1419,10 +1419,11 @@ export interface HistoryEntry {
 export async function listHistory(): Promise<HistoryEntry[]> {
   try {
     const res = await invoke<{ history: HistoryEntry[] }>("agent_history", { paneId: "primary" });
-    return res.history ?? [];
+    if (!Array.isArray(res.history)) throw new Error("Invalid history response");
+    return res.history;
   } catch (e) {
     await logError(`agent_history failed: ${String(e)}`);
-    return [];
+    throw e;
   }
 }
 
@@ -3515,7 +3516,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         );
       }
     },
-    listHistory: () => safeArray("agent_history", "history"),
+    async listHistory() {
+      // A failed read is not an empty session: hydration must keep sends closed.
+      const response = await call<{ history: HistoryEntry[] }>("agent_history");
+      if (!Array.isArray(response.history)) throw new Error("Invalid history response");
+      return response.history;
+    },
     async cancelQueued(id) {
       try {
         const response = await call<{ queued?: QueuedMessage[] }>("agent_cancel_queued", { id });

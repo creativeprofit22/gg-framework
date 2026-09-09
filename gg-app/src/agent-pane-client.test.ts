@@ -25,6 +25,7 @@ import {
   isRoadmapPhaseDraftChangeEvent,
   PlanMutationError,
   sendPrompt,
+  setAutopilot,
 } from "./agent";
 
 const target = {
@@ -46,6 +47,7 @@ describe("pane agent client", () => {
         return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
       if (command === "agent_prompt") return { queued: false, count: 0 };
       if (command === "agent_history") return { history: [] };
+      if (command === "agent_autopilot_set") return { autopilot: true };
       if (command === "agent_enhance_prompt") {
         return {
           enhanced: "Enhanced prompt",
@@ -76,6 +78,25 @@ describe("pane agent client", () => {
       }
       return {};
     });
+  });
+
+  it.each(["primary", "right"])("validates Autopilot confirmations and propagates failures for %s", async (paneId) => {
+    const set = paneId === "primary" ? setAutopilot : createPaneAgentClient(paneId).setAutopilot;
+    const ready = invoke.getMockImplementation()!;
+    for (const autopilot of [true, false]) {
+      invoke.mockImplementation(async (command, args) => command === "agent_autopilot_set" ? { autopilot } : ready(command, args));
+      await expect(set(true)).resolves.toBe(autopilot);
+    }
+    for (const response of [{ error: "configuration refresh in progress" }, {}, null, { autopilot: "true" }, { autopilot: 1 }]) {
+      invoke.mockImplementation(async (command, args) => command === "agent_autopilot_set" ? response : ready(command, args));
+      await expect(set(true)).rejects.toThrow("Invalid Autopilot response");
+    }
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "agent_autopilot_set") throw new Error("Transport unavailable");
+      return ready(command, args);
+    });
+    await expect(set(true)).rejects.toThrow("Transport unavailable");
+    expect(invoke).toHaveBeenCalledWith("agent_autopilot_set", { paneId, enabled: true });
   });
 
   it.each(["primary", "right"])("does not treat failed history reads as an empty session for %s", async (paneId) => {

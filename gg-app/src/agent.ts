@@ -1301,16 +1301,24 @@ export async function cancelKen(ken: KenRunIdentity): Promise<void> {
   }
 }
 
+function requireAutopilotResponse(response: unknown): boolean {
+  if (!response || typeof response !== "object" || !("autopilot" in response) ||
+      typeof response.autopilot !== "boolean" || "error" in response) {
+    throw new Error("Invalid Autopilot response");
+  }
+  return response.autopilot;
+}
+
 /** Toggle project-wide Autopilot (auto-review). Persisted server-side and fanned
  *  out live to every pane/window on the same canonical project. */
 export async function setAutopilot(enabled: boolean): Promise<boolean> {
   try {
     await waitForReady();
-    const res = await invoke<{ autopilot?: boolean }>("agent_autopilot_set", {
+    const res = await invoke<unknown>("agent_autopilot_set", {
       paneId: "primary",
       enabled,
     });
-    return res.autopilot ?? enabled;
+    return requireAutopilotResponse(res);
   } catch (e) {
     await logError(`agent_autopilot_set failed: ${String(e)}`);
     throw e;
@@ -3479,10 +3487,7 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async setAutopilot(enabled) {
       await ready();
       try {
-        return (
-          (await call<{ autopilot?: boolean }>("agent_autopilot_set", { enabled })).autopilot ??
-          enabled
-        );
+        return requireAutopilotResponse(await call<unknown>("agent_autopilot_set", { enabled }));
       } catch (error) {
         await logError(`agent_autopilot_set failed: ${String(error)}`);
         throw error;

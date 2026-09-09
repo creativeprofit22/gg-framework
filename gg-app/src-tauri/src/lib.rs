@@ -4306,6 +4306,28 @@ async fn agent_ken_cancel(
     .map(|_| ())
 }
 
+async fn post_autopilot(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let response = post_session_json(
+        client,
+        base_url,
+        session_id,
+        "/autopilot",
+        &serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    if response.get("autopilot").and_then(|value| value.as_bool()).is_none()
+        || response.get("error").is_some()
+    {
+        return Err("Invalid Autopilot response".to_string());
+    }
+    Ok(response)
+}
+
 /// Proxy: toggle autopilot (auto-review) for THIS window's project. Persisted
 /// server-side in ~/.gg/gg-app.json keyed by cwd; returns `{ autopilot }`.
 #[tauri::command]
@@ -4317,16 +4339,7 @@ async fn agent_autopilot_set(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/autopilot", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "enabled": enabled }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    post_autopilot(&client, &sidecar_base(port), &gg_sid, enabled).await
 }
 
 /// Proxy: list workflow (prompt-template) slash commands.
@@ -10906,15 +10919,51 @@ mod tests {
             .default_headers(headers)
             .build()
             .unwrap();
-        let result = tauri::async_runtime::block_on(post_session_json(
-            &client,
-            &format!("http://{address}"),
-            "pane-session",
-            route,
-            &request_body,
-        ));
+        let result = if route == "/autopilot" {
+            tauri::async_runtime::block_on(post_autopilot(
+                &client, &format!("http://{address}"), "pane-session",
+                request_body["enabled"].as_bool().unwrap(),
+            ))
+        } else {
+            tauri::async_runtime::block_on(post_session_json(
+                &client,
+                &format!("http://{address}"),
+                "pane-session",
+                route,
+                &request_body,
+            ))
+        };
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn agent_autopilot_set_validates_confirmations_and_errors() {
+        for enabled in [true, false] {
+            let response = serde_json::json!({ "autopilot": enabled });
+            assert_eq!(session_json_proxy_result(reqwest::StatusCode::OK, &response.to_string(),
+                "/autopilot", serde_json::json!({ "enabled": true })), Ok(response));
+        }
+        assert_eq!(session_json_proxy_result(reqwest::StatusCode::CONFLICT,
+            r#"{"error":"configuration refresh in progress"}"#, "/autopilot",
+            serde_json::json!({ "enabled": true })), Err("configuration refresh in progress".into()));
+        for body in ["{}", "null", r#"{"autopilot":"true"}"#, r#"{"autopilot":1}"#] {
+            assert_eq!(session_json_proxy_result(reqwest::StatusCode::OK, body,
+                "/autopilot", serde_json::json!({ "enabled": true })), Err("Invalid Autopilot response".into()));
+        }
+    }
+
+    #[test]
+    fn agent_autopilot_set_propagates_transport_rejection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || { drop(listener.accept().unwrap()); });
+        let client = http_client_builder().build().unwrap();
+        let result = tauri::async_runtime::block_on(post_autopilot(
+            &client, &format!("http://{address}"), "pane-session", true,
+        ));
+        server.join().unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

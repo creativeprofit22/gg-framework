@@ -153,6 +153,22 @@ function setup(
 }
 
 describe("useAgentEvents", () => {
+  it("merges live boolean Autopilot policy without replacing pane state", () => {
+    const { hook, deps } = setup(undefined, { autopilot: false, sessionId: "pane-session" });
+    const initial = deps.stateRef.current;
+    for (const autopilot of [true, false]) {
+      act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot })));
+      expect(deps.stateRef.current).toEqual({ ...initial, autopilot });
+    }
+    for (const autopilot of ["true", 1, null, undefined]) {
+      act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot })));
+      expect(deps.stateRef.current).toEqual(initial);
+    }
+    deps.setState(null);
+    act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot: true })));
+    expect(deps.stateRef.current).toBeNull();
+  });
+
   it("shows Unverified instead of completion and does not finish an approved plan", () => {
     const { hook, deps } = setup();
     act(() => hook.result.current.handleEvent(ev("run_start", {})));

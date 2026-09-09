@@ -8,6 +8,7 @@ import type * as AgentModule from "./agent";
 import type * as MentorModule from "./useKenMentor";
 import type * as EventsModule from "./useAgentEvents";
 import type * as ToastModule from "./toast";
+import { Toaster } from "./Toaster";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
@@ -1153,7 +1154,125 @@ describe("AgentPane question acknowledgement", () => {
   });
 });
 
+describe("AgentPane Autopilot confirmation", () => {
+  it("keeps failures off, reports an error, blocks duplicates, and permits retry", async () => {
+    const realToast = await vi.importActual<typeof ToastModule>("./toast");
+    nativeMocks.toast.mockImplementation(realToast.toast);
+    const pane = client("autopilot-failure", 1);
+    let reject!: (error: Error) => void;
+    vi.mocked(pane.setAutopilot).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const { container } = render(<><AgentPane client={pane} target={target} /><Toaster /></>);
+    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+    fireEvent.click(toggle);
+    expect(toggle).toMatchObject({ checked: false, disabled: true });
+    expect(container.querySelector(".ken-power-overlay")).toBeNull();
+    fireEvent.click(toggle);
+    expect(pane.setAutopilot).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("configuration refresh in progress")));
+    expect(toggle).toMatchObject({ checked: false, disabled: false });
+    expect(container.querySelector(".ken-power-overlay")).toBeNull();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(expect.stringContaining("configuration refresh in progress"), "error");
+    expect(screen.getByText("Could not change Autopilot: configuration refresh in progress. Try again.")).toBeTruthy();
+    act(() => realToast.dismissToast(nativeMocks.toast.mock.results[0].value));
+    vi.mocked(pane.setAutopilot).mockResolvedValueOnce(true);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toMatchObject({ checked: true, disabled: false }));
+    expect(container.querySelector(".ken-power-banner-on")).not.toBeNull();
+  });
+
+  it("honors returned false and reflects valid server events", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("autopilot-false", 1);
+    let emit: ((event: SidecarEvent) => void) | undefined;
+    vi.mocked(pane.subscribe).mockImplementation((handler) => { emit = handler; return vi.fn(); });
+    vi.mocked(pane.setAutopilot).mockResolvedValue(false);
+    const { container } = render(<><AgentPane client={pane} target={target} /><Toaster /></>);
+    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(container.querySelector(".ken-power-banner-off")).not.toBeNull());
+    expect(pane.setAutopilot).toHaveBeenCalledWith(true);
+    expect(toggle).toMatchObject({ checked: false });
+    expect(container.querySelector(".ken-power-banner-on")).toBeNull();
+    act(() => emit?.({ type: "autopilot", data: { autopilot: true } }));
+    expect(toggle).toMatchObject({ checked: true });
+    act(() => emit?.({ type: "autopilot", data: { autopilot: "false" } }));
+    expect(toggle).toMatchObject({ checked: true });
+    act(() => emit?.({ type: "autopilot", data: { autopilot: false } }));
+    expect(toggle).toMatchObject({ checked: false });
+  });
+
+  it.each(["resolve", "reject"])("ignores stale %s after replacing the pane session", async (outcome) => {
+    const pane = client("autopilot-stale", 1);
+    let resolve!: (value: boolean) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(pane.setAutopilot).mockImplementation(() => new Promise((ok, fail) => { resolve = ok; reject = fail; }));
+    const view = render(<AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />);
+    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+    fireEvent.click(toggle);
+    view.rerender(<AgentPane client={pane} target={{ ...target, sessionPath: "/replacement.jsonl" }} generation={2} workspaceOwnsSessionLifecycle />);
+    await act(async () => { if (outcome === "resolve") resolve(true); else reject(new Error("old failure")); });
+    expect(toggle).toMatchObject({ checked: false });
+    expect(view.container.querySelector(".ken-power-overlay")).toBeNull();
+    expect(nativeMocks.toast).not.toHaveBeenCalled();
+  });
+});
+
 describe("AgentPane task request failures", () => {
+  it.each([false, true])("renders an accepted task failure and allows retry (all=%s)", async (all) => {
+    nativeMocks.realMentor = true; // Exercise the real event hook and error renderer.
+    const pane = client("accepted-task-failure", 1);
+    vi.mocked(pane.runTask).mockResolvedValue(undefined);
+    vi.mocked(pane.runAllTasks).mockResolvedValue(undefined);
+    let emit: ((event: SidecarEvent) => void) | undefined;
+    vi.mocked(pane.subscribe).mockImplementation((handler) => { emit = handler; return vi.fn(); });
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    await openTasksModal(pane);
+    fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+    act(() => {
+      emit?.({ type: "tasks_run_done", data: {} });
+      emit?.({ type: "error", data: {
+        headline: all ? "Run All stopped" : "Task run stopped",
+        message: "Task setup or execution could not finish.",
+        guidance: "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+      } });
+    });
+    expect(await screen.findByText(all ? "Run All stopped" : "Task run stopped")).toBeTruthy();
+    expect(screen.getByText("Task setup or execution could not finish.")).toBeTruthy();
+    expect(screen.getByText("Open Tasks and retry the unfinished task. If it fails again, report the problem.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
+    await screen.findByRole("dialog", { name: "Tasks" });
+    const retry = screen.getByRole("button", { name: "Run" });
+    expect(retry).toMatchObject({ disabled: false });
+    fireEvent.click(retry);
+    await waitFor(() => expect(pane.runTask).toHaveBeenCalledTimes(all ? 1 : 2));
+    expect(pane.runTask).toHaveBeenLastCalledWith(projectTask.id);
+  });
+  it("disables task launches while Autopilot reviews, then enables them after settlement", async () => {
+    const pane = client("task-autopilot-review", 1);
+    let emit: ((event: SidecarEvent) => void) | undefined;
+    vi.mocked(pane.subscribe).mockImplementation((handler) => {
+      emit = handler;
+      return vi.fn();
+    });
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    await openTasksModal(pane);
+    act(() => emit?.({ type: "autopilot_review_start", data: {} }));
+    const single = screen.getByRole("button", { name: "Run" });
+    const all = screen.getByRole("button", { name: "Run all (1)" });
+    expect(single).toMatchObject({ disabled: true });
+    expect(all).toMatchObject({ disabled: true });
+    fireEvent.click(single);
+    fireEvent.click(all);
+    expect(pane.runTask).not.toHaveBeenCalled();
+    expect(pane.runAllTasks).not.toHaveBeenCalled();
+    act(() => emit?.({ type: "autopilot_done", data: {} }));
+    expect(single).toMatchObject({ disabled: false });
+    expect(all).toMatchObject({ disabled: false });
+  });
   it("keeps the current tasks visible when refreshing the list fails", async () => {
     const pane = client("pane-task-list-failure", 1);
     let rejectRefresh = false;

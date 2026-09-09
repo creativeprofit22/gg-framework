@@ -806,6 +806,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // is toggled. Null = not showing; the banner clears itself via `onDone`
   // once its slide-out animation finishes.
   const [kenPowerBanner, setKenPowerBanner] = useState<"on" | "off" | null>(null);
+  const [autopilotPending, setAutopilotPending] = useState<(() => boolean) | null>(null);
+  const autopilotPendingRef = useRef<(() => boolean) | null>(null);
   const [running, setRunning] = useState(false);
   const [hasFinishedRun, setHasFinishedRun] = useState(false);
   const glowSeed = `${windowLabel}:${props.paneId}`;
@@ -2650,6 +2652,33 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       sessionId === stateRef.current?.sessionId;
   }, []);
 
+  async function handleAutopilotChange(next: boolean): Promise<void> {
+    if (autopilotPendingRef.current?.() || blockUnconfirmedSession()) return;
+    const sessionIsCurrent = capturePromptSession();
+    const lifecycle = lifecycleEpochRef.current;
+    const isCurrent = () => sessionIsCurrent() && lifecycle === lifecycleEpochRef.current;
+    autopilotPendingRef.current = isCurrent;
+    setAutopilotPending(() => isCurrent);
+    setKenPowerBanner(null);
+    try {
+      const confirmed = await setAutopilot(next);
+      if (!isCurrent()) return;
+      setState((previous) => previous ? { ...previous, autopilot: confirmed } : previous);
+      setKenPowerBanner(confirmed ? "on" : "off");
+      playSound(confirmed ? "done" : "click");
+    } catch (error) {
+      if (isCurrent()) {
+        setKenPowerBanner(null);
+        toast(`Could not change Autopilot: ${taskErrorMessage(error)}. Try again.`, "error");
+      }
+    } finally {
+      if (autopilotPendingRef.current === isCurrent) {
+        autopilotPendingRef.current = null;
+        if (mountedRef.current) setAutopilotPending(null);
+      }
+    }
+  }
+
   // Keep the draft until acceptance. A late receipt must not clear newer edits
   // or a different session's composer, including newly staged media/references.
   function captureComposerAcceptance(clearMedia = true): () => void {
@@ -4185,14 +4214,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             <span className="picker-head-actions">
               <AutopilotToggle
                 checked={state?.autopilot ?? false}
-                disabled={running || autopilotReviewing}
-                onChange={(next) => {
-                  setState((s) => (s ? { ...s, autopilot: next } : s));
-                  void setAutopilot(next);
-                  setKenPowerBanner(next ? "on" : "off");
-                  // The upstream sound set no longer ships dedicated autopilot assets.
-                  playSound(next ? "done" : "click");
-                }}
+                disabled={running || autopilotReviewing || newSessionBusy || !state || !!autopilotPending?.()}
+                onChange={(next) => void handleAutopilotChange(next)}
               />
               <button
                 className="btn btn-primary btn-sm"
@@ -5018,7 +5041,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {workspaceMode === "code" && showTasks && (
         <TasksModal
           tasks={projectTasks}
-          running={running}
+          running={running || autopilotReviewing || newSessionBusy}
           onRun={handleRunTask}
           onRunAll={handleRunAllTasks}
           onDelete={handleDeleteTask}

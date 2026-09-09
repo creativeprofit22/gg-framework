@@ -15,7 +15,7 @@ import type { ProjectTask } from "./agent";
  */
 interface Props {
   tasks: readonly ProjectTask[];
-  /** True while the agent is running (task or chat) — disables run actions. */
+  /** True while the session is busy, including Autopilot review — disables run actions. */
   running: boolean;
   onRun: (id: string) => void;
   onRunAll: () => void;

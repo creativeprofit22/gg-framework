@@ -652,6 +652,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       }
       const d = e.data as Record<string, unknown>;
       switch (e.type) {
+        case "autopilot": {
+          if (typeof d.autopilot === "boolean") {
+            const autopilot = d.autopilot;
+            setState((previous) => previous ? { ...previous, autopilot } : previous);
+          }
+          break;
+        }
         case "ready": {
           const readyState = {
             ...d,

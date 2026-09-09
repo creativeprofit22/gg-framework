@@ -15,6 +15,7 @@ import {
   classifyLegacyNotesLifecycleEvent,
   classifyRoadmapAutoStartEligibility,
   isNotesPhaseAdvancementSourceCurrent,
+  isNotesDirectCompletionAuthority,
   isNotesLifecycleEventSource,
   isNotesPhaseStatus,
   isNotesReminderDeliveryChannel,
@@ -1159,7 +1160,11 @@ function isCompletionCheckpointAuthoritative(
   source: NotesPhase,
   checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
 ): boolean {
-  return isNotesPhaseAdvancementSourceCurrent(source, checkpoint);
+  // Legacy persisted direct checkpoints must retain their evidence-chain integrity.
+  // This does not authorize new Done calls or impose transcript certification on runs.
+  return isNotesPhaseAdvancementSourceCurrent(source, checkpoint) &&
+    (!("implementationCheckpointId" in checkpoint) ||
+      isNotesDirectCompletionAuthority(source, checkpoint));
 }
 
 function selectNextEligibleRoadmapPhaseIndexForCheckpoint(

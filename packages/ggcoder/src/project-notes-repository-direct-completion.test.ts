@@ -40,7 +40,7 @@ function statusUpdate(overrides: Partial<NotesRoadmapStatusUpdate> = {}): NotesR
   };
 }
 
-function document(kind: "mutated-fixture" | "later-untyped-status"): NotesDocumentV3 {
+function document(kind: "current" | "mutated-fixture" | "later-untyped-status"): NotesDocumentV3 {
   const verification = statusUpdate(
     kind === "mutated-fixture" ? { transition: "in-progress", statusOutcome: "applied" } : {},
   );
@@ -130,6 +130,20 @@ afterEach(async () => {
 });
 
 describe("ProjectNotesRepository direct completion authority", () => {
+  it("retains explicit advancement for an intact persisted direct-completion chain", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-direct-authority-"));
+    roots.push(agentDir);
+    const repository = new ProjectNotesRepository(agentDir);
+    const cwd = "/project/current";
+    await repository.migrate(cwd, document("current"));
+    const createBinding = vi.fn(async () => ({ sessionId: "next-session", sessionPath: "/sessions/next.jsonl" }));
+    const result = await repository.confirmPhaseAdvancement(cwd, {
+      checkpointId: "advancement-checkpoint", nextPhaseId: "phase-2",
+      action: "start-next-phase", operationId: "advance-current",
+    }, createBinding);
+    expect(result).toMatchObject({ status: "accepted", phase: { id: "phase-2", status: "planning" } });
+    expect(createBinding).toHaveBeenCalledOnce();
+  });
   it.each(["mutated-fixture", "later-untyped-status"] as const)(
     "does not authorize completion or advancement for %s evidence",
     async (kind) => {
@@ -138,6 +152,7 @@ describe("ProjectNotesRepository direct completion authority", () => {
       const repository = new ProjectNotesRepository(agentDir);
       const cwd = `/project/${kind}`;
       await repository.migrate(cwd, document(kind));
+      const before = await repository.load(cwd);
       const createBinding = vi.fn(async () => ({
         sessionId: "next-session",
         sessionPath: "/sessions/next.jsonl",
@@ -156,6 +171,7 @@ describe("ProjectNotesRepository direct completion authority", () => {
         ),
       ).resolves.toEqual({ status: "stale", reason: "completion-not-authoritative" });
       expect(createBinding).not.toHaveBeenCalled();
+      expect(await repository.load(cwd)).toEqual(before);
     },
   );
 });

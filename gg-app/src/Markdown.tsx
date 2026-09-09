@@ -8,13 +8,15 @@ import {
   useState,
   createContext,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { toast } from "./toast";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, CornerDownLeft, FilePlus2, Plus } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { KenPromptActionContext } from "./ken-prompt-context";
+import { PaneIdContext } from "./pane-context";
 import {
   KEN_PROMPT_TITLE_MAX_LENGTH,
   normalizeKenPrompt,
@@ -37,6 +39,30 @@ interface Props {
   animate?: boolean;
 }
 
+// Only link destinations get local-path exceptions; images retain the default filter.
+function markdownUrlTransform(value: string, key: string): string {
+  if (key === "href") {
+    // Markdown percent-encodes Windows backslashes before this transform.
+    if (/^[a-z]:(?:[/\\]|%5c)/i.test(value)) return value.replace(/%5c/gi, "/");
+    // Known schemes retain their protocol policy, even with numeric payloads.
+    const reservedScheme = /^(?:https?|mailto|ircs?|xmpp|javascript|data|vbscript|file|blob|about|ftps?|tel|sms|wss?):/i;
+    if (!reservedScheme.test(value) && /^[^:/\\?#]+:\d+(?::\d+)?$/.test(value)) {
+      return `./${value}`;
+    }
+    if (/^file:\/\//i.test(value)) {
+      try {
+        const url = new URL(value);
+        // Network file hosts are not local files.
+        if (url.hostname && url.hostname !== "localhost") return "";
+        return url.pathname.replace(/^\/([a-z]:\/)/i, "$1") + url.search + url.hash;
+      } catch {
+        return "";
+      }
+    }
+  }
+  return defaultUrlTransform(value);
+}
+
 function isExternalHref(href: string): boolean {
   const scheme = href.match(/^([a-z][a-z0-9+.-]*):/i)?.[1].toLowerCase();
   return Boolean(scheme && scheme !== "file" && scheme.length > 1);
@@ -45,7 +71,7 @@ function isExternalHref(href: string): boolean {
 /**
  * Anchor that opens outside the webview. Browser links go to the OS browser;
  * file-ish links from the agent (`src/App.tsx`, `/abs/file.ts`, `file://…`) open
- * against the current project window's cwd.
+ * against the originating pane's cwd.
  */
 function ExternalLink({
   href,
@@ -54,16 +80,23 @@ function ExternalLink({
   href?: string;
   children?: React.ReactNode;
 }): React.ReactElement {
+  const paneId = useContext(PaneIdContext);
   return (
     <a
       href={href}
-      onClick={(e) => {
-        if (!href || href.startsWith("#")) return;
+      onClick={async (e) => {
+        if (href?.startsWith("#")) return;
         e.preventDefault();
-        if (isExternalHref(href)) {
-          void openUrl(href);
-        } else {
-          void import("./agent").then(({ openProjectPath }) => openProjectPath(href));
+        if (!href) return;
+        try {
+          if (isExternalHref(href)) {
+            await openUrl(href);
+          } else {
+            const { openProjectPath } = await import("./agent");
+            await openProjectPath(href, paneId, "url");
+          }
+        } catch (error) {
+          toast(`Could not open link: ${String(error)}`, "error");
         }
       }}
     >
@@ -730,6 +763,7 @@ const MemoizedMarkdownBlock = memo(
           remarkPlugins={[remarkGfm]}
           rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
           components={{ a: ExternalLink, pre: PreBlock }}
+          urlTransform={markdownUrlTransform}
         >
           {normalized}
         </ReactMarkdown>

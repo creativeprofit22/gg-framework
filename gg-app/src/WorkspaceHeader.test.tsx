@@ -12,7 +12,11 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
+import { PaneIdProvider } from "./pane-context";
 
 afterEach(cleanup);
 
@@ -31,6 +35,19 @@ function ChatHeaderHarness(): React.ReactElement {
 }
 
 describe("WorkspaceHeader", () => {
+  it.each(["primary", "secondary"])("opens the originating %s pane folder", (paneId) => {
+    invoke.mockClear();
+    render(
+      <PaneIdProvider value={paneId}>
+        <WorkspaceHeader workspaceMode="code" cwd="/work/project" navHidden onToggleNav={() => {}}>
+          <button>New session</button>
+        </WorkspaceHeader>
+      </PaneIdProvider>,
+    );
+    fireEvent.click(screen.getByTitle("/work/project — open folder"));
+    expect(invoke).toHaveBeenCalledWith("open_project_path", { paneId, path: "/work/project" });
+  });
+
   it("renders the chevron in chat mode and toggles the navbar", () => {
     render(<ChatHeaderHarness />);
 

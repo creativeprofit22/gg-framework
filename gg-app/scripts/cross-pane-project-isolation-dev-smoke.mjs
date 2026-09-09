@@ -99,6 +99,11 @@ function sessionState(sessionId, session) {
     runState: session.running ? "running" : "idle",
     ready: true,
     planMode: false,
+    pendingPlanReview: process.env.GG_LOCAL_LINK_FIXTURE === "1" ? {
+      checkpointId: "local-link-plan", generation: 1, planPath: "plan.md",
+      content: "[Plan file](same.txt)", contentHash: "fixture",
+      state: "pending-review", reviewStatus: "unreviewed", feedback: null,
+    } : null,
     thinkingLevel: null,
     supportedThinkingLevels: [],
     supportsVideo: false,
@@ -179,7 +184,11 @@ function createFixtureServer({ auditFile, launchToken }) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
-        json(response, 200, { history: [] });
+        const history = process.env.GG_LOCAL_LINK_FIXTURE === "1" ? [
+          { role: "assistant", text: "[Pane file](same.txt)" },
+          { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", path: "same.txt" }] },
+        ] : [];
+        json(response, 200, { history });
         return;
       }
       if (request.method === "GET" && url.pathname === "/models") {
@@ -243,7 +252,7 @@ function parseArguments(args) {
   return { identity: values[1] };
 }
 
-export async function runCrossPaneProjectIsolationSmoke({ identity }) {
+export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false }) {
   if (process.platform !== "win32") throw new Error("Cross-pane developer smoke requires Windows");
   if (identity !== localForkIdentity)
     throw new Error("Only the Local Fork identity may run this smoke");
@@ -255,6 +264,11 @@ export async function runCrossPaneProjectIsolationSmoke({ identity }) {
   const projectC = join(projectsRoot, "project-c");
   const paths = createIsolatedProfile(root, projectA);
   mkdirSync(projectB, { recursive: true });
+  if (localLinks) {
+    for (const project of [projectA, projectB]) {
+      writeFileSync(join(project, "same.txt"), `Pane-local file: ${project}\n`);
+    }
+  }
   const agentDir = join(paths.home, ".gg");
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "auth.json"), "{}\n");
@@ -268,6 +282,7 @@ export async function runCrossPaneProjectIsolationSmoke({ identity }) {
     GG_SIDECAR_PATH: fileURLToPath(import.meta.url),
     [fixtureMode]: "sidecar",
     GG_CROSS_PANE_FIXTURE_AUDIT: auditFile,
+    GG_LOCAL_LINK_FIXTURE: localLinks ? "1" : "0",
     GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort),
     GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1",
     GG_APP_DEV_SMOKE_WINDOW: "minimized",
@@ -333,6 +348,41 @@ export async function runCrossPaneProjectIsolationSmoke({ identity }) {
         return a.startsWith(${JSON.stringify(canonicalPath(projectA))}) && b.startsWith(${JSON.stringify(canonicalPath(projectB))});
       })()`),
     );
+    if (localLinks) {
+      await waitFor("pane-local links and image cards", () => client.evaluate(`
+        document.querySelectorAll('.agent-pane a[href="same.txt"]').length === 4 &&
+        document.querySelectorAll('.img-card[title="Open same.txt"]').length === 2
+      `));
+      // Observe, but do not replace, the real native invocation and its result.
+      await client.evaluate(`(() => {
+        const original = window.fetch;
+        window.__localLinkResults = [];
+        window.fetch = async function(input, init) {
+          const response = await original.call(this, input, init);
+          if (String(input) === "http://ipc.localhost/open_project_path") {
+            const { paneId, path } = JSON.parse(init.body);
+            window.__localLinkResults.push({ paneId, path, ok: response.headers.get("Tauri-Response") === "ok" });
+          }
+          return response;
+        };
+      })()`);
+      for (const paneId of ["pane-b", "primary"]) {
+        await client.evaluate(`document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} .plan-review-details summary`)}).click()`);
+        for (const selector of ['.assistant-text a[href="same.txt"]', '.plan-review-body a[href="same.txt"]', '.img-card[title="Open same.txt"]']) {
+          await client.evaluate(`document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} ${selector}`)}).click()`);
+        }
+      }
+      const results = await waitFor("native local file opening", async () => {
+        const entries = await client.evaluate("window.__localLinkResults");
+        return entries.length === 6 ? entries : null;
+      });
+      for (const paneId of ["primary", "pane-b"]) {
+        if (results.filter((entry) => entry.paneId === paneId && entry.path === "same.txt" && entry.ok).length !== 3) {
+          throw new Error(`Wrong native local-file destination: ${JSON.stringify(results)}`);
+        }
+      }
+      process.stdout.write("PANE-LOCAL LINKS DEV SMOKE PASS: real native open calls from both pane transcripts, plan links, and image cards; fixture daemon.\n");
+    }
     const initialSessions = await waitFor("A and B daemon sessions", () => {
       const entries = readAudit(auditFile).filter((entry) => entry.action === "session-created");
       const a = entries.findLast((entry) => entry.cwd === canonicalPath(projectA));

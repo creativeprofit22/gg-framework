@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useContext, type ReactNode } from "react";
+import { PaneIdContext } from "./pane-context";
 import { openProjectPath, openUrl, type WorkspaceMode, type GitHubCI } from "./agent";
 import { CIIndicator } from "./CIIndicator";
 import { projectAccent } from "./projectAccent";
@@ -65,6 +66,7 @@ export function WorkspaceHeader({
   stripExtras,
   children,
 }: WorkspaceHeaderProps): React.ReactElement {
+  const paneId = useContext(PaneIdContext);
   const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME;
   const directory = cwd?.split(/[\\/]/).filter(Boolean).pop();
   // Stable per-project colour, so a wall of identical dark windows becomes
@@ -99,7 +101,7 @@ export function WorkspaceHeader({
                 className="chat-head-cwd chat-head-link"
                 disabled={!cwd}
                 title={cwd ? `${cwd} — open folder` : undefined}
-                onClick={() => cwd && void openProjectPath(cwd)}
+                onClick={() => cwd && void openProjectPath(cwd, paneId)}
               >
                 {directory}
               </button>

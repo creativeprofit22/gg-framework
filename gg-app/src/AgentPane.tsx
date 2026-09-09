@@ -6,6 +6,7 @@ import {
   createElement,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -131,6 +132,7 @@ import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
 import { LoginScreen } from "./LoginScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
+import { PaneIdContext, PaneIdProvider } from "./pane-context";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
@@ -3902,7 +3904,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     </button>
   ) : null;
 
-  return (
+  const content = (
     <div
       className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}`}
       data-glow={glowState}
@@ -4825,6 +4827,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       )}
     </div>
   );
+  return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
 }
 
 /** Smoothly reveals streamed prose and keeps its growing tail visible. */
@@ -4864,6 +4867,7 @@ const TranscriptRow = memo(function TranscriptRow({
   ) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
 }): React.ReactElement | null {
+  const paneId = useContext(PaneIdContext);
   switch (item.kind) {
     case "user":
       if (item.kenSent) {
@@ -5061,7 +5065,7 @@ const TranscriptRow = memo(function TranscriptRow({
         <div className="img-grid">
           {item.images.map((img, i) => {
             const openImage = (): void => {
-              if (img.path) void openProjectPath(img.path);
+              if (img.path) void openProjectPath(img.path, paneId);
             };
             return (
               <figure

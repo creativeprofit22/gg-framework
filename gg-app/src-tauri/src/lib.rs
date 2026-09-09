@@ -1395,27 +1395,28 @@ fn read_dropped_file_attachment(path: String) -> Result<serde_json::Value, Strin
     Ok(serde_json::json!({ "name": name, "mediaType": media_type, "data": data }))
 }
 
-fn strip_file_location_suffix(path: &str) -> &str {
-    let mut end = path.len();
-    for _ in 0..2 {
-        let Some(colon) = path[..end].rfind(':') else {
-            break;
-        };
-        let suffix = &path[colon + 1..end];
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
-            break;
-        }
-        let last_sep = path[..colon].rfind(|c| c == '/' || c == '\\').unwrap_or(0);
-        if colon <= last_sep {
-            break;
-        }
-        end = colon;
+/// Resolve literal paths without reinterpreting URL syntax or trimming filenames.
+fn resolve_project_path(cwd: &Path, path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() {
+        return Err("empty path".into());
     }
-    &path[..end]
+    if path.contains("://") {
+        return Err("not a file path".into());
+    }
+    let candidate = PathBuf::from(path);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        cwd.join(candidate)
+    };
+    Ok(strip_extended_prefix(
+        resolved
+            .canonicalize()
+            .map_err(|_| format!("file not found: {}", path))?,
+    ))
 }
 
-/// Open a project file linked from the chat. Relative paths resolve against this
-/// window's sidecar cwd; `:line[:col]` and `#Lline` decorations are tolerated.
+/// Open a literal path against the originating, owned pane's cwd.
 #[tauri::command]
 fn open_project_path(
     webview: WebviewWindow,
@@ -1424,35 +1425,7 @@ fn open_project_path(
 ) -> Result<(), String> {
     let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
     let cwd = pane_cwd_for(&webview, pane_id).ok_or("sidecar not ready")?;
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("empty path".into());
-    }
-    if trimmed.contains("://") && !trimmed.starts_with("file://") {
-        return Err("not a file path".into());
-    }
-
-    let without_file_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
-    let without_anchor = without_file_scheme
-        .split_once("#L")
-        .map(|(p, _)| p)
-        .unwrap_or(without_file_scheme);
-    let without_query = without_anchor
-        .split_once('?')
-        .map(|(p, _)| p)
-        .unwrap_or(without_anchor);
-    let cleaned = strip_file_location_suffix(without_query);
-    let candidate = PathBuf::from(cleaned);
-    let resolved = if candidate.is_absolute() {
-        candidate
-    } else {
-        cwd.join(candidate)
-    };
-    let canonical = strip_extended_prefix(
-        resolved
-            .canonicalize()
-            .map_err(|_| format!("file not found: {}", cleaned))?,
-    );
+    let canonical = resolve_project_path(&cwd, &path)?;
 
     webview
         .opener()
@@ -12337,6 +12310,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_project_path_preserves_literal_filenames() {
+        let root = std::env::temp_dir().join(format!(
+            "gg-path-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for name in ["report#Log.md", "report#L12", "my file.md", "README.md", " leading.md"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        std::fs::create_dir(root.join("project%20copy")).unwrap();
+        // Decoys make unintended decoding/truncation observable even when lookup succeeds.
+        std::fs::write(root.join("report"), "wrong").unwrap();
+        std::fs::create_dir(root.join("project copy")).unwrap();
+        for name in ["report#Log.md", "report#L12", "project%20copy", "my file.md", "README.md", " leading.md"] {
+            let expected = strip_extended_prefix(root.join(name).canonicalize().unwrap());
+            assert_eq!(resolve_project_path(&root, name).unwrap(), expected);
+            assert_eq!(resolve_project_path(&root, expected.to_str().unwrap()).unwrap(), expected);
+        }
+        assert!(resolve_project_path(&root, "").is_err());
+        assert!(resolve_project_path(&root, "https://example.com").is_err());
+        assert!(resolve_project_path(&root, "README.md#section").is_err());
+        #[cfg(not(windows))]
+        for name in ["report:12:3", "report?query", " padded "] {
+            std::fs::write(root.join(name), name).unwrap();
+            assert_eq!(resolve_project_path(&root, name).unwrap(), root.join(name).canonicalize().unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn strip_extended_prefix_normalizes_windows_canonical_paths() {
         // canonicalize() always returns the \\?\ form on Windows; nothing else
         // in the app (discovery, workspace json, the picker) produces it, and
@@ -13758,6 +13762,29 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn local_file_pane_cwds_distinguish_identical_relative_paths() {
+        let home = identity_bootstrap_test_home("pane-local-files");
+        let mut registry = PaneRegistry::default();
+        for (pane_id, directory) in [("primary", "one"), ("secondary", "two")] {
+            let cwd = home.join(directory);
+            std::fs::create_dir_all(&cwd).unwrap();
+            std::fs::write(cwd.join("same.md"), directory).unwrap();
+            add_pane(&mut registry, "main", pane_id, cwd.to_str().unwrap());
+        }
+        for (pane_id, expected) in [("primary", "one"), ("secondary", "two")] {
+            let cwd = resolve_owned_pane(&registry, "main", pane_id)
+                .unwrap()
+                .cwd
+                .as_ref()
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(cwd.join("same.md")).unwrap(), expected);
+            assert!(resolve_owned_pane(&registry, "other-window", pane_id).is_none());
+        }
+        assert!(resolve_owned_pane(&registry, "main", "missing").is_none());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

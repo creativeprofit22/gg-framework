@@ -14,6 +14,7 @@ HTMLElement.prototype.scrollTo = vi.fn();
 Element.prototype.scrollIntoView = vi.fn();
 
 const nativeMocks = vi.hoisted(() => ({
+  invoke: vi.fn(async () => undefined),
   onDragDropEvent: vi.fn(async () => vi.fn()),
   openDialog: vi.fn(),
   saveDialog: vi.fn(),
@@ -46,6 +47,7 @@ const nativeMocks = vi.hoisted(() => ({
   })),
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeMocks.invoke }));
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: nativeMocks.onDragDropEvent }),
 }));
@@ -487,6 +489,52 @@ afterEach(() => {
   nativeMocks.appUpdate.localPatched = true;
   nativeMocks.appUpdate.install.mockReset();
   vi.useRealTimers();
+});
+
+describe("pane-local opening (mocked native transport)", () => {
+  it("keeps transcript, lazy plan links, and image cards tied to their source pane", async () => {
+    const panes = [client("primary", 1), client("pane-secondary", 1)];
+    const roots = ["/projects/one", "/projects/two"];
+    const emitters = panes.map(liveEvents);
+    panes.forEach((pane, index) => {
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("test"), cwd: roots[index] });
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "[Transcript file](same.md)" },
+        { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,AA==", path: "same.md" }] },
+      ]);
+    });
+    const view = render(<>{panes.map((pane, index) => (
+      <AgentPane key={pane.paneId} client={pane} focused={index === 0}
+        target={{ ...target, cwd: roots[index] }} workspaceOwnsSessionLifecycle />
+    ))}</>);
+    // Flush the real lazy parser load inside React's async boundary.
+    await act(async () => { await import("./Markdown"); });
+    await waitFor(() => expect(screen.getAllByRole("link", { name: "Transcript file" })).toHaveLength(2));
+    await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(2));
+    act(() => emitters.forEach((emit) => emit("plan_exit", {
+      checkpointId: "plan", generation: 1, planPath: "plan.md",
+      content: "[Plan file](same.md)",
+    })));
+    for (const summary of screen.getAllByText("Review plan")) fireEvent.click(summary);
+    await screen.findAllByRole("link", { name: "Plan file" });
+    const slots = view.container.querySelectorAll<HTMLElement>(".agent-pane");
+    // Click the unfocused pane first; focus must never choose the destination.
+    for (const index of [1, 0]) {
+      const slot = slots[index];
+      for (const name of ["Transcript file", "Plan file"]) {
+        nativeMocks.invoke.mockClear();
+        fireEvent.click(within(slot).getByRole("link", { name }));
+        await waitFor(() => expect(nativeMocks.invoke).toHaveBeenCalledWith(
+          "open_project_path", { paneId: panes[index].paneId, path: "same.md" },
+        ));
+      }
+      nativeMocks.invoke.mockClear();
+      fireEvent.click(within(slot).getByTitle("Open same.md"));
+      await waitFor(() => expect(nativeMocks.invoke).toHaveBeenCalledWith(
+        "open_project_path", { paneId: panes[index].paneId, path: "same.md" },
+      ));
+    }
+  });
 });
 
 describe("completed verification task (mocked native transport)", () => {

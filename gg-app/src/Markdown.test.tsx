@@ -10,7 +10,109 @@ import type {
 } from "./ken-prompt-actions";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
-vi.mock("./agent", () => ({ openProjectPath: vi.fn() }));
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main", listen: vi.fn() }),
+}));
+vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
+vi.mock("./toast", () => ({ toast: vi.fn() }));
+
+describe("Markdown links", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["E:/Projects/README.md", "E:/Projects/README.md"],
+    ["E:\\Projects\\README.md", "E:/Projects/README.md"],
+    ["file:///E:/Projects/my%20file.md#L12", "E:/Projects/my file.md"],
+    ["docs/report%23Log.md", "docs/report#Log.md"],
+    ["docs/report%23L12.md", "docs/report#L12.md"],
+    ["project%2520copy/image.png", "project%20copy/image.png"],
+    ["my%20file.md", "my file.md"],
+    ["README.md#installation", "README.md"],
+    ["README.md?view=1#L12", "README.md"],
+    ["file:///tmp/readme.md", "/tmp/readme.md"],
+    ["file://localhost/E:/Projects/README.md", "E:/Projects/README.md"],
+    ["src/App.tsx", "src/App.tsx"],
+    ["Dockerfile:12", "./Dockerfile"],
+    ["Makefile:12:3", "./Makefile"],
+    ["LICENSE:1", "./LICENSE"],
+    ["./Dockerfile:12", "./Dockerfile"],
+    ["./Makefile:12:3", "./Makefile"],
+    ["./LICENSE:1", "./LICENSE"],
+    ["src/Dockerfile:12", "src/Dockerfile"],
+    ["README.md:12", "./README.md"],
+    ["./README.md:12:3", "./README.md"],
+    ["README.md:12:3", "./README.md"],
+    ["src/App.tsx:12", "src/App.tsx"],
+  ])("opens local destination %s", async (destination, expected) => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const openProjectPath = vi.spyOn(await import("./agent"), "openProjectPath");
+    render(<Markdown>{`[file](${destination})`}</Markdown>);
+    const link = screen.getByRole("link");
+    if (/^[^:/]+:\d+(?::\d+)?$/.test(destination)) {
+      expect(link.getAttribute("href")).toBe(`./${destination}`);
+    }
+    fireEvent.click(link);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_project_path", {
+      paneId: "primary", path: expected,
+    }));
+    expect(openProjectPath).toHaveBeenCalledExactlyOnceWith(link.getAttribute("href"), "primary", "url");
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "javascript:alert(1)", "data:text/plain,hello", "vbscript:msgbox(1)",
+    "javascript:12", "JaVaScRiPt:12:3", "data:12:3", "vbscript:12",
+    "file:12", "blob:12", "about:12", "ftp:12", "tel:12", "sms:12",
+    "unknown:payload", "Dockerfile:abc", "Dockerfile:12:3:4",
+    "file://server/share/file.md",
+  ])(
+    "does not open blocked destination %s",
+    async (destination) => {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      render(<Markdown>{`[blocked](${destination})`}</Markdown>);
+      const link = screen.getByText("blocked");
+      expect(link.getAttribute("href")).toBe("");
+      fireEvent.click(link);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(openUrl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "file:///E:/image.png", "E:/image.png", "README.md:12",
+    "Dockerfile:12", "Makefile:12:3", "LICENSE:1", "javascript:12", "data:12",
+  ])("keeps image exception %s blocked", (destination) => {
+    render(<Markdown>{`![local](${destination})`}</Markdown>);
+    expect(screen.getByRole("img").getAttribute("src")).toBeFalsy();
+  });
+
+  it.each(["https://example.com", "http://example.com", "mailto:person@example.com", "https:12", "mailto:12"])(
+    "preserves external destination %s", async (destination) => {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      render(<Markdown>{`[external](${destination})`}</Markdown>);
+      fireEvent.click(screen.getByRole("link"));
+      await waitFor(() => expect(openUrl).toHaveBeenCalledWith(destination));
+      expect(invoke).not.toHaveBeenCalled();
+    },
+  );
+
+  it("opens web links and reports opening errors", async () => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const { toast } = await import("./toast");
+    vi.mocked(openUrl).mockRejectedValueOnce(new Error("No application"));
+    render(<Markdown>{"[web](https://example.com)"}</Markdown>);
+    fireEvent.click(screen.getByRole("link"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("Could not open link: Error: No application", "error"),
+    );
+    expect(openUrl).toHaveBeenCalledWith("https://example.com");
+  });
+});
 
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
 afterEach(() => {

@@ -6,6 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import { toast } from "./toast";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
   continuationInstructionError,
@@ -916,16 +917,34 @@ export async function openUrl(url: string): Promise<void> {
   }
 }
 
-export async function openProjectPath(path: string): Promise<void> {
-  let decoded = path;
-  try {
-    decoded = decodeURIComponent(path);
-  } catch {
-    // Keep the original string if the model emitted a malformed `%` escape.
+// Remove URL syntax before decoding, so encoded filename characters stay literal.
+function projectUrlPath(destination: string): string {
+  let path = destination;
+  if (/^file:\/\//i.test(path)) {
+    const url = new URL(path);
+    if (url.hostname && url.hostname !== "localhost") throw new Error("not a local file URL");
+    path = url.pathname.replace(/^\/([a-z]:\/)/i, "$1");
+  } else {
+    path = path.split(/[?#]/, 1)[0];
   }
+  path = path.replace(/(?::\d+){1,2}$/, "");
   try {
-    await invoke("open_project_path", { paneId: "primary", path: decoded });
+    return decodeURIComponent(path);
+  } catch {
+    // Keep malformed percent escapes literal, matching existing link behavior.
+    return path;
+  }
+}
+
+export async function openProjectPath(
+  path: string,
+  paneId = "primary",
+  kind: "path" | "url" = "path",
+): Promise<void> {
+  try {
+    await invoke("open_project_path", { paneId, path: kind === "url" ? projectUrlPath(path) : path });
   } catch (e) {
+    toast(`Could not open file: ${String(e)}`, "error");
     await logError(`open_project_path failed: ${String(e)}`);
   }
 }

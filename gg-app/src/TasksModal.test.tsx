@@ -21,8 +21,16 @@ describe("TasksModal", () => {
   it("blocks both launch actions when the session is busy", () => {
     const onRun = vi.fn();
     const onRunAll = vi.fn();
-    render(<TasksModal tasks={[taskWithStatus("pending")]} running={true}
-      onRun={onRun} onRunAll={onRunAll} onDelete={vi.fn()} onClose={vi.fn()} />);
+    render(
+      <TasksModal
+        tasks={[taskWithStatus("pending")]}
+        running={true}
+        onRun={onRun}
+        onRunAll={onRunAll}
+        onDelete={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
     const single = screen.getByRole("button", { name: "Run" });
     const all = screen.getByRole("button", { name: "Run all (1)" });
     expect(single).toMatchObject({ disabled: true });

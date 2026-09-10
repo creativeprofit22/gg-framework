@@ -1974,7 +1974,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           })
           .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
         setItems(
-          history.map((h): Item => {
+          history.flatMap((h): Item | Item[] => {
             if (h.mcpToolFailure)
               return {
                 kind: "mcp_tool_failure",
@@ -1985,11 +1985,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             // Tool-produced images (screenshots, generate_image) — reconstructed
             // from persisted ImageContent blocks, downsampled by the sidecar.
             if (h.toolImages && h.toolImages.length > 0)
-              return {
-                kind: "images",
-                id: nextId(),
-                images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
-              };
+              return [
+                ...(h.text ? [{ kind: "info" as const, id: nextId(), text: h.text }] : []),
+                {
+                  kind: "images",
+                  id: nextId(),
+                  images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
+                },
+              ];
             // Sub-agent delegation group — reconstructed from persisted tool_call
             // + tool_result pairing. toolUseCount/activities aren't persisted, so
             // the resumed feed shows agent name + status only.

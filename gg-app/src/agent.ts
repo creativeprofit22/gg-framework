@@ -1430,7 +1430,8 @@ export interface HistoryEntry {
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   /** Tool-produced images rendered inline (same as live `images` items),
-   *  reconstructed from ImageContent blocks in persisted tool results. */
+   *  reconstructed from ImageContent blocks in persisted tool results.
+   *  `text` holds verbatim image warnings, rendered once before these images. */
   toolImages?: Array<{ src: string; path?: string }>;
   /** Failed MCP result restored as a durable transcript row. */
   mcpToolFailure?: { name: string; result: string };

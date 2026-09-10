@@ -32,12 +32,17 @@ describe("openProjectPath", () => {
     });
   });
 
-  it.each(["project%20copy", "report#Log.md", "report#L12", " leading space", " padded ", "file:12:3"])(
-    "preserves raw filename %s", async (path) => {
-      await openProjectPath(path);
-      expect(invoke).toHaveBeenCalledWith("open_project_path", { paneId: "primary", path });
-    },
-  );
+  it.each([
+    "project%20copy",
+    "report#Log.md",
+    "report#L12",
+    " leading space",
+    " padded ",
+    "file:12:3",
+  ])("preserves raw filename %s", async (path) => {
+    await openProjectPath(path);
+    expect(invoke).toHaveBeenCalledWith("open_project_path", { paneId: "primary", path });
+  });
 
   it.each([
     ["report%23Log.md", "report#Log.md"],

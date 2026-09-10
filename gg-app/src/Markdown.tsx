@@ -45,7 +45,8 @@ function markdownUrlTransform(value: string, key: string): string {
     // Markdown percent-encodes Windows backslashes before this transform.
     if (/^[a-z]:(?:[/\\]|%5c)/i.test(value)) return value.replace(/%5c/gi, "/");
     // Known schemes retain their protocol policy, even with numeric payloads.
-    const reservedScheme = /^(?:https?|mailto|ircs?|xmpp|javascript|data|vbscript|file|blob|about|ftps?|tel|sms|wss?):/i;
+    const reservedScheme =
+      /^(?:https?|mailto|ircs?|xmpp|javascript|data|vbscript|file|blob|about|ftps?|tel|sms|wss?):/i;
     if (!reservedScheme.test(value) && /^[^:/\\?#]+:\d+(?::\d+)?$/.test(value)) {
       return `./${value}`;
     }

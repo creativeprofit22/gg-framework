@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { localWireModelId, stream } from "./stream.js";
 import { GGAIError } from "./errors.js";
 import { providerRegistry } from "./provider-registry.js";
-import type { StreamOptions } from "./types.js";
+import type { StreamOptions, ToolResultMessage } from "./types.js";
 
 describe("localWireModelId", () => {
   it("strips the endpoint routing prefix so the server sees its own id", () => {
@@ -64,6 +64,31 @@ describe("provider wire boundary", () => {
       expect(captured?.messages[1]).toEqual({ role: "user", content: "hello" });
       expect(captured?.messages[1]).not.toHaveProperty("provenance");
       expect(tagged.provenance.source).toBe("human");
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
+  });
+
+  it("keeps generated previews in history but strips them from provider context", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => { captured = options; throw sentinel; },
+    });
+    const message: ToolResultMessage = {
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: "images", content: [
+        { type: "text", text: "Generated two images" },
+        { type: "image", mediaType: "image/png", data: "AA==" },
+      ], imageResult: { version: 1, images: [
+        { type: "image", mediaType: "image/png", data: "AQ==", path: "/original one.png" },
+        { type: "image", mediaType: "image/png", data: "Ag==", path: "/original, two.png" },
+      ] } }],
+    };
+    try {
+      expect(() => stream({ provider: "wire-capture" as StreamOptions["provider"], model: "test", supportsImages: true, messages: [message] })).toThrow(sentinel);
+      expect(captured?.messages).toEqual([{ role: "tool", content: [{ type: "tool_result", toolCallId: "images", content: message.content[0]!.content }] }]);
+      expect(message.content[0]!.imageResult?.images).toHaveLength(2);
     } finally {
       providerRegistry.unregister("wire-capture");
     }

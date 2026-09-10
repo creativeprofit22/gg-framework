@@ -51,8 +51,10 @@ const GenerateImageParams = z.object({
     .string()
     .optional()
     .describe(
-      "Output resolution. GPT Image 2.5 accepts any size where both edges are multiples " +
-        "of 16px, max edge ≤3840px, long:short ratio ≤3:1, total pixels 655,360–8,294,400. " +
+      "Requested resolution, forwarded to the image service; exact output dimensions are not guaranteed. " +
+        "Actual dimensions and shape may differ. Originals are never silently resized; mismatches are warned. " +
+        "Request sizes with both edges multiples of 16px, max edge ≤3840px, " +
+        "long:short ratio ≤3:1, total pixels 655,360–8,294,400. " +
         "Popular: 1024x1024, 1536x1024, 1024x1536, 2048x2048. Default: auto.",
     ),
   quality: z
@@ -80,9 +82,9 @@ const GenerateImageParams = z.object({
     .optional()
     .describe("Output file format (default png)"),
   background: z
-    .enum(["opaque", "auto", "transparent"])
+    .enum(["opaque", "auto"])
     .optional()
-    .describe("Background type (default auto). Transparent requires png or webp output."),
+    .describe("Background type (default auto). Transparent backgrounds are not supported by this tool."),
 });
 
 type GenerateImageArgs = z.infer<typeof GenerateImageParams>;
@@ -112,15 +114,19 @@ export function createGenerateImageTool(
       "chat provider is active — only requires OpenAI to be connected. Only use this tool when " +
       "the user explicitly asks to create, generate, or edit an image. Pass `image` with a " +
       "file path to edit an existing image (e.g. a previously generated one or a user attachment). " +
-      "Use `out_path` to save to a specific location (defaults to .gg/generated/).",
+      "Use `out_path` to save to a specific location (defaults to .gg/generated/). " +
+      "Requested dimensions are forwarded to the image service, but actual dimensions and shape may differ. " +
+      "Originals are never silently resized; mismatches are warned.",
     parameters: GenerateImageParams,
     async execute(
       args: GenerateImageArgs,
       context: ToolContext,
-    ): Promise<string | StructuredToolResult> {
-      if (context.signal.aborted) return "Image generation aborted before start.";
-      if (args.background === "transparent" && args.output_format === "jpeg") {
-        return "Transparent backgrounds require png or webp output, not jpeg.";
+    ): Promise<StructuredToolResult> {
+      if (context.signal.aborted) return { content: "Image generation aborted before start.", isError: true };
+      // Stale callers can bypass the public schema; reject before credential refresh or provider usage.
+      const background: unknown = args.background;
+      if (background === "transparent") {
+        return { content: "Transparent backgrounds are not supported by this tool. Use opaque or auto.", isError: true };
       }
 
       // Resolve OpenAI credentials at execution time (lazy — token refresh
@@ -132,10 +138,11 @@ export function createGenerateImageTool(
         token = creds.accessToken;
         accountId = creds.accountId;
       } catch {
-        return (
-          "OpenAI is not connected. The user needs to connect their OpenAI account " +
-          "to use image generation."
-        );
+        return {
+          content: "OpenAI is not connected. The user needs to connect their OpenAI account " +
+            "to use image generation.",
+          isError: true,
+        };
       }
 
       const outputFormat = args.output_format ?? "png";
@@ -143,6 +150,27 @@ export function createGenerateImageTool(
       const outPath = args.out_path
         ? resolvePath(cwd, args.out_path)
         : defaultOutPath(cwd, outputFormat);
+
+      const requestedCount = args.n ?? 1;
+      const savedPaths: string[] = [];
+      const sizing: Array<{
+        path: string;
+        requested: string;
+        actual: string | null;
+        status: "matched" | "mismatched" | "not-requested" | "unverified";
+      }> = [];
+      let failure: string | undefined;
+      const completionReport = () =>
+        `Partial completion: saved ${savedPaths.length} of ${requestedCount} requested images.\n` +
+        `Saved originals: ${savedPaths.join(", ")}\nFailure: ${failure}\n` +
+        "No retry or fallback was attempted; saved originals were not overwritten. " +
+        "Resolve the reported error before requesting only the missing images with a new output path.";
+      const sizeReport = () => sizing.map((item) => {
+        const dimensions = `Requested: ${item.requested}; actual: ${item.actual ?? "unknown"}.`;
+        if (item.status === "mismatched") return `WARNING: Image saved, requested dimensions not met. ${dimensions} Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${item.path})`;
+        if (item.status === "unverified") return `WARNING: Image saved, dimensions could not be verified. ${dimensions} (${item.path})`;
+        return `${dimensions} ${item.status === "matched" ? "Requested dimensions matched." : "No exact dimensions requested."} (${item.path})`;
+      }).join("\n");
 
       try {
         // Build the image_generation tool definition with the requested params.
@@ -167,7 +195,7 @@ export function createGenerateImageTool(
           try {
             fileBuffer = await readFile(imagePath);
           } catch {
-            return `Could not read the image at ${args.image}. Check the path is correct.`;
+            return { content: `Could not read the image at ${args.image}. Check the path is correct.`, isError: true };
           }
           // The Responses API accepts images as data URLs.
           const refMediaType =
@@ -189,64 +217,51 @@ export function createGenerateImageTool(
         // provider uses) with the image_generation built-in tool. ChatGPT OAuth
         // tokens work here, unlike api.openai.com/v1/images/*.
         // The Responses image tool does not accept an `n` property. Generate
-        // multiple images with separate requests and merge the results instead.
-        const requestedCount = args.n ?? 1;
+        // multiple images with separate requests. Save each completed request
+        // before starting another so later failures cannot discard its originals.
         const imageBuffers: Buffer[] = [];
-        for (
-          let index = 0;
-          index < requestedCount && imageBuffers.length < requestedCount;
-          index++
-        ) {
-          const generated = await callImageGeneration(
-            inputContent,
-            imageTool,
-            token,
-            accountId,
-            context.signal,
-          );
-          imageBuffers.push(...generated.slice(0, requestedCount - imageBuffers.length));
-          if (generated.length === 0) break;
-        }
-
-        if (imageBuffers.length === 0) {
-          return "Image generation returned no image results from GPT-6 Astra. No fallback model was used.";
-        }
-
-        // Save each image and build preview content.
-        const savedPaths: string[] = [];
-        const sizing: Array<{
-          path: string;
-          requested: string;
-          actual: string | null;
-          status: "matched" | "mismatched" | "not-requested" | "unverified";
-        }> = [];
         const requestedPixels = /^(\d+)x(\d+)$/.exec(args.size ?? "");
-
-        for (let i = 0; i < imageBuffers.length; i++) {
-          const buf = imageBuffers[i]!;
-          const savePath = imageBuffers.length === 1 ? outPath : insertIndex(outPath, i);
-          await mkdir(path.dirname(savePath), { recursive: true });
-          context.signal.throwIfAborted();
-          await writeFile(savePath, buf, { flag: "wx" });
-          savedPaths.push(savePath);
-          // Inspect the saved original buffer, never a resized model/preview derivative.
-          let actual: string | null = null;
-          let status: (typeof sizing)[number]["status"] = "unverified";
-          try {
-            const { default: sharp } = await import("sharp");
-            const meta = await sharp(buf).metadata();
-            if (meta.width && meta.height) {
-              actual = `${meta.width}x${meta.height}`;
-              status = requestedPixels
-                ? meta.width === Number(requestedPixels[1]) && meta.height === Number(requestedPixels[2])
-                  ? "matched"
-                  : "mismatched"
-                : !args.size || args.size === "auto" ? "not-requested" : "unverified";
+        try {
+          while (savedPaths.length < requestedCount) {
+            const generated = await callImageGeneration(
+              inputContent, imageTool, token, accountId, context.signal,
+            );
+            if (generated.length === 0) {
+              if (savedPaths.length === 0) {
+                return { content: "Image generation returned no image results from GPT-6 Astra. No fallback model was used.", isError: true };
+              }
+              throw new Error("Image generation returned no image results from GPT-6 Astra.");
             }
-          } catch {
-            // Preserve valid returned bytes even when dimension inspection is unavailable.
+            for (const buf of generated.slice(0, requestedCount - savedPaths.length)) {
+              const savePath = requestedCount === 1 ? outPath : insertIndex(outPath, savedPaths.length);
+              await mkdir(path.dirname(savePath), { recursive: true });
+              context.signal.throwIfAborted();
+              await writeFile(savePath, buf, { flag: "wx" });
+              savedPaths.push(savePath);
+              imageBuffers.push(buf);
+              // Inspect the saved original buffer, never a resized model/preview derivative.
+              let actual: string | null = null;
+              let status: (typeof sizing)[number]["status"] = "unverified";
+              try {
+                const { default: sharp } = await import("sharp");
+                const meta = await sharp(buf).metadata();
+                if (meta.width && meta.height) {
+                  actual = `${meta.width}x${meta.height}`;
+                  status = requestedPixels
+                    ? meta.width === Number(requestedPixels[1]) && meta.height === Number(requestedPixels[2])
+                      ? "matched"
+                      : "mismatched"
+                    : !args.size || args.size === "auto" ? "not-requested" : "unverified";
+                }
+              } catch {
+                // Preserve valid returned bytes even when dimension inspection is unavailable.
+              }
+              sizing.push({ path: savePath, requested: args.size ?? "auto", actual, status });
+            }
           }
-          sizing.push({ path: savePath, requested: args.size ?? "auto", actual, status });
+        } catch (err) {
+          if (savedPaths.length === 0) throw err;
+          failure = context.signal.aborted ? "Image generation aborted." : err instanceof Error ? err.message : String(err);
         }
 
         // The primary image (first) gets the full treatment: model-visible
@@ -285,14 +300,8 @@ export function createGenerateImageTool(
             ? `Generated image → ${primaryPath}`
             : `Generated ${savedPaths.length} images → ${savedPaths.join(", ")}`;
 
-        const sizeReport = sizing.map((item) => {
-          const dimensions = `Requested: ${item.requested}; actual: ${item.actual ?? "unknown"}.`;
-          if (item.status === "mismatched") return `WARNING: Image saved, requested dimensions not met. ${dimensions} Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${item.path})`;
-          if (item.status === "unverified") return `WARNING: Image saved, dimensions could not be verified. ${dimensions} (${item.path})`;
-          return `${dimensions} ${item.status === "matched" ? "Requested dimensions matched." : "No exact dimensions requested."} (${item.path})`;
-        }).join("\n");
         const allContent: StructuredToolResult["content"] = [
-          { type: "text", text: `${summary}\n${sizeReport}` },
+          { type: "text", text: `${failure ? completionReport() : summary}\n${sizeReport()}` },
           {
             type: "image",
             mediaType: detectedType,
@@ -302,12 +311,28 @@ export function createGenerateImageTool(
 
         return {
           content: allContent,
-          details: { imagePreviews, sizing },
+          imageResult: {
+            version: 1,
+            images: imagePreviews.map(({ base64, mediaType, path }) => ({
+              type: "image", data: base64, mediaType, path,
+            })),
+          },
+          details: { imagePreviews, sizing, requestedCount, savedCount: savedPaths.length, savedPaths, failure },
+          ...(failure ? { isError: true } : {}),
         };
       } catch (err) {
-        if (context.signal.aborted) return "Image generation aborted.";
+        if (savedPaths.length > 0) {
+          const reason = err instanceof Error ? err.message : String(err);
+          failure = failure ? `${failure}; preview failed: ${reason}` : `Preview failed: ${reason}`;
+          return {
+            content: `${completionReport()}\n${sizeReport()}`,
+            details: { sizing, requestedCount, savedCount: savedPaths.length, savedPaths, failure },
+            isError: true,
+          };
+        }
+        if (context.signal.aborted) return { content: "Image generation aborted.", isError: true };
         const reason = err instanceof Error ? err.message : String(err);
-        return `Image generation failed: ${reason}`;
+        return { content: `Image generation failed: ${reason}`, isError: true };
       }
     },
   };

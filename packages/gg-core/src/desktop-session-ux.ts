@@ -1,3 +1,9 @@
+/** Preserve saved-image warnings verbatim in both live and restored transcripts. */
+export function extractImageWarnings(text: string): string {
+  if (/^Partial completion: saved \d+ of \d+ requested images\./.test(text)) return text;
+  return text.split("\n").filter((line) => line.startsWith("WARNING: Image saved,")).join("\n");
+}
+
 /** Display-only prompt hints. Never put these fields in model messages. */
 export type PromptSegment =
   | { kind: "text"; text: string }

@@ -57,49 +57,75 @@ describe("Markdown links", () => {
       expect(link.getAttribute("href")).toBe(`./${destination}`);
     }
     fireEvent.click(link);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_project_path", {
-      paneId: "primary", path: expected,
-    }));
-    expect(openProjectPath).toHaveBeenCalledExactlyOnceWith(link.getAttribute("href"), "primary", "url");
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("open_project_path", {
+        paneId: "primary",
+        path: expected,
+      }),
+    );
+    expect(openProjectPath).toHaveBeenCalledExactlyOnceWith(
+      link.getAttribute("href"),
+      "primary",
+      "url",
+    );
     expect(openUrl).not.toHaveBeenCalled();
   });
 
   it.each([
-    "javascript:alert(1)", "data:text/plain,hello", "vbscript:msgbox(1)",
-    "javascript:12", "JaVaScRiPt:12:3", "data:12:3", "vbscript:12",
-    "file:12", "blob:12", "about:12", "ftp:12", "tel:12", "sms:12",
-    "unknown:payload", "Dockerfile:abc", "Dockerfile:12:3:4",
+    "javascript:alert(1)",
+    "data:text/plain,hello",
+    "vbscript:msgbox(1)",
+    "javascript:12",
+    "JaVaScRiPt:12:3",
+    "data:12:3",
+    "vbscript:12",
+    "file:12",
+    "blob:12",
+    "about:12",
+    "ftp:12",
+    "tel:12",
+    "sms:12",
+    "unknown:payload",
+    "Dockerfile:abc",
+    "Dockerfile:12:3:4",
     "file://server/share/file.md",
-  ])(
-    "does not open blocked destination %s",
-    async (destination) => {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      render(<Markdown>{`[blocked](${destination})`}</Markdown>);
-      const link = screen.getByText("blocked");
-      expect(link.getAttribute("href")).toBe("");
-      fireEvent.click(link);
-      expect(invoke).not.toHaveBeenCalled();
-      expect(openUrl).not.toHaveBeenCalled();
-    },
-  );
+  ])("does not open blocked destination %s", async (destination) => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    render(<Markdown>{`[blocked](${destination})`}</Markdown>);
+    const link = screen.getByText("blocked");
+    expect(link.getAttribute("href")).toBe("");
+    fireEvent.click(link);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(openUrl).not.toHaveBeenCalled();
+  });
 
   it.each([
-    "file:///E:/image.png", "E:/image.png", "README.md:12",
-    "Dockerfile:12", "Makefile:12:3", "LICENSE:1", "javascript:12", "data:12",
+    "file:///E:/image.png",
+    "E:/image.png",
+    "README.md:12",
+    "Dockerfile:12",
+    "Makefile:12:3",
+    "LICENSE:1",
+    "javascript:12",
+    "data:12",
   ])("keeps image exception %s blocked", (destination) => {
     render(<Markdown>{`![local](${destination})`}</Markdown>);
     expect(screen.getByRole("img").getAttribute("src")).toBeFalsy();
   });
 
-  it.each(["https://example.com", "http://example.com", "mailto:person@example.com", "https:12", "mailto:12"])(
-    "preserves external destination %s", async (destination) => {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      render(<Markdown>{`[external](${destination})`}</Markdown>);
-      fireEvent.click(screen.getByRole("link"));
-      await waitFor(() => expect(openUrl).toHaveBeenCalledWith(destination));
-      expect(invoke).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    "https://example.com",
+    "http://example.com",
+    "mailto:person@example.com",
+    "https:12",
+    "mailto:12",
+  ])("preserves external destination %s", async (destination) => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    render(<Markdown>{`[external](${destination})`}</Markdown>);
+    fireEvent.click(screen.getByRole("link"));
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith(destination));
+    expect(invoke).not.toHaveBeenCalled();
+  });
 
   it("opens web links and reports opening errors", async () => {
     const { openUrl } = await import("@tauri-apps/plugin-opener");

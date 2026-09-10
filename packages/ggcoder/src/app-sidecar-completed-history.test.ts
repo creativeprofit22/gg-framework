@@ -9,7 +9,7 @@ import type { Message } from "@kenkaiiii/gg-ai";
 import { expect, it } from "vitest";
 import { SessionManager } from "./core/session-manager.js";
 
-it("serves the completed task's final answer from persisted messages on every history reload", async () => {
+it("serves the completed answer and image sizing warnings unchanged across session reopen", async () => {
   const fixture = JSON.parse(
     await fs.readFile(
       new URL(
@@ -62,6 +62,38 @@ it("serves the completed task's final answer from persisted messages on every hi
     parentId = id;
   }
   await manager.appendRunFinished(saved.path, { version: 1, generation: 1, outcome: "completed" });
+  const { default: sharp } = await import("sharp");
+  const originals = new Map<string, Buffer>();
+  for (const [width, height] of [[1536, 1024], [1254, 1254], [1024, 1024]]) {
+    const imagePath = path.join(project, `${width}x${height}.png`);
+    const bytes = await sharp({ create: { width, height, channels: 3, background: "red" } }).png().toBuffer();
+    await fs.writeFile(imagePath, bytes);
+    originals.set(imagePath, bytes);
+    const warning = width === 1024 ? "" : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${width}x${height}. Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${imagePath})`;
+    const id = randomUUID();
+    await manager.appendRequiredMessage(saved.path, {
+      type: "message", id, parentId, timestamp,
+      message: {
+        role: "tool",
+        content: [{
+          type: "tool_result", toolCallId: `image-${width}`,
+          content: [
+            { type: "text", text: `Generated image → ${imagePath}` },
+            { type: "text", text: warning || "Requested: 1024x1024; actual: 1024x1024. Requested dimensions matched." },
+            { type: "image", mediaType: "image/png", data: bytes.toString("base64") },
+          ],
+        }],
+      },
+    });
+    parentId = id;
+    fixture.history.push({ role: "assistant", text: warning, toolImages: [{ src: expect.stringMatching(/^data:image\/png;base64,/), path: imagePath }] });
+  }
+  const previewFailure = "Partial completion: saved 1 of 2 requested images.\nSaved originals: offline-original.png\nFailure: Preview failed: offline fixture\nNo retry or fallback was attempted; saved originals were not overwritten.";
+  await manager.appendRequiredMessage(saved.path, {
+    type: "message", id: randomUUID(), parentId, timestamp,
+    message: { role: "tool", content: [{ type: "tool_result", toolCallId: "failed-preview", content: previewFailure, isError: true }] },
+  });
+  fixture.history.push({ role: "assistant", text: previewFailure, toolImages: [] });
   const original = await fs.readFile(saved.path);
   const credentials = {
     accessToken: "fixture-not-a-real-token",
@@ -126,19 +158,19 @@ it("serves the completed task's final answer from persisted messages on every hi
       });
     });
     const base = `http://127.0.0.1:${port}`;
-    const created = await fetch(`${base}/session`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-gg-token": token,
-        "x-gg-daemon-token": nativeToken,
-      },
-      body: JSON.stringify({ cwd: project, sessionPath: saved.path }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const body = (await created.json()) as { sessionId: string; error?: string };
-    expect(created.status, body.error).toBe(200);
     for (let reload = 0; reload < 2; reload++) {
+      const created = await fetch(`${base}/session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-gg-token": token,
+          "x-gg-daemon-token": nativeToken,
+        },
+        body: JSON.stringify({ cwd: project, sessionPath: saved.path }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body = (await created.json()) as { sessionId: string; error?: string };
+      expect(created.status, body.error).toBe(200);
       const response = await fetch(`${base}/history`, {
         headers: { "x-gg-token": token, "x-gg-session": body.sessionId },
         signal: AbortSignal.timeout(5000),
@@ -146,7 +178,7 @@ it("serves the completed task's final answer from persisted messages on every hi
       expect(response.status).toBe(200);
       const result = (await response.json()) as { history: Array<{ role: string; text: string }> };
       expect(result.history).toEqual(fixture.history);
-      expect(result.history.at(-1)).toEqual({
+      expect(result.history.at(-5)).toEqual({
         role: "assistant",
         text: fixture.finalAnswer,
         images: [],
@@ -156,6 +188,9 @@ it("serves the completed task's final answer from persisted messages on every hi
       });
     }
     expect(await fs.readFile(saved.path)).toEqual(original);
+    for (const [imagePath, bytes] of originals) {
+      expect(await fs.readFile(imagePath)).toEqual(bytes);
+    }
   } finally {
     child.kill();
     await closed;

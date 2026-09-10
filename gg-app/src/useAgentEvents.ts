@@ -22,7 +22,11 @@ import {
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { isAskUserPrompt } from "./ask-user";
-import { isAskUserSettledEvent, resolveRunEndOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  extractImageWarnings,
+  isAskUserSettledEvent,
+  resolveRunEndOutcome,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -460,11 +464,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         const accepted = {
           ...item,
           queueId: receipt.queueId,
-          queued: receipt.queued && !hideQueued &&
+          queued:
+            receipt.queued &&
+            !hideQueued &&
             (acknowledgedQueueRef.current.get(receipt.queueId) ?? true),
         };
         return previous.some((row) => row.id === item.id)
-          ? previous.map((row) => row.id === item.id ? accepted : row)
+          ? previous.map((row) => (row.id === item.id ? accepted : row))
           : [...previous, accepted];
       });
     },
@@ -655,7 +661,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "autopilot": {
           if (typeof d.autopilot === "boolean") {
             const autopilot = d.autopilot;
-            setState((previous) => previous ? { ...previous, autopilot } : previous);
+            setState((previous) => (previous ? { ...previous, autopilot } : previous));
           }
           break;
         }
@@ -939,10 +945,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // (success or failure). If it produced images, they're pushed below.
           setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
           if (liveEntry?.name === "generate_image" && typeof result === "string") {
-            const warnings = result.split("\n").filter((line) => line.startsWith("WARNING: Image saved,"));
-            if (warnings.length > 0) {
+            const warnings = extractImageWarnings(result);
+            if (warnings) {
               endStreamingText();
-              pushItem({ kind: "info", id: nextId(), text: warnings.join("\n") });
+              pushItem({ kind: "info", id: nextId(), text: warnings });
             }
           }
           // Surface any image previews (screenshot / read of an image) inline in
@@ -1354,12 +1360,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             acknowledgedQueueRef.current.set(id, pendingIds.has(id));
           }
           for (const id of pendingIds) acknowledgedQueueRef.current.set(id, true);
-          setItems((previous) => previous.map((item) =>
-            item.kind === "user" && item.queued && item.queueId &&
-            acknowledgedQueueRef.current.get(item.queueId) === false
-              ? { ...item, queued: false, promoted: true }
-              : item,
-          ));
+          setItems((previous) =>
+            previous.map((item) =>
+              item.kind === "user" &&
+              item.queued &&
+              item.queueId &&
+              acknowledgedQueueRef.current.get(item.queueId) === false
+                ? { ...item, queued: false, promoted: true }
+                : item,
+            ),
+          );
           schedulePromotionEnd();
           break;
         }

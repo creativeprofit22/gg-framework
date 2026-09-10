@@ -52,7 +52,9 @@ export function mergeAskAnswers(
         const value = entry[1];
         return typeof value === "string"
           ? value.trim().length > 0
-          : value !== undefined && value.length > 0 && value.every((pick) => pick.trim().length > 0);
+          : value !== undefined &&
+              value.length > 0 &&
+              value.every((pick) => pick.trim().length > 0);
       },
     ),
   );

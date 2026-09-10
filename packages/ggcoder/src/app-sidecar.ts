@@ -40,6 +40,7 @@ import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
 import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
 import { collectPersistedMcpToolFailures } from "./app-sidecar-tool-failures.js";
+import { restoreToolImages } from "./app-sidecar-image-history.js";
 import {
   AppSidecarContinuationHandoffService,
   type ContinuationSynthesisSessionOptions,
@@ -53,7 +54,7 @@ import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-rou
 import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
-import { createRunEndPayload, normalizePromptMeta, type PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { createRunEndPayload, extractImageWarnings, normalizePromptMeta, type PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
@@ -221,7 +222,7 @@ import {
   stopRadio,
 } from "./core/radio.js";
 import { enrichProcessPath } from "./core/shell-path.js";
-import { downscaleForPreview, shrinkToFit, validateVisionImage } from "./utils/image.js";
+import { shrinkToFit, validateVisionImage } from "./utils/image.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
 import { installSteroids, probeSteroids } from "./core/steroids.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
@@ -619,6 +620,7 @@ interface HistoryEntryForWire {
   error?: { scope: string; headline: string; message?: string; guidance?: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Image previews; `text` carries verbatim warnings rendered once before them. */
   toolImages?: Array<{ src: string; path?: string }>;
   /** Failed MCP result restored as a durable transcript row. */
   mcpToolFailure?: { name: string; result: string };
@@ -5063,10 +5065,9 @@ async function createSession(
       // generate_image) that must re-render inline, and assistant tool_call
       // blocks carry sub-agent delegations that must re-appear as group items.
       //
-      // The `details` object (imagePreviews with path + downscaled preview) is
-      // event-only and never persisted — we reconstruct from the raw
-      // ImageContent in the tool result, downsampling on the sidecar side and
-      // extracting the path from the text block ("Generated image → /path").
+      // Generated image results persist display-only previews and exact original
+      // paths. Older results fall back to their model-visible ImageContent;
+      // only unambiguous, existing single-image paths regain an open action.
       void (async () => {
         const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(cwd))];
         const messages = session.getMessages();
@@ -5272,40 +5273,16 @@ async function createSession(
               // Tool result messages: check for ImageContent blocks (screenshots,
               // generated images) and emit a toolImages entry.
               for (const tr of msg.content) {
-                if (typeof tr.content === "string") continue;
-                const imageBlocks = tr.content.filter((c) => c.type === "image");
-                if (imageBlocks.length === 0) continue;
-                // Extract the path from the text block (e.g. "Generated image → /path").
-                const textBlock = tr.content.find(
-                  (c) => c.type === "text" && "text" in c && typeof c.text === "string",
-                );
-                const textContent = textBlock && textBlock.type === "text" ? textBlock.text : "";
-                const pathMatch = textContent.match(/→\s*(\S+)/);
-                const imgPath = pathMatch?.[1];
-
-                // Downscale each image for the webview preview.
-                const toolImages: Array<{ src: string; path?: string }> = [];
-                for (const block of imageBlocks) {
-                  if (block.type !== "image") continue;
-                  try {
-                    const rawBuf = Buffer.from(block.data, "base64");
-                    const previewBuf = await downscaleForPreview(rawBuf);
-                    toolImages.push({
-                      src: `data:${block.mediaType};base64,${previewBuf.toString("base64")}`,
-                      path: imgPath,
-                    });
-                  } catch {
-                    // Downscale failed — use the raw data.
-                    toolImages.push({
-                      src: `data:${block.mediaType};base64,${block.data}`,
-                      path: imgPath,
-                    });
-                  }
-                }
-                if (toolImages.length > 0) {
+                const toolImages = await restoreToolImages(tr);
+                const textContent = typeof tr.content === "string" ? tr.content : tr.content
+                  .filter((c) => c.type === "text")
+                  .map((c) => c.text)
+                  .join("\n");
+                const imageWarnings = extractImageWarnings(textContent);
+                if (toolImages.length > 0 || imageWarnings) {
                   history.push({
                     role: "assistant",
-                    text: "",
+                    text: imageWarnings,
                     toolImages,
                   });
                 }

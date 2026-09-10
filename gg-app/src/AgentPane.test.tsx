@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import fs from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { imageOriginals } from "../../packages/ggcoder/src/test-support/image-originals";
 import path from "node:path";
 import { useCallback, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -591,6 +593,114 @@ describe("pane-local opening (mocked native transport)", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
   });
+
+  it.each(["1536x1024", "1254x1254", "1024x1024"])(
+    "restores %s sizing evidence once alongside its image after live rendering",
+    async (actual) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`image-${actual}`, 1);
+      const emit = liveEvents(pane);
+      const warning =
+        actual === "1024x1024"
+          ? ""
+          : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${actual}. Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (/saved/original.png)`;
+      const view = render(
+        <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />,
+      );
+      await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+      await act(async () => {
+        emit("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} });
+        emit("tool_call_end", {
+          toolCallId: "image",
+          result: `Generated image → /saved/original.png\n${warning}`,
+          details: {
+            imagePreviews: [
+              { base64: "AA==", mediaType: "image/png", path: "/saved/original.png" },
+            ],
+          },
+        });
+      });
+      expect(view.container.querySelectorAll(".img-card")).toHaveLength(1);
+      expect(view.container.querySelectorAll(".line.info")).toHaveLength(warning ? 1 : 0);
+      if (warning) expect(screen.getAllByText(warning)).toHaveLength(1);
+      view.unmount();
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        {
+          role: "assistant",
+          text: warning,
+          toolImages: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }],
+        },
+      ]);
+      for (let reopen = 0; reopen < 2; reopen++) {
+        const restored = render(
+          <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />,
+        );
+        await waitFor(() =>
+          expect(restored.container.querySelectorAll(".img-card")).toHaveLength(1),
+        );
+        expect(restored.container.querySelectorAll(".line.info")).toHaveLength(warning ? 1 : 0);
+        if (warning) expect(screen.getAllByText(warning)).toHaveLength(1);
+        else expect(screen.queryByText(/Exact-size verification failed/)).toBeNull();
+        expect(screen.getByRole("img").getAttribute("src")).toBe("data:image/png;base64,AA==");
+        restored.unmount();
+      }
+    },
+  );
+
+  it("opens each exact original from real reopened multi-image history (mocked native open)", async () => {
+    await withRealSidecar(async ({ project, manager, open, request }) => {
+      const { result, images, hashes } = await imageOriginals(project);
+      expect(hashes[0]).not.toBe(hashes[1]);
+      const saved = await manager.create(project, "openai", "gpt-5", {
+        openAICodexContextProfile: "stable",
+      });
+      await manager.appendRequiredMessage(saved.path, {
+        type: "message",
+        id: randomUUID(),
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: { role: "tool", content: [result] },
+      });
+      for (let reopen = 0; reopen < 2; reopen++) {
+        const sessionId = await open(saved.path);
+        const response = await request("/history", sessionId);
+        expect(response.ok).toBe(true);
+        const { history } = (await response.json()) as { history: AgentModule.HistoryEntry[] };
+        expect(history.flatMap((row) => row.toolImages ?? [])).toEqual(
+          images.map((image) => ({
+            src: `data:${image.mediaType};base64,${image.data}`,
+            path: image.path,
+          })),
+        );
+        const pane = client(`originals-${reopen}`, 1);
+        vi.mocked(pane.listHistory).mockResolvedValue(history);
+        const view = render(
+          <AgentPane
+            client={pane}
+            target={{ ...target, cwd: project }}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+        await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(2));
+        for (const [index, image] of images.entries()) {
+          nativeMocks.invoke.mockClear();
+          fireEvent.click(within(view.container).getByTitle(`Open ${image.path}`));
+          await waitFor(() =>
+            expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+              paneId: pane.paneId,
+              path: image.path,
+            }),
+          );
+          expect(
+            createHash("sha256")
+              .update(await fs.readFile(image.path))
+              .digest("hex"),
+          ).toBe(hashes[index]);
+        }
+        view.unmount();
+      }
+    });
+  }, 60_000);
 
   it("keeps submission unavailable when history restoration fails", async () => {
     const pane = client("pane-history-failure", 1);

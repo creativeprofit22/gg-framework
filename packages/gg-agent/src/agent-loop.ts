@@ -1811,6 +1811,7 @@ interface ToolExecutionRecord {
   toolCallId: string;
   content: ToolResultContent;
   isError: boolean;
+  imageResult?: ToolResult["imageResult"];
 }
 
 interface ToolBatchExecutionOptions {
@@ -1864,6 +1865,7 @@ async function executeSingleToolCall(
 
   let resultContent: ToolResultContent;
   let details: unknown;
+  let imageResult: ToolResult["imageResult"];
   let isError: boolean;
   let invalidArgAttempt: number | undefined;
 
@@ -1915,6 +1917,7 @@ async function executeSingleToolCall(
       const normalized = normalizeToolResult(raw);
       resultContent = redactValue(normalized.content);
       details = redactValue(normalized.details);
+      imageResult = redactValue(normalized.imageResult);
       isError = normalized.isError === true;
       for (const key of options.invalidToolArgumentCounts.keys()) {
         if (key.startsWith(`${toolCall.name}:`)) options.invalidToolArgumentCounts.delete(key);
@@ -1985,7 +1988,7 @@ async function executeSingleToolCall(
     ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }),
   });
 
-  return { toolCallId: toolCall.id, content: resultContent, isError };
+  return { toolCallId: toolCall.id, content: resultContent, isError, ...(imageResult ? { imageResult } : {}) };
 }
 
 /**
@@ -2189,6 +2192,7 @@ function buildToolResults(
         toolCallId: toolCall.id,
         content: result.content,
         isError: result.isError || undefined,
+        ...(result.imageResult ? { imageResult: result.imageResult } : {}),
       });
     } else {
       // No record: either the abort landed before this call was dispatched

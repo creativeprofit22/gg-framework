@@ -6,6 +6,7 @@ import type {
   ServerToolDefinition,
   StopReason,
   ToolResultContent,
+  ToolResult,
   Usage,
   StreamOptions,
 } from "@kenkaiiii/gg-ai";
@@ -15,6 +16,7 @@ import type {
 export interface StructuredToolResult {
   content: ToolResultContent;
   details?: unknown;
+  imageResult?: ToolResult["imageResult"];
   /** Explicit tool-level failure reported without throwing (for example MCP isError). */
   isError?: boolean;
 }

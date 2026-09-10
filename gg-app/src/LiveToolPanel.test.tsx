@@ -37,6 +37,45 @@ const entries: LiveToolEntry[] = [
 ];
 
 describe("LiveToolPanel completion status", () => {
+  it.each([
+    [
+      "Image generation failed: OpenAI Image API (400): unsupported tool",
+      "Image generation failed: OpenAI Image API (…",
+    ],
+    [
+      "Image generation failed: Astra image request failed (response.failed).",
+      "Image generation failed: Astra image reques…",
+    ],
+    [
+      "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
+      "Image generation returned no image results …",
+    ],
+    [
+      "OpenAI is not connected. Connect OpenAI to use image generation.",
+      "OpenAI is not connected. Connect OpenAI to …",
+    ],
+    ["Image generation aborted.", "Image generation aborted."],
+  ])("shows image failure instead of completion: %s", (result, preview) => {
+    render(
+      <LiveToolPanel
+        entries={[
+          {
+            toolCallId: "image",
+            name: "generate_image",
+            args: { prompt: "a cat" },
+            status: "done",
+            isError: true,
+            result,
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByTitle("Failed")).toBeTruthy();
+    expect(screen.getByText("Failed:")).toBeTruthy();
+    expect(screen.queryByTitle("Completed")).toBeNull();
+    expect(screen.getByText(`· ${preview}`)).toBeTruthy();
+  });
+
   it("shows success, thrown failure, and MCP isError failure with accessible status text", () => {
     render(<LiveToolPanel entries={entries} />);
 

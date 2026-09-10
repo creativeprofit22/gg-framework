@@ -76,6 +76,11 @@ export interface ToolResult {
   toolCallId: string;
   content: ToolResultContent;
   isError?: boolean;
+  /** Display-only generated previews with exact originals; never sent to providers. */
+  imageResult?: {
+    version: 1;
+    images: Array<ImageContent & { path: string }>;
+  };
   /**
    * Set when the agent loop trimmed `content` to fit a per-result or per-turn
    * budget. The provider (model input) and the persistent transcript both see

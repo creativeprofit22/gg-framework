@@ -103,7 +103,8 @@ describe("useAppUpdate local-fork isolation", () => {
       type: "completed",
       exitCode: 0,
       disposition: "install-scheduled",
-      message: "Verified replacement scheduled. GG Coder will close and restart after installation.",
+      message:
+        "Verified replacement scheduled. GG Coder will close and restart after installation.",
     },
     {
       type: "completed",

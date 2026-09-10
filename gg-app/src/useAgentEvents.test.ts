@@ -33,16 +33,68 @@ import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
-it("surfaces image sizing warnings alongside the accessible original image path", () => {
-  const { hook, getItems } = setup();
-  const warning = "WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: 1536x1024. Exact-size verification failed.";
-  act(() => hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} })));
-  act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "image", result: `Generated image\n${warning}`, details: { imagePreviews: [{ base64: "AA==", mediaType: "image/png", path: "/saved/original.png" }] } })));
-  expect(getItems()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ kind: "info", text: warning }),
-    expect.objectContaining({ kind: "images", images: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }] }),
-  ]));
+it.each([
+  "Image generation failed: OpenAI Image API (400): unsupported tool",
+  "Image generation failed: Astra image request failed (response.failed).",
+  "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
+  "OpenAI is not connected. Connect OpenAI to use image generation.",
+  "Image generation aborted.",
+])("keeps image failures visible and removes the generating placeholder: %s", (result) => {
+  const { hook, getItems, getLiveToolFeed } = setup();
+  act(() =>
+    hook.result.current.handleEvent(
+      ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} }),
+    ),
+  );
+  expect(getItems().some((item) => item.kind === "generating_image")).toBe(true);
+  act(() =>
+    hook.result.current.handleEvent(
+      ev("tool_call_end", { toolCallId: "image", result, isError: true }),
+    ),
+  );
+  expect(getLiveToolFeed()).toEqual([
+    expect.objectContaining({ name: "generate_image", status: "done", isError: true, result }),
+  ]);
+  expect(
+    getItems().some((item) => item.kind === "generating_image" || item.kind === "images"),
+  ).toBe(false);
 });
+
+it.each(["1536x1024", "1254x1254", "1024x1024"])(
+  "surfaces %s sizing warnings once alongside the accessible original image path",
+  (actual) => {
+    const { hook, getItems } = setup();
+    const warning =
+      actual === "1024x1024"
+        ? ""
+        : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${actual}. Exact-size verification failed.`;
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "image",
+          result: `Generated image\n${warning}`,
+          details: {
+            imagePreviews: [
+              { base64: "AA==", mediaType: "image/png", path: "/saved/original.png" },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(getItems()).toEqual([
+      ...(warning ? [expect.objectContaining({ kind: "info", text: warning })] : []),
+      expect.objectContaining({
+        kind: "images",
+        images: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }],
+      }),
+    ]);
+  },
+);
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;

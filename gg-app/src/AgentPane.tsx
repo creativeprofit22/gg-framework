@@ -118,10 +118,7 @@ import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import {
-  submitDisposition,
-  withoutSupersedingMessage,
-} from "./submit-disposition";
+import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
 import { Toaster } from "./Toaster";
 import { Confetti } from "./Confetti";
 import { RankBadge } from "./RankBadge";
@@ -382,7 +379,7 @@ export type Item =
     }
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
   // rendered like the TUI: a shimmering tone-colored one-liner.
-  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" }
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" | "check_review" }
   // Images produced by a tool (screenshot / read of an image file).
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
@@ -789,7 +786,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   } | null>(null);
   // Holds the resolved enhancement so the animation's onDone can apply it once
   // the decode settles (rather than popping the text in mid-animation).
-  const pendingEnhanceRef = useRef<{ enhanced: string; segments: PromptSegment[] } | null>(null);
+  const pendingEnhanceRef = useRef<{
+    enhanced: string;
+    segments: PromptSegment[];
+    isCurrent: () => boolean;
+  } | null>(null);
   // Number of messages queued mid-run (injected as steering by the sidecar).
   const [queuedCount, setQueuedCount] = useState(0);
   // Pending queued messages, so each can be cancelled individually. Kept
@@ -1689,11 +1690,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
     if (operationId && recoveredSessionResetOperationRef.current === operationId) return false;
     const unresolved = unresolvedSessionResetRef.current;
-    if (unresolved && (
-      unresolved.generation !== generationRef.current ||
-      (unresolved.operationId === null ? !sessionMutationLockRef.current : operationId !== unresolved.operationId) ||
-      !operationId || !conversationId || !sessionId || conversationId === stateRef.current?.conversationId
-    )) return false;
+    if (
+      unresolved &&
+      (unresolved.generation !== generationRef.current ||
+        (unresolved.operationId === null
+          ? !sessionMutationLockRef.current
+          : operationId !== unresolved.operationId) ||
+        !operationId ||
+        !conversationId ||
+        !sessionId ||
+        conversationId === stateRef.current?.conversationId)
+    )
+      return false;
     if (operationId && continuationResetsRef.current.has(operationId)) return false;
     if (conversationId && retiredConversationIdsRef.current.has(conversationId)) return false;
     const attempt = continuationAttemptRef.current;
@@ -1786,7 +1794,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     kenCurrentSubmissionRef.current = null;
     if (!operationId) return;
     const unresolved = unresolvedSessionResetRef.current;
-    if (unresolved?.operationId === operationId && unresolved.generation === generationRef.current) {
+    if (
+      unresolved?.operationId === operationId &&
+      unresolved.generation === generationRef.current
+    ) {
       unresolvedSessionResetRef.current = null;
     }
     recoveredSessionResetOperationRef.current = operationId;
@@ -1829,47 +1840,48 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
-  const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } = useAgentEvents({
-    client,
-    setItems,
-    nextId,
-    handleKenEvent,
-    hydrateKen,
-    handleAutopilotEvent,
-    setState,
-    setTasks,
-    setProjectTasks,
-    setStatus,
-    setRunning,
-    setLiveToolFeed,
-    setTokens,
-    setContextTokens,
-    setDoneStatus,
-    setIsThinking,
-    setThinkingStartTs,
-    setThinkingAccumMs,
-    setPlanTotal,
-    setPlanDone,
-    setPlanReview,
-    setQueuedCount,
-    setQueuedMessages,
-    setAttachments: (next) => {
-      if (!unresolvedSessionResetRef.current) setAttachments(next);
-    },
-    setCommands,
-    setModels,
-    onAstraStateChange,
-    onRoadmapPhaseDraftChange,
-    stateRef,
-    planDoneRef,
-    planTotalRef,
-    planReviewPathRef,
-    pendingPlanTotalRef,
-    stickToBottomRef,
-    onSessionReset: onAuthoritativeSessionReset,
-    shouldApplySessionReset,
-    onContinuationAccepted,
-  });
+  const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } =
+    useAgentEvents({
+      client,
+      setItems,
+      nextId,
+      handleKenEvent,
+      hydrateKen,
+      handleAutopilotEvent,
+      setState,
+      setTasks,
+      setProjectTasks,
+      setStatus,
+      setRunning,
+      setLiveToolFeed,
+      setTokens,
+      setContextTokens,
+      setDoneStatus,
+      setIsThinking,
+      setThinkingStartTs,
+      setThinkingAccumMs,
+      setPlanTotal,
+      setPlanDone,
+      setPlanReview,
+      setQueuedCount,
+      setQueuedMessages,
+      setAttachments: (next) => {
+        if (!unresolvedSessionResetRef.current) setAttachments(next);
+      },
+      setCommands,
+      setModels,
+      onAstraStateChange,
+      onRoadmapPhaseDraftChange,
+      stateRef,
+      planDoneRef,
+      planTotalRef,
+      planReviewPathRef,
+      pendingPlanTotalRef,
+      stickToBottomRef,
+      onSessionReset: onAuthoritativeSessionReset,
+      shouldApplySessionReset,
+      onContinuationAccepted,
+    });
 
   const handleEventRef = useRef(handleEvent);
   handleEventRef.current = handleEvent;
@@ -1886,10 +1898,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const epoch = ++hydrateEpochRef.current;
     const unresolved = unresolvedSessionResetRef.current;
     const lifecycle = lifecycleEpochRef.current;
-    const pending = { epoch, generation: generationRef.current, events: [] as Parameters<typeof handleEvent>[0][] };
+    const pending = {
+      epoch,
+      generation: generationRef.current,
+      events: [] as Parameters<typeof handleEvent>[0][],
+    };
     hydrationEventsRef.current = pending;
-    const isCurrent = () => mountedRef.current && epoch === hydrateEpochRef.current &&
-      lifecycle === lifecycleEpochRef.current && pending.generation === generationRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      epoch === hydrateEpochRef.current &&
+      lifecycle === lifecycleEpochRef.current &&
+      pending.generation === generationRef.current;
     const replayEvents = () => {
       if (hydrationEventsRef.current !== pending) return;
       hydrationEventsRef.current = null;
@@ -1933,7 +1952,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
-      if (!isCurrent() || generation !== generationRef.current || unresolvedSessionResetRef.current !== unresolved) return;
+      if (
+        !isCurrent() ||
+        generation !== generationRef.current ||
+        unresolvedSessionResetRef.current !== unresolved
+      )
+        return;
       if (history.length > 0 || unresolved) {
         clearKenStream();
         // A freshly hydrated session lands at the bottom (newest message).
@@ -2061,7 +2085,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         );
       }
       if (st?.conversationId && st.sessionId && unresolvedSessionResetRef.current === unresolved) {
-        if (unresolved?.operationId) recoveredSessionResetOperationRef.current = unresolved.operationId;
+        if (unresolved?.operationId)
+          recoveredSessionResetOperationRef.current = unresolved.operationId;
         unresolvedSessionResetRef.current = null;
         stateRef.current = st;
       }
@@ -2097,7 +2122,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const unsub = subscribe((event) => {
       const pending = hydrationEventsRef.current;
       if (pending) {
-        if (pending.epoch === hydrateEpochRef.current && pending.generation === generationRef.current) {
+        if (
+          pending.epoch === hydrateEpochRef.current &&
+          pending.generation === generationRef.current
+        ) {
           pending.events.push(event);
         }
         return;
@@ -2644,7 +2672,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const reset = promptSessionResetEpochRef.current;
     const conversationId = stateRef.current?.conversationId;
     const sessionId = stateRef.current?.sessionId;
-    return () => mountedRef.current &&
+    return () =>
+      mountedRef.current &&
       generation === generationRef.current &&
       hydration === hydrateEpochRef.current &&
       reset === promptSessionResetEpochRef.current &&
@@ -2663,7 +2692,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     try {
       const confirmed = await setAutopilot(next);
       if (!isCurrent()) return;
-      setState((previous) => previous ? { ...previous, autopilot: confirmed } : previous);
+      setState((previous) => (previous ? { ...previous, autopilot: confirmed } : previous));
       setKenPowerBanner(confirmed ? "on" : "off");
       playSound(confirmed ? "done" : "click");
     } catch (error) {
@@ -2692,7 +2721,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         current.attachments !== sent.attachments ||
         current.mentionedPaths !== sent.mentionedPaths ||
         current.enhancement !== sent.enhancement
-      ) return;
+      )
+        return;
       setInput("");
       setSlashIndex(0);
       if (clearMedia) {
@@ -2875,7 +2905,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       throw new LocalSessionMutationBusyError();
     }
     if (unresolvedSessionResetRef.current) {
-      throw new SessionResetConfirmationTimeoutError(unresolvedSessionResetRef.current.operationId ?? "");
+      throw new SessionResetConfirmationTimeoutError(
+        unresolvedSessionResetRef.current.operationId ?? "",
+      );
     }
     sessionMutationLockRef.current = true;
     setNewSessionBusy(true);
@@ -2922,12 +2954,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           setState(snapshot);
         }
       }
-      if (generationRef.current !== generation) throw new SessionResetConfirmationTimeoutError(operationId);
+      if (generationRef.current !== generation)
+        throw new SessionResetConfirmationTimeoutError(operationId);
       if (unresolvedSessionResetRef.current === pending) unresolvedSessionResetRef.current = null;
       recoveredSessionResetOperationRef.current = operationId;
       return operationId;
     } catch (error) {
-      if (error instanceof NewSessionError && error.kind === "creation-rejected" && unresolvedSessionResetRef.current === pending) {
+      if (
+        error instanceof NewSessionError &&
+        error.kind === "creation-rejected" &&
+        unresolvedSessionResetRef.current === pending
+      ) {
         unresolvedSessionResetRef.current = null;
       }
       throw error;
@@ -2957,7 +2994,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const commitPreparedContinuation = useCallback(
     async (ownsLock = false): Promise<KenPromptActionResult> => {
       const attempt = continuationAttemptRef.current;
-      if (blockUnconfirmedSession() || !attempt || (!ownsLock && sessionMutationLockRef.current)) return { status: "cancelled" };
+      if (blockUnconfirmedSession() || !attempt || (!ownsLock && sessionMutationLockRef.current))
+        return { status: "cancelled" };
       sessionMutationLockRef.current = true;
       setNewSessionBusy(true);
       setContinuationConfirmation((current) =>
@@ -3071,7 +3109,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const dispatchKenPromptAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult> => {
       const prompt = action.prompt;
-      if ((action.type === "send-current" || action.type === "send-fresh") && blockUnconfirmedSession()) {
+      if (
+        (action.type === "send-current" || action.type === "send-fresh") &&
+        blockUnconfirmedSession()
+      ) {
         return { status: "failed", action: action.type, message: AMBIGUOUS_NEW_SESSION_MESSAGE };
       }
       if (action.type === "send-fresh") {
@@ -3123,12 +3164,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           if (supersedesQuestion && submission.queued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
-          acceptSubmission({
-            kind: "user",
-            id: nextId(),
-            text: prompt,
-            kenSent: true,
-          }, submission, supersedesQuestion);
+          acceptSubmission(
+            {
+              kind: "user",
+              id: nextId(),
+              text: prompt,
+              kenSent: true,
+            },
+            submission,
+            supersedesQuestion,
+          );
           if (!submission.queued) endStreamingText();
           return { status: "sent", session: "current" };
         } catch {
@@ -3382,8 +3427,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // a tighter, terminology-correct prompt. The result plays in over the input as
   // a Matrix dissolve→decode animation (unless reduced-motion), then fills it.
   async function runEnhance(): Promise<void> {
-    const draft = input.trim();
-    if (!draft || enhancing) return;
+    const draft = input;
+    if (!draft.trim() || enhancing) return;
+    const sessionIsCurrent = capturePromptSession();
+    const isCurrent = () => sessionIsCurrent() && composerRef.current.input === draft;
     setEnhanceHintVisible(false);
     setEnhancing(true);
 
@@ -3393,9 +3440,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
     if (reduced) {
       try {
-        applyEnhanceResult(await enhancePrompt(draft));
-      } catch {
-        toast("Couldn't enhance the prompt", "error");
+        const result = await enhancePrompt(draft);
+        if (isCurrent()) applyEnhanceResult(result);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), "error");
       } finally {
         setEnhancing(false);
       }
@@ -3408,10 +3456,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setEnhanceAnim({ oldText: draft, newText: null });
     try {
       const r = await enhancePrompt(draft);
-      pendingEnhanceRef.current = r;
+      if (!isCurrent()) {
+        setEnhanceAnim(null);
+        setEnhancing(false);
+        return;
+      }
+      pendingEnhanceRef.current = { ...r, isCurrent };
       setEnhanceAnim((a) => (a ? { ...a, newText: r.enhanced } : null));
-    } catch {
-      toast("Couldn't enhance the prompt", "error");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), "error");
       setEnhanceAnim(null);
       setEnhancing(false);
     }
@@ -3427,7 +3480,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function onEnhanceAnimDone(): void {
     const r = pendingEnhanceRef.current;
     pendingEnhanceRef.current = null;
-    if (r) {
+    if (r?.isCurrent()) {
       setInput(r.enhanced);
       setEnhancement({ plain: r.enhanced, segments: r.segments });
     }
@@ -3583,7 +3636,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const isCurrent = capturePromptSession();
     promptSubmissionPendingRef.current = isCurrent;
     const finishSubmission = () => {
-      if (promptSubmissionPendingRef.current === isCurrent) promptSubmissionPendingRef.current = null;
+      if (promptSubmissionPendingRef.current === isCurrent)
+        promptSubmissionPendingRef.current = null;
     };
     recordHistory(trimmed);
     // A user send always re-pins to the bottom — they want to see their message.
@@ -3668,8 +3722,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       })
       .catch((error) => {
         if (!isCurrent()) return;
-        setItems((current) => current.filter((item) =>
-          item.id !== pendingUserId && item.id !== pendingVideoWarningId));
+        setItems((current) =>
+          current.filter((item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId),
+        );
         reportPromptFailure(error);
       })
       .finally(finishSubmission);
@@ -4214,7 +4269,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             <span className="picker-head-actions">
               <AutopilotToggle
                 checked={state?.autopilot ?? false}
-                disabled={running || autopilotReviewing || newSessionBusy || !state || !!autopilotPending?.()}
+                disabled={
+                  running ||
+                  autopilotReviewing ||
+                  newSessionBusy ||
+                  !state ||
+                  !!autopilotPending?.()
+                }
                 onChange={(next) => void handleAutopilotChange(next)}
               />
               <button
@@ -4232,7 +4293,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 onStartPhase={startRoadmapPhase}
                 onStartNextPhase={async (checkpointId, nextPhaseId) => {
                   if (blockUnconfirmedSession()) {
-                    return { status: "failed", code: "session-busy", operationId: null, message: AMBIGUOUS_NEW_SESSION_MESSAGE };
+                    return {
+                      status: "failed",
+                      code: "session-busy",
+                      operationId: null,
+                      message: AMBIGUOUS_NEW_SESSION_MESSAGE,
+                    };
                   }
                   return client.startNextPhase(checkpointId, nextPhaseId);
                 }}
@@ -4655,7 +4721,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         style={{ color: theme.footerText }}
       >
         {!readyRef.current ? (
-          <span role="status" style={{ color: theme.textDim }}>{status}</span>
+          <span role="status" style={{ color: theme.textDim }}>
+            {status}
+          </span>
         ) : (
           <>
             {workspaceMode === "chat" ? (
@@ -5083,11 +5151,7 @@ const TranscriptRow = memo(function TranscriptRow({
 }: {
   item: Item;
   onImageLoad?: () => void;
-  onAskAnswer?: (
-    itemId: number,
-    promptId: string,
-    delta: AskAnswerDelta,
-  ) => void;
+  onAskAnswer?: (itemId: number, promptId: string, delta: AskAnswerDelta) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
 }): React.ReactElement | null {
   const paneId = useContext(PaneIdContext);
@@ -5267,9 +5331,11 @@ const TranscriptRow = memo(function TranscriptRow({
       // tone-colored one-liner so the self-correction is obvious.
       const { text: defaultText, color } = HOOK_PRESENTATION[item.hook];
       const text =
-        item.verificationReason === "recheck"
-          ? "Hook engaged. Re-checking the changes made after verification."
-          : defaultText;
+        item.verificationReason === "check_review"
+          ? "Hook engaged. Reviewing changes to tests and checks."
+          : item.verificationReason === "recheck"
+            ? "Hook engaged. Re-checking the changes made after verification."
+            : defaultText;
       return (
         <div className="assistant-msg">
           <span className="assistant-dot" style={{ color }}>

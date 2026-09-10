@@ -17,9 +17,9 @@ const TaskOutputParams = z.object({
     .max(MAX_PROCESS_WAIT_MS)
     .optional()
     .describe(
-      `Block until the process exits, up to this many ms (max ${MAX_PROCESS_WAIT_MS}), then ` +
-        "read. Returns the moment it finishes — use this instead of sleeping for a " +
-        "guessed duration when you have nothing else to do until it is done.",
+      `Block until the process exits or a declared wake condition fires, up to this many ms (max ${MAX_PROCESS_WAIT_MS}), then read. ` +
+        "For dev servers, declare a readiness wake.pattern when starting, then check HTTP once it matches. " +
+        "Omit wait_ms to read immediately; never wait for a ready server to exit.",
     ),
 });
 
@@ -50,8 +50,9 @@ export function createTaskOutputTool(
       "Use from_start=true to read from the beginning. Progress and exit status arrive " +
       "automatically for background processes \u2014 call this when you need the full output, " +
       "not merely to check whether something finished. Set wait_ms to block until the " +
-      "process exits rather than sleeping for a guessed duration (wait_agent is for child " +
-      "agents, not background processes).",
+      "process exits OR its declared wake condition fires (wait_agent is for child agents). " +
+      "A wake match is not an exit or proof of success: inspect the output. " +
+      "For dev servers, check HTTP readiness, then finish while leaving the server running.",
     parameters: TaskOutputParams,
     executionMode: "sequential",
     // Waiting can exceed the default per-tool ceiling but remains process-bounded.
@@ -59,9 +60,13 @@ export function createTaskOutputTool(
     async execute({ id, from_start, wait_ms }, context) {
       let waitNotice = "";
       if (wait_ms !== undefined) {
-        const reason = await processManager.waitForExit(id, wait_ms, context?.signal);
+        const reason = await processManager.waitForExitOrWake(id, wait_ms, context?.signal);
         if (reason === "timeout") {
           waitNotice = ` — still running after waiting ${Math.round(wait_ms / 1000)}s`;
+        } else if (reason === "pattern") {
+          waitNotice = " — wake pattern matched; inspect output before declaring success";
+        } else if (reason === "silence") {
+          waitNotice = " — silence wake fired; process may be stalled, not necessarily ready";
         }
       }
       const result = await processManager.readOutput(id, from_start);

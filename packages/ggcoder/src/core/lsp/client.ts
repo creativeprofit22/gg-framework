@@ -63,12 +63,13 @@ export type LspRequestOutcome<T> =
 
 interface PublishDiagnosticsParams {
   uri: string;
+  version?: number;
   diagnostics: LspDiagnostic[];
 }
 
 interface DiagnosticWaiter {
   uri: string;
-  resolve: (diagnostics: LspDiagnostic[]) => void;
+  resolve: (diagnostics: LspDiagnostic[] | null) => void;
 }
 
 interface ProgressParams {
@@ -270,6 +271,8 @@ export class LspClient {
   private readonly conn: JsonRpcConnection;
   private readonly versions = new Map<string, number>();
   private readonly published = new Map<string, LspDiagnostic[]>();
+  private readonly diagnosticTails = new Map<string, Promise<void>>();
+  private readonly uncertainDiagnostics = new Set<string>();
   private waiters: DiagnosticWaiter[] = [];
   private hasPullDiagnostics = false;
   /** Server capabilities from `initialize`; undefined until the handshake lands. */
@@ -325,6 +328,8 @@ export class LspClient {
     this.conn.onNotification("textDocument/publishDiagnostics", (params) => {
       const publish = params as PublishDiagnosticsParams;
       const uri = normalizeUri(publish.uri);
+      if (publish.version !== undefined && publish.version !== this.versions.get(uri)) return;
+      if (publish.version !== undefined) this.uncertainDiagnostics.delete(uri);
       this.published.set(uri, publish.diagnostics);
       this.waiters = this.waiters.filter((waiter) => {
         if (waiter.uri !== uri) return true;
@@ -552,6 +557,12 @@ export class LspClient {
     const uri = pathToFileURL(filePath).href;
     const key = normalizeUri(uri);
     this.published.delete(key);
+    // A reply for a newer edit cannot satisfy an older edit's wait.
+    this.waiters = this.waiters.filter((waiter) => {
+      if (waiter.uri !== key) return true;
+      waiter.resolve(null);
+      return false;
+    });
     const previousVersion = this.versions.get(key);
     if (previousVersion === undefined) {
       this.versions.set(key, 1);
@@ -575,14 +586,44 @@ export class LspClient {
     return uri;
   }
 
-  /**
-   * Current diagnostics for `uri`, racing the push channel (next
-   * publishDiagnostics after the last sync) against a pull-diagnostics poll
-   * loop when the server supports LSP 3.17 pull. Returns null on timeout.
-   */
+  /** Serialize document checks across sessions sharing this server, including unversioned publishers. */
+  async withDocumentDiagnostics<T>(filePath: string, work: () => Promise<T>): Promise<T> {
+    const key = normalizeUri(pathToFileURL(filePath).href);
+    const previous = this.diagnosticTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => finished);
+    this.diagnosticTails.set(key, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.diagnosticTails.get(key) === tail) this.diagnosticTails.delete(key);
+    }
+  }
+
+  documentVersion(uri: string): number | undefined {
+    return this.versions.get(normalizeUri(uri));
+  }
+
+  /** After a timeout, an unversioned empty publish may belong to an earlier edit. */
+  hasUncertainDiagnostics(uri: string): boolean {
+    return this.uncertainDiagnostics.has(normalizeUri(uri));
+  }
+
+  /** Race push against supported pull requests, rejecting superseded document versions. */
   async collectDiagnostics(uri: string, timeoutMs: number): Promise<LspDiagnostic[] | null> {
-    const push = this.waitForPublish(uri, timeoutMs);
-    if (!this.hasPullDiagnostics) return push;
+    const version = this.documentVersion(uri);
+    const cancelPush = new AbortController();
+    const push = this.waitForPublish(uri, timeoutMs, cancelPush.signal);
+    if (!this.hasPullDiagnostics) {
+      const result = await push;
+      if (result === null) this.uncertainDiagnostics.add(normalizeUri(uri));
+      return this.documentVersion(uri) === version ? result : null;
+    }
 
     let stopped = false;
     const pull = (async (): Promise<LspDiagnostic[] | null> => {
@@ -590,16 +631,23 @@ export class LspClient {
       while (!stopped && this.alive && Date.now() < deadline) {
         const items = await this.pullDiagnostics(uri, Math.max(1, deadline - Date.now()));
         if (items === "unsupported") return push;
-        if (items !== "retry") return items;
+        if (items !== "retry") {
+          if (this.documentVersion(uri) === version)
+            this.uncertainDiagnostics.delete(normalizeUri(uri));
+          return items;
+        }
         await sleep(PULL_POLL_INTERVAL_MS);
       }
       return push;
     })();
 
     try {
-      return await Promise.race([push, pull]);
+      const result = await Promise.race([push, pull]);
+      if (result === null) this.uncertainDiagnostics.add(normalizeUri(uri));
+      return this.documentVersion(uri) === version ? result : null;
     } finally {
       stopped = true;
+      cancelPush.abort();
     }
   }
 
@@ -664,29 +712,34 @@ export class LspClient {
     this.conn.dispose();
     const waiters = this.waiters;
     this.waiters = [];
-    for (const waiter of waiters) waiter.resolve([]);
+    for (const waiter of waiters) waiter.resolve(null);
   }
 
-  private waitForPublish(uri: string, timeoutMs: number): Promise<LspDiagnostic[] | null> {
+  private waitForPublish(
+    uri: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<LspDiagnostic[] | null> {
     // Both the cache and the waiter list are keyed by the normalized form, which
     // is what the publishDiagnostics handler stores under.
     const key = normalizeUri(uri);
     const cached = this.published.get(key);
     if (cached !== undefined) return Promise.resolve(cached);
-    if (!this.alive) return Promise.resolve(null);
+    if (!this.alive || signal?.aborted) return Promise.resolve(null);
     return new Promise<LspDiagnostic[] | null>((resolve) => {
       const waiter: DiagnosticWaiter = {
         uri: key,
         resolve: (diagnostics) => {
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          this.waiters = this.waiters.filter((w) => w !== waiter);
           resolve(diagnostics);
         },
       };
-      const timer = setTimeout(() => {
-        this.waiters = this.waiters.filter((w) => w !== waiter);
-        resolve(null);
-      }, timeoutMs);
+      const onAbort = () => waiter.resolve(null);
+      const timer = setTimeout(onAbort, timeoutMs);
       timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.push(waiter);
     });
   }
@@ -702,7 +755,8 @@ export class LspClient {
         timeoutMs,
       )) as { kind?: string; items?: LspDiagnostic[] } | null;
       if (report?.kind === "full") return report.items ?? [];
-      if (report?.kind === "unchanged") return this.published.get(normalizeUri(uri)) ?? [];
+      if (report?.kind === "unchanged")
+        return this.published.get(normalizeUri(uri)) ?? "unsupported";
       return "unsupported";
     } catch (error) {
       if (error instanceof JsonRpcRequestError) {

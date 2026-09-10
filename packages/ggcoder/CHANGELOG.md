@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.59.0
+
+### Minor Changes
+
+- Add GPT Image 2.5 Flare and Sunburst image generation with transparent backgrounds. Preserve intent and detailed requirements in prompt enhancement, respect the selected model's settings, and keep drafts intact on incomplete responses. Keep coding moving with background edit diagnostics, responsive dev-server readiness waits, leaner agent instructions, and clearer completion guidance after verification.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.59.0
+- @kenkaiiii/gg-agent@5.59.0
+- @kenkaiiii/gg-core@5.59.0
+
 ## 5.58.1
 
 ### Patch Changes

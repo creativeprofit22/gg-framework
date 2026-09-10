@@ -46,16 +46,14 @@ function generateSkillDescription(skills: Skill[], limits: ContextLimits = CONTE
     return "Invoke a skill by name. No skills are currently available.";
   }
 
-  // Same byte budgets as the prompt's Skills section — this description ships
-  // in the tool schema on every request, so a bloated skill list bills twice.
+  // The active schema owns skill discovery; the system prompt omits its duplicate catalog.
   const { lines, dropped } = renderSkillLines(skills, limits);
   const overflow =
     dropped.length > 0 ? `\n_Skills omitted (catalog byte budget): ${dropped.join(", ")}_` : "";
 
   return (
-    `Invoke a skill by name to get specialized instructions for a task. ` +
-    `Before acting, invoke a skill when the request matches its scope and respect explicit exclusions. ` +
-    `Invoke as soon as the work enters a skill's scope — while building or when checking — not only for reviews. ` +
+    `Before acting, invoke a skill when the work matches its scope; respect explicit exclusions. ` +
+    `Load it when the work enters its scope, not only for reviews. ` +
     `Match the work rather than the topic, skip it for routine or narrow changes, and do not re-invoke a skill already loaded in this conversation.\n\n` +
     `Available skills:\n${lines.join("\n")}${overflow}`
   );

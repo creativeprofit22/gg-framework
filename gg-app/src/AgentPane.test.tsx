@@ -511,7 +511,9 @@ describe("pane-local opening (mocked native transport)", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(input.value).toBe("Draft during connection");
-    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(screen.getByText(/connecting to agent/)).toBeTruthy();
     act(() => {
       emit("text_delta", { text: "Live answer" });
@@ -539,16 +541,36 @@ describe("pane-local opening (mocked native transport)", () => {
     const emit = liveEvents(pane);
     const oldHistory = deferred<AgentModule.HistoryEntry[]>();
     const newHistory = deferred<AgentModule.HistoryEntry[]>();
-    vi.mocked(pane.listHistory).mockReturnValueOnce(oldHistory.promise).mockReturnValueOnce(newHistory.promise);
-    const view = render(<AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />);
+    vi.mocked(pane.listHistory)
+      .mockReturnValueOnce(oldHistory.promise)
+      .mockReturnValueOnce(newHistory.promise);
+    const view = render(
+      <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+    );
     await waitFor(() => expect(pane.listHistory).toHaveBeenCalledTimes(1));
     act(() => emit("text_delta", { text: "Stale live answer" }));
     vi.mocked(pane.restore).mockResolvedValue(2);
-    vi.mocked(pane.waitForReady).mockResolvedValue({ ready: true, error: null, generation: 2, sessionId: pane.paneId });
-    view.rerender(<AgentPane client={pane} target={{ ...target, sessionPath: "/new.jsonl" }} generation={2} workspaceOwnsSessionLifecycle />);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: pane.paneId,
+    });
+    view.rerender(
+      <AgentPane
+        client={pane}
+        target={{ ...target, sessionPath: "/new.jsonl" }}
+        generation={2}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
     await waitFor(() => expect(pane.listHistory).toHaveBeenCalledTimes(2));
-    const otherView = render(<AgentPane client={other} target={target} workspaceOwnsSessionLifecycle />);
-    await waitFor(() => expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull());
+    const otherView = render(
+      <AgentPane client={other} target={target} workspaceOwnsSessionLifecycle />,
+    );
+    await waitFor(() =>
+      expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull(),
+    );
     const otherInput = within(otherView.container).getByRole("textbox");
     fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
     fireEvent.keyDown(otherInput, { key: "Enter" });
@@ -580,7 +602,9 @@ describe("pane-local opening (mocked native transport)", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(input.value).toBe("Keep this draft");
-    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
   it("keeps transcript, lazy plan links, and image cards tied to their source pane", async () => {
     const panes = [client("primary", 1), client("pane-secondary", 1)];
@@ -590,21 +614,44 @@ describe("pane-local opening (mocked native transport)", () => {
       vi.mocked(pane.getState).mockResolvedValue({ ...agentState("test"), cwd: roots[index] });
       vi.mocked(pane.listHistory).mockResolvedValue([
         { role: "assistant", text: "[Transcript file](same.md)" },
-        { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,AA==", path: "same.md" }] },
+        {
+          role: "assistant",
+          text: "",
+          toolImages: [{ src: "data:image/png;base64,AA==", path: "same.md" }],
+        },
       ]);
     });
-    const view = render(<>{panes.map((pane, index) => (
-      <AgentPane key={pane.paneId} client={pane} focused={index === 0}
-        target={{ ...target, cwd: roots[index] }} workspaceOwnsSessionLifecycle />
-    ))}</>);
+    const view = render(
+      <>
+        {panes.map((pane, index) => (
+          <AgentPane
+            key={pane.paneId}
+            client={pane}
+            focused={index === 0}
+            target={{ ...target, cwd: roots[index] }}
+            workspaceOwnsSessionLifecycle
+          />
+        ))}
+      </>,
+    );
     // Flush the real lazy parser load inside React's async boundary.
-    await act(async () => { await import("./Markdown"); });
-    await waitFor(() => expect(screen.getAllByRole("link", { name: "Transcript file" })).toHaveLength(2));
+    await act(async () => {
+      await import("./Markdown");
+    });
+    await waitFor(() =>
+      expect(screen.getAllByRole("link", { name: "Transcript file" })).toHaveLength(2),
+    );
     await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(2));
-    act(() => emitters.forEach((emit) => emit("plan_exit", {
-      checkpointId: "plan", generation: 1, planPath: "plan.md",
-      content: "[Plan file](same.md)",
-    })));
+    act(() =>
+      emitters.forEach((emit) =>
+        emit("plan_exit", {
+          checkpointId: "plan",
+          generation: 1,
+          planPath: "plan.md",
+          content: "[Plan file](same.md)",
+        }),
+      ),
+    );
     for (const summary of screen.getAllByText("Review plan")) fireEvent.click(summary);
     await screen.findAllByRole("link", { name: "Plan file" });
     const slots = view.container.querySelectorAll<HTMLElement>(".agent-pane");
@@ -614,15 +661,21 @@ describe("pane-local opening (mocked native transport)", () => {
       for (const name of ["Transcript file", "Plan file"]) {
         nativeMocks.invoke.mockClear();
         fireEvent.click(within(slot).getByRole("link", { name }));
-        await waitFor(() => expect(nativeMocks.invoke).toHaveBeenCalledWith(
-          "open_project_path", { paneId: panes[index].paneId, path: "same.md" },
-        ));
+        await waitFor(() =>
+          expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+            paneId: panes[index].paneId,
+            path: "same.md",
+          }),
+        );
       }
       nativeMocks.invoke.mockClear();
       fireEvent.click(within(slot).getByTitle("Open same.md"));
-      await waitFor(() => expect(nativeMocks.invoke).toHaveBeenCalledWith(
-        "open_project_path", { paneId: panes[index].paneId, path: "same.md" },
-      ));
+      await waitFor(() =>
+        expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+          paneId: panes[index].paneId,
+          path: "same.md",
+        }),
+      );
     }
   });
 });
@@ -746,13 +799,43 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       fireEvent.change(input, { target: { value: draft } });
       fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
       await waitFor(() =>
-        expect(nativeMocks.toast).toHaveBeenCalledWith("Couldn't enhance the prompt", "error"),
+        expect(nativeMocks.toast).toHaveBeenCalledWith("Invalid enhancement response", "error"),
       );
       expect(input.value).toBe(draft);
       expect(input.disabled).toBe(false);
       expect(document.querySelector(".enh-diss")).toBeNull();
       fireEvent.click(await screen.findByRole("button", { name: "Enhance?" }));
       await waitFor(() => expect(pane.enhancePrompt).toHaveBeenCalledTimes(2));
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "preserves exact input and ignores stale enhancement results (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", () => ({
+        matches: reduced,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-stale", 1);
+      let resolve!: (result: AgentModule.EnhanceResult) => void;
+      vi.mocked(pane.enhancePrompt).mockReturnValue(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await renderKenPromptPane(pane);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      const original = `  ${draft}\n`;
+      fireEvent.change(input, { target: { value: original } });
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      await waitFor(() => expect(pane.enhancePrompt).toHaveBeenCalledWith(original));
+      fireEvent.change(input, { target: { value: "A newer draft" } });
+      await act(async () => {
+        resolve({ enhanced, segments: [{ kind: "text", text: enhanced }] });
+      });
+      expect(input.value).toBe("A newer draft");
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
@@ -806,7 +889,8 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       expect(screen.queryByText("Cancelled prompt")).toBeNull();
       expect(screen.queryByText("Ken queued prompt")).toBeNull();
       expect(document.querySelector(".queued-pill")).toBeNull();
-    }, 60_000,
+    },
+    60_000,
   );
 
   it("never offers enhancement for schedule drafts", async () => {
@@ -928,19 +1012,25 @@ describe("AgentPane question acknowledgement", () => {
       vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
       const { container } = render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
-      act(() => emit("ask_user", {
-        id: "ask-clear",
-        questions: [
-          {
-            id: "checks", kind: "multi", question: "Which checks?",
-            options: [{ label: "Typecheck" }, { label: "Tests" }],
-          },
-          {
-            id: "then", kind: "choice", question: "Then what?",
-            options: [{ label: "Continue" }, { label: "Stop" }],
-          },
-        ],
-      }));
+      act(() =>
+        emit("ask_user", {
+          id: "ask-clear",
+          questions: [
+            {
+              id: "checks",
+              kind: "multi",
+              question: "Which checks?",
+              options: [{ label: "Typecheck" }, { label: "Tests" }],
+            },
+            {
+              id: "then",
+              kind: "choice",
+              question: "Then what?",
+              options: [{ label: "Continue" }, { label: "Stop" }],
+            },
+          ],
+        }),
+      );
       fireEvent.click(await screen.findByRole("button", { name: "Typecheck" }));
       fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
       // Capture the second question's composer target before reopening the first.
@@ -954,13 +1044,19 @@ describe("AgentPane question acknowledgement", () => {
       }
       expect(pane.answerAskUser).not.toHaveBeenCalled();
       expect(pane.sendPrompt).not.toHaveBeenCalled();
-      expect(container.querySelector('[data-ask-question="checks"]')?.hasAttribute("data-ask-answered")).toBe(false);
-      expect(screen.getByRole("button", { name: /Continue/ })).toHaveProperty("ariaPressed", "true");
+      expect(
+        container.querySelector('[data-ask-question="checks"]')?.hasAttribute("data-ask-answered"),
+      ).toBe(false);
+      expect(screen.getByRole("button", { name: /Continue/ })).toHaveProperty(
+        "ariaPressed",
+        "true",
+      );
       fireEvent.click(screen.getByRole("button", { name: "Tests" }));
       expect(pane.answerAskUser).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
       expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-clear", "answer", {
-        checks: ["Tests"], then: "Continue",
+        checks: ["Tests"],
+        then: "Continue",
       });
       expect(container.querySelector(".ask-band.is-done")).toBeNull();
       await act(async () => acknowledgement.resolve());
@@ -1057,56 +1153,91 @@ describe("AgentPane question acknowledgement", () => {
     },
   );
 
-  it.each([false, true])("replays real controller question settlement on acceptance=%s", async (accepted) => {
-    vi.useRealTimers();
-    nativeMocks.realMentor = true;
-    const { requirePromptSubmissionResult } = await vi.importActual<typeof AgentModule>("./agent");
-    await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
-      const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: "stable" });
-      const logicalId = await open(saved.path, "chat");
-      const pane = client(logicalId, 1);
-      const emit = liveEvents(pane);
-      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
-      vi.mocked(pane.sendPrompt).mockImplementation(async (text, attachments, meta) => {
-        const response = await request("/prompt", logicalId, { text, attachments, meta });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return requirePromptSubmissionResult(await response.json());
-      });
-      vi.mocked(pane.answerAskUser).mockImplementation(async (id, action, answers) => {
-        const response = await request(`/ask/${id}`, logicalId, { action, answers });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      });
-      try {
-        const { container } = render(<AgentPane client={pane} target={target} />);
-        await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
-        const stream = await subscribe(logicalId, (event) => act(() => emit(event.type, event.data)));
-        await act(async () => {
-          expect((await request("/prompt", logicalId, { text: "Ask for approval" })).status).toBe(202);
-          await stream.waitFor("ask_user");
-        });
-        await screen.findByRole("button", { name: /Allow action/ });
-        const text = accepted ? "Change direction" : "/research";
-        const input = screen.getByRole("textbox");
-        fireEvent.change(input, { target: { value: text } });
-        fireEvent.keyDown(input, { key: "Enter" });
-        if (accepted) {
-          await waitFor(() => expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull());
-          expect(stream.events.filter((event) => event.type === "ask_user_settled").map((event) => event.data))
-            .toEqual([{ id: "ask-1", action: "cancel" }]);
-          expect(pane.answerAskUser).not.toHaveBeenCalled();
-        } else {
-          await screen.findByText("Prompt wasn’t sent");
-          expect((input as HTMLTextAreaElement).value).toBe(text);
-          expect(container.querySelector(".ask-band.is-done")).toBeNull();
-          expect(stream.events.filter((event) => event.type === "ask_user_settled")).toEqual([]);
-          fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
-          await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
-          expect(stream.events.filter((event) => event.type === "ask_user_settled").map((event) => event.data))
-            .toEqual([{ id: "ask-1", action: "answer" }]);
-        }
-      } finally { cleanup(); }
-    }, { parkQuestion: true });
-  }, 60_000);
+  it.each([false, true])(
+    "replays real controller question settlement on acceptance=%s",
+    async (accepted) => {
+      vi.useRealTimers();
+      nativeMocks.realMentor = true;
+      const { requirePromptSubmissionResult } =
+        await vi.importActual<typeof AgentModule>("./agent");
+      await withRealSidecar(
+        async ({ project, manager, open, request, subscribe }) => {
+          const saved = await manager.create(project, "openai", "gpt-5", {
+            openAICodexContextProfile: "stable",
+          });
+          const logicalId = await open(saved.path, "chat");
+          const pane = client(logicalId, 1);
+          const emit = liveEvents(pane);
+          vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+          vi.mocked(pane.sendPrompt).mockImplementation(async (text, attachments, meta) => {
+            const response = await request("/prompt", logicalId, { text, attachments, meta });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return requirePromptSubmissionResult(await response.json());
+          });
+          vi.mocked(pane.answerAskUser).mockImplementation(async (id, action, answers) => {
+            const response = await request(`/ask/${id}`, logicalId, { action, answers });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          });
+          try {
+            const { container } = render(<AgentPane client={pane} target={target} />);
+            await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+            const stream = await subscribe(logicalId, (event) =>
+              act(() => emit(event.type, event.data)),
+            );
+            await act(async () => {
+              expect(
+                (await request("/prompt", logicalId, { text: "Ask for approval" })).status,
+              ).toBe(202);
+              await stream.waitFor("ask_user");
+            });
+            await screen.findByRole("button", { name: /Allow action/ });
+            const text = accepted ? "Change direction" : "/research";
+            const input = screen.getByRole("textbox");
+            fireEvent.change(input, { target: { value: text } });
+            fireEvent.keyDown(input, { key: "Enter" });
+            if (accepted) {
+              await waitFor(() =>
+                expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull(),
+              );
+              await act(async () => {
+                await stream.waitFor("ask_user_settled");
+              });
+              expect(
+                stream.events
+                  .filter((event) => event.type === "ask_user_settled")
+                  .map((event) => event.data),
+              ).toEqual([{ id: "ask-1", action: "cancel" }]);
+              expect(pane.answerAskUser).not.toHaveBeenCalled();
+            } else {
+              await screen.findByText("Prompt wasn’t sent");
+              expect((input as HTMLTextAreaElement).value).toBe(text);
+              expect(container.querySelector(".ask-band.is-done")).toBeNull();
+              expect(stream.events.filter((event) => event.type === "ask_user_settled")).toEqual(
+                [],
+              );
+              fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+              await waitFor(() =>
+                expect(container.querySelector(".ask-band.is-done")).not.toBeNull(),
+              );
+              // The HTTP receipt can update the card before its SSE notification arrives.
+              await act(async () => {
+                await stream.waitFor("ask_user_settled");
+              });
+              expect(
+                stream.events
+                  .filter((event) => event.type === "ask_user_settled")
+                  .map((event) => event.data),
+              ).toEqual([{ id: "ask-1", action: "answer" }]);
+            }
+          } finally {
+            cleanup();
+          }
+        },
+        { parkQuestion: true },
+      );
+    },
+    60_000,
+  );
 
   it("preserves live approval when Ken's Continue here send is rejected", async () => {
     nativeMocks.realMentor = true;
@@ -1160,8 +1291,18 @@ describe("AgentPane Autopilot confirmation", () => {
     nativeMocks.toast.mockImplementation(realToast.toast);
     const pane = client("autopilot-failure", 1);
     let reject!: (error: Error) => void;
-    vi.mocked(pane.setAutopilot).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
-    const { container } = render(<><AgentPane client={pane} target={target} /><Toaster /></>);
+    vi.mocked(pane.setAutopilot).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const { container } = render(
+      <>
+        <AgentPane client={pane} target={target} />
+        <Toaster />
+      </>,
+    );
     const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
     await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
     fireEvent.click(toggle);
@@ -1172,8 +1313,13 @@ describe("AgentPane Autopilot confirmation", () => {
     await act(async () => reject(new Error("configuration refresh in progress")));
     expect(toggle).toMatchObject({ checked: false, disabled: false });
     expect(container.querySelector(".ken-power-overlay")).toBeNull();
-    expect(nativeMocks.toast).toHaveBeenCalledWith(expect.stringContaining("configuration refresh in progress"), "error");
-    expect(screen.getByText("Could not change Autopilot: configuration refresh in progress. Try again.")).toBeTruthy();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("configuration refresh in progress"),
+      "error",
+    );
+    expect(
+      screen.getByText("Could not change Autopilot: configuration refresh in progress. Try again."),
+    ).toBeTruthy();
     act(() => realToast.dismissToast(nativeMocks.toast.mock.results[0].value));
     vi.mocked(pane.setAutopilot).mockResolvedValueOnce(true);
     fireEvent.click(toggle);
@@ -1185,9 +1331,17 @@ describe("AgentPane Autopilot confirmation", () => {
     nativeMocks.realMentor = true;
     const pane = client("autopilot-false", 1);
     let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => { emit = handler; return vi.fn(); });
+    vi.mocked(pane.subscribe).mockImplementation((handler) => {
+      emit = handler;
+      return vi.fn();
+    });
     vi.mocked(pane.setAutopilot).mockResolvedValue(false);
-    const { container } = render(<><AgentPane client={pane} target={target} /><Toaster /></>);
+    const { container } = render(
+      <>
+        <AgentPane client={pane} target={target} />
+        <Toaster />
+      </>,
+    );
     const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
     await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
     fireEvent.click(toggle);
@@ -1203,54 +1357,89 @@ describe("AgentPane Autopilot confirmation", () => {
     expect(toggle).toMatchObject({ checked: false });
   });
 
-  it.each(["resolve", "reject"])("ignores stale %s after replacing the pane session", async (outcome) => {
-    const pane = client("autopilot-stale", 1);
-    let resolve!: (value: boolean) => void;
-    let reject!: (error: Error) => void;
-    vi.mocked(pane.setAutopilot).mockImplementation(() => new Promise((ok, fail) => { resolve = ok; reject = fail; }));
-    const view = render(<AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />);
-    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
-    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
-    fireEvent.click(toggle);
-    view.rerender(<AgentPane client={pane} target={{ ...target, sessionPath: "/replacement.jsonl" }} generation={2} workspaceOwnsSessionLifecycle />);
-    await act(async () => { if (outcome === "resolve") resolve(true); else reject(new Error("old failure")); });
-    expect(toggle).toMatchObject({ checked: false });
-    expect(view.container.querySelector(".ken-power-overlay")).toBeNull();
-    expect(nativeMocks.toast).not.toHaveBeenCalled();
-  });
+  it.each(["resolve", "reject"])(
+    "ignores stale %s after replacing the pane session",
+    async (outcome) => {
+      const pane = client("autopilot-stale", 1);
+      let resolve!: (value: boolean) => void;
+      let reject!: (error: Error) => void;
+      vi.mocked(pane.setAutopilot).mockImplementation(
+        () =>
+          new Promise((ok, fail) => {
+            resolve = ok;
+            reject = fail;
+          }),
+      );
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+      await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+      fireEvent.click(toggle);
+      view.rerender(
+        <AgentPane
+          client={pane}
+          target={{ ...target, sessionPath: "/replacement.jsonl" }}
+          generation={2}
+          workspaceOwnsSessionLifecycle
+        />,
+      );
+      await act(async () => {
+        if (outcome === "resolve") resolve(true);
+        else reject(new Error("old failure"));
+      });
+      expect(toggle).toMatchObject({ checked: false });
+      expect(view.container.querySelector(".ken-power-overlay")).toBeNull();
+      expect(nativeMocks.toast).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("AgentPane task request failures", () => {
-  it.each([false, true])("renders an accepted task failure and allows retry (all=%s)", async (all) => {
-    nativeMocks.realMentor = true; // Exercise the real event hook and error renderer.
-    const pane = client("accepted-task-failure", 1);
-    vi.mocked(pane.runTask).mockResolvedValue(undefined);
-    vi.mocked(pane.runAllTasks).mockResolvedValue(undefined);
-    let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => { emit = handler; return vi.fn(); });
-    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
-    await openTasksModal(pane);
-    fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
-    act(() => {
-      emit?.({ type: "tasks_run_done", data: {} });
-      emit?.({ type: "error", data: {
-        headline: all ? "Run All stopped" : "Task run stopped",
-        message: "Task setup or execution could not finish.",
-        guidance: "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
-      } });
-    });
-    expect(await screen.findByText(all ? "Run All stopped" : "Task run stopped")).toBeTruthy();
-    expect(screen.getByText("Task setup or execution could not finish.")).toBeTruthy();
-    expect(screen.getByText("Open Tasks and retry the unfinished task. If it fails again, report the problem.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
-    await screen.findByRole("dialog", { name: "Tasks" });
-    const retry = screen.getByRole("button", { name: "Run" });
-    expect(retry).toMatchObject({ disabled: false });
-    fireEvent.click(retry);
-    await waitFor(() => expect(pane.runTask).toHaveBeenCalledTimes(all ? 1 : 2));
-    expect(pane.runTask).toHaveBeenLastCalledWith(projectTask.id);
-  });
+  it.each([false, true])(
+    "renders an accepted task failure and allows retry (all=%s)",
+    async (all) => {
+      nativeMocks.realMentor = true; // Exercise the real event hook and error renderer.
+      const pane = client("accepted-task-failure", 1);
+      vi.mocked(pane.runTask).mockResolvedValue(undefined);
+      vi.mocked(pane.runAllTasks).mockResolvedValue(undefined);
+      let emit: ((event: SidecarEvent) => void) | undefined;
+      vi.mocked(pane.subscribe).mockImplementation((handler) => {
+        emit = handler;
+        return vi.fn();
+      });
+      vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+      await openTasksModal(pane);
+      fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+      act(() => {
+        emit?.({ type: "tasks_run_done", data: {} });
+        emit?.({
+          type: "error",
+          data: {
+            headline: all ? "Run All stopped" : "Task run stopped",
+            message: "Task setup or execution could not finish.",
+            guidance:
+              "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+          },
+        });
+      });
+      expect(await screen.findByText(all ? "Run All stopped" : "Task run stopped")).toBeTruthy();
+      expect(screen.getByText("Task setup or execution could not finish.")).toBeTruthy();
+      expect(
+        screen.getByText(
+          "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+        ),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
+      await screen.findByRole("dialog", { name: "Tasks" });
+      const retry = screen.getByRole("button", { name: "Run" });
+      expect(retry).toMatchObject({ disabled: false });
+      fireEvent.click(retry);
+      await waitFor(() => expect(pane.runTask).toHaveBeenCalledTimes(all ? 1 : 2));
+      expect(pane.runTask).toHaveBeenLastCalledWith(projectTask.id);
+    },
+  );
   it("disables task launches while Autopilot reviews, then enables them after settlement", async () => {
     const pane = client("task-autopilot-review", 1);
     let emit: ((event: SidecarEvent) => void) | undefined;
@@ -2223,49 +2412,69 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).toHaveBeenCalledTimes(selected === null ? 0 : 1);
   });
 
-  it.each([false, true])("retains rejected composer submissions while running=%s", async (running) => {
-    const pane = client("pane-send-recovery", 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), running });
-    vi.mocked(pane.searchFiles).mockResolvedValue([{ path: "src/context.ts", name: "context.ts" }]);
-    const submission = deferred<AgentModule.PromptSubmissionResult>();
-    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
-    const actionsRef: { current: PaneInputActions | null } = { current: null };
-    render(<AgentPane client={pane} target={target} registerInput={(_id, actions) => {
-      actionsRef.current = actions;
-    }} />);
-    const input = await screen.findByRole("textbox");
-    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
-    await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
-    await screen.findByRole("button", { name: "Remove file.txt" });
-    fireEvent.change(input, { target: { value: "@context" } });
-    fireEvent.click(await screen.findByText("context.ts"));
-    await screen.findByRole("button", { name: "Remove src/context.ts" });
-    fireEvent.change(input, { target: { value: "Keep this prompt" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
-    await act(async () => submission.reject(new Error("send rejected")));
-    expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
-    expect((input as HTMLTextAreaElement).value).toBe("Keep this prompt");
-    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
-    vi.mocked(pane.sendPrompt).mockResolvedValueOnce(running
-      ? { queued: true, count: 1, queueId: "q1" }
-      : { queued: false, count: 0 });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(pane.sendPrompt).mock.calls[1]).toEqual(vi.mocked(pane.sendPrompt).mock.calls[0]);
-    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
-    expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
-  });
+  it.each([false, true])(
+    "retains rejected composer submissions while running=%s",
+    async (running) => {
+      const pane = client("pane-send-recovery", 8);
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), running });
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      render(
+        <AgentPane
+          client={pane}
+          target={target}
+          registerInput={(_id, actions) => {
+            actionsRef.current = actions;
+          }}
+        />,
+      );
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
+      await screen.findByRole("button", { name: "Remove file.txt" });
+      fireEvent.change(input, { target: { value: "@context" } });
+      fireEvent.click(await screen.findByText("context.ts"));
+      await screen.findByRole("button", { name: "Remove src/context.ts" });
+      fireEvent.change(input, { target: { value: "Keep this prompt" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      await act(async () => submission.reject(new Error("send rejected")));
+      expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+      expect((input as HTMLTextAreaElement).value).toBe("Keep this prompt");
+      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
+      vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+        running ? { queued: true, count: 1, queueId: "q1" } : { queued: false, count: 0 },
+      );
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(pane.sendPrompt).mock.calls[1]).toEqual(
+        vi.mocked(pane.sendPrompt).mock.calls[0],
+      );
+      await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+    },
+  );
 
-  it.each([false, true].flatMap((busy) => ["", "Keep this file draft"].map((text) => ({ busy, text }))))(
-    "retains attachments after upload rejection (busy=$busy, text='$text')", async ({ busy, text }) => {
+  it.each(
+    [false, true].flatMap((busy) => ["", "Keep this file draft"].map((text) => ({ busy, text }))),
+  )(
+    "retains attachments after upload rejection (busy=$busy, text='$text')",
+    async ({ busy, text }) => {
       await withRealSidecar(async ({ project, manager, open, request, generation }) => {
-        const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: "stable" });
+        const saved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: "stable",
+        });
         const logicalId = await open(saved.path);
         if (busy) {
-          expect((await request("/prompt", logicalId, { text: "Hold generation" })).status).toBe(202);
+          expect((await request("/prompt", logicalId, { text: "Hold generation" })).status).toBe(
+            202,
+          );
           await generation.started;
         }
         await fs.mkdir(path.join(project, ".gg"), { recursive: true });
@@ -2281,9 +2490,15 @@ describe("AgentPane lifecycle", () => {
         });
         const actionsRef: { current: PaneInputActions | null } = { current: null };
         try {
-          const view = render(<AgentPane client={pane} target={target} registerInput={(_id, actions) => {
-            actionsRef.current = actions;
-          }} />);
+          const view = render(
+            <AgentPane
+              client={pane}
+              target={target}
+              registerInput={(_id, actions) => {
+                actionsRef.current = actions;
+              }}
+            />,
+          );
           const input = await screen.findByRole("textbox");
           await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
           await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
@@ -2296,19 +2511,26 @@ describe("AgentPane lifecycle", () => {
           expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
           expect(view.container.querySelector(".user-msg")).toBeNull();
           expect(pane.sendPrompt).toHaveBeenCalledOnce();
-        } finally { cleanup(); }
+        } finally {
+          cleanup();
+        }
       });
-    }, 60_000,
+    },
+    60_000,
   );
 
   it("retains composer text, references and attachments after a real required-append rejection", async () => {
     vi.useRealTimers();
     const { requirePromptSubmissionResult } = await vi.importActual<typeof AgentModule>("./agent");
     await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
-      const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: "stable" });
+      const saved = await manager.create(project, "openai", "gpt-5", {
+        openAICodexContextProfile: "stable",
+      });
       const logicalId = await open(saved.path);
       const pane = client(logicalId, 8);
-      vi.mocked(pane.searchFiles).mockResolvedValue([{ path: "src/context.ts", name: "context.ts" }]);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
       let responseStatus: number | undefined;
       // Mock only the native transport: the response comes from the real /prompt route.
       vi.mocked(pane.sendPrompt).mockImplementation(async (text, attachments, meta) => {
@@ -2321,9 +2543,15 @@ describe("AgentPane lifecycle", () => {
       await subscribe(logicalId, (event) => act(() => emit(event.type, event.data)));
       const actionsRef: { current: PaneInputActions | null } = { current: null };
       try {
-        render(<AgentPane client={pane} target={target} registerInput={(_id, actions) => {
-          actionsRef.current = actions;
-        }} />);
+        render(
+          <AgentPane
+            client={pane}
+            target={target}
+            registerInput={(_id, actions) => {
+              actionsRef.current = actions;
+            }}
+          />,
+        );
         const input = await screen.findByRole("textbox");
         await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
         await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
@@ -2341,7 +2569,9 @@ describe("AgentPane lifecycle", () => {
         expect((input as HTMLTextAreaElement).value).toBe("Keep this durable draft");
         expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
         expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
-      } finally { cleanup(); }
+      } finally {
+        cleanup();
+      }
     });
   }, 60_000);
 
@@ -3264,163 +3494,242 @@ describe("AgentPane lifecycle", () => {
   it.each(
     (["typed-queued", "typed-idle", "toolbar", "ken"] as const).flatMap((source) =>
       (["reset", "anonymous-reset", "generation"] as const).flatMap((replacement) =>
-        (["queued", "accepted", "rejected"] as const).map((outcome) => ({ source, replacement, outcome })))),
-  )("ignores stale $source $outcome settlement after $replacement", async ({ source, replacement, outcome }) => {
-    nativeMocks.realMentor = true;
-    const pane = client("stale-submission", 1);
-    const emit = liveEvents(pane);
-    const running = source === "typed-queued" || source === "ken";
-    vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("azure:gpt-test"), running, runState: running ? "running" : "idle",
-    });
-    vi.mocked(pane.listCommands).mockResolvedValue([
-      { name: "commit", aliases: [], description: "Commit changes", source: "custom",
-        input: { text: "optional", references: "optional", attachments: "optional" } },
-    ]);
-    vi.mocked(pane.listHistory).mockResolvedValue([
-      { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
-    ]);
-    const old = deferred<AgentModule.PromptSubmissionResult>();
-    const fresh = deferred<AgentModule.PromptSubmissionResult>();
-    vi.mocked(pane.sendPrompt).mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
-    const view = render(<AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />);
-    const input = await screen.findByRole("textbox") as HTMLTextAreaElement;
-    await waitFor(() => expect(input.disabled).toBe(false));
-    if (source === "ken") fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
-    else if (source === "toolbar") fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
-    else {
-      fireEvent.change(input, { target: { value: "Old typed prompt" } });
-      fireEvent.keyDown(input, { key: "Enter" });
-    }
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
-    if (replacement === "generation") {
-      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text: "Replacement conversation" }]);
-      vi.mocked(pane.waitForReady).mockResolvedValue({ ready: true, error: null, generation: 2, sessionId: pane.paneId });
-      view.rerender(<AgentPane client={pane} target={{ ...target, sessionPath: "/replacement.jsonl" }} generation={2} workspaceOwnsSessionLifecycle />);
-      await screen.findByText("Replacement conversation");
+        (["queued", "accepted", "rejected"] as const).map((outcome) => ({
+          source,
+          replacement,
+          outcome,
+        })),
+      ),
+    ),
+  )(
+    "ignores stale $source $outcome settlement after $replacement",
+    async ({ source, replacement, outcome }) => {
+      nativeMocks.realMentor = true;
+      const pane = client("stale-submission", 1);
+      const emit = liveEvents(pane);
+      const running = source === "typed-queued" || source === "ken";
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running,
+        runState: running ? "running" : "idle",
+      });
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name: "commit",
+          aliases: [],
+          description: "Commit changes",
+          source: "custom",
+          input: { text: "optional", references: "optional", attachments: "optional" },
+        },
+      ]);
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
+      ]);
+      const old = deferred<AgentModule.PromptSubmissionResult>();
+      const fresh = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt)
+        .mockReturnValueOnce(old.promise)
+        .mockReturnValueOnce(fresh.promise);
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      const input = (await screen.findByRole("textbox")) as HTMLTextAreaElement;
       await waitFor(() => expect(input.disabled).toBe(false));
-    } else {
-      act(() => emit("session_reset", replacement === "reset"
-        ? { operationId: "replacement", conversationId: "new-conversation", sessionId: "new-session" }
-        : {}));
-    }
-    // A replacement conversation can send immediately, even while the old request is pending.
-    fireEvent.change(input, { target: { value: "New conversation prompt" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
-    const transcript = view.container.querySelector(".transcript")?.textContent;
-    await act(async () => {
-      if (outcome === "rejected") old.reject(new Error("Obsolete submission failure"));
-      else old.resolve(outcome === "queued"
-        ? { queued: true, count: 9, queueId: "old-queue" }
-        : { queued: false, count: 0 });
-    });
-    expect(view.container.querySelector(".transcript")?.textContent).toBe(transcript);
-    expect(view.container.querySelector(".queued-pill")).toBeNull();
-    expect(screen.queryByText("Obsolete submission failure")).toBeNull();
-    expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
-    expect(view.container.querySelectorAll(".user-msg")).toHaveLength(running ? 0 : 1);
-    expect(input.value).toBe("New conversation prompt");
-    // The old finally must not unlock the new request.
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
-    await act(async () => fresh.resolve({ queued: false, count: 0 }));
-    expect(input.value).toBe("");
-    expect(view.container.querySelectorAll(".user-msg")).toHaveLength(1);
-  });
+      if (source === "ken")
+        fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
+      else if (source === "toolbar")
+        fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
+      else {
+        fireEvent.change(input, { target: { value: "Old typed prompt" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      }
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+      if (replacement === "generation") {
+        vi.mocked(pane.listHistory).mockResolvedValue([
+          { role: "assistant", text: "Replacement conversation" },
+        ]);
+        vi.mocked(pane.waitForReady).mockResolvedValue({
+          ready: true,
+          error: null,
+          generation: 2,
+          sessionId: pane.paneId,
+        });
+        view.rerender(
+          <AgentPane
+            client={pane}
+            target={{ ...target, sessionPath: "/replacement.jsonl" }}
+            generation={2}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+        await screen.findByText("Replacement conversation");
+        await waitFor(() => expect(input.disabled).toBe(false));
+      } else {
+        act(() =>
+          emit(
+            "session_reset",
+            replacement === "reset"
+              ? {
+                  operationId: "replacement",
+                  conversationId: "new-conversation",
+                  sessionId: "new-session",
+                }
+              : {},
+          ),
+        );
+      }
+      // A replacement conversation can send immediately, even while the old request is pending.
+      fireEvent.change(input, { target: { value: "New conversation prompt" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      const transcript = view.container.querySelector(".transcript")?.textContent;
+      await act(async () => {
+        if (outcome === "rejected") old.reject(new Error("Obsolete submission failure"));
+        else
+          old.resolve(
+            outcome === "queued"
+              ? { queued: true, count: 9, queueId: "old-queue" }
+              : { queued: false, count: 0 },
+          );
+      });
+      expect(view.container.querySelector(".transcript")?.textContent).toBe(transcript);
+      expect(view.container.querySelector(".queued-pill")).toBeNull();
+      expect(screen.queryByText("Obsolete submission failure")).toBeNull();
+      expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
+      expect(view.container.querySelectorAll(".user-msg")).toHaveLength(running ? 0 : 1);
+      expect(input.value).toBe("New conversation prompt");
+      // The old finally must not unlock the new request.
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => fresh.resolve({ queued: false, count: 0 }));
+      expect(input.value).toBe("");
+      expect(view.container.querySelectorAll(".user-msg")).toHaveLength(1);
+    },
+  );
 
   it.each(
     (["reset", "generation"] as const).flatMap((replacement) =>
-      [false, true].map((rejected) => ({ replacement, rejected }))),
-  )("keeps the new Ken send locked after old settlement ($replacement, rejected=$rejected)", async ({ replacement, rejected }) => {
-    const pane = client("ken-reset-lock", 1);
-    const emit = liveEvents(pane);
-    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
-    vi.mocked(pane.listHistory).mockResolvedValue([
-      { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
-    ]);
-    const old = deferred<AgentModule.PromptSubmissionResult>();
-    const fresh = deferred<AgentModule.PromptSubmissionResult>();
-    vi.mocked(pane.sendPrompt).mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
-    const view = render(<AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />);
-    fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
-    const newPrompts = "```prompt\nNew Ken prompt\n```\n\n```prompt\nAnother Ken prompt\n```";
-    if (replacement === "generation") {
-      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text: newPrompts, ken: true }]);
-      vi.mocked(pane.waitForReady).mockResolvedValue({ ready: true, error: null, generation: 2, sessionId: pane.paneId });
-      view.rerender(<AgentPane client={pane} target={{ ...target, sessionPath: "/new-ken.jsonl" }} generation={2} workspaceOwnsSessionLifecycle />);
-    } else {
-      act(() => {
-        emit("session_reset", { conversationId: "new-conversation", sessionId: "new-session" });
-        emit("ken_text", { text: newPrompts });
+      [false, true].map((rejected) => ({ replacement, rejected })),
+    ),
+  )(
+    "keeps the new Ken send locked after old settlement ($replacement, rejected=$rejected)",
+    async ({ replacement, rejected }) => {
+      const pane = client("ken-reset-lock", 1);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
+      ]);
+      const old = deferred<AgentModule.PromptSubmissionResult>();
+      const fresh = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt)
+        .mockReturnValueOnce(old.promise)
+        .mockReturnValueOnce(fresh.promise);
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+      const newPrompts = "```prompt\nNew Ken prompt\n```\n\n```prompt\nAnother Ken prompt\n```";
+      if (replacement === "generation") {
+        vi.mocked(pane.listHistory).mockResolvedValue([
+          { role: "assistant", text: newPrompts, ken: true },
+        ]);
+        vi.mocked(pane.waitForReady).mockResolvedValue({
+          ready: true,
+          error: null,
+          generation: 2,
+          sessionId: pane.paneId,
+        });
+        view.rerender(
+          <AgentPane
+            client={pane}
+            target={{ ...target, sessionPath: "/new-ken.jsonl" }}
+            generation={2}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+      } else {
+        act(() => {
+          emit("session_reset", { conversationId: "new-conversation", sessionId: "new-session" });
+          emit("ken_text", { text: newPrompts });
+        });
+      }
+      await screen.findByText("New Ken prompt");
+      const buttons = await screen.findAllByRole("button", { name: "Continue here" });
+      fireEvent.click(buttons[0]);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
+      expect(pane.sendPrompt).toHaveBeenLastCalledWith("New Ken prompt", [], { kenSent: true });
+      await act(async () => {
+        if (rejected) old.reject(new Error("obsolete"));
+        else old.resolve({ queued: false, count: 0 });
       });
-    }
-    await screen.findByText("New Ken prompt");
-    const buttons = await screen.findAllByRole("button", { name: "Continue here" });
-    fireEvent.click(buttons[0]);
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
-    expect(pane.sendPrompt).toHaveBeenLastCalledWith("New Ken prompt", [], { kenSent: true });
-    await act(async () => {
-      if (rejected) old.reject(new Error("obsolete"));
-      else old.resolve({ queued: false, count: 0 });
-    });
-    expect(view.container.querySelector(".user-ken-sent")).toBeNull();
-    expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
-    fireEvent.click(buttons[1]);
-    await screen.findByText("This prompt is already being sent.");
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
-    await act(async () => fresh.resolve({ queued: false, count: 0 }));
-    expect(view.container.querySelectorAll(".user-ken-sent")).toHaveLength(1);
-    fireEvent.click(buttons[1]);
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(3));
-  });
+      expect(view.container.querySelector(".user-ken-sent")).toBeNull();
+      expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
+      fireEvent.click(buttons[1]);
+      await screen.findByText("This prompt is already being sent.");
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => fresh.resolve({ queued: false, count: 0 }));
+      expect(view.container.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      fireEvent.click(buttons[1]);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(3));
+    },
+  );
 
-  it.each([false, true])("reconciles a delayed queued receipt after drain (UI running=%s)", async (running) => {
-    nativeMocks.realMentor = true;
-    const pane = client("delayed-queue", 1);
-    vi.mocked(pane.searchFiles).mockResolvedValue([{ path: "src/context.ts", name: "context.ts" }]);
-    const emit = liveEvents(pane);
-    vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("azure:gpt-test"), running, runState: running ? "running" : "idle",
-    });
-    const submission = deferred<AgentModule.PromptSubmissionResult>();
-    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
-    const { container } = render(<AgentPane client={pane} target={target} />);
-    const input = await screen.findByRole("textbox");
-    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
-    fireEvent.change(input, { target: { value: "@context" } });
-    fireEvent.click(await screen.findByText("context.ts"));
-    await screen.findByRole("button", { name: "Remove src/context.ts" });
-    fireEvent.change(input, { target: { value: "Queued follow-up" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
-    const wireText = "Queued follow-up\n\nReferenced files:\n- src/context.ts";
-    expect(vi.mocked(pane.sendPrompt).mock.calls[0]?.[0]).toBe(wireText);
-    act(() => {
-      emit("queued", { count: 1, messages: [{ id: "q1", text: wireText }] });
-      emit("queued", { count: 0, messages: [] });
-      emit("run_end", {});
-    });
-    await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
-    expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
-    expect(container.querySelector(".user-msg.queued")).toBeNull();
-    expect(container.querySelector(".user-msg")?.textContent).toContain("Queued follow-up");
-    expect(container.querySelector(".user-msg")?.textContent).toContain("context.ts");
-    expect(container.querySelector(".user-msg")?.textContent).not.toContain("Referenced files:");
-    expect(container.querySelector(".queued-pill")).toBeNull();
-  });
+  it.each([false, true])(
+    "reconciles a delayed queued receipt after drain (UI running=%s)",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("delayed-queue", 1);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running,
+        runState: running ? "running" : "idle",
+      });
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+      fireEvent.change(input, { target: { value: "@context" } });
+      fireEvent.click(await screen.findByText("context.ts"));
+      await screen.findByRole("button", { name: "Remove src/context.ts" });
+      fireEvent.change(input, { target: { value: "Queued follow-up" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      const wireText = "Queued follow-up\n\nReferenced files:\n- src/context.ts";
+      expect(vi.mocked(pane.sendPrompt).mock.calls[0]?.[0]).toBe(wireText);
+      act(() => {
+        emit("queued", { count: 1, messages: [{ id: "q1", text: wireText }] });
+        emit("queued", { count: 0, messages: [] });
+        emit("run_end", {});
+      });
+      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+      expect(container.querySelector(".user-msg.queued")).toBeNull();
+      expect(container.querySelector(".user-msg")?.textContent).toContain("Queued follow-up");
+      expect(container.querySelector(".user-msg")?.textContent).toContain("context.ts");
+      expect(container.querySelector(".user-msg")?.textContent).not.toContain("Referenced files:");
+      expect(container.querySelector(".queued-pill")).toBeNull();
+    },
+  );
 
   it.each([false, true])("uses typed receipt instead of stale UI running=%s", async (running) => {
     nativeMocks.realMentor = true;
     const pane = client("typed-stale-running", 1);
     const emit = liveEvents(pane);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("azure:gpt-test"), running, runState: running ? "running" : "idle",
+      ...agentState("azure:gpt-test"),
+      running,
+      runState: running ? "running" : "idle",
     });
-    vi.mocked(pane.sendPrompt).mockResolvedValueOnce(running
-      ? { queued: false, count: 0 }
-      : { queued: true, count: 1, queueId: "q1" });
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+      running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+    );
     const { container } = render(<AgentPane client={pane} target={target} />);
     const input = await screen.findByRole("textbox");
     await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
@@ -3438,46 +3747,57 @@ describe("AgentPane lifecycle", () => {
     }
   });
 
-  it.each([false, true])("uses Ken's queued receipt despite stale UI running=%s", async (running) => {
-    nativeMocks.realMentor = true;
-    const pane = client("ken-stale-running", 1);
-    vi.mocked(pane.sendPrompt).mockResolvedValueOnce(running
-      ? { queued: false, count: 0 }
-      : { queued: true, count: 1, queueId: "q1" });
-    const send = await renderKenPromptPane(pane, running);
-    fireEvent.click(send);
-    await waitFor(() => expect(document.querySelector(".user-ken-sent")).not.toBeNull());
-    expect(document.querySelector(".user-ken-sent")?.classList.contains("queued")).toBe(!running);
-    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
-  });
+  it.each([false, true])(
+    "uses Ken's queued receipt despite stale UI running=%s",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("ken-stale-running", 1);
+      vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+        running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+      );
+      const send = await renderKenPromptPane(pane, running);
+      fireEvent.click(send);
+      await waitFor(() => expect(document.querySelector(".user-ken-sent")).not.toBeNull());
+      expect(document.querySelector(".user-ken-sent")?.classList.contains("queued")).toBe(!running);
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    },
+  );
 
-  it.each([false, true])("does not resurrect Ken's consumed queue after a delayed receipt (running=%s)", async (running) => {
-    nativeMocks.realMentor = true;
-    const pane = client("ken-delayed-queue", 1);
-    const emit = liveEvents(pane);
-    const submission = deferred<AgentModule.PromptSubmissionResult>();
-    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
-    const send = await renderKenPromptPane(pane, running);
-    fireEvent.click(send);
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
-    act(() => {
-      emit("queued", { count: 1, messages: [{ id: "q1", text: KEN_PROMPT }] });
-      emit("queued", { count: 0, messages: [] });
-      emit("run_end", {});
-    });
-    await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
-    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
-    expect(document.querySelector(".user-ken-sent.queued")).toBeNull();
-    expect(document.querySelector(".queued-pill")).toBeNull();
-  });
+  it.each([false, true])(
+    "does not resurrect Ken's consumed queue after a delayed receipt (running=%s)",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("ken-delayed-queue", 1);
+      const emit = liveEvents(pane);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const send = await renderKenPromptPane(pane, running);
+      fireEvent.click(send);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      act(() => {
+        emit("queued", { count: 1, messages: [{ id: "q1", text: KEN_PROMPT }] });
+        emit("queued", { count: 0, messages: [] });
+        emit("run_end", {});
+      });
+      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      expect(document.querySelector(".user-ken-sent.queued")).toBeNull();
+      expect(document.querySelector(".queued-pill")).toBeNull();
+    },
+  );
 
   it("reconciles a toolbar submission against events before its receipt", async () => {
     nativeMocks.realMentor = true;
     const pane = client("toolbar-delayed-queue", 1);
     const emit = liveEvents(pane);
     vi.mocked(pane.listCommands).mockResolvedValue([
-      { name: "commit", aliases: [], description: "Commit changes", source: "custom",
-        input: { text: "optional", references: "optional", attachments: "optional" } },
+      {
+        name: "commit",
+        aliases: [],
+        description: "Commit changes",
+        source: "custom",
+        input: { text: "optional", references: "optional", attachments: "optional" },
+      },
     ]);
     const submission = deferred<AgentModule.PromptSubmissionResult>();
     vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
@@ -3948,13 +4268,20 @@ describe("AgentPane lifecycle", () => {
       vi.useRealTimers();
       nativeMocks.realMentor = true;
       await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
-        const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: profile });
+        const saved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: profile,
+        });
         await manager.appendRequiredMessage(saved.path, {
-          type: "message", id: "old-message", parentId: null, timestamp: new Date().toISOString(),
+          type: "message",
+          id: "old-message",
+          parentId: null,
+          timestamp: new Date().toISOString(),
           message: { role: "user", content: "Old real transcript" },
         });
         const logicalId = await open(saved.path);
-        const otherSaved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: profile });
+        const otherSaved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: profile,
+        });
         const otherId = await open(otherSaved.path);
         const readState = async (id: string): Promise<AgentState> => {
           const response = await request("/state", id);
@@ -3970,7 +4297,9 @@ describe("AgentPane lifecycle", () => {
         vi.mocked(pane.listHistory).mockImplementation(async () => {
           const response = await request("/history", logicalId);
           expect(response.status).toBe(200);
-          const body = await response.json() as { history: Awaited<ReturnType<PaneAgentClient["listHistory"]>> };
+          const body = (await response.json()) as {
+            history: Awaited<ReturnType<PaneAgentClient["listHistory"]>>;
+          };
           return body.history;
         });
         vi.mocked(pane.newSession).mockImplementation(async () => {
@@ -3994,10 +4323,16 @@ describe("AgentPane lifecycle", () => {
           fireEvent.click(screen.getByRole("button", { name: "New Session" }));
           const late = await stream.waitFor("session_reset");
           expect(late.sessionId).toBe(logicalId);
-          await waitFor(() => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull(), { timeout: 20_000 });
+          await waitFor(
+            () => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull(),
+            { timeout: 20_000 },
+          );
           const current = await readState(logicalId);
-          expect(current.lastNewSessionReset).toMatchObject({ operationId: late.data.operationId,
-            conversationId: current.conversationId, sessionId: current.sessionId });
+          expect(current.lastNewSessionReset).toMatchObject({
+            operationId: late.data.operationId,
+            conversationId: current.conversationId,
+            sessionId: current.sessionId,
+          });
           expect(pane.getState).toHaveBeenCalled();
           expect(screen.queryByText("Old real transcript")).toBeNull();
           expect(nativeMocks.kenStateRef?.current?.conversationId).toBe(current.conversationId);
@@ -4007,7 +4342,9 @@ describe("AgentPane lifecycle", () => {
           expect(pane.newSession).toHaveBeenCalledOnce();
           const filesAfter = await manager.list(project);
           expect(filesAfter).toHaveLength(filesBefore.length + 1);
-          expect(filesAfter.filter((file) => !filesBefore.some((old) => old.id === file.id))).toHaveLength(1);
+          expect(
+            filesAfter.filter((file) => !filesBefore.some((old) => old.id === file.id)),
+          ).toHaveLength(1);
           expect(nativeMocks.toast).not.toHaveBeenCalled();
           const input = screen.getByRole("textbox");
           fireEvent.change(input, { target: { value: "Keep this real recovery message" } });
@@ -4022,7 +4359,9 @@ describe("AgentPane lifecycle", () => {
           expect(otherCurrent.lastNewSessionReset).toBeUndefined();
           expect(otherCurrent.conversationId).toBe(otherOriginal.conversationId);
           expect(otherCurrent.sessionId).toBe(otherOriginal.sessionId);
-        } finally { cleanup(); }
+        } finally {
+          cleanup();
+        }
       });
     },
     90_000,
@@ -4057,7 +4396,9 @@ describe("AgentPane lifecycle", () => {
       vi.useFakeTimers();
       fireEvent.click(screen.getByTitle("Start a new session for this project"));
       fireEvent.click(screen.getByRole("button", { name: "New Session" }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(8_001); });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_001);
+      });
       expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
       expect(nativeMocks.toast).not.toHaveBeenCalled();
       expect(screen.queryByText("Old transcript")).toBeNull();
@@ -4068,7 +4409,9 @@ describe("AgentPane lifecycle", () => {
       const input = screen.getByRole("textbox");
       fireEvent.change(input, { target: { value: "Keep this new message" } });
       fireEvent.keyDown(input, { key: "Enter" });
-      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
       expect(pane.sendPrompt).toHaveBeenCalledOnce();
       const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
       act(() => emit({ type: "session_reset", data: snapshot.lastNewSessionReset! }));
@@ -4076,69 +4419,112 @@ describe("AgentPane lifecycle", () => {
     },
   );
 
-  it.each((["stable", "experimental"] as const).flatMap((profile) =>
-    ["missing", "wrong-operation", "wrong-conversation", "wrong-session", "unavailable", "hung"].map((failure) => ({ profile, failure })),
-  ))(
-    "refuses sends in $profile when reset recovery is $failure",
-    async ({ profile, failure }) => {
-      nativeMocks.realMentor = true;
-      const pane = client("pane-reset-unconfirmed", 1);
-      const actionsRef: { current: PaneInputActions | null } = { current: null };
-      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), openAICodexContextProfile: profile });
-      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Preserve old transcript" }]);
-      render(<AgentPane client={pane} registerInput={(_id, actions) => { actionsRef.current = actions; }} />);
-      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-      expect(await screen.findByText("Preserve old transcript")).toBeTruthy();
-      const snapshot: AgentState = {
-        ...agentState("azure:gpt-test"),
-        conversationId: "fresh-conversation",
-        sessionId: "fresh-session",
-        lastNewSessionReset: failure === "missing" ? undefined : {
-          operationId: failure === "wrong-operation" ? "other" : "operation-1",
-          conversationId: failure === "wrong-conversation" ? "other" : "fresh-conversation",
-          sessionId: failure === "wrong-session" ? "other" : "fresh-session",
-        },
-      };
-      vi.mocked(pane.getState).mockImplementation(() =>
-        failure === "unavailable" ? Promise.reject(new Error("disconnected")) :
-        failure === "hung" ? new Promise(() => {}) : Promise.resolve(snapshot),
-      );
-      vi.useFakeTimers();
-      fireEvent.click(screen.getByTitle("Start a new session for this project"));
-      fireEvent.click(screen.getByRole("button", { name: "New Session" }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
-      expect(nativeMocks.toast).toHaveBeenCalledWith(
-        expect.stringContaining("confirm which session is active"), "error", 7000,
-      );
-      expect(screen.getByText("Preserve old transcript")).toBeTruthy();
-      expect(pane.newSession).toHaveBeenCalledOnce();
-      expect(pane.sendPrompt).not.toHaveBeenCalled();
-      expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
-      const input = screen.getByRole("textbox");
-      fireEvent.change(input, { target: { value: "Keep my draft" } });
-      await act(async () => { actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]); });
-      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
-      fireEvent.keyDown(input, { key: "Enter" });
-      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(pane.sendPrompt).not.toHaveBeenCalled();
-      expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
-      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
-      const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
-      act(() => emit({ type: "session_reset", data: { operationId: "other", conversationId: "other", sessionId: "other" } }));
-      fireEvent.keyDown(input, { key: "Enter" });
-      expect(pane.sendPrompt).not.toHaveBeenCalled();
-      const receipt = { operationId: "operation-1", conversationId: "fresh-conversation", sessionId: "fresh-session" };
-      act(() => emit({ type: "session_reset", data: receipt }));
-      expect(screen.queryByText("Preserve old transcript")).toBeNull();
-      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
-      fireEvent.keyDown(input, { key: "Enter" });
-      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(pane.sendPrompt).toHaveBeenCalledOnce();
-      act(() => emit({ type: "session_reset", data: receipt }));
-      expect(screen.getByText("Keep my draft")).toBeTruthy();
-    },
-  );
+  it.each(
+    (["stable", "experimental"] as const).flatMap((profile) =>
+      [
+        "missing",
+        "wrong-operation",
+        "wrong-conversation",
+        "wrong-session",
+        "unavailable",
+        "hung",
+      ].map((failure) => ({ profile, failure })),
+    ),
+  )("refuses sends in $profile when reset recovery is $failure", async ({ profile, failure }) => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-reset-unconfirmed", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      openAICodexContextProfile: profile,
+    });
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "Preserve old transcript" },
+    ]);
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_id, actions) => {
+          actionsRef.current = actions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await screen.findByText("Preserve old transcript")).toBeTruthy();
+    const snapshot: AgentState = {
+      ...agentState("azure:gpt-test"),
+      conversationId: "fresh-conversation",
+      sessionId: "fresh-session",
+      lastNewSessionReset:
+        failure === "missing"
+          ? undefined
+          : {
+              operationId: failure === "wrong-operation" ? "other" : "operation-1",
+              conversationId: failure === "wrong-conversation" ? "other" : "fresh-conversation",
+              sessionId: failure === "wrong-session" ? "other" : "fresh-session",
+            },
+    };
+    vi.mocked(pane.getState).mockImplementation(() =>
+      failure === "unavailable"
+        ? Promise.reject(new Error("disconnected"))
+        : failure === "hung"
+          ? new Promise(() => {})
+          : Promise.resolve(snapshot),
+    );
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("confirm which session is active"),
+      "error",
+      7000,
+    );
+    expect(screen.getByText("Preserve old transcript")).toBeTruthy();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Keep my draft" } });
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+    });
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "other", conversationId: "other", sessionId: "other" },
+      }),
+    );
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    const receipt = {
+      operationId: "operation-1",
+      conversationId: "fresh-conversation",
+      sessionId: "fresh-session",
+    };
+    act(() => emit({ type: "session_reset", data: receipt }));
+    expect(screen.queryByText("Preserve old transcript")).toBeNull();
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    act(() => emit({ type: "session_reset", data: receipt }));
+    expect(screen.getByText("Keep my draft")).toBeTruthy();
+  });
 
   it("keeps other panes usable and only restores reset authority after successful reopen hydration", async () => {
     nativeMocks.realMentor = true;
@@ -4158,54 +4544,92 @@ describe("AgentPane lifecycle", () => {
     vi.useFakeTimers();
     fireEvent.click(within(first.container).getByTitle("Start a new session for this project"));
     fireEvent.click(screen.getByRole("button", { name: "New Session" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
     fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
     fireEvent.keyDown(otherInput, { key: "Enter" });
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
     expect(other.sendPrompt).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     vi.useRealTimers();
     // A generation change alone and a failed state read cannot restore authority.
     vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
-    vi.mocked(pane.waitForReady).mockResolvedValue({ ready: true, error: null, generation: 2, sessionId: pane.paneId });
-    fireEvent.click(within(first.container).getByRole("button", { name: /Back to this project's sessions/ }));
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: pane.paneId,
+    });
+    fireEvent.click(
+      within(first.container).getByRole("button", { name: /Back to this project's sessions/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
     let input = await within(first.container).findByRole("textbox");
     const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
-    act(() => emit({ type: "session_reset", data: { operationId: "operation-1", conversationId: "late", sessionId: "late" } }));
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "operation-1", conversationId: "late", sessionId: "late" },
+      }),
+    );
     fireEvent.change(input, { target: { value: "Recovered draft" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), conversationId: "reopened", sessionId: "reopened" });
-    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Authoritative reopened history" }]);
-    fireEvent.click(within(first.container).getByRole("button", { name: /Back to this project's sessions/ }));
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      conversationId: "reopened",
+      sessionId: "reopened",
+    });
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "Authoritative reopened history" },
+    ]);
+    fireEvent.click(
+      within(first.container).getByRole("button", { name: /Back to this project's sessions/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
     expect(await within(first.container).findByText("Authoritative reopened history")).toBeTruthy();
     input = within(first.container).getByRole("textbox");
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
-    act(() => emit({ type: "session_reset", data: { operationId: "operation-1", conversationId: "late", sessionId: "late" } }));
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "operation-1", conversationId: "late", sessionId: "late" },
+      }),
+    );
     expect(within(first.container).getByText("Recovered draft")).toBeTruthy();
     expect(pane.newSession).toHaveBeenCalledOnce();
   });
 
-  it.each(["stable", "experimental"] as const)("enforces the shared New Chat gate in %s mode", async (profile) => {
-    nativeMocks.realMentor = true;
-    const pane = client("unresolved-chat", 1);
-    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), mode: "chat", openAICodexContextProfile: profile });
-    render(<AgentPane client={pane} initialTarget={chatTarget} />);
-    const input = await screen.findByRole("textbox");
-    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByTitle("Start a new chat"));
-    fireEvent.click(screen.getByRole("button", { name: "New Chat" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
-    fireEvent.change(input, { target: { value: "Keep chat draft" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect((input as HTMLTextAreaElement).value).toBe("Keep chat draft");
-    expect(pane.newSession).toHaveBeenCalledOnce();
-  });
+  it.each(["stable", "experimental"] as const)(
+    "enforces the shared New Chat gate in %s mode",
+    async (profile) => {
+      nativeMocks.realMentor = true;
+      const pane = client("unresolved-chat", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        mode: "chat",
+        openAICodexContextProfile: profile,
+      });
+      render(<AgentPane client={pane} initialTarget={chatTarget} />);
+      const input = await screen.findByRole("textbox");
+      vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByTitle("Start a new chat"));
+      fireEvent.click(screen.getByRole("button", { name: "New Chat" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16_001);
+      });
+      fireEvent.change(input, { target: { value: "Keep chat draft" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect((input as HTMLTextAreaElement).value).toBe("Keep chat draft");
+      expect(pane.newSession).toHaveBeenCalledOnce();
+    },
+  );
 
   it("blocks Ken current, fresh and quick sends after unresolved toolbar reset", async () => {
     nativeMocks.realMentor = true;
@@ -4215,11 +4639,15 @@ describe("AgentPane lifecycle", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByTitle("Start a new session for this project"));
     fireEvent.click(screen.getByRole("button", { name: "New Session" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(16_001); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
     fireEvent.click(continueHere);
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
     fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(pane.sendKenPrompt).not.toHaveBeenCalled();
     expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
@@ -4232,14 +4660,21 @@ describe("AgentPane lifecycle", () => {
     const { NewSessionError } = await vi.importActual<typeof AgentModule>("./agent");
     const pane = client("rejected-reset", 1);
     vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
-    vi.mocked(pane.newSession).mockRejectedValue(new NewSessionError("creation-rejected", "HTTP 409: busy"));
+    vi.mocked(pane.newSession).mockRejectedValue(
+      new NewSessionError("creation-rejected", "HTTP 409: busy"),
+    );
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
     const input = await screen.findByRole("textbox");
     fireEvent.click(screen.getByTitle("Start a new session for this project"));
     fireEvent.click(screen.getByRole("button", { name: "New Session" }));
-    await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(expect.stringContaining("current session is unchanged"), "error"));
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        expect.stringContaining("current session is unchanged"),
+        "error",
+      ),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     fireEvent.change(input, { target: { value: "Still usable" } });
     fireEvent.keyDown(input, { key: "Enter" });

@@ -875,6 +875,15 @@ export async function enhancePrompt(text: string): Promise<EnhanceResult> {
 }
 
 function requireEnhanceResult(result: unknown): EnhanceResult {
+  if (
+    result &&
+    typeof result === "object" &&
+    "error" in result &&
+    typeof result.error === "string" &&
+    result.error.trim()
+  ) {
+    throw new Error(result.error);
+  }
   // IPC types are not runtime validation: an error payload or empty rewrite must
   // reach the caller's catch, never replace the draft or enter the animation.
   if (
@@ -942,7 +951,10 @@ export async function openProjectPath(
   kind: "path" | "url" = "path",
 ): Promise<void> {
   try {
-    await invoke("open_project_path", { paneId, path: kind === "url" ? projectUrlPath(path) : path });
+    await invoke("open_project_path", {
+      paneId,
+      path: kind === "url" ? projectUrlPath(path) : path,
+    });
   } catch (e) {
     toast(`Could not open file: ${String(e)}`, "error");
     await logError(`open_project_path failed: ${String(e)}`);
@@ -1127,7 +1139,9 @@ export function requirePromptSubmissionResult(value: unknown): PromptSubmissionR
     !Number.isSafeInteger(result.count) ||
     result.count < 0 ||
     (result.queued
-      ? result.count < 1 || typeof result.queueId !== "string" || !/^q[1-9][0-9]*$/.test(result.queueId)
+      ? result.count < 1 ||
+        typeof result.queueId !== "string" ||
+        !/^q[1-9][0-9]*$/.test(result.queueId)
       : result.count !== 0 || result.queueId !== undefined)
   ) {
     throw new Error("invalid prompt submission response");
@@ -1302,8 +1316,13 @@ export async function cancelKen(ken: KenRunIdentity): Promise<void> {
 }
 
 function requireAutopilotResponse(response: unknown): boolean {
-  if (!response || typeof response !== "object" || !("autopilot" in response) ||
-      typeof response.autopilot !== "boolean" || "error" in response) {
+  if (
+    !response ||
+    typeof response !== "object" ||
+    !("autopilot" in response) ||
+    typeof response.autopilot !== "boolean" ||
+    "error" in response
+  ) {
     throw new Error("Invalid Autopilot response");
   }
   return response.autopilot;

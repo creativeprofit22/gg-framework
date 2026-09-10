@@ -672,10 +672,14 @@ export function createBashTool(
       "With run_in_background, also set wake (pattern and/or silence_seconds) to be " +
       "actively notified the moment matching output appears or the task stalls. " +
       "Never sleep to wait for a background process — task_output with wait_ms returns " +
-      "the instant it exits.";
+      "when it exits or a declared wake fires.";
   return {
     name: "bash",
-    description,
+    description:
+      description +
+      " For dev servers, set a readiness wake.pattern, use task_output with wait_ms, " +
+      "then check HTTP and finish while leaving the server running. " +
+      "Do not use silence as readiness; healthy servers normally go quiet.",
     parameters: BashParams,
     executionMode: "sequential",
     async execute({ command, timeout: timeoutMs, run_in_background, persist, wake }, context) {
@@ -708,7 +712,7 @@ export function createBashTool(
           return (
             `Error: refusing to sleep ${napSeconds}s while ${running.length} background ` +
             `process(es) are running (${ids}). Sleeping guesses at a finish time. Call ` +
-            `task_output with wait_ms instead \u2014 it returns the moment the process exits. ` +
+            `task_output with wait_ms instead \u2014 it returns on exit or a declared wake. ` +
             `For something that never exits, such as a dev server, run it with a wake ` +
             `pattern and wait for that line.`
           );

@@ -12,6 +12,7 @@
  * unchanged via AgentSession — this file is only a network seam.
  */
 import http from "node:http";
+import { nativeDevAuthFile } from "./app-sidecar-native-auth.js";
 import fs from "node:fs/promises";
 import { watch as fsWatch } from "node:fs";
 import os from "node:os";
@@ -1147,7 +1148,7 @@ async function main(): Promise<void> {
   // Fire-and-forget: cleanup must never delay or break startup.
   void cleanupToolOutputs().catch(() => {});
 
-  const auth = new AuthStorage(paths.authFile);
+  const auth = new AuthStorage(nativeDevAuthFile(paths.authFile));
   await auth.load();
 
   // Every window's session lives here as an in-process object, keyed by the id

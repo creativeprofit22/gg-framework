@@ -1,5 +1,6 @@
 // Core entry point
 export { stream, localWireModelId } from "./stream.js";
+export { codexRequestProfile } from "./providers/openai-codex-request.js";
 
 // Provider registry
 export { providerRegistry } from "./provider-registry.js";

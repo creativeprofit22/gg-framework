@@ -22,6 +22,8 @@ export interface BackgroundProcess {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   lastReadOffset: number | null;
+  /** Unread one-shot wake, retained even if it fired before task_output waited. */
+  wakeReason?: "pattern" | "silence";
   /** Last observed retained-log size, used by completion gates and notifications. */
   logSize: number;
 }
@@ -63,12 +65,12 @@ const DEFAULT_EOF_GRACE_MS = 2_000;
 const DEFAULT_TERMINAL_SETTLEMENT_MS = 5_000;
 const LOG_SWEEP_INTERVAL_MS = 60 * 1000;
 const WATCH_INTERVAL_MS = 5_000;
-/** Tick for model-declared wake rules (match/silence). */
-const WAKE_INTERVAL_MS = 5_000;
+/** Bounded readiness checks stay responsive without waiting for process exit. */
+const WAKE_INTERVAL_MS = 500;
 const WATCH_INTERVAL_MAX_MS = 120_000;
 const WATCH_MAX_REPORTS = 3;
 const CHECKPOINT_TAIL_CHARS = 320;
-/** Ceiling on a single blocking `waitForExit`, so one wedged process cannot
+/** Ceiling on a single blocking `waitForExitOrWake`, so one wedged process cannot
  *  hold the agent loop indefinitely; callers re-wait if they still want to. */
 export const MAX_PROCESS_WAIT_MS = 600_000;
 /** Chars of the matched log line carried in a pattern-wake notification. */
@@ -192,7 +194,8 @@ function lifecycleFromOptions(options: ProcessManagerOptions): ProcessLifecycleA
   return {
     ...localProcessLifecycle,
     cleanupProcessTree: async (target, cleanupOptions) => {
-      if (cleanupOptions?.requireSettlement) throw new Error("Legacy process overrides cannot verify cleanup");
+      if (cleanupOptions?.requireSettlement)
+        throw new Error("Legacy process overrides cannot verify cleanup");
       killTree(target);
     },
     killProcessTree: killTree,
@@ -284,7 +287,8 @@ export class ProcessManager {
         void this.emitProgress(proc).then((emitted) => {
           if (!this.children.has(proc.id) || !this.watchers.has(proc.id)) return;
           if (emitted && ++reports >= WATCH_MAX_REPORTS) {
-            this.disposeWatcher(proc.id);
+            // Preserve declared readiness after generic progress exhausts its budget.
+            this.disposeProgressWatcher(proc.id);
             return;
           }
           if (emitted) delay = Math.min(delay * 2, WATCH_INTERVAL_MAX_MS);
@@ -437,6 +441,7 @@ export class ProcessManager {
     if (pattern && !state.matched && size > state.scanOffset) {
       const start = Math.max(0, state.scanOffset - overlap);
       const chunk = await this.readRange(proc.logFile, start, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       state.scanOffset = size;
       const match = pattern.exec(chunk);
       if (match) {
@@ -454,6 +459,8 @@ export class ProcessManager {
             `pattern /${pattern.source}/: ${boundedLine(line)}. Still running — ` +
             `task_output id="${proc.id}" for full context.`,
         );
+        proc.wakeReason = "pattern";
+        this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
       }
     }
     if (
@@ -465,6 +472,7 @@ export class ProcessManager {
       state.silenceFired = true;
       this.disposeProgressWatcher(proc.id);
       const tail = await this.readTail(proc.logFile, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       queue.enqueue(
         "process",
         proc.id,
@@ -473,6 +481,8 @@ export class ProcessManager {
           `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
           `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
       );
+      proc.wakeReason = "silence";
+      this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
     }
   }
 
@@ -724,7 +734,8 @@ export class ProcessManager {
           await this.refreshLogSize(completedProcess);
           this.scheduleRecordExpiry(id, completedProcess.completedAt);
           try {
-            if (!this.closing) this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
+            if (!this.closing)
+              this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
           } catch {
             // Completion is authoritative; wrapper reaping remains best-effort.
           }
@@ -761,7 +772,8 @@ export class ProcessManager {
         this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
         child.unref();
         if (!this.closing) this.armWatcher(proc);
-        const shouldArmWake = !this.closing && (wake?.pattern !== undefined || wake?.silenceMs !== undefined);
+        const shouldArmWake =
+          !this.closing && (wake?.pattern !== undefined || wake?.silenceMs !== undefined);
         const wakeArmed = shouldArmWake ? this.armWakeWatcher(proc, wake!) : false;
         startupSettled = true;
         resolve({ id, pid, logFile, wakeArmed });
@@ -774,40 +786,52 @@ export class ProcessManager {
       child.once("spawn", onSpawn);
     });
     this.pendingStarts.add(startup);
-    try { return await startup; }
-    finally { this.pendingStarts.delete(startup); }
+    try {
+      return await startup;
+    } finally {
+      this.pendingStarts.delete(startup);
+    }
   }
 
-  /** Wait for terminal process settlement without guessing a sleep duration. */
-  async waitForExit(
+  /** Terminal-only observation remains available to evidence owners. */
+  async waitForExit(id: string, timeoutMs: number, signal?: AbortSignal) {
+    return this.waitForExitOrWake(id, timeoutMs, signal, false);
+  }
+
+  /** Readiness releases observation, never marks a running process complete. */
+  async waitForExitOrWake(
     id: string,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<"exited" | "timeout" | "unknown"> {
+    includeWake = true,
+  ): Promise<"exited" | "timeout" | "unknown" | "pattern" | "silence"> {
     const proc = this.processes.get(id);
     if (!proc) return "unknown";
     const child = this.children.get(id);
     const managedCompletion = this.completions.get(id);
     if (proc.completedAt !== null || (!child && !managedCompletion)) return "exited";
     if (signal?.aborted) return "timeout";
-
+    if (includeWake && proc.wakeReason) return proc.wakeReason;
     const bounded = Math.min(Math.max(timeoutMs, 0), MAX_PROCESS_WAIT_MS);
     return await new Promise((resolve) => {
       let settled = false;
-      const settle = (outcome: "exited" | "timeout"): void => {
+      const settle = (outcome: "exited" | "timeout" | "pattern" | "silence"): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         child?.off("close", onClose);
+        child?.off("gg:wake", onWake);
         signal?.removeEventListener("abort", onAbort);
         resolve(outcome);
       };
       const onClose = (): void => settle("exited");
+      const onWake = (reason: "pattern" | "silence"): void => settle(reason);
       const onAbort = (): void => settle("timeout");
       const timer = setTimeout(() => settle("timeout"), bounded);
       timer.unref?.();
       if (managedCompletion) void managedCompletion.then(onClose);
       else child!.once("close", onClose);
+      if (includeWake) child?.once("gg:wake", onWake);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -832,6 +856,7 @@ export class ProcessManager {
       };
     }
 
+    delete proc.wakeReason;
     const configuredReadCap = Math.floor(this.options.readCapBytes ?? DEFAULT_READ_CAP_BYTES);
     const readCap = Number.isFinite(configuredReadCap)
       ? Math.max(4, configuredReadCap)
@@ -1098,14 +1123,18 @@ export class ProcessManager {
     });
     const processes = (async () => {
       await Promise.allSettled([...this.pendingStarts]);
-      await Promise.all([...this.children].map(async ([id, child]) => {
-        const proc = this.processes.get(id);
-        if (!proc) throw new Error("Owned process identity is missing");
-        const closed = this.getNativeClose(id, proc, child);
-        await this.lifecycle.cleanupProcessTree(processTarget(proc.pid, child), { requireSettlement: true });
-        await closed;
-        await this.waitForTerminalSettlement(id, proc, closed);
-      }));
+      await Promise.all(
+        [...this.children].map(async ([id, child]) => {
+          const proc = this.processes.get(id);
+          if (!proc) throw new Error("Owned process identity is missing");
+          const closed = this.getNativeClose(id, proc, child);
+          await this.lifecycle.cleanupProcessTree(processTarget(proc.pid, child), {
+            requireSettlement: true,
+          });
+          await closed;
+          await this.waitForTerminalSettlement(id, proc, closed);
+        }),
+      );
       await Promise.all(this.completions.values());
     })();
     this.shutdownPromise = Promise.all([...settlers, processes]).then(() => {
@@ -1164,7 +1193,9 @@ export class ProcessManager {
       proc.signal = signal;
       proc.completedAt = this.now();
       this.disposeWatcher(id);
-      void this.refreshLogSize(proc).then(() => { if (!this.closing) this.notifyExit(proc); });
+      void this.refreshLogSize(proc).then(() => {
+        if (!this.closing) this.notifyExit(proc);
+      });
       this.scheduleRecordExpiry(id, proc.completedAt);
     };
 

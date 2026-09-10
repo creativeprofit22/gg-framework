@@ -1,21 +1,22 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-07",
-  "label": "Upstream 0.62.1, with steadier Roadmap updates",
+  "date": "2026-09-09",
+  "label": "Upstream 0.63.0, with clearer prompts and image results",
   "sections": [
     {
-      "title": "Less interruption, less startup work",
+      "title": "Your words and images, with clearer boundaries",
       "items": [
-        "Stay signed in across windows and the `CLI`. When another session refreshes your login, this one now notices the replacement even when its timestamp looks unchanged, instead of hanging on to an old login.",
-        "Less work before you get to yours. `What's new` and release histories now load when needed rather than with your workspace. Empty-input hints stop animating while you type, focus the composer, or leave a pane inactive."
+        "Sharpen your request without changing the mission. `Enhance?` respects your selected model and keeps questions, details, and exclusions in view. Empty or cut-short rewrites are rejected rather than replacing your draft.",
+        "Create with `GPT Image 2.5 Flare` and edit with `Sunburst`, orchestrated by `GPT-6 Astra` through your connected OpenAI account—even when your chat uses another provider. Returned dimensions can differ from your request: the original image stays unchanged, and a visible warning compares requested and actual sizes. Exact sizing is not guaranteed; transparent backgrounds are not supported by this tested route."
       ]
     },
     {
-      "title": "Roadmap updates you can trust",
+      "title": "Keep your place while work moves",
       "items": [
-        "A refused `Roadmap` update no longer looks saved. If another session owns the phase or the plan changed while work was running, the agent gets the reason instead of a success message. Newer progress stays in place.",
-        "Recovering `Project Notes` shouldn’t undo newer work. A delayed recovery response now leaves newer edits alone and checks the latest saved notes before trying again. Notes from an unsupported app version stay untouched rather than falling back to an older local copy.",
-        "Your approval still starts the work. An approved plan carries its instructions into the working session without letting a reviewer start it for you. Completed `Roadmap` activity also keeps its `Done` label when reopening older sessions."
+        "A sent prompt should stay sent. Accepted prompts are saved before work begins, and pane-local drafts stay with their workspace instead of spilling into another pane. Regular sent prompts also get a distinct blue treatment without changing queued messages or question answers.",
+        "Question cards wait for an accepted answer before looking settled. Busy controls and `Autopilot` keep their session boundaries, so a stale response cannot silently approve a newer request or start unrelated work.",
+        "Repository references are easier to follow. Linked repository names take you to the source without losing the context of the result.",
+        "Preview ready? Keep going without shutting it down. Readiness waits can release the agent while the server stays running; that does not count as a completed command. Delayed edit diagnostics still arrive without bringing back the Local Fork's removed automatic check reminders."
       ]
     }
   ]

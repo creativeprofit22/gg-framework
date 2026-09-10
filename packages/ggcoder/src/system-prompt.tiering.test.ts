@@ -62,6 +62,17 @@ describe("tool tiering in the system prompt", () => {
     expect(prompt).toContain("Available on demand (call `tool_search` to load):");
   });
 
+  it("keeps cross-tool steering without repeating live tool descriptions", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["edit", "write"]);
+    expect(prompt).toContain("Prefer `edit` over `write` for changes to existing files.");
+    expect(prompt).not.toContain("**edit**");
+    expect(prompt).not.toContain("**write**");
+
+    const restricted = await buildSystemPrompt(cwd, [], false, undefined, ["edit"]);
+    expect(restricted).not.toContain("Prefer `edit` over `write`");
+  });
+
   it("never double-lists a tool that is already live", async () => {
     const cwd = await makeProject();
     const prompt = await buildSystemPrompt(
@@ -76,8 +87,28 @@ describe("tool tiering in the system prompt", () => {
       ["source_path", "screenshot"],
     );
 
-    expect(countOccurrences(prompt, "- **source_path**:")).toBe(1);
+    // Live tools already carry their descriptions in schemas, not the deferred index.
+    expect(countOccurrences(prompt, "- **source_path**:")).toBe(0);
     expect(countOccurrences(prompt, "- **screenshot**:")).toBe(1);
+  });
+
+  it("does not advertise deferred tools without a loader", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      ["read"],
+      undefined,
+      "anthropic",
+      undefined,
+      ["screenshot", "source_path"],
+    );
+    expect(prompt).not.toContain("Available on demand");
+    expect(prompt).not.toContain("tool_search");
+    expect(prompt).not.toContain("**screenshot**");
+    expect(prompt).not.toContain("**source_path**");
   });
 
   it("keeps deferred parameter schemas out of the serialized tool payload", async () => {

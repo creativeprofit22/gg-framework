@@ -938,6 +938,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // Remove any generating_image placeholders — the tool has finished
           // (success or failure). If it produced images, they're pushed below.
           setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
+          if (liveEntry?.name === "generate_image" && typeof result === "string") {
+            const warnings = result.split("\n").filter((line) => line.startsWith("WARNING: Image saved,"));
+            if (warnings.length > 0) {
+              endStreamingText();
+              pushItem({ kind: "info", id: nextId(), text: warnings.join("\n") });
+            }
+          }
           // Surface any image previews (screenshot / read of an image) inline in
           // the transcript — the tool panel is text-only.
           const previews = (details as { imagePreviews?: ImagePreview[] } | undefined)
@@ -1394,8 +1401,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 kind: "hook",
                 id: nextId(),
                 hook: kind,
-                ...(kind === "verification" && d.verificationReason === "recheck"
-                  ? { verificationReason: "recheck" as const }
+                ...(kind === "verification" &&
+                (d.verificationReason === "recheck" || d.verificationReason === "check_review")
+                  ? { verificationReason: d.verificationReason }
                   : {}),
               },
               { skipIfSameAsLast: true },

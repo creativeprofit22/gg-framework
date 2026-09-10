@@ -11,6 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { stream, StreamResult, type StreamEvent, type StreamResponse } from "@kenkaiiii/gg-ai";
+import { getModel } from "./model-registry.js";
+import { AuthStorage } from "./auth-storage.js";
+
+vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  stream: vi.fn(),
+}));
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
 
@@ -40,10 +48,35 @@ beforeEach(async () => {
   tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "agent-switch-project-"));
   restoreHome = useFakeHome(tempHome);
   agentLoopMock.mockReset();
+  vi.mocked(stream)
+    .mockReset()
+    .mockImplementation(
+      () =>
+        new StreamResult(
+          (async function* (): AsyncGenerator<StreamEvent, StreamResponse> {
+            yield { type: "text_delta", text: "Fix the bug." };
+            return {
+              message: { role: "assistant", content: "Fix the bug." },
+              stopReason: "end_turn",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          })(),
+        ),
+    );
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
+  await fs.writeFile(
+    path.join(tempHome, ".gg", "claude-code-version.json"),
+    JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }),
+  );
   await fs.writeFile(
     path.join(tempHome, ".gg", "auth.json"),
     JSON.stringify({
+      gemini: {
+        accessToken: "test-gemini-token",
+        refreshToken: "test-gemini-refresh",
+        expiresAt: Date.now() + 3_600_000,
+        projectId: "test-google-project",
+      },
       anthropic: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
       openai: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
     }),
@@ -57,6 +90,7 @@ afterEach(async () => {
     fs.rm(tempProject, { recursive: true, force: true }),
   ]);
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 async function createSession() {
@@ -91,6 +125,73 @@ function cachedPrefix(content: string): string {
 }
 
 describe("AgentSession model switch", () => {
+  it("enhances with the active model and its settings after switching providers", async () => {
+    const session = await createSession();
+    try {
+      for (const [provider, model] of [
+        ["openai", "gpt-5.6-sol"],
+        ["anthropic", "claude-fable-5-1"],
+        ["gemini", "gemini-3.1-pro-preview"],
+        ["openai", "custom-future-model"],
+      ]) {
+        await session.switchModel(provider, model);
+        session.setThinkingLevel("high");
+        const messages = [...session.getMessages()];
+        expect((await session.enhancePrompt("fix bug")).enhanced).toBe("Fix the bug.");
+        expect(session.getMessages()).toEqual(messages);
+        const request = vi.mocked(stream).mock.lastCall![0];
+        expect(request).toMatchObject({
+          provider,
+          model,
+          thinking: "high",
+          maxTokens: getModel(model)?.maxOutputTokens ?? 16384,
+        });
+        if (provider === "anthropic") {
+          expect(request.userAgent).toMatch(/^claude-cli\//);
+        }
+        if (provider === "gemini") {
+          expect(request.projectId).toBe("test-google-project");
+        }
+      }
+    } finally {
+      await session.dispose();
+    }
+  }, 30_000);
+
+  it("keeps the click-time model paired with its credentials during a switch", async () => {
+    const session = await createSession();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const resolveCredentials = AuthStorage.prototype.resolveCredentials;
+    vi.spyOn(AuthStorage.prototype, "resolveCredentials").mockImplementationOnce(async function (
+      this: AuthStorage,
+      provider,
+      options,
+    ) {
+      const credentials = await resolveCredentials.call(this, provider, options);
+      await pending;
+      return credentials;
+    });
+    try {
+      session.setThinkingLevel("high");
+      const enhancement = session.enhancePrompt("fix bug");
+      await session.switchModel("anthropic", "claude-fable-5-1");
+      session.setThinkingLevel("low");
+      release();
+      await enhancement;
+      expect(vi.mocked(stream).mock.lastCall![0]).toMatchObject({
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        thinking: "high",
+      });
+    } finally {
+      release();
+      await session.dispose();
+    }
+  }, 30_000);
+
   it("keeps the cached system prefix byte-identical across a switch", async () => {
     const session = await createSession();
     try {

@@ -4484,11 +4484,19 @@ async fn agent_enhance_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.error_for_status()
-        .map_err(|e| e.to_string())?
+    let status = res.status();
+    let body = res
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Couldn't enhance the prompt. Your original draft has been kept.")
+            .to_owned());
+    }
+    Ok(body)
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.
@@ -4963,8 +4971,24 @@ fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEntry> {
 // Keep the two in sync when adding a provider.
 
 /// Absolute path to ~/.gg/auth.json.
+fn native_auth_file_override(default: PathBuf, debug: bool, requested: Option<PathBuf>) -> Result<PathBuf, String> {
+    if debug {
+        if let Some(file) = requested {
+            if !file.is_absolute() || !file.is_file() {
+                return Err("GG_APP_DEV_AUTH_FILE must name an existing absolute file".into());
+            }
+            return Ok(file);
+        }
+    }
+    Ok(default)
+}
+
 fn auth_file_path(identifier: &str) -> PathBuf {
-    agent_data_root(identifier).join("auth.json")
+    native_auth_file_override(
+        agent_data_root(identifier).join("auth.json"),
+        cfg!(debug_assertions),
+        std::env::var_os("GG_APP_DEV_AUTH_FILE").map(PathBuf::from),
+    ).expect("Invalid development-only credential store override")
 }
 
 /// One API-key option for a provider that splits auth across multiple
@@ -5503,6 +5527,10 @@ fn parse_auth_object(existing: Option<&str>) -> Result<serde_json::Value, String
 /// Atomically write auth.json (temp file + rename), creating ~/.gg if needed.
 /// On unix the file is mode 0600 (credentials). Mirrors gg-core's atomicWriteFile.
 fn write_auth_file(identifier: &str, contents: &str) -> Result<(), String> {
+    // Shared smoke credentials may only rotate through the daemon's locked AuthStorage.
+    if cfg!(debug_assertions) && std::env::var_os("GG_APP_DEV_AUTH_FILE").is_some() {
+        return Err("Native credential edits are disabled while development credentials are shared".into());
+    }
     let path = auth_file_path(identifier);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -9354,6 +9382,14 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     } else {
         cmd.env("GG_AGENT_DIR", &identity_data_root);
     }
+    // Release shells never forward inherited development credential routing.
+    cmd.env_remove("GG_APP_DEV_AUTH_FILE");
+    cmd.env_remove("GG_APP_NATIVE_DEBUG_AUTH_ALLOWED");
+    #[cfg(debug_assertions)]
+    if std::env::var_os("GG_APP_DEV_AUTH_FILE").is_some() {
+        cmd.env("GG_APP_DEV_AUTH_FILE", auth_file_path(&identifier));
+        cmd.env("GG_APP_NATIVE_DEBUG_AUTH_ALLOWED", "1");
+    }
     let secure_azure = azure_connection::secure_config().unwrap_or_else(|_| {
         log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
         None
@@ -12655,6 +12691,19 @@ mod tests {
     /// A ledger containing the given sidecar pgids.
     fn ledger(pgids: &[i32]) -> HashSet<i32> {
         pgids.iter().copied().collect()
+    }
+
+    #[test]
+    fn native_auth_override_is_debug_only_and_does_not_redirect_workspace() {
+        let root = agent_data_root_for_home(&PathBuf::from("/isolated"), "com.ggcoder.local-fork");
+        let default = root.join("auth.json");
+        let existing = std::env::current_exe().unwrap();
+        assert_eq!(native_auth_file_override(default.clone(), false, Some(existing.clone())).unwrap(), default);
+        assert_eq!(native_auth_file_override(default.clone(), true, Some(existing.clone())).unwrap(), existing);
+        assert_eq!(native_auth_file_override(default.clone(), true, None).unwrap(), default);
+        assert!(native_auth_file_override(default.clone(), true, Some(PathBuf::from("relative.json"))).is_err());
+        assert!(native_auth_file_override(default, true, Some(existing.parent().unwrap().to_path_buf())).is_err());
+        assert_eq!(root, agent_data_root_for_home(&PathBuf::from("/isolated"), "com.ggcoder.local-fork"));
     }
 
     #[test]

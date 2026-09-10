@@ -87,6 +87,14 @@ const DEFAULT_FIRST_BUDGET_MS = 8000;
 const DEFAULT_SETTLE_MS = 1500;
 const DEFAULT_SNAPSHOT_LIMIT = 100;
 
+interface QueuedDiagnostics {
+  next?: { content: string; source?: EditSource; before: number | null };
+  work: Promise<void>;
+  running: boolean;
+  cancelled?: boolean;
+  outcome?: LspDiagnosticOutcome;
+}
+
 /**
  * Per-session view over the process-wide language-server pool (see pool.ts).
  *
@@ -114,6 +122,9 @@ export class LspManager {
    */
   private readonly warmKeys = new Map<string, number>();
   private readonly latestOutcomes = new Map<string, LspDiagnosticOutcome>();
+  private readonly diagnosticRequests = new Map<string, object>();
+  private readonly queuedDiagnostics = new Map<string, QueuedDiagnostics>();
+  private diagnosticsOverflow = false;
   private shutDown = false;
   private cleanup?: Promise<void>;
 
@@ -129,8 +140,140 @@ export class LspManager {
     this.pool = options?.pool ?? lspClientPool;
   }
 
+  /** Schedule without holding the edit response; coalesce superseded writes per file. */
+  queueDiagnosticsAfterWrite(filePath: string, content: string, source?: EditSource): string {
+    if (this.shutDown) return "\nDiagnostics unavailable; this change is not verified.";
+    const file = path.resolve(this.cwd, filePath);
+    if (!serverForFile(file, this.catalog)) return "";
+    const before = this.errorBaseline(file);
+    this.latestOutcomes.delete(file);
+    this.diagnosticRequests.delete(file);
+    const existing = this.queuedDiagnostics.get(file);
+    if (!existing && this.queuedDiagnostics.size >= this.snapshotLimit) {
+      this.diagnosticsOverflow = true;
+      return "\nDiagnostics queue full; this change is not verified. Run the project checks.";
+    }
+    const next = { content, source, before };
+    if (existing?.running) {
+      existing.cancelled = false;
+      existing.next = next;
+    } else {
+      const job: QueuedDiagnostics = { next, work: Promise.resolve(), running: true };
+      this.queuedDiagnostics.set(file, job);
+      // Starting on the microtask queue coalesces writes in the same tool batch.
+      job.work = Promise.resolve().then(async () => {
+        try {
+          while (job.next && this.queuedDiagnostics.get(file) === job && !this.shutDown) {
+            const request = job.next;
+            job.next = undefined;
+            const outcome = await this.diagnosticsAfterWriteDetailed(file, request.content);
+            if (
+              job.next ||
+              job.cancelled ||
+              this.queuedDiagnostics.get(file) !== job ||
+              this.shutDown
+            )
+              continue;
+            job.outcome =
+              outcome.kind === "diagnostics"
+                ? {
+                    ...outcome,
+                    formatted:
+                      outcome.formatted +
+                      this.attribute(
+                        file,
+                        request.before,
+                        errorCount(outcome.diagnostics),
+                        request.source,
+                      ),
+                  }
+                : outcome;
+          }
+        } catch (error) {
+          log("WARN", "lsp", "Queued diagnostics failed", { error: String(error) });
+          job.outcome = this.outcome("server_failed", file);
+        } finally {
+          job.running = false;
+          if (job.cancelled && this.queuedDiagnostics.get(file) === job)
+            this.queuedDiagnostics.delete(file);
+        }
+      });
+    }
+    return "\nDiagnostics queued; results will arrive before completion. This is not verification.";
+  }
+
+  /** Includes completed evidence not yet delivered to the agent. */
+  hasQueuedDiagnostics(): boolean {
+    return (
+      [...this.queuedDiagnostics.values()].some((job) => !job.cancelled) || this.diagnosticsOverflow
+    );
+  }
+
+  /** Wait only at the completion boundary, or return immediately on cancellation. */
+  async flushDiagnostics(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.shutDown) return;
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<void>((resolve) => {
+      onAbort = resolve;
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([
+        Promise.all(
+          [...this.queuedDiagnostics.values()]
+            .filter((job) => !job.cancelled)
+            .map((job) => job.work),
+        ),
+        aborted,
+      ]);
+    } finally {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Deliver completed, latest-write evidence once; silence is never a clean verdict. */
+  drainDiagnostics(includeUnverified = true): string {
+    const results: string[] = [];
+    for (const [file, job] of this.queuedDiagnostics) {
+      if (job.running || job.cancelled || !job.outcome) continue;
+      this.queuedDiagnostics.delete(file);
+      const outcome = job.outcome;
+      if (outcome.kind === "diagnostics" && outcome.formatted) results.push(outcome.formatted);
+      else if (includeUnverified && outcome.kind !== "clean" && outcome.kind !== "unsupported") {
+        results.push(
+          `${path.relative(this.cwd, file)}: diagnostics ${outcome.kind}; not verified. Run the project checks; do not infer success from silence.`,
+        );
+      }
+    }
+    if (this.diagnosticsOverflow) {
+      if (includeUnverified)
+        results.push(
+          "Diagnostics capacity was exceeded; some changes are not verified. Run the project checks.",
+        );
+      this.diagnosticsOverflow = false;
+    }
+    return results.length
+      ? `Post-edit diagnostics for the latest queued changes:\n${results.join("\n")}\nAddress reported errors before completion. These diagnostics do not replace the project's verification checks.`
+      : "";
+  }
+
+  /** Forget a cancelled run's deliveries; bounded in-flight work may still warm its server. */
+  clearPendingDiagnostics(): void {
+    for (const [file, job] of this.queuedDiagnostics) {
+      this.diagnosticRequests.delete(file);
+      this.latestOutcomes.delete(file);
+      job.next = undefined;
+      job.outcome = undefined;
+      job.cancelled = true;
+      // Keep an in-flight predecessor until it settles: push-only servers can
+      // send unversioned replies, so a new run must not race the cancelled one.
+      if (!job.running) this.queuedDiagnostics.delete(file);
+    }
+    this.diagnosticsOverflow = false;
+  }
+
   /**
-   * Compatibility surface used by edit/write tools. Diagnostics remain visible;
+   * Compatibility surface used by synchronous diagnostic callers. Diagnostics remain visible;
    * every clean/degraded outcome remains the exact historical empty string.
    *
    * When a baseline is available, the diagnostics are labelled as caused by
@@ -198,11 +341,22 @@ export class LspManager {
     content: string,
   ): Promise<LspDiagnosticOutcome> {
     const normalizedFilePath = path.resolve(this.cwd, filePath);
-    if (this.shutDown) return this.record(this.outcome("unavailable", normalizedFilePath));
+    if (this.shutDown) return this.outcome("unavailable", normalizedFilePath);
+    const request = {};
+    this.diagnosticRequests.delete(normalizedFilePath);
+    this.diagnosticRequests.set(normalizedFilePath, request);
+    while (this.diagnosticRequests.size > this.snapshotLimit) {
+      const oldest = this.diagnosticRequests.keys().next().value;
+      if (oldest !== undefined) this.diagnosticRequests.delete(oldest);
+    }
+    const record = (outcome: LspDiagnosticOutcome): LspDiagnosticOutcome =>
+      !this.shutDown && this.diagnosticRequests.get(normalizedFilePath) === request
+        ? this.record(outcome)
+        : outcome;
 
     try {
       const spec = serverForFile(normalizedFilePath, this.catalog);
-      if (!spec) return this.record(this.outcome("unsupported", normalizedFilePath));
+      if (!spec) return record(this.outcome("unsupported", normalizedFilePath));
       const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
       const key = `${spec.id}\u0000${root}`;
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
@@ -214,14 +368,14 @@ export class LspManager {
         this.outcome("timeout", normalizedFilePath),
       );
       if (outcome.kind === "timeout") {
-        void work.then((eventual) => this.record(eventual)).catch(() => {});
+        void work.then(record).catch(() => {});
       }
-      return this.record(outcome);
+      return record(outcome);
     } catch (error) {
       log("WARN", "lsp", `diagnostics failed for ${normalizedFilePath}`, {
         error: error instanceof Error ? error.message : String(error),
       });
-      return this.record(this.outcome("server_failed", normalizedFilePath));
+      return record(this.outcome("server_failed", normalizedFilePath));
     }
   }
 
@@ -270,6 +424,9 @@ export class LspManager {
 
   shutdownAll(): void {
     this.shutDown = true;
+    this.clearPendingDiagnostics();
+    this.queuedDiagnostics.clear();
+    this.diagnosticRequests.clear();
     this.pool.release(this);
     this.warmKeys.clear();
   }
@@ -307,6 +464,7 @@ export class LspManager {
     const deadline = Date.now() + budgetMs;
     const resolution = await this.pool.retain(spec, root, this);
     if (this.shutDown) return this.outcome("unavailable", filePath);
+    if (Date.now() >= deadline) return this.outcome("timeout", filePath);
     if (resolution.status !== "ready") return this.outcome(resolution.status, filePath);
     const { client } = resolution;
     if (!client.isAlive) {
@@ -319,7 +477,11 @@ export class LspManager {
     // seconds, and the idle sweep must not reclaim a server that is mid-answer.
     const endCall = this.pool.beginCall(spec, root);
     try {
-      return await this.collectFrom(client, key, spec, root, filePath, content, budgetMs, deadline);
+      return await client.withDocumentDiagnostics(filePath, async () => {
+        if (this.shutDown) return this.outcome("unavailable", filePath);
+        if (Date.now() >= deadline) return this.outcome("timeout", filePath);
+        return this.collectFrom(client, key, spec, root, filePath, content, budgetMs, deadline);
+      });
     } finally {
       endCall();
     }
@@ -340,7 +502,8 @@ export class LspManager {
     // project, and therefore the only one that can answer prematurely.
     const wasCold = !this.isWarm(key, spec, root);
     const uri = client.syncDocument(filePath, content);
-    let diagnostics = await client.collectDiagnostics(uri, budgetMs);
+    const version = client.documentVersion(uri);
+    let diagnostics = await client.collectDiagnostics(uri, Math.max(1, deadline - Date.now()));
     // Record WHICH build of the server went warm, so a later reclamation of it
     // is detectable rather than silently inherited as warm.
     if (this.shutDown) return this.outcome("unavailable", filePath);
@@ -376,6 +539,7 @@ export class LspManager {
       }
     }
 
+    if (client.documentVersion(uri) !== version) return this.outcome("timeout", filePath);
     if (diagnostics.length > 0) {
       const relPath = path.relative(this.cwd, filePath);
       return {
@@ -386,7 +550,10 @@ export class LspManager {
         formatted: formatDiagnostics(relPath, diagnostics),
       };
     }
-    return this.outcome(client.hasActiveProgress ? "low_confidence" : "clean", filePath);
+    return this.outcome(
+      client.hasActiveProgress || client.hasUncertainDiagnostics(uri) ? "low_confidence" : "clean",
+      filePath,
+    );
   }
 
   // ── Navigation ───────────────────────────────────────────────

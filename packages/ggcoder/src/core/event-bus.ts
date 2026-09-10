@@ -71,7 +71,7 @@ export interface BusEventMap {
     kind: "ideal" | "verification" | "loop_break" | "regrounding";
     coverageExpected?: string[];
     coverageMissing?: string[];
-    verificationReason?: "recheck";
+    verificationReason?: "recheck" | "check_review";
   };
 
   /** A pre-final hook would fire if the agent stopped right now: the Ideal

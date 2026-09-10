@@ -49,6 +49,12 @@ describe("enhancePrompt bridge", () => {
     await expect(enhancePrompt("Fix the look")).rejects.toThrow();
   });
 
+  it("preserves the sidecar's useful error instead of replacing it with a validation error", async () => {
+    const error = "Prompt enhancement was cut short. Your original draft has been kept.";
+    vi.mocked(invoke).mockResolvedValueOnce({ error });
+    await expect(enhancePrompt("Fix the look")).rejects.toThrow(error);
+  });
+
   it("propagates native failures to the existing draft-preserving error handler", async () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("Enhancement failed"));
     await expect(enhancePrompt("Fix the look")).rejects.toThrow("Enhancement failed");

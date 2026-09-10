@@ -146,7 +146,7 @@ export function buildSteroidsArgs(a: Params): string[] {
   return args;
 }
 
-const DESCRIPTION = `Read real, current open-source code from a local corpus. REQUIRED before the first edit/write on any nontrivial task: search (literal tokens), then show the matching file, then build from it. Offline, no limits.
+const DESCRIPTION = `Read real, current open-source code from a local corpus when local evidence leaves an API, design choice, or risk unresolved. Search literal tokens, then show matching code; reuse examples already read. Offline, no limits.
 Actions:
 - search: regex across every repo (fixed=true for literal). Filter by repo/language/path/tag; perRepo=1 for breadth.
 - define: where a symbol is defined, corpus-wide (no repo filter; ts/js/py/go/rust/java only). For one repo or other languages use search with repo + a definition pattern.

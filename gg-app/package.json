@@ -1,7 +1,7 @@
 {
   "name": "gg-app",
   "private": true,
-  "version": "0.62.1",
+  "version": "0.63.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -30,6 +30,7 @@
     "test:installer-serial": "vitest run scripts/install-local-patched.test.mjs --no-file-parallelism",
     "test:launcher-serial": "vitest run scripts/launch-local-patched.test.mjs --no-file-parallelism",
     "test:workspace-narrow": "node scripts/workspace-narrow-regression.mjs",
+    "test:prompt-colours": "node scripts/prompt-colours-regression.mjs",
     "test:whats-new-loading": "node scripts/whats-new-loading.mjs",
     "test:workspace-shell-evidence": "vitest run scripts/workspace-shell-evidence.test.mjs --no-file-parallelism",
     "smoke:roadmap-reliability-dev": "node scripts/roadmap-reliability-dev-smoke.mjs --identity com.ggcoder.local-fork",

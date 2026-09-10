@@ -134,6 +134,24 @@ describe("honest reports without stop gates", () => {
     expect(events).not.toContain("verification");
   });
 
+  it("accepts format-check evidence without restoring automatic reminders", async () => {
+    const { internal, events } = await makeSession();
+    await tool(internal, "edit", { file_path: "src/a.test.ts" });
+    await tool(
+      internal,
+      "bash",
+      {
+        command: "pnpm check && pnpm lint && pnpm format:check && pnpm test",
+      },
+      0,
+    );
+    expect(
+      session!.getVerificationEvidenceLedgerSnapshot().currentEvidence.map((entry) => entry.status),
+    ).toEqual(["passed"]);
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events).not.toContain("verification");
+  });
+
   it("resumes without requiring fresh evidence or claiming historical outcomes are current", async () => {
     const { internal } = await makeSession(false);
     await tool(internal, "bash", { command: "node --test first.test.mjs" }, 1);

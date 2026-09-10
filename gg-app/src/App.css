@@ -3546,6 +3546,13 @@ select {
   color: var(--ken);
   background: color-mix(in srgb, var(--ken) 12%, var(--user-bg));
 }
+/* Sent prompts get their own identity without changing the composer or special states. */
+.user-msg:where(:not(.user-ken-sent, .user-ken, .ask-answered-bubble, .queued, .promoted)) {
+  color: #bfdbfe;
+  background: #172b46;
+  border-color: #36577d;
+}
+
 /* "Sent to GG Coder" bubble (from a Ken prompt-block button): same faint Ken
    tint as a @Ken bubble, with the shimmer label carrying Ken's color. */
 .user-msg.user-ken-sent {

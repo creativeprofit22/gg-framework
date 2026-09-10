@@ -277,8 +277,10 @@ describe("ProcessManager progress notifications", () => {
     // background_task_status are now LEGACY_ATTACHMENT_TYPES, dropped before
     // the model sees them).
     const started = await instance.start(
-      `for i in $(seq 1 600); do echo "[electron] compiled ok $i"; sleep 0.2; done`,
+      `for i in $(seq 1 12); do echo "[electron] compiled ok $i"; sleep 0.2; done; read -r signal; echo SERVER_READY; sleep 60`,
       cwd,
+      undefined,
+      { pattern: /SERVER_READY/ },
     );
 
     // Assert the structural end state: the watcher RETIRES, so no further tick
@@ -290,6 +292,10 @@ describe("ProcessManager progress notifications", () => {
     // Process is still very much alive — this is retirement, not exit.
     expect((await instance.readOutput(started.id)).isRunning).toBe(true);
     expect(instance.activeWatchers()).toEqual([]);
+    // A slow startup must still release task_output after generic progress retires.
+    expect(instance.activeWakeWatchers()).toContain(started.id);
+    await instance.sendInput(started.id, "ready");
+    expect(await instance.waitForExitOrWake(started.id, 15_000)).toBe("pattern");
     await instance.stop(started.id);
   }, 120_000);
 

@@ -27,21 +27,36 @@ describe("plan mode", () => {
     processManager.shutdownAll();
   });
 
-  it("renders active plan instructions and plan tools", async () => {
-    const prompt = await buildSystemPrompt(os.tmpdir(), [], true, undefined, [
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "enter_plan",
-      "exit_plan",
-    ]);
+  it("renders active plan instructions with plan guidance in the tool schemas", async () => {
+    const { tools, processManager } = await createTools(os.tmpdir(), {
+      onEnterPlan: () => {},
+      onExitPlan: async () => "ok",
+    });
+    try {
+      const prompt = await buildSystemPrompt(
+        os.tmpdir(),
+        [],
+        true,
+        undefined,
+        tools.map((tool) => tool.name),
+      );
 
-    expect(prompt).toContain("## Plan Mode (ACTIVE)");
-    expect(prompt).toContain("draft a structured markdown plan at `.gg/plans/<name>.md`");
-    expect(prompt).not.toContain("1. Explore");
-    expect(prompt).toContain("**enter_plan**");
-    expect(prompt).toContain("**exit_plan**");
+      expect(prompt).toContain("## Plan Mode (ACTIVE)");
+      expect(prompt).toContain("draft a structured markdown plan at `.gg/plans/<name>.md`");
+      expect(prompt).toContain("then call `exit_plan` with that path for user review");
+      expect(prompt).not.toContain("1. Explore");
+      // Live-tool guidance moved out of the prompt, not out of the model's tool catalog.
+      expect(tools.find((tool) => tool.name === "enter_plan")?.description).toContain(
+        "Enter plan mode for safe, read-only exploration before making changes.",
+      );
+      expect(tools.find((tool) => tool.name === "exit_plan")?.description).toContain(
+        "Submit a .gg/plans/ markdown plan for user review",
+      );
+      expect(prompt).not.toContain("**enter_plan**");
+      expect(prompt).not.toContain("**exit_plan**");
+    } finally {
+      processManager.shutdownAll();
+    }
   });
 
   it("allows write only under .gg/plans while plan mode is active", async () => {

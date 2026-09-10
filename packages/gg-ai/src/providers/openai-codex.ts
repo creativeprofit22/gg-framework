@@ -1,4 +1,4 @@
-import os from "node:os";
+import { codexRequestProfile } from "./openai-codex-request.js";
 import * as zstd from "@bokuweb/zstd-wasm";
 import type {
   ContentPart,
@@ -31,11 +31,6 @@ import {
 } from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
-// Advertised Codex client version. The ChatGPT backend gates models on the
-// catalog's `minimal_client_version` (GPT-6 Astra needs >= 0.153.0) and
-// rejects older clients with "requires a newer version of Codex". Track the
-// latest openai/codex `rust-v*` release when adding a model.
-const CODEX_CLIENT_VERSION = "0.153.4";
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
 // hit the backend's finite Envoy retry buffer.
@@ -96,10 +91,6 @@ async function encodeCodexRequest(body: Record<string, unknown>): Promise<Encode
   }
 }
 
-function usesResponsesLite(model: string): boolean {
-  return model.startsWith("gpt-5.6-") || model.startsWith("gpt-6-");
-}
-
 function outputTextKey(itemId: string | undefined, contentIndex: number | undefined): string {
   return `${itemId ?? ""}:${contentIndex ?? 0}`;
 }
@@ -124,7 +115,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     createCodexInputAdapter(options.supportsImages),
   );
 
-  const responsesLite = usesResponsesLite(options.model);
+  const profile = codexRequestProfile(options.model, options.thinking);
   const body: Record<string, unknown> = {
     model: options.model,
     store: false,
@@ -135,7 +126,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       transportName: "OpenAI Codex",
       supportsNamedTool: false,
     }),
-    parallel_tool_calls: !responsesLite,
+    parallel_tool_calls: profile.parallelToolCalls,
     include: ["reasoning.encrypted_content"],
   };
 
@@ -159,31 +150,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (options.temperature != null && !options.thinking) {
     body.temperature = options.temperature;
   }
-  body.reasoning = {
-    // GPT-5.6/6 require at least low; older models still support thinking off.
-    // Apply the floor here for every caller, including one-off prompt rewrites.
-    // `ultra` is a client orchestration preset, not a Codex API effort.
-    effort:
-      options.thinking === "ultra" ? "max" : (options.thinking ?? (responsesLite ? "low" : "none")),
-    summary: "auto",
-    ...(responsesLite ? { context: "all_turns" } : {}),
-  };
+  body.reasoning = profile.reasoning;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "text/event-stream",
     Authorization: `Bearer ${options.apiKey}`,
-    "OpenAI-Beta": "responses=experimental",
-    originator: responsesLite ? "codex_cli_rs" : "ggcoder",
-    "User-Agent": responsesLite
-      ? `codex_cli_rs/${CODEX_CLIENT_VERSION}`
-      : `ggcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
-    ...(responsesLite
-      ? {
-          version: CODEX_CLIENT_VERSION,
-          "X-OpenAI-Internal-Codex-Responses-Lite": "true",
-        }
-      : {}),
+    ...profile.headers,
   };
 
   if (options.accountId) {

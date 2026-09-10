@@ -33,6 +33,17 @@ import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
+it("surfaces image sizing warnings alongside the accessible original image path", () => {
+  const { hook, getItems } = setup();
+  const warning = "WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: 1536x1024. Exact-size verification failed.";
+  act(() => hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} })));
+  act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "image", result: `Generated image\n${warning}`, details: { imagePreviews: [{ base64: "AA==", mediaType: "image/png", path: "/saved/original.png" }] } })));
+  expect(getItems()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: "info", text: warning }),
+    expect.objectContaining({ kind: "images", images: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }] }),
+  ]));
+});
+
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
 
@@ -472,28 +483,43 @@ describe("useAgentEvents", () => {
   });
 
   describe("queued pill lifecycle", () => {
-    it.each([false, true])("correlates references and duplicate receipts after drain, run ended=%s", (ended) => {
-      const { hook, getItems } = setup();
-      act(() => {
-        hook.result.current.handleEvent(ev("queued", { count: 2, messages: [
-          { id: "q1", text: "same\n\nReferenced files:\n- src/a.ts" },
-          { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
-        ] }));
-        hook.result.current.handleEvent(ev("queued", { count: 1, messages: [
-          { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
-        ] }));
-        if (ended) hook.result.current.handleEvent(ev("run_end"));
-        // Receipts may complete in reverse order. Only q1 was consumed.
-        hook.result.current.acceptSubmission({ kind: "user", id: 2, text: "same", files: ["src/a.ts"] },
-          { queued: true, count: 2, queueId: "q2" });
-        hook.result.current.acceptSubmission({ kind: "user", id: 1, text: "same", files: ["src/a.ts"] },
-          { queued: true, count: 1, queueId: "q1" });
-      });
-      expect(getItems()).toEqual([
-        expect.objectContaining({ id: 2, queueId: "q2", queued: true, files: ["src/a.ts"] }),
-        expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
-      ]);
-    });
+    it.each([false, true])(
+      "correlates references and duplicate receipts after drain, run ended=%s",
+      (ended) => {
+        const { hook, getItems } = setup();
+        act(() => {
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 2,
+              messages: [
+                { id: "q1", text: "same\n\nReferenced files:\n- src/a.ts" },
+                { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
+              ],
+            }),
+          );
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 1,
+              messages: [{ id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" }],
+            }),
+          );
+          if (ended) hook.result.current.handleEvent(ev("run_end"));
+          // Receipts may complete in reverse order. Only q1 was consumed.
+          hook.result.current.acceptSubmission(
+            { kind: "user", id: 2, text: "same", files: ["src/a.ts"] },
+            { queued: true, count: 2, queueId: "q2" },
+          );
+          hook.result.current.acceptSubmission(
+            { kind: "user", id: 1, text: "same", files: ["src/a.ts"] },
+            { queued: true, count: 1, queueId: "q1" },
+          );
+        });
+        expect(getItems()).toEqual([
+          expect.objectContaining({ id: 2, queueId: "q2", queued: true, files: ["src/a.ts"] }),
+          expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
+        ]);
+      },
+    );
 
     it("updates an existing idle bubble without duplicates and settles a referenced queue ID", () => {
       const { hook, getItems } = setup();
@@ -506,12 +532,17 @@ describe("useAgentEvents", () => {
       expect(getItems()).toHaveLength(1);
       expect(getItems()[0]).toMatchObject({ queued: true });
       act(() => {
-        hook.result.current.handleEvent(ev("queued", { count: 1, messages: [
-          { id: "q1", text: "read\n\nReferenced files:\n- src/a.ts" },
-        ] }));
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "q1", text: "read\n\nReferenced files:\n- src/a.ts" }],
+          }),
+        );
         hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
       });
-      expect(getItems()).toEqual([expect.objectContaining({ queued: false, promoted: true, files: ["src/a.ts"] })]);
+      expect(getItems()).toEqual([
+        expect.objectContaining({ queued: false, promoted: true, files: ["src/a.ts"] }),
+      ]);
     });
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();
@@ -964,6 +995,40 @@ describe("useAgentEvents", () => {
     });
     expect(getItems()).toHaveLength(2);
     expect(getItems()[1]).toMatchObject({ hook: "verification", verificationReason: "recheck" });
+  });
+
+  it("keeps check-review notices distinct and shows the completed outcome after the hook", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.handleEvent(
+        ev("text_delta", {
+          text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+        }),
+      );
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({
+        kind: "hook",
+        hook: "verification",
+        verificationReason: "check_review",
+      }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+      }),
+    ]);
   });
 
   it("retains a readiness evidence limitation without approving the pending plan", () => {

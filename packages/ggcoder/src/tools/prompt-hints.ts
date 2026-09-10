@@ -49,7 +49,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
-  generate_image: "Generate or edit images with gpt-image-2, only when explicitly requested.",
+  generate_image:
+    "Generate/edit images with Flare/Sunburst, orchestrated by GPT-6 Astra. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };

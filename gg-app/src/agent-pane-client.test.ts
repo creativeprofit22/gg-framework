@@ -80,41 +80,61 @@ describe("pane agent client", () => {
     });
   });
 
-  it.each(["primary", "right"])("validates Autopilot confirmations and propagates failures for %s", async (paneId) => {
-    const set = paneId === "primary" ? setAutopilot : createPaneAgentClient(paneId).setAutopilot;
-    const ready = invoke.getMockImplementation()!;
-    for (const autopilot of [true, false]) {
-      invoke.mockImplementation(async (command, args) => command === "agent_autopilot_set" ? { autopilot } : ready(command, args));
-      await expect(set(true)).resolves.toBe(autopilot);
-    }
-    for (const response of [{ error: "configuration refresh in progress" }, {}, null, { autopilot: "true" }, { autopilot: 1 }]) {
-      invoke.mockImplementation(async (command, args) => command === "agent_autopilot_set" ? response : ready(command, args));
-      await expect(set(true)).rejects.toThrow("Invalid Autopilot response");
-    }
-    invoke.mockImplementation(async (command, args) => {
-      if (command === "agent_autopilot_set") throw new Error("Transport unavailable");
-      return ready(command, args);
-    });
-    await expect(set(true)).rejects.toThrow("Transport unavailable");
-    expect(invoke).toHaveBeenCalledWith("agent_autopilot_set", { paneId, enabled: true });
-  });
+  it.each(["primary", "right"])(
+    "validates Autopilot confirmations and propagates failures for %s",
+    async (paneId) => {
+      const set = paneId === "primary" ? setAutopilot : createPaneAgentClient(paneId).setAutopilot;
+      const ready = invoke.getMockImplementation()!;
+      for (const autopilot of [true, false]) {
+        invoke.mockImplementation(async (command, args) =>
+          command === "agent_autopilot_set" ? { autopilot } : ready(command, args),
+        );
+        await expect(set(true)).resolves.toBe(autopilot);
+      }
+      for (const response of [
+        { error: "configuration refresh in progress" },
+        {},
+        null,
+        { autopilot: "true" },
+        { autopilot: 1 },
+      ]) {
+        invoke.mockImplementation(async (command, args) =>
+          command === "agent_autopilot_set" ? response : ready(command, args),
+        );
+        await expect(set(true)).rejects.toThrow("Invalid Autopilot response");
+      }
+      invoke.mockImplementation(async (command, args) => {
+        if (command === "agent_autopilot_set") throw new Error("Transport unavailable");
+        return ready(command, args);
+      });
+      await expect(set(true)).rejects.toThrow("Transport unavailable");
+      expect(invoke).toHaveBeenCalledWith("agent_autopilot_set", { paneId, enabled: true });
+    },
+  );
 
-  it.each(["primary", "right"])("does not treat failed history reads as an empty session for %s", async (paneId) => {
-    const load = paneId === "primary" ? listHistory : createPaneAgentClient(paneId).listHistory;
-    const ready = invoke.getMockImplementation()!;
-    invoke.mockImplementation(async (command, args) => {
-      if (command === "agent_history") throw new Error("History unavailable");
-      return ready(command, args);
-    });
-    await expect(load()).rejects.toThrow("History unavailable");
-    for (const response of [{}, { history: null }, { history: "invalid" }]) {
-      invoke.mockImplementation(async (command, args) => command === "agent_history" ? response : ready(command, args));
-      await expect(load()).rejects.toThrow("Invalid history response");
-    }
-    invoke.mockImplementation(async (command, args) => command === "agent_history" ? { history: [] } : ready(command, args));
-    await expect(load()).resolves.toEqual([]);
-    expect(invoke).toHaveBeenCalledWith("agent_history", { paneId });
-  });
+  it.each(["primary", "right"])(
+    "does not treat failed history reads as an empty session for %s",
+    async (paneId) => {
+      const load = paneId === "primary" ? listHistory : createPaneAgentClient(paneId).listHistory;
+      const ready = invoke.getMockImplementation()!;
+      invoke.mockImplementation(async (command, args) => {
+        if (command === "agent_history") throw new Error("History unavailable");
+        return ready(command, args);
+      });
+      await expect(load()).rejects.toThrow("History unavailable");
+      for (const response of [{}, { history: null }, { history: "invalid" }]) {
+        invoke.mockImplementation(async (command, args) =>
+          command === "agent_history" ? response : ready(command, args),
+        );
+        await expect(load()).rejects.toThrow("Invalid history response");
+      }
+      invoke.mockImplementation(async (command, args) =>
+        command === "agent_history" ? { history: [] } : ready(command, args),
+      );
+      await expect(load()).resolves.toEqual([]);
+      expect(invoke).toHaveBeenCalledWith("agent_history", { paneId });
+    },
+  );
 
   it.each(["primary", "right"])("requires an ask acknowledgement for %s", async (paneId) => {
     const submit = () =>
@@ -182,7 +202,7 @@ describe("pane agent client", () => {
 
   it.each([
     null,
-    { error: "Enhancement failed" },
+    { error: " " },
     {},
     { enhanced: " ", segments: [] },
     { enhanced: "Rewrite", segments: [null] },
@@ -193,6 +213,18 @@ describe("pane agent client", () => {
     invoke.mockResolvedValueOnce(response);
     await expect(createPaneAgentClient("right").enhancePrompt("Keep my draft")).rejects.toThrow(
       "Invalid prompt enhancement response",
+    );
+    expect(invoke).toHaveBeenCalledWith("agent_enhance_prompt", {
+      paneId: "right",
+      text: "Keep my draft",
+    });
+  });
+
+  it("preserves the provider error for the owning pane", async () => {
+    invoke.mockResolvedValueOnce({ ready: true, generation: 1, sessionId: "right-session" });
+    invoke.mockResolvedValueOnce({ error: "Enhancement failed" });
+    await expect(createPaneAgentClient("right").enhancePrompt("Keep my draft")).rejects.toThrow(
+      "Enhancement failed",
     );
     expect(invoke).toHaveBeenCalledWith("agent_enhance_prompt", {
       paneId: "right",
@@ -565,15 +597,20 @@ describe("pane agent client", () => {
     }
   });
 
-  it.each(["primary", "right"])("preserves queue correlation through %s prompt IPC", async (paneId) => {
-    const receipt = { queued: true, count: 2, queueId: "q19" };
-    invoke.mockResolvedValueOnce(receipt);
-    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
-    await expect(submit("read\n\nReferenced files:\n- src/a.ts")).resolves.toEqual(receipt);
-  });
+  it.each(["primary", "right"])(
+    "preserves queue correlation through %s prompt IPC",
+    async (paneId) => {
+      const receipt = { queued: true, count: 2, queueId: "q19" };
+      invoke.mockResolvedValueOnce(receipt);
+      const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+      await expect(submit("read\n\nReferenced files:\n- src/a.ts")).resolves.toEqual(receipt);
+    },
+  );
 
   it.each([
-    null, {}, { queued: true, count: 1 },
+    null,
+    {},
+    { queued: true, count: 1 },
     { queued: true, count: 1, queueId: "" },
     { queued: true, count: 1, queueId: "q0" },
     { queued: true, count: 1, queueId: "q1\n" },

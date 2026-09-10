@@ -26,13 +26,13 @@ afterEach(async () => {
   );
 });
 
-describe("ProcessManager.waitForExit", () => {
+describe("ProcessManager.waitForExitOrWake", () => {
   it("returns as soon as the process exits, well before the timeout", async () => {
     const pm = await manager();
     const { id } = await pm.start("sleep 1; echo done", process.cwd());
     const startedAt = Date.now();
 
-    expect(await pm.waitForExit(id, 30_000)).toBe("exited");
+    expect(await pm.waitForExitOrWake(id, 30_000)).toBe("exited");
     expect(Date.now() - startedAt).toBeLessThan(10_000);
     // Exit state is settled by the time the wait resolves, so the read that
     // follows reports "exited", not a stale "running".
@@ -43,28 +43,28 @@ describe("ProcessManager.waitForExit", () => {
     const pm = await manager();
     const { id } = await pm.start("sleep 30", process.cwd());
 
-    expect(await pm.waitForExit(id, 1000)).toBe("timeout");
+    expect(await pm.waitForExitOrWake(id, 1000)).toBe("timeout");
     expect((await pm.readOutput(id)).isRunning).toBe(true);
   });
 
   it("returns immediately for an already-exited process and unknown ids", async () => {
     const pm = await manager();
     const { id } = await pm.start("echo quick", process.cwd());
-    await pm.waitForExit(id, 30_000);
+    await pm.waitForExitOrWake(id, 30_000);
 
-    expect(await pm.waitForExit(id, 30_000)).toBe("exited");
-    expect(await pm.waitForExit("nope1234", 30_000)).toBe("unknown");
+    expect(await pm.waitForExitOrWake(id, 30_000)).toBe("exited");
+    expect(await pm.waitForExitOrWake("nope1234", 30_000)).toBe("unknown");
   });
 });
 
-describe("ProcessManager.waitForExit cancellation", () => {
+describe("ProcessManager.waitForExitOrWake cancellation", () => {
   it("gives up the wait when the caller aborts, leaving the process alive", async () => {
     const pm = await manager();
     const { id } = await pm.start("sleep 30", process.cwd());
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 200);
 
-    expect(await pm.waitForExit(id, 30_000, controller.signal)).toBe("timeout");
+    expect(await pm.waitForExitOrWake(id, 30_000, controller.signal)).toBe("timeout");
     expect((await pm.readOutput(id)).isRunning).toBe(true);
   });
 
@@ -72,7 +72,7 @@ describe("ProcessManager.waitForExit cancellation", () => {
     const pm = await manager();
     const { id } = await pm.start("sleep 30", process.cwd());
 
-    expect(await pm.waitForExit(id, 30_000, AbortSignal.abort())).toBe("timeout");
+    expect(await pm.waitForExitOrWake(id, 30_000, AbortSignal.abort())).toBe("timeout");
   });
 });
 

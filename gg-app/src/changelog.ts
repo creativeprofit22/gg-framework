@@ -22,6 +22,16 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.63.0",
+    date: "2026-09-09",
+    items: [
+      "Your image toolbox just leveled up. I added `GPT Image 2.5 Flare` for fast creation and `Sunburst` for precise edits, plus `transparent backgrounds` so you can make artwork ready to drop into your project.",
+      "Your words, sharpened without changing the mission. I tuned the `Prompt Enhancer` to keep your questions, details, and boundaries intact while respecting your selected model's settings. If a rewrite comes back empty or cut short, your original draft stays safe.",
+      "Less stop-start while your agent codes. I moved `edit checks` into the background and streamlined `verification` follow-ups, so you get smoother progress and a final answer about your task, not a detour about the checks.",
+      "No more waiting for a running preview to shut down. I fixed `dev-server readiness` waits so your agent can check the page when it is ready and leave the server running for you.",
+    ],
+  },
+  {
     version: "0.62.1",
     date: "2026-09-08",
     items: [

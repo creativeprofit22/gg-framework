@@ -1,3 +1,4 @@
+import { nativeDevAuthFile } from "../app-sidecar-native-auth.js";
 import {
   agentLoop,
   isAbortError,
@@ -611,6 +612,7 @@ export class AgentSession {
   private readonly notifications = new AgentNotificationQueue();
   private managerAbortSignal?: AbortSignal;
   private readonly managerAbortHandler = () => {
+    this.lspManager?.clearPendingDiagnostics();
     void this.subAgentManager?.interruptAll();
   };
   private mcpManager?: MCPClientManager;
@@ -761,7 +763,7 @@ export class AgentSession {
     await this.settingsManager.load();
     this.contextLimits = resolveContextLimits(this.settingsManager.get("contextLimits"));
 
-    this.authStorage = new AuthStorage(paths.authFile);
+    this.authStorage = new AuthStorage(nativeDevAuthFile(paths.authFile));
     await this.authStorage.load();
     await this.refreshStoredAuthState();
 
@@ -807,6 +809,7 @@ export class AgentSession {
       provider: this.provider,
       model: this.model,
       lspDiagnostics: this.settingsManager.get("lspDiagnostics"),
+      deferLspDiagnostics: true,
       getWriteGuardSettings: () => ({
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
         additionalRoots: this.additionalRoots,
@@ -1502,7 +1505,11 @@ export class AgentSession {
   private async acceptPromptTemplate(
     content: string,
     provenance: MessageProvenance,
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta } = {},
+    options: {
+      disableTools?: boolean;
+      onAccepted?: () => void | Promise<void>;
+      meta?: PromptMeta;
+    } = {},
   ): Promise<void> {
     await this.ensureActivePhaseSessionMetadata();
     const userMessage: Message = { role: "user", content, provenance };
@@ -1541,7 +1548,11 @@ export class AgentSession {
       kind: "prompt",
       visibility: "transcript",
     },
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta } = {},
+    options: {
+      disableTools?: boolean;
+      onAccepted?: () => void | Promise<void>;
+      meta?: PromptMeta;
+    } = {},
   ): Promise<void> {
     if (!content.trim()) return;
     await this.adoptDeferredCheckpointBeforePrompt();
@@ -1597,7 +1608,8 @@ export class AgentSession {
       return;
     }
     const parts = this.buildAttachmentParts(text, attachments);
-    if (parts.length === 0) throw new Error("Attachments produced no usable content. Nothing was sent.");
+    if (parts.length === 0)
+      throw new Error("Attachments produced no usable content. Nothing was sent.");
     await this.adoptDeferredCheckpointBeforePrompt();
     await this.ensureActivePhaseSessionMetadata();
     const userMessage: Message = {
@@ -1635,7 +1647,9 @@ export class AgentSession {
     const glmImageHint = this.provider === "glm" && modelInfo?.supportsImages === false;
     for (const a of attachments) {
       if (!a.path && (a.kind !== "image" || glmImageHint || !a.data)) {
-        throw new Error(`Attachment "${a.name}" is unavailable for analysis. Nothing was sent; retry the attachment.`);
+        throw new Error(
+          `Attachment "${a.name}" is unavailable for analysis. Nothing was sent; retry the attachment.`,
+        );
       }
       if (a.kind === "image") {
         if (glmImageHint && a.path) {
@@ -1700,6 +1714,7 @@ export class AgentSession {
    */
   private resetHookState(originalRequest: string): void {
     this.semanticLoop.controller?.abort();
+    this.lspManager?.clearPendingDiagnostics();
     this.hookStats = {
       changedLines: 0,
       toolCalls: 0,
@@ -1900,6 +1915,14 @@ export class AgentSession {
    * post-compaction re-grounding. At most one loop-break/re-grounding per run.
    * Mirrors the TUI's getSteeringMessages ordering.
    */
+  private drainQueuedDiagnostics(): string | undefined {
+    const evidence = this.verificationEvidenceLedger.snapshot().currentEvidence;
+    // Suppress silence notices only after current, successful command evidence.
+    // Real diagnostics remain visible; failed/stale/skipped checks never qualify.
+    const verified = evidence.length > 0 && evidence.every((entry) => entry.status === "passed");
+    return this.lspManager?.drainDiagnostics(!verified);
+  }
+
   private getHookSteeringMessages(): Message[] | null {
     // Environment drift: settings can move the network allowlist mid-session,
     // and `/add-dir` can widen the workspace, with no prompt rebuild — leaving
@@ -1929,12 +1952,17 @@ export class AgentSession {
     // it in the very next turn instead of discovering it at the pre-stop
     // completion gate — but it never displaces user steering, which rides out
     // in the same batch when both are pending.
+    const diagnosticText = this.drainQueuedDiagnostics();
+    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
     const notified = this.notifications.drain();
     const notificationMessage: Message | null =
-      notified.length > 0
+      notified.length > 0 || diagnosticText
         ? {
             role: "user",
-            content: buildNotificationSteeringText(notified.map((entry) => entry.text)),
+            content: buildNotificationSteeringText([
+              ...notified.map((entry) => entry.text),
+              ...(diagnosticText ? [diagnosticText] : []),
+            ]),
             provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
           }
         : null;
@@ -2328,6 +2356,21 @@ export class AgentSession {
    * blocked until harness-owned post-injection reads cover every changed file.
    */
   private async getHookFollowUpMessages(): Promise<Message[] | null> {
+    // Edits return immediately; only the completion boundary waits for remaining
+    // checks. Queued timeouts stay explicitly unverified, never a false all-clear.
+    await this.lspManager?.flushDiagnostics(this.opts.signal);
+    if (this.opts.signal?.aborted) return null;
+    const diagnosticText = this.drainQueuedDiagnostics();
+    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
+    if (diagnosticText) {
+      return [
+        {
+          role: "user",
+          content: buildNotificationSteeringText([diagnosticText]),
+          provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+        },
+      ];
+    }
     const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager);
     if (childCompletionFollowUp) return childCompletionFollowUp;
 
@@ -3701,8 +3744,12 @@ export class AgentSession {
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
     const displayMeta = normalizePromptMeta(meta);
-    this.userQueue.push({ id: `q${this.queueSeq}`, text, attachments,
-      ...(displayMeta ? { meta: displayMeta } : {}) });
+    this.userQueue.push({
+      id: `q${this.queueSeq}`,
+      text,
+      attachments,
+      ...(displayMeta ? { meta: displayMeta } : {}),
+    });
     return this.userQueue.length;
   }
 
@@ -4777,7 +4824,10 @@ export class AgentSession {
    */
   async enhancePrompt(text: string): Promise<EnhanceResult> {
     if (!text.trim()) return { enhanced: text, segments: [{ kind: "text", text }] };
-    const creds = await this.authStorage.resolveCredentials(this.provider, {
+    // Keep credentials and settings on the model selected at click time, even
+    // if the user switches models while credential resolution is pending.
+    const { provider, model, thinkingLevel, maxTokens, baseUrl } = this;
+    const creds = await this.authStorage.resolveCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     // Cheap, best-effort stack detection from the project root so terminology is
@@ -4789,12 +4839,16 @@ export class AgentSession {
       /* detection is best-effort — fall back to no stack hint */
     }
     return enhancePrompt({
-      provider: this.provider,
-      model: resolveTransportModel(this.provider, this.model),
+      provider,
+      model: resolveTransportModel(provider, model),
+      thinking: thinkingLevel,
+      maxTokens,
+      userAgent: provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
+      projectId: creds.projectId,
       prompt: text,
       stack,
       apiKey: creds.accessToken,
-      baseUrl: this.baseUrl ?? creds.baseUrl,
+      baseUrl: baseUrl ?? creds.baseUrl,
       accountId: creds.accountId,
       signal: this.opts.signal,
     });
@@ -5216,8 +5270,14 @@ export class AgentSession {
       const messages = this.activeLoopMessages ?? this.messages;
       const index = messages.indexOf(message);
       if (index < 0) throw new Error("Prompt hint message is not in the accepted transcript");
-      const afterMessageCount = messages.slice(0, index + 1).filter((m) => m.role !== "system").length;
-      await this.persistAppMarker("user_hint", { ...meta }, afterMessageCount - this.persistedTranscriptCount());
+      const afterMessageCount = messages
+        .slice(0, index + 1)
+        .filter((m) => m.role !== "system").length;
+      await this.persistAppMarker(
+        "user_hint",
+        { ...meta },
+        afterMessageCount - this.persistedTranscriptCount(),
+      );
       this.promptHints.delete(message);
     }
   }

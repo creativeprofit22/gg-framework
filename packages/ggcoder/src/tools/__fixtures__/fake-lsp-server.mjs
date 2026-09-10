@@ -39,6 +39,7 @@ const endsProgress = args.includes("--progress-end") || prematureEmpty;
 const initError = args.includes("--init-error");
 const crashOnOpen = args.includes("--crash-on-open");
 const silent = args.includes("--silent");
+const staleVersion = args.includes("--stale-version");
 const pidFile = args.find((a) => a.startsWith("--pid-file="))?.split("=")[1];
 const noNav = args.includes("--no-nav");
 const navSilent = args.includes("--nav-silent");
@@ -109,7 +110,7 @@ function publish(uri) {
     send({
       jsonrpc: "2.0",
       method: "textDocument/publishDiagnostics",
-      params: { uri, diagnostics: diagnosticsFor(text) },
+      params: { uri, diagnostics: diagnosticsFor(text), ...(staleVersion ? { version: 0 } : {}) },
     });
   };
   if (delayMs > 0) setTimeout(fire, delayMs);

@@ -149,10 +149,10 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
     reason = "preflight-rejected";
     const approvalKey = randomUUID();
     const answer = await ask({ questions: [{
-      id: approvalKey, kind: "choice", question: `Run /${snapshot.command.name} for this opportunity?`,
-      detail: `Scope: ${snapshot.route.scopePaths.join(", ")}. ${snapshot.route.mutates ? "May change files and run commands; scope is not a filesystem sandbox. Later actions need separate approval." : "Read-only tools; no installs, corpus additions, or MCP access."} ${snapshot.route.availability.portability === "machine-local" ? snapshot.route.availability.portabilityWarning : "Bundled specialist."}`,
+      id: approvalKey, kind: "choice", question: `Allow /${snapshot.command.name} to work on this task?`,
+      detail: `Task area: ${snapshot.route.scopePaths.join(", ")}. ${snapshot.route.mutates ? "This task can change files and run commands. It is not technically restricted to the listed files. Later actions need separate approval." : "This task can only read information. It cannot install software, add projects to the code reference library, or use connected external tools (MCP)."} ${snapshot.route.availability.portability === "machine-local" ? "This task tool is installed on this computer and may not be available elsewhere." : "This task tool comes with GG."}`,
       allowOther: false,
-      options: [{ label: "Run this opportunity", value: snapshot.sha256 }, { label: "Cancel", value: "cancel", recommended: true }],
+      options: [{ label: "Approve and start task", value: snapshot.sha256 }, { label: "Cancel", value: "cancel", recommended: true }],
     }] });
     if (answer.action !== "answer" || answer.answers[approvalKey] !== snapshot.sha256) {
       reason = "approval-rejected";
@@ -200,7 +200,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
       onExitPlan: snapshot.route.mutates ? async (_planPath, content) => {
         if (content.length > 12000) { failed = true; throw new Error("Plan is too large for isolated approval; use a regular session."); }
         const key = randomUUID();
-        const answer = await ask({ questions: [{ id: key, kind: "choice", question: "Approve this isolated specialist's plan?", detail: content, allowOther: false,
+        const answer = await ask({ questions: [{ id: key, kind: "choice", question: "Approve this task's plan?", detail: content, allowOther: false,
           options: [{ label: "Approve this plan", value: "approve" }, { label: "Reject this plan", value: "reject", recommended: true }],
         }] });
         if (answer.action !== "answer" || answer.answers[key] !== "approve") {
@@ -223,7 +223,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
         const detail = JSON.stringify(args);
         if (detail.length > 12000) { failed = true; return false; }
         const key = randomUUID();
-        const answer = await ask({ questions: [{ id: key, kind: "choice", question: `Allow this specialist action: ${name}?`,
+        const answer = await ask({ questions: [{ id: key, kind: "choice", question: `Allow this step (${name}) using the exact details below? It may change files or run commands.`,
           detail, allowOther: false,
           options: [{ label: "Allow this action", value: "allow" }, { label: "Refuse this action", value: "refuse", recommended: true }],
         }] });
@@ -263,7 +263,7 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
         throw new Error("Required Tauri actions are unavailable.");
       }
       reason = "provider-or-partial-failure";
-      options.progress(`\nRunning isolated /${snapshot!.command.name}.\n`);
+      options.progress(`\nStarting /${snapshot!.command.name} for this task.\n`);
       await session!.promptResolvedCommand(snapshot!.command, `<programmatic-route-data>\n${JSON.stringify(snapshot!.route)}\n</programmatic-route-data>`);
     })();
     await bounded(operation, signal);
@@ -309,10 +309,10 @@ export async function executeProgrammaticOpportunity(options: ProgrammaticExecut
   return executionResultV1Schema.parse({
     version: 1, route: snapshot.route,
     status: success ? "succeeded" : reason === "cancelled" ? "cancelled" : "failed",
-    summary: success ? completed!.summary : `Execution did not complete: ${reason}. Any partial file changes remain; no automatic retry or rollback.`,
+    summary: success ? completed!.summary : `The task did not finish (${reason}). Files may already have changed. GG will not undo those changes or try again automatically.`,
     evidence: { version: 1, items: [
-      ...(configurationRefreshRequired ? [{ basis: "observed", source: "programmatic-execution", code: "configuration-refresh-required", severity: "warning", message: "Configuration changed or could not be inventoried. Refresh inventory, approve the current profile and scan again before future execution. This settlement grants no approval to configuration changes." }] : []),
-      { basis: "inferred", source: "programmatic-execution", code: reason, severity: success ? "info" : "warning", message: success ? "Specialist claims the selected success condition was verified; host observed the referenced tool calls, not independent semantic verification." : "Execution did not produce a verified, cleanly settled result." },
+      ...(configurationRefreshRequired ? [{ basis: "observed", source: "programmatic-execution", code: "configuration-refresh-required", severity: "warning", message: "Project settings changed or could not be checked. Review setup, approve the current settings and check for opportunities before starting another task. This result does not approve any changed settings." }] : []),
+      { basis: "inferred", source: "programmatic-execution", code: reason, severity: success ? "info" : "warning", message: success ? "The task tool reports that its success check passed. GG confirmed the listed tools ran, but did not independently check whether the result is correct." : "The task did not finish with a confirmed result. Review its progress and errors before deciding what to do next." },
       ...(success ? completed!.toolCallIds : [...observed.keys()].slice(0, 16)).map((id) => ({ basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: `Tool ${observed.get(id)} completed (${id}).` })),
     ] },
   });

@@ -44,15 +44,15 @@ export async function handleAppSidecarProgrammaticExecution(options: {
   const selection = parseProgrammaticRunSelection(options.text);
   if (selection === null) return false;
   if (selection === "invalid" || options.attachmentCount || options.automated || !options.codeMode) {
-    options.respond(400, { error: "invalid_programmatic_selection", message: "Select exactly one opportunity and its configuration fingerprint in Code mode, without attachments or automation." });
+    options.respond(400, { error: "invalid_programmatic_selection", message: "In Code mode, choose one item in Opportunities and use Review task approval. Start it yourself, without attachments or automatic follow-ups." });
     return true;
   }
   if (options.planMode) {
-    options.respond(403, { error: "programmatic_execution_plan_mode", message: "Plan mode permits inspection only." });
+    options.respond(403, { error: "programmatic_execution_plan_mode", message: "Plan mode only allows review. Turn it off before starting a task." });
     return true;
   }
   if (options.busy || !options.claimStart()) {
-    options.respond(409, { error: "programmatic_execution_busy", message: "Wait for the current run to finish. Opportunity selection is never queued." });
+    options.respond(409, { error: "programmatic_execution_busy", message: "Wait for the current work to finish, then try again. This task was not added to a waiting list." });
     return true;
   }
   options.respond(202, { queued: false, count: 0 });

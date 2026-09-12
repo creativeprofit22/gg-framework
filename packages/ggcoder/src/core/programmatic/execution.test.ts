@@ -182,7 +182,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
         planMode: parent.getPlanMode(), claimStart, respond, runAgent, execute,
       };
       expect(await handleAppSidecarProgrammaticExecution(input)).toBe(true);
-      expect(respond).toHaveBeenCalledExactlyOnceWith(403, { error: "programmatic_execution_plan_mode", message: "Plan mode permits inspection only." });
+      expect(respond).toHaveBeenCalledExactlyOnceWith(403, { error: "programmatic_execution_plan_mode", message: "Plan mode only allows review. Turn it off before starting a task." });
       expect(claimStart).not.toHaveBeenCalled();
       expect(runAgent).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
@@ -314,7 +314,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     const parent = new AbortController();
     const run = executeThroughApp(options({ signal: parent.signal, cancelQuestions: () => bridge.cancelAll(), ask: (request) => {
       const question = request.questions[0]!.question;
-      const shouldPark = mode === "execution" || (mode === "action" ? question.startsWith("Allow this specialist action") : question.startsWith("Approve this isolated"));
+      const shouldPark = mode === "execution" || (mode === "action" ? question.startsWith("Allow this step (") : question.startsWith("Approve this task's plan?"));
       return shouldPark ? bridge.park(request) : answer(request);
     } }), "failed");
     await parked;
@@ -562,7 +562,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     const approvedActions: string[] = [];
     const ask = vi.fn(async (request: AskUserRequest) => {
       const question = request.questions[0]!;
-      if (question.question.startsWith("Run /")) return answer(request);
+      if (question.question.startsWith("Allow /")) return answer(request);
       const action = JSON.parse(question.detail!).action as string;
       approvedActions.push(action);
       if (approvedActions.length === 1 || action === "calibrate" || (action === "package" && approvedActions.filter((value) => value === "package").length === 2)) {

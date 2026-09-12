@@ -362,7 +362,7 @@ describe("chat report and dismissal", () => {
     await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "broken");
     const report = await readProgrammaticChatReport(root);
     expect(report.rows[0]!.route.reason).toBe(
-      "The opportunity has no allowlisted specialist candidate.",
+      "GG has no supported task tool for this opportunity. It can be reviewed but not started here.",
     );
     expect(
       await dismissProgrammaticOpportunity(root, report.rows[0]!.id, report.snapshot!),

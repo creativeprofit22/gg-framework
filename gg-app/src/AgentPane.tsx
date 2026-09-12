@@ -1988,7 +1988,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           type: "error",
           generation,
           epoch: programmaticEpoch.current,
-          error: "Opportunity request failed. Read the current report before retrying.",
+          error: "The request failed. Reload results to check what happened before trying again.",
           reconcile: ["approve-setup", "scan", "dismiss"].includes(request.action),
         });
     } finally {
@@ -2052,7 +2052,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           generation,
           epoch,
           error: rejected ? `Run rejected: ${error.message}` :
-            "Run acknowledgement is uncertain. Read the current report before retrying.",
+            "We could not confirm whether the task started. Reload results before trying again.",
           reconcile: !rejected,
         });
     } finally {

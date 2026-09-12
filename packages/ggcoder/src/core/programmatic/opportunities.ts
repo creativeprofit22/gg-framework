@@ -70,13 +70,13 @@ function detectCanonicalTauri(paths: ReadonlySet<string>): OpportunityDraft[] {
         },
         representativeCase: tauriConfig,
         repeatableTrigger:
-          "A package root contains package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json.",
+          "The app has the three configuration files needed to check its Tauri desktop packaging setup.",
         inputPaths,
         currentProcess: "Tauri packaging support must otherwise be maintained manually.",
-        expectedOutput: "Deterministic host-native Tauri packaging support for this app root.",
-        verification: "Verify the generated packaging support against the detected Tauri app.",
+        expectedOutput: "Set up repeatable desktop app packaging for this computer's operating system.",
+        verification: "Check that the generated packaging files match this desktop app.",
         risks: [
-          "Generated support could conflict with existing manually maintained packaging files.",
+          "New packaging files could conflict with packaging files you already maintain.",
         ],
         confidence: "medium",
         mutationPaths,
@@ -86,19 +86,19 @@ function detectCanonicalTauri(paths: ReadonlySet<string>): OpportunityDraft[] {
             observedEvidence(
               detectorId,
               "package-manifest",
-              "A sibling package manifest is present.",
+              "The app's package settings file was found.",
               packageManifest,
             ),
             observedEvidence(
               detectorId,
               "cargo-manifest",
-              "A sibling Tauri Cargo manifest is present.",
+              "The desktop app's Rust build settings were found.",
               cargoManifest,
             ),
             observedEvidence(
               detectorId,
               "tauri-json-config",
-              "A canonical Tauri JSON configuration is present.",
+              "The desktop app's settings use the supported JSON format.",
               tauriConfig,
             ),
           ],
@@ -141,15 +141,15 @@ function detectUnsupportedTauriConfig(paths: ReadonlySet<string>): OpportunityDr
         },
         representativeCase: unsupportedConfigs[0]!,
         repeatableTrigger:
-          "A package root contains package.json and src-tauri/Cargo.toml with only a known non-JSON Tauri configuration.",
+          "The desktop app's settings use a format this packaging setup does not support.",
         inputPaths,
         currentProcess: "The unsupported configuration format requires manual normalization.",
         expectedOutput:
-          "A canonical Tauri JSON configuration suitable for supported packaging setup.",
+          "Convert the desktop app's settings to the supported JSON format before setting up packaging.",
         verification:
-          "Confirm a canonical src-tauri/tauri.conf.json before routing packaging setup.",
+          "Check that src-tauri/tauri.conf.json exists and is valid before setting up packaging.",
         risks: [
-          "Configuration normalization could lose format-specific comments or unsupported values.",
+          "Converting settings could lose comments or values the new format does not support.",
         ],
         confidence: "low",
         mutationPaths: [canonicalConfig, ...unsupportedConfigs].sort(),
@@ -159,13 +159,13 @@ function detectUnsupportedTauriConfig(paths: ReadonlySet<string>): OpportunityDr
             observedEvidence(
               detectorId,
               "package-manifest",
-              "A sibling package manifest is present.",
+              "The app's package settings file was found.",
               packageManifest,
             ),
             observedEvidence(
               detectorId,
               "cargo-manifest",
-              "A sibling Tauri Cargo manifest is present.",
+              "The desktop app's Rust build settings were found.",
               cargoManifest,
             ),
             ...unsupportedConfigs.map((path) =>

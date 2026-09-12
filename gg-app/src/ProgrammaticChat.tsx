@@ -7,6 +7,14 @@ import {
 import { Badge } from "./Badge";
 import { canRunProgrammaticSelection, type ProgrammaticChatState } from "./programmatic-chat-state";
 
+const stateLabels: Record<ProgrammaticChatSummary["state"], string> = {
+  discovered: "Found",
+  queued: "Waiting to start",
+  running: "In progress",
+  completed: "Completed",
+  dismissed: "Dismissed",
+};
+
 /** One in-thread review section, sharing the transcript rail and existing controls. */
 export function ProgrammaticChat({
   state,
@@ -38,7 +46,7 @@ export function ProgrammaticChat({
   const selected = state.detail;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
-      title: "Actionable",
+      title: "Ready to review",
       matches: (row) =>
         row.presence === "present" && !["completed", "dismissed"].includes(row.state),
     },
@@ -50,7 +58,7 @@ export function ProgrammaticChat({
       title: "Dismissed",
       matches: (row) => row.presence === "present" && row.state === "dismissed",
     },
-    { title: "Disappeared", matches: (row) => row.presence === "disappeared" },
+    { title: "No longer found", matches: (row) => row.presence === "disappeared" },
   ];
   return (
     <section
@@ -72,13 +80,13 @@ export function ProgrammaticChat({
         {state.operation
           ? `${state.operation === "report" || state.operation === "detail" ? "Loading" : "Working"}…`
           : busy
-            ? "A run is active. Use the existing approval and cancellation controls below."
+            ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
             : state.notice}
       </p>
       {planMode && (
         <p>
-          Plan mode: inspection only. Leave plan mode before approving, scanning, running or
-          dismissing.
+          Plan mode lets you review without making changes. Turn it off before saving setup,
+          checking for opportunities, starting work or dismissing an item.
         </p>
       )}
       {report && <p>{report.reason}</p>}
@@ -86,8 +94,8 @@ export function ProgrammaticChat({
       {state.error && <p role="alert">{state.error}</p>}
       {state.reconcile && (
         <p>
-          Read the current report before submitting another change. Nothing is retried
-          automatically.
+          Reload the results to check what was saved before trying again. This action
+          will not retry automatically.
         </p>
       )}
       <div className="programmatic-actions">
@@ -96,14 +104,14 @@ export function ProgrammaticChat({
           disabled={locked}
           onClick={() => onAction({ version: 1, action: "inspect-setup" })}
         >
-          Inspect setup
+          Review setup
         </button>
         <button
           className="btn btn-ghost btn-sm"
           disabled={locked}
           onClick={() => onAction({ version: 1, action: "report", offset: report?.offset ?? 0 })}
         >
-          {state.error ? "Retry report" : "Refresh report"}
+          {state.error ? "Retry loading results" : "Refresh results"}
         </button>
         {report && report.status !== "setup-required" && (
           <button
@@ -112,34 +120,35 @@ export function ProgrammaticChat({
             title={report.scan?.reason}
             onClick={() => onAction({ version: 1, action: "scan" })}
           >
-            Rescan
+            Check for opportunities
           </button>
         )}
       </div>
       {state.proposal && (
         <div className="programmatic-proposal">
-          <h3>Exact setup proposal</h3>
+          <h3>Review what to enable</h3>
           <p>
-            Inspection writes nothing. Approve only this profile; specialist execution requires its
-            own approval.
+            Find repeatable tasks GG can help with. Reviewing setup changes no files.
+            Approve and save setup writes the check settings shown below to this project.
+            It does not start the work; each task needs a separate approval.
           </p>
-          <pre aria-label="Exact proposed profile">{state.proposal.profileJson}</pre>
+          <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
           <p>
-            Configuration fingerprint: <code>{state.proposal.fingerprint}</code>
+            Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
           </p>
-          <h4>Proposed routes</h4>
+          <h4>Tasks and the tools that handle them</h4>
           <ul>
             {state.proposal.routes.map(({ id, route }) => (
               <li key={id}>
                 {route.command ?? "Unavailable"}: {route.reason}
                 {route.machineLocal &&
-                  " Available only on machines with this specialist installed."}
+                  " This task tool must be installed on the computer you use."}
               </li>
             ))}
           </ul>
           <details>
-            <summary>Exclusions and configuration inputs</summary>
-            <h4>Exclusions</h4>
+            <summary>What is skipped and which files were checked</summary>
+            <h4>Skipped items</h4>
             <ul>
               {state.proposal.exclusions.map((item, index) => (
                 <li key={index}>
@@ -147,7 +156,7 @@ export function ProgrammaticChat({
                 </li>
               ))}
             </ul>
-            <h4>Configuration inputs</h4>
+            <h4>Files checked and their versions</h4>
             <ul>
               {state.proposal.configurationInputs.map((item) => (
                 <li key={item.path}>
@@ -157,7 +166,7 @@ export function ProgrammaticChat({
             </ul>
           </details>
           {!state.proposalApprovable && (
-            <p>Inspect setup again before approving. This proposal is retained for reference only.</p>
+            <p>Choose Review setup again before approving. These older settings are shown for reference only.</p>
           )}
           <button
             className="btn btn-primary btn-sm"
@@ -170,15 +179,15 @@ export function ProgrammaticChat({
               })
             }
           >
-            Approve setup
+            Approve and save setup
           </button>
         </div>
       )}
       {report?.status === "setup-required" && (
-        <p>Setup required. Inspect the exact profile before approving it.</p>
+        <p>Start with Review setup to see which repeatable tasks GG can help with. Nothing is saved until you approve.</p>
       )}
       {report && report.status !== "setup-required" && report.total === 0 && (
-        <p>No opportunities in this report. Scan to check the approved profile.</p>
+        <p>No opportunities to show. Choose Check for opportunities to run the saved checks and save their results. This does not start any task.</p>
       )}
       {groups.map(({ title, matches }) => {
         const rows = report?.rows.filter(matches) ?? [];
@@ -196,8 +205,8 @@ export function ProgrammaticChat({
                       onClick={() => onSelect(row.id)}
                     >
                       <span>{row.expectedOutput}</span>
-                      <Badge>{row.state}</Badge>
-                      {row.presence === "disappeared" && <Badge>Disappeared</Badge>}
+                      <Badge>{stateLabels[row.state]}</Badge>
+                      {row.presence === "disappeared" && <Badge>No longer found</Badge>}
                     </button>
                     <p>{row.route.reason}</p>
                   </li>
@@ -234,8 +243,8 @@ export function ProgrammaticChat({
       )}
       {state.missingSelection && (
         <p>
-          The selected opportunity is missing from the recovered report. No replacement was
-          selected.
+          Your selected opportunity is not in the restored results. Choose another item to
+          review; none was selected for you.
         </p>
       )}
       {selected && (
@@ -243,15 +252,15 @@ export function ProgrammaticChat({
           <h3>Selected opportunity</h3>
           <p>{selected.summary.expectedOutput}</p>
           <p>
-            <Badge>{selected.summary.state}</Badge>{" "}
-            {selected.summary.presence === "disappeared" && "Disappeared; cannot run."}
+            <Badge>{stateLabels[selected.summary.state]}</Badge>{" "}
+            {selected.summary.presence === "disappeared" && "No longer found; cannot start."}
           </p>
           <p>{selected.summary.route.reason}</p>
           {selected.summary.actions?.run.available === false && <p>{selected.summary.actions.run.reason}</p>}
           {selected.summary.route.machineLocal && (
-            <p>This specialist is machine-local and may be unavailable elsewhere.</p>
+            <p>This task tool is installed on this computer. It may not be available on another computer.</p>
           )}
-          <h4>Mutation boundary</h4>
+          <h4>Files this task may change</h4>
           {selected.summary.mutationPaths.length ? (
             <ul>
               {selected.summary.mutationPaths.map((item) => (
@@ -261,7 +270,7 @@ export function ProgrammaticChat({
               ))}
             </ul>
           ) : (
-            <p>Read-only; no project changes.</p>
+            <p>This task only reads information; it does not change project files.</p>
           )}
           <div className="programmatic-actions">
             <button
@@ -270,7 +279,7 @@ export function ProgrammaticChat({
               title={selected.summary.actions?.run.reason}
               onClick={onRun}
             >
-              Run selected opportunity
+              Review task approval
             </button>
             <button
               className="btn btn-ghost btn-sm"
@@ -290,14 +299,14 @@ export function ProgrammaticChat({
                 })
               }
             >
-              Dismiss selected opportunity
+              Dismiss this item
             </button>
           </div>
           <details>
-            <summary>Evidence and verification</summary>
-            <h4>Repeatable trigger</h4>
+            <summary>Why this was suggested and how to check it</summary>
+            <h4>What was found</h4>
             <p>{selected.trigger}</p>
-            <h4>Verification</h4>
+            <h4>How success should be checked</h4>
             <p>{selected.verification}</p>
             <h4>Risks</h4>
             <ul>
@@ -309,7 +318,7 @@ export function ProgrammaticChat({
             <ul>
               {selected.evidence.map((item, index) => (
                 <li key={index}>
-                  <Badge>{item.basis}</Badge> {item.message}
+                  <Badge>{item.basis === "observed" ? "Checked directly" : item.basis === "inferred" ? "Inferred, not confirmed" : "Assumed, not checked"}</Badge> {item.message}
                   {item.location && (
                     <>
                       {" "}

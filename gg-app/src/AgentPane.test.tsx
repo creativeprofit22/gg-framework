@@ -3097,7 +3097,7 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh report" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(2));
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
   });
@@ -3143,7 +3143,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /Review packaging/ }));
-    const run = await screen.findByRole("button", { name: "Run selected opportunity" });
+    const run = await screen.findByRole("button", { name: "Review task approval" });
     await waitFor(() => expect((run as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(run);
     expect(pane.sendPrompt).toHaveBeenCalledExactlyOnceWith(`/programmatic-run ${id} ${id}`);
@@ -3171,10 +3171,10 @@ describe("AgentPane lifecycle", () => {
     const question = {
       id: "ask-1",
       questions: [{
-        id: "specialist-approval", kind: "choice", question: "Run /research for this opportunity?",
+        id: "specialist-approval", kind: "choice", question: "Allow /research to work on this task?",
         allowOther: false,
         options: [
-          { label: "Run this opportunity", value: "approved-snapshot" },
+          { label: "Approve and start task", value: "approved-snapshot" },
           { label: "Cancel", value: "cancel", recommended: true },
         ],
       }],
@@ -3191,7 +3191,7 @@ describe("AgentPane lifecycle", () => {
     }));
     expect(await screen.findByText(question.questions[0].question)).toBeTruthy();
     expect(pane.answerAskUser).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "1Run this opportunity" }));
+    fireEvent.click(screen.getByRole("button", { name: "1Approve and start task" }));
     await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith(
       "ask-1", "answer", { "specialist-approval": "approved-snapshot" },
     ));
@@ -3203,8 +3203,8 @@ describe("AgentPane lifecycle", () => {
       category: "rejected", code, message: "Wait for the current run to finish.",
     })));
     expect(await screen.findByText("Run rejected: Wait for the current run to finish.")).toBeTruthy();
-    expect(screen.queryByText(/Run acknowledgement is uncertain/)).toBeNull();
-    expect((screen.getByRole("button", { name: "Run selected opportunity" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/We could not confirm whether the task started/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(false);
     expect(pane.programmatic).toHaveBeenCalledTimes(2);
     expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
   });
@@ -3212,8 +3212,8 @@ describe("AgentPane lifecycle", () => {
   it.each(["Network response lost", "invalid prompt submission response"])("keeps %s uncertain without retrying execution", async (message) => {
     const { pane, receipt } = await deferredOpportunityRun(false);
     await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
-    expect(await screen.findByText(/Run acknowledgement is uncertain/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Run selected opportunity" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText(/We could not confirm whether the task started/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(true);
     expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
   });
 
@@ -3222,7 +3222,7 @@ describe("AgentPane lifecycle", () => {
     await act(async () => receipt.resolve({ queued: false, count: 0 }));
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(4));
     expect(await screen.findByText("Verified completion")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Review packaging.*completed/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /Review packaging.*Completed/ }).getAttribute("aria-pressed")).toBe("true");
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
       { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
       { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },

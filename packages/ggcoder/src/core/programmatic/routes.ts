@@ -157,7 +157,7 @@ export function resolveOpportunityRoute(
       status: "unroutable",
       opportunityId: opportunity.identity.id,
       availability: unavailable("unsupported"),
-      reason: "The opportunity has no allowlisted specialist candidate.",
+      reason: "GG has no supported task tool for this opportunity. It can be reviewed but not started here.",
     });
   }
 
@@ -168,7 +168,7 @@ export function resolveOpportunityRoute(
       status: "unroutable",
       opportunityId: opportunity.identity.id,
       availability: unavailable("unsupported"),
-      reason: "The opportunity names an unsupported specialist command.",
+      reason: "This opportunity needs a tool that GG does not support.",
     });
   }
   const definition = registryEntry(command.data);
@@ -222,7 +222,7 @@ export function resolveOpportunityRoute(
     opportunityId: opportunity.identity.id,
     candidateCommand: command.data,
     availability: failure,
-    reason: "Bounded route controls could not be derived from the opportunity.",
+    reason: "GG could not determine safe instructions for this task. It cannot start here.",
   });
 }
 

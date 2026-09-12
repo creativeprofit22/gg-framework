@@ -6,12 +6,12 @@ import { isProgrammaticChatResponse } from "../../packages/gg-core/src/programma
 
 // Browser-only changed-component evidence. Native actions are NOT exercised here.
 const origin = process.env.GG_UI_EVIDENCE_ORIGIN ?? "http://127.0.0.1:1421";
-const output = resolve(".gg/evidence/programmatic-chat-ui");
+const output = resolve(".gg/evidence/programmatic-chat-copy-ui");
 mkdirSync(output, { recursive: true });
 const hash = "a".repeat(64);
 const summary = { id: hash, expectedOutput: "Review repeatable packaging checks for the desktop application", state: "discovered", presence: "present", mutationPaths: [], actions: { run: { available: true, reason: "Ready to run." }, dismiss: { available: true, reason: "Ready to dismiss." } }, route: { available: true, command: "research", reason: "Research is available on this machine.", machineLocal: true } };
 const state = { generation: "fixture", epoch: 0, selectedId: hash, detailSnapshot: hash, operation: null, error: null, reconcile: false, notice: "One opportunity ready to review.", missingSelection: false, proposal: null, proposalApprovable: false,
-  report: { status: "current", reason: "Approved configuration is current.", fingerprint: hash, snapshot: hash, offset: 0, total: 1, scan: { available: true, reason: "Approved profile is ready to scan." }, rows: [summary] },
+  report: { status: "current", reason: "Saved check settings match the project.", fingerprint: hash, snapshot: hash, offset: 0, total: 1, scan: { available: true, reason: "Check for opportunities runs the saved checks and saves results. It does not start any task." }, rows: [summary] },
   detail: { summary, trigger: "Changes to the desktop application's manifest", verification: "Produce a read-only report with linked findings", risks: ["The specialist is installed on this machine only."], evidence: [{ basis: "observed", message: "Desktop manifest found", location: { path: `src/${"long-project-directory/".repeat(15)}package.json`, startLine: 1 } }], evidenceTruncated: false } };
 assert.ok(isProgrammaticChatResponse({ version: 1, ok: true, action: "report", report: state.report }), "Preview report must match the shared contract");
 assert.ok(isProgrammaticChatResponse({ version: 1, ok: true, action: "detail", snapshot: hash, detail: state.detail }), "Preview detail must match the shared contract");
@@ -27,14 +27,16 @@ await import('/@vite/client');
 const {default: React} = await import('/node_modules/.vite/deps/react.js');
 const {default: ReactDOM} = await import('/node_modules/.vite/deps/react-dom_client.js');
 const {ProgrammaticChat} = await import('/src/ProgrammaticChat.tsx');
+const {AskBand} = await import('/src/AskBand.tsx');
 await import('/src/App.css');
 const root = ReactDOM.createRoot(document.getElementById('fixture'));
 window.renderFixture = (state) => root.render(React.createElement(ProgrammaticChat,{state,busy:false,planMode:false,onAction:()=>{},onSelect:()=>{},onRun:()=>{}}));
+window.renderApproval = (prompt) => root.render(React.createElement(AskBand, { prompt, onAnswer: ()=>{}, onTypeInstead: ()=>{} }));
 window.renderFixture(${JSON.stringify(state)});
 </script><style>body{overflow:auto;background:var(--bg);color:var(--text)}#fixture{max-width:900px;margin:auto;padding:16px}</style></body></html>` }));
   await page.goto(`${origin}/__programmatic-preview`);
   await page.getByRole("heading", { name: "Opportunities", exact: true }).waitFor();
-  await page.getByText("Evidence and verification", { exact: true }).click();
+  await page.getByText("Why this was suggested and how to check it", { exact: true }).click();
   const capture = async (name) => { await page.screenshot({ path: `${output}/${name}.png`, fullPage: true }); results.screenshots.push(`${name}.png`); };
   await capture("desktop");
   await page.locator("body").click({ position: { x: 5, y: 5 } });
@@ -43,8 +45,8 @@ window.renderFixture(${JSON.stringify(state)});
   assert.equal(focused.visible, true); assert.notEqual(focused.ring, "none");
   results.checks.keyboardFocus = focused;
   await capture("keyboard-focus");
-  await page.getByRole("button", { name: "Refresh report" }).click();
-  results.checks.pointerFocus = await page.getByRole("button", { name: "Refresh report" }).evaluate((button) => button.matches(":focus-visible"));
+  await page.getByRole("button", { name: "Refresh results" }).click();
+  results.checks.pointerFocus = await page.getByRole("button", { name: "Refresh results" }).evaluate((button) => button.matches(":focus-visible"));
   assert.equal(results.checks.pointerFocus, false);
   const overflow = () => page.locator(".programmatic-chat").evaluate((node) => ({ width: node.clientWidth, scroll: node.scrollWidth }));
   await page.setViewportSize({ width: 320, height: 900 });
@@ -78,6 +80,35 @@ window.renderFixture(${JSON.stringify(state)});
   });
   assert.ok(results.checks.contrast.text >= 4.5); assert.ok(results.checks.contrast.primary >= 4.5); assert.ok(results.checks.contrast.focus >= 3);
   results.checks.accessibilityTree = await page.locator(".programmatic-chat").ariaSnapshot();
+  await page.goto(`${origin}/__programmatic-preview`);
+  await page.getByRole("heading", { name: "Opportunities", exact: true }).waitFor();
+  const proposal = { handle: hash, fingerprint: hash, profileJson: JSON.stringify({ version: 1, scanners: [{ version: 1, id: "tauri-package-json", specialistCommand: "setup-tauri-package" }] }, null, 2), routes: [{ id: hash, route: { ...summary.route, command: "setup-tauri-package", machineLocal: false, reason: "Desktop packaging setup is available." } }], exclusions: ["node_modules/**"], configurationInputs: [{ path: "package.json", sha256: hash }] };
+  const cases = {
+    setup: { ...state, proposal, proposalApprovable: true },
+    empty: { ...state, notice: null, selectedId: null, detail: null, report: { ...state.report, rows: [], total: 0 } },
+    "setup-required": { ...state, notice: null, selectedId: null, detail: null, report: { ...state.report, status: "setup-required", rows: [], total: 0, scan: { available: false, reason: "Review and approve setup before checking for opportunities." }, fingerprint: null, reason: "Choose Review setup to see which checks can be enabled. Reviewing changes no files." } },
+    error: { ...state, reconcile: true, error: "We could not confirm whether your change was saved. Reload results before trying again." },
+    progress: { ...state, operation: "scan" },
+    completed: { ...state, notice: null, detail: { ...state.detail, summary: { ...summary, state: "completed", route: { ...summary.route, available: false } } }, report: { ...state.report, rows: [{ ...summary, state: "completed" }] } },
+  };
+  for (const [name, fixture] of Object.entries(cases)) {
+    await page.evaluate((value) => window.renderFixture(value), fixture);
+    await page.getByRole("heading", { name: "Opportunities", exact: true }).waitFor();
+    for (const width of [1100, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      const dimensions = await overflow();
+      assert.ok(dimensions.scroll <= dimensions.width + 1, `${name} fits ${width}px`);
+      await capture(`${name}-${width}`);
+    }
+  }
+  await page.evaluate(() => window.renderApproval({ id: "fixture-approval", questions: [{ id: "task", kind: "choice", question: "Allow /setup-tauri-package to work on this task?", detail: "Task area: src-tauri. This task can change files and run commands. It is not technically restricted to the listed files. Later actions need separate approval. This task tool comes with GG.", allowOther: false, options: [{ label: "Approve and start task", value: "approve" }, { label: "Cancel", value: "cancel", recommended: true }] }] }));
+  await page.getByText("Allow /setup-tauri-package to work on this task?", { exact: true }).waitFor();
+  for (const width of [1100, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    const dimensions = await page.locator('#fixture').evaluate((node) => ({ width: node.clientWidth, scroll: node.scrollWidth }));
+    assert.ok(dimensions.scroll <= dimensions.width + 1, `approval fits ${width}px`);
+    await capture(`approval-${width}`);
+  }
   assert.deepEqual(errors, []);
   results.passed = true;
 } finally {

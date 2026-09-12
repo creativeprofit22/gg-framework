@@ -638,12 +638,12 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   // Inspect the full validated snapshot, not the displayed page or selected record.
   const conflictReason = loaded?.state.records.some(
     (record) => record.lifecycle.state === "running" || record.lifecycle.runId,
-  ) ? "An opportunity is running in this project. Refresh the report after it settles." : null;
+  ) ? "A task is running in this project. Choose Refresh results after it finishes." : null;
   let status: ProgrammaticChatReport["status"] = loaded ? "stale" : "setup-required";
   let reason =
     profile.status === "missing"
-      ? "Inspect setup to propose a profile; no writes are made."
-      : "Configuration is unavailable. Showing last-known records when available.";
+      ? "Choose Review setup to see which checks can be enabled. Reviewing changes no files."
+      : "Saved settings cannot be read. Any results shown are from an earlier check.";
   let scanAvailable = false;
   if (profile.status === "valid") {
     try {
@@ -663,14 +663,14 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
       ) {
         status = state.recovered ? "recovered" : "current";
         reason = state.recovered
-          ? "Showing the previous valid report; scan to recover."
-          : "Approved configuration is current.";
+          ? "Showing older saved results. Choose Check for opportunities to get current results."
+          : "Saved check settings match the project.";
       } else
         reason =
-          "Approved configuration is current. Showing last-known records; scan before execution.";
+          "Saved settings match the project, but these results are older. Choose Check for opportunities before starting a task.";
     } catch {
       status = "stale";
-      reason = "Configuration changed or cannot be read. Inspect setup before execution.";
+      reason = "Project settings changed or cannot be read. Choose Review setup before starting a task.";
     }
   }
   return {
@@ -683,8 +683,8 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
     scan: {
       available: scanAvailable && conflictReason === null,
       reason: conflictReason ?? (scanAvailable
-        ? "Approved configuration is current. Scan to refresh opportunities."
-        : "Inspect and approve the current setup before scanning."),
+        ? "Check for opportunities runs the saved checks and saves results. It does not start any task."
+        : "Review and approve setup before checking for opportunities."),
     },
     snapshot: loaded ? sha256(loaded.bytes) : sha256(canonicalJson(null)),
     fingerprint:
@@ -734,14 +734,14 @@ async function projectChatSummaries(
         run: {
           available: available && context.conflictReason === null,
           reason: context.conflictReason ?? (available
-            ? "This opportunity can run."
-            : "This opportunity cannot run. See the route and lifecycle details."),
+            ? "Ready for you to review task approval."
+            : "This task cannot start. Check its status and the explanation below."),
         },
         dismiss: {
           available: context.conflictReason === null && ["discovered", "queued"].includes(record.lifecycle.state),
           reason: context.conflictReason ?? (["discovered", "queued"].includes(record.lifecycle.state)
-            ? "This opportunity can be dismissed."
-            : "This lifecycle state cannot be dismissed."),
+            ? "Save this item as dismissed without starting the task."
+            : "Only items that have not started can be dismissed."),
         },
       },
       route: {
@@ -753,11 +753,11 @@ async function projectChatSummaries(
             : context.status !== "current"
               ? context.reason
               : !configured
-                ? "Selected specialist is not approved in the current profile."
+                ? "This task tool is not included in your approved setup. Choose Review setup."
                 : record.presence === "disappeared"
-                  ? "This opportunity is no longer present."
+                  ? "The latest checks no longer find this opportunity."
                   : !available
-                    ? "This lifecycle state cannot run."
+                    ? "This item has already started, completed or been dismissed. It cannot start again."
                     : resolution!.reason,
         machineLocal: resolution?.availability.portability === "machine-local",
       },

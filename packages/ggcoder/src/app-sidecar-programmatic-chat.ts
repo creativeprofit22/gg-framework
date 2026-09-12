@@ -65,7 +65,7 @@ export class AppSidecarProgrammaticChat {
     input: unknown,
   ): Promise<{ status: number; body: ProgrammaticChatResponse | { error: string } }> {
     if (!isProgrammaticChatRequest(input))
-      return { status: 400, body: { error: "Invalid programmatic action." } };
+      return { status: 400, body: { error: "This opportunity request could not be read. Reopen Opportunities and try again." } };
     const { action } = input;
     const target = this.target();
     const fail = (status: number, error: string, reconcile = false) => ({
@@ -88,10 +88,10 @@ export class AppSidecarProgrammaticChat {
     if (this.disposed || !target.codeMode)
       return fail(403, "Opportunities are available only in Code mode.");
     const mutates = ["approve-setup", "scan", "dismiss"].includes(action);
-    if (mutates && target.planMode) return fail(403, "Plan mode permits inspection only.");
+    if (mutates && target.planMode) return fail(403, "Plan mode only allows review. Turn it off before making changes.");
     // Hold the existing run claim through I/O, preventing prompt/reset/configuration races.
     if (target.busy || !this.claim())
-      return fail(409, "Wait for the current operation. This action is never queued.");
+      return fail(409, "Wait for the current work to finish, then try again. This request was not added to a waiting list.");
     const epoch = this.epoch;
     const current = () => {
       const now = this.target();
@@ -107,8 +107,8 @@ export class AppSidecarProgrammaticChat {
     let submitted = false;
     try {
       if (!(await stat(target.cwd)).isDirectory())
-        return fail(409, "Project filesystem is unavailable.");
-      if (!current()) return fail(409, "Project session changed. Reopen opportunities.");
+        return fail(409, "The project folder cannot be read. Check that it is still available.");
+      if (!current()) return fail(409, "The project or chat changed. Reopen Opportunities to load its results.");
       let body: ProgrammaticChatResponse;
       switch (input.action) {
         case "report":
@@ -130,7 +130,7 @@ export class AppSidecarProgrammaticChat {
         case "inspect-setup": {
           this.pending = null;
           const proposal = await this.implementations.inspect(target.cwd);
-          if (!current()) return fail(409, "Project session changed. Inspect setup again.");
+          if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
           const handle = sha256(randomBytes(32).toString("hex") + canonicalJson(proposal));
           const projection: ProgrammaticChatProposal = {
             handle,
@@ -153,7 +153,7 @@ export class AppSidecarProgrammaticChat {
           };
           body = { version: 1, action: "inspect-setup", ok: true, proposal: projection };
           if (!isProgrammaticChatResponse(body))
-            return fail(422, "Setup proposal exceeds display limits. No approval was created.");
+            return fail(422, "The proposed setup is too large to display safely. It cannot be approved here; no settings were saved.");
           this.pending = { identity: target.identity, cwd: target.cwd, handle, proposal };
           break;
         }
@@ -161,7 +161,7 @@ export class AppSidecarProgrammaticChat {
           const pending = this.pending;
           this.pending = null;
           if (!pending || pending.handle !== input.proposalHandle)
-            return fail(409, "Setup approval expired. Inspect setup again.");
+            return fail(409, "This setup is no longer ready for approval. Choose Review setup again.");
           submitted = true;
           const result = await this.implementations.persist(
             target.cwd,
@@ -169,7 +169,7 @@ export class AppSidecarProgrammaticChat {
             pending.proposal.profile,
           );
           if (!result.ok)
-            return fail(409, "Setup changed. Inspect the exact proposal again before approving.");
+            return fail(409, "The project settings changed. Choose Review setup to see the new settings before approving.");
           body = { version: 1, action: "approve-setup", ok: true, changed: result.changed };
           break;
         }
@@ -181,7 +181,7 @@ export class AppSidecarProgrammaticChat {
               409,
               result.changed
                 ? result.detail
-                : "Scan did not complete. Read the current report before retrying.",
+                : "The checks did not finish. Reload results before trying again.",
               true,
             );
           body = { version: 1, action: "scan", ok: true, changed: result.changed };
@@ -201,18 +201,18 @@ export class AppSidecarProgrammaticChat {
       if (!current())
         return fail(
           409,
-          "Project session changed. Read the current report before continuing.",
+          "The project or chat changed. Reload results before continuing.",
           submitted,
         );
       if (!isProgrammaticChatResponse(body))
-        return fail(500, "Programmatic response is unavailable.", submitted);
+        return fail(500, "The opportunity results could not be displayed. Reload results before continuing.", submitted);
       return { status: 200, body };
     } catch {
       return fail(
         409,
         submitted
-          ? "Action acknowledgement is uncertain. Read the current report before retrying."
-          : "Inspection is unavailable. Check the project and retry.",
+          ? "We could not confirm whether your change was saved. Reload results before trying again."
+          : "The project could not be checked. Make sure its folder is available, then try again.",
         submitted,
       );
     } finally {

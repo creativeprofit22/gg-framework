@@ -84,7 +84,7 @@ export function programmaticChatReducer(
       ...state,
       operation: null,
       detailSnapshot: null,
-      notice: "Run submitted. Follow its separate approval and progress in this chat.",
+      notice: "Task requested. Review the separate approval prompt in this chat before work starts.",
     };
   const response = event.response;
   if (!response.ok)
@@ -119,17 +119,17 @@ export function programmaticChatReducer(
         ...base,
         proposal: response.proposal,
         proposalApprovable: true,
-        notice: "Proposal ready. No files were written.",
+        notice: "Setup is ready to review. No files have been changed.",
       };
     case "approve-setup":
-      return { ...base, proposal: null, proposalApprovable: false, notice: "Setup approved. Scan to review opportunities." };
+      return { ...base, proposal: null, proposalApprovable: false, notice: "Setup saved. Choose Check for opportunities to run the saved checks." };
     case "scan":
-      return { ...base, notice: "Scan finished. Updating the report." };
+      return { ...base, notice: "Checks finished. Loading the saved results." };
     case "dismiss":
       return {
         ...base,
         detailSnapshot: null,
-        notice: "Dismissal acknowledged. Updating the report.",
+        notice: "Dismissal saved. Reloading results to show the current status.",
       };
   }
 }

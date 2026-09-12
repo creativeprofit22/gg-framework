@@ -2281,19 +2281,12 @@ async function createSession(
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
-    durableExecution: durableRoadmapExecution,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     mutateStatusWithLeaseFence: (phaseId, operation) =>
       phaseBinding.withStatusLease(session, phaseId, operation),
-    resolvePlanProgress: ({ phaseId, session: expectedSession }) =>
-      phaseImplementationPlans.resolve({
-        phaseId,
-        session: expectedSession,
-        current: planProgressPayload(),
-      }),
     broadcastNotesSnapshot,
     onError: (error, metadata) =>
       captureSidecarError(error, "app-sidecar.roadmap-status", metadata),

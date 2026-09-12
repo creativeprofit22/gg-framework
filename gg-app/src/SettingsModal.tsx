@@ -11,17 +11,27 @@ import {
   type PermissionsStatus,
 } from "./agent";
 import { toast } from "./toast";
+import { SoundButton } from "./SoundButton";
+import { formatBuildIdentity } from "./build-info";
+import { AzureConnectionSettings } from "./AzureConnectionSettings";
+import { MemesButton } from "./MemesButton";
 
 interface Props {
   onClose: () => void;
   /** Called with the saved projects root so callers can refresh. */
   onSaved?: (projectsRoot: string) => void;
+  onAzureConnectionChanged?: () => void;
 }
 
-export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
+export function SettingsModal({
+  onClose,
+  onSaved,
+  onAzureConnectionChanged,
+}: Props): React.ReactElement {
   const [projectsRoot, setProjectsRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
+  const buildIdentity = formatBuildIdentity();
 
   useEffect(() => {
     // Native (Rust) read — no sidecar wait needed.
@@ -65,7 +75,7 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   }
 
   return (
-    <Modal title="Settings" onClose={onClose}>
+    <Modal title="Settings" onClose={onClose} className="settings-modal">
       {permissions?.applicable && (
         <>
           <div className="modal-label" style={{ color: theme.textMuted }}>
@@ -86,6 +96,13 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
         </>
       )}
       <div className="modal-label" style={{ color: theme.textMuted }}>
+        Effects
+      </div>
+      <div className="modal-row">
+        <SoundButton variant="settings" />
+        <MemesButton variant="settings" />
+      </div>
+      <div className="modal-label" style={{ color: theme.textMuted }}>
         Project folder
       </div>
       <div className="modal-hint" style={{ color: theme.textDim }}>
@@ -103,6 +120,12 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           {"Browse\u2026"}
         </button>
       </div>
+      <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
+      {buildIdentity && (
+        <div className="modal-build-identity" style={{ color: theme.textDim }}>
+          {buildIdentity}
+        </div>
+      )}
       <div className="modal-actions">
         <button className="modal-btn" onClick={onClose}>
           Cancel

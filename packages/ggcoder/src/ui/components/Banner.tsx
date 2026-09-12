@@ -21,21 +21,31 @@ const LOGO_LINES = [
   " \u255a\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u255d",
 ];
 
-// Extended gradient with reverse path for smooth animation loop
-const GRADIENT = [
-  "#60a5fa",
-  "#6da1f9",
-  "#7a9df7",
-  "#8799f5",
-  "#9495f3",
-  "#a18ff1",
-  "#a78bfa",
-  "#a18ff1",
-  "#9495f3",
-  "#8799f5",
-  "#7a9df7",
-  "#6da1f9",
-];
+// Gradient steps across the logo: primary -> secondary -> primary, giving a
+// smooth ping-pong. Derived from the active theme's tokens rather than a fixed
+// palette, so light, ansi and daltonized themes all get a readable ramp.
+const GRADIENT_STEPS = 7;
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+function lerpColor(a: string, b: string, t: number): string {
+  const [r1, g1, b1] = hexToRgb(a);
+  const [r2, g2, b2] = hexToRgb(b);
+  const mix = (x: number, y: number): number => Math.round(x + (y - x) * t);
+  return `#${((1 << 24) | (mix(r1, r2) << 16) | (mix(g1, g2) << 8) | mix(b1, b2)).toString(16).slice(1)}`;
+}
+
+/** Ping-pong ramp from `from` to `to` and back, `2 * (steps - 1)` entries. */
+function buildGradient(from: string, to: string): string[] {
+  const oneWay: string[] = [];
+  for (let i = 0; i < GRADIENT_STEPS; i++) {
+    oneWay.push(lerpColor(from, to, i / (GRADIENT_STEPS - 1)));
+  }
+  return [...oneWay, ...oneWay.slice(1, -1).reverse()];
+}
 
 // One-space left pad to match the terminal-history banner (RESPONSE_LEFT_PADDING).
 const LEFT_PAD = " ";
@@ -161,6 +171,8 @@ function ShortcutHints() {
 }
 
 function GradientText({ text, shift = 0 }: { text: string; shift?: number }) {
+  const theme = useTheme();
+  const gradient = React.useMemo(() => buildGradient(theme.primary, theme.secondary), [theme]);
   const chars: React.ReactNode[] = [];
   let colorIdx = 0;
   for (let i = 0; i < text.length; i++) {
@@ -168,7 +180,7 @@ function GradientText({ text, shift = 0 }: { text: string; shift?: number }) {
     if (ch === " ") {
       chars.push(ch);
     } else {
-      const color = GRADIENT[(colorIdx + shift) % GRADIENT.length];
+      const color = gradient[(colorIdx + shift) % gradient.length];
       chars.push(
         <Text key={i} color={color}>
           {ch}

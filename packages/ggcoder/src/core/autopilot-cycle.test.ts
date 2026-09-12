@@ -8,7 +8,11 @@ import {
   type AutopilotCycleDeps,
   type AutopilotCycleEmit,
 } from "./autopilot-cycle.js";
-import type { AutopilotVerdict } from "./autopilot-verdict.js";
+import {
+  CORPUS_UNVERIFIED_REASON,
+  parseAutopilotVerdict,
+  type AutopilotVerdict,
+} from "./autopilot-verdict.js";
 
 /** Build a full deps object with sane defaults; tests override what they probe.
  *  `verdicts` feeds the WORK review queue; `planVerdicts` feeds the PLAN review
@@ -21,7 +25,7 @@ function makeDeps(
   emitted: AutopilotCycleEmit[];
   injected: Array<{ body: string; round: number }>;
   ran: string[];
-  counters: { implemented: number; accepted: number };
+  counters: { ready: number; revisions: number };
   resetReviewer: ReturnType<typeof vi.fn<() => Promise<void>>>;
   review: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
   reviewPlan: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
@@ -31,7 +35,7 @@ function makeDeps(
   const ran: string[] = [];
   const queue = [...verdicts];
   const planQueue = [...planVerdicts];
-  const counters = { implemented: 0, accepted: 0 };
+  const counters = { ready: 0, revisions: 0 };
   const deps = {
     maxRounds: 3,
     isCancelled: () => false,
@@ -40,15 +44,17 @@ function makeDeps(
     resetReviewer: vi.fn(async () => {}),
     review: vi.fn(async () => queue.shift() ?? null),
     reviewPlan: vi.fn(async () => planQueue.shift() ?? null),
-    acceptPlan: async () => {
-      counters.accepted++;
-      return true;
+    markPlanReady: async () => {
+      counters.ready++;
+      return { checkpointId: "checkpoint-1", generation: 1 };
     },
-    runImplement: async () => {
-      counters.implemented++;
+    requestPlanRevision: async () => {
+      counters.revisions++;
+      return true;
     },
     runPrompt: async (body: string) => {
       ran.push(body);
+      return true;
     },
     onInjected: (body: string, round: number) => {
       injected.push({ body, round });
@@ -58,21 +64,19 @@ function makeDeps(
     },
     ...overrides,
   };
-  // Overrides may swap the vi.fn defaults for plain functions; every test that
-  // asserts on mock calls passes a vi.fn itself, so the cast is safe.
-  return Object.assign(deps, { emitted, injected, ran, counters }) as AutopilotCycleDeps & {
-    emitted: AutopilotCycleEmit[];
-    injected: Array<{ body: string; round: number }>;
-    ran: string[];
-    counters: { implemented: number; accepted: number };
-    resetReviewer: ReturnType<typeof vi.fn<() => Promise<void>>>;
-    review: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
-    reviewPlan: ReturnType<typeof vi.fn<() => Promise<AutopilotVerdict | null>>>;
-  };
+  return Object.assign(deps, {
+    emitted,
+    injected,
+    ran,
+    counters,
+    resetReviewer: vi.fn(deps.resetReviewer),
+    review: vi.fn(deps.review),
+    reviewPlan: vi.fn(deps.reviewPlan),
+  });
 }
 
 /** planPending() driven by a mutable flag the plan deps flip, mirroring the
- *  sidecar (acceptPlan / injection clear pending; exit_plan re-sets it). */
+ *  sidecar (revision-requested clears review eligibility; exit_plan re-sets it). */
 function pendingFlag(initial = true): { get: () => boolean; set: (v: boolean) => void } {
   let value = initial;
   return { get: () => value, set: (v) => (value = v) };
@@ -92,12 +96,81 @@ describe("frameAutopilotInjection", () => {
 });
 
 describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
+  it.each([
+    { verdict: { kind: "all_clear" }, expected: "all-clear" },
+    { verdict: { kind: "ignore" }, expected: "ignored" },
+    { verdict: { kind: "human", reason: "Choose" }, expected: "human" },
+    { verdict: { kind: "prompt", body: "Fix" }, expected: "capped" },
+    { verdict: null, expected: "review-failed" },
+  ] satisfies Array<{ verdict: AutopilotVerdict | null; expected: string }>) (
+    "returns $expected instead of erasing the verdict", async ({ verdict, expected }) => {
+      await expect(driveAutopilotCycle(makeDeps([verdict], { maxRounds: 0 }))).resolves.toBe(expected);
+    },
+  );
+
+  it("returns cancellation without accepting a review", async () => {
+    await expect(driveAutopilotCycle(makeDeps([], { isCancelled: () => true }))).resolves.toBe("cancelled");
+  });
+
+  it("returns a plan hold for readiness and drafting", async () => {
+    await expect(driveAutopilotCycle(makeDeps([], { isPlanMode: () => true }))).resolves.toBe("plan-pending");
+    await expect(driveAutopilotCycle(makeDeps([], { planPending: () => true }, [
+      { kind: "all_clear" },
+    ]))).resolves.toBe("plan-pending");
+  });
+
+  it("does not review again after a swallowed injected-run failure", async () => {
+    const deps = makeDeps([{ kind: "prompt", body: "Fix" }, { kind: "all_clear" }], {
+      runPrompt: async () => false,
+    });
+    await expect(driveAutopilotCycle(deps)).resolves.toBe("run-failed");
+    expect(deps.review).toHaveBeenCalledOnce();
+    expect(deps.emitted).toEqual([]);
+  });
   it("ALL_CLEAR → autopilot_done, no injected run", async () => {
     const deps = makeDeps([{ kind: "all_clear" }]);
     await driveAutopilotCycle(deps);
     expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
     expect(deps.ran).toEqual([]);
     expect(deps.resetReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a parsed evidence limitation in the terminal event without another run", async () => {
+    const verdict = parseAutopilotVerdict(
+      '{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}',
+    );
+    const deps = makeDeps([verdict]);
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_done", data: { reason: CORPUS_UNVERIFIED_REASON } },
+    ]);
+    expect(deps.ran).toEqual([]);
+    expect(deps.review).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not approve unsupported verification exceptions", async () => {
+    const deps = makeDeps([
+      parseAutopilotVerdict('{"verdict":"ALL_CLEAR","evidenceLimitation":"verification_failed"}'),
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted[0]?.type).toBe("autopilot_human");
+    expect(deps.ran).toEqual([]);
+  });
+
+  it("passes a plan's limitation to readiness without authorizing implementation", async () => {
+    const pending = pendingFlag();
+    const identity = { checkpointId: "checkpoint-1", generation: 1 };
+    const markPlanReady = vi.fn(async () => identity);
+    const deps = makeDeps([], { planPending: pending.get, markPlanReady }, [
+      { kind: "all_clear", evidenceLimitation: "corpus_unverified" },
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(markPlanReady).toHaveBeenCalledWith(CORPUS_UNVERIFIED_REASON);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_plan_ready", data: { ...identity, reason: CORPUS_UNVERIFIED_REASON } },
+    ]);
+    expect(deps.ran).toEqual([]);
+    expect(pending.get()).toBe(true);
   });
 
   it("IGNORE → autopilot_ignored, no injected run", async () => {
@@ -122,6 +195,7 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
       onInjected: (body) => order.push(`injected:${body}`),
       runPrompt: async (body) => {
         order.push(`ran:${body}`);
+        return true;
       },
     });
     await driveAutopilotCycle(deps);
@@ -132,18 +206,29 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     expect(deps.review).toHaveBeenCalledTimes(2);
   });
 
-  it("caps at maxRounds PROMPT verdicts → autopilot_capped", async () => {
+  it("caps only after reviewing the last permitted remediation", async () => {
     const deps = makeDeps([
       { kind: "prompt", body: "fix 1" },
       { kind: "prompt", body: "fix 2" },
       { kind: "prompt", body: "fix 3" },
-      // Would be round 4 — must never be reached.
       { kind: "prompt", body: "fix 4" },
     ]);
     await driveAutopilotCycle(deps);
     expect(deps.ran).toEqual(["fix 1", "fix 2", "fix 3"]);
     expect(deps.emitted).toEqual([{ type: "autopilot_capped", data: { rounds: 3 } }]);
-    expect(deps.review).toHaveBeenCalledTimes(3);
+    expect(deps.review).toHaveBeenCalledTimes(4);
+  });
+
+  it("allows terminal final review after the last permitted remediation", async () => {
+    const deps = makeDeps([{ kind: "prompt", body: "final fix" }, { kind: "all_clear" }], {
+      maxRounds: 1,
+    });
+
+    await driveAutopilotCycle(deps);
+
+    expect(deps.ran).toEqual(["final fix"]);
+    expect(deps.review).toHaveBeenCalledTimes(2);
+    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
   });
 
   it("review failure (null) → silent stop, nothing injected", async () => {
@@ -180,6 +265,7 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     const deps = makeDeps([{ kind: "prompt", body: "fix it" }, { kind: "all_clear" }], {
       runPrompt: async () => {
         cancelled = true; // /cancel fires mid-injected-run
+        return true;
       },
       isCancelled: () => cancelled,
     });
@@ -210,6 +296,7 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
         runPrompt: async (body) => {
           ran.push(body);
           planMode = true; // GG Coder called enter_plan (no exit_plan) mid-run
+          return true;
         },
         isPlanMode: () => planMode,
       },
@@ -242,6 +329,7 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
       }),
       runPrompt: async () => {
         order.push("run");
+        return true;
       },
     });
     // Wrap review to trace ordering while preserving queue behavior.
@@ -255,201 +343,158 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
   });
 });
 
-describe("driveAutopilotCycle — plan branch", () => {
-  it("plan approve → acceptPlan → runImplement → work review of the implementation", async () => {
+describe("driveAutopilotCycle — durable plan gate", () => {
+  it.each(["all_clear", "ignore"] as const)(
+    "%s marks the plan ready but never accepts or implements it",
+    async (kind) => {
+      const pending = pendingFlag();
+      const order: string[] = [];
+      const deps = makeDeps(
+        [],
+        {
+          planPending: pending.get,
+          markPlanReady: async () => {
+            order.push("ready");
+            return { checkpointId: "checkpoint-1", generation: 1 };
+          },
+          runPrompt: async () => {
+            order.push("unexpected-run");
+            return true;
+          },
+        },
+        [{ kind }],
+      );
+      await driveAutopilotCycle(deps);
+      expect(order).toEqual(["ready"]);
+      expect(deps.review).not.toHaveBeenCalled();
+      expect(deps.emitted).toEqual([
+        {
+          type: "autopilot_plan_ready",
+          data: { checkpointId: "checkpoint-1", generation: 1 },
+        },
+      ]);
+    },
+  );
+
+  it("requests revision through the gate before injecting feedback and reviews a resubmission", async () => {
     const pending = pendingFlag();
+    const revisionBody = buildPlanRevisionPrompt("Swap steps 3 and 4");
     const order: string[] = [];
-    const deps = makeDeps(
-      [{ kind: "all_clear" }],
-      {
-        planPending: pending.get,
-        acceptPlan: async () => {
-          order.push("accept");
-          pending.set(false);
-          return true;
-        },
-        runImplement: async () => {
-          order.push("implement");
-        },
-      },
-      [{ kind: "all_clear" }],
-    );
-    await driveAutopilotCycle(deps);
-    expect(order).toEqual(["accept", "implement"]);
-    expect(deps.reviewPlan).toHaveBeenCalledTimes(1);
-    expect(deps.review).toHaveBeenCalledTimes(1); // post-implement work review
-    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
-  });
-
-  it("IGNORE on a plan maps to approve (no user blocker for plans)", async () => {
-    const pending = pendingFlag();
-    const deps = makeDeps(
-      [{ kind: "all_clear" }],
-      {
-        planPending: pending.get,
-        acceptPlan: async () => {
-          pending.set(false);
-          return true;
-        },
-      },
-      [{ kind: "ignore" }],
-    );
-    await driveAutopilotCycle(deps);
-    expect(deps.counters.implemented).toBe(1);
-    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
-  });
-
-  it("plan revision → resubmit → approve", async () => {
-    const pending = pendingFlag();
-    const revisionBody = buildPlanRevisionPrompt("steps 3 and 4 are in the wrong order");
-    const deps = makeDeps(
-      [{ kind: "all_clear" }],
-      {
-        maxRounds: 5,
-        planPending: pending.get,
-        acceptPlan: async () => {
-          pending.set(false);
-          return true;
-        },
-        runPrompt: async (body) => {
-          expect(body).toBe(revisionBody);
-          // Sidecar: injecting a revision clears pending; the run resubmits
-          // via exit_plan, which re-sets it.
-          pending.set(true);
-        },
-      },
-      [{ kind: "prompt", body: "steps 3 and 4 are in the wrong order" }, { kind: "all_clear" }],
-    );
-    // The sidecar clears pending on injection BEFORE runPrompt; emulate by
-    // wrapping onInjected.
-    deps.onInjected = (body, round) => {
-      pending.set(false);
-      deps.injected.push({ body, round });
-    };
-    await driveAutopilotCycle(deps);
-    expect(deps.injected).toEqual([{ body: revisionBody, round: 1 }]);
-    expect(deps.reviewPlan).toHaveBeenCalledTimes(2);
-    expect(deps.counters.implemented).toBe(1);
-    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
-  });
-
-  it("plan revision WITHOUT resubmit falls through to a normal work review", async () => {
-    const pending = pendingFlag();
-    const deps = makeDeps(
-      [{ kind: "all_clear" }],
-      {
-        planPending: pending.get,
-        onInjected: () => pending.set(false), // sidecar clears pending on injection
-        runPrompt: async () => {
-          // Run never calls exit_plan again — pending stays false.
-        },
-      },
-      [{ kind: "prompt", body: "drop step 5" }],
-    );
-    await driveAutopilotCycle(deps);
-    expect(deps.reviewPlan).toHaveBeenCalledTimes(1);
-    expect(deps.review).toHaveBeenCalledTimes(1);
-    expect(deps.counters.accepted).toBe(0);
-    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
-  });
-
-  it("HUMAN on a plan → autopilot_human, no accept, no implement", async () => {
-    const deps = makeDeps([], { planPending: () => true }, [
-      { kind: "human", reason: "destructive migration needs a user call" },
-    ]);
-    await driveAutopilotCycle(deps);
-    expect(deps.counters.accepted).toBe(0);
-    expect(deps.counters.implemented).toBe(0);
-    expect(deps.emitted).toEqual([
-      { type: "autopilot_human", data: { reason: "destructive migration needs a user call" } },
-    ]);
-  });
-
-  it("acceptPlan returning false (stale generation — user acted) exits silently", async () => {
     const deps = makeDeps(
       [],
       {
-        planPending: () => true,
-        acceptPlan: async () => false,
-      },
-      [{ kind: "all_clear" }],
-    );
-    await driveAutopilotCycle(deps);
-    expect(deps.counters.implemented).toBe(0);
-    expect(deps.emitted).toEqual([]);
-  });
-
-  it("plan review failure (null) → silent stop", async () => {
-    const deps = makeDeps([], { planPending: () => true }, [null]);
-    await driveAutopilotCycle(deps);
-    expect(deps.counters.accepted).toBe(0);
-    expect(deps.emitted).toEqual([]);
-  });
-
-  it("cancel landing during the plan review discards the verdict", async () => {
-    let cancelled = false;
-    const deps = makeDeps([], {
-      planPending: () => true,
-      isCancelled: () => cancelled,
-      reviewPlan: vi.fn(async () => {
-        cancelled = true; // user Accept/cancel fired while Ken reviewed the plan
-        return { kind: "all_clear" } as AutopilotVerdict;
-      }),
-    });
-    await driveAutopilotCycle(deps);
-    expect(deps.counters.accepted).toBe(0);
-    expect(deps.emitted).toEqual([]);
-  });
-
-  it("cancel landing during the implement run stops before the next review", async () => {
-    const pending = pendingFlag();
-    let cancelled = false;
-    const deps = makeDeps(
-      [{ kind: "all_clear" }],
-      {
+        maxRounds: 3,
         planPending: pending.get,
-        isCancelled: () => cancelled,
-        acceptPlan: async () => {
+        requestPlanRevision: async (feedback) => {
+          expect(feedback).toBe("Swap steps 3 and 4");
+          order.push("gate-revision");
           pending.set(false);
           return true;
         },
-        runImplement: async () => {
-          cancelled = true; // /cancel fires mid-implementation
+        onInjected: (body, round) => {
+          order.push(`inject-${round}`);
+          deps.injected.push({ body, round });
+        },
+        runPrompt: async (body) => {
+          expect(body).toBe(revisionBody);
+          order.push("revision-run");
+          pending.set(true);
+          return true;
+        },
+        markPlanReady: async () => {
+          order.push("ready");
+          return { checkpointId: "checkpoint-2", generation: 2 };
         },
       },
-      [{ kind: "all_clear" }],
+      [{ kind: "prompt", body: "Swap steps 3 and 4" }, { kind: "all_clear" }],
     );
     await driveAutopilotCycle(deps);
-    expect(deps.review).not.toHaveBeenCalled();
+    expect(order).toEqual(["gate-revision", "inject-1", "revision-run", "ready"]);
+    expect(deps.reviewPlan).toHaveBeenCalledTimes(2);
+    expect(deps.emitted).toEqual([
+      {
+        type: "autopilot_plan_ready",
+        data: { checkpointId: "checkpoint-2", generation: 2 },
+      },
+    ]);
+  });
+
+  it("stops safely when revision loses a generation race", async () => {
+    const deps = makeDeps([], { planPending: () => true, requestPlanRevision: async () => false }, [
+      { kind: "prompt", body: "stale" },
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(deps.ran).toEqual([]);
     expect(deps.emitted).toEqual([]);
   });
 
-  it("repeated plan rejections hit the round cap safely", async () => {
+  it("stops safely when ready loses a generation race", async () => {
+    const deps = makeDeps([], { planPending: () => true, markPlanReady: async () => null }, [
+      { kind: "all_clear" },
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([]);
+  });
+
+  it("HUMAN leaves the plan gate pending for explicit human action", async () => {
+    const deps = makeDeps([], { planPending: () => true }, [
+      { kind: "human", reason: "Destructive migration needs a user call" },
+    ]);
+    await driveAutopilotCycle(deps);
+    expect(deps.counters.ready).toBe(0);
+    expect(deps.emitted).toEqual([
+      {
+        type: "autopilot_human",
+        data: { reason: "Destructive migration needs a user call" },
+      },
+    ]);
+  });
+
+  it("review failure and cancellation stop without mutating the gate", async () => {
+    const failed = makeDeps([], { planPending: () => true }, [null]);
+    await driveAutopilotCycle(failed);
+    expect(failed.counters).toEqual({ ready: 0, revisions: 0 });
+
+    let cancelled = false;
+    const cancelledDeps = makeDeps([], {
+      planPending: () => true,
+      isCancelled: () => cancelled,
+      reviewPlan: vi.fn(async () => {
+        cancelled = true;
+        return { kind: "all_clear" } as AutopilotVerdict;
+      }),
+    });
+    await driveAutopilotCycle(cancelledDeps);
+    expect(cancelledDeps.counters).toEqual({ ready: 0, revisions: 0 });
+  });
+
+  it("repeated revision resubmissions stop only after a post-remediation review", async () => {
     const pending = pendingFlag();
+    const requestPlanRevision = vi.fn(async () => {
+      pending.set(false);
+      return true;
+    });
     const deps = makeDeps(
       [],
       {
         maxRounds: 2,
         planPending: pending.get,
-        onInjected: () => pending.set(false),
-        runPrompt: async () => pending.set(true), // every revision resubmits
+        requestPlanRevision,
+        runPrompt: async () => { pending.set(true); return true; },
       },
       [
         { kind: "prompt", body: "reject 1" },
         { kind: "prompt", body: "reject 2" },
-        // Would be round 3 — must never be reached.
         { kind: "prompt", body: "reject 3" },
       ],
     );
     await driveAutopilotCycle(deps);
-    expect(deps.reviewPlan).toHaveBeenCalledTimes(2);
+    expect(deps.reviewPlan).toHaveBeenCalledTimes(3);
+    expect(requestPlanRevision).toHaveBeenCalledTimes(2);
     expect(deps.emitted).toEqual([{ type: "autopilot_capped", data: { rounds: 2 } }]);
   });
 
-  it("plan branch wins over the drafting hold when both flags are up", async () => {
-    // exit_plan fired (pending) but isPlanMode is somehow still true — the
-    // submitted plan takes precedence; the drafting hold is only for
-    // enter-without-exit.
+  it("submitted plan review takes precedence over the drafting hold", async () => {
     const deps = makeDeps([], { planPending: () => true, isPlanMode: () => true }, [
       { kind: "human", reason: "needs a user call" },
     ]);

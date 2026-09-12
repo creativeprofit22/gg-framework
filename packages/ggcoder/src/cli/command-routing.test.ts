@@ -10,6 +10,7 @@ function handlers(calls: string[]): Record<CliSubcommandName, () => void> {
     telegram: () => calls.push("telegram"),
     serve: () => calls.push("serve"),
     doctor: () => calls.push("doctor"),
+    acp: () => calls.push("acp"),
     "agent-home-login": () => calls.push("agent-home-login"),
     "agent-home": () => calls.push("agent-home"),
   };

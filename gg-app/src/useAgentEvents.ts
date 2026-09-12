@@ -1,14 +1,32 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import {
-  listCommands,
+  parseContextProfileEligibility,
+  listCommands as listPrimaryCommands,
+  listModels as listPrimaryModels,
   type SidecarEvent,
+  type SubAgentStatePayload,
+  type ToolCallStartPayload,
   type AgentState,
   type BackgroundTask,
+  type ModelOption,
+  type PendingPlanReview,
   type ProjectTask,
+  type QueuedMessage,
+  type PromptSubmissionResult,
   type SlashCommand,
+  type PaneAgentClient,
+  isRoadmapPhaseDraftChangeEvent,
 } from "./agent";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import { isPhaseLaunchErrorEvent } from "./notes-types";
+import { isAskUserPrompt } from "./ask-user";
+import {
+  extractImageWarnings,
+  isAskUserSettledEvent,
+  resolveRunEndOutcome,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -41,10 +59,16 @@ export interface ImagePreview {
 }
 
 // Hook kind → notice copy + tone color, mirroring the TUI's app-items.ts.
-export type HookKind = "ideal" | "loop_break" | "regrounding";
+export type HookKind = "ideal" | "verification" | "loop_break" | "regrounding";
+/** Hooks that fire in place of a final answer, so their draft must be held. */
+export type PreFinalHookKind = Extract<HookKind, "ideal" | "verification">;
 export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }> = {
   ideal: {
     text: "Hook engaged. Running an ideal review before finalizing.",
+    color: theme.secondary,
+  },
+  verification: {
+    text: "Hook engaged. Running the project's verification before finalizing.",
     color: theme.secondary,
   },
   loop_break: {
@@ -63,6 +87,30 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
+type PlanReviewEventIdentity = Pick<PendingPlanReview, "checkpointId" | "generation">;
+
+function planReviewEventIdentity(data: Record<string, unknown>): PlanReviewEventIdentity | null {
+  if (
+    typeof data.checkpointId !== "string" ||
+    !data.checkpointId ||
+    typeof data.generation !== "number" ||
+    !Number.isSafeInteger(data.generation) ||
+    data.generation < 1
+  ) {
+    return null;
+  }
+  return { checkpointId: data.checkpointId, generation: data.generation };
+}
+
+function isMatchingPlanReview(
+  current: PendingPlanReview,
+  identity: PlanReviewEventIdentity,
+): boolean {
+  return (
+    current.checkpointId === identity.checkpointId && current.generation === identity.generation
+  );
 }
 
 // Port of packages/ggcoder/src/ui/duration-summary.ts, adapted to the sidecar's
@@ -111,10 +159,12 @@ function pickDoneVerb(toolsUsed: ReadonlySet<string>): string {
  * mirrors the memoized handler reads without re-subscribing.
  */
 export interface AgentEventsDeps {
+  client?: Pick<PaneAgentClient, "listCommands" | "listModels">;
   setItems: Dispatch<SetStateAction<Item[]>>;
   nextId: () => number;
   /** Ken (mentor) event delegate — consulted first; ken events early-return. */
   handleKenEvent: (e: SidecarEvent) => boolean;
+  hydrateKen?: (value: unknown, replaceHistory?: boolean) => void;
   /** Autopilot event delegate — consulted first; autopilot events early-return. */
   handleAutopilotEvent: (e: SidecarEvent) => boolean;
 
@@ -132,11 +182,17 @@ export interface AgentEventsDeps {
   setThinkingAccumMs: Dispatch<SetStateAction<number>>;
   setPlanTotal: Dispatch<SetStateAction<number>>;
   setPlanDone: Dispatch<SetStateAction<Set<number>>>;
-  setSessionTitle: Dispatch<SetStateAction<string | null>>;
-  setPlanReview: Dispatch<SetStateAction<string | null>>;
+  setPlanReview: Dispatch<SetStateAction<PendingPlanReview | null>>;
   setQueuedCount: Dispatch<SetStateAction<number>>;
+  /** Pending queued messages (id + text) for the cancel affordance. */
+  setQueuedMessages: Dispatch<SetStateAction<QueuedMessage[]>>;
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
+  setModels: Dispatch<SetStateAction<ModelOption[]>>;
+  onAstraStateChange?: () => void;
+  onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
+  onRoadmapPhaseDraftRefresh?: () => void;
+  onProgrammaticActivity?: (open: boolean) => void;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -144,6 +200,10 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Notifies session-mutation callers after the reset has been applied locally. */
+  onSessionReset?: (operationId?: string) => void;
+  shouldApplySessionReset?: (data: Record<string, unknown>) => boolean;
+  onContinuationAccepted?: (data: unknown) => void;
 }
 
 export interface AgentEvents {
@@ -151,15 +211,25 @@ export interface AgentEvents {
   handleEvent: (e: SidecarEvent) => void;
   /** Append a finished transcript item (used by App's submit/etc. too). */
   pushItem: (item: Item) => void;
+  /** Insert or acknowledge a user row against the latest queue snapshot. */
+  acceptSubmission: (
+    item: Extract<Item, { kind: "user" }>,
+    receipt: PromptSubmissionResult,
+    hideQueued?: boolean,
+  ) => void;
   /** Flush buffered assistant text + end the streaming section (used by App too). */
   endStreamingText: () => void;
+  /** Replace the durable approval gate and every private fallback mirror atomically. */
+  replacePlanReview: Dispatch<SetStateAction<PendingPlanReview | null>>;
 }
 
 export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const {
+    client,
     setItems,
     nextId,
     handleKenEvent,
+    hydrateKen,
     handleAutopilotEvent,
     setState,
     setTasks,
@@ -175,27 +245,55 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setThinkingAccumMs,
     setPlanTotal,
     setPlanDone,
-    setSessionTitle,
-    setPlanReview,
+    setPlanReview: publishPlanReview,
     setQueuedCount,
+    setQueuedMessages,
     setAttachments,
     setCommands,
-    stateRef,
+    setModels,
+    onAstraStateChange,
+    onRoadmapPhaseDraftChange,
+    onRoadmapPhaseDraftRefresh,
+    onProgrammaticActivity,
     planDoneRef,
     planTotalRef,
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset,
+    shouldApplySessionReset,
+    onContinuationAccepted,
   } = deps;
+  const listCommands = client?.listCommands ?? listPrimaryCommands;
+  const listModels = client?.listModels ?? listPrimaryModels;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
   const streamingIdRef = useRef<number | null>(null);
   const pendingChunksRef = useRef<string>("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Retain acknowledged IDs through receipt delivery, even when enqueue and
+  // drain both precede the HTTP response. Unknown IDs still await their SSE ack.
+  const acknowledgedQueueRef = useRef<Map<string, boolean>>(new Map());
   // Transcript id of the active sub-agent group for this run (null until the
-  // first subagent spawns). Lets later parallel agents join the same in-chat
-  // feed instead of each opening a fresh block.
+  // first subagent spawns). The per-agent map keeps late async lifecycle events
+  // attached to their original transcript group after a newer run starts.
   const subagentGroupIdRef = useRef<number | null>(null);
+  const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
+  const liveToolByIdRef = useRef<Map<string, LiveToolEntry>>(new Map());
+  // subagent_state snapshots arrive per tool/turn event PER AGENT — with
+  // several parallel agents that's a steady burst of full-transcript setItems,
+  // which saturates the main thread and makes scrolling janky mid-run. Buffer
+  // the latest snapshot per agent and flush them together on a short timer:
+  // one batched render per window no matter how many agents are talking. Keep
+  // every distinct activity seen inside the window so coalescing never hides a
+  // quick tool transition.
+  const pendingSubagentRef = useRef<
+    Map<string, { snapshot: SubAgentStatePayload; activities: string[] }>
+  >(new Map());
+  const subagentFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A prompt-failed phase frame is followed by runAgent's generic provider error.
+  // Remember that ordered pair so the phase-specific recovery message wins once.
+  const pendingPhasePromptFailureRef = useRef<string | null>(null);
   // Transcript id of the in-flight compaction notice, so compaction_end can
   // flip the same row from shimmer → summary instead of pushing a new line.
   const compactionIdRef = useRef<number | null>(null);
@@ -210,18 +308,42 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // them for render. Finalizing a span happens outside setState updaters.
   const thinkingStartRef = useRef<number | null>(null);
   const thinkingAccumRef = useRef<number>(0);
-  // Content of the plan currently in the review modal, mirrored from plan_exit.
-  // autopilot_plan_accepted reads it SYNCHRONOUSLY to seed the plan-progress
-  // widget — the planReview state value may not have flushed yet when the
-  // accepted + session_reset frames arrive back-to-back over SSE.
+  // Submitted plan content retained until approval. Current sidecars provide the
+  // canonical live-file count on session_reset; this content supplies the fallback
+  // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
+  // Keep event ownership synchronous: a ready frame can follow plan_exit before
+  // React renders. All gate replacements (including IPC recovery) use this path.
+  const currentPlanReviewRef = useRef<PendingPlanReview | null>(null);
+  const readinessNoticeRef = useRef<string | null>(null);
+  const setPlanReview = useCallback(
+    (update: SetStateAction<PendingPlanReview | null>) => {
+      const current = currentPlanReviewRef.current;
+      const review = typeof update === "function" ? update(current) : update;
+      if (!review || !current || !isMatchingPlanReview(current, review)) {
+        readinessNoticeRef.current = null;
+      }
+      currentPlanReviewRef.current = review;
+      planReviewPathRef.current = review?.planPath ?? null;
+      planReviewContentRef.current = review?.content ?? null;
+      publishPlanReview(review);
+    },
+    [planReviewPathRef, publishPlanReview],
+  );
+  const replacePlanReview = setPlanReview;
+  // Hold candidate final text while any pre-final review hook is armed.
+  const armedHooksRef = useRef<Set<PreFinalHookKind>>(new Set());
+  const heldTextRef = useRef<string>("");
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
   // but roughly halves streaming render CPU vs per-frame flushing, since the
-  // Markdown re-render dominates and CPU scales with flush count
-  // (bench/RESULTS.md, bench B). First token still paints immediately.
+  // Markdown re-render dominates and CPU scales with flush count.
+  // First token still paints immediately.
   const STREAM_FLUSH_MS = 100;
+
+  /** Queued→sent morph duration. Must match `.user-msg.promoted` in App.css. */
+  const PROMOTE_MS = 300;
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;
     const chunk = pendingChunksRef.current;
@@ -238,6 +360,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   const appendAssistant = useCallback(
     (text: string) => {
+      // Armed: this text is a review draft until proven otherwise. Accumulate it
+      // off-screen; releaseHeldText paints it if the turn turns out to be real.
+      if (armedHooksRef.current.size > 0) {
+        heldTextRef.current += text;
+        return;
+      }
       const current = streamingIdRef.current;
       if (current === null) {
         // First token of a new assistant turn: create immediately (no delay
@@ -255,6 +383,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     },
     [flushChunks, nextId, setItems],
   );
+
+  // Paint text held under arming. Called the moment the turn proves it was not
+  // a review draft — a tool call, a server tool, a non-ideal hook, or the run
+  // ending without the review firing. It lands as one complete bubble rather
+  // than a stream, which is the whole cost of never showing a draft.
+  const releaseHeldText = useCallback(() => {
+    const held = heldTextRef.current;
+    heldTextRef.current = "";
+    if (!held) return;
+    const id = nextId();
+    streamingIdRef.current = id;
+    setItems((prev) => [...prev, { kind: "assistant", id, text: held }]);
+  }, [nextId, setItems]);
 
   // Flush any pending buffered text and end the current streaming section.
   // Called whenever streaming transitions to tool calls, a new prompt, etc.
@@ -279,11 +420,218 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     streamingIdRef.current = null;
   }, [setItems]);
 
+  // Ideal review is a pre-final hook: the no-tool response immediately before
+  // it is an internal draft, not a transcript answer. Normally the draft was
+  // held (never painted) because `hook_armed` arrived first; this drops the
+  // visible bubble in the cases arming cannot cover — an older sidecar that
+  // never sends `hook_armed`, or a gate that only crossed on the draft's own
+  // turn — so the user still ends up with hook → reviewed final response.
+  const discardStreamingDraft = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    pendingChunksRef.current = "";
+    heldTextRef.current = "";
+    const current = streamingIdRef.current;
+    streamingIdRef.current = null;
+    if (current !== null) {
+      setItems((prev) =>
+        prev.filter((item) => !(item.kind === "assistant" && item.id === current)),
+      );
+    }
+  }, [setItems]);
+
   const pushItem = useCallback(
-    (item: Item) => {
-      setItems((prev) => [...prev, item]);
+    (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
+      setItems((prev) => {
+        if (opts?.skipIfSameAsLast) {
+          const last = prev[prev.length - 1];
+          if (last && last.kind === item.kind && last.kind === "hook" && item.kind === "hook") {
+            if (last.hook === item.hook && last.verificationReason === item.verificationReason)
+              return prev;
+          }
+        }
+        return [...prev, item];
+      });
     },
     [setItems],
+  );
+
+  const acceptSubmission = useCallback(
+    (
+      item: Extract<Item, { kind: "user" }>,
+      receipt: PromptSubmissionResult,
+      hideQueued = false,
+    ) => {
+      setItems((previous) => {
+        const accepted = {
+          ...item,
+          queueId: receipt.queueId,
+          queued:
+            receipt.queued &&
+            !hideQueued &&
+            (acknowledgedQueueRef.current.get(receipt.queueId) ?? true),
+        };
+        return previous.some((row) => row.id === item.id)
+          ? previous.map((row) => (row.id === item.id ? accepted : row))
+          : [...previous, accepted];
+      });
+    },
+    [setItems],
+  );
+
+  // End the queued→sent morph: drop `promoted` once its animation has played, so
+  // the flag never outlives the motion. Leaving it set would replay the collapse
+  // on old bubbles whenever the transcript remounts (a picker/home view taking
+  // over the window and coming back).
+  //
+  // One shared timer, restarted whenever another message is promoted. That can
+  // clear an earlier bubble's flag late, which is harmless: its animation has
+  // already finished and settled on exactly the resting style (the pill keeps
+  // its collapsed state via `forwards`), so removing the class changes nothing
+  // on screen.
+  const promoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const schedulePromotionEnd = useCallback(() => {
+    if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
+    promoteTimerRef.current = setTimeout(() => {
+      promoteTimerRef.current = null;
+      setItems((prev) =>
+        prev.some((it) => it.kind === "user" && it.promoted)
+          ? prev.map((it) => (it.kind === "user" && it.promoted ? { ...it, promoted: false } : it))
+          : prev,
+      );
+    }, PROMOTE_MS);
+  }, [setItems]);
+
+  useEffect(() => {
+    return () => {
+      if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
+    };
+  }, []);
+
+  // Apply one sub-agent snapshot to its transcript group (creating the group
+  // on first sight). Called from the buffered flush below — multiple snapshots
+  // flushed in the same tick batch into a single React render.
+  const applySubagentSnapshot = useCallback(
+    (snapshot: SubAgentStatePayload, bufferedActivities: readonly string[]): void => {
+      const status: SubAgentLine["status"] =
+        snapshot.state === "starting"
+          ? "starting"
+          : snapshot.state === "running"
+            ? "running"
+            : snapshot.state === "completed"
+              ? "idle"
+              : snapshot.state === "interrupted"
+                ? "interrupted"
+                : snapshot.state === "closed" && !snapshot.error
+                  ? "done"
+                  : "error";
+      const appendActivities = (existing: readonly string[]): string[] => {
+        const next = [...existing];
+        for (const activity of bufferedActivities) {
+          if (activity !== next[next.length - 1]) next.push(activity);
+        }
+        return next.slice(-12);
+      };
+      const updateAgent = (agent: SubAgentLine): SubAgentLine => ({
+        ...agent,
+        status,
+        toolUseCount: snapshot.tool_use_count,
+        tokenUsage: snapshot.token_usage,
+        durationMs: snapshot.elapsed_ms,
+        activities: appendActivities(agent.activities),
+      });
+      const mappedGroupId = subagentGroupByAgentRef.current.get(snapshot.agent_id);
+      const activeGroupId = subagentGroupIdRef.current;
+      const shouldCreateGroup = mappedGroupId === undefined && activeGroupId === null;
+      const groupId = mappedGroupId ?? activeGroupId ?? nextId();
+      if (mappedGroupId === undefined) {
+        subagentGroupByAgentRef.current.set(snapshot.agent_id, groupId);
+        if (shouldCreateGroup) subagentGroupIdRef.current = groupId;
+      }
+      if (shouldCreateGroup) {
+        pushItem({
+          kind: "subagent_group",
+          id: groupId,
+          agents: [
+            {
+              toolCallId: snapshot.agent_id,
+              agentName: snapshot.task_name,
+              status,
+              async: true,
+              activities: appendActivities([]),
+              toolUseCount: snapshot.tool_use_count,
+              tokenUsage: snapshot.token_usage,
+              durationMs: snapshot.elapsed_ms,
+            },
+          ],
+        });
+      } else {
+        setItems((previous) =>
+          previous.map((item) => {
+            if (item.kind !== "subagent_group" || item.id !== groupId) return item;
+            const found = item.agents.some((agent) => agent.toolCallId === snapshot.agent_id);
+            return {
+              ...item,
+              agents: found
+                ? item.agents.map((agent) =>
+                    agent.toolCallId === snapshot.agent_id ? updateAgent(agent) : agent,
+                  )
+                : [
+                    ...item.agents,
+                    {
+                      toolCallId: snapshot.agent_id,
+                      agentName: snapshot.task_name,
+                      status,
+                      async: true,
+                      activities: appendActivities([]),
+                      toolUseCount: snapshot.tool_use_count,
+                      tokenUsage: snapshot.token_usage,
+                      durationMs: snapshot.elapsed_ms,
+                    },
+                  ],
+            };
+          }),
+        );
+      }
+    },
+    [nextId, pushItem, setItems],
+  );
+
+  const SUBAGENT_FLUSH_MS = 150;
+  // Drain the buffered snapshots synchronously (cancelling any pending timer).
+  // Run boundaries call this so final statuses land before run_end's own
+  // group updates, and so nothing lingers into the next run.
+  const flushSubagentSnapshots = useCallback(() => {
+    if (subagentFlushTimerRef.current !== null) {
+      clearTimeout(subagentFlushTimerRef.current);
+      subagentFlushTimerRef.current = null;
+    }
+    if (pendingSubagentRef.current.size === 0) return;
+    const pending = [...pendingSubagentRef.current.values()];
+    pendingSubagentRef.current.clear();
+    for (const { snapshot, activities } of pending) {
+      applySubagentSnapshot(snapshot, activities);
+    }
+  }, [applySubagentSnapshot]);
+
+  // Drop buffered snapshots WITHOUT applying them (session reset wipes the
+  // transcript — a late flush would recreate a stale group in the fresh one).
+  const dropPendingSubagentSnapshots = useCallback(() => {
+    if (subagentFlushTimerRef.current !== null) {
+      clearTimeout(subagentFlushTimerRef.current);
+      subagentFlushTimerRef.current = null;
+    }
+    pendingSubagentRef.current.clear();
+  }, []);
+
+  // No timer may outlive the hook (window close / project switch).
+  useEffect(
+    () => () => {
+      if (subagentFlushTimerRef.current !== null) clearTimeout(subagentFlushTimerRef.current);
+    },
+    [],
   );
 
   // End the active thinking span (if any), folding its duration into the
@@ -308,15 +656,59 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       // Autopilot (auto-review) events are owned by the useAutopilot hook; same
       // early-return so they never touch the build-session handling below.
       if (handleAutopilotEvent(e)) return;
+      if (isRoadmapPhaseDraftChangeEvent(e)) {
+        onRoadmapPhaseDraftChange?.(e.data);
+        return;
+      }
       const d = e.data as Record<string, unknown>;
+      if (
+        (e.type === "tool_call_start" || e.type === "tool_call_end") &&
+        (d.name === "programmatic_profile" || d.name === "programmatic_scan")
+      )
+        onProgrammaticActivity?.(true);
+      if (e.type === "run_end" || e.type === "agent_done" || e.type === "ready")
+        onProgrammaticActivity?.(false);
       switch (e.type) {
-        case "ready":
-          setState(d as unknown as AgentState);
-          setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
-          setStatus("ready");
+        case "autopilot": {
+          if (typeof d.autopilot === "boolean") {
+            const autopilot = d.autopilot;
+            setState((previous) => (previous ? { ...previous, autopilot } : previous));
+          }
           break;
+        }
+        case "ready": {
+          onRoadmapPhaseDraftRefresh?.();
+          const readyState = {
+            ...d,
+            openAICodexContextProfileEligibility: parseContextProfileEligibility(
+              d.openAICodexContextProfileEligibility,
+            ),
+          } as unknown as AgentState;
+          onAstraStateChange?.();
+          setState(readyState);
+          setRunning(readyState.running);
+          setContextTokens(readyState.contextTokens);
+          setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
+          setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
+          // Reconnect snapshots are authoritative for the durable gate. Older
+          // sidecars omit this field, so absence preserves the local review;
+          // an explicit null is the only snapshot value that clears it.
+          if (readyState.pendingPlanReview !== undefined) {
+            const pendingReview = readyState.pendingPlanReview;
+            planReviewPathRef.current = pendingReview?.planPath ?? null;
+            planReviewContentRef.current = pendingReview?.content ?? null;
+            setPlanReview(pendingReview);
+          }
+          break;
+        }
         case "run_start":
+          // Land any still-buffered sub-agent snapshots on their (previous
+          // run's) group before the active-group pointer resets below.
+          flushSubagentSnapshots();
           setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "running" } : previous,
+          );
           endStreamingText();
           subagentGroupIdRef.current = null;
           compactionIdRef.current = null;
@@ -324,8 +716,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           toolsUsedRef.current = new Set();
           tokensRef.current = 0;
           assistantTextRef.current = "";
+          // Arming is per-run state on the sidecar; start every run streaming
+          // live and let hook_armed hold text back once a gate is crossed.
+          armedHooksRef.current.clear();
+          heldTextRef.current = "";
           thinkingStartRef.current = null;
           thinkingAccumRef.current = 0;
+          liveToolByIdRef.current.clear();
+          liveToolByIdRef.current.clear();
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
@@ -370,25 +768,57 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // assistant bubble so the post-tool text starts a fresh paragraph
           // instead of gluing onto the pre-tool text ("…command.Let me pull…").
           finalizeThinking();
+          releaseHeldText();
           endStreamingText();
           assistantTextRef.current = "";
           break;
         }
+        case "subagent_state": {
+          // Buffer the latest snapshot per agent; flushSubagentSnapshots
+          // applies them together on a short timer (one batched render per
+          // window instead of one full-transcript setItems per event).
+          const snapshot = d as unknown as SubAgentStatePayload;
+          const previous = pendingSubagentRef.current.get(snapshot.agent_id);
+          const activities = previous ? [...previous.activities] : [];
+          const activity = snapshot.current_activity;
+          if (activity && activity !== activities[activities.length - 1]) activities.push(activity);
+          pendingSubagentRef.current.set(snapshot.agent_id, { snapshot, activities });
+          if (subagentFlushTimerRef.current === null) {
+            subagentFlushTimerRef.current = setTimeout(flushSubagentSnapshots, SUBAGENT_FLUSH_MS);
+          }
+          break;
+        }
         case "tool_call_start": {
           finalizeThinking();
+          // Text followed by a tool call is narration, not a review draft.
+          releaseHeldText();
           endStreamingText();
-          const toolCallId = String(d.toolCallId ?? "");
-          const name = String(d.name ?? "tool");
-          const args = (d.args as Record<string, unknown>) ?? {};
+          const payload = d as Partial<ToolCallStartPayload>;
+          const toolCallId = String(payload.toolCallId ?? "");
+          const name = String(payload.name ?? "tool");
+          const args = payload.args ?? {};
+          const mcpIdentity =
+            typeof payload.displayName === "string" &&
+            typeof payload.mcpServerName === "string" &&
+            typeof payload.mcpToolName === "string"
+              ? {
+                  displayName: payload.displayName,
+                  mcpServerName: payload.mcpServerName,
+                  mcpToolName: payload.mcpToolName,
+                }
+              : {};
           toolsUsedRef.current.add(name);
-          // Tools live ONLY in the pinned panel, never in the transcript. Keep a
-          // bounded tail so memory stays flat across long sessions; the panel
-          // itself renders just the last LIVE_TOOL_PANEL_ROWS.
-          setLiveToolFeed((prev) =>
-            [...prev, { toolCallId, name, args, status: "running" as const }].slice(
-              -(LIVE_TOOL_PANEL_ROWS * 2),
-            ),
-          );
+          const liveEntry: LiveToolEntry = {
+            toolCallId,
+            name,
+            args,
+            ...mcpIdentity,
+            status: "running",
+          };
+          liveToolByIdRef.current.set(toolCallId, liveEntry);
+          // Tools live in the pinned panel while running. Successful completions
+          // stay there; explicit MCP failures move to one durable transcript row.
+          setLiveToolFeed((prev) => [...prev, liveEntry].slice(-(LIVE_TOOL_PANEL_ROWS * 2)));
           // Sub-agents also get a persistent, live feed in the transcript so the
           // user can watch parallel delegations by name + what each is doing.
           if (name === "subagent") {
@@ -433,7 +863,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             | {
                 toolUseCount?: number;
                 currentActivity?: string;
-                tokenUsage?: { input: number; output: number };
+                tokenUsage?: SubAgentLine["tokenUsage"];
               }
             | undefined;
           const groupId = subagentGroupIdRef.current;
@@ -470,7 +900,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const groupId = subagentGroupIdRef.current;
           if (groupId !== null) {
             const endDetails = details as
-              | { durationMs?: number; tokenUsage?: { input: number; output: number } }
+              | { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] }
               | undefined;
             const durationMs = endDetails?.durationMs;
             const finalTokens = endDetails?.tokenUsage;
@@ -496,18 +926,44 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               }),
             );
           }
-          // Update the entry in place to its done state — it stays in the pinned
-          // panel (mirrors ggcoder), it does NOT move into the transcript.
-          setLiveToolFeed((prev) =>
-            prev.map((entry) =>
-              entry.toolCallId === id
-                ? { ...entry, status: "done" as const, isError, result, details }
-                : entry,
-            ),
-          );
+          const liveEntry = liveToolByIdRef.current.get(id);
+          liveToolByIdRef.current.delete(id);
+          if (liveEntry?.name === "roadmap_phase_draft") onRoadmapPhaseDraftRefresh?.();
+          const isMcpFailure =
+            isError &&
+            liveEntry !== undefined &&
+            (liveEntry.mcpServerName !== undefined || liveEntry.name.startsWith("mcp__"));
+          if (isMcpFailure) {
+            // Replace the temporary panel row instead of duplicating it. The
+            // persisted tool result reconstructs the same transcript item.
+            setLiveToolFeed((prev) => prev.filter((entry) => entry.toolCallId !== id));
+            pushItem({
+              kind: "mcp_tool_failure",
+              id: nextId(),
+              name: liveEntry.name,
+              displayName: liveEntry.displayName,
+              result: result?.trim() || "MCP tool reported a failure.",
+            });
+          } else {
+            // Successful tool rendering remains in the pinned panel unchanged.
+            setLiveToolFeed((prev) =>
+              prev.map((entry) =>
+                entry.toolCallId === id
+                  ? { ...entry, status: "done" as const, isError, result, details }
+                  : entry,
+              ),
+            );
+          }
           // Remove any generating_image placeholders — the tool has finished
           // (success or failure). If it produced images, they're pushed below.
           setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
+          if (liveEntry?.name === "generate_image" && typeof result === "string") {
+            const warnings = extractImageWarnings(result);
+            if (warnings) {
+              endStreamingText();
+              pushItem({ kind: "info", id: nextId(), text: warnings });
+            }
+          }
           // Surface any image previews (screenshot / read of an image) inline in
           // the transcript — the tool panel is text-only.
           const previews = (details as { imagePreviews?: ImagePreview[] } | undefined)
@@ -538,18 +994,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             tokensRef.current += usage.outputTokens;
             setTokens(tokensRef.current);
           }
-          // Context-window usage (footer meter). Mirrors ggcoder: Anthropic has
-          // separate input/output limits so only the input side counts; every
-          // other provider shares one window, so add the output too.
-          if (usage) {
-            const inputContext =
-              (usage.inputTokens ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-            const isAnthropic = stateRef.current?.provider === "anthropic";
-            setContextTokens(inputContext + (isAnthropic ? 0 : (usage.outputTokens ?? 0)));
-          }
           break;
         }
         case "agent_done": {
+          // The loop stopped and no review was injected, so anything held under
+          // arming was the real final answer after all — paint it.
+          releaseHeldText();
           const usage = d.totalUsage as { outputTokens?: number } | undefined;
           if (usage && typeof usage.outputTokens === "number") {
             // Authoritative final total — set rather than add to avoid
@@ -574,15 +1024,52 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const id = compactionIdRef.current;
           compactionIdRef.current = null;
           setItems((prev) =>
-            prev.map((it) =>
-              it.kind === "compaction" && it.id === id
-                ? { ...it, status: "done" as const, originalCount, newCount }
-                : it,
-            ),
+            d.compacted === false
+              ? prev.filter((it) => !(it.kind === "compaction" && it.id === id))
+              : prev.map((it) =>
+                  it.kind === "compaction" && it.id === id
+                    ? { ...it, status: "done" as const, originalCount, newCount }
+                    : it,
+                ),
           );
           break;
         }
+        case "run_cancelling":
+          setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "cancelling" } : previous,
+          );
+          setStatus("cancelling...");
+          break;
+        case "cancel_failed":
+          setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "running" } : previous,
+          );
+          setStatus("cancellation failed; agent still running");
+          break;
+        case "phase_launch_error": {
+          if (!isPhaseLaunchErrorEvent(e)) break;
+          const phaseError = e.data;
+          if (phaseError.code === "prompt-failed") {
+            pendingPhasePromptFailureRef.current = phaseError.operationId;
+          }
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline: phaseError.message,
+            message: phaseError.detail,
+          });
+          break;
+        }
         case "error": {
+          // runAgent emits one generic provider error immediately after the richer
+          // prompt-failed phase frame. Suppress only that ordered duplicate; run_end
+          // clears the marker if an older sidecar never sends the generic frame.
+          if (pendingPhasePromptFailureRef.current !== null) {
+            pendingPhasePromptFailureRef.current = null;
+            break;
+          }
           // Structured payload from the sidecar's broadcastError (headline always
           // present; message/guidance may be omitted for terse capability errors).
           // Fall back to a flat string for any older-shaped frame.
@@ -601,13 +1088,39 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "run_end": {
+          pendingPhasePromptFailureRef.current = null;
+          // Cancels and errors end a run without agent_done; never strand held
+          // text, and clear arming so the next run starts streaming live.
+          releaseHeldText();
+          armedHooksRef.current.clear();
+          // Flush first so final sub-agent statuses are in place before the
+          // aborted-marking pass below reads them.
+          flushSubagentSnapshots();
           setRunning(false);
+          setState((previous) =>
+            previous ? { ...previous, running: false, runState: "idle" } : previous,
+          );
           endStreamingText();
           finalizeThinking();
-          // The queue drained into this run — un-dim any messages that were
-          // waiting, since the agent has now consumed them.
+          // Queue snapshots, not run boundaries, settle queued submissions:
+          // autopilot may finish a run with steering still pending.
+          //
+          // A run boundary closes question bands only on cancellation, when
+          // the sidecar answers with `asks.cancelAll()`. A plain run_end must
+          // leave it live: autopilot emits one per injected round while the
+          // parked tool call is still waiting, so closing here would kill a
+          // question the user can still answer and strand the agent until it
+          // timed out ten minutes later.
+          const outcome = resolveRunEndOutcome(d);
+          const runCancelled = outcome === "cancelled";
+          const runFailed = outcome === "failed";
           setItems((prev) =>
-            prev.map((it) => (it.kind === "user" && it.queued ? { ...it, queued: false } : it)),
+            prev.map((it) => {
+              if (runCancelled && it.kind === "ask" && !it.sent && !it.cancelled) {
+                return { ...it, cancelled: true };
+              }
+              return it;
+            }),
           );
           // Exit the tool panel (mirrors ggcoder).
           setLiveToolFeed([]);
@@ -622,10 +1135,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 it.kind === "subagent_group" && it.id === saGroupId
                   ? {
                       ...it,
-                      aborted: d.cancelled ? true : it.aborted,
+                      aborted: runCancelled ? true : it.aborted,
                       agents: it.agents.map((a) =>
-                        a.status === "running"
-                          ? { ...a, status: d.cancelled ? ("error" as const) : ("done" as const) }
+                        a.status === "running" && !a.async
+                          ? {
+                              ...a,
+                              status:
+                                runCancelled || runFailed ? ("error" as const) : ("done" as const),
+                            }
                           : a,
                       ),
                     }
@@ -633,31 +1150,25 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               ),
             );
           }
-          subagentGroupIdRef.current = null;
-          if (d.cancelled) {
+          if (runCancelled) {
             setDoneStatus(null);
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = pickDoneVerb(toolsUsedRef.current);
+            const verb = runFailed
+              ? "Failed"
+              : outcome === "unverified"
+                ? "Unverified"
+                : pickDoneVerb(toolsUsedRef.current);
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);
             }
             setDoneStatus(parts.join(" \u2022 "));
             setStatus("ready");
-            const completedPlan =
-              planTotalRef.current > 0 &&
-              Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
-                planDoneRef.current.has(step),
-              );
-            if (completedPlan) {
-              planTotalRef.current = 0;
-              planDoneRef.current = new Set();
-              setPlanTotal(0);
-              setPlanDone(new Set());
-            }
-            playSound("done");
+            // Only plan_progress confirms approved-plan consumption. Even a
+            // completed run can retain the plan when backend cleanup fails.
+            if (outcome === "completed") playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
@@ -667,7 +1178,28 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "context_profile_change": {
+          const profile = d.openAICodexContextProfile;
+          const contextWindow = d.contextWindow;
+          if (
+            (profile === "stable" || profile === "experimental") &&
+            typeof contextWindow === "number" &&
+            Number.isSafeInteger(contextWindow) &&
+            contextWindow > 0
+          ) {
+            onAstraStateChange?.();
+            setState((s) => (s ? { ...s, openAICodexContextProfile: profile, contextWindow } : s));
+          }
+          break;
+        }
+        case "fast_change":
+          if (typeof d.openAICodexFast === "boolean") {
+            onAstraStateChange?.();
+            setState((s) => (s ? { ...s, openAICodexFast: d.openAICodexFast as boolean } : s));
+          }
+          break;
         case "model_change":
+        case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));
           break;
         // Ken's effective model changed — either his pin was set/cleared or he
@@ -691,48 +1223,129 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
           break;
+        case "ask_user_settled":
+          if (!isAskUserSettledEvent(d)) break;
+          setItems((previous) =>
+            previous.map((item) => {
+              if (item.kind !== "ask" || item.prompt.id !== d.id || item.sent || item.cancelled)
+                return item;
+              return d.action === "cancel" ? { ...item, cancelled: true } : { ...item, sent: true };
+            }),
+          );
+          break;
+
+        case "ask_user":
+          // The agent's turn is parked on this question until App POSTs the
+          // answers back (or the run ends and `run_end` closes the band). A
+          // malformed frame is dropped rather than rendered as an empty band
+          // the user could never answer.
+          if (isAskUserPrompt(d)) pushItem({ kind: "ask", id: nextId(), prompt: d });
+          break;
+        case "plan_progress": {
+          // The sidecar reads the live approved-plan file, so this snapshot
+          // stays accurate even if implementation expands or rewrites `## Steps`.
+          // It is authoritative over the approval-time count and local streamed
+          // marker detection, both of which can be stale between tool calls.
+          const total =
+            typeof d.total === "number" && Number.isFinite(d.total)
+              ? Math.max(0, Math.floor(d.total))
+              : 0;
+          const completed = new Set(
+            Array.isArray(d.completed)
+              ? d.completed.filter(
+                  (step): step is number =>
+                    typeof step === "number" &&
+                    Number.isInteger(step) &&
+                    step >= 1 &&
+                    step <= total,
+                )
+              : [],
+          );
+          planTotalRef.current = total;
+          planDoneRef.current = completed;
+          setPlanTotal(total);
+          setPlanDone(completed);
+          break;
+        }
         case "plan_exit": {
           setState((s) => (s ? { ...s, planMode: false } : s));
-          // Always stash the submitted plan: autopilot needs the content to
-          // seed the plan-progress widget if Ken approves it, and manual accept
-          // needs the path when autopilot is off.
-          planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           const content = String(d.content ?? "");
+          const checkpointId = String(d.checkpointId ?? "");
+          const generation = Number(d.generation);
+          if (!checkpointId || !Number.isSafeInteger(generation) || generation < 1) break;
+          planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           planReviewContentRef.current = content;
-          // Autopilot owns plan review when enabled. Showing the human overlay
-          // during the few seconds before Ken accepts/rejects is just visual
-          // noise, and users generally cannot act in time anyway. Non-autopilot
-          // stays unchanged: the modal opens for manual Accept/Feedback/Reject.
-          if (stateRef.current?.autopilot) {
-            setPlanReview(null);
-          } else {
-            setPlanReview(content);
+          setPlanReview({
+            checkpointId,
+            generation,
+            planPath: planReviewPathRef.current ?? "",
+            content,
+            contentHash: String(d.contentHash ?? ""),
+            state: "pending-review",
+            reviewStatus: "unreviewed",
+            feedback: null,
+          });
+          break;
+        }
+        case "autopilot_plan_ready": {
+          const identity = planReviewEventIdentity(d);
+          const current = currentPlanReviewRef.current;
+          if (
+            !identity ||
+            !current ||
+            !isMatchingPlanReview(current, identity) ||
+            current.state !== "pending-review"
+          ) {
+            break;
+          }
+          const reason =
+            typeof d.reason === "string"
+              ? d.reason.trim()
+              : current.reviewStatus === "ready"
+                ? (current.feedback?.trim() ?? "")
+                : "";
+          // For a ready pending gate, feedback carries the persisted evidence
+          // limitation, not a human revision request. Revision state is separate.
+          setPlanReview({ ...current, reviewStatus: "ready", feedback: reason || null });
+          // Readiness is not approval. Surface evidence limitations only for the
+          // current gate, outside React updaters, without consuming human authority.
+          if (reason && readinessNoticeRef.current !== reason) {
+            readinessNoticeRef.current = reason;
+            pushItem({
+              kind: "info",
+              id: nextId(),
+              text: `Plan ready for your approval.\n\n${reason}`,
+            });
           }
           break;
         }
-        case "autopilot_plan_accepted":
-          // Autopilot Ken approved the submitted plan (no user in the loop).
-          // Mirrors the manual-accept path: seed the plan-progress widget from
-          // the modal's plan BEFORE the imminent session_reset consumes the
-          // ref, close the modal, and drop the approved marker in the
-          // transcript.
-          pendingPlanTotalRef.current = planReviewContentRef.current
-            ? countPlanSteps(planReviewContentRef.current)
-            : 0;
-          planReviewContentRef.current = null;
-          setPlanReview(null);
-          endStreamingText();
-          pushItem({ kind: "autopilot", id: nextId(), phase: "plan_approved" });
+        case "plan_revision_requested": {
+          const identity = planReviewEventIdentity(d);
+          if (!identity) break;
+          setPlanReview((current) =>
+            current && isMatchingPlanReview(current, identity)
+              ? {
+                  ...current,
+                  state: "revision-requested",
+                  feedback: typeof d.feedback === "string" ? d.feedback : current.feedback,
+                }
+              : current,
+          );
           break;
+        }
+        case "plan_accepted": {
+          const identity = planReviewEventIdentity(d);
+          if (!identity) break;
+          setPlanReview((current) => {
+            if (!current || !isMatchingPlanReview(current, identity)) return current;
+            pendingPlanTotalRef.current = countPlanSteps(current.content);
+            planReviewContentRef.current = null;
+            return null;
+          });
+          break;
+        }
         case "autopilot_prompted":
-          // Autopilot-only plan revision path: Ken rejected/refined the plan and
-          // the sidecar injected a revision prompt into GG Coder. Close the
-          // stale human review modal so autopilot visibly continues. In
-          // non-autopilot mode this frame never exists, so the normal modal +
-          // manual Accept/Feedback/Reject flow stays unchanged.
-          planReviewContentRef.current = null;
-          planReviewPathRef.current = null;
-          setPlanReview(null);
+          // Revision prompts never consume approval authority.
           break;
         case "tasks":
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
@@ -749,32 +1362,109 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "tasks_run_done":
           // Run-all sweep finished — nothing to render; the modal reflects it.
           break;
-        case "queued":
+        case "queued": {
           setQueuedCount(Number(d.count ?? 0));
+          // The sidecar sends the full pending list alongside the depth so each
+          // row can offer an individual cancel.
+          const list = Array.isArray(d.messages) ? (d.messages as QueuedMessage[]) : [];
+          setQueuedMessages(list);
+          const pendingIds = new Set(list.map((message) => message.id));
+          for (const id of acknowledgedQueueRef.current.keys()) {
+            acknowledgedQueueRef.current.set(id, pendingIds.has(id));
+          }
+          for (const id of pendingIds) acknowledgedQueueRef.current.set(id, true);
+          setItems((previous) =>
+            previous.map((item) =>
+              item.kind === "user" &&
+              item.queued &&
+              item.queueId &&
+              acknowledgedQueueRef.current.get(item.queueId) === false
+                ? { ...item, queued: false, promoted: true }
+                : item,
+            ),
+          );
+          schedulePromotionEnd();
           break;
+        }
+        case "hook_armed": {
+          // Pre-final hooks hold text back; other hooks are mid-loop.
+          const armedKind = String(d.kind ?? "ideal");
+          if (armedKind !== "ideal" && armedKind !== "verification") break;
+          if (d.armed !== false) {
+            armedHooksRef.current.add(armedKind);
+            break;
+          }
+          armedHooksRef.current.delete(armedKind);
+          // Disarming without the hook firing (autopilot takes verification over
+          // mid-run) must not strand text collected while armed — but only once
+          // no other pre-final hook still wants it held.
+          if (armedHooksRef.current.size === 0) releaseHeldText();
+          break;
+        }
         case "hook": {
           const kind = String(d.kind ?? "ideal") as HookKind;
           if (kind in HOOK_PRESENTATION) {
-            endStreamingText();
-            pushItem({ kind: "hook", id: nextId(), hook: kind });
+            if (kind === "ideal" || kind === "verification") {
+              // Draft dies here — held (never painted) in the normal armed path,
+              // or removed from the transcript when arming came too late. Both
+              // pre-final hooks replace that draft with a later, better answer.
+              discardStreamingDraft();
+            } else {
+              // Mid-loop hooks interrupt real work: keep what was said.
+              releaseHeldText();
+              endStreamingText();
+            }
+            // One review can inject several times (the read-coverage retries
+            // and their escalation), and each injection announces itself so the
+            // draft it supersedes is discarded. The DISCARD must happen every
+            // time; the notice is the same sentence, so stacking identical
+            // copies just tells the user the same thing four times.
+            pushItem(
+              {
+                kind: "hook",
+                id: nextId(),
+                hook: kind,
+                ...(kind === "verification" &&
+                (d.verificationReason === "recheck" || d.verificationReason === "check_review")
+                  ? { verificationReason: d.verificationReason }
+                  : {}),
+              },
+              { skipIfSameAsLast: true },
+            );
           }
           break;
         }
+        case "continuation_accepted":
+          onContinuationAccepted?.(d);
+          break;
         case "session_reset":
+          if (shouldApplySessionReset && !shouldApplySessionReset(d)) break;
+          hydrateKen?.(d.kenState, true);
           // Sidecar started a fresh session — clear the transcript + counters.
+          // Buffered sub-agent snapshots are dropped, not flushed: a late
+          // flush would recreate a stale group in the fresh transcript.
+          dropPendingSubagentSnapshots();
+          // The transcript is going away, so acknowledged queue IDs from the old
+          // session must not gate clears in the new one.
+          acknowledgedQueueRef.current.clear();
+          armedHooksRef.current.clear();
+          heldTextRef.current = "";
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
           setContextTokens(0);
-          setSessionTitle(null);
           setPlanReview(null);
           planReviewContentRef.current = null;
           {
             // On an accept-driven reset, restore the approved plan's step count
             // instead of zeroing it (the widget tracks the implementation run).
-            const carriedTotal = pendingPlanTotalRef.current ?? 0;
+            const eventTotal =
+              typeof d.planTotal === "number" && Number.isFinite(d.planTotal)
+                ? Math.max(0, Math.floor(d.planTotal))
+                : null;
+            const carriedTotal = eventTotal ?? pendingPlanTotalRef.current ?? 0;
             pendingPlanTotalRef.current = null;
             planTotalRef.current = carriedTotal;
             planDoneRef.current = new Set();
@@ -783,24 +1473,87 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           setAttachments([]);
           setQueuedCount(0);
+          setQueuedMessages([]);
           endStreamingText();
           subagentGroupIdRef.current = null;
+          subagentGroupByAgentRef.current.clear();
+          onSessionReset?.(typeof d.operationId === "string" ? d.operationId : undefined);
           break;
-        case "session_title":
-          setSessionTitle(String(d.title ?? "") || null);
+        case "models_change":
+          // The set of usable models changed: local-model discovery landed
+          // (boot scan, manual scan, endpoint added/removed) or a provider was
+          // connected/disconnected. Without this, neither the models found on
+          // the user's machine nor the ones a fresh login unlocks reach the
+          // picker until the session is reopened.
+          //
+          // `null` means the refetch failed — keep what we have. `[]` is a real
+          // answer (the last provider was disconnected) and must clear the picker.
+          void listModels().then((available) => {
+            if (available) setModels(available);
+          });
           break;
         case "extras":
-          // Context window / git branch refresh (model switch, run end).
+          // Context window / git status refresh (model switch, run end).
+          if (
+            d.accountId !== undefined ||
+            d.openAICodexContextProfileEligibility !== undefined ||
+            d.openAICodexContextProfile !== undefined ||
+            d.openAICodexFast !== undefined ||
+            d.contextTokens !== undefined ||
+            d.contextWindow !== undefined
+          ) {
+            onAstraStateChange?.();
+          }
           setState((s) =>
             s
               ? {
                   ...s,
+                  accountId:
+                    typeof d.accountId === "string" || d.accountId === null
+                      ? (d.accountId as string | null)
+                      : s.accountId,
+                  openAICodexContextProfile:
+                    d.openAICodexContextProfile === "stable" ||
+                    d.openAICodexContextProfile === "experimental"
+                      ? d.openAICodexContextProfile
+                      : s.openAICodexContextProfile,
+                  openAICodexContextProfileEligibility:
+                    "openAICodexContextProfileEligibility" in d
+                      ? parseContextProfileEligibility(d.openAICodexContextProfileEligibility)
+                      : s.openAICodexContextProfileEligibility,
+                  openAICodexFast:
+                    typeof d.openAICodexFast === "boolean" ? d.openAICodexFast : s.openAICodexFast,
+                  contextTokens:
+                    typeof d.contextTokens === "number" ? d.contextTokens : s.contextTokens,
                   contextWindow: (d.contextWindow as number | undefined) ?? s.contextWindow,
                   gitBranch: (d.gitBranch as string | null | undefined) ?? s.gitBranch,
                   isGitRepo: (d.isGitRepo as boolean | undefined) ?? s.isGitRepo,
+                  gitDirtyFileCount:
+                    (d.gitDirtyFileCount as number | undefined) ?? s.gitDirtyFileCount,
+                  // null is meaningful here (counts unknown → chips hidden), so
+                  // only fall back to the old value when the field is absent.
+                  gitHubIssues:
+                    d.gitHubIssues !== undefined
+                      ? (d.gitHubIssues as number | null)
+                      : s.gitHubIssues,
+                  gitHubPRs:
+                    d.gitHubPRs !== undefined ? (d.gitHubPRs as number | null) : s.gitHubPRs,
+                  gitHubRepoUrl:
+                    d.gitHubRepoUrl !== undefined
+                      ? (d.gitHubRepoUrl as string | null)
+                      : s.gitHubRepoUrl,
+                  gitHubCI:
+                    d.gitHubCI !== undefined
+                      ? (d.gitHubCI as AgentState["gitHubCI"])
+                      : (d.gitHubRepoUrl !== undefined && d.gitHubRepoUrl !== s.gitHubRepoUrl) ||
+                          (d.gitBranch !== undefined && d.gitBranch !== s.gitBranch)
+                        ? null
+                        : s.gitHubCI,
+                  additionalRoots: (d.additionalRoots as string[] | undefined) ?? s.additionalRoots,
                 }
               : s,
           );
+          if (typeof d.contextTokens === "number") setContextTokens(d.contextTokens);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           break;
 
@@ -810,12 +1563,24 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     },
     [
       handleKenEvent,
+      hydrateKen,
       handleAutopilotEvent,
+      onRoadmapPhaseDraftChange,
+      onRoadmapPhaseDraftRefresh,
+      onProgrammaticActivity,
+      onAstraStateChange,
       appendAssistant,
       pushItem,
       finalizeThinking,
       endStreamingText,
+      discardStreamingDraft,
+      releaseHeldText,
+      schedulePromotionEnd,
+      flushSubagentSnapshots,
+      dropPendingSubagentSnapshots,
       nextId,
+      listCommands,
+      listModels,
       setItems,
       setState,
       setTasks,
@@ -831,19 +1596,22 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setThinkingAccumMs,
       setPlanTotal,
       setPlanDone,
-      setSessionTitle,
       setPlanReview,
       setQueuedCount,
+      setQueuedMessages,
       setAttachments,
       setCommands,
-      stateRef,
+      setModels,
       planDoneRef,
       planTotalRef,
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      onSessionReset,
+      shouldApplySessionReset,
+      onContinuationAccepted,
     ],
   );
 
-  return { handleEvent, pushItem, endStreamingText };
+  return { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview };
 }

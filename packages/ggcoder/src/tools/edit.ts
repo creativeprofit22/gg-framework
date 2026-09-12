@@ -16,11 +16,17 @@ import { localOperations, type ToolOperations } from "./operations.js";
 import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
 import { resolveAnchoredEdit } from "../core/hashline.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import type { EditSource } from "../core/lsp/edit-telemetry.js";
+import { resolveWriteGuard, type WriteGuardSettings } from "../core/workspace-guard.js";
 
 type MutationCallback = (filePath: string) => void | Promise<void>;
 
 /** Post-write diagnostics provider (LSP). Non-empty results are appended to successful tool output. */
-type DiagnosticsProvider = (filePath: string, content: string) => Promise<string>;
+type DiagnosticsProvider = (
+  filePath: string,
+  content: string,
+  source?: EditSource,
+) => Promise<string>;
 
 function isMutationCallback(value: unknown): value is MutationCallback {
   return typeof value === "function";
@@ -73,9 +79,10 @@ const EditItem = z.object({
     ),
 });
 
-// Some models (Opus 4.6, GLM-5.1) occasionally send `edits` as a JSON string
-// instead of a real array, which trips Zod and makes the model fall back to
-// sed/python. Coerce the string back into an array before validation.
+// Several models (opus-5, sonnet-5, fable-5, glm-5.x) occasionally send `edits`
+// as a JSON string instead of a real array, which trips Zod and makes the model
+// fall back to sed/python. Coerce the well-formed case back into an array before
+// validation.
 const coerceStringifiedEdits = (v: unknown): unknown => {
   if (typeof v !== "string") return v;
   try {
@@ -86,10 +93,48 @@ const coerceStringifiedEdits = (v: unknown): unknown => {
   }
 };
 
+// Reaching the array schema with a string means the coercion above could not
+// parse it. Every observed case is a hand-serialized array whose inner escaping
+// broke, whose `new_text` key went missing, or that was truncated mid-write.
+//
+// A lenient repair stage (the `jsonrepair` package, as used by several agent
+// runtimes) was measured against 41 real failures from ~/.gg session logs: it
+// parses 11, but only 2 faithfully. The rest pass this schema while silently
+// dropping content -- it closes the JSON at the first error, so a truncated
+// stream yields a short `new_text` and one 8.8KB payload came back with 11% of
+// its characters. Those write partial code over a real file. Recovering 2 in 41
+// is not worth 4 corrupted files, so this stays a hard rejection.
+//
+// What was actually costing turns is the message: Zod's stock "expected array,
+// received string" never tells the model what it did, so it re-sends the
+// identical payload until the agent loop's repeat counter turns the turn fatal.
+// Name the mistake and the way out instead.
+const STRINGIFIED_EDITS_ERROR =
+  "`edits` arrived as a JSON-encoded string and could not be parsed back into an array. " +
+  "Send `edits` as a real JSON array of objects, never as a string. " +
+  "Re-sending the same large payload usually breaks the same way: split the work into " +
+  "several `edit` calls carrying one or two smaller edits each.";
+
 const EditParams = z.object({
   file_path: z.string().describe("The file path to edit"),
   edits: z
-    .preprocess(coerceStringifiedEdits, z.array(EditItem).min(1))
+    .preprocess(
+      coerceStringifiedEdits,
+      z
+        .array(EditItem, {
+          // Narrow to "an array was expected, a string arrived" so a nested
+          // string-typed mistake (`anchor: "x"`, `replace_all: "true"`) keeps
+          // its own accurate message. Any non-matching issue returns undefined
+          // and falls through to Zod's default.
+          error: (issue) =>
+            issue.code === "invalid_type" &&
+            issue.expected === "array" &&
+            typeof issue.input === "string"
+              ? STRINGIFIED_EDITS_ERROR
+              : undefined,
+        })
+        .min(1),
+    )
     .describe(
       "One or more edits applied in order. Each edit operates on the result of the previous one.",
     ),
@@ -157,6 +202,20 @@ type FailureKind =
 interface EditOutcome {
   ok: boolean;
   failure?: FailureKind;
+  /** Which matching strategy placed this edit; absent for no-ops. */
+  source?: EditSource;
+}
+
+/**
+ * Riskiest strategy used in a batch, worst first. When one edit landed by exact
+ * text and another only by `...` elision, the elision is what a resulting
+ * breakage should be attributed to.
+ */
+const SOURCE_RISK: EditSource[] = ["dotdotdot", "blank_edges", "indent_flex", "text", "span"];
+
+function riskiestSource(outcomes: EditOutcome[]): EditSource | undefined {
+  const used = new Set(outcomes.map((o) => o.source).filter(Boolean));
+  return SOURCE_RISK.find((s) => used.has(s));
 }
 
 export function createEditTool(
@@ -167,6 +226,7 @@ export function createEditTool(
   onFileMutated?: MutationCallback,
   onPreFileMutation?: MutationCallback,
   getDiagnostics?: DiagnosticsProvider,
+  getWriteGuardSettings?: () => WriteGuardSettings | undefined,
 ): AgentTool<typeof EditParams> {
   const planModeRef = isPlanModeRef(planModeRefOrOnFileMutated)
     ? planModeRefOrOnFileMutated
@@ -197,6 +257,12 @@ export function createEditTool(
       }
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
+
+      // Workspace write guard: outside cwd/tmp/~/.gg requires user approval.
+      const guard = resolveWriteGuard(cwd, resolved, getWriteGuardSettings?.());
+      if (!guard.allowed) {
+        return `Error: ${guard.reason}`;
+      }
 
       await assertFresh(readFiles, resolved, ops);
 
@@ -267,7 +333,7 @@ export function createEditTool(
       for (let i = spanApplied.length - 1; i >= 0; i--) {
         const s = spanApplied[i];
         workingLines.splice(s.start, s.end - s.start + 1, ...s.lines);
-        outcomes[s.index] = { ok: true };
+        outcomes[s.index] = { ok: true, source: "span" };
       }
       let working = workingLines.join("\n");
 
@@ -309,6 +375,7 @@ export function createEditTool(
         //   2. indent-flex (model omitted/shortened leading whitespace)
         //   3. drop spurious leading/trailing blank lines, retry 1+2
         //   4. dotdotdots (`...` elision with preserved middle)
+        let source: EditSource = "text";
         let result = tryMatch(working, normalizedOld, normalizedNew, replaceAll);
 
         const tryFallbacks = (oldText: string): string | null => {
@@ -324,6 +391,7 @@ export function createEditTool(
           const indentFlexed = applyMissingLeadingWhitespace(working, normalizedOld, normalizedNew);
           if (indentFlexed !== null) {
             result = { ok: true, newWorking: indentFlexed };
+            source = "indent_flex";
           }
         }
 
@@ -331,18 +399,24 @@ export function createEditTool(
           const stripped = stripBlankEdges(normalizedOld);
           if (stripped !== null) {
             const candidate = tryFallbacks(stripped);
-            if (candidate !== null) result = { ok: true, newWorking: candidate };
+            if (candidate !== null) {
+              result = { ok: true, newWorking: candidate };
+              source = "blank_edges";
+            }
           }
         }
 
         if (!result.ok && result.reason === "not_found") {
           const elided = applyDotdotdots(working, normalizedOld, normalizedNew);
-          if (elided !== null) result = { ok: true, newWorking: elided };
+          if (elided !== null) {
+            result = { ok: true, newWorking: elided };
+            source = "dotdotdot";
+          }
         }
 
         if (result.ok) {
           working = result.newWorking;
-          outcomes[i] = { ok: true };
+          outcomes[i] = { ok: true, source };
           continue;
         }
 
@@ -472,7 +546,11 @@ export function createEditTool(
         // carries the closest match and a bounded re-read hint.
         if (getDiagnostics) {
           try {
-            diagnosticsNote = await getDiagnostics(resolved, finalContent);
+            diagnosticsNote = await getDiagnostics(
+              resolved,
+              finalContent,
+              riskiestSource(outcomes),
+            );
           } catch {
             // Diagnostics must never break a successful edit.
           }

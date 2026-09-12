@@ -1,5 +1,342 @@
 # @kenkaiiii/gg-ai
 
+## 5.59.0
+
+## 5.58.1
+
+## 5.58.0
+
+## 5.57.2
+
+## 5.57.1
+
+## 5.57.0
+
+## 5.56.1
+
+## 5.56.0
+
+## 5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Fix GPT-6 Astra on the ChatGPT OAuth route. OpenAI gates Astra on the Codex client version (`minimal_client_version: 0.153.0`); GG Coder now advertises `0.153.4`. Future client-version rejections now tell users to update or switch models.
+
+  Remove GPT-5.5 from general model selection and stale defaults while retaining its private image-orchestration role and historical compatibility labels.
+
+## 5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra (`gpt-6-astra`, released 2026-09-03) to the model registry — 1.05M context on the public Responses API, stable 272K or experimental 872K on ChatGPT OAuth, 128K output, text and image input, and the `low` through `max` reasoning ladder. Public Responses requests use `prompt_cache_options`; OAuth uses Responses-Lite.
+
+## 5.53.3
+
+## 5.53.2
+
+## 5.53.1
+
+## 5.53.0
+
+## 5.52.0
+
+### Minor Changes
+
+- 17ca096: Add Claude Fable 5.1 (`claude-fable-5-1`, released 2026-09-01) to the model registry — 1M context, 128k output, image input, always-on adaptive thinking on the low→max ladder (no xhigh), $10/$50 MTok with cache reads at $0.25/MTok. It replaces Fable 5, which is retired from the registry and the model picker — a session still pinned to it falls back to the provider default on next start. Fable 5.1 rejects forced tool use (`tool_choice` `any`/`tool`) with a 400; gg-coder only ever sends `auto`/`none`, so no call path changes.
+
+  The login screen now derives its provider rows from `AUTH_PROVIDERS` instead of keeping a second hardcoded copy, and a new test pins every provider description to the model registry — which caught two stale ones: Z.AI now lists GLM-5.3-Flash alongside GLM-5.3, and OpenRouter names Qwen3.6-Plus rather than just "multi-provider gateway".
+
+## 5.51.4
+
+## 5.51.3
+
+## 5.51.2
+
+## 5.51.1
+
+## 5.51.0
+
+## 5.50.0
+
+## 5.49.11
+
+## 5.49.10
+
+## 5.49.9
+
+## 5.49.8
+
+## 5.49.7
+
+## 5.49.6
+
+## 5.49.5
+
+## 5.49.4
+
+## 5.49.3
+
+## 5.49.2
+
+## 5.49.1
+
+## 5.49.0
+
+### Minor Changes
+
+- 05685fe: Add Gemini 3.7 Flash (`gemini-3.7-flash`, released 2026-08-13) and retarget `deepseek-v4-pro` to DeepSeek-V4-Pro-0813 under the same API id. 3.7 Flash is Google's most capable Flash for coding and agents — 1M context, 64K output, thinking low/medium/high, video input (20 MB inline cap) — listed as a selectable option for Gemini but kept non-default because it ships on our Code Assist transport ahead of gemini-cli (issue #28802 tracks upstream); free/personal accounts get the existing account-gated 404 guidance while entitled Code Assist Standard/Enterprise accounts can use it. DeepSeek's `deepseek-v4-pro` alias now serves the first stable V4 Pro (0813, supersedes the April preview, calling name unchanged): max output corrected to 393,216 and costTier dropped to `medium` to match the ~$0.43/$0.87 per-MTok pricing; saved sessions keep working since the id is unchanged.
+- 05685fe: Add Grok 4.6 (`grok-4.6`, released 2026-08-12) to the model registry and make it the xAI default — 500K context, image input, $2/$6 MTok (under 200K prompt tokens), and a `reasoning_effort` ladder that adds a new `xhigh` top rung (`low`/`medium`/`high` default/`xhigh`), which `XAI_THINKING_LEVELS` now exposes; thinking starts at `xhigh`. Grok 4.5 stays registered as a legacy option, still capped at `high` since it rejects `xhigh`. The OpenAI-compatible transport needs no changes — `xhigh` passes through `toOpenAIReasoningEffort` unchanged — so both the public API and the Grok CLI OAuth proxy serve the new model; CLI/app login defaults point at `grok-4.6`.
+- 05685fe: Add a first-class `huggingface` provider backed by Hugging Face's Inference Providers router (`https://router.huggingface.co/v1`, OpenAI-compatible Chat Completions, one HF token with "Make calls to Inference Providers" permission). Model ids are Hub repo paths: `Qwen/Qwen3-Coder-480B-A35B-Instruct` (default; 262K context, tool-native, non-thinking Coder line) and `openai/gpt-oss-120b` (low-tier sibling for summaries and scout sub-agents; reasoning effort low/medium/high). Auth is a static API key wired through the existing apikey login flow in both TUI and desktop app, with label/logo/order entries everywhere providers are enumerated (`config`/`settings-manager`/`app-sidecar`/`auth-providers`/`ModelSelector`/`login`/`provider-labels`/`provider-logos`). Local-weight users keep the existing routes: Ollama `hf.co/...` pulls and any self-hosted OpenAI-compatible server via local endpoints.
+
+## 5.48.0
+
+## 5.47.0
+
+## 5.46.2
+
+## 5.46.1
+
+## 5.46.0
+
+## 5.45.0
+
+## 5.44.3
+
+### Patch Changes
+
+- Export `resolveToolSchema` from gg-ai so the exact request-path tool-schema serialization (raw input-schema passthrough for MCP tools, zod-to-JSON otherwise) is reusable; ggcoder's new tool-catalog test pins every default tool's name, description, and schema against a committed snapshot so accidental schema drift fails CI instead of silently invalidating cached prompt prefixes.
+
+## 5.44.2
+
+## 5.44.1
+
+## 5.44.0
+
+### Minor Changes
+
+- bc99e74: **GLM-5.3 is now the only GLM model.** Z.AI's new coding-first flagship (released 2026-08-14) replaces GLM-5.2, and GLM-5.1 / GLM-4.7 / GLM-4.7 Flash are retired from the registry — they routed to strictly worse coding for the same plan quota, and the coding endpoint already answers `glm-5.2` requests as glm-5.3. Sessions saved on any retired id fall back to the provider default.
+
+  Same GLM-5 base as 5.2 with every gain from post-training: Z.AI reports ~50% better coding and open-source SOTA on Terminal-Bench 3.0 and Agent's Last Exam. Context window (1M) and max output (131K) are unchanged, so compaction budgeting is untouched.
+
+  **GLM thinking is now a real effort ladder, not an on/off toggle.** ggcoder previously sent only `thinking: { type: "enabled" }`, which silently ran Z.AI's `max` default at every setting. The endpoint in fact declares `none, minimal, low, medium, high, xhigh, max` (an unknown value 400s with that list), so `low / medium / high / xhigh / max` are now selectable and sent as `reasoning_effort` alongside the toggle. Measured end-to-end on one hard reasoning prompt: `low` → 0.8K reasoning chars in 15s, `high` → 3.2K in 28s, `max` → 24.9K in 129s. The default stays `max`, matching what the server was already doing, so existing behaviour is unchanged — but dialing effort _down_ is now possible for the first time.
+
+  Note `max` is kept as `max` on the wire for GLM rather than remapped to `xhigh` the way OpenAI-compatible efforts are: GLM spells its own top rung `max`.
+
+  With no low-cost GLM sibling left, compaction-summary and scout sub-agent routing keep GLM-5.3 instead of downshifting — the existing graceful fallback, no crash and no cross-provider jump.
+
+## 5.43.0
+
+## 5.42.0
+
+## 5.41.1
+
+## 5.41.0
+
+## 5.40.1
+
+## 5.40.0
+
+## 5.39.4
+
+## 5.39.3
+
+## 5.39.2
+
+## 5.39.1
+
+## 5.39.0
+
+## 5.38.0
+
+## 5.37.0
+
+## 5.36.0
+
+## 5.35.1
+
+### Patch Changes
+
+- 8e124fd: Fix "no low surrogate in string" / Bad Request errors from Anthropic and OpenAI.
+
+  An unpaired UTF-16 surrogate anywhere in the conversation (a model streaming a
+  split emoji inside tool-call arguments, or a character-indexed truncation that
+  cut an astral character in half) made the JSON request body unparseable for
+  every provider — and it persisted in history, so retries and model switches
+  failed identically.
+
+  `stream()` now scrubs lone surrogates from all messages at the single provider
+  boundary, and the tool-result/shell/web-fetch/grep truncation paths cut on
+  character boundaries instead of splitting surrogate pairs.
+
+## 5.35.0
+
+## 5.34.3
+
+## 5.34.2
+
+## 5.34.1
+
+## 5.34.0
+
+## 5.33.0
+
+## 5.32.0
+
+## 5.31.0
+
+## 5.30.3
+
+## 5.30.2
+
+## 5.30.1
+
+## 5.30.0
+
+## 5.29.1
+
+## 5.29.0
+
+## 5.28.0
+
+## 5.27.0
+
+## 5.26.3
+
+## 5.26.2
+
+## 5.26.1
+
+## 5.26.0
+
+## 5.25.0
+
+## 5.24.0
+
+## 5.23.3
+
+## 5.23.2
+
+## 5.23.1
+
+## 5.23.0
+
+### Minor Changes
+
+- a6a78c2: Add Claude Opus 5 (`claude-opus-5`, released 2026-07-24) to the model registry — 1M context, 128k output, image input, adaptive thinking with the full effort ladder (low→max, xhigh included), $5/$25 MTok (same price as Opus 4.8). gg-ai treats it as an adaptive-thinking model (no interleaved-thinking beta, xhigh passes through), footers short-name it "Opus" (Opus 4.8 becomes "Opus 4.8"), login/provider descriptions mention it, and gg-boss's default boss model moves from `claude-opus-4-8` to `claude-opus-5`. Opus 4.8 stays registered as a legacy option.
+
+## 5.22.6
+
+## 5.22.5
+
+## 5.22.4
+
+## 5.22.3
+
+## 5.22.2
+
+## 5.22.1
+
+### Patch Changes
+
+- Reliability fixes from the baseline harness (bench/baseline):
+  - **Truncated-stream guard (gg-ai):** a clean stream close with no terminal event (no `message_stop` / `finish_reason`) now throws a retryable `ProviderError(504)` instead of silently returning partial text as a phantom-complete `end_turn`. Applies to both the Anthropic and OpenAI-compatible providers.
+  - **Sidecar bounds (ggcoder):** inbound HTTP bodies capped at 10 MB (413) via `readCappedBody`; the `~/.gg` progress `fs.watch` handle is now closed on shutdown; the project-file glob search streams and bails after 50k entries. Closes three unbounded-memory/leak paths.
+  - **Cap-divergence marker (gg-agent):** `capToolResults`/`capTurnToolResults` now stamp `ToolResult.capped = { originalChars, keptChars, scope }` when they trim, so the event-transcript vs model-input divergence is programmatically visible. Internal metadata only — never serialized to the provider.
+  - **Empty-part serializer fix (gg-ai):** `toAnthropicMessages` no longer emits empty text parts (user `""`, user `{text:""}`, settled assistant `""`), eliminating live Anthropic 400 "text content blocks must be non-empty" failures.
+  - **Tool-id remap fix (gg-ai):** `remapToolCallId` now strips the full `toolu_` prefix (`slice(6)`), mapping `toolu_01ABC` → clean `call_01ABC` instead of the lossy double-underscore `call__01ABC`.
+
+## 5.22.0
+
+## 5.21.0
+
+## 5.20.5
+
+## 5.20.4
+
+## 5.20.3
+
+## 5.20.2
+
+## 5.20.1
+
+## 5.20.0
+
+## 5.19.6
+
+## 5.19.5
+
+## 5.19.4
+
+## 5.19.3
+
+### Patch Changes
+
+- b6e7562: Compress large OpenAI Codex request bodies with zstd and automatically retry HTTP 507 upstream retry-buffer failures.
+
+## 5.19.2
+
+## 5.19.1
+
+## 5.19.0
+
+## 5.18.0
+
+### Minor Changes
+
+- e00de5b: Add Kimi K3 as Moonshot's default model with its 1M-token multimodal registry metadata and endpoint-specific max-effort request handling for both the public API and Kimi Code OAuth. Keep Kimi K2.7 Code available as the dedicated coding alternative.
+
+## 5.17.0
+
+### Minor Changes
+
+- a3916ff: Harden provider error handling, cancellation settlement, review evidence, LSP confidence, route-aware context limits, turn metrics, and durable child-agent recovery.
+
+## 5.16.0
+
+## 5.15.1
+
+## 5.15.0
+
+## 5.14.0
+
+## 5.13.3
+
+## 5.13.2
+
+## 5.13.1
+
+## 5.13.0
+
+## 5.12.0
+
+## 5.11.0
+
+## 5.10.1
+
+## 5.10.0
+
+## 5.9.7
+
+## 5.9.6
+
+## 5.9.5
+
+## 5.9.4
+
+## 5.9.3
+
+## 5.9.2
+
+## 5.9.1
+
+### Patch Changes
+
+- Fix error guidance to use desktop-app UI actions instead of CLI commands in the gg-app
+
 ## 5.9.0
 
 ## 5.8.8

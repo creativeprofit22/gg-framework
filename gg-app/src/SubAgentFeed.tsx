@@ -12,12 +12,18 @@ export interface SubAgentLine {
   toolCallId: string;
   /** Named agent (e.g. "researcher") when supplied, else a positional label. */
   agentName?: string;
-  status: "running" | "done" | "error";
+  status: "starting" | "running" | "idle" | "done" | "error" | "interrupted";
+  async?: boolean;
   /** Rolling feed of tool activities the agent has run (already humanized). */
   activities: string[];
   toolUseCount: number;
   /** Cumulative token usage for this agent (live during the run). */
-  tokenUsage?: { input: number; output: number };
+  tokenUsage?: {
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
   durationMs?: number;
 }
 
@@ -38,12 +44,20 @@ function displayName(agent: SubAgentLine, index: number): string {
   return agent.agentName && agent.agentName !== "default" ? agent.agentName : `Agent ${index + 1}`;
 }
 
-/** Compact "↑in ↓out" token readout, or null until any tokens are counted. */
-function formatTokens(usage: SubAgentLine["tokenUsage"]): string | null {
+/** Codex-style fresh-input + cached-input + output readout. */
+export function formatSubAgentTokens(usage: SubAgentLine["tokenUsage"]): string | null {
   if (!usage) return null;
-  const total = usage.input + usage.output;
-  if (total === 0) return null;
-  return `\u2191 ${formatTokenCount(usage.input)} \u2193 ${formatTokenCount(usage.output)}`;
+  // Anthropic reports newly cacheable input under cacheWrite, while OpenAI
+  // reports it as ordinary non-cached input. Add writes back so the two rows
+  // compare the same quantity instead of making Claude look artificially tiny.
+  const freshInput = usage.input + (usage.cacheWrite ?? 0);
+  const cacheRead = usage.cacheRead ?? 0;
+  if (freshInput + cacheRead + usage.output === 0) return null;
+  return [
+    `\u2191 ${formatTokenCount(freshInput)}`,
+    ...(cacheRead > 0 ? [`\u21BB ${formatTokenCount(cacheRead)} cached`] : []),
+    `\u2193 ${formatTokenCount(usage.output)}`,
+  ].join(" \u00b7 ");
 }
 
 /**
@@ -55,7 +69,9 @@ function formatTokens(usage: SubAgentLine["tokenUsage"]): string | null {
 export function SubAgentFeed({ agents, aborted = false }: Props): React.ReactElement | null {
   if (agents.length === 0) return null;
 
-  const running = agents.filter((a) => a.status === "running").length;
+  const running = agents.filter(
+    (agent) => agent.status === "running" || agent.status === "starting",
+  ).length;
   const headerColor = aborted ? theme.error : running > 0 ? theme.primary : theme.success;
   const noun = `agent${agents.length !== 1 ? "s" : ""}`;
   const header = aborted
@@ -74,25 +90,25 @@ export function SubAgentFeed({ agents, aborted = false }: Props): React.ReactEle
       </div>
       <div className="subagents-list">
         {agents.map((agent, i) => {
-          const isRunning = agent.status === "running" && !aborted;
+          const isRunning = (agent.status === "running" || agent.status === "starting") && !aborted;
           const icon = aborted
             ? "\u2717"
             : agent.status === "done"
               ? "\u2713"
-              : agent.status === "error"
+              : agent.status === "error" || agent.status === "interrupted"
                 ? "\u2717"
                 : DOT;
           const iconColor =
             agent.status === "done"
               ? theme.success
-              : agent.status === "error" || aborted
+              : agent.status === "error" || agent.status === "interrupted" || aborted
                 ? theme.error
                 : theme.primary;
 
           // Done/errored agents collapse to a one-line summary; running agents
           // show their live tool feed (most recent last).
           const feed = isRunning ? agent.activities.slice(-MAX_FEED_ROWS) : [];
-          const tokens = formatTokens(agent.tokenUsage);
+          const tokens = formatSubAgentTokens(agent.tokenUsage);
 
           return (
             <div className="subagent" key={agent.toolCallId}>
@@ -117,7 +133,11 @@ export function SubAgentFeed({ agents, aborted = false }: Props): React.ReactEle
                       ? "interrupted"
                       : agent.status === "error"
                         ? "failed"
-                        : `${agent.toolUseCount} ${agent.toolUseCount === 1 ? "tool" : "tools"}`}
+                        : agent.status === "interrupted"
+                          ? "interrupted"
+                          : agent.status === "idle"
+                            ? "idle · ready for follow-up"
+                            : `${agent.toolUseCount} ${agent.toolUseCount === 1 ? "tool" : "tools"}`}
                     {agent.durationMs != null && !aborted
                       ? ` \u00b7 ${formatDuration(agent.durationMs)}`
                       : ""}

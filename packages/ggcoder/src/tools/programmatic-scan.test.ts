@@ -1,0 +1,192 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type {
+  ConfigurationFingerprintV1,
+  ProgrammaticProfileV1,
+} from "../core/programmatic/contracts.js";
+import {
+  configurationFingerprintV1Schema,
+  programmaticLifecycleStateV1Schema,
+  programmaticProfileEnvelopeV1Schema,
+} from "../core/programmatic/contracts.js";
+import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../core/programmatic/lifecycle.js";
+import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "../core/programmatic/profile.js";
+import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { createProgrammaticProfileTool } from "./programmatic-profile.js";
+import { createProgrammaticScanTool } from "./programmatic-scan.js";
+
+const roots: string[] = [];
+const context = {
+  signal: new AbortController().signal,
+  toolCallId: "programmatic-scan-test",
+};
+
+async function repository(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-programmatic-scan-"));
+  roots.push(root);
+  await fs.mkdir(path.join(root, "src-tauri"), { recursive: true });
+  await fs.writeFile(path.join(root, ".gitignore"), ".gg/\n");
+  await fs.writeFile(path.join(root, "package.json"), '{"name":"fixture"}\n');
+  await fs.writeFile(path.join(root, "src-tauri/Cargo.toml"), '[package]\nname="fixture"\n');
+  await fs.writeFile(
+    path.join(root, "src-tauri/tauri.conf.json"),
+    '{"identifier":"dev.fixture"}\n',
+  );
+  return root;
+}
+
+async function generateProfile(root: string): Promise<void> {
+  const tool = createProgrammaticProfileTool(root);
+  const inspected = JSON.parse((await tool.execute({ action: "inspect" }, context)) as string) as {
+    configuration_fingerprint: ConfigurationFingerprintV1;
+    profile: ProgrammaticProfileV1;
+  };
+  const generated = JSON.parse(
+    (await tool.execute(
+      {
+        action: "generate",
+        configuration_fingerprint: inspected.configuration_fingerprint,
+        profile: inspected.profile,
+      },
+      context,
+    )) as string,
+  ) as { ok: boolean };
+  expect(generated.ok).toBe(true);
+}
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe("`/programmatic` validates the stored profile and configuration fingerprint before running a read-only scan", () => {
+  it("loads and invokes only the argument-free scan tool once", () => {
+    const command = PROMPT_COMMANDS.find(({ name }) => name === "programmatic");
+
+    expect(command).toMatchObject({
+      aliases: [],
+      description: "Scan programmatic opportunities",
+    });
+    expect(command?.prompt).toContain(
+      "Load the deferred `programmatic_scan` tool using `tool_search`.",
+    );
+    expect(command?.prompt.match(/Call `[^`]+`/g)).toEqual(["Call `programmatic_scan`"]);
+    expect(command?.prompt).toContain("exactly once with an empty argument object");
+    expect(command?.prompt).toContain("Report only the tool's bounded result");
+    expect(command?.prompt).toContain(
+      "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+    );
+  });
+
+  it("fails before inventory for an invalid profile and persists only a validated fingerprint", async () => {
+    const root = await repository();
+    await generateProfile(root);
+    const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
+    const validProfile = await fs.readFile(profilePath);
+    await fs.writeFile(profilePath, '{"version":1,"scanners":[],"unexpected":true}\n');
+    let inventoryReads = 0;
+
+    const invalid = await runProgrammaticScan(root, {
+      inventoryOperations: {
+        readFile: async () => {
+          inventoryReads += 1;
+          throw new Error("inventory must not run");
+        },
+      },
+    });
+
+    expect(invalid).toMatchObject({ ok: false, error: "profile-invalid", changed: false });
+    expect(inventoryReads).toBe(0);
+    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+
+    await fs.writeFile(profilePath, validProfile);
+    const output = await createProgrammaticScanTool(root).execute({}, context);
+    if (typeof output !== "string") throw new Error("Expected string tool output");
+    const result = JSON.parse(output) as Record<string, unknown>;
+    const fingerprint = configurationFingerprintV1Schema.parse(result.configuration_fingerprint);
+    const state = programmaticLifecycleStateV1Schema.parse(
+      JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")) as unknown,
+    );
+
+    expect(result).toMatchObject({ ok: true, changed: true, recovered: false });
+    expect(result).not.toHaveProperty("inventory");
+    expect(state.configurationFingerprint).toEqual(fingerprint);
+  });
+
+  it("serializes a committed failure without claiming the state was unchanged", async () => {
+    const root = await repository();
+    await generateProfile(root);
+    const output = await createProgrammaticScanTool(root, {
+      onFileMutated: (file) => {
+        if (file === path.join(root, PROGRAMMATIC_STATE_PATH)) {
+          throw new Error("injected notification failure");
+        }
+      },
+    }).execute({}, context);
+    if (typeof output !== "string") throw new Error("Expected string tool output");
+    const state = programmaticLifecycleStateV1Schema.parse(
+      JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")),
+    );
+    expect(state.records).toHaveLength(1);
+    expect(JSON.parse(output)).toMatchObject({
+      ok: false, changed: true, recovered: false,
+      state_path: PROGRAMMATIC_STATE_PATH,
+      configuration_fingerprint: state.configurationFingerprint,
+      summary: { new: 1, active: 1, failed: 1 },
+      error: { code: "post-commit-failed", detail: expect.stringContaining("Read the current report") },
+    });
+  });
+
+  it("rejects configuration drift in the final commit window without creating lifecycle state", async () => {
+    const root = await repository();
+    await generateProfile(root);
+
+    const result = await runProgrammaticScan(root, {
+      onPreFileMutation: async () => {
+        await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+      changed: false,
+    });
+    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+  });
+
+  it("serializes profile replacement against the final lifecycle commit window", async () => {
+    const root = await repository();
+    await generateProfile(root);
+    const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
+    const stored = programmaticProfileEnvelopeV1Schema.parse(
+      JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown,
+    );
+    await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
+    const proposal = await buildProgrammaticProfileProposal(root);
+    let replacementResult: Awaited<ReturnType<typeof persistProgrammaticProfile>> | undefined;
+
+    const result = await runProgrammaticScan(root, {
+      onPreFileMutation: async () => {
+        replacementResult = await persistProgrammaticProfile(
+          root,
+          proposal.configurationFingerprint,
+          proposal.profile,
+        );
+      },
+    });
+
+    expect(replacementResult).toMatchObject({ ok: true, changed: true });
+    expect(result).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+      changed: false,
+    });
+    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+  });
+});

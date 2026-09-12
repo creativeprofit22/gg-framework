@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-core",
-  "version": "5.9.0",
+  "version": "5.59.0",
   "type": "module",
   "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
   "license": "MIT",
@@ -15,6 +15,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./desktop-session-ux": {
+      "types": "./dist/desktop-session-ux.d.ts",
+      "import": "./dist/desktop-session-ux.js",
+      "require": "./dist/desktop-session-ux.cjs"
+    },
     "./models": {
       "types": "./dist/model-registry.d.ts",
       "import": "./dist/model-registry.js",
@@ -24,6 +29,51 @@
       "types": "./dist/paths.d.ts",
       "import": "./dist/paths.js",
       "require": "./dist/paths.cjs"
+    },
+    "./project-notes": {
+      "types": "./dist/project-notes.d.ts",
+      "import": "./dist/project-notes.js",
+      "require": "./dist/project-notes.cjs"
+    },
+    "./programmatic-chat-contract": {
+      "types": "./dist/programmatic-chat-contract.d.ts",
+      "import": "./dist/programmatic-chat-contract.js",
+      "require": "./dist/programmatic-chat-contract.cjs"
+    },
+    "./project-task-contract": {
+      "types": "./dist/project-task-contract.d.ts",
+      "import": "./dist/project-task-contract.js",
+      "require": "./dist/project-task-contract.cjs"
+    },
+    "./project-notes-diagnostics": {
+      "types": "./dist/project-notes-diagnostics.d.ts",
+      "import": "./dist/project-notes-diagnostics.js",
+      "require": "./dist/project-notes-diagnostics.cjs"
+    },
+    "./phase-binding-protocol": {
+      "types": "./dist/phase-binding-protocol.d.ts",
+      "import": "./dist/phase-binding-protocol.js",
+      "require": "./dist/phase-binding-protocol.cjs"
+    },
+    "./phase-start-protocol": {
+      "types": "./dist/phase-start-protocol.d.ts",
+      "import": "./dist/phase-start-protocol.js",
+      "require": "./dist/phase-start-protocol.cjs"
+    },
+    "./plan-review": {
+      "types": "./dist/plan-review.d.ts",
+      "import": "./dist/plan-review.js",
+      "require": "./dist/plan-review.cjs"
+    },
+    "./roadmap-workflow": {
+      "types": "./dist/roadmap-workflow.d.ts",
+      "import": "./dist/roadmap-workflow.js",
+      "require": "./dist/roadmap-workflow.cjs"
+    },
+    "./slash-command-contract": {
+      "types": "./dist/slash-command-contract.d.ts",
+      "import": "./dist/slash-command-contract.js",
+      "require": "./dist/slash-command-contract.cjs"
     }
   },
   "main": "./dist/index.cjs",

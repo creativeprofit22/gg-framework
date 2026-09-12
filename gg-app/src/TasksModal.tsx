@@ -1,3 +1,7 @@
+import {
+  isManuallyRunnableTaskStatus,
+  isRunnableTaskStatus,
+} from "@kenkaiiii/gg-core/project-task-contract";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import type { ProjectTask } from "./agent";
@@ -5,13 +9,13 @@ import type { ProjectTask } from "./agent";
 /**
  * Task list modal. Mirrors the CLI's task pane: shows every project task with
  * its status, lets the user run one task (fresh session, end-to-end) or run all
- * pending tasks sequentially, and delete tasks. The agent loop streams progress
+ * runnable tasks sequentially, and delete tasks. The agent loop streams progress
  * back into the transcript — this modal just kicks things off and reflects the
  * live status updates pushed via the `tasks_list` SSE event.
  */
 interface Props {
   tasks: readonly ProjectTask[];
-  /** True while the agent is running (task or chat) — disables run actions. */
+  /** True while the session is busy, including Autopilot review — disables run actions. */
   running: boolean;
   onRun: (id: string) => void;
   onRunAll: () => void;
@@ -19,10 +23,12 @@ interface Props {
   onClose: () => void;
 }
 
-const STATUS_STYLE: Record<ProjectTask["status"], { label: string; color: string }> = {
+const UNKNOWN_STATUS_STYLE = { label: "unknown", color: theme.textMuted };
+const STATUS_STYLE: Partial<Record<ProjectTask["status"], { label: string; color: string }>> = {
   pending: { label: "pending", color: theme.textMuted },
   "in-progress": { label: "running", color: theme.warning },
   done: { label: "done", color: theme.success },
+  blocked: { label: "blocked", color: theme.textMuted },
 };
 
 export function TasksModal({
@@ -33,8 +39,8 @@ export function TasksModal({
   onDelete,
   onClose,
 }: Props): React.ReactElement {
-  const pending = tasks.filter((t) => t.status !== "done");
-  const hasPending = pending.length > 0;
+  const runnable = tasks.filter((task) => isRunnableTaskStatus(task.status));
+  const hasRunnable = runnable.length > 0;
 
   return (
     <Modal title="Tasks" onClose={onClose}>
@@ -46,8 +52,9 @@ export function TasksModal({
         <>
           <div className="tasks-list">
             {tasks.map((task) => {
-              const status = STATUS_STYLE[task.status];
+              const status = STATUS_STYLE[task.status] ?? UNKNOWN_STATUS_STYLE;
               const isDone = task.status === "done";
+              const canRunManually = isManuallyRunnableTaskStatus(task.status);
               return (
                 <div className="tasks-item" key={task.id}>
                   <span className="tasks-dot" style={{ color: status.color }} title={status.label}>
@@ -63,7 +70,7 @@ export function TasksModal({
                   <span className="tasks-status" style={{ color: status.color }}>
                     {status.label}
                   </span>
-                  {!isDone && (
+                  {canRunManually && (
                     <button
                       className="btn btn-sm btn-ghost tasks-run-one"
                       disabled={running}
@@ -88,15 +95,15 @@ export function TasksModal({
           <div className="tasks-actions">
             <button
               className="btn btn-sm btn-primary"
-              disabled={running || !hasPending}
+              disabled={running || !hasRunnable}
               title={
-                hasPending
-                  ? "Run all pending tasks, one fresh session each"
-                  : "No pending tasks to run"
+                hasRunnable
+                  ? "Run all runnable tasks, one fresh session each"
+                  : "No runnable tasks to run"
               }
               onClick={onRunAll}
             >
-              {`Run all (${pending.length})`}
+              {`Run all (${runnable.length})`}
             </button>
           </div>
         </>

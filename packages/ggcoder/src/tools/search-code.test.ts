@@ -73,12 +73,23 @@ describe("createSearchCodeTool", () => {
     expect(out).toContain("// thing.ts:3 → WidgetFactory");
   });
 
-  it("ignores non-TS files", async () => {
+  it("ignores file types it cannot chunk", async () => {
     await fs.writeFile(path.join(tmpDir, "notes.md"), "# resolveCredentials lives here\n");
     await fs.writeFile(path.join(tmpDir, "data.json"), '{"resolveCredentials": true}\n');
 
     const out = await run({ query: "resolveCredentials" });
-    expect(out).toContain("No TS/JS files to search");
+    expect(out).toContain("No indexable source files here");
+  });
+
+  it("indexes languages beyond TS/JS", async () => {
+    await fs.writeFile(
+      path.join(tmpDir, "auth.py"),
+      "def resolve_credentials(profile):\n    return profile.token\n",
+    );
+
+    const out = await run({ query: "resolve credentials for a profile" });
+    expect(out).toContain("auth.py:1 \u2192 resolve_credentials");
+    expect(out).toContain("return profile.token");
   });
 
   it("returns a clean no-results message when no symbols match nothing useful", async () => {

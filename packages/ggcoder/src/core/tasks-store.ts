@@ -3,21 +3,19 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { isRunnableTaskStatus, type ProjectTask } from "@kenkaiiii/gg-core";
 
 const TASKS_BASE = join(homedir(), ".gg-tasks", "projects");
 
-export interface TaskRecord {
-  id: string;
-  title: string;
-  prompt: string;
+export interface TaskRecord extends ProjectTask {
   /** @deprecated Old field — migrated to title+prompt on load. */
   text?: string;
   details?: string;
-  status: "pending" | "in-progress" | "done";
-  createdAt: string;
+  /** Desktop task completion is provisional until its user-turn/review settles. */
+  completionPending?: boolean;
 }
 
-export interface PendingTaskInfo {
+export interface RunnableTaskInfo {
   id: string;
   title: string;
   prompt: string;
@@ -88,13 +86,13 @@ export function getTaskCount(cwd: string): number {
   return loadTasksSync(cwd).filter((task) => task.status !== "done").length;
 }
 
-export function getNextPendingTask(cwd: string): PendingTaskInfo | null {
-  const pending = loadTasksSync(cwd).find((task) => task.status === "pending");
-  if (!pending) return null;
+export function getNextRunnableTask(cwd: string): RunnableTaskInfo | null {
+  const runnable = loadTasksSync(cwd).find((task) => isRunnableTaskStatus(task.status));
+  if (!runnable) return null;
   return {
-    id: pending.id,
-    title: pending.title,
-    prompt: pending.prompt || pending.text || pending.title,
+    id: runnable.id,
+    title: runnable.title,
+    prompt: runnable.prompt || runnable.text || runnable.title,
   };
 }
 
@@ -106,16 +104,26 @@ export function getNextPendingTask(cwd: string): PendingTaskInfo | null {
  */
 export function pruneDoneTasksSync(cwd: string): TaskRecord[] {
   const tasks = loadTasksSync(cwd);
-  const remaining = tasks.filter((task) => task.status !== "done");
+  const remaining = tasks.filter((task) => task.status !== "done" || task.completionPending);
   if (remaining.length !== tasks.length) saveTasksSync(cwd, remaining);
   return remaining;
 }
 
-export function markTaskInProgress(cwd: string, taskId: string): void {
+export function markTaskInProgress(cwd: string, taskId: string, completionPending = false): void {
   const tasks = loadTasksSync(cwd);
   if (tasks.length === 0) return;
   const updated = tasks.map((task) =>
-    task.id === taskId ? { ...task, status: "in-progress" as const } : task,
+    task.id === taskId ? { ...task, status: "in-progress" as const, completionPending } : task,
   );
   saveTasksSync(cwd, updated);
+}
+
+/** Release provisional completion only after orchestration has explicitly settled. */
+export function finalizeTaskRun(cwd: string, taskId: string, succeeded: boolean): void {
+  const tasks = loadTasksSync(cwd);
+  const task = tasks.find((candidate) => candidate.id === taskId);
+  if (!task) return; // Respect an explicit removal during the run.
+  if (!succeeded) task.status = "blocked";
+  delete task.completionPending;
+  saveTasksSync(cwd, tasks);
 }

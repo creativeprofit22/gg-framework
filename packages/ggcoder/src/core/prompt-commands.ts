@@ -3,29 +3,49 @@
  * into the agent loop. Each command maps to a full prompt the agent executes.
  */
 
+import { SLASH_COMMAND_INPUT_NONE, type SlashCommandInputPolicy } from "@kenkaiiii/gg-core";
+import { isGgApp } from "./runtime-mode.js";
+
 export interface PromptCommand {
   name: string;
   aliases: string[];
   description: string;
   prompt: string;
+  /** Omitted commands preserve the normal free-text argument behavior. */
+  input?: SlashCommandInputPolicy;
 }
 
-/**
- * True when this process is the gg-app sidecar (Tauri spawns it with
- * `GG_APP_PORT` set, even to "0" — plain `ggcoder` CLI never sets it). Used
- * to phrase user-facing notices (restart / task-list pointers) in terms of
- * the desktop app's UI instead of CLI keybinds, since most users are on the
- * app now and it has no terminal keybinds at all.
- */
-const IS_GG_APP = process.env.GG_APP_PORT !== undefined;
+const IS_GG_APP = isGgApp();
 
 const TASKS_ADDED_NOTICE = IS_GG_APP
   ? 'Tasks added. Click the "Tasks" button to open the task list and run them.'
   : "Tasks added. Press Ctrl+T to open the task list and run them.";
 
+// The context file is whichever name won CONTEXT_FILES priority for this repo
+// (AGENTS.override.md > AGENTS.md > CLAUDE.md > …), so the notice stays
+// filename-agnostic — /init picks the winner at run time.
 const CLAUDE_MD_RESTART_NOTICE = IS_GG_APP
-  ? '> ⚠️ CLAUDE.md was created/updated. GG App loads it fresh per session, so start a **New Session** (click "+ New") before continuing. Without a new session, I won\'t see the new context.'
-  : "> ⚠️ CLAUDE.md was created/updated. ggcoder loads it at startup, so **exit and restart ggcoder** (`/quit` then run `ggcoder` again) before continuing. Without a restart, I won't see the new context.";
+  ? '> ⚠️ The project context file was created/updated. GG App loads it fresh per session, so start a **New Session** (click "+ New") before continuing. Without a new session, I won\'t see the new context.'
+  : "> ⚠️ The project context file was created/updated. ggcoder loads it at startup, so **exit and restart ggcoder** (`/quit` then run `ggcoder` again) before continuing. Without a restart, I won't see the new context.";
+
+/**
+ * Shared sub-agent fan-out phrasing. One home so the "call the tool N times
+ * in a single response" wording can't drift between command prompts.
+ */
+const spawnParallel = (count: string | number): string =>
+  `in parallel using the subagent tool (call the subagent tool ${count} times in a single response)`;
+
+function renderProgrammaticPrompt(scanRegistered: boolean): string {
+  const steps = [
+    ...(scanRegistered ? [] : ["Load the deferred `programmatic_scan` tool using `tool_search`."]),
+    "Call `programmatic_scan` exactly once with an empty argument object.",
+    "Report only the tool's bounded result.",
+    "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+  ];
+  return `# Scan Programmatic Opportunities\n\n${steps
+    .map((step, index) => `${index + 1}. ${step}`)
+    .join("\n")}`;
+}
 
 export const PROMPT_COMMANDS: PromptCommand[] = [
   {
@@ -50,7 +70,7 @@ Use this profile to decide which features are relevant and genuinely missing. If
 
 ## Phase 1: Parallel feature research
 
-Spawn exactly 5 sub-agents in parallel using the subagent tool (call the subagent tool 5 times in a single response). Give each sub-agent the project profile and a different feature-hunting lens:
+Spawn exactly 5 sub-agents ${spawnParallel(5)}. Give each sub-agent the project profile and a different feature-hunting lens:
 
 **Agent 1 - Direct competitor killer features**: The standout, most-loved user-facing features in the closest peer projects/tools/products that this project lacks.
 
@@ -77,7 +97,7 @@ For every candidate from the sub-agents, validate it yourself before reporting:
 1. Confirm the external source is relevant to this project and fresh enough (normally within 6 months).
 2. Search this repo with grep/find and language-aware anchors to confirm the feature is not already present under another name.
 3. Check routes, CLI commands, UI surfaces, package exports, config, docs, and examples before calling a feature missing.
-4. Use mcp__kencode-search__searchCode when a code-level look clarifies how peers actually ship the feature. Use literal imports, functions, config keys, CLI flags, route names, or package names — not conceptual phrases.
+4. Use the \`steroids\` tool (\`search\`, then \`show\` to read the full file) when a code-level look clarifies how peers actually ship the feature. Use literal imports, functions, config keys, CLI flags, route names, or package names — not conceptual phrases.
 5. Drop anything already present, irrelevant, too vague, too stale, or that is not a real user-facing feature.
 6. Merge duplicates and keep only the most exciting 5–10 features.
 
@@ -97,265 +117,93 @@ Rules:
 - Keep each cell concise but specific enough to be actionable.
 - If no exciting validated features are found, output one row saying no fresh validated features were found.
 
-After the table, ask exactly:
+After the table, ask the user what to do with the \`ask_user\` tool: one \`choice\` question (\`id: "scope"\`, question "What should I do?") with these options, each carrying a one-line hint:
 
-What should I do?
-A) Build all of these features in plan mode
-B) Build only the top priority ones in plan mode
-C) Other
+- Build all of these features in plan mode
+- Build only the top priority ones in plan mode
+
+Leave the free-text escape on so they can pick specific ranks or re-scope. The card is the ONLY ask: do not also list the options as text, and do not end with an asking line. Only if \`ask_user\` is unavailable, ask the same question in prose as a lettered list.
 
 Do not start implementing until the user chooses.
 
-If the user chooses A or B, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them for A; the top 3 most exciting — ranks 1-3 — for B). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via kencode search using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
+If they choose all or the top ones, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them, or the top 3 most exciting — ranks 1-3). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via the steroids tool using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
 
-If the user chooses C, ask what they would like — pick specific features by rank, refine or re-scope the list, or skip — and do not implement anything until they say so.`,
-  },
-  {
-    name: "bullet-proof",
-    aliases: ["bp"],
-    description: "Audit exploitable weaknesses",
-    prompt: `# Bullet-Proof: Defensive Security Review
-
-You are a defensive security auditor reviewing this codebase to identify exploitable weaknesses so they can be patched before the project ships. Think rigorously about realistic threat scenarios — boundary checks, edge cases, race conditions, trust assumptions, supply-chain risks, agent-mediated paths.
-
-Goal: harden this project against realistic threats. **Report only HIGH CONFIDENCE findings (≥0.8) with a concrete data-flow path that demonstrates exposure.** Better to miss theoretical issues than flood the report with noise.
-
-This command is **dynamic and project-agnostic**. Recon drives everything. Do not assume the stack, the language, the deploy target, or that there is an LLM/agent layer. Read first, decide second.
-
-## Phase 1: Recon — Understand THIS project before auditing anything
-
-Spawn **FOUR recon subagents in parallel** using the subagent tool (call the subagent tool 4 times in a single response). Each has a narrow, independent slice so they can all run at once. **No vulnerabilities flagged in this phase.**
-
-**Recon Agent A — Stack & Deployment.** Read manifests, lockfiles, CI/CD configs, Dockerfile/Helm/Terraform, deploy scripts. Produce:
-- Primary language(s), framework(s), runtimes
-- Deploy target (browser / server / CLI / mobile / desktop / embedded / cloud function / container / serverless / smart contract / firmware / ML pipeline / library / SaaS / self-hosted)
-- How it ships (npm/PyPI/cargo/go modules/app store/binary/Docker image/Helm chart/Terraform)
-- Where it runs (which cloud/host, multi-tenant or single-tenant, network topology if discernible)
-
-**Recon Agent B — Trust Boundaries & Sources.** Walk entry-point code (route handlers, CLI argparse, queue consumers, WebSocket handlers, IPC receivers, MCP server handlers, file/env readers, deserialization entry, plugin loaders). Produce:
-- **Trust boundaries table** — every place untrusted data crosses into the system
-- **Sources table** — for each entry point: location (file:line), input shape, who controls it (anonymous / authenticated user / admin / other service / build-time / env)
-
-**Recon Agent C — Sinks.** Walk dangerous-operation code. Produce a **Sinks table** with location (file:line) and sink type for: shell exec, SQL / NoSQL / LDAP / XPath queries, eval / Function / exec / pickle / yaml.load / Marshal / ObjectInputStream, file write, file include / require with dynamic path, network egress (fetch / requests / http.Get), auth decisions, secret reads, native deserializers, dynamic code load, smart-contract external calls, child_process spawns.
-
-**Recon Agent D — Assets.** Scan for what is worth stealing or destroying. Produce an **Assets table** with location and asset type for: credentials / tokens (config files, env files, KMS, OAuth flows, ~/.{app}/auth.json-style stores), customer/PII data stores, source code with IP value, build/CI secrets, signing keys, model API tokens, on-chain funds / wallets, session state, MCP config files, license keys.
-
-**After all four return, the main agent synthesizes:**
-1. Assemble the four tables (Stack/Deploy, Sources, Sinks, Assets) into the recon report
-2. Add the **Threat model** — concrete to THIS project, derived from the four agents' outputs. Who would realistically target it and what for? (Examples: supply-chain risks affecting downstream users of a library; multi-tenant abuse on a SaaS; untrusted user input on a CLI/mobile app; insider risk with repo access; phishing-based account takeover; coding-agent risks from injected web content; on-chain reentrancy risks for a smart contract.) Be specific.
-3. Note any obvious gaps the four recon agents flagged (areas that need a deeper look in Phase 3)
-
-## Phase 2: Plan the audit — recon drives this
-
-From the recon output, decide which vulnerability classes apply to THIS project. **Skip audits with no entry surface.** A static documentation site does not get a SQLi audit. A Rust embedded firmware project does not get a prompt-injection audit. A Python ML pipeline does get pickle/yaml audits. A library that ships to others gets supply-chain weighted heavily.
-
-Default catalog — pick what applies, drop what doesn't, add stack-specific audits where recon shows a unique surface:
-
-| Audit | Fires when | Audits for |
-|---|---|---|
-| **Injection** | unsanitized input reaches an interpreter | SQLi, command injection, template injection, eval/Function/exec, pickle/yaml.load, NoSQL/LDAP/XPath injection, prompt injection |
-| **AuthN/AuthZ/Session** | any auth, session, or access-control logic exists | broken access control (IDOR, BOLA), JWT alg confusion / alg:none, OAuth state/PKCE/redirect-uri abuse, session fixation, missing rate limit on credential checks, MFA bypass, TOCTOU races |
-| **Secrets & exposure paths** | any secret/credential/token exists | hardcoded keys, logs/errors/debug-file leakage, source maps in published artifacts, telemetry leakage, prototype pollution exposing secrets, \`JSON.stringify(err)\` shapes, env dump in error pages, exposed \`.git\`/\`.env\`/\`.map\` |
-| **Supply chain** | any dependency manager or external code | unpinned deps/actions, postinstall scripts, typosquats, **slopsquats (AI-hallucinated package names registered by malicious parties)**, dependency confusion, lockfile drift, install-time \`curl \\| sh\`, unsigned releases, unverified maintainer takeovers, self-spreading worms (Shai-Hulud family) |
-| **CI/CD & build integrity** | any CI workflow, release pipeline | \`pull_request_target\` + checkout of PR HEAD (Pwn Request), Actions cache poisoning, OIDC token theft from \`/proc\`, self-hosted runner reuse, secret echoes, missing \`permissions:\` block |
-| **SSRF, path traversal, file ops** | any URL/path/file built from input | SSRF to metadata endpoints (IMDSv1), path traversal, zip-slip, symlink races, unrestricted upload, archive extraction outside target dir |
-| **Cloud/infra & misconfig** | any IaC, container, cloud SDK use | overpermissive IAM (\`Action:*\`, \`iam:PassRole:*\`), public buckets, IMDSv1, exposed K8s API/kubelet, presigned URLs without expiry, default creds, debug endpoints in prod, CORS \`origin:*\` + \`credentials:true\` |
-| **Crypto** | any crypto/hashing/signing | weak algos (MD5/SHA1 for auth), missing IV, ECB mode, hardcoded keys, JWT \`alg:none\`, non-constant-time compare on secrets, predictable PRNG for tokens |
-| **Agent surface** | only if recon detected LLM/AI/MCP/coding-agent/tool-calling code | indirect prompt injection via fetched content, MCP tool poisoning, tool-description injection (ToolLeak), system-prompt exposure via tool args, **Rules-File Backdoor (Unicode bidi / zero-width chars hiding instructions in CLAUDE.md / .cursorrules / AGENTS.md)**, malicious CLAUDE.md walking up parent dirs, DNS-exfil via coerced tool calls, RAG / memory / context poisoning, vector-store embedding risks |
-| **Dangerous-sink dataflow (taint)** | Sources × Sinks tables are non-empty | trace each Source through the codebase to every reachable Sink; flag reachable paths with no sanitization between |
-
-**Add stack-specific audits when recon surfaces them**: smart-contract reentrancy/oracle manipulation; mobile IPC / deep links / pasteboard / WebView \`addJavascriptInterface\`; embedded firmware update integrity, debug interfaces left enabled; ML model deserialization, training-data poisoning, MLflow/Triton config exposure.
-
-## Phase 3: Parallel audits
-
-Spawn one subagent per active audit **in a single response** (call the subagent tool N times **with \`agent: "auditor"\`**, where N is whatever Phase 2 picked — do not pad to a fixed number, do not drop audits Phase 2 selected). The \`auditor\` agent has the defensive-review persona and exclusion list baked in, so your task description only needs the vulnerability-class scope. Each auditor receives:
-- The full recon output (Sources, Sinks, Assets, Threat model)
-- Its specific vulnerability-class scope
-- The 2026 threat reference at the bottom of this prompt
-
-Each auditor must:
-1. **Trace data flow** from Sources to Sinks for its class. Not pattern matching.
-2. For every candidate, apply the **untrusted-input vs trusted-input** decision: is the input *actually reachable* by an untrusted source, or is it a settings constant / build-time string / hard-coded value?
-3. Construct a concrete **vulnerability scenario** — describe how the weakness would be triggered (input → system response → resulting exposure). If you can't describe the steps, don't flag it.
-4. Assign **confidence 0.0–1.0**. Drop anything <0.8 before returning.
-5. Be framework-aware: ORM parameterization, auto-escape, memory-safe languages, JSX/template escaping all eliminate entire vuln classes. Don't flag what the framework already handles.
-
-## Phase 4: False-positive filter
-
-After auditors complete, spawn one verification subagent per surviving finding **in parallel with \`agent: "skeptic"\`** (call the subagent tool once per finding in a single response). The \`skeptic\` agent starts from "this is a false positive" and tries to disprove the finding — only confirmed findings survive. Pass each verifier the full audit finding (location, source/sink, vulnerability scenario, claimed confidence). Drop anything the skeptic returns as DROP; lower severity for DOWNGRADE.
-
-**Hard exclusions — do NOT report these, even if real:**
-- DOS / rate-limiting / memory exhaustion without a clear amplification primitive
-- Theoretical race conditions without a demonstrable trigger window
-- Regex-DOS without untrusted-supplied regex
-- Log spoofing / log injection (cosmetic)
-- SSRF where the URL is a settings constant or build-time string
-- Env-var trust (env is server-controlled by definition)
-- Client-side authentication theatre on a server-validated endpoint
-- React/Angular/Vue XSS in non-unsafe-sink paths (\`dangerouslySetInnerHTML\`, \`v-html\`, \`bypassSecurityTrust*\` are the only real ones)
-- Shell-script command injection without an untrusted input path
-- Findings in documentation files, example code, or test fixtures
-- Insecure-by-design dev tooling that doesn't ship to users
-- "Could be improved" style preferences or hardening-best-practice nudges with no demonstrable path
-
-## Phase 5: Report
-
-Output one report. No code edits in this phase.
-
-\`\`\`
-# Bullet-Proof Report — [Project name from recon]
-Date: [today's date]
-Threat model: [from recon]
-
-## Exposure Surface Summary
-[1-paragraph summary of the project's realistic exposure profile and where untrusted data enters]
-
-## Sources / Sinks / Assets
-[Compact tables from recon]
-
-## Risk Matrix
-| Severity | Count | Definition |
-|---|---|---|
-| Critical | N | RCE, full auth bypass, credential theft, fund loss |
-| High     | N | privilege escalation, data exposure with auth, supply-chain compromise |
-| Medium   | N | limited-scope info disclosure, weakened crypto, partial bypass |
-
-## Findings
-
-### [BP-001] <title> — Critical
-- Location: path:line
-- Category: <slug>   CWE: CWE-XXX   Confidence: 0.95
-- Exposure surface: <entry point from Sources>
-- Source → Sink: <e.g. \`POST /api/foo body.userId\` → \`subprocess.run(..., shell=True)\`>
-- Vulnerability scenario:
-  1. Untrusted input <specific payload> reaches <source>
-  2. Server processes it as <what>
-  3. Result: <RCE / data exposure / auth bypass>
-- Impact: <blast radius — what is exposed, how far it spreads>
-- Fix: <concrete remediation, code-level>
-
-[…repeat per finding, ordered Critical → High → Medium…]
-
-## What was not flagged
-[1-paragraph: which vulnerability classes returned zero findings, and how many findings the FP filter dropped — so the user sees the work, not just the survivors]
-\`\`\`
-
-## Phase 6: Ask before fixing
-
-After the report, ask:
-
-> Which (if any) should I fix? Options:
-> - A) Add tasks for all Critical + High
-> - B) Add tasks for specific findings (give IDs, e.g. "BP-001, BP-004")
-> - C) Add tasks for a category (auth, supply chain, secrets, …)
-> - D) None — report only
-
-**Do not start fixing until the user picks.**
-
-If the user chooses A, B, or C, do not fix directly. Instead, add one task per selected finding or tightly coupled finding group using the \`tasks\` tool (action=add), ordered by severity, exploitability, and dependency. Each task needs a short title and a standalone prompt that includes the finding ID, vulnerability scenario, affected local files/anchors, concrete remediation, instructions to compare security-sensitive implementation details with kencode search or authoritative docs before editing, project verification commands, and instructions to compare the final fix with kencode search or authoritative docs again before completing the task. After adding the tasks, tell the user exactly: "${TASKS_ADDED_NOTICE}" Do not begin executing them unless the user explicitly says so.
-
-## Threat reference (May 2026)
-
-Cite these as needed per audit. Do not dump them into the report — use them to verify whether a candidate is actually reachable.
-
-**OWASP Top 10:2025** — A01 Broken Access Control (now includes SSRF), A02 Misconfig, **A03 Supply Chain Failures (new)**, A05 Injection (now includes prompt injection), **A10 Mishandling Exceptional Conditions (new — fail-open patterns)**.
-
-**OWASP API Security Top 10 (2023)** — BOLA, Broken Auth, BOPLA, SSRF (API7).
-
-**OWASP Top 10 for LLM Apps v2025** — LLM01 Prompt Injection (direct + indirect), LLM02 Sensitive Info Disclosure, LLM03 Supply Chain, LLM04 Data & Model Poisoning, LLM05 Improper Output Handling, LLM06 Excessive Agency, **LLM07 System Prompt Leakage (new)**, **LLM08 Vector & Embedding Weaknesses (new — RAG/embedding-store attacks)**, LLM09 Misinformation, LLM10 Unbounded Consumption.
-
-**OWASP Top 10 for Agents 2026 (ASI01–10)** — Goal hijack, tool misuse, identity/privilege abuse, agentic supply chain, unexpected code exec, memory/context poisoning, inter-agent comms, cascading failures, human-trust exploit, rogue agents.
-
-**Real 2024-2026 incidents — use as grep templates:**
-- tj-actions/changed-files (Mar 14-15 2025, CVE-2025-30066, 23k repos) → unpinned GH Actions, \`uses: foo/bar@main\` / mutable tags, runner-memory secret dumps
-- TanStack Mini Shai-Hulud (May 11 2026, CVE-2026-45321, CVSS 9.6 — 84 versions across 42 \`@tanstack/*\` + UiPath/Mistral/Guardrails/OpenSearch, 169+ packages total, "TeamPCP") → self-spreading npm worm, \`pull_request_target\` + cache poisoning + OIDC token extraction from \`/proc/<pid>/mem\`, persistent \`gh-token-monitor\` daemon
-- Slopsquatting (ongoing 2025-2026, \`react-codeshift\` Jan 2026) → AI coding assistants hallucinate ~20% non-existent package names (open-source models ~21.7%, GPT-4 ~5.2%); malicious parties register the hallucinated names on npm/PyPI. **Verify every package actually existed BEFORE the agent suggested it** — check registry age, download history, author identity
-- XZ Utils (CVE-2024-3094) → unverified maintainer takeovers, multi-year backdoor injection in install scripts
-- Invariant Labs MCP hijack (May 2025) → MCP server returns malicious tool descriptions / crafted issue content
-- Claude Code source-map leak (Mar 2026, 513k LOC) → \`*.map\` files in \`npm pack\` / shipped artifacts
-- Embrace The Red DNS-exfil (Aug 2025) → coding agent coerced into encoding secrets in DNS queries
-- IMDSv1 → AWS creds via SSRF (Mar 2025 campaign) → Terraform missing \`http_tokens = "required"\`
-- GitGuardian 2026 — 28.6M GitHub secret leaks in 2025, 24k inside MCP config files
-
-**Language-specific hot zones — only apply to languages actually present:**
-- **Node/TS**: \`child_process.exec\`/\`execSync\`, \`spawn(..., {shell:true})\`, \`eval\`/\`Function\`, \`vm.runIn*\`, prototype pollution via \`lodash.merge\`/\`Object.assign({}, userJson)\`, \`serialize-javascript\`/\`node-serialize\`, source maps in published packages
-- **Python**: \`pickle.load\`, \`yaml.load\` without \`SafeLoader\`, \`eval\`/\`exec\`, \`subprocess.*(shell=True)\`, \`os.system\`, \`Jinja2(autoescape=False)\`, \`flask.render_template_string(user_input)\`, \`requests(verify=False)\`, \`xml.etree\`/\`lxml\` without \`defusedxml\`
-- **Go**: \`exec.Command("sh", "-c", userInput)\`, \`html/template\` vs \`text/template\` confusion, unbounded \`io.ReadAll\`, race-prone \`map\` access without lock
-- **Rust**: \`unsafe\` blocks with raw pointers, \`Command::new("sh").arg("-c")\`, deserializing untrusted \`bincode\`/\`serde_pickle\`/\`serde_json\` with \`#[serde(deny_unknown_fields)]\` missing
-- **Java/JVM**: \`ObjectInputStream\` deserialization, JNDI lookup (Log4Shell-style), \`Runtime.exec(String)\`, XXE in default XML parsers
-- **Ruby**: \`eval\`/\`instance_eval\`, \`Marshal.load\`, \`YAML.load\` (not \`safe_load\`), \`Kernel#system\` with interpolation, mass assignment
-- **PHP**: \`unserialize\`, \`eval\`, \`assert(string)\`, \`include $userInput\`, \`preg_replace\` /e modifier
-- **C/C++**: unsafe \`strcpy\`/\`sprintf\`/\`gets\`, integer overflows, format strings (\`printf(userInput)\`), use-after-free, double-free
-- **Solidity / EVM**: reentrancy, unchecked external calls, integer over/underflow (pre-0.8), \`tx.origin\` for auth, delegatecall to untrusted, oracle manipulation
-- **Mobile (iOS/Android)**: insecure IPC / deep links / pasteboard, WebView \`addJavascriptInterface\`, exported activities/intents without permission checks, insecure local storage
-
-## Rules
-
-- **Recon first, audits second.** No audit fires without a recon-identified entry surface to justify it.
-- **No pattern-only findings.** Every flag must have a Sources → Sinks path traced through the code.
-- **No "could be improved" recommendations.** Either it's exploitable or it's not in scope.
-- **Strict confidence gate (≥0.8).** Drop everything else, even if it looks suspicious.
-- **Adapt to the stack, always.** The audit catalog and threat reference above are guidance, not a checklist to apply uniformly.
-- **Report only.** Wait for the user to pick what to fix in Phase 6.`,
+If they answer with anything else, follow what they asked — specific features by rank, a refined or re-scoped list, or skipping — and do not implement anything until they say so.`,
   },
   {
     name: "init",
     aliases: [],
     description: "Generate or update CLAUDE.md for this project",
-    prompt: `Generate or update a minimal CLAUDE.md with project-specific context only: what this project is, how it is structured, and commands/workflows that are unique to it.
+    prompt: `Generate or update the project context file with project-specific context only: what this project is, the non-obvious knowledge needed to change it safely, and the workflows that are unique to it.
 
-Do NOT add generic agent behavior already covered by the system prompt, including: read before edit/write, re-read after formatters, ask before destructive actions, no fake verification, generic code-quality advice, single-responsibility rules, one-file-per-component rules, or language-style conventions. Never add guidance that requires running checks, builds, or the full quality suite after every edit or every file change. Include only project-specific overrides or stricter local requirements.
+This file is injected verbatim into the **cached prefix of every request in every future session**, alongside the system prompt. Every line costs tokens forever. A line that repeats something the agent already has is worse than absent: it dilutes the lines that matter. So the bar is not "is this true?" — it is **"would a competent agent get this wrong without being told?"**
 
-## Step 1: Check if CLAUDE.md Exists
+## What is already in the agent's context — never restate any of it
 
-If CLAUDE.md exists:
-- Read the existing file
-- Preserve custom sections the user may have added
-- Update only project-specific facts that are stale or missing
-- Remove generic guidance that is already covered by the system prompt unless it is a deliberate project-specific override
+Read this list once and apply it to every step below. These are already supplied by the system prompt, so writing them into the context file is pure duplication:
 
-If CLAUDE.md does NOT exist:
-- Create a new one from scratch
+1. **Agent behavior** — Do NOT add generic agent behavior already covered by the system prompt: read before edit/write, re-read after formatters, ask before destructive actions, no fake verification, generic code-quality advice, how to use tools, or how to talk to the user.
+2. **Language conventions** — a Language Style Packs section is auto-injected for every language detected in this repo. Do not duplicate language style packs, generic verification rules, or boilerplate quality gates such as "After editing ANY file" / "Code Quality — Zero Tolerance".
+3. **Verify commands** — a Verification section is auto-generated from package scripts / manifests (lint, typecheck, format, test) with the correct runner already resolved from the lockfile. Only write a command down if it is NOT discoverable that way: an undocumented multi-step sequence, a required ordering, a non-obvious flag, or a command that lives outside the manifest. Never add guidance that requires running checks, builds, or the full quality suite after every edit or every file change, and never turn discovered commands into mandatory after-every-edit requirements unless local CI explicitly enforces that sequence.
+4. **The file tree** — the agent can list and grep the repo in one call. Do NOT embed generated symbol maps, exhaustive file indexes, auto-generated directory listings, or large trees. Do not add symbol indexes or auto-generated project inventories; the context file must remain durable, agent-focused project context.
 
-## Step 2: Analyze Project (Use Sub-agents in Parallel)
+Include only project-specific overrides, stricter local requirements, or knowledge that cannot be derived by reading the code.
 
-Derive every fact from the actual project — source code, entry points, manifests, and config. Treat README, docs, and code comments as unverified hints that are frequently stale: never copy claims from them, and only state things you can confirm from the code and config themselves.
+## Step 1: Pick the target filename
 
-Spawn 3 sub-agents in parallel using the subagent tool (call the subagent tool 3 times in a single response):
+Context files are loaded **one per directory, first match wins**, in this priority order: \`AGENTS.override.md\` > \`AGENTS.md\` > \`CLAUDE.md\` > \`.cursorrules\` > \`CONVENTIONS.md\`.
 
-1. **Project Purpose Agent**: Determine what the project actually does from its real code — entry points, main modules, exported/public APIs, CLI commands, routes, and manifests. Do not rely on the README's description.
-2. **Directory Structure Agent**: Map out the folder structure and what each folder contains
-3. **Tech Stack Agent**: Identify languages, frameworks, tools, and dependencies from manifests/lockfiles and config (not from prose docs)
+List the repo root and write to **whichever of those already exists with the highest priority**. If the repo already has an \`AGENTS.md\`, update that file — creating a new CLAUDE.md next to it produces a file the agent will never load. If none exists, create \`CLAUDE.md\`. State which file you chose and why in one line.
 
-Wait for all sub-agents to complete, then synthesize the information.
+## Step 2: Set up the regenerated block
 
-## Step 3: Detect Project Type & Commands
+\`/init\` is re-run over the project's lifetime, so the generated content must be **replaceable, not appendable** — otherwise each run grows the file forever.
 
-Check for config files:
-- package.json -> JavaScript/TypeScript (extract package-manager, build, lint, typecheck, test, format, and server scripts)
-- pyproject.toml or requirements.txt -> Python
-- go.mod -> Go
-- Cargo.toml -> Rust
+All content you generate goes inside these exact fence markers:
 
-Extract exact commands that are useful project facts. Take commands from authoritative sources — package scripts, manifests, Makefiles, and CI config; do not invent them from convention, and do not trust README/doc command snippets unless a script or manifest confirms they still exist. Do not restate generic "run checks after edits" behavior, and do not turn discovered commands into mandatory after-every-edit requirements unless local docs or CI explicitly require that stricter sequence.
+\`\`\`
+<!-- gg:init:start -->
+…generated content…
+<!-- gg:init:end -->
+\`\`\`
 
-## Step 4: Summarize Stable Structure
+- If the file exists and already has the fence: **replace everything between the markers wholesale**. Text outside the fence is user-owned — do not touch it, do not reformat it, do not move it.
+- If the file exists without the fence: read it, decide which content is hand-written knowledge worth keeping, move that above the fence untouched, and put your generated content inside a new fence. Remove generic guidance that is already covered by the system prompt (see the list above) unless it is a deliberate project-specific override.
+- If the file does not exist: create it with the fence.
 
-If useful, create a concise structure summary for future agents showing only key stable directories and files with brief descriptions. Do NOT embed generated symbol maps, exhaustive file indexes, auto-generated directory listings, or large trees in CLAUDE.md.
+## Step 3: Analyze the project (sub-agents in parallel)
 
-## Step 5: Generate or Update CLAUDE.md
+Derive every fact from the actual project — source code, entry points, manifests, config, and history. Treat README, docs, and code comments as unverified hints that are frequently stale: never copy claims from them, and only state things you can confirm from the code and config themselves.
 
-Create CLAUDE.md with only sections that add project-specific value. Prefer this structure:
+Spawn 3 sub-agents ${spawnParallel(3)}:
+
+1. **Purpose & Shape Agent**: What does this project actually do, and what are its top-level parts? Read entry points, main modules, exported/public APIs, CLI commands, routes, and manifests. Return: a one-sentence purpose, and for each package/app/module a one-line statement of what it *owns*. Do not rely on the README's description. Do not return a directory listing.
+2. **Gotchas & Invariants Agent**: Find the knowledge that is expensive to rediscover. Mine \`git log\` (especially revert/fix/hotfix commits), CI and release workflows, \`NOTE\`/\`HACK\`/\`IMPORTANT\`/\`WARNING\`/\`XXX\` comments, test names asserting surprising behavior, generated-file and build-order constraints, and any config with a non-default value. Return only: rules that are non-obvious from reading the code, ordering/sequencing constraints, things that silently break, and the *reason* each exists. Skip anything a careful reader would infer in 30 seconds.
+3. **Workflow & Stack Agent**: How is this project run, built, released, and deployed, from authoritative sources only — package scripts, manifests, Makefiles, CI config, deploy config. Return the workflows and any command that is NOT a plain single manifest script (multi-step sequences, required order, env vars, non-obvious flags, commands living outside the manifest). Inspect GUI test launchers for required startup window state and explicit visual-test overrides, and report those contracts when present. Do not return commands the auto-generated Verification section already covers (see item 3 above). Do not invent commands from convention, and do not trust README/doc command snippets unless a script or manifest confirms they still exist.
+
+Wait for all sub-agents to complete, then synthesize.
+
+## Step 4: Write the generated block
+
+Inside the fence, write only sections that add project-specific value. Prefer this order — drop any section that would be empty or obvious:
 
 - Project name and one-sentence purpose
-- Key packages/apps/modules and what each owns
-- Important project-specific architecture or workflow notes
-- Exact local commands (install/build/check/test/dev/publish/deploy) when they are not obvious from package scripts alone
-- Project-specific constraints that override defaults (for example required publish order, generated-file workflow, auth/secrets storage, deployment caveats)
+- Key packages/apps/modules and what each owns (one line each, no tree)
+- Architecture or data-flow notes an agent could not infer quickly from the code
+- **Gotchas / invariants** — the highest-value section. Each entry states the rule *and* why it exists.
+- Project-specific commands and workflows that survived the Step 3 filter (required publish order, generated-file workflow, dev-server startup, deployment caveats, auth/secrets storage)
 
-Avoid generic sections named "Code Quality", "Organization Rules", or "How to Work" unless every bullet is specific to this project. Do not duplicate language style packs, generic verification rules, or boilerplate quality gates such as "After editing ANY file" / "Code Quality — Zero Tolerance". Do not add symbol indexes, exhaustive file indexes, or auto-generated project inventories; CLAUDE.md must remain durable, agent-focused project context.
+Avoid generic sections named "Code Quality", "Organization Rules", or "How to Work" unless every bullet is specific to this project.
 
-Keep total file under 100 lines. If updating, preserve any custom sections the user added. After writing, re-read CLAUDE.md and confirm it contains only project-specific facts supported by local files.
+## Step 5: Budget and verify
+
+The combined budget for all project context files is 32KB, shared with any parent-directory context files. **Target 6KB or less for the generated block** — a tight 4KB file that gets read every time beats a 25KB file the agent skims.
+
+After writing:
+
+1. Run \`wc -c\` on the file and report the byte size. If the generated block exceeds ~6KB, cut the weakest sections (the ones closest to "derivable by reading the code") and rewrite.
+2. Re-read the file and confirm every remaining line passes the bar: **project-specific, supported by a local file you actually read, and not already in the agent's context per the list above.**
+3. Report in one line: which file, how many bytes, and how many lines you removed as redundant.
 
 ## Step 6: Restart Notice
 
@@ -386,54 +234,168 @@ Create the directory \`.gg/commands/\` if it doesn't exist, then write \`.gg/com
 \`\`\`markdown
 ---
 name: commit
-description: Run checks, agent code review, commit with AI message, and push
+description: Group changes by intent, verify, commit in order, and push once
 ---
 
-1. Run quality checks:
-   [PROJECT-SPECIFIC LINT/TYPECHECK COMMANDS]
-   Fix ALL errors before continuing. Use auto-fix commands where available.
+Clicking \`/commit\` authorizes this entire workflow. Execute directly: never enter plan mode, create a plan, pause for confirmation, or ask how to group changes.
 
-2. Review changes: run git status and git diff --staged and git diff
+1. Inspect status, staged/unstaged diffs, and untracked files. Review the full diff for bugs, regressions, debug leftovers, and unintended changes.
+2. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
+3. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
+4. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
+5. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits.
 
-3. Fast review gate: spawn ONE subagent with the full diff. Instructions: review ONLY
-   the diff for real bugs, regressions, leftover debug code, and unintended changes.
-   Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks = false
-   positives, score low). Report ONLY issues with confidence >= 80, with file:line and a
-   one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
+4. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
+5. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
+6. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
+7. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits. Never force-push.
 
-4. If CLEAR: proceed straight to step 5 and push WITHOUT asking the user anything.
-   If issues >= 80 were reported: STOP, show the issues, and ask exactly:
-   "Want me to fix this first, or commit and push anyway?
-   A) Fix it first, then commit & push
-   B) Commit & push anyway"
-   On A: fix, re-run step 1, then continue (no re-review). On B: continue as-is.
-
-5. Stage relevant files with git add (specific files, not -A)
-
-6. Generate a commit message:
-   - Start with verb (Add/Update/Fix/Remove/Refactor)
-   - Be specific and concise, one line preferred
-
-7. Commit AND push in one go - never pause for confirmation here:
-   git commit -m "your generated message"
-   git push
+Finish with the created commits, passed checks, review result, and push result.
 \`\`\`
 
-Replace [PROJECT-SPECIFIC LINT/TYPECHECK COMMANDS] with the actual commands.
+Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual commands.
 
 Keep the command file under 30 lines.
 
 ## Step 3: Confirm
 
-Report that /commit is now available with quality checks, an agent code review gate, and AI-generated commit messages, and mention which local scripts/docs verified the commands.`,
+Report that /commit now automatically groups changes into ordered commits, verifies them, and pushes once; mention which local scripts/docs verified the commands.`,
+  },
+  {
+    name: "setup-programmatic",
+    aliases: [],
+    description: "Inspect and propose programmatic setup",
+    prompt: `# Inspect Programmatic Setup
+
+1. Load the deferred \`programmatic_profile\` tool using \`tool_search\`.
+2. Call \`programmatic_profile\` exactly once with \`action: "inspect"\`.
+3. Report its inventory, exact configuration fingerprint, exact profile, every route, exclusions, drift inputs, and fixed profile path without altering them.
+4. State explicitly that setup performed no writes.
+5. Stop for separate user approval. Do not call \`generate\`, run scanners or specialists, invoke shell commands, mutate files, or perform lifecycle work.
+6. Explain that a later explicit invocation must call the \`generate\` action with the exact returned fingerprint and profile.`,
+  },
+  {
+    name: "programmatic",
+    aliases: [],
+    description: "Scan programmatic opportunities",
+    input: { ...SLASH_COMMAND_INPUT_NONE },
+    prompt: renderProgrammaticPrompt(false),
+  },
+  {
+    name: "setup-tauri-package",
+    aliases: [],
+    description: "Set up safe Tauri packaging",
+    prompt: `# Set Up Deterministic Tauri Packaging
+
+1. Load the deferred \`tauri_package\` tool using \`tool_search\`.
+2. Call \`tauri_package\` with \`action: "inspect"\`.
+3. If inspection returns no target, stop and report its deterministic rejection. If it returns multiple targets, stop and require one explicit target ID; never choose one.
+4. For exactly one target, call \`tauri_package\` with \`action: "setup"\`, its exact target ID, and the exact \`evidence_sha256\` returned by inspection.
+5. Only after setup succeeds and its verification is successful, call \`tauri_package\` with \`action: "calibrate"\` and the same target ID.
+6. Report only the tool results. Never invent paths, commands, scripts, hashes, artifacts, calibration, smoke, or validation outcomes.`,
+  },
+  {
+    name: "setup-ci",
+    aliases: [],
+    description: "Set up or harden CI for any stack",
+    prompt: `# /setup-ci — set up CI from scratch OR harden what exists, any stack
+
+You configure CI for THIS project. Completely stack-agnostic: manifests on disk decide
+everything — never assume a stack, never copy GitHub's starter workflows (they are stale
+and unhardened: no permissions, no concurrency, no timeouts, naive matrices).
+
+## Step 0: Preconditions
+
+- Not a git repository? STOP: tell the user to initialize git first (GG App's Initialize
+  Git button, or \`git init\` + a remote).
+- Look at \`git remote\`. Not GitHub? Adapt: GitLab -> \`.gitlab-ci.yml\` equivalents of the
+  same rules and skip the ruleset step. Other CI providers already configured -> leave
+  them alone and say so.
+
+## Step 1: Detect the stack (manifests only)
+
+- \`package.json\` -> Node; the lockfile picks the package manager (pnpm-lock.yaml ->
+  pnpm, yarn.lock -> yarn, package-lock.json -> npm, bun.lock/b -> bun).
+- \`pyproject.toml\` / \`requirements.txt\` / \`uv.lock\` / \`poetry.lock\` -> Python.
+- \`go.mod\` -> Go. \`Cargo.toml\` -> Rust. \`composer.json\` -> PHP. \`Gemfile\` -> Ruby.
+- \`*.csproj\`/\`*.sln\` -> .NET. \`pubspec.yaml\` -> Flutter/Dart. \`mix.exs\` -> Elixir.
+- \`Dockerfile\` and none of the above -> container build check.
+- Nothing detected -> static site: generate CI only if a build/lint tool exists;
+  otherwise say honestly that CI adds nothing and skip generation.
+
+## Step 2: Pick the mode
+
+- \`.github/workflows/\` empty (or no real CI) -> **Mode A: generate.**
+- Workflows exist -> **Mode B: audit + harden** (still add missing extras below).
+
+## Mode A — generate
+
+Write \`.github/workflows/ci.yml\`. EVERY rule is required:
+
+- \`on:\` push + pull_request targeting the default branch (detect it, don't assume main).
+- \`permissions:\n  contents: read\` at workflow level (least privilege).
+- ONE job on \`ubuntu-latest\` — never macOS (10x billing) or Windows (2x) unless the
+  project has OS-specific native code.
+- \`concurrency\` group \`\${{ github.workflow }}-\${{ github.head_ref || github.run_id }}\`
+  with \`cancel-in-progress: true\`.
+- \`timeout-minutes: 15\` on the job.
+- Install + build + test using ONLY commands that exist in the project's
+  manifest/scripts; no test command -> build only, and say so in the report.
+- Stack setup actions (verify the CURRENT major version against official docs before
+  writing): pnpm -> \`pnpm/action-setup\` + \`actions/setup-node\` with \`cache: pnpm\`;
+  npm/yarn/bun -> \`actions/setup-node\`/\`actions/setup-bun\` with cache for the lockfile;
+  Python -> \`astral-sh/setup-uv\` + \`uv sync\` (fall back to pip when there is no uv
+  lockfile); Go -> \`actions/setup-go\` (cache on by default); Rust -> minimal stable
+  toolchain + \`Swatinem/rust-cache\`; PHP / Ruby / .NET / Flutter -> the canonical setup
+  action for that stack, verified the same way.
+- \`paths-ignore\` for \`**/*.md\` and docs folders if the repo has them.
+- No artifact uploads.
+
+## Mode B — audit + harden existing workflows
+
+For EVERY file in \`.github/workflows/\`, apply and report one line per change:
+
+1. Add top-level \`permissions: contents: read\` if missing. A job that legitimately
+   needs more keeps its own narrower block — note why, never widen globally.
+2. Add \`concurrency\` + \`cancel-in-progress: true\` if missing — EXCEPT on
+   publish/deploy/release workflows, where cancelling mid-publish is worse than waiting.
+3. Add \`timeout-minutes\` if missing (15 for test jobs; more for release jobs).
+4. macOS/Windows matrix legs: keep ONLY if the project genuinely tests OS-specific
+   behavior (native modules, installers, cross-platform bugs). Otherwise collapse to
+   \`ubuntu-latest\` and state the minutes saved (macOS bills 10x, Windows 2x).
+5. Ensure the package manager's dependency cache is enabled.
+6. Bump actions to the current major version (verify against official docs). Do not
+   SHA-pin unless asked — Dependabot keeps majors fresh once added.
+7. NEVER weaken a check to make it pass. If an existing workflow is already stricter
+   than these rules (e.g. a release job needing \`contents: write\`), leave it and say so.
+
+## Both modes — extras
+
+- \`.github/dependabot.yml\` if missing: version updates for \`github-actions\` plus the
+  ecosystem from Step 1 (npm, pip, cargo, go, ...), weekly cadence.
+- Branch protection (GitHub repos only): if no ruleset protects the default branch, run
+  \`gh api -X POST /repos/{owner}/{repo}/rulesets\` with \`enforcement: active\`,
+  \`conditions.ref_name.include: ["~DEFAULT_BRANCH"]\`, and rules \`deletion\` +
+  \`non_fast_forward\`. Do NOT require pull requests. On failure (no admin, or private
+  repo on a free plan): one line, continue — not an error.
+- \`AGENTS.md\` at the repo root if missing: build/test/lint commands for this stack,
+  a pointer that CI lives in \`.github/workflows/\` and must stay green, and a rule to
+  never commit with \`--no-verify\`. If \`CLAUDE.md\` exists, keep AGENTS.md short and
+  point to it.
+
+## Finish
+
+- Do NOT commit anything — the user reviews the diff first. Point them at /commit.
+- Report bottom line first: mode chosen + stack detected, files written/changed, what CI
+  now runs, rough minutes impact, and anything skipped with the reason.`,
   },
   {
     name: "compare",
     aliases: [],
     description: "Compare real-world code",
-    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`mcp__kencode-search__searchCode\` tool.
+    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`steroids\` tool (\`search\`, then \`show\` to read the full file).
 
-You already know what you just built. For each file you created or modified, use \`mcp__kencode-search__searchCode\` to search for how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
+You already know what you just built. For each file you created or modified, use \`steroids\` \`search\` to find how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
 
 If you find something consistently done differently across real codebases, or something commonly included that you left out, report it:
 
@@ -441,12 +403,64 @@ If you find something consistently done differently across real codebases, or so
 [MISSING/DIVERGENT/INCOMPLETE] file:line - What it is
 Wrote: What was implemented
 Real-world: What real projects do instead/additionally
-Evidence: kencode-search - pattern seen in X out of Y repos searched
+Evidence: steroids — pattern seen in X of Y repos
 \`\`\`
 
-Style preferences and subjective improvements are not valid findings. Only report things backed by clear kencode-search evidence across multiple repos.
+Style preferences and subjective improvements are not valid findings. Only report things backed by clear steroids evidence across multiple repos.
 
-If the code aligns well with real-world patterns, say so. That's a good outcome.`,
+After reporting, automatically add every validated finding to the project task list using the \`tasks\` tool. Do not wait for user confirmation.
+
+1. Call the \`tasks\` tool with \`action=list\` before adding anything.
+2. Compare each finding against every existing task by meaning, affected code, and intended correction—not title alone. Do not add a semantic duplicate, including a duplicate of a done or in-progress task.
+3. For each non-duplicate finding, call the \`tasks\` tool with \`action=add\`. Add exactly one task per finding and use a concise title.
+4. Make each task prompt standalone: include the finding type (MISSING, DIVERGENT, or INCOMPLETE), exact file and line, the local implementation, the multi-repo Steroids evidence, and the concrete correction. The task must be actionable by an agent with no conversation context.
+5. After all task calls, if at least one task was added, output exactly: ${TASKS_ADDED_NOTICE}
+
+If the code aligns well with real-world patterns, say so and do not add tasks. That's a good outcome.`,
+  },
+  {
+    name: "steroids",
+    aliases: [],
+    description: "Index real repos like this project",
+    prompt: `# Steroids: build a code corpus that matches THIS project
+
+Goal: fill the local \`steroids\` corpus with real, current, well-maintained repos that do what this project does, in the same stack, so later work can read proven code instead of guessing.
+
+If the \`steroids\` tool is not available, stop and tell the user to install Agent Steroids first (Home screen, Steroids button). Do not improvise with bash.
+
+## Phase 0: Profile the project
+
+Inspect the local project (manifests, top-level layout, README, main entry points) and write a short private profile:
+
+- What it is and does, and who uses it.
+- Primary language(s) and the frameworks/libraries that define it (not every dependency, the ones that shape the code).
+- Its shape: CLI, web app, desktop app, API, library, game, firmware, pipeline, etc.
+- The 3-5 hardest or most central technical topics (e.g. "Tauri sidecar lifecycle", "streaming LLM tool calls", "trigram search index").
+
+If the user passed arguments to /steroids, treat them as the focus and let them override the profile.
+
+## Phase 1: Discover candidates
+
+Call \`steroids\` \`repos\` once so you know what is already indexed. Then run 3-6 \`steroids\` \`discover\` queries WITHOUT \`add\`, each targeting a different angle from the profile: the framework (\`topic:<framework> language:<lang>\`), the product category (peer projects), and the central technical topics. Queries are GitHub repo searches, so keep each one SHORT: one \`topic:\` plus \`language:\`, or 2-3 keywords. A sentence like "llm streaming tool calls sdk" returns nothing. \`limit\` 10-15 per query. Never pass \`add\`.
+
+Merge the results, drop anything already indexed, and rank by fit with this project first, then stars and recent \`pushed_at\`. Keep at most 20.
+
+## Phase 2: Present and ask
+
+FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. In every repo cell, make the repository name a clickable Markdown link: [owner/name](https://github.com/owner/name). Do not use plain text, inline code, or a separate URL column for repository names. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?") with these options, each with a one-line hint on disk/time cost:
+
+- All of them
+- Top 10
+- Top 5
+- None
+
+Mark Top 10 as recommended. Leave the free-text escape on so they can name specific ranks. The card is the ONLY ask: do not also list the options as text, and do not end with an asking line. Only if \`ask_user\` is unavailable, ask the same question in prose as a lettered list.
+
+Do not index anything until the user answers.
+
+## Phase 3: Index
+
+Tell the user indexing is starting and can take a few minutes (each repo is a full download). Then index exactly the chosen repos with \`steroids\` \`add\` (\`repos\` = owner/name list, \`tag\` = a short slug for this project, e.g. its directory name), 2-3 repos per call so progress is visible and a cancel loses little. Then confirm with \`steroids\` \`repos\` filtered by that tag and report what was added, what failed, and the new corpus size. Suggest one concrete \`steroids\` \`search\` the user could run next against the new repos.`,
   },
   {
     name: "setup-skills",
@@ -489,7 +503,7 @@ Illustrative only (not prescriptive):
 
 ## Phase 3: Parallel sweep
 
-Spawn one sub-agent per domain you chose, in parallel using the subagent tool (call it N times in a single response, one task per domain). Each explores its assigned domain and returns skill-worthy opportunities.
+Spawn one sub-agent per domain you chose, ${spawnParallel("N")} — one task per domain. Each explores its assigned domain and returns skill-worthy opportunities.
 
 **Skill-worthy means**: a recurring activity someone will do on THIS project — shipping, reviewing, migrating, debugging, onboarding, whatever applies — where a reusable instruction set would make it **faster** (efficient), **lower-effort** (easier), or **less likely to break something** (safer). The test is: will this skill save real time, reduce real cognitive load, or prevent real mistakes, repeatedly, on this project? If no, drop it. A domain returning zero candidates is a valid outcome.
 
@@ -547,103 +561,16 @@ If strong candidates had no ecosystem match, list them at the bottom:
 
 After presenting the list, ask which (if any) to install. Install nothing without explicit confirmation. Once confirmed, hand off to find-skills to perform the actual install.`,
   },
-  {
-    name: "setup",
-    aliases: ["setup-project"],
-    description: "Audit project setup",
-    prompt: `Audit this project across six categories and report gaps. **Do not fix anything yet.** Wait for me to choose what to address after the report.
-
-Language-agnostic and project-agnostic — adapt findings to the languages and stack actually present. Ignore categories that don't apply (e.g. skip CI for a local-only scratchpad).
-
-## Categories
-
-### 1. Project hygiene
-
-- \`.gitignore\` present and covers the active language(s)?
-- \`README.md\` present with at least install + run instructions?
-- License file present (if this looks like a public/shareable project)?
-- \`.editorconfig\` present?
-- Git initialized? (\`.git\` directory exists)
-
-### 2. Toolchain version pinning
-
-- Language version pinned in a canonical file: \`.nvmrc\` / \`package.json#engines\` (Node), \`.python-version\` / \`pyproject.toml#requires-python\` (Python), \`rust-toolchain.toml\` (Rust), the \`go\` line in \`go.mod\`, \`.ruby-version\` (Ruby), etc.
-- Lockfile present and committed? (\`package-lock.json\`, \`pnpm-lock.yaml\`, \`yarn.lock\`, \`bun.lockb\`, \`uv.lock\`, \`poetry.lock\`, \`Cargo.lock\`, \`go.sum\`, \`Gemfile.lock\`, \`composer.lock\`)
-
-### 3. Code quality tooling
-
-For each active language, check that a formatter, linter, and (where applicable) type checker are configured:
-- **Formatter**: Prettier / ruff format / gofmt (built-in) / rustfmt (built-in) / clang-format / etc.
-- **Linter**: ESLint / Ruff / golangci-lint / Clippy / etc. — with a reasonable strictness preset
-- **Type checker** (statically-typed langs only): tsc strict, Pyright strict, mypy strict
-- **Test framework**: vitest / jest / pytest / go test / cargo test / rspec / etc.
-
-Report which are present, missing, or configured below the pack's strictness recommendation.
-
-### 4. Verify pipeline
-
-- Are \`lint\` / \`typecheck\` / \`format:check\` / \`test\` (or language-equivalent) wired as runnable commands? (scripts in \`package.json\`, \`pyproject.toml\`, a \`Makefile\`, or \`justfile\`)
-- Pre-commit hook configured? (\`.husky/\`, \`pre-commit\` framework, \`lefthook\`, etc.) — nice-to-have, not required.
-- CI config present? (\`.github/workflows/\`, \`.gitlab-ci.yml\`, \`.circleci/\`, etc.)
-
-### 5. Style pack alignment
-
-"Active style packs" refers specifically to the per-language sub-sections inside the **Language Style Packs** section in your system prompt (e.g. \`### TypeScript\`, \`### Python\`, \`### Go\`). It does **NOT** include the cross-cutting \`### Agent-Written Code\` preamble that sits above them — those are guidelines for how code is *written*, not project-scaffolding to audit. It also does **NOT** include Skills (\`.gg/skills/\`) or any other extension category. If the Language Style Packs section is absent or empty, **skip this entire section entirely** — do not substitute Skills or any other concept.
-
-When per-language packs are present, compare the project against each pack's **Tooling** bullet and the system prompt's **Verification** commands. For tool recommendations or config semantics, verify against official docs when local files are ambiguous:
-- Tooling: which strict-mode flags or lint-rule presets does the pack recommend that the project is missing? (e.g. \`tsconfig\` missing \`noUncheckedIndexedAccess\`, \`pyproject\` missing \`[tool.ruff]\`, Go project missing \`golangci-lint\` config).
-- Dependencies: list which pack-mentioned libs (Zod, Pydantic, thiserror, anyhow, etc.) the project uses, has an equivalent for, or lacks. **Observation only — no recommendation to install.**
-
-### 6. Documentation hygiene
-
-- \`CLAUDE.md\` or \`AGENTS.md\` present?
-- Public API documented? (top-level docstrings, type signatures, or README examples)
-- Architecture doc for non-trivial projects? (\`ARCHITECTURE.md\`, \`docs/architecture/\`, ADRs)
-
-## How to investigate
-
-- Read the project root + obvious config locations (\`./\`, \`.github/\`, \`.husky/\`, \`docs/\`).
-- Don't recurse into \`node_modules\`, \`dist\`, \`build\`, \`target\`, vendored folders.
-- Use \`ls\`, \`read\`, \`find\` (with name patterns) — do not \`grep\` source code for this audit; it's about scaffolding, not code review.
-- Cap at ~20 file reads total. If a file is huge (e.g. \`pnpm-lock.yaml\`), don't read its body — presence is what matters.
-
-## Output format
-
-A single Markdown report, organized by category. Within each category, mark each item as one of:
-- \`[OK]\` — present and reasonable
-- \`[GAP]\` — missing or misconfigured; safe to add/fix
-- \`[INFO]\` — observation only, no action implied
-- \`[N/A]\` — doesn't apply to this project (omit from output if obvious)
-
-Keep each line to one sentence. No prose paragraphs.
-
-At the end:
-
-\`\`\`
-## Summary
-
-<N> gaps in hygiene, <N> in tooling, <N> in verify pipeline, <N> in style-pack alignment.
-
-Which (if any) would you like me to fix? Options:
-- A) Add tasks for all [GAP] items that are safe + additive (no overwrites)
-- B) Add tasks for a category: hygiene / tooling / verify / style-pack alignment
-- C) Add tasks for specific items — tell me which
-- D) None — just the report
-\`\`\`
-
-## Rules
-
-- **Report only.** No edits, no installs, no commits without explicit user confirmation after the report.
-- **Task handoff for fixes.** If the user chooses A, B, or C, do not fix directly. Add one task per selected gap or tightly coupled gap group using the \`tasks\` tool (action=add). Each task needs a short title and a standalone prompt that includes the gap, affected files/configs, safe-additive constraints, implementation instructions, project verification commands, and instructions to verify relevant tool/config semantics against official docs before completing the task. Use kencode search only for code-level examples, not as proof of scaffolding requirements. After adding the tasks, tell the user exactly: "${TASKS_ADDED_NOTICE}" Do not begin executing them unless the user explicitly says so.
-- **No code refactors recommended.** This audit is about scaffolding/tooling, not code review. Use \`/scan\` or \`/verify\` for code-level findings.
-- **No dependency installations in the report.** Listing them as observations is fine; recommending installation is not — that's the user's call.
-- **Skip empty categories.** If a category has no findings, omit it.
-- **Adapt to scale.** A 50-line script doesn't need CI, a license, or an ARCHITECTURE.md. Use judgment.
-- **Brand-new empty project**: report "Empty project — nothing to audit. To bootstrap, tell me the stack you want and I'll scaffold from scratch." and stop.`,
-  },
 ];
 
-/** Look up a prompt command by name or alias */
-export function getPromptCommand(name: string): PromptCommand | undefined {
-  return PROMPT_COMMANDS.find((cmd) => cmd.name === name || cmd.aliases.includes(name));
+/** Look up a prompt command by name or alias and render session-aware instructions. */
+export function getPromptCommand(
+  name: string,
+  isToolRegistered: (toolName: string) => boolean = () => false,
+): PromptCommand | undefined {
+  const command = PROMPT_COMMANDS.find(
+    (candidate) => candidate.name === name || candidate.aliases.includes(name),
+  );
+  if (command?.name !== "programmatic") return command;
+  return { ...command, prompt: renderProgrammaticPrompt(isToolRegistered("programmatic_scan")) };
 }

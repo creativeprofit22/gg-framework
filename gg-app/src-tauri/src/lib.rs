@@ -1,17 +1,123 @@
+mod azure_connection;
+mod decisions;
+mod local_patched_update;
+
+use azure_connection::commands::{
+    azure_connection_remove, azure_connection_save, azure_connection_status,
+    AzureConnectionMutations,
+};
+#[cfg(test)]
+use local_patched_update::local_patched_update_available;
+
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::Duration;
+#[cfg(any(test, not(target_os = "windows")))]
+use std::time::SystemTime;
+use unicode_normalization::UnicodeNormalization;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as WindowsCommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hide_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn lifecycle_message_at(event: &str, timestamp_ms: i64, details: &str) -> String {
+    format!("lifecycle event={event} timestamp_ms={timestamp_ms} {details}")
+}
+
+fn lifecycle_message(event: &str, details: &str) -> String {
+    lifecycle_message_at(event, current_unix_millis(), details)
+}
+
+fn install_panic_diagnostics() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("non-string panic payload");
+        let location = panic_info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = lifecycle_message(
+            "shell_panic",
+            &format!(
+                "shell_pid={} location={location} payload={payload:?}",
+                std::process::id()
+            ),
+        );
+        log::error!("{message}");
+        eprintln!("{message}");
+        previous_hook(panic_info);
+    }));
+}
 
 use base64::Engine as _;
 use futures_util::StreamExt;
-use tauri::{Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonProcessIdentity {
+    daemon_instance_id: String,
+    process_id: u32,
+    process_start_token: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonPredecessorProof {
+    daemon_instance_id: String,
+    process_id: u32,
+    process_start_token: String,
+    terminated_at: String,
+}
+
+impl DaemonPredecessorProof {
+    fn from_terminated(identity: DaemonProcessIdentity) -> Self {
+        Self {
+            daemon_instance_id: identity.daemon_instance_id,
+            process_id: identity.process_id,
+            process_start_token: identity.process_start_token,
+            terminated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }
+    }
+}
 
 /// The single shared Node daemon process. Every window's `AgentSession` lives
 /// inside this one process as an in-process object, addressed by a session id
@@ -21,26 +127,422 @@ use tauri_plugin_opener::OpenerExt;
 struct Daemon {
     /// The daemon child process (process-group leader). `None` until spawned.
     child: Mutex<Option<Child>>,
+    /// High-entropy bootstrap credential used only to mint logical sessions.
+    /// It never crosses the native IPC boundary into the webview.
+    auth_token: Mutex<Option<String>>,
     /// The daemon's HTTP port, learned from its `GG_APP_LISTENING` handshake.
     /// `None` until ready; reset to `None` across a crash-respawn.
     port: Mutex<Option<u16>>,
+    /// Consecutive short-lived crashes. A daemon that stays up for the stable
+    /// window resets this budget; repeated crashes hit a circuit breaker.
+    respawn_attempts: Mutex<u32>,
+    /// Monotonic successful-spawn counter used to await a completed refresh.
+    generation: AtomicU64,
+    /// Distinguishes a requested configuration refresh from a process crash.
+    planned_reload: AtomicBool,
+    /// Window labels awaiting a complete pane recovery before model refresh.
+    model_refresh_windows: Mutex<HashSet<String>>,
+    /// Exact native-supervised process identity currently holding Roadmap leases.
+    process_identity: Mutex<Option<DaemonProcessIdentity>>,
+    /// Proof that the immediately preceding daemon was reaped before respawn.
+    predecessor_proof: Mutex<Option<DaemonPredecessorProof>>,
+    /// Per-launch bearer token required as `x-gg-token` on every daemon request.
+    token: String,
 }
 
-/// One window's session inside the shared daemon. `session_id` is the id the
-/// daemon returned from `POST /session` (`None` until it does). `cwd` and
-/// `session_path` mirror what the session was created with, so the workspace
-/// snapshot (restore-on-restart) + crash-respawn can be driven from this map.
-#[derive(Default, Clone)]
-struct WindowSession {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WorkspaceMode {
+    Chat,
+    #[default]
+    #[serde(other)]
+    Code,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ChatAgent {
+    Therapist,
+    Research,
+    #[default]
+    #[serde(other)]
+    General,
+}
+
+const PRIMARY_PANE_ID: &str = "primary";
+const MAX_PANE_ID_LEN: usize = 64;
+const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
+const DAEMON_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_SESSION_DISPOSAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One logical pane's session inside the shared daemon.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct PaneSession {
     session_id: Option<String>,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
     cwd: Option<PathBuf>,
     session_path: Option<String>,
+    generation: u64,
+    startup_error: Option<String>,
 }
 
-/// Per-window session registry, keyed by window label.
+#[derive(Default)]
+struct PaneRegistry {
+    windows: HashMap<String, HashMap<String, PaneSession>>,
+    next_generation: u64,
+}
+
+impl std::ops::Deref for PaneRegistry {
+    type Target = HashMap<String, HashMap<String, PaneSession>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.windows
+    }
+}
+
+impl std::ops::DerefMut for PaneRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.windows
+    }
+}
+
+/// Pane registry keyed by native owner window then validated logical pane ID.
 #[derive(Default)]
 struct Windows {
-    map: Mutex<HashMap<String, WindowSession>>,
+    map: Mutex<PaneRegistry>,
+}
+
+fn validate_pane_id(pane_id: &str) -> Result<(), String> {
+    if pane_id.is_empty() || pane_id.len() > MAX_PANE_ID_LEN {
+        return Err("pane id must contain 1-64 characters".into());
+    }
+    if !pane_id
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("pane id contains unsupported characters".into());
+    }
+    Ok(())
+}
+
+fn resolve_owned_pane<'a>(
+    registry: &'a PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Option<&'a PaneSession> {
+    registry.get(owner_label)?.get(pane_id)
+}
+
+fn record_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> u64 {
+    registry.next_generation = registry.next_generation.saturating_add(1);
+    let generation = registry.next_generation;
+    registry.entry(owner_label.to_string()).or_default().insert(
+        pane_id.to_string(),
+        PaneSession {
+            session_id: None,
+            mode,
+            chat_agent,
+            cwd: Some(cwd),
+            session_path,
+            generation,
+            startup_error: None,
+        },
+    );
+    generation
+}
+
+fn create_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> Result<u64, String> {
+    validate_pane_id(pane_id)?;
+    let panes = registry.get(owner_label);
+    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
+        return Err(format!("pane '{pane_id}' already exists"));
+    }
+    if panes.is_some_and(|panes| panes.len() >= MAX_AGENT_PANES_PER_WINDOW) {
+        return Err(format!(
+            "window cannot contain more than {MAX_AGENT_PANES_PER_WINDOW} agent panes"
+        ));
+    }
+    Ok(record_pane_target(
+        registry,
+        owner_label,
+        pane_id,
+        mode,
+        chat_agent,
+        cwd,
+        session_path,
+    ))
+}
+
+fn restore_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> Result<(u64, bool, Option<String>), String> {
+    validate_pane_id(pane_id)?;
+    if let Some(existing) = registry
+        .get(owner_label)
+        .and_then(|panes| panes.get(pane_id))
+    {
+        let target_changed = existing.mode != mode
+            || existing.chat_agent != chat_agent
+            || existing.cwd.as_ref() != Some(&cwd)
+            || existing.session_path != session_path;
+        let should_relaunch =
+            target_changed || existing.session_id.is_none() || existing.startup_error.is_some();
+        if !should_relaunch {
+            return Ok((existing.generation, false, None));
+        }
+
+        registry.next_generation = registry.next_generation.saturating_add(1);
+        let generation = registry.next_generation;
+        let existing = registry
+            .get_mut(owner_label)
+            .and_then(|panes| panes.get_mut(pane_id))
+            .expect("pane existence checked");
+        let replaced_session_id = existing.session_id.take();
+        existing.mode = mode;
+        existing.chat_agent = chat_agent;
+        existing.cwd = Some(cwd);
+        existing.session_path = session_path;
+        existing.generation = generation;
+        existing.startup_error = None;
+        return Ok((generation, true, replaced_session_id));
+    }
+    create_pane_target(
+        registry,
+        owner_label,
+        pane_id,
+        mode,
+        chat_agent,
+        cwd,
+        session_path,
+    )
+    .map(|generation| (generation, true, None))
+}
+
+fn take_pane_session(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Option<PaneSession> {
+    let panes = registry.get_mut(owner_label)?;
+    let pane = panes.remove(pane_id);
+    if panes.is_empty() {
+        registry.remove(owner_label);
+    }
+    pane
+}
+
+fn pane_disposal_target(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    allow_primary: bool,
+    expected_generation: Option<u64>,
+) -> Result<PaneSession, String> {
+    validate_pane_id(pane_id)?;
+    if pane_id == PRIMARY_PANE_ID && !allow_primary {
+        return Err("primary pane cannot be disposed".into());
+    }
+    let pane = resolve_owned_pane(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?;
+    if expected_generation.is_some_and(|generation| pane.generation != generation) {
+        return Err(format!("pane '{pane_id}' generation is stale"));
+    }
+    Ok(pane.clone())
+}
+
+fn dispose_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    allow_primary: bool,
+    expected_generation: Option<u64>,
+) -> Result<PaneSession, String> {
+    pane_disposal_target(
+        registry,
+        owner_label,
+        pane_id,
+        allow_primary,
+        expected_generation,
+    )?;
+    take_pane_session(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))
+}
+
+fn complete_pane_disposal(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    deletion_result: Result<(), String>,
+) -> Result<(), String> {
+    deletion_result?;
+    dispose_pane_target(registry, owner_label, pane_id, false, Some(generation)).map(|_| ())
+}
+
+fn bind_pane_session(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    session_id: String,
+) -> bool {
+    let Some(pane) = registry
+        .get_mut(owner_label)
+        .and_then(|panes| panes.get_mut(pane_id))
+    else {
+        return false;
+    };
+    if pane.generation != generation || pane.session_id.is_some() {
+        return false;
+    }
+    pane.session_id = Some(session_id);
+    pane.startup_error = None;
+    true
+}
+
+fn record_pane_startup_error(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    message: String,
+) -> bool {
+    let Some(pane) = registry
+        .get_mut(owner_label)
+        .and_then(|panes| panes.get_mut(pane_id))
+    else {
+        return false;
+    };
+    if pane.generation != generation || pane.session_id.is_some() {
+        return false;
+    }
+    pane.startup_error = Some(message);
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneStartupStatus {
+    ready: bool,
+    error: Option<String>,
+    generation: u64,
+    session_id: Option<String>,
+}
+
+type PaneStartupCompletion = tokio::sync::oneshot::Receiver<Result<(), String>>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum PaneStartupOutcome {
+    Ready { port: u16, session_id: String },
+    Failed(String),
+    Superseded,
+}
+
+fn pane_startup_status(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Result<PaneStartupStatus, String> {
+    validate_pane_id(pane_id)?;
+    let pane = resolve_owned_pane(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?;
+    Ok(PaneStartupStatus {
+        ready: pane.startup_error.is_none() && pane.session_id.is_some(),
+        error: pane.startup_error.clone(),
+        generation: pane.generation,
+        session_id: pane.session_id.clone(),
+    })
+}
+
+fn take_window_panes(registry: &mut PaneRegistry, owner_label: &str) -> Vec<PaneSession> {
+    registry
+        .remove(owner_label)
+        .map(|panes| panes.into_values().collect())
+        .unwrap_or_default()
+}
+
+type RecoveryTarget = (
+    String,
+    String,
+    WorkspaceMode,
+    ChatAgent,
+    PathBuf,
+    Option<String>,
+    u64,
+);
+
+fn recovery_targets(registry: &PaneRegistry) -> Vec<RecoveryTarget> {
+    registry
+        .iter()
+        .flat_map(|(label, panes)| {
+            panes.iter().filter_map(move |(pane_id, pane)| {
+                pane.cwd.clone().map(|cwd| {
+                    (
+                        label.clone(),
+                        pane_id.clone(),
+                        pane.mode,
+                        pane.chat_agent,
+                        cwd,
+                        pane.session_path.clone(),
+                        pane.generation,
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn pane_identity_is_current(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    session_id: &str,
+) -> bool {
+    resolve_owned_pane(registry, owner_label, pane_id).is_some_and(|pane| {
+        pane.generation == generation && pane.session_id.as_deref() == Some(session_id)
+    })
+}
+
+fn trusted_event_envelope(
+    pane_id: &str,
+    session_id: &str,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if value.get("sessionId").and_then(|v| v.as_str()) != Some(session_id) {
+        return None;
+    }
+    let event_type = value.get("type")?.as_str()?;
+    let data = value.get("data")?.clone();
+    Some(serde_json::json!({
+        "paneId": pane_id,
+        "sessionId": session_id,
+        "type": event_type,
+        "data": data,
+    }))
 }
 
 /// True once the app has begun quitting. Set on `ExitRequested` so the cascade
@@ -49,10 +551,13 @@ struct Windows {
 #[derive(Default)]
 struct AppExiting(AtomicBool);
 
-/// One restored window's target (cwd + optional session), handed to the webview
-/// once via `window_restore_target` so it skips the project picker on boot.
+/// One window's active target (mode, cwd, and optional session), returned by
+/// `window_restore_target` so the webview can recover without showing Home.
 #[derive(Clone, serde::Serialize)]
 struct RestoreEntry {
+    mode: WorkspaceMode,
+    #[serde(rename = "chatAgent")]
+    chat_agent: ChatAgent,
     cwd: String,
     #[serde(rename = "sessionPath")]
     session_path: Option<String>,
@@ -78,10 +583,113 @@ struct PermissionsStatus {
     granted: bool,
 }
 
-/// Pending per-window restore targets, consumed once by the webview on mount.
+/// Per-window active workspace targets. An entry exists only after the user has
+/// chosen a workspace (or when one was restored at boot). Targets stay available
+/// for the lifetime of the window so a WebKit content-process reload can recover
+/// the same workspace instead of falling back to Home.
 #[derive(Default)]
 struct RestoreTargets {
     map: Mutex<HashMap<String, RestoreEntry>>,
+}
+
+#[derive(Clone)]
+struct PaneCopyOperation {
+    source_owner: String,
+    target_label: String,
+    restore: RestoreEntry,
+    cloned_session_path: Option<PathBuf>,
+    started: bool,
+}
+
+#[derive(Default)]
+struct PaneCopyRegistry {
+    operations: HashMap<(String, String), PaneCopyOperation>,
+    target_owners: HashMap<String, (String, String)>,
+    rolling_back: HashSet<String>,
+}
+
+#[derive(Default)]
+struct PaneCopies {
+    map: Mutex<PaneCopyRegistry>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedPaneCopy {
+    copy_id: String,
+    window_label: String,
+    reused_window: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneCopyResult {
+    window_label: String,
+    reused_window: bool,
+}
+
+fn remove_copy_operation(
+    registry: &mut PaneCopyRegistry,
+    source_owner: &str,
+    copy_id: &str,
+) -> Option<PaneCopyOperation> {
+    let key = (source_owner.to_string(), copy_id.to_string());
+    let operation = registry.operations.remove(&key)?;
+    registry.target_owners.remove(&operation.target_label);
+    Some(operation)
+}
+
+fn consume_copy_restore_target(
+    copies: &PaneCopyRegistry,
+    targets: &mut HashMap<String, RestoreEntry>,
+    target_label: &str,
+) -> Option<RestoreEntry> {
+    copies.target_owners.get(target_label)?;
+    remove_restore_target(targets, target_label)
+}
+
+fn register_restore_target(
+    targets: &mut HashMap<String, RestoreEntry>,
+    label: String,
+    entry: RestoreEntry,
+) {
+    targets.insert(label, entry);
+}
+
+fn register_selected_primary_restore_target(
+    targets: &mut HashMap<String, RestoreEntry>,
+    label: &str,
+    pane_id: &str,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: &str,
+    session_path: Option<&str>,
+) -> bool {
+    if pane_id != PRIMARY_PANE_ID {
+        return false;
+    }
+    register_restore_target(
+        targets,
+        label.to_string(),
+        RestoreEntry {
+            mode,
+            chat_agent,
+            cwd: cwd.to_string(),
+            session_path: session_path.map(str::to_string),
+        },
+    );
+    true
+}
+
+fn restore_target(targets: &HashMap<String, RestoreEntry>, label: &str) -> Option<RestoreEntry> {
+    targets.get(label).cloned()
+}
+
+fn remove_restore_target(
+    targets: &mut HashMap<String, RestoreEntry>,
+    label: &str,
+) -> Option<RestoreEntry> {
+    targets.remove(label)
 }
 
 /// The label of the currently-focused window, updated on `Focused` window
@@ -153,6 +761,49 @@ fn restore_sibling_windows(window: &tauri::Window) {
     }
 }
 
+/// App-wide guards for protected installation and lightweight status refreshes.
+#[derive(Default)]
+struct LocalPatchedUpdate {
+    running: Mutex<bool>,
+    status_check: Mutex<LocalPatchedStatusCheck>,
+}
+
+#[derive(Default)]
+struct LocalPatchedStatusCheck {
+    running: bool,
+    last_completed: Option<local_patched_update::LocalPatchedUpdateStatus>,
+}
+
+impl LocalPatchedUpdate {
+    /// Returns `None` to elect a leader, or the immediate follower response.
+    fn begin_status_check(&self) -> Option<local_patched_update::LocalPatchedUpdateStatus> {
+        let mut check = self.status_check.lock().unwrap();
+        if check.running {
+            return Some(check.last_completed.clone().unwrap_or(
+                local_patched_update::LocalPatchedUpdateStatus {
+                    available: false,
+                    current_source_sha: String::new(),
+                    upstream_integrated: false,
+                    origin: local_patched_update::StatusOrigin::Unavailable,
+                },
+            ));
+        }
+        check.running = true;
+        None
+    }
+
+    fn finish_status_check(
+        &self,
+        result: &Result<local_patched_update::LocalPatchedUpdateStatus, String>,
+    ) {
+        let mut check = self.status_check.lock().unwrap();
+        check.running = false;
+        if let Ok(status) = result {
+            check.last_completed = Some(status.clone());
+        }
+    }
+}
+
 fn sidecar_base(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
@@ -170,8 +821,18 @@ fn sidecar_base(port: u16) -> String {
 ///
 /// On Windows there is no process-group kill, so we tree-kill via
 /// `taskkill /T /F` (kills the descendant tree), then `wait()` to reap.
-fn terminate_child(mut child: Child) {
+fn terminate_child(mut child: Child, reason: &'static str) {
     let pid = child.id() as i32;
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_termination_requested",
+            &format!(
+                "shell_pid={} daemon_pid={pid} reason={reason}",
+                std::process::id()
+            ),
+        )
+    );
     #[cfg(unix)]
     unsafe {
         // Negative pid = signal the entire process group. The sidecar is its
@@ -183,7 +844,17 @@ fn terminate_child(mut child: Child) {
         #[cfg(unix)]
         {
             for _ in 0..30 {
-                if matches!(child.try_wait(), Ok(Some(_))) {
+                if let Ok(Some(status)) = child.try_wait() {
+                    log::info!(
+                        "{}",
+                        lifecycle_message(
+                            "daemon_exit",
+                            &format!(
+                                "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                                std::process::id()
+                            ),
+                        )
+                    );
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -196,7 +867,7 @@ fn terminate_child(mut child: Child) {
         #[cfg(not(unix))]
         {
             // Tree-kill on Windows: /T kills the descendant tree, /F forces it.
-            let _ = std::process::Command::new("taskkill")
+            let _ = hide_console(&mut std::process::Command::new("taskkill"))
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -204,8 +875,74 @@ fn terminate_child(mut child: Child) {
             // Fall back to direct kill if taskkill is unavailable.
             let _ = child.kill();
         }
-        let _ = child.wait(); // reap the direct child (avoid zombie)
+        match child.wait() {
+            Ok(status) => log::info!(
+                "{}",
+                lifecycle_message(
+                    "daemon_exit",
+                    &format!(
+                        "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                        std::process::id()
+                    ),
+                )
+            ),
+            Err(error) => log::error!(
+                "{}",
+                lifecycle_message(
+                    "daemon_exit_wait_failed",
+                    &format!(
+                        "shell_pid={} daemon_pid={pid} reason={reason} error={error}",
+                        std::process::id()
+                    ),
+                )
+            ),
+        }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_child_synchronously(mut child: Child, reason: &'static str) {
+    let pid = child.id() as i32;
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_termination_requested",
+            &format!(
+                "shell_pid={} daemon_pid={pid} reason={reason}",
+                std::process::id()
+            ),
+        )
+    );
+    // Tree-kill on Windows: /T kills the descendant tree, /F forces it.
+    let _ = hide_console(&mut std::process::Command::new("taskkill"))
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Fall back to direct kill if taskkill is unavailable.
+    let _ = child.kill();
+    match child.wait() {
+        Ok(status) => log::info!(
+            "{}",
+            lifecycle_message(
+                "daemon_exit",
+                &format!(
+                    "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                    std::process::id()
+                ),
+            )
+        ),
+        Err(error) => log::error!(
+            "{}",
+            lifecycle_message(
+                "daemon_exit_wait_failed",
+                &format!(
+                    "shell_pid={} daemon_pid={pid} reason={reason} error={error}",
+                    std::process::id()
+                ),
+            )
+        ),
+    }
 }
 
 // ── Startup orphan sweeper ─────────────────────────────────────────────────
@@ -235,76 +972,76 @@ struct ProcInfo {
     command: String,
 }
 
-/// Command substrings that identify a GG Coder *sidecar* process itself.
-/// `app-sidecar` matches both bundled `app-sidecar.mjs` and dev
-/// `app-sidecar.js`. This is our OWN binary name (fully under our control, not
-/// a third-party MCP name), so it's a safe, stable anchor. MCP children are NOT
-/// matched by name — there are thousands of possible MCP servers and users can
-/// add any of them — they're recognised structurally instead (descendant walk +
-/// process-group lineage; see `orphan_killset`).
+/// Command substring shared by bundled `app-sidecar.mjs` and dev
+/// `app-sidecar.js`. The product-specific `--gg-app-identity=...` argument is
+/// also required before an orphan can be attributed to this app identity.
 const SIDECAR_COMMAND_PATTERNS: &[&str] = &["app-sidecar"];
+const SIDECAR_IDENTITY_ARG_PREFIX: &str = "--gg-app-identity=";
 
-/// Pure (no I/O): given a process-table snapshot, the current app's pid, and the
-/// set of process-group ids belonging to sidecars we have ever spawned (the
-/// ledger — see `read_sidecar_ledger`), return the orphaned sidecar-tree PIDs to
-/// SIGKILL.
-///
-/// A sidecar-tree member is killed when ANY of these hold and it isn't self:
-///
-/// 1. **Orphaned sidecar** — command matches `SIDECAR_COMMAND_PATTERNS` and its
-///    parent is dead (`ppid == 1` or `ppid` absent from the snapshot).
-/// 2. **Descendant of an orphaned sidecar** — transitively reachable via the
-///    ppid tree from a (1) root. Catches MCP/LSP children still linked to a
-///    freshly-dead sidecar that's still in this snapshot.
-/// 3. **Process-group lineage (name-agnostic)** — the process's `pgid` is a
-///    ledgered sidecar group whose *leader is dead* (no live process has
-///    `pid == pgid`). This is the key case: after a crash/force-quit the sidecar
-///    is long gone and its MCP children have reparented to init, but they keep
-///    the sidecar's pgid. Any MCP server, of any name the user added, is caught
-///    here — no whitelist. PID-recycle-safe: a group whose leader is alive is
-///    skipped entirely (either a still-live sidecar, whose children we must NOT
-///    kill, or an unrelated process that recycled the pid).
-///
-/// The current app pid and its live sidecars are never matched — a live
-/// sidecar's parent is the still-running `gg-app`, so its `ppid` is alive, and
-/// its group leader is alive so lineage skips it.
-fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i32>) -> Vec<i32> {
+fn sidecar_identity_arg(identifier: &str) -> String {
+    format!("{SIDECAR_IDENTITY_ARG_PREFIX}{identifier}")
+}
+
+/// Assign every Tauri product identity its own sidecar log and PID ledger.
+fn runtime_identity_slug(identifier: &str) -> String {
+    let suffix = identifier
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!("gg-app-{suffix}")
+}
+
+fn sidecar_log_filename(identifier: &str) -> String {
+    format!("{}-sidecar.log", runtime_identity_slug(identifier))
+}
+
+/// Pure classifier used by runtime identity-scoped orphan cleanup.
+fn orphan_killset_for_identity(
+    snapshot: &[ProcInfo],
+    self_pid: i32,
+    ledger_pgids: &HashSet<i32>,
+    identity_arg: &str,
+) -> Vec<i32> {
     let live_pids: HashSet<i32> = snapshot.iter().map(|p| p.pid).collect();
     let mut parent_children: HashMap<i32, Vec<i32>> = HashMap::new();
     for p in snapshot {
         parent_children.entry(p.ppid).or_default().push(p.pid);
     }
 
-    let matches_sidecar = |cmd: &str| SIDECAR_COMMAND_PATTERNS.iter().any(|pat| cmd.contains(pat));
+    let matches_sidecar = |cmd: &str| {
+        cmd.contains(identity_arg)
+            && SIDECAR_COMMAND_PATTERNS
+                .iter()
+                .any(|pattern| cmd.contains(pattern))
+    };
     let parent_dead = |ppid: i32| ppid == 1 || !live_pids.contains(&ppid);
 
-    // The subset of ledgered sidecar groups whose LEADER is dead. A group whose
-    // leader (pid == pgid) is still alive is skipped: it's either a live sidecar
-    // (its children are in use) or an unrelated process that recycled the pid.
     let dead_leader_groups: HashSet<i32> = ledger_pgids
         .iter()
         .copied()
-        .filter(|&g| g > 1 && !live_pids.contains(&g))
+        .filter(|&group| group > 1 && !live_pids.contains(&group))
         .collect();
 
     let mut killset: HashSet<i32> = HashSet::new();
-
-    // (1) Orphaned sidecars + (3) process-group lineage. Both are single-pass
-    // over the snapshot.
-    for p in snapshot {
-        if p.pid == self_pid {
+    for process in snapshot {
+        if process.pid == self_pid {
             continue;
         }
-        let orphaned_sidecar = matches_sidecar(&p.command) && parent_dead(p.ppid);
-        let orphaned_group_member = p.pgid > 1 && dead_leader_groups.contains(&p.pgid);
+        let orphaned_sidecar = matches_sidecar(&process.command) && parent_dead(process.ppid);
+        let orphaned_group_member = process.pgid > 1 && dead_leader_groups.contains(&process.pgid);
         if orphaned_sidecar || orphaned_group_member {
-            killset.insert(p.pid);
+            killset.insert(process.pid);
         }
     }
 
-    // (2) Descendants: transitively collect children of each root via the map.
-    // Catches freshly-orphaned MCP/LSP trees still linked to a dead sidecar
-    // that remains in this snapshot (its pgid leader still "alive").
     let mut stack: Vec<i32> = killset.iter().copied().collect();
     while let Some(parent) = stack.pop() {
         if let Some(children) = parent_children.get(&parent) {
@@ -319,6 +1056,13 @@ fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i
     let mut result: Vec<i32> = killset.into_iter().collect();
     result.sort_unstable();
     result
+}
+
+/// Backward-compatible generic classifier for unit fixtures that predate the
+/// product marker. Runtime cleanup always calls `orphan_killset_for_identity`
+/// with the exact current Tauri identifier.
+fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i32>) -> Vec<i32> {
+    orphan_killset_for_identity(snapshot, self_pid, ledger_pgids, "app-sidecar")
 }
 
 /// Pure parser for `ps -eo pid=,ppid=,pgid=,command=` output (one row per
@@ -336,7 +1080,12 @@ fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
             // Pattern matching uses .contains(), so rejoining with single
             // spaces is fine.
             let command = parts.collect::<Vec<_>>().join(" ");
-            Some(ProcInfo { pid, ppid, pgid, command })
+            Some(ProcInfo {
+                pid,
+                ppid,
+                pgid,
+                command,
+            })
         })
         .collect()
 }
@@ -400,7 +1149,7 @@ fn process_snapshot() -> Option<Vec<ProcInfo>> {
     let script = "Get-CimInstance Win32_Process | ForEach-Object { \
         [string]$_.ProcessId + '|' + [string]$_.ParentProcessId + '|' + [string]$_.CommandLine \
     }";
-    let output = Command::new("powershell")
+    let output = hide_console(&mut Command::new("powershell"))
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .ok()?;
@@ -419,111 +1168,94 @@ fn force_kill_pid(pid: i32) {
 /// the sweeper kills every orphan-tree member individually from the snapshot).
 #[cfg(not(unix))]
 fn force_kill_pid(pid: i32) {
-    let _ = Command::new("taskkill")
+    let _ = hide_console(&mut Command::new("taskkill"))
         .args(["/PID", &pid.to_string(), "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 }
 
-/// Absolute path to the sidecar PID ledger (`~/.gg/gg-app-sidecars`).
-///
-/// Newline-delimited list of PIDs of every Node sidecar this app has spawned.
-/// Because each sidecar is spawned as a process-group leader (`process_group(0)`
-/// on Unix), its PID equals the pgid shared by all of its MCP/LSP children. So a
-/// ledgered PID doubles as "a GG process-group id", which is how the sweep
-/// recognises a crashed sidecar's children by lineage — no MCP-name whitelist.
-fn sidecar_ledger_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-sidecars")
+/// Absolute path to this product identity's sidecar PID ledger.
+fn sidecar_ledger_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join(format!("{}-sidecars", runtime_identity_slug(identifier)))
 }
 
-/// Read the ledgered sidecar PIDs (== process-group ids). Missing/garbage file
-/// → empty set (the sweep then degrades to name + descendant matching, exactly
-/// the pre-ledger behaviour). Best-effort, never panics.
-fn read_sidecar_ledger() -> HashSet<i32> {
-    let Ok(contents) = std::fs::read_to_string(sidecar_ledger_path()) else {
+fn read_sidecar_ledger(identifier: &str) -> HashSet<i32> {
+    let Ok(contents) = std::fs::read_to_string(sidecar_ledger_path(identifier)) else {
         return HashSet::new();
     };
     contents
         .lines()
-        .filter_map(|l| l.trim().parse::<i32>().ok())
-        .filter(|&p| p > 1)
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .filter(|&pid| pid > 1)
         .collect()
 }
 
-/// Append a freshly-spawned sidecar's PID to the ledger. Called right after
-/// `spawn_daemon` gets a live child. Creates `~/.gg` if needed. Best-effort:
-/// a write failure only means that sidecar's orphans fall back to name matching.
-fn record_sidecar_pid(pid: i32) {
-    let path = sidecar_ledger_path();
+fn record_sidecar_pid(identifier: &str, pid: i32) {
+    let path = sidecar_ledger_path(identifier);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "{pid}");
+        let _ = writeln!(file, "{pid}");
     }
 }
 
-/// Rewrite the ledger to keep only PIDs whose process group is still live —
-/// i.e. a process with `pid == pgid` exists in the snapshot (a still-running
-/// sidecar, ours or a concurrent instance's). Drops dead groups (their members
-/// were just swept) and pids recycled away, so the file can't grow without
-/// bound. Best-effort.
-fn prune_sidecar_ledger(ledger: &HashSet<i32>, snapshot: &[ProcInfo]) {
-    let live_pids: HashSet<i32> = snapshot.iter().map(|p| p.pid).collect();
+fn prune_sidecar_ledger(identifier: &str, ledger: &HashSet<i32>, snapshot: &[ProcInfo]) {
+    let live_pids: HashSet<i32> = snapshot.iter().map(|process| process.pid).collect();
     let keep: Vec<i32> = ledger
         .iter()
         .copied()
-        .filter(|g| live_pids.contains(g))
+        .filter(|group| live_pids.contains(group))
         .collect();
-    let path = sidecar_ledger_path();
+    let path = sidecar_ledger_path(identifier);
     if keep.is_empty() {
-        // Nothing worth keeping — remove the file so a stale set can't linger.
         let _ = std::fs::remove_file(&path);
         return;
     }
     let body = keep
         .iter()
-        .map(|p| p.to_string())
+        .map(|pid| pid.to_string())
         .collect::<Vec<_>>()
         .join("\n");
     let _ = std::fs::write(&path, format!("{body}\n"));
 }
 
-/// Snapshot the process table, classify orphaned sidecar trees, and force-kill
-/// each. Best-effort + logged; never panics. Runs once at startup before any
-/// sidecar is spawned.
-fn sweep_orphan_sidecars() {
+/// Sweep only orphaned sidecar trees carrying this exact product identity.
+fn sweep_orphan_sidecars(identifier: &str) {
     let Some(snapshot) = process_snapshot() else {
         log::warn!("orphan sweep: process listing unavailable, skipping");
         return;
     };
     let self_pid = std::process::id() as i32;
-    let ledger = read_sidecar_ledger();
-
-    let killset = orphan_killset(&snapshot, self_pid, &ledger);
+    let ledger = read_sidecar_ledger(identifier);
+    let identity_arg = sidecar_identity_arg(identifier);
+    let killset = orphan_killset_for_identity(&snapshot, self_pid, &ledger, &identity_arg);
     if killset.is_empty() {
-        log::info!("orphan sweep: no stale sidecars found");
-        prune_sidecar_ledger(&ledger, &snapshot);
+        log::info!("orphan sweep: no stale sidecars found for {identifier}");
+        prune_sidecar_ledger(identifier, &ledger, &snapshot);
         return;
     }
 
-    log::info!("orphan sweep: killing {} stale process(es)", killset.len());
+    log::info!(
+        "orphan sweep: killing {} stale process(es) for {identifier}",
+        killset.len()
+    );
     for pid in &killset {
-        let cmd = snapshot
+        let command = snapshot
             .iter()
-            .find(|p| &p.pid == pid)
-            .map(|p| p.command.as_str())
+            .find(|process| &process.pid == pid)
+            .map(|process| process.command.as_str())
             .unwrap_or("?");
-        log::info!("orphan sweep: killing pid {pid}: {cmd}");
+        log::info!("orphan sweep: killing pid {pid}: {command}");
         force_kill_pid(*pid);
     }
-    prune_sidecar_ledger(&ledger, &snapshot);
+    prune_sidecar_ledger(identifier, &ledger, &snapshot);
 }
 
 /// The shared daemon port (same for every window). Named `port_for` so the ~35
@@ -535,18 +1267,26 @@ fn port_for(webview: &WebviewWindow) -> Option<u16> {
     port
 }
 
-/// The daemon session id for the window that issued a command, or `None` until
-/// the daemon's `POST /session` has returned for this window.
-fn session_for(webview: &WebviewWindow) -> Option<String> {
+fn pane_session_for(webview: &WebviewWindow, pane_id: &str) -> Option<String> {
+    validate_pane_id(pane_id).ok()?;
     let windows: State<Windows> = webview.state();
-    let map = windows.map.lock().unwrap();
-    map.get(webview.label()).and_then(|w| w.session_id.clone())
+    let registry = windows.map.lock().unwrap();
+    resolve_owned_pane(&registry, webview.label(), pane_id)?
+        .session_id
+        .clone()
 }
 
-fn cwd_for(webview: &WebviewWindow) -> Option<PathBuf> {
+fn session_for(webview: &WebviewWindow) -> Option<String> {
+    pane_session_for(webview, PRIMARY_PANE_ID)
+}
+
+fn pane_cwd_for(webview: &WebviewWindow, pane_id: &str) -> Option<PathBuf> {
+    validate_pane_id(pane_id).ok()?;
     let windows: State<Windows> = webview.state();
-    let map = windows.map.lock().unwrap();
-    map.get(webview.label()).and_then(|w| w.cwd.clone())
+    let registry = windows.map.lock().unwrap();
+    resolve_owned_pane(&registry, webview.label(), pane_id)?
+        .cwd
+        .clone()
 }
 
 /// Await the daemon's HTTP port (set by its `GG_APP_LISTENING` handshake),
@@ -562,13 +1302,23 @@ async fn await_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
     None
 }
 
-/// Frontend polls this until it returns a port. Returns the daemon port only
-/// once THIS window has a session (so `waitForReady` still gates correctly:
-/// a window isn't "ready" until its session exists), mirroring `sidecar-ready`.
+/// Frontend compatibility readiness seam, explicitly routed to one pane.
 #[tauri::command]
-fn sidecar_port(webview: WebviewWindow) -> Option<u16> {
-    session_for(&webview)?;
+fn sidecar_port(webview: WebviewWindow, pane_id: Option<String>) -> Option<u16> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    pane_session_for(&webview, pane_id)?;
     port_for(&webview)
+}
+
+#[tauri::command]
+fn agent_pane_status(webview: WebviewWindow, pane_id: String) -> Result<PaneStartupStatus, String> {
+    let mut status = {
+        let windows: State<Windows> = webview.state();
+        let registry = windows.map.lock().unwrap();
+        pane_startup_status(&registry, webview.label(), &pane_id)?
+    };
+    status.ready &= port_for(&webview).is_some();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -576,7 +1326,9 @@ fn dropped_path_info(paths: Vec<String>) -> Vec<DroppedPathInfo> {
     paths
         .into_iter()
         .map(|path| {
-            let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            let is_dir = std::fs::metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             DroppedPathInfo { path, is_dir }
         })
         .collect()
@@ -643,57 +1395,37 @@ fn read_dropped_file_attachment(path: String) -> Result<serde_json::Value, Strin
     Ok(serde_json::json!({ "name": name, "mediaType": media_type, "data": data }))
 }
 
-fn strip_file_location_suffix(path: &str) -> &str {
-    let mut end = path.len();
-    for _ in 0..2 {
-        let Some(colon) = path[..end].rfind(':') else {
-            break;
-        };
-        let suffix = &path[colon + 1..end];
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
-            break;
-        }
-        let last_sep = path[..colon].rfind(|c| c == '/' || c == '\\').unwrap_or(0);
-        if colon <= last_sep {
-            break;
-        }
-        end = colon;
-    }
-    &path[..end]
-}
-
-/// Open a project file linked from the chat. Relative paths resolve against this
-/// window's sidecar cwd; `:line[:col]` and `#Lline` decorations are tolerated.
-#[tauri::command]
-fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String> {
-    let cwd = cwd_for(&webview).ok_or("sidecar not ready")?;
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
+/// Resolve literal paths without reinterpreting URL syntax or trimming filenames.
+fn resolve_project_path(cwd: &Path, path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() {
         return Err("empty path".into());
     }
-    if trimmed.contains("://") && !trimmed.starts_with("file://") {
+    if path.contains("://") {
         return Err("not a file path".into());
     }
-
-    let without_file_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
-    let without_anchor = without_file_scheme
-        .split_once("#L")
-        .map(|(p, _)| p)
-        .unwrap_or(without_file_scheme);
-    let without_query = without_anchor
-        .split_once('?')
-        .map(|(p, _)| p)
-        .unwrap_or(without_anchor);
-    let cleaned = strip_file_location_suffix(without_query);
-    let candidate = PathBuf::from(cleaned);
+    let candidate = PathBuf::from(path);
     let resolved = if candidate.is_absolute() {
         candidate
     } else {
         cwd.join(candidate)
     };
-    let canonical = resolved
-        .canonicalize()
-        .map_err(|_| format!("file not found: {}", cleaned))?;
+    Ok(strip_extended_prefix(
+        resolved
+            .canonicalize()
+            .map_err(|_| format!("file not found: {}", path))?,
+    ))
+}
+
+/// Open a literal path against the originating, owned pane's cwd.
+#[tauri::command]
+fn open_project_path(
+    webview: WebviewWindow,
+    pane_id: Option<String>,
+    path: String,
+) -> Result<(), String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let cwd = pane_cwd_for(&webview, pane_id).ok_or("sidecar not ready")?;
+    let canonical = resolve_project_path(&cwd, &path)?;
 
     webview
         .opener()
@@ -701,28 +1433,2044 @@ fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
+/// Open an http(s) URL in the system browser (title-bar GitHub issue/PR links).
+/// Scheme-validated so the webview can't turn this into a local-file opener.
+#[tauri::command]
+fn open_url(webview: WebviewWindow, url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    webview
+        .opener()
+        .open_url(trimmed, None::<String>)
+        .map_err(|e| e.to_string())
+}
+
 /// Proxy: current agent/session state.
 #[tauri::command]
 async fn agent_state(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/state", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn normalize_notes_response(
+    status: reqwest::StatusCode,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let typed_outcome = body
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| {
+            matches!(
+                value,
+                "ok" | "missing"
+                    | "corrupt"
+                    | "conflict"
+                    | "invalid"
+                    | "committed"
+                    | "duplicate"
+                    | "already-resolved"
+                    | "duplicate-id-conflict"
+                    | "stale-revision"
+                    | "stale-session"
+                    | "phase-not-found"
+                    | "phase-archived"
+                    | "blocker-not-found"
+            )
+        });
+    if status.is_success() || typed_outcome {
+        return Ok(body);
+    }
+    Err(body
+        .get("message")
+        .or_else(|| body.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("notes request failed")
+        .to_string())
+}
+
+async fn notes_response(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| error.to_string())?;
+    normalize_notes_response(status, body)
+}
+
+const NOTES_DIAGNOSTICS_PATH: &str = "/notes/diagnostics";
+const NOTES_PHASE_BINDING_PATH: &str = "/notes/roadmap/phase-binding";
+
+/// Proxy: load the authenticated pane's canonical Notes storage diagnostics.
+#[tauri::command]
+async fn agent_notes_diagnostics(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!("{}{NOTES_DIAGNOSTICS_PATH}", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: bind or explicitly rebind a Roadmap phase to the authenticated pane.
+#[tauri::command]
+async fn agent_notes_phase_binding(
+    webview: WebviewWindow,
+    pane_id: String,
+    request: serde_json::Value,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    validate_public_phase_binding_request(&request)?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let kind = match request.get("version").and_then(serde_json::Value::as_u64) {
+        Some(2) => RoadmapTypedResponseKind::PhaseLease,
+        Some(3) => RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+        _ => RoadmapTypedResponseKind::PhaseBinding,
+    };
+    roadmap_typed_request(
+        client
+            .post(format!("{}{NOTES_PHASE_BINDING_PATH}", sidecar_base(port)))
+            .header("x-gg-session", &gg_sid)
+            .json(&request),
+        kind,
+    )
+    .await
+}
+
+const ROADMAP_TYPED_RESPONSE_MAX_BYTES: usize = 256 * 1024;
+const ROADMAP_TYPED_RESPONSE_ERROR: &str = "invalid Roadmap response from daemon";
+const PHASE_LEASE_PREDECESSOR_PROOF_ERROR: &str =
+    "phase lease predecessor proof is native supervisor-only";
+const PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR: &str =
+    "invalid phase execution reconciliation request";
+
+fn validate_public_phase_binding_request(request: &serde_json::Value) -> Result<(), String> {
+    match request.get("version").and_then(serde_json::Value::as_u64) {
+        Some(2)
+            if request
+                .get("predecessorProof")
+                .is_some_and(|proof| !proof.is_null()) =>
+        {
+            Err(PHASE_LEASE_PREDECESSOR_PROOF_ERROR.to_string())
+        }
+        Some(3) if !is_phase_execution_reconciliation_request(request) => {
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RoadmapTypedResponseKind {
+    PhaseBinding,
+    PhaseLease,
+    PhaseExecutionReconciliation,
+}
+
+async fn roadmap_typed_request(
+    request: reqwest::RequestBuilder,
+    kind: RoadmapTypedResponseKind,
+) -> Result<serde_json::Value, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+    roadmap_typed_response(response, kind).await
+}
+
+async fn roadmap_typed_response(
+    response: reqwest::Response,
+    kind: RoadmapTypedResponseKind,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    if !matches!(status.as_u16(), 200 | 404 | 409 | 410 | 500) {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+    let is_json = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    if !is_json
+        || response
+            .content_length()
+            .is_some_and(|length| length > ROADMAP_TYPED_RESPONSE_MAX_BYTES as u64)
+    {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+        if body.len().saturating_add(chunk.len()) > ROADMAP_TYPED_RESPONSE_MAX_BYTES {
+            return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let outcome: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+    if !is_roadmap_typed_outcome(kind, status.as_u16(), &outcome) {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+    Ok(outcome)
+}
+
+fn is_roadmap_typed_outcome(
+    kind: RoadmapTypedResponseKind,
+    http_status: u16,
+    value: &serde_json::Value,
+) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let status_matches = match kind {
+        RoadmapTypedResponseKind::PhaseBinding => match status {
+            "committed" | "duplicate" | "already-bound" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "duplicate-id-conflict"
+            | "stale-revision"
+            | "stale-previous-session"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "missing-session-path" => http_status == 409,
+            _ => false,
+        },
+        RoadmapTypedResponseKind::PhaseLease => match status {
+            "inspected" | "acquired" | "renewed" | "released" | "duplicate" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "corrupt" => http_status == 500,
+            "phase-lease-held"
+            | "phase-lease-lost"
+            | "lease-owner-unreachable"
+            | "operation-conflict"
+            | "stale-revision"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "plan-mismatch" => http_status == 409,
+            _ => false,
+        },
+        RoadmapTypedResponseKind::PhaseExecutionReconciliation => match status {
+            "reconciled" | "duplicate" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "corrupt" | "lease-corrupt" => http_status == 500,
+            "stale-revision"
+            | "operation-conflict"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "execution-missing"
+            | "reconciliation-not-required"
+            | "repository-mismatch"
+            | "plan-mismatch"
+            | "plan-hash-mismatch"
+            | "workspace-mismatch"
+            | "phase-lease-lost"
+            | "missing-session-path" => http_status == 409,
+            _ => false,
+        },
+    };
+    status_matches
+        && match kind {
+            RoadmapTypedResponseKind::PhaseBinding => is_phase_binding_outcome(value),
+            RoadmapTypedResponseKind::PhaseLease => is_phase_lease_outcome(value),
+            RoadmapTypedResponseKind::PhaseExecutionReconciliation => {
+                is_phase_execution_reconciliation_outcome(value)
+            }
+        }
+}
+
+fn exact_roadmap_object<'a>(
+    value: &'a serde_json::Value,
+    expected: &[&str],
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let object = value.as_object()?;
+    has_exact_keys(object, expected).then_some(object)
+}
+
+fn is_roadmap_revision(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|revision| revision <= 9_007_199_254_740_991)
+}
+
+fn is_roadmap_bounded_string(value: Option<&serde_json::Value>, max_length: usize) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| {
+            !candidate.trim().is_empty() && candidate.encode_utf16().count() <= max_length
+        })
+}
+
+fn is_roadmap_lower_hex(value: Option<&serde_json::Value>, length: usize) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| {
+            candidate.len() == length
+                && candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn is_roadmap_timestamp(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| chrono::DateTime::parse_from_rfc3339(candidate).is_ok())
+}
+
+fn is_roadmap_safe_relative_path(value: Option<&serde_json::Value>) -> bool {
+    let Some(candidate) = value.and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if !is_roadmap_bounded_string(value, 4096)
+        || candidate.contains('\0')
+        || candidate.starts_with('/')
+        || candidate.starts_with('\\')
+        || candidate.as_bytes().get(1) == Some(&b':')
+    {
+        return false;
+    }
+    candidate
+        .split(['/', '\\'])
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn is_notes_repository_identity(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| has_exact_keys(object, &["projectKey", "identityHash", "rootCommit"]))
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("projectKey"), 4096)
+        && is_roadmap_lower_hex(object.get("identityHash"), 64)
+        && object
+            .get("rootCommit")
+            .is_some_and(|commit| commit.is_null() || is_roadmap_lower_hex(Some(commit), 40))
+}
+
+fn is_phase_execution_reconciliation_request(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object().filter(|object| {
+        has_exact_keys(
+            object,
+            &[
+                "version",
+                "action",
+                "phaseId",
+                "expectedProjectKey",
+                "expectedRevision",
+                "operationId",
+                "repository",
+                "plan",
+                "workspace",
+            ],
+        )
+    }) else {
+        return false;
+    };
+    let Some(plan) = object
+        .get("plan")
+        .and_then(serde_json::Value::as_object)
+        .filter(|plan| {
+            has_exact_keys(
+                plan,
+                &[
+                    "planId",
+                    "contentHash",
+                    "snapshotPath",
+                    "approvedAt",
+                    "approvedRevision",
+                    "baseCommit",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    let Some(workspace) = object
+        .get("workspace")
+        .and_then(serde_json::Value::as_object)
+        .filter(|workspace| {
+            has_exact_keys(
+                workspace,
+                &[
+                    "version",
+                    "repository",
+                    "headCommit",
+                    "worktreeDigest",
+                    "clean",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    object.get("version").and_then(serde_json::Value::as_u64) == Some(3)
+        && object.get("action").and_then(serde_json::Value::as_str) == Some("reconcile-execution")
+        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+        && is_roadmap_bounded_string(object.get("expectedProjectKey"), 4096)
+        && is_roadmap_revision(object.get("expectedRevision"))
+        && is_roadmap_bounded_string(object.get("operationId"), 256)
+        && is_notes_repository_identity(object.get("repository"))
+        && is_roadmap_bounded_string(plan.get("planId"), 256)
+        && is_roadmap_lower_hex(plan.get("contentHash"), 64)
+        && is_roadmap_safe_relative_path(plan.get("snapshotPath"))
+        && is_roadmap_timestamp(plan.get("approvedAt"))
+        && is_roadmap_revision(plan.get("approvedRevision"))
+        && plan
+            .get("baseCommit")
+            .is_some_and(|commit| commit.is_null() || is_roadmap_lower_hex(Some(commit), 40))
+        && workspace.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && is_notes_repository_identity(workspace.get("repository"))
+        && workspace.get("repository") == object.get("repository")
+        && is_roadmap_lower_hex(workspace.get("headCommit"), 40)
+        && is_roadmap_lower_hex(workspace.get("worktreeDigest"), 64)
+        && workspace
+            .get("clean")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()
+}
+
+fn is_roadmap_bounded_string_array(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.len() <= 10_000
+                && items
+                    .iter()
+                    .all(|item| is_roadmap_bounded_string(Some(item), 256))
+        })
+}
+
+fn is_project_notes_corrupt_reason(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_str().is_some_and(|reason| {
+            matches!(
+                reason,
+                "malformed-json" | "invalid-envelope" | "project-key-mismatch"
+            )
+        })
+}
+
+fn is_phase_execution_reconciliation_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "reconciled" | "duplicate" => exact_roadmap_object(
+            value,
+            &[
+                "status",
+                "revision",
+                "phaseId",
+                "preservedStepIds",
+                "revalidationStepIds",
+                "revalidationEvidenceCount",
+                "reconciledAt",
+            ],
+        )
+        .is_some_and(|object| {
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_roadmap_bounded_string_array(object.get("preservedStepIds"))
+                && is_roadmap_bounded_string_array(object.get("revalidationStepIds"))
+                && is_roadmap_revision(object.get("revalidationEvidenceCount"))
+                && is_roadmap_timestamp(object.get("reconciledAt"))
+        }),
+        "stale-revision" | "operation-conflict" => {
+            exact_roadmap_object(value, &["status", "revision"])
+                .is_some_and(|object| is_roadmap_revision(object.get("revision")))
+        }
+        "project-mismatch" => {
+            exact_roadmap_object(value, &["status", "revision", "currentProjectKey"]).is_some_and(
+                |object| {
+                    is_roadmap_revision(object.get("revision"))
+                        && is_roadmap_bounded_string(object.get("currentProjectKey"), 4096)
+                },
+            )
+        }
+        "phase-not-found"
+        | "phase-archived"
+        | "phase-terminal"
+        | "execution-missing"
+        | "reconciliation-not-required"
+        | "repository-mismatch"
+        | "plan-mismatch"
+        | "plan-hash-mismatch"
+        | "workspace-mismatch"
+        | "phase-lease-lost"
+        | "lease-corrupt"
+        | "missing-session-path"
+        | "missing" => exact_roadmap_object(value, &["status"]).is_some(),
+        "corrupt" => {
+            exact_roadmap_object(value, &["status", "primary", "backup"]).is_some_and(|object| {
+                object
+                    .get("primary")
+                    .is_some_and(is_project_notes_corrupt_reason)
+                    && object
+                        .get("backup")
+                        .is_some_and(is_project_notes_corrupt_reason)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn is_notes_session_link(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| has_exact_keys(object, &["sessionId", "sessionPath"]))
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("sessionId"), ROADMAP_TYPED_RESPONSE_MAX_BYTES)
+        && object.get("sessionPath").is_some_and(|path| {
+            path.is_null()
+                || is_roadmap_bounded_string(Some(path), ROADMAP_TYPED_RESPONSE_MAX_BYTES)
+        })
+}
+
+fn is_nullable_notes_session_link(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|value| value.is_null() || is_notes_session_link(Some(value)))
+}
+
+fn is_phase_binding_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "committed" | "duplicate" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &[
+                    "status",
+                    "revision",
+                    "phaseId",
+                    "previousSession",
+                    "session",
+                ],
+            ) else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_nullable_notes_session_link(object.get("previousSession"))
+                && is_notes_session_link(object.get("session"))
+        }
+        "already-bound" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "revision", "phaseId", "session"])
+            else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_notes_session_link(object.get("session"))
+        }
+        "duplicate-id-conflict" | "stale-revision" => {
+            exact_roadmap_object(value, &["status", "revision"])
+                .is_some_and(|object| is_roadmap_revision(object.get("revision")))
+        }
+        "stale-previous-session" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "revision", "currentSession"])
+            else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_nullable_notes_session_link(object.get("currentSession"))
+        }
+        "project-mismatch" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "expectedProjectKey", "actualProjectKey"])
+            else {
+                return false;
+            };
+            is_roadmap_bounded_string(object.get("expectedProjectKey"), 4096)
+                && is_roadmap_bounded_string(object.get("actualProjectKey"), 4096)
+        }
+        "phase-not-found"
+        | "phase-archived"
+        | "phase-terminal"
+        | "missing-session-path"
+        | "missing" => exact_roadmap_object(value, &["status"]).is_some(),
+        _ => false,
+    }
+}
+
+fn is_phase_lease_holder(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| {
+            has_exact_keys(
+                object,
+                &["daemonInstanceId", "sessionId", "sessionPath", "processId"],
+            )
+        })
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("daemonInstanceId"), 256)
+        && is_roadmap_bounded_string(object.get("sessionId"), 256)
+        && object
+            .get("sessionPath")
+            .is_some_and(|path| path.is_null() || is_roadmap_bounded_string(Some(path), 4096))
+        && object
+            .get("processId")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|id| id > 0 && id <= 9_007_199_254_740_991)
+}
+
+fn is_phase_lease(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| {
+            has_exact_keys(
+                object,
+                &[
+                    "version",
+                    "projectKey",
+                    "phaseId",
+                    "planId",
+                    "leaseId",
+                    "fence",
+                    "holder",
+                    "runState",
+                    "acquiredAt",
+                    "renewedAt",
+                    "expiresAt",
+                    "operationId",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    let timestamps = ["acquiredAt", "renewedAt", "expiresAt"].map(|key| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    });
+    object.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && is_roadmap_bounded_string(object.get("projectKey"), 4096)
+        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+        && object
+            .get("planId")
+            .is_some_and(|plan| plan.is_null() || is_roadmap_bounded_string(Some(plan), 256))
+        && is_roadmap_bounded_string(object.get("leaseId"), 256)
+        && object
+            .get("fence")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|fence| fence > 0 && fence <= 9_007_199_254_740_991)
+        && is_phase_lease_holder(object.get("holder"))
+        && object
+            .get("runState")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| matches!(state, "idle" | "running"))
+        && timestamps.iter().all(Option::is_some)
+        && timestamps[0] <= timestamps[1]
+        && timestamps[1] < timestamps[2]
+        && is_roadmap_bounded_string(object.get("operationId"), 256)
+}
+
+fn is_phase_lease_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "inspected" | "acquired" | "renewed" | "released" | "duplicate" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &[
+                    "status",
+                    "roadmapRevision",
+                    "leaseRevision",
+                    "phaseId",
+                    "lease",
+                ],
+            ) else {
+                return false;
+            };
+            let lease_valid = object.get("lease").is_some_and(|lease| {
+                lease.is_null()
+                    || (is_phase_lease(Some(lease))
+                        && lease.get("phaseId") == object.get("phaseId"))
+            });
+            is_roadmap_revision(object.get("roadmapRevision"))
+                && is_roadmap_revision(object.get("leaseRevision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && lease_valid
+                && (status != "released"
+                    || object.get("lease").is_some_and(|lease| lease.is_null()))
+        }
+        "phase-lease-held" | "phase-lease-lost" | "lease-owner-unreachable" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &["status", "roadmapRevision", "leaseRevision", "currentLease"],
+            ) else {
+                return false;
+            };
+            is_roadmap_revision(object.get("roadmapRevision"))
+                && is_roadmap_revision(object.get("leaseRevision"))
+                && object
+                    .get("currentLease")
+                    .is_some_and(|lease| lease.is_null() || is_phase_lease(Some(lease)))
+        }
+        "operation-conflict" | "stale-revision" => {
+            exact_roadmap_object(value, &["status", "roadmapRevision", "leaseRevision"])
+                .is_some_and(|object| {
+                    is_roadmap_revision(object.get("roadmapRevision"))
+                        && is_roadmap_revision(object.get("leaseRevision"))
+                })
+        }
+        "project-mismatch" => {
+            exact_roadmap_object(value, &["status", "roadmapRevision", "currentProjectKey"])
+                .is_some_and(|object| {
+                    is_roadmap_revision(object.get("roadmapRevision"))
+                        && is_roadmap_bounded_string(object.get("currentProjectKey"), 4096)
+                })
+        }
+        "phase-not-found" | "phase-archived" | "phase-terminal" | "plan-mismatch" | "missing" => {
+            exact_roadmap_object(value, &["status"]).is_some()
+        }
+        "corrupt" => {
+            let Some(object) = exact_roadmap_object(value, &["status", "primary", "backup"]) else {
+                return false;
+            };
+            ["primary", "backup"].iter().all(|key| {
+                object
+                    .get(*key)
+                    .is_some_and(|reason| reason.is_null() || reason.is_string())
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Proxy: load the authenticated pane's project Notes snapshot.
+#[tauri::command]
+async fn agent_notes_get(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!("{}/notes", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn phase_start_path(phase_id: &str) -> String {
+    format!("/phases/{}/start", encode_path_segment(phase_id))
+}
+
+fn phase_advancement_start_path(checkpoint_id: &str) -> String {
+    format!(
+        "/notes/roadmap/advancement/{}/start",
+        encode_path_segment(checkpoint_id)
+    )
+}
+
+fn phase_advancement_start_body(next_phase_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "action": "start-next-phase",
+        "nextPhaseId": next_phase_id,
+    })
+}
+
+fn phase_cancel_path(phase_id: &str) -> String {
+    format!("/phases/{}/cancel", encode_path_segment(phase_id))
+}
+
+fn roadmap_phase_draft_approve_path(draft_id: &str) -> String {
+    format!(
+        "/roadmap/phase-drafts/{}/approve",
+        encode_path_segment(draft_id)
+    )
+}
+
+fn roadmap_phase_draft_reject_path(draft_id: &str) -> String {
+    format!(
+        "/roadmap/phase-drafts/{}/reject",
+        encode_path_segment(draft_id)
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RoadmapPhaseDraftResponseKind {
+    Get,
+    Approve,
+    Reject,
+}
+
+fn is_non_negative_integer(value: Option<&serde_json::Value>) -> bool {
+    value.and_then(serde_json::Value::as_u64).is_some()
+}
+
+fn is_non_empty_string(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| !candidate.is_empty())
+}
+
+const ROADMAP_PHASE_DRAFT_KEYS: [&str; 8] = [
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "phases",
+    "status",
+];
+const ROADMAP_DRAFT_PHASE_KEYS: [&str; 5] =
+    ["phaseId", "title", "goal", "doneWhen", "sourcePrompt"];
+const ROADMAP_PROPOSED_PHASES_MAX_ITEMS: usize = 20;
+const ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS: usize = 20;
+
+fn has_exact_keys(object: &serde_json::Map<String, serde_json::Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+}
+
+fn normalized_bounded_string(
+    value: Option<&serde_json::Value>,
+    max_length: usize,
+) -> Option<String> {
+    let candidate = value?.as_str()?;
+    let normalized_nfc = candidate.nfc().collect::<String>();
+    let normalized_lines = normalized_nfc.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized_lines.trim();
+    // Match the shared TypeScript contract's UTF-16 length bounds.
+    let length = normalized.encode_utf16().count();
+    (1..=max_length)
+        .contains(&length)
+        .then(|| normalized.to_string())
+}
+
+// Reference fields were absent in legacy drafts. Keep exact-key validation for both forms.
+fn has_roadmap_reference_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    base: &[&str],
+    reference_key: &str,
+) -> bool {
+    has_exact_keys(object, base)
+        || (object.len() == base.len() + 1
+            && object.contains_key(reference_key)
+            && base.iter().all(|key| object.contains_key(*key)))
+}
+
+fn roadmap_reference_array(value: Option<&serde_json::Value>) -> Option<&[serde_json::Value]> {
+    match value {
+        None | Some(serde_json::Value::Null) => Some(&[]),
+        Some(value) => value.as_array().map(Vec::as_slice),
+    }
+}
+
+// Mirrors roadmap-workflow normalizeDraftReference and Project Notes reference coordinates.
+fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(String, String)> {
+    let object = value.as_object()?;
+    if !has_exact_keys(object, &[
+        "id", "provider", "tool", "canonicalUrl", "owner", "repo", "revision", "path",
+        "range", "issue", "pullRequest", "query", "anchor", "relevance",
+    ]) {
+        return None;
+    }
+    let id = normalized_bounded_string(object.get("id"), 512)?;
+    let provider = normalized_bounded_string(object.get("provider"), 4_096)?.to_lowercase();
+    let owner = normalized_bounded_string(object.get("owner"), 4_096)?;
+    let repo = normalized_bounded_string(object.get("repo"), 4_096)?;
+    for field in ["tool", "revision", "path", "query", "anchor"] {
+        if !object.get(field)?.is_null() {
+            normalized_bounded_string(object.get(field), 4_096)?;
+        }
+    }
+    let relevance = object.get("relevance")?.as_str()?.nfc().collect::<String>();
+    if relevance.replace("\r\n", "\n").replace('\r', "\n").trim().encode_utf16().count() > 4_096 {
+        return None;
+    }
+    let canonical_url = normalized_bounded_string(object.get("canonicalUrl"), 2_048)?;
+    let mut url = reqwest::Url::parse(&canonical_url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    if url.as_str().trim_end_matches('/').encode_utf16().count() > 2_048 {
+        return None;
+    }
+    let range = object.get("range")?;
+    if !range.is_null() {
+        let range = range.as_object()?;
+        if !has_exact_keys(range, &["startLine", "endLine"]) {
+            return None;
+        }
+        let start = range.get("startLine")?.as_u64()?;
+        let end = range.get("endLine")?.as_u64()?;
+        if start == 0 || end < start || object.get("path")?.is_null() {
+            return None;
+        }
+    }
+    for field in ["issue", "pullRequest"] {
+        let number = object.get(field)?;
+        if !number.is_null() && !number.as_u64().is_some_and(|number| number > 0) {
+            return None;
+        }
+    }
+    if !object.get("issue")?.is_null() && !object.get("pullRequest")?.is_null() {
+        return None;
+    }
+    if provider == "github" {
+        let segments: Vec<_> = url.path().split('/').filter(|part| !part.is_empty()).collect();
+        let normalized_repo = repo.to_lowercase();
+        let url_repo = segments.get(1).copied().unwrap_or_default().to_lowercase();
+        if url.host_str() != Some("github.com") || segments.len() < 2
+            || segments[0].to_lowercase() != owner.to_lowercase()
+            || url_repo.strip_suffix(".git").unwrap_or(&url_repo)
+                != normalized_repo.strip_suffix(".git").unwrap_or(&normalized_repo)
+        {
+            return None;
+        }
+        if let Some(number) = segments.get(3).filter(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())) {
+            let field = match segments[2] {
+                "issues" => Some("issue"),
+                "pull" => Some("pullRequest"),
+                _ => None,
+            };
+            if let Some(field) = field {
+                if object.get(field)?.as_u64() != Some(number.parse::<u64>().ok()?) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((id, format!("{}\n{}", provider, url.as_str().trim_end_matches('/'))))
+}
+
+fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    if !has_roadmap_reference_keys(object, &ROADMAP_DRAFT_PHASE_KEYS, "referenceIds") {
+        return None;
+    }
+
+    let phase_id = normalized_bounded_string(object.get("phaseId"), 512)?;
+    normalized_bounded_string(object.get("title"), 200)?;
+    normalized_bounded_string(object.get("goal"), 4_096)?;
+    normalized_bounded_string(object.get("sourcePrompt"), 16_384)?;
+
+    let done_when = object.get("doneWhen")?.as_array()?;
+    if !(1..=ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS).contains(&done_when.len()) {
+        return None;
+    }
+    let mut criteria = HashSet::new();
+    for criterion in done_when {
+        let normalized = normalized_bounded_string(Some(criterion), 1_024)?;
+        if !criteria.insert(normalized) {
+            return None;
+        }
+    }
+
+    Some(phase_id)
+}
+
+fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if !has_roadmap_reference_keys(object, &ROADMAP_PHASE_DRAFT_KEYS, "references")
+        || !matches!(
+            object.get("status").and_then(serde_json::Value::as_str),
+            Some("pending" | "stale")
+        )
+        || normalized_bounded_string(object.get("id"), 512).is_none()
+        || normalized_bounded_string(object.get("projectKey"), 4_096).is_none()
+        || !is_non_negative_integer(object.get("basedOnRevision"))
+        || !object
+            .get("createdAt")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+        || normalized_bounded_string(object.get("createdBySessionId"), 512).is_none()
+        || normalized_bounded_string(object.get("summary"), 4_096).is_none()
+    {
+        return false;
+    }
+
+    let Some(phases) = object.get("phases").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !(1..=ROADMAP_PROPOSED_PHASES_MAX_ITEMS).contains(&phases.len()) {
+        return false;
+    }
+
+    let Some(references) = roadmap_reference_array(object.get("references")) else {
+        return false;
+    };
+    if references.len() > 20 {
+        return false;
+    }
+    let mut reference_ids = HashSet::new();
+    let mut identities = HashSet::new();
+    for reference in references {
+        let Some((id, identity)) = roadmap_draft_reference(reference) else {
+            return false;
+        };
+        if !reference_ids.insert(id) || !identities.insert(identity) {
+            return false;
+        }
+    }
+    let mut phase_ids = HashSet::new();
+    let mut linked_ids = HashSet::new();
+    for phase in phases {
+        if !is_roadmap_draft_phase(phase).is_some_and(|id| phase_ids.insert(id)) {
+            return false;
+        }
+        let Some(links) = roadmap_reference_array(phase.get("referenceIds")) else {
+            return false;
+        };
+        if links.len() > 20 {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        for link in links {
+            let Some(id) = normalized_bounded_string(Some(link), 128) else {
+                return false;
+            };
+            if !reference_ids.contains(&id) || !seen.insert(id.clone()) {
+                return false;
+            }
+            linked_ids.insert(id);
+        }
+    }
+    linked_ids == reference_ids
+}
+
+fn is_roadmap_phase_draft_get_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    outcome == "ok"
+        && has_exact_keys(object, &["status", "draft"])
+        && object.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+        && object
+            .get("draft")
+            .is_some_and(|draft| draft.is_null() || is_roadmap_phase_draft(draft))
+}
+
+fn has_decision(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("decision").and_then(serde_json::Value::as_str),
+        Some("approved" | "rejected")
+    )
+}
+
+fn is_roadmap_phase_draft_approval_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    match outcome {
+        "created" => {
+            is_non_negative_integer(value.get("revision"))
+                && value
+                    .get("phaseIds")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|ids| {
+                        !ids.is_empty()
+                            && ids
+                                .iter()
+                                .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+                    })
+        }
+        "already-decided" => has_decision(value),
+        "stale-revision" => {
+            is_non_negative_integer(value.get("expectedRevision"))
+                && is_non_negative_integer(value.get("currentRevision"))
+        }
+        "invalid-proposal" | "storage-failed" => is_non_empty_string(value.get("message")),
+        "proposal-not-found"
+        | "proposal-project-mismatch"
+        | "reconciliation-in-progress"
+        | "notes-missing"
+        | "notes-corrupt" => true,
+        _ => false,
+    }
+}
+
+fn is_roadmap_phase_draft_rejection_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    match outcome {
+        "rejected" | "proposal-not-found" | "proposal-project-mismatch" => true,
+        "already-decided" => has_decision(value),
+        _ => false,
+    }
+}
+
+fn normalize_roadmap_phase_draft_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    kind: RoadmapPhaseDraftResponseKind,
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid roadmap phase-draft response".to_string())?;
+    let outcome = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let typed = match kind {
+        RoadmapPhaseDraftResponseKind::Get => is_roadmap_phase_draft_get_outcome(&value, outcome),
+        RoadmapPhaseDraftResponseKind::Approve => {
+            is_roadmap_phase_draft_approval_outcome(&value, outcome)
+        }
+        RoadmapPhaseDraftResponseKind::Reject => {
+            is_roadmap_phase_draft_rejection_outcome(&value, outcome)
+        }
+    };
+    if typed {
+        Ok(value)
+    } else if status.is_success() {
+        Err("invalid roadmap phase-draft response".to_string())
+    } else {
+        Err(sidecar_error_text(status, body))
+    }
+}
+
+const ROADMAP_DRAFT_FEEDBACK_MAX_CHARS: usize = 4_096;
+const ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS: usize = 128;
+
+fn normalize_roadmap_draft_feedback(feedback: Option<String>) -> Result<Option<String>, String> {
+    let Some(feedback) = feedback else {
+        return Ok(None);
+    };
+    let normalized = feedback.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim().to_string();
+    let length = normalized.chars().count();
+    if length == 0 {
+        return Ok(None);
+    }
+    if length > ROADMAP_DRAFT_FEEDBACK_MAX_CHARS {
+        return Err(format!(
+            "feedback must contain at most {ROADMAP_DRAFT_FEEDBACK_MAX_CHARS} normalized characters"
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn bounded_roadmap_draft_audit_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{FFFD}'
+            } else {
+                character
+            }
+        })
+        .take(ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS)
+        .collect()
+}
+
+fn audit_roadmap_phase_draft_proxy(
+    action: &str,
+    pane_id: &str,
+    draft_id: Option<&str>,
+    http_status: reqwest::StatusCode,
+    result: &Result<serde_json::Value, String>,
+) {
+    let outcome = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("invalid-response");
+    log::info!(
+        "roadmap_phase_draft_proxy action={} pane_id={} draft_id={} http_status={} authenticated=true outcome={}",
+        bounded_roadmap_draft_audit_field(action),
+        bounded_roadmap_draft_audit_field(pane_id),
+        bounded_roadmap_draft_audit_field(draft_id.unwrap_or("-")),
+        http_status.as_u16(),
+        bounded_roadmap_draft_audit_field(outcome),
+    );
+}
+
+async fn roadmap_phase_draft_response(
+    response: reqwest::Response,
+    kind: RoadmapPhaseDraftResponseKind,
+) -> (reqwest::StatusCode, Result<serde_json::Value, String>) {
+    let status = response.status();
+    let result = match response.text().await {
+        Ok(body) => normalize_roadmap_phase_draft_response(status, &body, kind),
+        Err(_) => Err("invalid roadmap phase-draft response".to_string()),
+    };
+    (status, result)
+}
+
+fn normalize_phase_start_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid phase-start response".to_string())?;
+    let typed = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| matches!(candidate, "accepted" | "already-bound" | "failed"));
+    if status.is_success() || typed {
+        Ok(value)
+    } else {
+        Err(sidecar_error_text(status, body))
+    }
+}
+
+#[cfg(feature = "native-smoke")]
+fn audit_native_phase_start(
+    pane_id: &str,
+    phase_id: &str,
+    status: reqwest::StatusCode,
+    result: &Result<serde_json::Value, String>,
+) {
+    use std::io::Write as _;
+
+    let Ok(path) = std::env::var("GG_PHASE21_NATIVE_SMOKE_AUDIT_FILE") else {
+        return;
+    };
+    let outcome = match result {
+        Ok(value) => serde_json::json!({ "response": value }),
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    let entry = serde_json::json!({
+        "route": "agent_phase_start",
+        "paneId": pane_id,
+        "phaseId": phase_id,
+        "httpStatus": status.as_u16(),
+        "authenticated": true,
+        "outcome": outcome,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{entry}");
+    }
+}
+
+/// Proxy: atomically bind and start one Roadmap phase for the authenticated pane.
+#[tauri::command]
+async fn agent_phase_start(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    phase_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            phase_start_path(&phase_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let result = normalize_phase_start_response(status, &body);
+    #[cfg(feature = "native-smoke")]
+    audit_native_phase_start(&pane_id, &phase_id, status, &result);
+    result
+}
+
+/// Proxy: consume a durable human-confirmed Roadmap advancement checkpoint.
+#[tauri::command]
+async fn agent_phase_advancement_start(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    daemon: tauri::State<'_, Daemon>,
+    checkpoint_id: String,
+    next_phase_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let auth_token = daemon
+        .auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("agent daemon authentication is not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            phase_advancement_start_path(&checkpoint_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .header("x-gg-daemon-token", auth_token)
+        .json(&phase_advancement_start_body(&next_phase_id))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    normalize_phase_start_response(status, &body)
+}
+
+/// Proxy: resolve a Roadmap phase's bound live session, stop its operation, then update Notes.
+#[tauri::command]
+async fn agent_phase_cancel(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    phase_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            phase_cancel_path(&phase_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
+}
+
+/// Proxy: load the authenticated pane's current pending Roadmap phase draft.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_get(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!(
+            "{}/roadmap/phase-drafts/pending",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Get).await;
+    audit_roadmap_phase_draft_proxy("get", &pane_id, None, status, &result);
+    result
+}
+
+/// Proxy: approve exactly the stored Roadmap phase draft, without accepting phase content.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_approve(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    draft_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            roadmap_phase_draft_approve_path(&draft_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        // Deliberately no JSON body: approval can only identify an existing draft.
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Approve).await;
+    audit_roadmap_phase_draft_proxy("approve", &pane_id, Some(&draft_id), status, &result);
+    result
+}
+
+/// Proxy: reject exactly the stored Roadmap phase draft with optional bounded feedback.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_reject(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    draft_id: String,
+    feedback: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let feedback = normalize_roadmap_draft_feedback(feedback)?;
+    let body = match feedback {
+        Some(feedback) => serde_json::json!({ "feedback": feedback }),
+        None => serde_json::json!({}),
+    };
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            roadmap_phase_draft_reject_path(&draft_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Reject).await;
+    audit_roadmap_phase_draft_proxy("reject", &pane_id, Some(&draft_id), status, &result);
+    result
+}
+
+/// Proxy: create the pane's project Notes repository only when absent.
+#[tauri::command]
+async fn agent_notes_migrate(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    document: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/notes/migrate", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "document": document }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: persist a typed resolution for one Roadmap blocker report.
+#[tauri::command]
+async fn agent_notes_resolve_roadmap_blocker(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    resolution_id: String,
+    phase_id: String,
+    blocker_update_id: String,
+    expected_revision: u64,
+    expected_session: serde_json::Value,
+    resolver: String,
+    timestamp: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}/notes/roadmap/blocker-resolution",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "resolutionId": resolution_id,
+            "phaseId": phase_id,
+            "blockerUpdateId": blocker_update_id,
+            "expectedRevision": expected_revision,
+            "expectedSession": expected_session,
+            "resolver": resolver,
+            "timestamp": timestamp,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: compare-and-swap the pane's project Notes document.
+#[tauri::command]
+async fn agent_notes_save(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    expected_revision: u64,
+    document: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .put(format!("{}/notes", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "expectedRevision": expected_revision,
+            "document": document,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+const ROADMAP_REMINDER_NOTIFICATION_TITLE: &str = "Roadmap reminder due";
+const ROADMAP_REMINDER_NOTIFICATION_BODY: &str = "Open Supah Coder to review it.";
+
+#[derive(Debug, PartialEq)]
+struct RoadmapReminderNotificationSpec {
+    title: &'static str,
+    body: &'static str,
+    sound: Option<&'static str>,
+}
+
+fn roadmap_reminder_sound() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        return "Submarine";
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return "Mail";
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return "message-new-instant";
+    }
+    #[allow(unreachable_code)]
+    "default"
+}
+
+fn roadmap_reminder_notification_spec(sound_enabled: bool) -> RoadmapReminderNotificationSpec {
+    RoadmapReminderNotificationSpec {
+        title: ROADMAP_REMINDER_NOTIFICATION_TITLE,
+        body: ROADMAP_REMINDER_NOTIFICATION_BODY,
+        sound: sound_enabled.then(roadmap_reminder_sound),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotificationAvailabilitySignal {
+    Enabled,
+    Disabled,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum RoadmapReminderNotificationPermission {
+    Granted,
+    Denied,
+    Unavailable,
+}
+
+fn notification_permission_from_signal(
+    signal: NotificationAvailabilitySignal,
+) -> RoadmapReminderNotificationPermission {
+    match signal {
+        NotificationAvailabilitySignal::Enabled => RoadmapReminderNotificationPermission::Granted,
+        NotificationAvailabilitySignal::Disabled => RoadmapReminderNotificationPermission::Denied,
+        NotificationAvailabilitySignal::Unknown => {
+            RoadmapReminderNotificationPermission::Unavailable
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_notification_signal(
+    setting: Option<windows::UI::Notifications::NotificationSetting>,
+) -> NotificationAvailabilitySignal {
+    use windows::UI::Notifications::NotificationSetting;
+
+    match setting {
+        Some(NotificationSetting::Enabled) => NotificationAvailabilitySignal::Enabled,
+        Some(
+            NotificationSetting::DisabledForApplication
+            | NotificationSetting::DisabledForUser
+            | NotificationSetting::DisabledByGroupPolicy
+            | NotificationSetting::DisabledByManifest,
+        ) => NotificationAvailabilitySignal::Disabled,
+        Some(_) | None => NotificationAvailabilitySignal::Unknown,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_notification_signal(app_id: &str) -> NotificationAvailabilitySignal {
+    use windows::core::HSTRING;
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+    use windows::UI::Notifications::ToastNotificationManager;
+
+    let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+    let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
+        .and_then(|notifier| notifier.Setting());
+    if initialized {
+        unsafe { RoUninitialize() };
+    }
+    match setting {
+        Ok(setting) => windows_notification_signal(Some(setting)),
+        Err(error) => {
+            log::warn!("Windows notification availability probe failed: {error}");
+            windows_notification_signal(None)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosNotificationState {
+    Enabled,
+    Disabled,
+    NotDetermined,
+    Unknown,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notification_state(
+    authorization: objc2_user_notifications::UNAuthorizationStatus,
+    alert: objc2_user_notifications::UNNotificationSetting,
+) -> MacosNotificationState {
+    use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSetting};
+
+    match authorization {
+        UNAuthorizationStatus::Denied => MacosNotificationState::Disabled,
+        UNAuthorizationStatus::Authorized
+        | UNAuthorizationStatus::Provisional
+        | UNAuthorizationStatus::Ephemeral
+            if alert == UNNotificationSetting::Enabled =>
+        {
+            MacosNotificationState::Enabled
+        }
+        UNAuthorizationStatus::Authorized
+        | UNAuthorizationStatus::Provisional
+        | UNAuthorizationStatus::Ephemeral => MacosNotificationState::Disabled,
+        UNAuthorizationStatus::NotDetermined => MacosNotificationState::NotDetermined,
+        _ => MacosNotificationState::Unknown,
+    }
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn macos_notification_signal(
+    authorization: objc2_user_notifications::UNAuthorizationStatus,
+    alert: objc2_user_notifications::UNNotificationSetting,
+) -> NotificationAvailabilitySignal {
+    match macos_notification_state(authorization, alert) {
+        MacosNotificationState::Enabled => NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::NotDetermined | MacosNotificationState::Unknown => {
+            NotificationAvailabilitySignal::Unknown
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_current_notification_state() -> MacosNotificationState {
+    use block2::RcBlock;
+    use objc2_user_notifications::{UNNotificationSettings, UNUserNotificationCenter};
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        let settings = unsafe { settings.as_ref() };
+        let _ = sender.send(macos_notification_state(
+            settings.authorizationStatus(),
+            settings.alertSetting(),
+        ));
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .getNotificationSettingsWithCompletionHandler(&callback);
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or(MacosNotificationState::Unknown)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::NSError;
+    use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+    use std::sync::mpsc;
+
+    match macos_current_notification_state() {
+        MacosNotificationState::Enabled => return NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => return NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::Unknown => return NotificationAvailabilitySignal::Unknown,
+        MacosNotificationState::NotDetermined => {}
+    }
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+        let _ = sender.send(if !error.is_null() {
+            NotificationAvailabilitySignal::Unknown
+        } else if granted.as_bool() {
+            NotificationAvailabilitySignal::Enabled
+        } else {
+            NotificationAvailabilitySignal::Disabled
+        });
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &callback,
+        );
+    let requested = receiver
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or(NotificationAvailabilitySignal::Unknown);
+    if requested != NotificationAvailabilitySignal::Enabled {
+        return requested;
+    }
+
+    match macos_current_notification_state() {
+        MacosNotificationState::Enabled => NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::NotDetermined | MacosNotificationState::Unknown => {
+            NotificationAvailabilitySignal::Unknown
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    // Freedesktop notification services expose delivery, not a reliable per-app
+    // authorization state. Linux therefore uses the visible in-app fallback and
+    // records `unavailable` instead of manufacturing a `granted` audit result.
+    NotificationAvailabilitySignal::Unknown
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    NotificationAvailabilitySignal::Unknown
+}
+
+#[tauri::command]
+async fn roadmap_reminder_notification_permission(
+    app: tauri::AppHandle,
+) -> RoadmapReminderNotificationPermission {
+    let app_id = app.config().identifier.clone();
+    tauri::async_runtime::spawn_blocking(move || platform_notification_signal(&app_id))
+        .await
+        .map(notification_permission_from_signal)
+        .unwrap_or(RoadmapReminderNotificationPermission::Unavailable)
+}
+
+#[tauri::command]
+fn show_roadmap_reminder_notification(
+    app: tauri::AppHandle,
+    sound_enabled: bool,
+) -> Result<(), String> {
+    let spec = roadmap_reminder_notification_spec(sound_enabled);
+    let mut notification = app
+        .notification()
+        .builder()
+        .title(spec.title)
+        .body(spec.body);
+    if let Some(sound) = spec.sound {
+        notification = notification.sound(sound);
+    }
+    notification.show().map_err(|error| error.to_string())
+}
+
+fn normalize_reminder_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    allowed_statuses: &[&str],
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid reminder response".to_string())?;
+    let typed_status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .filter(|candidate| allowed_statuses.contains(candidate));
+    if typed_status.is_some() {
+        return Ok(value);
+    }
+    Err(if status.is_success() {
+        "invalid reminder response".to_string()
+    } else {
+        sidecar_error_text(status, body)
+    })
+}
+
+async fn reminder_response(
+    response: reqwest::Response,
+    allowed_statuses: &[&str],
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    normalize_reminder_response(status, &body, allowed_statuses)
+}
+
+#[tauri::command]
+async fn agent_reminder_reserve(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    focused: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/reserve", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "focused": focused }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "reserved",
+            "deferred",
+            "leased",
+            "none",
+            "already-delivered",
+            "missing",
+            "corrupt",
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn agent_reminder_claim(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    lease_token: String,
+    channel: String,
+    permission: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/claim", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "leaseToken": lease_token,
+            "channel": channel,
+            "permission": permission,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "ok",
+            "phase-not-found",
+            "phase-inactive",
+            "phase-archived",
+            "reminder-not-found",
+            "stale-occurrence",
+            "not-due",
+            "already-delivered",
+            "invalid-lease",
+            "expired-lease",
+            "wrong-session",
+            "invalid",
+            "missing",
+            "corrupt",
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn agent_reminder_release(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    lease_token: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/release", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "leaseToken": lease_token }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "released",
+            "invalid-lease",
+            "expired-lease",
+            "wrong-session",
+        ],
+    )
+    .await
+}
+
+/// Proxy: shared durable chat memories.
+#[tauri::command]
+async fn agent_memories(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/memories", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to load memories")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: delete exactly one shared durable chat memory.
+#[tauri::command]
+async fn agent_delete_memory(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .delete(format!(
+            "{}/memories/{}",
+            sidecar_base(port),
+            urlencoding(&id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to delete memory")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: shared chat behavior instructions (Jiwa).
+#[tauri::command]
+async fn agent_jiwa(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/jiwa", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to load Jiwa")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: delete exactly one shared Jiwa instruction.
+#[tauri::command]
+async fn agent_delete_jiwa(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .delete(format!("{}/jiwa/{}", sidecar_base(port), urlencoding(&id)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to delete Jiwa entry")
+            .to_string());
+    }
+    Ok(body)
 }
 
 /// Proxy: current XP/rank progress snapshot (Ranks system).
 #[tauri::command]
 async fn agent_progress(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    _pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let res = client
@@ -730,24 +3478,127 @@ async fn agent_progress(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// Proxy: submit a prompt (optionally with attachments). The reply streams back
-/// via the `agent-event` event. `attachments` is passed through opaquely.
+/// Proxy: the active provider's subscription quota snapshot. Account-wide, so
+/// no per-window session header is needed.
 #[tauri::command]
-async fn agent_prompt(
+async fn agent_usage(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    _pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    provider: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    if provider != "anthropic" && provider != "openai" && provider != "moonshot" {
+        return Err("unsupported usage provider".into());
+    }
+    let res = client
+        .get(format!(
+            "{}/usage?provider={}",
+            sidecar_base(port),
+            provider
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("usage request failed")
+            .to_string());
+    }
+    Ok(body)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptSubmissionResult {
+    queued: bool,
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_id: Option<String>,
+}
+
+// Only allowlisted pre-execution failures carry a definite rejection receipt.
+// Legacy failures remain strings for ordinary prompt callers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+enum PromptSubmissionFailure {
+    Rejected { category: &'static str, code: String, message: String },
+    Unknown(String),
+}
+
+impl From<String> for PromptSubmissionFailure {
+    fn from(message: String) -> Self { Self::Unknown(message) }
+}
+
+impl From<&str> for PromptSubmissionFailure {
+    fn from(message: &str) -> Self { Self::Unknown(message.to_string()) }
+}
+
+fn parse_prompt_submission_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
+    if !status.is_success() {
+        if body.len() <= 4096 {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+                let code = value.get("error").and_then(|v| v.as_str()).unwrap_or_default();
+                let known = matches!((status.as_u16(), code),
+                    (400, "invalid_programmatic_selection") |
+                    (409, "programmatic_execution_busy") |
+                    (403, "programmatic_execution_plan_mode"));
+                if known {
+                    let message = value.get("message").and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                        .unwrap_or("Opportunity run rejected before execution. Refresh the report before retrying.");
+                    return Err(PromptSubmissionFailure::Rejected {
+                        category: "rejected", code: code.to_string(), message: message.to_string(),
+                    });
+                }
+            }
+        }
+        return Err(sidecar_error_text(status, body).into());
+    }
+    let result: PromptSubmissionResult =
+        serde_json::from_str(body).map_err(|_| "invalid prompt submission response".to_string())?;
+    let has_queue_id = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid prompt submission response".to_string())?
+        .get("queueId").is_some();
+    let valid_queue_id = result.queue_id.as_deref().is_some_and(|id| {
+        let bytes = id.as_bytes();
+        bytes.len() >= 2 && bytes[0] == b'q' && (b'1'..=b'9').contains(&bytes[1])
+            && bytes[2..].iter().all(u8::is_ascii_digit)
+    });
+    if (result.queued && (result.count == 0 || !valid_queue_id))
+        || (!result.queued && (result.count != 0 || has_queue_id))
+    {
+        return Err("invalid prompt submission response".into());
+    }
+    Ok(result)
+}
+
+async fn post_sidecar_prompt(
+    client: &reqwest::Client,
+    endpoint: &str,
+    gg_sid: &str,
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
-) -> Result<(), String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
-        .post(format!("{}/prompt", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
+    let response = client
+        .post(endpoint)
+        .header("x-gg-session", gg_sid)
         .json(&serde_json::json!({
             "text": text,
             "attachments": attachments.unwrap_or(serde_json::Value::Array(vec![])),
@@ -756,53 +3607,361 @@ async fn agent_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_prompt_submission_response(status, &body)
+}
+
+/// Proxy: submit a prompt (optionally with attachments). The reply streams back
+/// via the `agent-event` event. `attachments` is passed through opaquely.
+#[tauri::command]
+async fn agent_prompt(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    text: String,
+    attachments: Option<serde_json::Value>,
+    meta: Option<serde_json::Value>,
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_sidecar_prompt(
+        &client,
+        &format!("{}/prompt", sidecar_base(port)),
+        &gg_sid,
+        text,
+        attachments,
+        meta,
+    )
+    .await
+}
+
+async fn sidecar_get_json(
+    webview: &WebviewWindow,
+    pane_id: &str,
+    client: &reqwest::Client,
+    path: &str,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(webview, pane_id).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}{}", sidecar_base(port), path))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if status.is_success() {
+        return Ok(body);
+    }
+    Err(body
+        .get("message")
+        .or_else(|| body.get("error"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| {
+            status
+                .canonical_reason()
+                .unwrap_or("sidecar request failed")
+        })
+        .to_string())
 }
 
 /// Proxy: resumed conversation history (user + assistant text) for hydration.
 #[tauri::command]
 async fn agent_history(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .get(format!("{}/history", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
+    sidecar_get_json(&webview, &pane_id, &client, "/history").await
+}
+
+/// Proxy: export this window's session as Markdown.
+#[tauri::command]
+async fn agent_export_transcript(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let Some(path) = path else {
+        return sidecar_get_json(&webview, pane_id, &client, "/export?name=1").await;
+    };
+    let body = sidecar_get_json(&webview, pane_id, &client, "/export").await?;
+    let markdown = body
+        .get("markdown")
+        .and_then(|value| value.as_str())
+        .ok_or("sidecar returned no transcript")?;
+    std::fs::write(&path, markdown)
+        .map_err(|error| format!("could not save transcript: {error}"))?;
+    Ok(serde_json::json!({ "path": path, "bytes": markdown.len() }))
+}
+
+fn sidecar_error_text(status: reqwest::StatusCode, body: &str) -> String {
+    let trimmed = body.trim();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(message) = json
+            .get("message")
+            .or_else(|| json.get("error"))
+            .and_then(|value| value.as_str())
+        {
+            return message.to_string();
+        }
+        return json.to_string();
+    }
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    format!("sidecar request failed with HTTP {status}")
+}
+
+fn parse_sidecar_json_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if !status.is_success() {
+        return Err(sidecar_error_text(status, body));
+    }
+    serde_json::from_str(body).map_err(|error| error.to_string())
+}
+
+async fn post_session_json(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    route: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .post(format!("{base_url}{route}"))
+        .header("x-gg-session", session_id)
+        .json(body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+    parse_sidecar_json_response(status, &body)
+}
+
+/// Plan mutations return recovery state in expected 400/409 JSON bodies.
+/// Preserve those bodies instead of collapsing them to one message.
+fn parse_plan_mutation_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::CONFLICT {
+        return match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(payload) => Err(payload.to_string()),
+            Err(_) => Err(sidecar_error_text(status, body)),
+        };
+    }
+    parse_sidecar_json_response(status, body)
+}
+
+const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS: usize = 24_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContinuationSourceRevision {
+    conversation_id: String,
+    session_id: String,
+    leaf_id: Option<String>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContinuationHandoffResponse {
+    version: u8,
+    prompt: String,
+    prepared_id: String,
+    source: ContinuationSourceRevision,
+    expires_at: u64,
+}
+
+fn parse_continuation_handoff_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<ContinuationHandoffResponse, String> {
+    if !status.is_success() {
+        return Err(sidecar_error_text(status, body));
+    }
+    let response: ContinuationHandoffResponse = serde_json::from_str(body)
+        .map_err(|_| "invalid continuation-handoff response".to_string())?;
+    if response.version != 1
+        || response.prepared_id.is_empty()
+        || response.source.conversation_id.is_empty()
+        || response.source.session_id.is_empty()
+        || response.source.fingerprint.is_empty()
+        || response.expires_at == 0
+        || response.prompt.trim().is_empty()
+        || response.prompt.chars().count() > CONTINUATION_HANDOFF_PROMPT_MAX_CHARS
+    {
+        return Err("invalid continuation-handoff response".to_string());
+    }
+    Ok(response)
+}
+
+/// Narrow authenticated programmatic actions; credentials never enter the webview.
+#[tauri::command]
+async fn agent_programmatic(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    request: serde_json::Value,
+    expected_generation: u64,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = {
+        let windows: State<Windows> = webview.state();
+        let registry = windows.map.lock().unwrap();
+        let pane = resolve_owned_pane(&registry, webview.label(), &pane_id).ok_or("session not ready")?;
+        if pane.generation != expected_generation { return Err("project pane changed".to_string()); }
+        pane.session_id.clone().ok_or("session not ready")?
+    };
+    if request.to_string().len() > 2048 {
+        return Err("programmatic request exceeds bounds".to_string());
+    }
+    let response = client.post(format!("{}/programmatic", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&request).send().await
+        .map_err(|_| "programmatic acknowledgement unknown; read the report before retrying".to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|_| "programmatic response unavailable".to_string())?;
+    if pane_session_for(&webview, &pane_id).as_deref() != Some(gg_sid.as_str()) {
+        return Err("project pane changed; discard this response".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| "invalid programmatic response".to_string())?;
+    // Keep typed rejection/reconciliation receipts, including non-success HTTP responses.
+    if !status.is_success() && value.get("ok").and_then(|v| v.as_bool()) != Some(false) {
+        return Err(sidecar_error_text(status, &body));
+    }
+    Ok(value)
+}
+
+/// Proxy: synthesize a bounded continuation prompt for the authenticated pane.
+#[tauri::command]
+async fn agent_continuation_handoff(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    next_instruction: String,
+) -> Result<ContinuationHandoffResponse, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/continuation-handoff", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "nextInstruction": next_instruction }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_continuation_handoff_response(status, &body)
+}
+
+/// Preserve typed conflict/partial receipts instead of reducing them to error strings.
+fn parse_continuation_commit_response(body: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| "invalid continuation-commit response; outcome unknown".to_string())?;
+    let outcome = value.get("outcome").and_then(|v| v.as_str());
+    if !matches!(outcome, Some("accepted" | "rejected" | "partial" | "outcome-unknown"))
+        || value.get("operationId").and_then(|v| v.as_str()).is_none()
+        || value.get("preparedId").and_then(|v| v.as_str()).is_none()
+    {
+        return Err("invalid continuation-commit response; outcome unknown".to_string());
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+async fn agent_commit_continuation(
+    webview: WebviewWindow,
+    client: tauri::State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/continuation-commit", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("continuation outcome unknown; inspect the session before retry: {error}"))?;
+    let body = response.text().await
+        .map_err(|error| format!("continuation outcome unknown: {error}"))?;
+    parse_continuation_commit_response(&body)
+}
+
+fn parse_new_session_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if !status.is_success() {
+        let kind = if status.is_client_error() {
+            "creation-rejected"
+        } else {
+            "outcome-unknown"
+        };
+        return Err(serde_json::json!({
+            "kind": kind,
+            "status": status.as_u16(),
+            "message": sidecar_error_text(status, body),
+        })
+        .to_string());
+    }
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid new-session response".to_string())?;
+    let operation_id = value
+        .get("operationId")
+        .and_then(|candidate| candidate.as_str())
+        .filter(|candidate| !candidate.is_empty())
+        .ok_or_else(|| "invalid new-session response: missing operationId".to_string())?;
+    Ok(serde_json::json!({ "operationId": operation_id }))
 }
 
 /// Proxy: start a fresh session (clears history) for this window's project.
 #[tauri::command]
 async fn agent_new_session(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-) -> Result<(), String> {
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
         .post(format!("{}/new-session", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_new_session_response(status, &body)
 }
 
 /// Proxy: store an API key for a provider.
 #[tauri::command]
 async fn agent_auth_apikey(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     provider: String,
     key: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/apikey", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -810,7 +3969,9 @@ async fn agent_auth_apikey(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: begin an OAuth login. Progress streams back via `agent-event`
@@ -818,11 +3979,12 @@ async fn agent_auth_apikey(
 #[tauri::command]
 async fn agent_auth_oauth_start(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     provider: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/start", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -830,18 +3992,21 @@ async fn agent_auth_oauth_start(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: submit a pasted OAuth code to an in-flight login.
 #[tauri::command]
 async fn agent_auth_oauth_code(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     code: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/code", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -849,18 +4014,96 @@ async fn agent_auth_oauth_code(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: answer an MCP server's mid-tool-call request for user input.
+///
+/// `action` is `accept` | `decline` | `cancel`; `content` carries the filled
+/// form and is only meaningful for `accept`.
+#[tauri::command]
+async fn agent_mcp_elicit(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+    action: String,
+    content: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!(
+            "{}/mcp/elicit/{}",
+            sidecar_base(port),
+            urlencoding(&id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "action": action, "content": content }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn parse_ask_user_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    let value = parse_sidecar_json_response(status, body)?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
+        || value.get("error").is_some()
+    {
+        return Err("The question answer was not acknowledged.".to_string());
+    }
+    Ok(value)
+}
+
+async fn ask_user_response(res: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_ask_user_response(status, &body)
+}
+
+/// Proxy: answer an `ask_user` question band.
+///
+/// `action` is `answer` | `cancel`; `answers` maps each question id to the
+/// picked value (or values, for a multi-select). The turn is blocked on this,
+/// so the webview must call it on every dismissal path too.
+#[tauri::command]
+async fn agent_ask_user(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: State<'_, reqwest::Client>,
+    id: String,
+    action: String,
+    answers: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/ask/{}", sidecar_base(port), urlencoding(&id)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "action": action, "answers": answers }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ask_user_response(res).await
 }
 
 /// Proxy: disconnect a provider (clear its stored credentials).
 #[tauri::command]
 async fn agent_auth_logout(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     provider: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/logout", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -868,18 +4111,46 @@ async fn agent_auth_logout(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: cancel one pending queued message by id. Returns
+/// `{ cancelled, queued }`. `cancelled: false` means it already drained into
+/// the run between render and click, which is a normal race, not an error.
+#[tauri::command]
+async fn agent_cancel_queued(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/queued/cancel", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: stop a background task by id. Returns `{ message }`.
 #[tauri::command]
 async fn agent_kill_task(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     id: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/kill", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -887,26 +4158,54 @@ async fn agent_kill_task(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// Proxy: radio state for THIS window's sidecar — `{ stations, current }`.
-/// Playback lives in the per-window sidecar process, so each window's radio is
-/// independent (opening more windows never duplicates audio).
+/// Proxy: import a Claude Code / Codex / Cursor transcript into a resumable
+/// GG Coder session. Returns the importer's typed result (`{ ok, ... }`),
+/// including the failure case, so the webview can show the reason verbatim.
 #[tauri::command]
-async fn agent_radio_state(
+async fn agent_import_transcript(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    path: String,
+    cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/import-transcript", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path, "cwd": cwd }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: app-wide radio state — `{ stations, current, volume }`.
+/// All windows share the daemon's single player, preventing duplicate audio.
+#[tauri::command]
+async fn agent_radio_state(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/radio", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: play a station by id, or stop with `station = "off"`. Returns
@@ -914,11 +4213,12 @@ async fn agent_radio_state(
 #[tauri::command]
 async fn agent_radio_set(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     station: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/radio", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -942,21 +4242,56 @@ async fn agent_radio_set(
     Ok(body)
 }
 
+/// Proxy: set app-wide radio volume from 0 to 100.
+#[tauri::command]
+async fn agent_radio_volume(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    volume: f64,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/radio/volume", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "volume": volume }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("radio volume request failed")
+            .to_string());
+    }
+    Ok(body)
+}
+
 /// Proxy: list this project's task list (the ~/.gg-tasks store for its cwd).
 #[tauri::command]
 async fn agent_tasks(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
         .get(format!("{}/tasks", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: run one task (`id`) or run-all (`all = true`, starting from the next
@@ -965,77 +4300,176 @@ async fn agent_tasks(
 #[tauri::command]
 async fn agent_run_tasks(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     id: Option<String>,
     all: bool,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
         .post(format!("{}/tasks/run", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id, "all": all }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: delete a task by id. Returns the remaining `{ tasks }`.
 #[tauri::command]
 async fn agent_delete_task(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     id: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
         .post(format!("{}/tasks/delete", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
-/// Proxy: accept the pending plan — bakes its `## Steps` into the system prompt
-/// so the agent emits `[DONE:n]` progress markers while implementing. Call
-/// before sending the "implement it now" prompt.
+/// Proxy: accept the exact server-issued persisted plan checkpoint.
 #[tauri::command]
 async fn agent_accept_plan(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-    plan_path: Option<String>,
-) -> Result<(), String> {
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    daemon: tauri::State<'_, Daemon>,
+    checkpoint_id: String,
+    generation: u64,
+) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let auth_token = daemon
+        .auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("agent daemon authentication is not ready")?;
+    let response = client
         .post(format!("{}/plan/accept", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "planPath": plan_path }))
+        .header("x-gg-daemon-token", auth_token)
+        .json(&serde_json::json!({
+            "checkpointId": checkpoint_id,
+            "generation": generation,
+        }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_plan_mutation_response(status, &body)
 }
 
-/// Proxy: cancel the in-flight run.
+/// Proxy: request revision of the exact persisted plan generation.
+#[tauri::command]
+async fn agent_revise_plan(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    daemon: tauri::State<'_, Daemon>,
+    checkpoint_id: String,
+    generation: u64,
+    feedback: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let auth_token = daemon
+        .auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("agent daemon authentication is not ready")?;
+    let response = client
+        .post(format!("{}/plan/revise", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .header("x-gg-daemon-token", auth_token)
+        .json(&serde_json::json!({
+            "checkpointId": checkpoint_id,
+            "generation": generation,
+            "feedback": feedback,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_plan_mutation_response(status, &body)
+}
+
+fn parse_cancel_response(
+    status: reqwest::StatusCode,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if status.is_success() {
+        return Ok(body);
+    }
+    // Preserve the typed sidecar payload (cancel_failed, reason, runState) so
+    // the webview can recover honestly instead of seeing only an HTTP code.
+    Err(body.to_string())
+}
+
+/// Proxy: cancel the in-flight run and reject non-2xx acknowledgements.
 #[tauri::command]
 async fn agent_cancel(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-) -> Result<(), String> {
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
         .post(format!("{}/cancel", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_cancel_response(status, body)
+}
+
+/// Proxy: retry only the Project Notes write for an already acknowledged cancellation.
+#[tauri::command]
+async fn agent_cancel_roadmap_status_retry(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}/cancel/roadmap-status/retry",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_cancel_response(status, body)
 }
 
 /// Proxy: ask Ken Kai (the read-only mentor agent). Reply streams back via the
@@ -1043,36 +4477,65 @@ async fn agent_cancel(
 #[tauri::command]
 async fn agent_ken_prompt(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     text: String,
+    target: serde_json::Value,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
-        .post(format!("{}/ken/prompt", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "text": text }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/prompt",
+        &serde_json::json!({ "text": text, "target": target }),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Proxy: cancel Ken's in-flight run (leaves GG Coder's run untouched).
 #[tauri::command]
 async fn agent_ken_cancel(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    ken: serde_json::Value,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
-        .post(format!("{}/ken/cancel", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/cancel",
+        &serde_json::json!({ "ken": ken }),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn post_autopilot(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let response = post_session_json(
+        client,
+        base_url,
+        session_id,
+        "/autopilot",
+        &serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    if response.get("autopilot").and_then(|value| value.as_bool()).is_none()
+        || response.get("error").is_some()
+    {
+        return Err("Invalid Autopilot response".to_string());
+    }
+    Ok(response)
 }
 
 /// Proxy: toggle autopilot (auto-review) for THIS window's project. Persisted
@@ -1080,64 +4543,65 @@ async fn agent_ken_cancel(
 #[tauri::command]
 async fn agent_autopilot_set(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     enabled: bool,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/autopilot", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "enabled": enabled }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_autopilot(&client, &sidecar_base(port), &gg_sid, enabled).await
 }
 
 /// Proxy: list workflow (prompt-template) slash commands.
 #[tauri::command]
 async fn agent_commands(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/commands", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list models available to the logged-in providers.
 #[tauri::command]
 async fn agent_models(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/models", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: switch the active model. Returns the new provider/model + thinking state.
 #[tauri::command]
 async fn agent_switch_model(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     model: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/model", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1145,7 +4609,49 @@ async fn agent_switch_model(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: select GPT-6 Astra's OpenAI Codex context profile.
+#[tauri::command]
+async fn agent_set_context_profile(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    profile: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/context-profile",
+        &serde_json::json!({ "profile": profile }),
+    )
+    .await
+}
+
+/// Proxy: opt into GPT-6 Astra's priority service tier.
+#[tauri::command]
+async fn agent_set_openai_codex_fast(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/openai-codex-fast",
+        &serde_json::json!({ "enabled": enabled }),
+    )
+    .await
 }
 
 /// Proxy: pin Ken (mentor + autopilot) to a model, or clear the pin so he
@@ -1154,19 +4660,20 @@ async fn agent_switch_model(
 #[tauri::command]
 async fn agent_switch_ken_model(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     model: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/ken/model", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "model": model }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        "/ken/model",
+        &serde_json::json!({ "model": model }),
+    )
+    .await
 }
 
 /// Proxy: rewrite a draft prompt into a tighter, terminology-correct version
@@ -1174,11 +4681,12 @@ async fn agent_switch_ken_model(
 #[tauri::command]
 async fn agent_enhance_prompt(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     text: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/enhance", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1186,7 +4694,19 @@ async fn agent_enhance_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Couldn't enhance the prompt. Your original draft has been kept.")
+            .to_owned());
+    }
+    Ok(body)
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.
@@ -1194,45 +4714,52 @@ async fn agent_enhance_prompt(
 #[tauri::command]
 async fn agent_cycle_thinking(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/thinking", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: read gg-app settings (e.g. the projects root folder).
 #[tauri::command]
 async fn agent_settings(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/settings", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: save gg-app settings.
 #[tauri::command]
 async fn agent_save_settings(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     projects_root: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/settings", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1240,7 +4767,78 @@ async fn agent_save_settings(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_plugins(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/plugins", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_install_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    bundle_path: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/plugins/install", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "bundlePath": bundle_path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_remove_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    plugin_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let mut endpoint = reqwest::Url::parse(&format!("{}/plugins/", sidecar_base(port)))
+        .map_err(|e| e.to_string())?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| "invalid sidecar URL".to_string())?
+        .push(&plugin_id);
+    let res = client
+        .delete(endpoint)
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Native app settings (~/.gg/gg-app.json) ───────────────────────────────
@@ -1251,9 +4849,9 @@ async fn agent_save_settings(
 // up-to-date builds. (The sidecar keeps its own /settings endpoint for its
 // internal use; this is the authoritative path for the webview.)
 
-/// Absolute path to ~/.gg/gg-app.json.
-fn app_settings_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app.json")
+/// Absolute path to this product identity's gg-app.json.
+fn app_settings_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join("gg-app.json")
 }
 
 /// Default projects root: ~/gg-projects.
@@ -1288,13 +4886,8 @@ fn is_valid_project_name(name: &str) -> bool {
     true
 }
 
-/// Native: read gg-app settings directly from ~/.gg/gg-app.json. `configured`
-/// is true only when the file exists with a non-empty projectsRoot (so the home
-/// screen's "Your Projects" gate matches the sidecar's semantics). Never needs
-/// the sidecar.
-#[tauri::command]
-fn app_settings_get() -> serde_json::Value {
-    let raw = std::fs::read_to_string(app_settings_path()).ok();
+fn read_app_settings(identifier: &str) -> serde_json::Value {
+    let raw = std::fs::read_to_string(app_settings_path(identifier)).ok();
     let parsed = raw
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
@@ -1314,21 +4907,59 @@ fn app_settings_get() -> serde_json::Value {
     serde_json::json!({ "projectsRoot": projects_root, "configured": configured })
 }
 
-/// Native: write gg-app settings directly to ~/.gg/gg-app.json. Creates the
-/// ~/.gg directory if needed. Never needs the sidecar.
+/// Native: read gg-app settings directly from this app identity's data root.
 #[tauri::command]
-fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String> {
+fn app_settings_get(app: tauri::AppHandle) -> serde_json::Value {
+    read_app_settings(&app.config().identifier)
+}
+
+/// Update only the user-facing projects root while preserving sidecar-owned
+/// preferences in the same file (models, hidden projects, extra roots, and
+/// forward-compatible fields).
+fn write_projects_root(path: &Path, projects_root: &str) -> Result<serde_json::Value, String> {
+    let mut settings = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| format!("app settings must be a JSON object: {}", path.display()))?;
+    object.insert(
+        "projectsRoot".to_string(),
+        serde_json::Value::String(projects_root.to_string()),
+    );
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("app settings path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid app settings filename: {}", path.display()))?;
+    let dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| format!("failed to open {}: {error}", parent.display()))?;
+    let mut bytes = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    atomic_write_identity_file(&dir, parent, filename, &bytes)?;
+    Ok(settings)
+}
+
+/// Native: update gg-app settings directly in this app identity's data root.
+/// The read-modify-write is atomic and never needs the sidecar.
+#[tauri::command]
+fn app_settings_save(
+    app: tauri::AppHandle,
+    projects_root: String,
+) -> Result<serde_json::Value, String> {
     let trimmed = projects_root.trim();
     if trimmed.is_empty() {
         return Err("projectsRoot is required".to_string());
     }
-    let path = app_settings_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let body = serde_json::json!({ "projectsRoot": trimmed });
-    let pretty = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
-    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    write_projects_root(&app_settings_path(&app.config().identifier), trimmed)?;
     Ok(serde_json::json!({ "projectsRoot": trimmed }))
 }
 
@@ -1336,7 +4967,7 @@ fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String>
 /// Returns `{ path }` on success, an error message on invalid name / conflict.
 /// Never needs the sidecar.
 #[tauri::command]
-fn app_create_project(name: String) -> Result<serde_json::Value, String> {
+fn app_create_project(app: tauri::AppHandle, name: String) -> Result<serde_json::Value, String> {
     let name = name.trim();
     if !is_valid_project_name(name) {
         return Err(
@@ -1345,7 +4976,7 @@ fn app_create_project(name: String) -> Result<serde_json::Value, String> {
         );
     }
     // Resolve the projects root the same way app_settings_get does.
-    let settings = app_settings_get();
+    let settings = read_app_settings(&app.config().identifier);
     let root = settings
         .get("projectsRoot")
         .and_then(|v| v.as_str())
@@ -1366,12 +4997,20 @@ fn app_create_project(name: String) -> Result<serde_json::Value, String> {
 // (same pattern as gg-app.json), written on project-select / window-close /
 // app-exit, replayed in `setup`.
 
-/// One saved window: the project cwd, an optional session file to resume, and
+/// One saved window: its mode, cwd, an optional session file to resume, and
 /// optional last-known geometry (physical pixels).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct WorkspaceEntry {
+    #[serde(default)]
+    mode: WorkspaceMode,
+    #[serde(rename = "chatAgent", default)]
+    chat_agent: ChatAgent,
     cwd: String,
-    #[serde(rename = "sessionPath", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "sessionPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     session_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     x: Option<i32>,
@@ -1391,21 +5030,21 @@ struct Workspace {
 }
 
 /// Absolute path to ~/.gg/gg-app-workspace.json.
-fn app_workspace_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-workspace.json")
+fn app_workspace_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join("gg-app-workspace.json")
 }
 
 /// Read the workspace snapshot; missing/invalid file → an empty workspace.
-fn read_workspace() -> Workspace {
-    std::fs::read_to_string(app_workspace_path())
+fn read_workspace(identifier: &str) -> Workspace {
+    std::fs::read_to_string(app_workspace_path(identifier))
         .ok()
         .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
         .unwrap_or_default()
 }
 
 /// Write the workspace snapshot (creating ~/.gg if needed). Best-effort.
-fn write_workspace(ws: &Workspace) {
-    let path = app_workspace_path();
+fn write_workspace(identifier: &str, ws: &Workspace) {
+    let path = app_workspace_path(identifier);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -1414,14 +5053,11 @@ fn write_workspace(ws: &Workspace) {
     }
 }
 
-/// Pure: is this window worth snapshotting? A window still sitting on the picker
-/// has no project chosen (its cwd is None or equals the default boot cwd) and
-/// must be excluded so it doesn't restore as an empty home window.
-fn keep_for_snapshot(cwd: Option<&Path>, default_cwd: &Path) -> bool {
-    match cwd {
-        Some(c) => c != default_cwd,
-        None => false,
-    }
+/// Pure: picker-only windows have a daemon session at the default boot cwd but
+/// no active workspace target. A selected project remains snapshot-worthy even
+/// when its path happens to equal that default cwd.
+fn keep_for_snapshot(workspace_selected: bool, cwd: Option<&Path>) -> bool {
+    workspace_selected && cwd.is_some()
 }
 
 /// Pure: drop restore entries that can't be opened (empty cwd, or a cwd that no
@@ -1437,11 +5073,18 @@ fn filter_restorable<F: Fn(&str) -> bool>(
 }
 
 /// Walk every live window + its `Windows` session entry and write a fresh
-/// snapshot. Picker-only windows (still at the default boot cwd) are excluded.
+/// snapshot. Picker-only windows (without an active target) are excluded.
 /// Geometry is captured from each window's current outer position + inner size.
 fn snapshot_workspace(app: &tauri::AppHandle) {
-    let default = default_cwd();
     let windows = app.webview_windows();
+    let selected_labels: HashSet<String> = app
+        .state::<RestoreTargets>()
+        .map
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
     let state: State<Windows> = app.state();
     let map = state.map.lock().unwrap();
 
@@ -1452,9 +5095,11 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
 
     let mut entries: Vec<WorkspaceEntry> = Vec::new();
     for label in &labels {
-        let Some(inst) = map.get(label) else { continue };
+        let Some(inst) = map.get(label).and_then(|panes| panes.get(PRIMARY_PANE_ID)) else {
+            continue;
+        };
         let cwd = inst.cwd.as_deref();
-        if !keep_for_snapshot(cwd, &default) {
+        if !keep_for_snapshot(selected_labels.contains(label), cwd) {
             continue;
         }
         let cwd = cwd.unwrap().to_string_lossy().to_string();
@@ -1470,6 +5115,8 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
             }
         }
         entries.push(WorkspaceEntry {
+            mode: inst.mode,
+            chat_agent: inst.chat_agent,
             cwd,
             session_path: inst.session_path.clone(),
             x,
@@ -1479,37 +5126,47 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
         });
     }
     drop(map);
-    write_workspace(&Workspace { windows: entries });
+    write_workspace(&app.config().identifier, &Workspace { windows: entries });
 }
 
 /// Remove one window's entry from the snapshot (deliberate user close). Keyed by
-/// the window's recorded cwd, since the snapshot has no labels.
+/// the window's recorded mode + cwd, since the snapshot has no labels.
 fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
-    let cwd = {
+    let target = {
         let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.get(label)
-            .and_then(|i| i.cwd.as_ref())
-            .map(|c| c.to_string_lossy().to_string())
+            .and_then(|panes| panes.get(PRIMARY_PANE_ID))
+            .and_then(|i| {
+                i.cwd
+                    .as_ref()
+                    .map(|cwd| (i.mode, i.chat_agent, cwd.to_string_lossy().to_string()))
+            })
     };
-    let Some(cwd) = cwd else { return };
-    let mut ws = read_workspace();
-    // Remove a SINGLE matching entry (not retain-by-cwd): two windows can have
-    // the same project open, and closing one must not prune the other's restore.
-    if let Some(idx) = ws.windows.iter().position(|w| w.cwd == cwd) {
+    let Some((mode, chat_agent, cwd)) = target else {
+        return;
+    };
+    let identifier = &app.config().identifier;
+    let mut ws = read_workspace(identifier);
+    // Remove a SINGLE matching entry: duplicate windows must restore independently.
+    if let Some(idx) = ws
+        .windows
+        .iter()
+        .position(|w| w.mode == mode && w.chat_agent == chat_agent && w.cwd == cwd)
+    {
         ws.windows.remove(idx);
-        write_workspace(&ws);
+        write_workspace(identifier, &ws);
     }
 }
 
-/// Consume-once: hand the calling window its restore target (cwd + session) so
-/// the webview skips the picker on boot. Returns null for a normal (non-restored)
-/// window. The entry is removed after the first read.
+/// Hand the calling webview its active workspace target so it can skip Home and
+/// hydrate the existing daemon session. Unlike the old consume-once target, this
+/// remains available across React remounts and WebKit content-process reloads.
 #[tauri::command]
 fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEntry> {
     let state: State<RestoreTargets> = webview.state();
-    let mut map = state.map.lock().unwrap();
-    map.remove(webview.label())
+    let map = state.map.lock().unwrap();
+    restore_target(&map, webview.label())
 }
 
 // ── Native provider auth status (~/.gg/auth.json) ─────────────────────────
@@ -1524,8 +5181,24 @@ fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEntry> {
 // Keep the two in sync when adding a provider.
 
 /// Absolute path to ~/.gg/auth.json.
-fn auth_file_path() -> PathBuf {
-    home_dir().join(".gg").join("auth.json")
+fn native_auth_file_override(default: PathBuf, debug: bool, requested: Option<PathBuf>) -> Result<PathBuf, String> {
+    if debug {
+        if let Some(file) = requested {
+            if !file.is_absolute() || !file.is_file() {
+                return Err("GG_APP_DEV_AUTH_FILE must name an existing absolute file".into());
+            }
+            return Ok(file);
+        }
+    }
+    Ok(default)
+}
+
+fn auth_file_path(identifier: &str) -> PathBuf {
+    native_auth_file_override(
+        agent_data_root(identifier).join("auth.json"),
+        cfg!(debug_assertions),
+        std::env::var_os("GG_APP_DEV_AUTH_FILE").map(PathBuf::from),
+    ).expect("Invalid development-only credential store override")
 }
 
 /// One API-key option for a provider that splits auth across multiple
@@ -1542,6 +5215,22 @@ struct ApiKeyVariant {
     base_url: Option<&'static str>,
 }
 
+/// Guidance for one auth method — what it bills against and when to pick it.
+/// Only providers offering a real choice (the dual-auth ones) carry these.
+/// Mirrors `AuthMethodMeta` in packages/ggcoder/src/core/auth-providers.ts.
+struct MethodDetail {
+    /// "oauth" or "apikey".
+    method: &'static str,
+    /// Button/row label, e.g. "Sign in with Grok".
+    label: &'static str,
+    /// What the user spends on this method.
+    billing: &'static str,
+    /// When to choose it.
+    when: &'static str,
+    /// Prerequisite the user must already have, if any.
+    requires: Option<&'static str>,
+}
+
 /// Static metadata for one AI provider in the login hub. Mirrors
 /// packages/ggcoder/src/core/auth-providers.ts (AUTH_PROVIDERS) — keep in sync.
 struct ProviderMeta {
@@ -1551,6 +5240,16 @@ struct ProviderMeta {
     description: &'static str,
     /// Supported auth methods, e.g. `["oauth"]`, `["apikey"]`, or both.
     methods: &'static [&'static str],
+    /// Distinct auth.json key holding subscription OAuth credentials, for the
+    /// providers that can hold OAuth *and* an API key at once. Mirrors gg-core's
+    /// DUAL_AUTH_PROVIDERS — OAuth-only providers store under `value` itself and
+    /// leave this `None`.
+    oauth_key: Option<&'static str>,
+    /// Display name of the OAuth credential ("Grok OAuth"), for the
+    /// priority note. Only meaningful alongside `oauth_key`.
+    oauth_label: Option<&'static str>,
+    /// Per-method guidance; empty when the provider offers no choice.
+    method_details: &'static [MethodDetail],
     api_key_label: Option<&'static str>,
     /// Custom API base URL stored alongside an API-key credential. Used as the
     /// default when `api_key_variants` is empty.
@@ -1567,8 +5266,11 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "anthropic",
         label: "Anthropic",
-        description: "Claude Opus 4.8, Fable 5, Sonnet 4.6, Haiku 4.5",
+        description: "Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1576,8 +5278,11 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "openai",
         label: "OpenAI",
-        description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex",
+        description: "GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1585,17 +5290,65 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "gemini",
         label: "Gemini",
-        description: "Gemini 3.1 Flash Lite Preview",
+        description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
+        api_key_base_url: None,
+        api_key_variants: &[],
+    },
+    ProviderMeta {
+        value: "xai",
+        label: "xAI (Grok)",
+        description: "Grok 4.6, Grok 4.5 · OAuth or API key",
+        methods: &["oauth", "apikey"],
+        oauth_key: Some("xai-oauth"),
+        oauth_label: Some("Grok OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Grok",
+                billing: "Included with SuperGrok or X Premium.",
+                when: "",
+                requires: None,
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "xAI API key",
+                billing: "Pay-per-token on console.x.ai credits.",
+                when: "",
+                requires: None,
+            },
+        ],
+        api_key_label: Some("xAI"),
         api_key_base_url: None,
         api_key_variants: &[],
     },
     ProviderMeta {
         value: "moonshot",
         label: "Moonshot",
-        description: "Kimi K2.7 · OAuth or API key",
+        description: "Kimi K3, K2.7 Code · OAuth or API key",
         methods: &["oauth", "apikey"],
+        oauth_key: Some("moonshot-oauth"),
+        oauth_label: Some("Kimi OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Kimi",
+                billing: "Included with a Kimi For Coding plan.",
+                when: "",
+                requires: None,
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "Moonshot API key",
+                billing: "Pay-per-token on Moonshot credits.",
+                when: "",
+                requires: None,
+            },
+        ],
         api_key_label: Some("Moonshot"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1603,8 +5356,11 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "glm",
         label: "Z.AI (GLM)",
-        description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+        description: "GLM-5.3, GLM-5.3-Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Z.AI"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1614,6 +5370,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "MiniMax",
         description: "MiniMax M3",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("MiniMax"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1621,8 +5380,12 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xiaomi",
         label: "Xiaomi (MiMo)",
-        description: "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
+        description:
+            "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Xiaomi MiMo"),
         api_key_base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
         api_key_variants: &[
@@ -1643,16 +5406,10 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "DeepSeek",
         description: "DeepSeek V4 Pro, V4 Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("DeepSeek"),
-        api_key_base_url: None,
-        api_key_variants: &[],
-    },
-    ProviderMeta {
-        value: "openrouter",
-        label: "OpenRouter",
-        description: "Qwen3.6-Plus, multi-provider gateway",
-        methods: &["apikey"],
-        api_key_label: Some("OpenRouter"),
         api_key_base_url: None,
         api_key_variants: &[],
     },
@@ -1661,7 +5418,22 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Sakana (Fugu)",
         description: "Fugu, Fugu Ultra",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Sakana"),
+        api_key_base_url: None,
+        api_key_variants: &[],
+    },
+    ProviderMeta {
+        value: "openrouter",
+        label: "OpenRouter",
+        description: "Qwen3.6-Plus · multi-provider gateway",
+        methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
+        api_key_label: Some("OpenRouter"),
         api_key_base_url: None,
         api_key_variants: &[],
     },
@@ -1692,14 +5464,21 @@ fn resolve_apikey_target(
 
 /// Native: provider list + live connection status, read directly from
 /// ~/.gg/auth.json. `connected` is true when a credential key is present
-/// (moonshot is satisfied by either its OAuth key `moonshot-oauth` or the
-/// `moonshot` API key; a multi-variant provider like Xiaomi is satisfied by
-/// ANY of its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs
-/// the sidecar.
+/// (a dual-auth provider like Moonshot/xAI is satisfied by either its OAuth key
+/// or its API key; a multi-variant provider like Xiaomi is satisfied by ANY of
+/// its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs the
+/// sidecar.
+///
+/// Also reports WHICH methods are connected and which one a request would
+/// actually use, mirroring AuthStorage's resolution order: subscription OAuth
+/// wins, and the API key only takes over while OAuth's usage window is
+/// exhausted. A single `connected` bit cannot express "signed in with OAuth,
+/// key on file as backup", and the UI needs that to explain itself and to offer
+/// a per-method disconnect.
 #[tauri::command]
-fn app_auth_status() -> serde_json::Value {
+fn app_auth_status(app: tauri::AppHandle) -> serde_json::Value {
     // Parse the auth file into a JSON object; missing/invalid → empty (no creds).
-    let creds = std::fs::read_to_string(auth_file_path())
+    let creds = std::fs::read_to_string(auth_file_path(&app.config().identifier))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
     let has_key = |key: &str| -> bool {
@@ -1709,26 +5488,115 @@ fn app_auth_status() -> serde_json::Value {
             .map(|v| !v.is_null())
             .unwrap_or(false)
     };
-    let connected = |p: &ProviderMeta| -> bool {
-        if p.value == "moonshot" {
-            return has_key("moonshot-oauth") || has_key("moonshot");
-        }
-        if !p.api_key_variants.is_empty() {
-            return has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key));
-        }
-        has_key(p.value)
+    // `usageExhaustedUntil` on an OAuth credential: set by the agent loop when the
+    // subscription endpoint reported its plan usage was spent (0 when absent).
+    let exhausted_until = |key: &str| -> i64 {
+        creds
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.get("usageExhaustedUntil"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
     };
+    // API-key credential present under any of the provider's key(s).
+    let has_api_key = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"apikey") {
+            return false;
+        }
+        has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key))
+    };
+    // OAuth credential present. Dual-auth providers keep it under a distinct key;
+    // OAuth-only providers store it under the provider id itself.
+    let has_oauth = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"oauth") {
+            return false;
+        }
+        match p.oauth_key {
+            Some(key) => has_key(key),
+            None => has_key(p.value),
+        }
+    };
+    let connected = |p: &ProviderMeta| -> bool { has_oauth(p) || has_api_key(p) };
 
+    let now_ms = current_unix_millis();
     let list: Vec<serde_json::Value> = AUTH_PROVIDERS
         .iter()
         .map(|p| {
+            let oauth = has_oauth(p);
+            let api_key = has_api_key(p);
+            let mut connected_methods: Vec<&str> = Vec::new();
+            if oauth {
+                connected_methods.push("oauth");
+            }
+            if api_key {
+                connected_methods.push("apikey");
+            }
+            // OAuth is sidelined only while its usage window is spent AND a key
+            // exists to cover it — with no key, OAuth stays active so the real
+            // usage-limit error surfaces instead of a silent billing switch.
+            let sidelined_until = match p.oauth_key {
+                Some(key) if oauth && api_key => {
+                    let until = exhausted_until(key);
+                    if until > now_ms {
+                        Some(until)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let active_method = if oauth {
+                if sidelined_until.is_some() {
+                    Some("apikey")
+                } else {
+                    Some("oauth")
+                }
+            } else if api_key {
+                Some("apikey")
+            } else {
+                None
+            };
+
             let mut obj = serde_json::json!({
                 "value": p.value,
                 "label": p.label,
                 "description": p.description,
                 "methods": p.methods,
                 "connected": connected(p),
+                "connectedMethods": connected_methods,
             });
+            if let Some(m) = active_method {
+                obj["activeMethod"] = serde_json::json!(m);
+            }
+            if let Some(until) = sidelined_until {
+                obj["oauthExhaustedUntil"] = serde_json::json!(until);
+            }
+            if !p.method_details.is_empty() {
+                let guidance: Vec<serde_json::Value> = p
+                    .method_details
+                    .iter()
+                    .map(|d| {
+                        let mut g = serde_json::json!({
+                            "method": d.method,
+                            "label": d.label,
+                            "billing": d.billing,
+                            "when": d.when,
+                        });
+                        if let Some(r) = d.requires {
+                            g["requires"] = serde_json::json!(r);
+                        }
+                        g
+                    })
+                    .collect();
+                obj["methodGuidance"] = serde_json::json!(guidance);
+            }
+            // Only a provider with two methods has a priority to explain. Keep the
+            // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order.
+            if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
+                obj["priorityNote"] = serde_json::json!(format!(
+                    "Uses {oauth_label} first; the {key_label} API key takes over when it runs out, then switches back."
+                ));
+            }
             if let Some(l) = p.api_key_label {
                 obj["apiKeyLabel"] = serde_json::json!(l);
             }
@@ -1804,20 +5672,44 @@ fn apply_apikey(
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
-/// Pure: remove a provider's credential from the existing auth.json text.
-/// Moonshot also drops its distinct OAuth key (`moonshot-oauth`) so a single
-/// "disconnect" fully removes Kimi OAuth + the Moonshot API key. Returns the new
-/// pretty-printed JSON (an empty object `{}` when nothing remains / no file).
-fn apply_logout(existing: Option<&str>, provider: &str) -> Result<String, String> {
+/// Pure: remove a provider's credential(s) from the existing auth.json text.
+///
+/// `method` scopes the removal for dual-auth providers (Moonshot, xAI), which
+/// hold two independent credentials: `Some("oauth")` drops only the subscription
+/// login, `Some("apikey")` drops only the key(s), and `None` disconnects the
+/// provider entirely. Dropping a spent API key must not sign the user out of
+/// their subscription, and vice versa.
+///
+/// Returns the new pretty-printed JSON (an empty object `{}` when nothing
+/// remains / no file).
+fn apply_logout(
+    existing: Option<&str>,
+    provider: &str,
+    method: Option<&str>,
+) -> Result<String, String> {
     let mut root = parse_auth_object(existing)?;
+    let meta = AUTH_PROVIDERS.iter().find(|p| p.value == provider);
     if let Some(map) = root.as_object_mut() {
-        map.remove(provider);
-        if provider == "moonshot" {
-            map.remove("moonshot-oauth");
+        if method != Some("apikey") {
+            // A dual-auth provider's OAuth credential lives under its own key;
+            // every other provider's lives under the provider id.
+            match meta.and_then(|m| m.oauth_key) {
+                Some(key) => {
+                    map.remove(key);
+                }
+                None => {
+                    map.remove(provider);
+                }
+            }
         }
-        if let Some(meta) = AUTH_PROVIDERS.iter().find(|p| p.value == provider) {
-            for v in meta.api_key_variants {
-                map.remove(v.key);
+        if method != Some("oauth") {
+            // Covers single-credential providers and a dual provider's API key,
+            // plus every extra variant key (currently only Xiaomi's).
+            map.remove(provider);
+            if let Some(meta) = meta {
+                for v in meta.api_key_variants {
+                    map.remove(v.key);
+                }
             }
         }
     }
@@ -1844,8 +5736,12 @@ fn parse_auth_object(existing: Option<&str>) -> Result<serde_json::Value, String
 
 /// Atomically write auth.json (temp file + rename), creating ~/.gg if needed.
 /// On unix the file is mode 0600 (credentials). Mirrors gg-core's atomicWriteFile.
-fn write_auth_file(contents: &str) -> Result<(), String> {
-    let path = auth_file_path();
+fn write_auth_file(identifier: &str, contents: &str) -> Result<(), String> {
+    // Shared smoke credentials may only rotate through the daemon's locked AuthStorage.
+    if cfg!(debug_assertions) && std::env::var_os("GG_APP_DEV_AUTH_FILE").is_some() {
+        return Err("Native credential edits are disabled while development credentials are shared".into());
+    }
+    let path = auth_file_path(identifier);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -1871,6 +5767,7 @@ fn write_auth_file(contents: &str) -> Result<(), String> {
 /// unknown defaults to the first/primary variant. Returns `{ ok: true }`.
 #[tauri::command]
 fn app_auth_apikey(
+    app: tauri::AppHandle,
     provider: String,
     key: String,
     variant: Option<String>,
@@ -1881,28 +5778,62 @@ fn app_auth_apikey(
     }
     let (storage_key, base_url) = resolve_apikey_target(&provider, variant.as_deref())
         .ok_or_else(|| "provider does not support API key auth".to_string())?;
-    let existing = std::fs::read_to_string(auth_file_path()).ok();
+    let identifier = &app.config().identifier;
+    let existing = std::fs::read_to_string(auth_file_path(identifier)).ok();
     let now_ms = current_unix_millis();
     let next = apply_apikey(existing.as_deref(), &storage_key, base_url, now_ms, key)?;
-    write_auth_file(&next)?;
+    write_auth_file(identifier, &next)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
 /// Native: disconnect a provider (remove its credential from ~/.gg/auth.json).
-/// Moonshot also clears its OAuth key; any provider with multiple
-/// `api_key_variants` (currently only Xiaomi) clears every variant key, so a
-/// single "disconnect" fully removes all of a provider's credentials. Never
-/// touches the sidecar. Returns `{ ok: true }`.
+/// `method` ("oauth" | "apikey") disconnects just one of a dual-auth provider's
+/// two credentials; omitted, it removes all of them — including the OAuth key
+/// and every API-key variant (currently only Xiaomi's). Never touches the
+/// sidecar. Returns `{ ok: true }`.
 #[tauri::command]
-fn app_auth_logout(provider: String) -> Result<serde_json::Value, String> {
-    let existing = std::fs::read_to_string(auth_file_path()).ok();
+fn app_auth_logout(
+    app: tauri::AppHandle,
+    provider: String,
+    method: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if let Some(m) = method.as_deref() {
+        if m != "oauth" && m != "apikey" {
+            return Err(format!("unknown auth method: {m}"));
+        }
+    }
+    let identifier = &app.config().identifier;
+    let existing = std::fs::read_to_string(auth_file_path(identifier)).ok();
     // Nothing to remove and no file → succeed silently (idempotent).
     if existing.is_none() {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    let next = apply_logout(existing.as_deref(), &provider)?;
-    write_auth_file(&next)?;
+    let next = apply_logout(existing.as_deref(), &provider, method.as_deref())?;
+    write_auth_file(identifier, &next)?;
+    // Disconnecting removes that provider's models from `/models` and clears
+    // its connection dot. Logout is deliberately native (it must work even with
+    // no daemon), so the sidecar never learns about it — tell every window
+    // directly, or their pickers keep offering models the user can no longer
+    // authenticate against and the login screen still shows them connected.
+    broadcast_agent_event(&app, "models_change", serde_json::json!({}));
+    broadcast_agent_event(
+        &app,
+        "auth_change",
+        serde_json::json!({ "provider": provider }),
+    );
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Emit one `agent-event` frame to EVERY window, matching the shape the SSE
+/// bridge produces. For global state changed natively, outside any session.
+fn broadcast_agent_event(app: &tauri::AppHandle, event_type: &str, data: serde_json::Value) {
+    for label in app.webview_windows().keys() {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.clone()),
+            "agent-event",
+            serde_json::json!({ "type": event_type, "data": data }),
+        );
+    }
 }
 
 /// Current unix time in milliseconds (wall clock; fine for an expiry stamp).
@@ -1917,17 +5848,205 @@ fn current_unix_millis() -> i64 {
 #[tauri::command]
 async fn agent_telegram_get(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/telegram", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: local model endpoints + their last-scan status (no probing).
+#[tauri::command]
+async fn agent_local(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/local", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: re-probe every local endpoint (the "Scan" button). Slower than
+/// `agent_local` — it actually talks to each server.
+#[tauri::command]
+async fn agent_local_scan(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/local/scan", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: add a custom local endpoint (URL + optional API key).
+#[tauri::command]
+async fn agent_local_endpoint_add(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    base_url: String,
+    label: Option<String>,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/local/endpoints", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "baseUrl": base_url, "label": label, "apiKey": api_key }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: remove a custom local endpoint (and its stored credential).
+#[tauri::command]
+async fn agent_local_endpoint_remove(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .delete(format!(
+            "{}/local/endpoints/{}",
+            sidecar_base(port),
+            urlencoding(&id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: search Hugging Face for GGUF repos (the "Add from Hugging Face" modal).
+#[tauri::command]
+async fn agent_hf_search(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/search", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("Hugging Face search failed")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: start an `ollama pull` of a Hugging Face repo (progress arrives as
+/// `hf_pull` sidecar events). Returns the pull state immediately.
+#[tauri::command]
+async fn agent_hf_pull(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    repo: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/pull", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("Could not start the download")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: current Hugging Face pull state (null when none ever started).
+#[tauri::command]
+async fn agent_hf_pull_status(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/hf/pull", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: cancel the running Hugging Face pull (if any).
+#[tauri::command]
+async fn agent_hf_pull_cancel(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/pull/cancel", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: save Telegram config (bot token + user id). Verifies the token via
@@ -1935,12 +6054,13 @@ async fn agent_telegram_get(
 #[tauri::command]
 async fn agent_telegram_save(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     bot_token: String,
     user_id: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/telegram", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1967,27 +6087,31 @@ async fn agent_telegram_save(
 #[tauri::command]
 async fn agent_serve_status(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/serve", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: start the Telegram serve loop. Returns `{ running }` or an error.
 #[tauri::command]
 async fn agent_serve_start(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/start", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2013,17 +6137,69 @@ async fn agent_serve_start(
 #[tauri::command]
 async fn agent_serve_stop(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/stop", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: Agent Steroids status (`{ installed, connected, version?, repos?, … }`).
+#[tauri::command]
+async fn agent_steroids_status(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/steroids", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: download + verify + install the `steroids` binary. Returns the
+/// post-install status or the sidecar's error text.
+#[tauri::command]
+async fn agent_steroids_install(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/steroids/install", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to install Steroids");
+        return Err(msg.to_string());
+    }
+    Ok(body)
 }
 
 /// Proxy: list MCP servers with live connection status (`{ servers: […] }`).
@@ -2031,11 +6207,12 @@ async fn agent_serve_stop(
 #[tauri::command]
 async fn agent_mcp_list(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let mut req = client
         .get(format!("{}/mcp", sidecar_base(port)))
         .header("x-gg-session", &gg_sid);
@@ -2043,7 +6220,9 @@ async fn agent_mcp_list(
         req = req.query(&[("cwd", c)]);
     }
     let res = req.send().await.map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: add an MCP server from a pasted `claude mcp add …` line. Returns
@@ -2053,13 +6232,14 @@ async fn agent_mcp_list(
 #[tauri::command]
 async fn agent_mcp_add(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     line: String,
     scope: String,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/add", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2087,13 +6267,14 @@ async fn agent_mcp_add(
 #[tauri::command]
 async fn agent_mcp_remove(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     name: String,
     scope: String,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/remove", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2101,7 +6282,9 @@ async fn agent_mcp_remove(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.
@@ -2112,13 +6295,14 @@ async fn agent_mcp_remove(
 #[tauri::command]
 async fn agent_mcp_login(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     name: String,
     scope: String,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/login", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2146,11 +6330,12 @@ async fn agent_mcp_login(
 #[tauri::command]
 async fn agent_create_project(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/create-project", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2173,40 +6358,84 @@ async fn agent_create_project(
     Ok(body)
 }
 
+/// Proxy: hide (or with `hidden: false`, restore) a project in the picker.
+#[tauri::command]
+async fn agent_set_project_hidden(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+    hidden: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/projects/hidden", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path, "hidden": hidden }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to update hidden projects");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
 /// Proxy: discover known projects across ggcoder/Claude Code/Codex stores.
 #[tauri::command]
 async fn agent_projects(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/projects", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list recent sessions for a project cwd.
 #[tauri::command]
 async fn agent_sessions(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     cwd: String,
+    chat_agent: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let encoded = urlencoding(&cwd);
+    let mut url = format!("{}/sessions?cwd={}", sidecar_base(port), encoded);
+    if let Some(agent) = chat_agent {
+        url.push_str("&chatAgent=");
+        url.push_str(&urlencoding(&agent));
+    }
     let res = client
-        .get(format!("{}/sessions?cwd={}", sidecar_base(port), encoded))
+        .get(url)
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: search project files for the chat input's `@` picker. Empty `query`
@@ -2214,11 +6443,12 @@ async fn agent_sessions(
 #[tauri::command]
 async fn agent_files(
     webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
     query: String,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let encoded = urlencoding(&query);
     let res = client
         .get(format!("{}/files?q={}", sidecar_base(port), encoded))
@@ -2226,7 +6456,9 @@ async fn agent_files(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Minimal percent-encoding for a filesystem path in a query string.
@@ -2241,6 +6473,503 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
+
+#[tauri::command]
+async fn app_verified_decisions(
+    repo_root: String,
+) -> Result<Vec<decisions::DecisionRecord>, String> {
+    let repo = resolve_local_update_repo_root(repo_root)?;
+    tauri::async_runtime::spawn_blocking(move || decisions::load_verified_decisions(&repo))
+        .await
+        .map_err(|error| format!("Decisions worker failed: {error}"))
+}
+
+/// Check local source state without blocking Tauri's async command runtime. The
+/// protected update workflow remains the sole owner of merges and builds.
+#[tauri::command]
+async fn app_local_patched_update_status(
+    update_state: State<'_, LocalPatchedUpdate>,
+    repo_root: String,
+    built_git_sha: String,
+) -> Result<local_patched_update::LocalPatchedUpdateStatus, String> {
+    if built_git_sha.trim().is_empty() {
+        return Err("The Local Fork build SHA is missing.".to_string());
+    }
+
+    if let Some(status) = update_state.begin_status_check() {
+        return Ok(status);
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let repo = resolve_local_update_repo_root(repo_root)?;
+        local_patched_update::check_local_patched_update(
+            &local_patched_update::BoundedGitRunner::default(),
+            &repo,
+            &built_git_sha,
+        )
+    })
+    .await
+    .map_err(|error| format!("Local Fork status worker failed: {error}"))
+    .and_then(|result| result);
+
+    update_state.finish_status_check(&result);
+    result
+}
+
+#[tauri::command]
+fn app_local_patched_update_start(
+    app: tauri::AppHandle,
+    webview: WebviewWindow,
+    update_state: State<'_, LocalPatchedUpdate>,
+    repo_root: String,
+    summarize_decisions: bool,
+) -> Result<serde_json::Value, String> {
+    let repo = resolve_local_update_repo_root(repo_root)?;
+    {
+        let mut running = update_state.running.lock().unwrap();
+        if *running {
+            return Err("A local-patched update is already running.".into());
+        }
+        *running = true;
+    }
+    let sidecar = port_for(&webview).zip(pane_session_for(&webview, PRIMARY_PANE_ID));
+    std::thread::spawn(move || run_local_patched_update(app, repo, summarize_decisions, sidecar));
+    Ok(serde_json::json!({ "started": true }))
+}
+
+fn resolve_local_update_repo_root(repo_root: String) -> Result<PathBuf, String> {
+    let raw = if repo_root.trim().is_empty() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    } else {
+        PathBuf::from(repo_root)
+    };
+    let repo = std::fs::canonicalize(&raw).map_err(|e| {
+        format!(
+            "Could not find the local source checkout at {}: {e}",
+            raw.display()
+        )
+    })?;
+    if !repo.join("package.json").is_file()
+        || !repo.join("gg-app/package.json").is_file()
+        || !repo
+            .join("gg-app/scripts/update-with-local-fixes.mjs")
+            .is_file()
+    {
+        return Err(format!(
+            "{} does not look like the local gg-framework checkout.",
+            repo.display()
+        ));
+    }
+    Ok(repo)
+}
+
+fn emit_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    let _ = app.emit(LOCAL_PATCHED_UPDATE_EVENT, payload);
+}
+
+fn run_local_patched_update(
+    app: tauri::AppHandle,
+    repo: PathBuf,
+    summarize_decisions: bool,
+    sidecar: Option<(u16, String)>,
+) {
+    emit_local_patched_update(
+        &app,
+        serde_json::json!({
+            "type": "started",
+            "message": "Starting protected source update: backup, fetch, rebase, restore, check, and build.",
+        }),
+    );
+    let mut command = local_patched_update_command(summarize_decisions);
+    command
+        .current_dir(&repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            finish_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "error",
+                    "message": format!("Failed to start the local source updater: {error}"),
+                }),
+            );
+            return;
+        }
+    };
+    let mut readers: Vec<JoinHandle<()>> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(stream_local_update_output(app.clone(), "stdout", stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(stream_local_update_output(app.clone(), "stderr", stderr));
+    }
+    let status = child.wait();
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    match status {
+        Ok(status) if status.success() => {
+            if summarize_decisions {
+                write_decision_summary(&app, &repo, sidecar);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                match schedule_local_patched_installer_handoff(&repo) {
+                    Ok(disposition) => {
+                        emit_local_patched_update(
+                            &app,
+                            serde_json::json!({
+                                "type": "completed",
+                                "exitCode": status.code().unwrap_or(0),
+                                "disposition": disposition,
+                                "message": completed_local_update_message(disposition),
+                            }),
+                        );
+                        clear_local_patched_update_running(&app);
+                        if disposition == "install-scheduled" {
+                            app.exit(0);
+                        }
+                    }
+                    Err(error) => finish_local_patched_update(
+                        &app,
+                        serde_json::json!({
+                            "type": "error",
+                            "message": format!("Failed to schedule the guarded Local Fork installer: {error}"),
+                        }),
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let installer = newest_rebuilt_installer(&repo);
+                let opened = open_rebuilt_update_result(&app, installer.as_deref(), &repo);
+                emit_local_patched_update(
+                    &app,
+                    serde_json::json!({
+                        "type": "completed",
+                        "exitCode": status.code().unwrap_or(0),
+                        "installerPath": installer.map(|path| path.to_string_lossy().to_string()),
+                        "opened": opened,
+                        "message": completed_local_update_message(opened),
+                    }),
+                );
+                clear_local_patched_update_running(&app);
+            }
+        }
+        Ok(status) => finish_local_patched_update(
+            &app,
+            serde_json::json!({
+                "type": "error",
+                "exitCode": status.code(),
+                "message": format!(
+                    "Local-patched update failed with exit code {}. Review the progress output for recovery instructions.",
+                    status.code().map_or_else(|| "unknown".into(), |code| code.to_string())
+                ),
+            }),
+        ),
+        Err(error) => finish_local_patched_update(
+            &app,
+            serde_json::json!({
+                "type": "error",
+                "message": format!("Local-patched update process failed: {error}"),
+            }),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionSummaryResponse {
+    version: u8,
+    summary: String,
+}
+
+fn write_decision_summary(app: &tauri::AppHandle, repo: &Path, sidecar: Option<(u16, String)>) {
+    let pending = match decisions::load_pending_decision_summary(repo) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return,
+        Err(_) => {
+            eprintln!("Decision summary context was rejected; protected update remains verified.");
+            emit_local_patched_update(
+                app,
+                serde_json::json!({
+                    "type": "line",
+                    "stream": "stdout",
+                    "line": "Summary unavailable; protected update remains verified.",
+                }),
+            );
+            return;
+        }
+    };
+    emit_local_patched_update(
+        app,
+        serde_json::json!({
+            "type": "line",
+            "stream": "stdout",
+            "line": "Writing a short What's New summary…",
+        }),
+    );
+
+    let context_json = pending.context_json.clone();
+    let summary = sidecar.and_then(|(port, session)| {
+        let client = app.state::<reqwest::Client>().inner().clone();
+        tauri::async_runtime::block_on(async move {
+            let response = client
+                .post(format!("{}/decision-summary", sidecar_base(port)))
+                .header("x-gg-session", session)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(context_json)
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let envelope = response.json::<DecisionSummaryResponse>().await.ok()?;
+            (envelope.version == 1).then_some(envelope.summary)
+        })
+    });
+    let available = summary.is_some();
+    if decisions::complete_pending_decision_summary(pending, summary.as_deref()).is_err() {
+        eprintln!("Decision summary could not be stored or cleaned up; protected update remains verified.");
+    }
+    if !available {
+        emit_local_patched_update(
+            app,
+            serde_json::json!({
+                "type": "line",
+                "stream": "stdout",
+                "line": "Summary unavailable; protected update remains verified.",
+            }),
+        );
+    }
+}
+
+fn local_patched_update_command(summarize_decisions: bool) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            "pnpm",
+            "--filter",
+            "gg-app",
+            "update:local-fixes",
+            "--",
+            "--check",
+        ]);
+        if summarize_decisions {
+            command.arg("--decision-summary-context");
+        }
+        command
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = Command::new("pnpm");
+        command.args(["--filter", "gg-app", "update:local-fixes", "--", "--check"]);
+        if summarize_decisions {
+            command.arg("--decision-summary-context");
+        }
+        command
+    }
+}
+
+fn stream_local_update_output<R: Read + Send + 'static>(
+    app: tauri::AppHandle,
+    stream: &'static str,
+    reader: R,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            emit_local_patched_update(
+                &app,
+                serde_json::json!({ "type": "line", "stream": stream, "line": line }),
+            );
+        }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn local_patched_installer_handoff_command(repo: &Path, source_revision: &str) -> Command {
+    let powershell =
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+    let mut command = Command::new(powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(
+        repo.join("gg-app")
+            .join("scripts")
+            .join("launch-local-patched.ps1"),
+    );
+    command.arg("-MetadataPath");
+    command.arg(
+        repo.join(".gg")
+            .join("local-fixes")
+            .join("latest-installer.json"),
+    );
+    command.args([
+        "-ExpectedVersion",
+        env!("CARGO_PKG_VERSION"),
+        "-ExpectedSourceRevision",
+        source_revision,
+    ]);
+    command
+}
+
+#[cfg(target_os = "windows")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPatchedInstallerHandoff {
+    disposition: String,
+    expected_version: String,
+    source_revision: String,
+}
+
+#[cfg(target_os = "windows")]
+fn parse_local_patched_installer_handoff(
+    stdout: &[u8],
+    expected_version: &str,
+    expected_source_revision: &str,
+) -> Result<&'static str, String> {
+    let result: LocalPatchedInstallerHandoff = serde_json::from_slice(stdout)
+        .map_err(|error| format!("launcher returned malformed output: {error}"))?;
+    if result.expected_version != expected_version {
+        return Err("launcher did not confirm the expected version".into());
+    }
+    if result.source_revision != expected_source_revision {
+        return Err("launcher did not echo the expected source revision".into());
+    }
+    match result.disposition.as_str() {
+        "install-scheduled" => Ok("install-scheduled"),
+        "existing-and-verified" => Ok("existing-and-verified"),
+        _ => Err("launcher returned an unexpected disposition".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_local_patched_installer_handoff(repo: &Path) -> Result<&'static str, String> {
+    let source_revision = local_patched_update::full_source_head(
+        &local_patched_update::BoundedGitRunner::default(),
+        repo,
+    )?;
+    let output = hide_console(&mut local_patched_installer_handoff_command(
+        repo,
+        &source_revision,
+    ))
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .map_err(|error| format!("failed to start canonical launcher: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "launcher exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_local_patched_installer_handoff(
+        &output.stdout,
+        env!("CARGO_PKG_VERSION"),
+        &source_revision,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn newest_rebuilt_installer(repo: &Path) -> Option<PathBuf> {
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    let directories = ["nsis", "msi", "dmg", "appimage", "deb", "rpm"];
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for directory in directories.map(|name| bundle.join(name)) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if !["exe", "msi", "dmg", "AppImage", "deb", "rpm"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+                newest = Some((modified, path));
+            }
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_rebuilt_update_result(
+    app: &tauri::AppHandle,
+    installer: Option<&Path>,
+    repo: &Path,
+) -> &'static str {
+    if let Some(installer) = installer {
+        if app
+            .opener()
+            .open_path(installer.to_string_lossy().to_string(), None::<String>)
+            .is_ok()
+        {
+            return "installer";
+        }
+    }
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    if app
+        .opener()
+        .open_path(bundle.to_string_lossy().to_string(), None::<String>)
+        .is_ok()
+    {
+        "folder"
+    } else {
+        "none"
+    }
+}
+
+fn completed_local_update_message(opened: &str) -> &'static str {
+    match opened {
+        "install-scheduled" => {
+            "Verified replacement scheduled. GG Coder will close and restart after installation."
+        }
+        "installer" => "Patched installer built and opened. Finish installation to update the app.",
+        "folder" => "Patched installer built. Opened its containing folder.",
+        _ => "Patched installer built under gg-app/src-tauri/target/release/bundle.",
+    }
+}
+
+fn finish_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    emit_local_patched_update(app, payload);
+    clear_local_patched_update_running(app);
+}
+
+fn clear_local_patched_update_running(app: &tauri::AppHandle) {
+    let state: State<LocalPatchedUpdate> = app.state();
+    *state.running.lock().unwrap() = false;
 }
 
 /// App background (#111317) painted on the native window + webview BEFORE the
@@ -2289,12 +7018,78 @@ fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// shows — the in-app `chat-head-title` is the ONLY title. Building via the
 /// builder (rather than the config + a runtime patch) is the only way to hide
 /// the native title, since there's no runtime `set_hidden_title` setter.
-fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+fn exact_fixture_opt_in(enabled: bool, value: Option<&str>) -> bool {
+    enabled && value == Some("1")
+}
+
+fn phase25_dev_fixture_enabled() -> bool {
+    exact_fixture_opt_in(
+        cfg!(debug_assertions),
+        std::env::var("GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn dev_smoke_window_minimized(enabled: bool, value: Option<&str>) -> Result<bool, String> {
+    if !enabled {
+        return Ok(false);
+    }
+    match value {
+        Some("minimized") => Ok(true),
+        Some("visible") => Ok(false),
+        _ => Err("GG_APP_DEV_SMOKE_WINDOW must be 'minimized' or 'visible'".into()),
+    }
+}
+
+fn phase25_dev_smoke_window_minimized() -> Result<bool, String> {
+    dev_smoke_window_minimized(
+        cfg!(all(debug_assertions, target_os = "windows")) && phase25_dev_fixture_enabled(),
+        std::env::var("GG_APP_DEV_SMOKE_WINDOW").ok().as_deref(),
+    )
+}
+
+fn apply_dev_smoke_window_state(window: &WebviewWindow) -> Result<(), String> {
+    if phase25_dev_smoke_window_minimized()? {
+        window.minimize().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn phase26_macos_smoke_enabled() -> bool {
+    exact_fixture_opt_in(
+        cfg!(all(debug_assertions, target_os = "macos")),
+        std::env::var("GG_PHASE26_MACOS_SMOKE").ok().as_deref(),
+    )
+}
+
+fn build_app_window_with_visibility(
+    app: &tauri::AppHandle,
+    label: &str,
+    visible: bool,
+) -> Result<WebviewWindow, String> {
+    let minimize_on_launch = visible && phase25_dev_smoke_window_minimized()?;
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-        .title("GG Coder")
+        .title("Supah Coder")
         .inner_size(1024.0, 720.0)
         .min_inner_size(480.0, 360.0)
-        .background_color(APP_BG);
+        .background_color(APP_BG)
+        .visible(visible);
+    #[cfg(target_os = "windows")]
+    if cfg!(feature = "native-smoke") || phase25_dev_fixture_enabled() {
+        let port_variable = if cfg!(feature = "native-smoke") {
+            "GG_APP_NATIVE_SMOKE_CDP_PORT"
+        } else {
+            "GG_PHASE25_DEV_FIXTURE_CDP_PORT"
+        };
+        let cdp_port = std::env::var(port_variable)
+            .map_err(|_| format!("{port_variable} is required"))?
+            .parse::<u16>()
+            .map_err(|_| format!("{port_variable} must be a TCP port"))?;
+        let browser_args = format!("--remote-debugging-port={cdp_port}");
+        builder = builder.additional_browser_args(&browser_args);
+    }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
     // macOS keeps Tauri's native handler so folder drops include absolute paths.
     #[cfg(target_os = "windows")]
@@ -2304,7 +7099,15 @@ fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow
     if matches!(window_chrome(), WindowChrome::MacOverlay) {
         builder = apply_mac_overlay(builder);
     }
-    builder.build().map_err(|e| e.to_string())
+    let window = builder.build().map_err(|e| e.to_string())?;
+    if minimize_on_launch {
+        apply_dev_smoke_window_state(&window)?;
+    }
+    Ok(window)
+}
+
+fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    build_app_window_with_visibility(app, label, true)
 }
 
 /// Open enough new project windows to reach `count` total (each with its own
@@ -2329,11 +7132,365 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
         // chrome (Overlay is a no-op / unsupported there) and the webview CSS
         // drops the mac traffic-light insets via the `.platform-*` class.
         let win = build_app_window(&app, &label)?;
-        start_window_session(app.clone(), label, default_cwd(), None);
+        start_window_session(
+            app.clone(),
+            label,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            default_cwd(),
+            None,
+        );
         let _ = win.set_focus();
     }
     arrange_windows(&app, count);
     broadcast_window_order(&app);
+    Ok(())
+}
+
+fn copy_window_label(copy_id: &str) -> String {
+    format!("copy-{copy_id}")
+}
+
+fn clone_pane_session_file(source: &Path, copy_id: &str) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("the pane session is not available to copy".into());
+    }
+    let parent = source
+        .parent()
+        .ok_or("the pane session has no parent directory")?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session");
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jsonl");
+    let destination = parent.join(format!("{stem}-copy-{copy_id}.{extension}"));
+    if destination.exists() {
+        return Ok(destination);
+    }
+
+    // Copy to a sibling temporary file, validate complete JSONL, assign the
+    // duplicate a fresh durable session identity, then publish by atomic rename.
+    // The caller only allows idle panes, so no session writer is active.
+    let temporary = parent.join(format!(".{stem}-copy-{copy_id}.tmp"));
+    std::fs::copy(source, &temporary).map_err(|error| error.to_string())?;
+    let contents = std::fs::read_to_string(&temporary).map_err(|error| error.to_string())?;
+    let parsed = (|| -> Option<String> {
+        if !contents.ends_with('\n') {
+            return None;
+        }
+        let first_newline = contents.find('\n')?;
+        let mut header =
+            serde_json::from_str::<serde_json::Value>(&contents[..first_newline]).ok()?;
+        if header.get("type").and_then(|value| value.as_str()) != Some("session") {
+            return None;
+        }
+        if !contents[first_newline + 1..]
+            .lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+        {
+            return None;
+        }
+        header["id"] = serde_json::Value::String(copy_id.to_string());
+        Some(format!("{}{}", header, &contents[first_newline..]))
+    })();
+    let Some(rewritten) = parsed else {
+        let _ = std::fs::remove_file(&temporary);
+        return Err("the pane session changed while it was being copied".into());
+    };
+    if let Err(error) = std::fs::write(&temporary, rewritten) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        error.to_string()
+    })?;
+    Ok(destination)
+}
+
+/// Prepare an owner-scoped copy. The source pane stays registered and running;
+/// only its durable session file is snapshotted to a new path for the destination.
+#[tauri::command]
+async fn agent_pane_copy(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    client: tauri::State<'_, reqwest::Client>,
+    pane_id: String,
+    copy_id: String,
+) -> Result<PreparedPaneCopy, String> {
+    validate_pane_id(&pane_id)?;
+    validate_pane_id(&copy_id)?;
+    let owner = webview.label().to_string();
+
+    if let Some(existing) = app
+        .state::<PaneCopies>()
+        .map
+        .lock()
+        .unwrap()
+        .operations
+        .get(&(owner.clone(), copy_id.clone()))
+        .cloned()
+    {
+        return Ok(PreparedPaneCopy {
+            copy_id,
+            window_label: existing.target_label,
+            reused_window: true,
+        });
+    }
+
+    let source = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        resolve_owned_pane(&registry, &owner, &pane_id)
+            .cloned()
+            .ok_or_else(|| format!("pane '{pane_id}' does not exist in this window"))?
+    };
+    let session_id = source
+        .session_id
+        .clone()
+        .ok_or("pane session is not ready")?;
+    let state = sidecar_get_json(&webview, &pane_id, &client, "/state").await?;
+    if state.get("running").and_then(|value| value.as_bool()) == Some(true)
+        || state.get("runState").and_then(|value| value.as_str()) != Some("idle")
+    {
+        return Err("wait for the pane to finish before copying it".into());
+    }
+    let live_session_path = state
+        .get("sessionPath")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| source.session_path.as_ref().map(PathBuf::from))
+        .ok_or("pane session has not been persisted yet")?;
+
+    {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        if !pane_identity_is_current(&registry, &owner, &pane_id, source.generation, &session_id) {
+            return Err("pane changed while the copy was being prepared".into());
+        }
+    }
+
+    let cloned_path = clone_pane_session_file(&live_session_path, &copy_id)?;
+    let cwd = source.cwd.ok_or("pane has no project target")?;
+    let restore = RestoreEntry {
+        mode: source.mode,
+        chat_agent: source.chat_agent,
+        cwd: cwd.to_string_lossy().to_string(),
+        session_path: Some(cloned_path.to_string_lossy().to_string()),
+    };
+    let target_label = {
+        let copies: State<PaneCopies> = app.state();
+        let mut registry = copies.map.lock().unwrap();
+        let key = (owner.clone(), copy_id.clone());
+        if let Some(existing) = registry.operations.get(&key) {
+            return Ok(PreparedPaneCopy {
+                copy_id,
+                window_label: existing.target_label.clone(),
+                reused_window: true,
+            });
+        }
+        let label = copy_window_label(&copy_id);
+        if app.get_webview_window(&label).is_some() || registry.target_owners.contains_key(&label) {
+            let _ = std::fs::remove_file(&cloned_path);
+            return Err("copy destination label is already in use".into());
+        }
+        registry.target_owners.insert(label.clone(), key.clone());
+        registry.operations.insert(
+            key,
+            PaneCopyOperation {
+                source_owner: owner,
+                target_label: label.clone(),
+                restore,
+                cloned_session_path: Some(cloned_path),
+                started: false,
+            },
+        );
+        label
+    };
+    Ok(PreparedPaneCopy {
+        copy_id,
+        window_label: target_label,
+        reused_window: false,
+    })
+}
+
+async fn rollback_pane_copy(app: &tauri::AppHandle, operation: PaneCopyOperation) {
+    remove_restore_target(
+        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+        &operation.target_label,
+    );
+    let panes = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        take_window_panes(&mut registry, &operation.target_label)
+    };
+    let daemon_port = *app.state::<Daemon>().port.lock().unwrap();
+    if let Some(port) = daemon_port {
+        for pane in panes {
+            if let Some(session_id) = pane.session_id {
+                let _ = daemon_delete_session(app, port, &session_id).await;
+            }
+        }
+    }
+    if let Some(path) = operation.cloned_session_path {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(window) = app.get_webview_window(&operation.target_label) {
+        app.state::<PaneCopies>()
+            .map
+            .lock()
+            .unwrap()
+            .rolling_back
+            .insert(operation.target_label.clone());
+        let _ = window.close();
+    }
+}
+
+/// Build/start the reserved destination. Retries with the same copy id focus the
+/// already-started window instead of creating another one.
+#[tauri::command]
+async fn agent_pane_copy_startup(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    copy_id: String,
+) -> Result<PaneCopyResult, String> {
+    validate_pane_id(&copy_id)?;
+    let owner = webview.label().to_string();
+    let operation = app
+        .state::<PaneCopies>()
+        .map
+        .lock()
+        .unwrap()
+        .operations
+        .get(&(owner.clone(), copy_id.clone()))
+        .cloned()
+        .ok_or("pane copy reservation does not exist")?;
+    if operation.source_owner != owner {
+        return Err("pane copy reservation belongs to another window".into());
+    }
+    if operation.started {
+        if let Some(window) = app.get_webview_window(&operation.target_label) {
+            let _ = window.set_focus();
+            return Ok(PaneCopyResult {
+                window_label: operation.target_label,
+                reused_window: true,
+            });
+        }
+        return Err("the copied window closed before startup completed".into());
+    }
+
+    register_restore_target(
+        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+        operation.target_label.clone(),
+        operation.restore.clone(),
+    );
+    let window = match build_app_window_with_visibility(&app, &operation.target_label, false) {
+        Ok(window) => window,
+        Err(error) => {
+            let removed = remove_copy_operation(
+                &mut app.state::<PaneCopies>().map.lock().unwrap(),
+                &owner,
+                &copy_id,
+            );
+            if let Some(removed) = removed {
+                rollback_pane_copy(&app, removed).await;
+            }
+            return Err(error);
+        }
+    };
+    start_window_session(
+        app.clone(),
+        operation.target_label.clone(),
+        operation.restore.mode,
+        operation.restore.chat_agent,
+        PathBuf::from(&operation.restore.cwd),
+        operation.restore.session_path.clone(),
+    );
+
+    let mut startup_error = None;
+    for _ in 0..600 {
+        if app.get_webview_window(&operation.target_label).is_none() {
+            startup_error = Some("copied window closed during startup".into());
+            break;
+        }
+        let status = {
+            let windows: State<Windows> = app.state();
+            let registry = windows.map.lock().unwrap();
+            pane_startup_status(&registry, &operation.target_label, PRIMARY_PANE_ID).ok()
+        };
+        if let Some(status) = status {
+            if let Some(error) = status.error {
+                startup_error = Some(error);
+                break;
+            }
+            if status.ready && port_for(&webview).is_some() {
+                let marked_started = app
+                    .state::<PaneCopies>()
+                    .map
+                    .lock()
+                    .unwrap()
+                    .operations
+                    .get_mut(&(owner.clone(), copy_id.clone()))
+                    .map(|operation| operation.started = true)
+                    .is_some();
+                if !marked_started {
+                    startup_error = Some("copy was closed during startup".into());
+                    break;
+                }
+                let _ = window.show();
+                let _ = window.set_focus();
+                snapshot_workspace(&app);
+                broadcast_window_order(&app);
+                return Ok(PaneCopyResult {
+                    window_label: operation.target_label,
+                    reused_window: false,
+                });
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let removed = remove_copy_operation(
+        &mut app.state::<PaneCopies>().map.lock().unwrap(),
+        &owner,
+        &copy_id,
+    );
+    if let Some(removed) = removed {
+        rollback_pane_copy(&app, removed).await;
+    }
+    Err(startup_error.unwrap_or_else(|| "copied pane did not start in time".into()))
+}
+
+/// Consume-once destination hydration. A source or unrelated window cannot read
+/// the target because ownership is looked up from the calling webview label.
+#[tauri::command]
+fn agent_pane_copy_restore(webview: WebviewWindow) -> Option<RestoreEntry> {
+    let copies: State<PaneCopies> = webview.state();
+    let targets: State<RestoreTargets> = webview.state();
+    let copies = copies.map.lock().unwrap();
+    let mut targets = targets.map.lock().unwrap();
+    consume_copy_restore_target(&copies, &mut targets, webview.label())
+}
+
+#[tauri::command]
+async fn agent_pane_copy_rollback(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    copy_id: String,
+) -> Result<(), String> {
+    validate_pane_id(&copy_id)?;
+    let operation = remove_copy_operation(
+        &mut app.state::<PaneCopies>().map.lock().unwrap(),
+        webview.label(),
+        &copy_id,
+    );
+    if let Some(operation) = operation {
+        rollback_pane_copy(&app, operation).await;
+    }
     Ok(())
 }
 
@@ -2347,7 +7504,14 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
 async fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     let label = next_window_label(&app);
     let win = build_app_window(&app, &label)?;
-    start_window_session(app.clone(), label, default_cwd(), None);
+    start_window_session(
+        app.clone(),
+        label,
+        WorkspaceMode::Code,
+        ChatAgent::General,
+        default_cwd(),
+        None,
+    );
     let _ = win.set_focus();
     broadcast_window_order(&app);
     Ok(())
@@ -2456,40 +7620,188 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+async fn settle_pane_selection(
+    pane_id: &str,
+    generation: u64,
+    completion: PaneStartupCompletion,
+) -> Result<u64, String> {
+    completion.await.map_err(|_| {
+        format!("pane '{pane_id}' generation {generation} startup ended without settlement")
+    })??;
+    Ok(generation)
+}
+
 /// Re-point THIS window's agent at a chosen project: dispose its current daemon
-/// session and create a fresh one at `cwd`, optionally resuming the session file
-/// `session_path`. No process is killed — only one session in the shared daemon
-/// is swapped. The webview re-runs its ready flow against the new session.
+/// session and start a fresh one at `cwd`, optionally resuming `session_path`.
+/// Returns only after that exact pane generation is ready; startup failures and
+/// concurrent replacement reject the command.
 #[tauri::command]
-fn select_project(
+async fn select_project(
     webview: WebviewWindow,
     app: tauri::AppHandle,
+    pane_id: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
     cwd: String,
     session_path: Option<String>,
-) -> Result<(), String> {
+    expected_generation: Option<u64>,
+) -> Result<u64, String> {
+    validate_pane_id(&pane_id)?;
     let label = webview.label().to_string();
-    // Take the old session id (and clear it) so the old SSE bridge retires.
-    let old_id = {
+    let old = {
         let windows: State<Windows> = app.state();
-        let mut map = windows.map.lock().unwrap();
-        map.get_mut(&label).and_then(|w| w.session_id.take())
-    };
-    // Dispose the old session on the daemon (best-effort, off-thread).
-    if let Some(id) = old_id {
-        if let Some(port) = port_for(&webview) {
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                daemon_delete_session(&app2, port, &id).await;
-            });
+        let mut registry = windows.map.lock().unwrap();
+        if pane_id != PRIMARY_PANE_ID && expected_generation.is_none() {
+            return Err(format!(
+                "pane '{pane_id}' replacement requires its generation"
+            ));
         }
+        dispose_pane_target(&mut registry, &label, &pane_id, true, expected_generation)?
+    };
+    if let (Some(port), Some(id)) = (port_for(&webview), old.session_id) {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = daemon_delete_session(&app2, port, &id).await;
+        });
     }
-    // Create the new session for this window (records cwd/session_path, awaits
-    // the daemon, starts the bridge, emits sidecar-ready).
-    start_window_session(app.clone(), label, PathBuf::from(cwd), session_path);
-    // The map now reflects this window's new project/session; persist the
-    // workspace so a restart reopens it here.
-    snapshot_workspace(&app);
-    Ok(())
+    let (generation, completion) = start_pane_session(
+        app.clone(),
+        label.clone(),
+        pane_id.clone(),
+        mode,
+        chat_agent,
+        PathBuf::from(&cwd),
+        session_path.clone(),
+    );
+    let registered_primary_target = {
+        let targets: State<RestoreTargets> = app.state();
+        let mut targets = targets.map.lock().unwrap();
+        register_selected_primary_restore_target(
+            &mut targets,
+            &label,
+            &pane_id,
+            mode,
+            chat_agent,
+            &cwd,
+            session_path.as_deref(),
+        )
+    };
+    if registered_primary_target {
+        snapshot_workspace(&app);
+    }
+    settle_pane_selection(&pane_id, generation, completion).await
+}
+
+#[tauri::command]
+fn agent_pane_create(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<u64, String> {
+    let label = webview.label().to_string();
+    let generation = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        create_pane_target(
+            &mut registry,
+            &label,
+            &pane_id,
+            mode,
+            chat_agent,
+            PathBuf::from(&cwd),
+            session_path.clone(),
+        )?
+    };
+    let _ = launch_pane_session(
+        app,
+        label,
+        pane_id,
+        mode,
+        chat_agent,
+        PathBuf::from(cwd),
+        session_path,
+        generation,
+    );
+    Ok(generation)
+}
+
+#[tauri::command]
+fn agent_pane_restore(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<u64, String> {
+    let label = webview.label().to_string();
+    let (generation, created, replaced_session_id) = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        restore_pane_target(
+            &mut registry,
+            &label,
+            &pane_id,
+            mode,
+            chat_agent,
+            PathBuf::from(&cwd),
+            session_path.clone(),
+        )?
+    };
+    if let (Some(port), Some(session_id)) = (port_for(&webview), replaced_session_id) {
+        let app_for_dispose = app.clone();
+        // The replacement generation is already authoritative. Disposal is best-effort so a
+        // stale daemon runtime cannot block launching or hydrating the selected saved session.
+        tauri::async_runtime::spawn(async move {
+            let _ = daemon_delete_session(&app_for_dispose, port, &session_id).await;
+        });
+    }
+    if created {
+        let _ = launch_pane_session(
+            app,
+            label,
+            pane_id,
+            mode,
+            chat_agent,
+            PathBuf::from(cwd),
+            session_path,
+            generation,
+        );
+    }
+    Ok(generation)
+}
+
+#[tauri::command]
+async fn agent_pane_dispose(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+    generation: Option<u64>,
+) -> Result<(), String> {
+    let pane = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        pane_disposal_target(&registry, webview.label(), &pane_id, false, generation)?
+    };
+    let deletion_result = match (port_for(&webview), pane.session_id.as_deref()) {
+        (Some(port), Some(id)) => daemon_delete_session(&app, port, id).await,
+        (None, Some(_)) => Err("agent daemon is unavailable; pane session was not disposed".into()),
+        (_, None) => Ok(()),
+    };
+    let windows: State<Windows> = app.state();
+    let mut registry = windows.map.lock().unwrap();
+    complete_pane_disposal(
+        &mut registry,
+        webview.label(),
+        &pane_id,
+        pane.generation,
+        deletion_result,
+    )
 }
 
 /// Map a normalized gaze point to a window and (optionally) focus it.
@@ -2563,6 +7875,296 @@ fn gaze_focus(
     Ok(target)
 }
 
+// ── System tray (macOS menu bar / Windows notification area) ──────────────
+// One status item giving the app a presence while its windows are hidden behind
+// a fullscreen editor.
+//
+// The icon is platform-split, and the split is NOT cosmetic:
+//   macOS   — a black-on-transparent "G" flagged as a TEMPLATE image, which the
+//             system re-tints for light/dark menu bars. Feeding the rounded app
+//             tile here would render as a solid blob.
+//   Windows — the full-colour app icon. Windows has no template concept, so a
+//             monochrome mark would vanish on either the light or the dark
+//             taskbar; the tile carries its own background and reads on both.
+// (Same split, same reasoning, as openclaw's Tauri tray.)
+//
+// Linux is excluded: it needs libayatana-appindicator and we don't ship Linux
+// (see the release workflow's matrix).
+//
+// The menu has no per-item visibility API in muda, so "Update now" is added and
+// removed by REBUILDING the menu whenever the webview reports a change
+// (`set_update_available` / `set_remote_active`).
+
+/// Tray menu item ids. Kept as one list so the builder and the click handler
+/// can never drift apart.
+#[cfg(any(target_os = "macos", windows))]
+mod tray_id {
+    pub const UPDATE: &str = "tray:update";
+    pub const NEW_CHAT: &str = "tray:new-chat";
+    pub const NEW_CODE: &str = "tray:new-code";
+    pub const REMOTE: &str = "tray:remote";
+    pub const SETTINGS: &str = "tray:settings";
+}
+
+/// Everything the tray menu's labels depend on. Both fields are pushed down by
+/// the webview (Rust owns neither the updater nor the Telegram serve loop), and
+/// any change rebuilds the menu.
+#[derive(Default, Clone, PartialEq, Eq)]
+struct TrayStatus {
+    /// Pending update version, or `None` when up to date. Drives whether the
+    /// "Update now" item exists at all.
+    update_version: Option<String>,
+    /// True while the Telegram serve loop is running. Flips the Remote item
+    /// between "Remote" and "Remote · Turn off".
+    remote_active: bool,
+}
+
+#[derive(Default)]
+struct TrayState(Mutex<TrayStatus>);
+
+/// Tray actions handed to a window that does not exist yet. A freshly built
+/// window's webview isn't listening when the menu is clicked, so the intent is
+/// parked here and the webview claims it on mount via `window_tray_intent`.
+#[derive(Default)]
+struct TrayIntents(Mutex<HashMap<String, String>>);
+
+/// True for the real app windows (`main`, `project-N`) — excludes transient
+/// chrome like the borderless `whatsnew` dialog, which must never be treated as
+/// a place to route a tray action.
+fn is_app_window(label: &str) -> bool {
+    label == "main" || label.starts_with("project-")
+}
+
+/// App-window labels in reading order (left-to-right, top-to-bottom).
+fn app_window_labels(app: &tauri::AppHandle) -> Vec<String> {
+    compute_window_order(app)
+        .into_iter()
+        .filter(|l| is_app_window(l))
+        .collect()
+}
+
+/// The window a tray action should target: the focused app window when there is
+/// one, else the first in reading order. `None` when no app window is open.
+fn tray_target_window(app: &tauri::AppHandle) -> Option<String> {
+    let labels = app_window_labels(app);
+    let focused = app.state::<FocusedWindow>().0.lock().unwrap().clone();
+    focused
+        .filter(|l| labels.iter().any(|x| x == l))
+        .or_else(|| labels.first().cloned())
+}
+
+/// Build the tray menu for a given status. "Update now" is present ONLY while
+/// `update_version` is `Some` — muda has no per-item visibility API, so the menu
+/// is rebuilt instead.
+#[cfg(any(target_os = "macos", windows))]
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    status: &TrayStatus,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let menu = Menu::new(app)?;
+    if let Some(version) = status.update_version.as_deref() {
+        menu.append(&MenuItem::with_id(
+            app,
+            tray_id::UPDATE,
+            format!("Update now \u{2192} v{version}"),
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::NEW_CHAT,
+        "New chat session",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::NEW_CODE,
+        "New code session",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::REMOTE,
+        if status.remote_active {
+            "Remote \u{b7} Turn off"
+        } else {
+            "Remote"
+        },
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::SETTINGS,
+        "Settings",
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(menu)
+}
+
+/// Install the status item. Called once from `setup`.
+#[cfg(any(target_os = "macos", windows))]
+fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::image::Image;
+    use tauri::tray::TrayIconBuilder;
+
+    // Black-on-transparent 72x72 PNG, flagged as a template below so macOS
+    // re-tints it per menu-bar appearance instead of us shipping two assets.
+    #[cfg(target_os = "macos")]
+    let icon = Image::from_bytes(include_bytes!("../icons/tray-mac.png"))?;
+    // Windows: the full-colour app tile. `CreateIcon` uses the bitmap at its
+    // native size, so this is the 32x32 asset (16pt at 200% DPI) rather than the
+    // 72px mac one, which the shell would have to scale down.
+    #[cfg(windows)]
+    let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+
+    TrayIconBuilder::with_id("gg")
+        .icon(icon)
+        // Template tinting is a macOS concept; on Windows it must stay off or the
+        // colour tile would be flattened.
+        .icon_as_template(cfg!(target_os = "macos"))
+        .tooltip("Supah Coder")
+        .menu(&build_tray_menu(app, &TrayStatus::default())?)
+        // The icon has no action other than its menu, so a click that did nothing
+        // would read as broken. Right-click opens it too (tray-icon defaults
+        // `menu_on_right_click` to true and tracks the two independently), so
+        // Windows still gets its expected right-click behaviour.
+        //
+        // Apps that ALSO open a window on left click must set this to `false` on
+        // Windows or the click does two things at once (rustdesk #15215). That
+        // does not apply here precisely because the menu is the only action — so
+        // don't "fix" this by copying their `cfg(windows)` override.
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| {
+            let action = match event.id().as_ref() {
+                tray_id::UPDATE => "update",
+                tray_id::NEW_CHAT => "new-chat",
+                tray_id::NEW_CODE => "new-code",
+                tray_id::REMOTE => "remote",
+                tray_id::SETTINGS => "settings",
+                _ => return,
+            };
+            dispatch_tray_action(app.clone(), action);
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Route a tray action to a window and tell that window's webview what to do.
+///
+/// `new-chat` / `new-code` reuse the single open window when there is exactly
+/// one; with several windows open there is no unambiguous "current" one, so a
+/// NEW window is opened for the session instead of hijacking someone's work.
+/// `remote` / `settings` always act on the existing target window (they're
+/// app-wide, not per-session) and only open a window when none exists.
+fn dispatch_tray_action(app: tauri::AppHandle, action: &'static str) {
+    let labels = app_window_labels(&app);
+    let wants_new_window = match action {
+        "new-chat" | "new-code" => labels.len() != 1,
+        _ => labels.is_empty(),
+    };
+
+    if !wants_new_window {
+        let Some(label) = tray_target_window(&app) else {
+            return;
+        };
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        let _ = app.emit_to(EventTarget::webview_window(&label), "tray-intent", action);
+        return;
+    }
+
+    // Window building must not run on the caller's thread (see `new_window`).
+    tauri::async_runtime::spawn(async move {
+        let label = next_window_label(&app);
+        // Park the intent BEFORE the webview can mount, so the claim on mount
+        // never races the window build.
+        app.state::<TrayIntents>()
+            .0
+            .lock()
+            .unwrap()
+            .insert(label.clone(), action.to_string());
+        let Ok(win) = build_app_window(&app, &label) else {
+            app.state::<TrayIntents>().0.lock().unwrap().remove(&label);
+            return;
+        };
+        start_window_session(
+            app.clone(),
+            label,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            default_cwd(),
+            None,
+        );
+        let _ = win.set_focus();
+        broadcast_window_order(&app);
+    });
+}
+
+/// Claim (once) the tray action this window was opened for. Returns `None` for
+/// windows the user opened themselves.
+#[tauri::command]
+fn window_tray_intent(webview: WebviewWindow) -> Option<String> {
+    let state: State<TrayIntents> = webview.state();
+    let mut map = state.0.lock().unwrap();
+    map.remove(webview.label())
+}
+
+/// Apply `edit` to the tray status and rebuild the menu IF anything changed.
+/// The no-change guard matters: every window pushes status on a timer, so
+/// without it the menu would be rebuilt constantly (and would collapse while
+/// open).
+fn update_tray_status(app: &tauri::AppHandle, edit: impl FnOnce(&mut TrayStatus)) {
+    let next = {
+        let state: State<TrayState> = app.state();
+        let mut current = state.0.lock().unwrap();
+        let mut next = current.clone();
+        edit(&mut next);
+        if next == *current {
+            return;
+        }
+        *current = next.clone();
+        next
+    };
+    let _ = &next;
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        use tauri::tray::TrayIconId;
+        if let Some(tray) = app.tray_by_id(&TrayIconId::new("gg")) {
+            match build_tray_menu(app, &next) {
+                Ok(menu) => {
+                    let _ = tray.set_menu(Some(menu));
+                }
+                Err(e) => log::warn!("tray menu rebuild failed: {e}"),
+            }
+        }
+    }
+}
+
+/// Report update availability from the webview so the tray can show or hide
+/// "Update now". `version` is `None` when up to date.
+#[tauri::command]
+fn set_update_available(app: tauri::AppHandle, version: Option<String>) {
+    update_tray_status(&app, |s| s.update_version = version);
+}
+
+/// Report whether the Telegram serve loop is running, so the tray's Remote item
+/// reads "Remote" or "Remote · Turn off".
+#[tauri::command]
+fn set_remote_active(app: tauri::AppHandle, active: bool) {
+    update_tray_status(&app, |s| s.remote_active = active);
+}
+
 /// Allocate a unique `project-N` window label.
 fn next_window_label(app: &tauri::AppHandle) -> String {
     let mut n = 1;
@@ -2590,7 +8192,12 @@ fn tile_rects(count: usize, ox: i32, oy: i32, w: i32, h: i32) -> Vec<(i32, i32, 
         .map(|i| {
             let col = i % cols;
             let row = i / cols;
-            (ox + col * cell_w, oy + row * cell_h, cell_w as u32, cell_h as u32)
+            (
+                ox + col * cell_w,
+                oy + row * cell_h,
+                cell_w as u32,
+                cell_h as u32,
+            )
         })
         .collect()
 }
@@ -2753,59 +8360,85 @@ fn drain_sse_frames(buf: &mut Vec<u8>) -> Vec<String> {
     frames
 }
 
-/// Connect to a window's sidecar SSE stream and re-emit each frame ONLY to that
-/// window (`emit_to` the window label) as `agent-event`, so windows never see
-/// each other's agent activity. Rust has no mixed-content restriction, so the
-/// webview never touches plain HTTP directly. Reconnects on stream end.
-fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_id: String) {
-    // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
-    // shares the connection pool with the proxy commands.
+/// Connect to exactly one pane identity's SSE stream. The bridge remains valid
+/// only while `(owner label, pane id, generation, session id)` still matches the
+/// registry. Sidecar payload identity is untrusted: frames for any other session
+/// are dropped, and only the expected identity plus `{type, data}` is emitted.
+fn start_event_bridge(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    generation: u64,
+    port: u16,
+    session_id: String,
+) {
     let client = app.state::<reqwest::Client>().inner().clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            // Stop once this window's active session has moved on (project switch
-            // created a new session) or the window is gone — otherwise the old
-            // bridge would reconnect to a stale session forever. Session routing
-            // is by id now (the daemon port is shared across all windows).
-            {
+            let identity_is_current = {
                 let state: State<Windows> = app.state();
-                let map = state.map.lock().unwrap();
-                if map.get(&label).and_then(|w| w.session_id.clone()) != Some(session_id.clone()) {
-                    log::debug!("event bridge for {label} session {session_id} retired");
-                    return;
-                }
+                let registry = state.map.lock().unwrap();
+                pane_identity_is_current(&registry, &label, &pane_id, generation, &session_id)
+            };
+            if !identity_is_current {
+                log::debug!(
+                    "event bridge retired for {label}/{pane_id} generation {generation} session {session_id}"
+                );
+                return;
             }
-            // The daemon adds this response to the target session's SSE clients.
-            let url = format!("{}/events?session={}", sidecar_base(port), urlencoding(&session_id));
+
+            let url = format!(
+                "{}/events?session={}",
+                sidecar_base(port),
+                urlencoding(&session_id)
+            );
             match client.get(&url).send().await {
                 Ok(res) => {
                     let mut stream = res.bytes_stream();
-                    // Raw byte buffer — decode only at frame boundaries so a
-                    // codepoint split across TCP chunks is never corrupted.
                     let mut buf: Vec<u8> = Vec::new();
                     while let Some(chunk) = stream.next().await {
+                        let identity_is_current = {
+                            let state: State<Windows> = app.state();
+                            let registry = state.map.lock().unwrap();
+                            resolve_owned_pane(&registry, &label, &pane_id).is_some_and(|pane| {
+                                pane.generation == generation
+                                    && pane.session_id.as_deref() == Some(&session_id)
+                            })
+                        };
+                        if !identity_is_current {
+                            log::debug!(
+                                "event bridge retired for {label}/{pane_id} generation {generation} session {session_id}"
+                            );
+                            return;
+                        }
                         let Ok(bytes) = chunk else { break };
                         buf.extend_from_slice(&bytes);
                         for frame in drain_sse_frames(&mut buf) {
                             for line in frame.lines() {
-                                if let Some(payload) = line.strip_prefix("data: ") {
-                                    if let Ok(value) =
-                                        serde_json::from_str::<serde_json::Value>(payload)
-                                    {
-                                        let _ = app.emit_to(
-                                            EventTarget::webview_window(label.clone()),
-                                            "agent-event",
-                                            value,
-                                        );
-                                    }
-                                }
+                                let Some(payload) = line.strip_prefix("data: ") else {
+                                    continue;
+                                };
+                                let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
+                                else {
+                                    continue;
+                                };
+                                let Some(trusted) =
+                                    trusted_event_envelope(&pane_id, &session_id, &value)
+                                else {
+                                    continue;
+                                };
+                                let _ = app.emit_to(
+                                    EventTarget::webview_window(label.clone()),
+                                    "agent-event",
+                                    trusted,
+                                );
                             }
                         }
                     }
-                    log::warn!("agent event stream ended, reconnecting");
+                    log::warn!("agent event stream ended for {label}/{pane_id}, reconnecting");
                 }
                 Err(e) => {
-                    log::error!("failed to connect to event stream: {e}");
+                    log::error!("failed to connect to event stream for {label}/{pane_id}: {e}");
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -2865,7 +8498,10 @@ fn pick_node(env_override: Option<String>, is_dev: bool, exe_dir: Option<&Path>)
 fn resolve_sidecar(app: &tauri::AppHandle) -> PathBuf {
     let resource = app
         .path()
-        .resolve("sidecar/app-sidecar.mjs", tauri::path::BaseDirectory::Resource)
+        .resolve(
+            "sidecar/app-sidecar.mjs",
+            tauri::path::BaseDirectory::Resource,
+        )
         .ok();
     pick_sidecar(
         std::env::var("GG_SIDECAR_PATH").ok(),
@@ -2874,9 +8510,16 @@ fn resolve_sidecar(app: &tauri::AppHandle) -> PathBuf {
     )
 }
 
-/// Path to the workspace dev sidecar, relative to this crate.
+/// Path to the workspace dev sidecar, preferring the Local Fork Error Mom wrapper.
 fn workspace_sidecar() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/ggcoder/dist/app-sidecar.js")
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let direct = workspace_root.join("packages/ggcoder/dist/app-sidecar.js");
+    let wrapper = workspace_root.join("gg-app/scripts/error-mom-sidecar.mjs");
+    if wrapper.exists() {
+        strip_extended_prefix(wrapper)
+    } else {
+        direct
+    }
 }
 
 /// Pure sidecar-path decision (testable without an AppHandle).
@@ -2891,7 +8534,7 @@ fn pick_sidecar(env_override: Option<String>, is_dev: bool, resource: Option<&Pa
         return workspace_sidecar();
     }
     match resource {
-        Some(p) => p.to_path_buf(),
+        Some(p) => strip_extended_prefix(p.to_path_buf()),
         None => workspace_sidecar(),
     }
 }
@@ -2907,18 +8550,864 @@ fn default_cwd() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
         home_dir(),
     );
-    std::fs::canonicalize(&raw).unwrap_or(raw)
+    strip_extended_prefix(std::fs::canonicalize(&raw).unwrap_or(raw))
 }
 
-/// The current user's home directory, from HOME (Unix) / USERPROFILE (Windows).
-/// Falls back to "/" only if neither is set (effectively never on a real OS).
+/// Drop Windows' extended-length (`\\?\`) prefix from a canonicalized path.
+///
+/// `std::fs::canonicalize` ALWAYS returns `\\?\C:\…` on Windows. That string is
+/// not interchangeable with the plain `C:\…` form everyone else produces:
+/// project paths from discovery, the workspace snapshot, and the picker's
+/// selected-project comparison all use the plain form, so the prefixed value
+/// silently matched nothing and leaked into the UI as `\\?\C:\Users\…`. Shell
+/// APIs (`ShellExecute`, hence the opener) also reject the prefixed form, so
+/// clicking a file path in a tool result did nothing.
+///
+/// UNC canonicalizes to `\\?\UNC\server\share`, which maps back to
+/// `\\server\share`. No-op on other platforms and for unprefixed paths.
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
+/// The current user's home directory.
+///
+/// This must agree with Node's `os.homedir()` because production preserves the
+/// legacy `~/.gg` root and identity roots are derived from that same home.
 fn home_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            if !profile.is_empty() {
+                return PathBuf::from(profile);
+            }
+        }
+        if let (Some(drive), Some(path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+        {
+            if !drive.is_empty() && !path.is_empty() {
+                let mut home = std::ffi::OsString::from(drive);
+                home.push(path);
+                return PathBuf::from(home);
+            }
+        }
+    }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+const PRODUCTION_APP_IDENTIFIER: &str = "com.ggcoder.app";
+const IDENTITY_BOOTSTRAP_MARKER: &str = ".identity-bootstrap-v1";
+const IDENTITY_RANK_BOOTSTRAP_MARKER: &str = ".identity-bootstrap-v2";
+const IDENTITY_SESSION_BOOTSTRAP_MARKER: &str = ".identity-bootstrap-v3";
+const IDENTITY_SESSION_DIRECTORIES: &[&str] = &["sessions", "chat-sessions"];
+const IDENTITY_SESSION_FILES: &[&str] = &["gg-app-workspace.json"];
+const PROGRESS_FILE: &str = "progress.json";
+const PROGRESS_BACKUP_FILE: &str = "progress.backup.json";
+const IDENTITY_RANK_BOOTSTRAP_LOCK: &str = ".identity-bootstrap-v2.lock";
+const PROGRESS_HMAC_KEY: &[u8] = b"gg-coder-progress-v1-9f2c4e7a1b8d3f6c";
+const PROGRESS_LOCK_WAIT: Duration = Duration::from_secs(5);
+const IDENTITY_BOOTSTRAP_FILES: &[&str] = &[
+    "auth.json",
+    "settings.json",
+    "gg-app.json",
+    "mcp.json",
+    "mcp-auth.json",
+];
+
+/// Production remains byte-for-byte compatible with the legacy root. Every
+/// other signed Tauri identity owns a child root under `~/.gg/identities`.
+fn agent_data_root_for_home(home: &Path, identifier: &str) -> PathBuf {
+    let legacy = home.join(".gg");
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        legacy
+    } else {
+        legacy.join("identities").join(identifier)
+    }
+}
+
+fn agent_data_root(identifier: &str) -> PathBuf {
+    agent_data_root_for_home(&home_dir(), identifier)
+}
+
+/// Seed a non-production identity once from production's legacy files.
+/// Sources are read-only; existing identity files are never overwritten.
+fn bootstrap_identity_data(home: &Path, identifier: &str) -> Result<bool, String> {
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        return Ok(false);
+    }
+
+    let target_root = agent_data_root_for_home(home, identifier);
+    let legacy_root = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+    prepare_isolated_identity_root(home, identifier, &target_root, &legacy_root)?;
+    let marker = target_root.join(IDENTITY_BOOTSTRAP_MARKER);
+    if marker.exists() {
+        return Ok(false);
+    }
+    for filename in IDENTITY_BOOTSTRAP_FILES {
+        let source = legacy_root.join(filename);
+        let target = target_root.join(filename);
+        if target.exists() || !source.is_file() {
+            continue;
+        }
+        std::fs::copy(&source, &target).map_err(|error| {
+            format!(
+                "failed to bootstrap {} into identity root: {error}",
+                source.display()
+            )
+        })?;
+    }
+    std::fs::write(&marker, b"v1\n").map_err(|error| {
+        format!(
+            "failed to complete identity bootstrap {}: {error}",
+            marker.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn copy_identity_directory_entries(source: &Path, target: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("failed to create {}: {error}", target.display()))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("failed to read entry in {}: {error}", source.display()))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path)
+            .map_err(|error| format!("failed to inspect {}: {error}", source_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            copy_identity_directory_entries(&source_path, &target_path)?;
+        } else if metadata.is_file() && !target_path.exists() {
+            std::fs::copy(&source_path, &target_path).map_err(|error| {
+                format!(
+                    "failed to bootstrap session file {} into identity root: {error}",
+                    source_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Seed durable session history and the native workspace once for alternate app
+/// identities. Existing identity files always win; session trees merge only
+/// missing transcript files so local work is never overwritten.
+fn bootstrap_identity_sessions(home: &Path, identifier: &str) -> Result<bool, String> {
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        return Ok(false);
+    }
+    let target_root = agent_data_root_for_home(home, identifier);
+    let legacy_root = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+    prepare_isolated_identity_root(home, identifier, &target_root, &legacy_root)?;
+    let marker = target_root.join(IDENTITY_SESSION_BOOTSTRAP_MARKER);
+    if marker.exists() {
+        return Ok(false);
+    }
+
+    for directory in IDENTITY_SESSION_DIRECTORIES {
+        copy_identity_directory_entries(
+            &legacy_root.join(directory),
+            &target_root.join(directory),
+        )?;
+    }
+    for filename in IDENTITY_SESSION_FILES {
+        let source = legacy_root.join(filename);
+        let target = target_root.join(filename);
+        if source.is_file() && !target.exists() {
+            std::fs::copy(&source, &target).map_err(|error| {
+                format!(
+                    "failed to bootstrap {} into identity root: {error}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+    std::fs::write(&marker, b"v3\n").map_err(|error| {
+        format!(
+            "failed to complete identity session bootstrap {}: {error}",
+            marker.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn stable_json(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok("null".to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) => {
+            let value = value
+                .as_f64()
+                .ok_or_else(|| "progress number is outside the JavaScript range".to_string())?;
+            Ok(ryu_js::Buffer::new().format(value).to_string())
+        }
+        serde_json::Value::String(value) => serde_json::to_string(value)
+            .map_err(|error| format!("failed to canonicalize progress string: {error}")),
+        serde_json::Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(stable_json)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", values.join(",")))
+        }
+        serde_json::Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            let entries = keys
+                .into_iter()
+                .map(|key| {
+                    let serialized_key = serde_json::to_string(key)
+                        .map_err(|_| "failed to canonicalize progress key".to_string())?;
+                    let serialized_value = stable_json(&values[key])?;
+                    Ok(format!("{serialized_key}:{serialized_value}"))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{{{}}}", entries.join(",")))
+        }
+    }
+}
+
+fn validate_progress_source(bytes: &[u8]) -> Result<(), String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut progress = serde_json::from_slice::<serde_json::Value>(bytes)
+        .map_err(|_| "production progress is not valid JSON".to_string())?;
+    let object = progress
+        .as_object_mut()
+        .ok_or_else(|| "production progress must be a JSON object".to_string())?;
+    let valid_shape = object.get("v").and_then(serde_json::Value::as_u64) == Some(1)
+        && object.get("xp").is_some_and(serde_json::Value::is_number)
+        && object
+            .get("createdAt")
+            .is_some_and(serde_json::Value::is_string)
+        && object
+            .get("totals")
+            .is_some_and(serde_json::Value::is_object)
+        && object
+            .get("streak")
+            .is_some_and(serde_json::Value::is_object)
+        && object
+            .get("rolling")
+            .is_some_and(serde_json::Value::is_object);
+    if !valid_shape {
+        return Err("production progress has an invalid shape".to_string());
+    }
+    let signature = object
+        .remove("sig")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "production progress is missing its signature".to_string())?;
+    let signature = decode_progress_signature(&signature)?;
+    let canonical = stable_json(&progress)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(PROGRESS_HMAC_KEY)
+        .map_err(|_| "failed to initialize progress signature validation".to_string())?;
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| "production progress signature is invalid".to_string())
+}
+
+fn decode_progress_signature(signature: &str) -> Result<Vec<u8>, String> {
+    if signature.len() != 64 {
+        return Err("production progress signature is invalid".to_string());
+    }
+    (0..signature.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&signature[index..index + 2], 16)
+                .map_err(|_| "production progress signature is invalid".to_string())
+        })
+        .collect()
+}
+
+fn atomic_write_identity_file(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let path = root.join(name);
+    let mut file = cap_tempfile::TempFile::new(dir)
+        .map_err(|error| format!("failed to stage identity file {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("failed to write identity file {}: {error}", path.display()))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| format!("failed to sync identity file {}: {error}", path.display()))?;
+    file.replace(name)
+        .map_err(|error| format!("failed to commit identity file {}: {error}", path.display()))
+}
+
+#[derive(Debug)]
+struct IdentityFileSnapshot {
+    name: &'static str,
+    contents: Option<Vec<u8>>,
+}
+
+fn identity_file_snapshot(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+    name: &'static str,
+) -> Result<IdentityFileSnapshot, String> {
+    let path = root.join(name);
+    let contents = match dir.symlink_metadata(name) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(format!(
+                "identity progress path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(_) => Some(dir.read(name).map_err(|error| {
+            format!(
+                "failed to read identity progress before v2 migration {}: {error}",
+                path.display()
+            )
+        })?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect identity progress before v2 migration {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    Ok(IdentityFileSnapshot { name, contents })
+}
+
+fn preserve_identity_file_once(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+    snapshot: &IdentityFileSnapshot,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let Some(bytes) = snapshot.contents.as_deref() else {
+        return Ok(());
+    };
+    let backup_name = format!("{}.pre-v2", snapshot.name);
+    let backup = root.join(&backup_name);
+    match dir.symlink_metadata(&backup_name) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(format!(
+                "pre-v2 backup path is not a regular file: {}",
+                backup.display()
+            ));
+        }
+        Ok(_) => {
+            let preserved = dir.read(&backup_name).map_err(|error| {
+                format!("failed to read pre-v2 backup {}: {error}", backup.display())
+            })?;
+            if preserved == bytes || bytes == source_bytes {
+                return Ok(());
+            }
+            return Err(format!(
+                "pre-v2 backup does not match current identity state: {}",
+                backup.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect pre-v2 backup {}: {error}",
+                backup.display()
+            ));
+        }
+    }
+    atomic_write_identity_file(dir, root, &backup_name, bytes)
+}
+
+fn restore_identity_file(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+    snapshot: &IdentityFileSnapshot,
+) -> Result<(), String> {
+    match snapshot.contents.as_deref() {
+        Some(contents) => atomic_write_identity_file(dir, root, snapshot.name, contents),
+        None => match dir.remove_file(snapshot.name) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "failed to remove partially seeded identity file {}: {error}",
+                root.join(snapshot.name).display()
+            )),
+        },
+    }
+}
+
+fn rollback_identity_rank_migration(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+    error: String,
+    snapshots: &[&IdentityFileSnapshot],
+    marker_attempted: bool,
+) -> String {
+    let mut failures = Vec::new();
+    if marker_attempted
+        && matches!(dir.read(IDENTITY_RANK_BOOTSTRAP_MARKER), Ok(contents) if contents == b"v2\n")
+    {
+        if let Err(rollback_error) = dir.remove_file(IDENTITY_RANK_BOOTSTRAP_MARKER) {
+            failures.push(format!(
+                "failed to remove partial migration marker {}: {rollback_error}",
+                root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).display()
+            ));
+        }
+    }
+    for snapshot in snapshots.iter().rev() {
+        if let Err(rollback_error) = restore_identity_file(dir, root, snapshot) {
+            failures.push(rollback_error);
+        }
+    }
+    if failures.is_empty() {
+        error
+    } else {
+        format!("{error}; rollback failed: {}", failures.join("; "))
+    }
+}
+
+struct IdentityProgressLock {
+    _file: std::fs::File,
+}
+
+fn identity_progress_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || cfg!(windows) && error.raw_os_error() == Some(33)
+}
+
+fn acquire_identity_progress_lock(
+    dir: &cap_std::fs::Dir,
+    root: &Path,
+) -> Result<IdentityProgressLock, String> {
+    use fs2::FileExt;
+
+    let path = root.join(IDENTITY_RANK_BOOTSTRAP_LOCK);
+    if matches!(dir.symlink_metadata(IDENTITY_RANK_BOOTSTRAP_LOCK), Ok(metadata) if !metadata.file_type().is_file())
+    {
+        return Err(format!(
+            "identity progress lock is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    let file = dir
+        .open_with(IDENTITY_RANK_BOOTSTRAP_LOCK, &options)
+        .map(cap_std::fs::File::into_std)
+        .map_err(|error| {
+            format!(
+                "failed to open identity progress lock {}: {error}",
+                path.display()
+            )
+        })?;
+    let deadline = std::time::Instant::now() + PROGRESS_LOCK_WAIT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(IdentityProgressLock { _file: file }),
+            Err(error) if identity_progress_lock_contended(&error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "timed out waiting for identity progress lock {}",
+                        path.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to acquire identity progress lock {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn prepare_isolated_identity_root(
+    home: &Path,
+    identifier: &str,
+    target_root: &Path,
+    production_root: &Path,
+) -> Result<(), String> {
+    let mut components = Path::new(identifier).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(format!("invalid non-production identity: {identifier}"));
+    }
+
+    let identities_root = home.join(".gg").join("identities");
+    std::fs::create_dir_all(&identities_root).map_err(|error| {
+        format!(
+            "failed to create identities root {}: {error}",
+            identities_root.display()
+        )
+    })?;
+    std::fs::create_dir_all(target_root).map_err(|error| {
+        format!(
+            "failed to create identity data root {}: {error}",
+            target_root.display()
+        )
+    })?;
+    let canonical_identities = std::fs::canonicalize(&identities_root).map_err(|error| {
+        format!(
+            "failed to resolve identities root {}: {error}",
+            identities_root.display()
+        )
+    })?;
+    let canonical_target = std::fs::canonicalize(target_root).map_err(|error| {
+        format!(
+            "failed to resolve identity data root {}: {error}",
+            target_root.display()
+        )
+    })?;
+    let canonical_production = std::fs::canonicalize(production_root).map_err(|error| {
+        format!(
+            "failed to resolve production data root {}: {error}",
+            production_root.display()
+        )
+    })?;
+    let canonical_target_name = canonical_target.file_name();
+    if canonical_identities.parent() != Some(canonical_production.as_path())
+        || canonical_identities.file_name() != Some(std::ffi::OsStr::new("identities"))
+        || canonical_target == canonical_production
+        || canonical_target.parent() != Some(canonical_identities.as_path())
+        || canonical_target_name != Some(std::ffi::OsStr::new(identifier))
+    {
+        return Err(format!(
+            "refusing non-isolated identity data root {}",
+            target_root.display()
+        ));
+    }
+    Ok(())
+}
+
+struct IdentityRankBootstrapDirs {
+    production: cap_std::fs::Dir,
+    _identities: cap_std::fs::Dir,
+    identity: cap_std::fs::Dir,
+}
+
+fn open_identity_rank_bootstrap_dirs(
+    production_root: &Path,
+    identifier: &str,
+) -> Result<IdentityRankBootstrapDirs, String> {
+    let mut components = Path::new(identifier).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(format!("invalid non-production identity: {identifier}"));
+    }
+
+    let production =
+        cap_std::fs::Dir::open_ambient_dir(production_root, cap_std::ambient_authority()).map_err(
+            |error| {
+                format!(
+                    "failed to open production data root {}: {error}",
+                    production_root.display()
+                )
+            },
+        )?;
+    production.create_dir_all("identities").map_err(|error| {
+        format!(
+            "failed to create identities root {}: {error}",
+            production_root.join("identities").display()
+        )
+    })?;
+    let identities_metadata = production.symlink_metadata("identities").map_err(|error| {
+        format!(
+            "failed to inspect identities root {}: {error}",
+            production_root.join("identities").display()
+        )
+    })?;
+    if !identities_metadata.file_type().is_dir() {
+        return Err(format!(
+            "refusing aliased identities root {}",
+            production_root.join("identities").display()
+        ));
+    }
+    let identities = production.open_dir("identities").map_err(|error| {
+        format!(
+            "failed to open identities root {}: {error}",
+            production_root.join("identities").display()
+        )
+    })?;
+
+    match identities.symlink_metadata(identifier) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(format!(
+                "refusing non-isolated identity data root {}",
+                production_root
+                    .join("identities")
+                    .join(identifier)
+                    .display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            identities.create_dir(identifier).map_err(|error| {
+                format!(
+                    "failed to create identity data root {}: {error}",
+                    production_root
+                        .join("identities")
+                        .join(identifier)
+                        .display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect identity data root {}: {error}",
+                production_root
+                    .join("identities")
+                    .join(identifier)
+                    .display()
+            ));
+        }
+    }
+
+    let expected = Path::new(identifier);
+    let resolved = identities.canonicalize(identifier).map_err(|error| {
+        format!(
+            "failed to resolve identity data root {}: {error}",
+            production_root
+                .join("identities")
+                .join(identifier)
+                .display()
+        )
+    })?;
+    if resolved != expected {
+        return Err(format!(
+            "refusing non-isolated identity data root {}",
+            production_root
+                .join("identities")
+                .join(identifier)
+                .display()
+        ));
+    }
+    let identity = identities.open_dir(identifier).map_err(|error| {
+        format!(
+            "failed to open identity data root {}: {error}",
+            production_root
+                .join("identities")
+                .join(identifier)
+                .display()
+        )
+    })?;
+    match identities.canonicalize(identifier) {
+        Ok(resolved) if resolved == expected => {}
+        _ => {
+            return Err(format!(
+                "identity data root changed while opening {}",
+                production_root
+                    .join("identities")
+                    .join(identifier)
+                    .display()
+            ));
+        }
+    }
+
+    Ok(IdentityRankBootstrapDirs {
+        production,
+        _identities: identities,
+        identity,
+    })
+}
+
+fn identity_rank_marker_complete(dir: &cap_std::fs::Dir, root: &Path) -> Result<bool, String> {
+    let marker = root.join(IDENTITY_RANK_BOOTSTRAP_MARKER);
+    let metadata = match dir.symlink_metadata(IDENTITY_RANK_BOOTSTRAP_MARKER) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect identity v2 marker {}: {error}",
+                marker.display()
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "identity v2 marker is not a regular file: {}",
+            marker.display()
+        ));
+    }
+    let contents = dir.read(IDENTITY_RANK_BOOTSTRAP_MARKER).map_err(|error| {
+        format!(
+            "failed to read identity v2 marker {}: {error}",
+            marker.display()
+        )
+    })?;
+    if contents != b"v2\n" {
+        return Err(format!(
+            "identity v2 marker has invalid contents: {}",
+            marker.display()
+        ));
+    }
+    Ok(true)
+}
+
+fn valid_production_progress(
+    production: &cap_std::fs::Dir,
+    production_root: &Path,
+) -> Result<Option<(PathBuf, Vec<u8>)>, String> {
+    let mut failures = Vec::new();
+    for filename in [PROGRESS_FILE, PROGRESS_BACKUP_FILE] {
+        let source = production_root.join(filename);
+        match production.symlink_metadata(filename) {
+            Ok(metadata) if !metadata.file_type().is_file() => failures.push(format!(
+                "{}: source is not a regular file",
+                source.display()
+            )),
+            Ok(_) => match production.read(filename) {
+                Ok(bytes) => match validate_progress_source(&bytes) {
+                    Ok(()) => return Ok(Some((source, bytes))),
+                    Err(error) => failures.push(format!("{}: {error}", source.display())),
+                },
+                Err(error) => failures.push(format!("{}: {error}", source.display())),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{}: {error}", source.display())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(None)
+    } else {
+        Err(format!(
+            "refusing identity v2 migration without valid production progress: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+/// Seed rank progress for a non-production identity exactly once. Production is
+/// read-only; identity-local progress is preserved before both isolated live files
+/// are atomically replaced with the same validated production snapshot.
+fn bootstrap_identity_rank_progress_v2(home: &Path, identifier: &str) -> Result<bool, String> {
+    bootstrap_identity_rank_progress_v2_with_fault(home, identifier, |_| Ok(()))
+}
+
+fn bootstrap_identity_rank_progress_v2_with_fault<F>(
+    home: &Path,
+    identifier: &str,
+    mut fault: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&'static str) -> Result<(), String>,
+{
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        return Ok(false);
+    }
+
+    let target_root = agent_data_root_for_home(home, identifier);
+    let production_root = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+    let dirs = open_identity_rank_bootstrap_dirs(&production_root, identifier)?;
+    if identity_rank_marker_complete(&dirs.identity, &target_root)? {
+        return Ok(false);
+    }
+    let _lock = acquire_identity_progress_lock(&dirs.identity, &target_root)?;
+    if identity_rank_marker_complete(&dirs.identity, &target_root)? {
+        return Ok(false);
+    }
+
+    let Some((source, source_bytes)) =
+        valid_production_progress(&dirs.production, &production_root)?
+    else {
+        return Ok(false);
+    };
+    log::info!(
+        "identity v2 migration source: identity={identifier} source={}",
+        source.display()
+    );
+
+    let target = identity_file_snapshot(&dirs.identity, &target_root, PROGRESS_FILE)?;
+    let target_backup = identity_file_snapshot(&dirs.identity, &target_root, PROGRESS_BACKUP_FILE)?;
+    fault("after-source-validation")?;
+    preserve_identity_file_once(&dirs.identity, &target_root, &target, &source_bytes)?;
+    fault("after-primary-backup")?;
+    preserve_identity_file_once(&dirs.identity, &target_root, &target_backup, &source_bytes)?;
+    fault("after-backups")?;
+
+    let mut touched = Vec::new();
+    touched.push(&target);
+    if let Err(error) =
+        atomic_write_identity_file(&dirs.identity, &target_root, target.name, &source_bytes)
+    {
+        return Err(rollback_identity_rank_migration(
+            &dirs.identity,
+            &target_root,
+            error,
+            &touched,
+            false,
+        ));
+    }
+    if let Err(error) = fault("after-primary-seed") {
+        return Err(rollback_identity_rank_migration(
+            &dirs.identity,
+            &target_root,
+            error,
+            &touched,
+            false,
+        ));
+    }
+
+    touched.push(&target_backup);
+    if let Err(error) = atomic_write_identity_file(
+        &dirs.identity,
+        &target_root,
+        target_backup.name,
+        &source_bytes,
+    ) {
+        return Err(rollback_identity_rank_migration(
+            &dirs.identity,
+            &target_root,
+            error,
+            &touched,
+            false,
+        ));
+    }
+    if let Err(error) = fault("before-marker") {
+        return Err(rollback_identity_rank_migration(
+            &dirs.identity,
+            &target_root,
+            error,
+            &touched,
+            false,
+        ));
+    }
+
+    if let Err(error) = atomic_write_identity_file(
+        &dirs.identity,
+        &target_root,
+        IDENTITY_RANK_BOOTSTRAP_MARKER,
+        b"v2\n",
+    ) {
+        return Err(rollback_identity_rank_migration(
+            &dirs.identity,
+            &target_root,
+            error,
+            &touched,
+            true,
+        ));
+    }
+    Ok(true)
+}
 /// Whether this process can read inside a macOS TCC-protected folder (probed
 /// via the user's Documents directory, present on every account). Full Disk
 /// Access grants blanket read access to all of them at once; a narrower grant
@@ -2977,7 +9466,12 @@ fn open_permissions_settings() -> Result<(), String> {
 ///   `/Users/runner/work/...`) which doesn't exist on the user's machine — the
 ///   sidecar would crash with EACCES trying to use it. Home always exists and
 ///   is writable; the project picker re-points the window immediately anyway.
-fn pick_cwd(env_override: Option<String>, is_dev: bool, dev_root: PathBuf, home: PathBuf) -> PathBuf {
+fn pick_cwd(
+    env_override: Option<String>,
+    is_dev: bool,
+    dev_root: PathBuf,
+    home: PathBuf,
+) -> PathBuf {
     if let Some(p) = env_override {
         return PathBuf::from(p);
     }
@@ -2987,67 +9481,212 @@ fn pick_cwd(env_override: Option<String>, is_dev: bool, dev_root: PathBuf, home:
     home
 }
 
+const DAEMON_STABLE_UPTIME: std::time::Duration = std::time::Duration::from_secs(60);
+const DAEMON_MAX_RESPAWNS: u32 = 5;
+
+fn generate_daemon_auth_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("failed to generate daemon authentication token: {error}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+/// Exponential crash-loop backoff: 1s, 2s, 4s, 8s, 16s, then stop.
+/// A hard retry budget prevents a broken sidecar/signature/configuration from
+/// turning the desktop shell into an unbounded process-spawn and disk-write loop.
+fn daemon_respawn_delay(attempt: u32) -> Option<std::time::Duration> {
+    if attempt == 0 || attempt > DAEMON_MAX_RESPAWNS {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(1 << (attempt - 1)))
+}
+
+fn emit_daemon_error(app: &tauri::AppHandle, message: &str) {
+    for label in app.webview_windows().keys() {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.clone()),
+            "sidecar-error",
+            message,
+        );
+    }
+}
+
 /// Spawn the ONE shared Node daemon. Reads its `GG_APP_LISTENING` handshake to
-/// learn the shared port; on an unexpected exit (its stdout closes while the app
-/// is NOT quitting) it respawns the daemon and re-creates every live window's
-/// session from its stored `{cwd, session_path}` (Step 9 crash recovery).
+/// learn the shared port; on an unexpected exit it reaps the dead child, applies
+/// bounded exponential backoff, and re-creates every live window's session.
+/// Five short-lived respawns exhaust the retry budget; one minute of stable
+/// uptime resets it.
 ///
 /// The daemon is a process-group leader (Unix), so `terminate_child` reaps its
 /// entire descendant tree (every session's MCP stdio children + LSP servers) in
 /// one group-kill — no orphans on quit.
 fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
+    let started_at = std::time::Instant::now();
     let script = resolve_sidecar(&app);
     let node = resolve_node(&app);
-    log::info!("spawning daemon: {} {}", node.display(), script.display());
+    let identifier = app.config().identifier.clone();
+    let identity_arg = sidecar_identity_arg(&identifier);
+    let identity_data_root = agent_data_root(&identifier);
+    let sidecar_log = sidecar_log_filename(&identifier);
+    let auth_token = match generate_daemon_auth_token() {
+        Ok(token) => token,
+        Err(message) => {
+            log::error!("{message}");
+            emit_daemon_error(&app, &message);
+            return;
+        }
+    };
+    let (daemon_instance_id, process_start_token) =
+        match (generate_daemon_auth_token(), generate_daemon_auth_token()) {
+            (Ok(instance_id), Ok(start_token)) => (instance_id, start_token),
+            (Err(message), _) | (_, Err(message)) => {
+                log::error!("{message}");
+                emit_daemon_error(&app, &message);
+                return;
+            }
+        };
+    let predecessor_proof = if is_respawn {
+        app.state::<Daemon>()
+            .predecessor_proof
+            .lock()
+            .unwrap()
+            .clone()
+    } else {
+        None
+    };
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_spawn_requested",
+            &format!(
+                "shell_pid={} respawn={is_respawn} identity={identifier} data_root={} node={} script={}",
+                std::process::id(),
+                identity_data_root.display(),
+                node.display(),
+                script.display()
+            ),
+        )
+    );
 
     let mut cmd = Command::new(node);
+    hide_console(&mut cmd);
     cmd.arg(&script)
+        .arg(&identity_arg)
         // Port 0 → the OS assigns a free port, reported back via the
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
+        .env("GG_APP_AUTH_TOKEN", &auth_token)
+        .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
+        .env("GG_DAEMON_INSTANCE_ID", &daemon_instance_id)
+        .env("GG_PROCESS_START_TOKEN", &process_start_token)
+        .env("GG_APP_SIDECAR_LOG_FILE", &sidecar_log)
+        .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(proof) = predecessor_proof.as_ref() {
+        if let Ok(serialized) = serde_json::to_string(proof) {
+            cmd.env("GG_DAEMON_PREDECESSOR_PROOF", serialized);
+        }
+    }
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        cmd.env_remove("GG_AGENT_DIR");
+    } else {
+        cmd.env("GG_AGENT_DIR", &identity_data_root);
+    }
+    // Release shells never forward inherited development credential routing.
+    cmd.env_remove("GG_APP_DEV_AUTH_FILE");
+    cmd.env_remove("GG_APP_NATIVE_DEBUG_AUTH_ALLOWED");
+    #[cfg(debug_assertions)]
+    if std::env::var_os("GG_APP_DEV_AUTH_FILE").is_some() {
+        cmd.env("GG_APP_DEV_AUTH_FILE", auth_file_path(&identifier));
+        cmd.env("GG_APP_NATIVE_DEBUG_AUTH_ALLOWED", "1");
+    }
+    let secure_azure = azure_connection::secure_config().unwrap_or_else(|_| {
+        log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
+        None
+    });
+    azure_connection::lifecycle::configure_daemon_azure_environment(
+        &mut cmd,
+        secure_azure.as_ref(),
+    );
     #[cfg(unix)]
     cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
-        Ok(c) => {
-            // Record the sidecar PID (== its process-group id on Unix, since it's
-            // a group leader). The startup orphan sweep uses this ledger to
-            // recognise this sidecar's MCP/LSP children by lineage if the app is
-            // later crashed/force-quit — works for ANY MCP server, no name list.
-            record_sidecar_pid(c.id() as i32);
-            c
+        Ok(child) => {
+            // The identity-scoped ledger lets orphan cleanup attribute this
+            // daemon tree without touching another installed GG Coder identity.
+            record_sidecar_pid(&identifier, child.id() as i32);
+            child
         }
         Err(e) => {
-            log::error!("failed to spawn daemon: {e}");
-            // Surface to every open window so they don't hang on waitForReady.
-            for label in app.webview_windows().keys() {
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-error",
-                    format!("failed to spawn daemon: {e}"),
-                );
-            }
+            let message = format!(
+                "{}",
+                lifecycle_message(
+                    "daemon_spawn_failed",
+                    &format!(
+                        "shell_pid={} respawn={is_respawn} error={e}",
+                        std::process::id()
+                    ),
+                )
+            );
+            log::error!("{message}");
+            emit_daemon_error(&app, &message);
             return;
         }
     };
+    let daemon_pid = child.id();
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_start",
+            &format!(
+                "shell_pid={} daemon_pid={daemon_pid} respawn={is_respawn}",
+                std::process::id()
+            ),
+        )
+    );
 
-    if let Some(stdout) = child.stdout.take() {
+    // Publish the child before starting pipe readers. A process can fail before
+    // the reader thread starts; storing first guarantees the crash handler can
+    // still take and reap that exact child instead of leaving a zombie behind.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    {
+        let daemon: State<Daemon> = app.state();
+        *daemon.child.lock().unwrap() = Some(child);
+        *daemon.auth_token.lock().unwrap() = Some(auth_token);
+        *daemon.process_identity.lock().unwrap() = Some(DaemonProcessIdentity {
+            daemon_instance_id,
+            process_id: daemon_pid,
+            process_start_token,
+        });
+    }
+
+    if let Some(stdout) = stdout {
         let app2 = app.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
-                    if let Ok(port) = rest.trim().parse::<u16>() {
-                        log::info!("daemon listening on port {port}");
-                        *app2.state::<Daemon>().port.lock().unwrap() = Some(port);
+                    // Format: `GG_APP_LISTENING <port> <token>`; Rust already owns
+                    // the configured token, while non-Rust spawners consume the second field.
+                    if let Ok(port) = rest.split_whitespace().next().unwrap_or("").parse::<u16>() {
+                        log::info!(
+                            "{}",
+                            lifecycle_message(
+                                "daemon_listening",
+                                &format!(
+                                    "shell_pid={} daemon_pid={daemon_pid} port={port}",
+                                    std::process::id()
+                                ),
+                            )
+                        );
+                        let daemon = app2.state::<Daemon>();
+                        *daemon.port.lock().unwrap() = Some(port);
+                        daemon.generation.fetch_add(1, Ordering::SeqCst);
                         // On a respawn the windows already exist with (now
                         // stale) sessions — re-create them all. On the initial
                         // spawn `restore_or_default_windows` drives creation.
-                        // (We can't infer respawn from prior port state: the
-                        // crash handler resets it to None before respawning so
-                        // proxy commands fail fast while the daemon is down.)
                         if is_respawn {
                             recreate_all_window_sessions(app2.clone());
                         }
@@ -3056,152 +9695,487 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     log::debug!("[daemon] {line}");
                 }
             }
-            // stdout closed → the daemon process exited. If the app isn't
-            // quitting, this is a crash: respawn + rehydrate every window.
-            let exiting = app2.state::<AppExiting>().0.load(Ordering::SeqCst);
-            if !exiting {
-                log::warn!("daemon exited unexpectedly — respawning");
-                {
-                    let daemon: State<Daemon> = app2.state();
-                    *daemon.port.lock().unwrap() = None;
+
+            // stdout closed → the daemon exited (or lost its control pipe). If
+            // the app isn't quitting, remove the stale port and reap/terminate
+            // the exact child before considering a bounded respawn.
+            if app2.state::<AppExiting>().0.load(Ordering::SeqCst) {
+                log::info!(
+                    "{}",
+                    lifecycle_message(
+                        "daemon_control_pipe_closed",
+                        &format!(
+                            "shell_pid={} daemon_pid={daemon_pid} reason=shell_exit",
+                            std::process::id()
+                        ),
+                    )
+                );
+                return;
+            }
+
+            let (attempt, planned) = {
+                let daemon: State<Daemon> = app2.state();
+                let planned = daemon.planned_reload.swap(false, Ordering::SeqCst);
+                let termination_reason = if planned {
+                    "configuration_refresh"
+                } else {
+                    "unexpected_control_pipe_close"
+                };
+                *daemon.port.lock().unwrap() = None;
+                *daemon.auth_token.lock().unwrap() = None;
+                if let Some(mut old_child) = daemon.child.lock().unwrap().take() {
+                    match old_child.try_wait() {
+                        Ok(Some(status)) => {
+                            log::info!(
+                                "{}",
+                                lifecycle_message(
+                                    "daemon_exit",
+                                    &format!(
+                                        "shell_pid={} daemon_pid={daemon_pid} reason={termination_reason} status={status}",
+                                        std::process::id()
+                                    ),
+                                )
+                            );
+                            let _ = old_child.wait();
+                        }
+                        Ok(None) => terminate_child(old_child, termination_reason),
+                        Err(error) => {
+                            log::warn!(
+                                "{}",
+                                lifecycle_message(
+                                    "daemon_status_failed",
+                                    &format!(
+                                        "shell_pid={} daemon_pid={daemon_pid} reason={termination_reason} error={error}",
+                                        std::process::id()
+                                    ),
+                                )
+                            );
+                            terminate_child(old_child, termination_reason);
+                        }
+                    }
                 }
+                if let Some(identity) = daemon.process_identity.lock().unwrap().take() {
+                    if identity.process_id == daemon_pid {
+                        *daemon.predecessor_proof.lock().unwrap() =
+                            Some(DaemonPredecessorProof::from_terminated(identity));
+                    }
+                }
+                let mut attempts = daemon.respawn_attempts.lock().unwrap();
+                if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
+                    *attempts = 0;
+                }
+                *attempts += 1;
+                (*attempts, planned)
+            };
+
+            let Some(delay) = daemon_respawn_delay(attempt) else {
+                let message =
+                    "Agent daemon stopped after repeated crashes. Restart Supah Coder to try again.";
+                log::error!("daemon crash circuit breaker opened after {attempt} crashes");
+                emit_daemon_error(&app2, message);
+                return;
+            };
+
+            if planned {
+                log::info!(
+                    "daemon configuration refresh — respawn {attempt}/{DAEMON_MAX_RESPAWNS} in {}s",
+                    delay.as_secs()
+                );
+            } else {
+                log::warn!(
+                    "daemon exited unexpectedly — respawn {attempt}/{DAEMON_MAX_RESPAWNS} in {}s",
+                    delay.as_secs()
+                );
+            }
+            std::thread::sleep(delay);
+            if !app2.state::<AppExiting>().0.load(Ordering::SeqCst) {
+                clear_runtime_pane_sessions(&app2);
                 spawn_daemon(app2.clone(), true);
             }
         });
     }
 
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = stderr {
         let app3 = app.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 log::error!("[daemon:stderr] {line}");
                 if line.starts_with("GG_APP_FATAL") {
-                    for label in app3.webview_windows().keys() {
-                        let _ = app3.emit_to(
-                            EventTarget::webview_window(label.clone()),
-                            "sidecar-error",
-                            line.clone(),
-                        );
-                    }
+                    emit_daemon_error(&app3, &line);
                 }
             }
         });
     }
-
-    let daemon: State<Daemon> = app.state();
-    *daemon.child.lock().unwrap() = Some(child);
 }
 
-/// POST /session to the daemon for `cwd` (+ optional resume `session_path`);
-/// returns the new session id, or `None` on failure.
+fn parse_daemon_create_session_response(
+    status: reqwest::StatusCode,
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    if !status.is_success() {
+        return Err(value
+            .get("error")
+            .and_then(|error| error.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("agent daemon rejected session with HTTP {status}")));
+    }
+    value
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "agent daemon response did not include a session id".to_string())
+}
+
+async fn send_daemon_create_session_request(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    request.timeout(timeout).send().await.map_err(|error| {
+        if error.is_timeout() {
+            "agent daemon session startup timed out; retry selecting the project".to_string()
+        } else {
+            format!("failed to reach agent daemon: {error}")
+        }
+    })
+}
+
+/// Authenticated POST /session to the daemon for `cwd` (+ optional resume
+/// `session_path`); returns the new session id or the daemon's concrete rejection reason.
 async fn daemon_create_session(
     app: &tauri::AppHandle,
     port: u16,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
     cwd: &Path,
     session_path: Option<&str>,
-) -> Option<String> {
+) -> Result<String, String> {
     let client = app.state::<reqwest::Client>().inner().clone();
+    let auth_token = app
+        .state::<Daemon>()
+        .auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "agent daemon authentication is not ready".to_string())?;
     let body = serde_json::json!({
+        "mode": mode,
+        "chatAgent": chat_agent,
         "cwd": cwd.to_string_lossy(),
         "sessionPath": session_path,
     });
-    let res = client
+    let request = client
         .post(format!("{}/session", sidecar_base(port)))
-        .json(&body)
+        .header("x-gg-daemon-token", auth_token)
+        .json(&body);
+    let response =
+        send_daemon_create_session_request(request, DAEMON_SESSION_STARTUP_TIMEOUT).await?;
+    let status = response.status();
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("agent daemon returned an invalid response: {error}"))?;
+    parse_daemon_create_session_response(status, &value)
+}
+
+/// DELETE /session/:id on the daemon and require an acknowledged success response.
+async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) -> Result<(), String> {
+    let client = app.state::<reqwest::Client>().inner().clone();
+    let response = client
+        .delete(format!(
+            "{}/session/{}",
+            sidecar_base(port),
+            urlencoding(id)
+        ))
+        .timeout(DAEMON_SESSION_DISPOSAL_TIMEOUT)
         .send()
         .await
-        .ok()?;
-    let value = res.json::<serde_json::Value>().await.ok()?;
-    value
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map_err(|error| {
+            if error.is_timeout() {
+                "agent daemon timed out during session disposal; retry closing the pane".to_string()
+            } else {
+                format!("failed to reach agent daemon for session disposal: {error}")
+            }
+        })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    let detail = body.trim();
+    Err(if detail.is_empty() {
+        format!("agent daemon rejected session disposal with HTTP {status}")
+    } else {
+        format!("agent daemon rejected session disposal with HTTP {status}: {detail}")
+    })
 }
 
-/// DELETE /session/:id on the daemon (best-effort, fire-and-forget).
-async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) {
-    let client = app.state::<reqwest::Client>().inner().clone();
-    let _ = client
-        .delete(format!("{}/session/{}", sidecar_base(port), urlencoding(id)))
-        .send()
+fn start_pane_session(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> (u64, PaneStartupCompletion) {
+    let generation = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        record_pane_target(
+            &mut registry,
+            &label,
+            &pane_id,
+            mode,
+            chat_agent,
+            cwd.clone(),
+            session_path.clone(),
+        )
+    };
+    let completion = launch_pane_session(
+        app,
+        label,
+        pane_id,
+        mode,
+        chat_agent,
+        cwd,
+        session_path,
+        generation,
+    );
+    (generation, completion)
+}
+
+async fn orchestrate_pane_session_startup<
+    DaemonFuture,
+    BindSession,
+    RecordError,
+    DeleteSession,
+    DeleteFuture,
+>(
+    pane_id: &str,
+    generation: u64,
+    daemon_session: DaemonFuture,
+    bind_session: BindSession,
+    record_error: RecordError,
+    delete_session: DeleteSession,
+    completion_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+) -> PaneStartupOutcome
+where
+    DaemonFuture: std::future::Future<Output = Result<(u16, String), String>>,
+    BindSession: FnOnce(&str) -> bool,
+    RecordError: FnOnce(&str) -> bool,
+    DeleteSession: FnOnce(u16, String) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = ()>,
+{
+    match daemon_session.await {
+        Ok((port, session_id)) if bind_session(&session_id) => {
+            let _ = completion_tx.send(Ok(()));
+            PaneStartupOutcome::Ready { port, session_id }
+        }
+        Ok((port, session_id)) => {
+            delete_session(port, session_id).await;
+            let message =
+                format!("pane '{pane_id}' generation {generation} was superseded during startup");
+            let _ = completion_tx.send(Err(message));
+            PaneStartupOutcome::Superseded
+        }
+        Err(message) if record_error(&message) => {
+            let _ = completion_tx.send(Err(message.clone()));
+            PaneStartupOutcome::Failed(message)
+        }
+        Err(_) => {
+            let message =
+                format!("pane '{pane_id}' generation {generation} was superseded during startup");
+            let _ = completion_tx.send(Err(message));
+            PaneStartupOutcome::Superseded
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "launch requires the complete immutable pane target and generation"
+)]
+fn launch_pane_session(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: PathBuf,
+    session_path: Option<String>,
+    generation: u64,
+) -> PaneStartupCompletion {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    tauri::async_runtime::spawn(async move {
+        let daemon_app = app.clone();
+        let daemon_session = async move {
+            let port = await_daemon_port(&daemon_app)
+                .await
+                .ok_or_else(|| "daemon did not start in time".to_string())?;
+            let session_id = daemon_create_session(
+                &daemon_app,
+                port,
+                mode,
+                chat_agent,
+                &cwd,
+                session_path.as_deref(),
+            )
+            .await?;
+            Ok((port, session_id))
+        };
+        let bind_app = app.clone();
+        let bind_label = label.clone();
+        let bind_pane_id = pane_id.clone();
+        let error_app = app.clone();
+        let error_label = label.clone();
+        let error_pane_id = pane_id.clone();
+        let delete_app = app.clone();
+        let outcome = orchestrate_pane_session_startup(
+            &pane_id,
+            generation,
+            daemon_session,
+            move |session_id| {
+                let windows: State<Windows> = bind_app.state();
+                let mut registry = windows.map.lock().unwrap();
+                bind_pane_session(
+                    &mut registry,
+                    &bind_label,
+                    &bind_pane_id,
+                    generation,
+                    session_id.to_string(),
+                )
+            },
+            move |message| {
+                let windows: State<Windows> = error_app.state();
+                let mut registry = windows.map.lock().unwrap();
+                record_pane_startup_error(
+                    &mut registry,
+                    &error_label,
+                    &error_pane_id,
+                    generation,
+                    message.to_string(),
+                )
+            },
+            move |port, session_id| async move {
+                let _ = daemon_delete_session(&delete_app, port, &session_id).await;
+            },
+            completion_tx,
+        )
         .await;
+
+        match outcome {
+            PaneStartupOutcome::Ready { port, session_id } => {
+                log::info!(
+                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={session_id}"
+                );
+                start_event_bridge(
+                    app.clone(),
+                    label.clone(),
+                    pane_id.clone(),
+                    generation,
+                    port,
+                    session_id,
+                );
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "agent-pane-ready",
+                    serde_json::json!({
+                        "paneId": pane_id,
+                        "generation": generation,
+                    }),
+                );
+                azure_connection::lifecycle::take_ready_model_refresh_windows(&app);
+                if pane_id == PRIMARY_PANE_ID {
+                    let _ = app.emit_to(
+                        EventTarget::webview_window(label.clone()),
+                        "sidecar-ready",
+                        port,
+                    );
+                }
+            }
+            PaneStartupOutcome::Failed(message) => {
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "agent-pane-error",
+                    serde_json::json!({
+                        "paneId": pane_id,
+                        "generation": generation,
+                        "error": message,
+                    }),
+                );
+            }
+            PaneStartupOutcome::Superseded => {}
+        }
+    });
+    completion_rx
 }
 
-/// Create (or re-point) one window's session: record `{cwd, session_path}`,
-/// await the daemon, `POST /session`, store the returned id, start the SSE
-/// bridge, and emit `sidecar-ready`. Fire-and-forget (spawns its own task) so
-/// callers in sync contexts (setup/restore) don't block. Replaces the old
-/// per-window `spawn_sidecar` (now one shared daemon).
 fn start_window_session(
     app: tauri::AppHandle,
     label: String,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
     cwd: PathBuf,
     session_path: Option<String>,
 ) {
-    // Record the target up front so snapshot/restore + crash-respawn can see it
-    // even before the daemon answers.
-    {
-        let windows: State<Windows> = app.state();
-        let mut map = windows.map.lock().unwrap();
-        let entry = map.entry(label.clone()).or_default();
-        entry.cwd = Some(cwd.clone());
-        entry.session_path = session_path.clone();
-        entry.session_id = None;
-    }
-    tauri::async_runtime::spawn(async move {
-        let Some(port) = await_daemon_port(&app).await else {
-            log::error!("daemon never came up; session for {label} not created");
-            let _ = app.emit_to(
-                EventTarget::webview_window(label.clone()),
-                "sidecar-error",
-                "daemon did not start in time",
-            );
-            return;
-        };
-        match daemon_create_session(&app, port, &cwd, session_path.as_deref()).await {
-            Some(id) => {
-                {
-                    let windows: State<Windows> = app.state();
-                    let mut map = windows.map.lock().unwrap();
-                    let entry = map.entry(label.clone()).or_default();
-                    entry.session_id = Some(id.clone());
-                    entry.cwd = Some(cwd.clone());
-                    entry.session_path = session_path.clone();
-                }
-                start_event_bridge(app.clone(), label.clone(), port, id);
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-ready",
-                    port,
-                );
-            }
-            None => {
-                log::error!("daemon POST /session failed for {label}");
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-error",
-                    "failed to create agent session",
-                );
-            }
-        }
-    });
+    decisions::initialize_project_decisions(&cwd);
+    let _ = start_pane_session(
+        app,
+        label,
+        PRIMARY_PANE_ID.to_string(),
+        mode,
+        chat_agent,
+        cwd,
+        session_path,
+    );
 }
 
-/// After a daemon respawn, re-create a session for every live window from its
-/// stored `{cwd, session_path}` so each webview re-hydrates (history survives
-/// via the JSONL session files). Skips windows with no recorded project (still
-/// on the picker).
+/// Invalidate every daemon-owned runtime identity immediately after a crash so
+/// stale bridges and proxy calls retire while the replacement daemon starts.
+fn clear_runtime_pane_sessions(app: &tauri::AppHandle) {
+    let windows: State<Windows> = app.state();
+    let mut registry = windows.map.lock().unwrap();
+    let labels: Vec<String> = registry.keys().cloned().collect();
+    for label in labels {
+        let pane_ids: Vec<String> = registry
+            .get(&label)
+            .map(|panes| panes.keys().cloned().collect())
+            .unwrap_or_default();
+        for pane_id in pane_ids {
+            registry.next_generation = registry.next_generation.saturating_add(1);
+            let generation = registry.next_generation;
+            if let Some(pane) = registry
+                .get_mut(&label)
+                .and_then(|panes| panes.get_mut(&pane_id))
+            {
+                pane.session_id = None;
+                pane.startup_error = None;
+                pane.generation = generation;
+            }
+        }
+    }
+}
+
+/// After a daemon respawn, re-create a session for every live pane from its
+/// stored `{mode, chat_agent, cwd, session_path}` target.
 fn recreate_all_window_sessions(app: tauri::AppHandle) {
-    let targets: Vec<(String, PathBuf, Option<String>)> = {
+    let targets = {
         let windows: State<Windows> = app.state();
-        let map = windows.map.lock().unwrap();
-        map.iter()
-            .filter_map(|(label, w)| w.cwd.clone().map(|c| (label.clone(), c, w.session_path.clone())))
-            .collect()
+        let registry = windows.map.lock().unwrap();
+        recovery_targets(&registry)
     };
-    for (label, cwd, session_path) in targets {
-        start_window_session(app.clone(), label, cwd, session_path);
+    for (label, pane_id, mode, chat_agent, cwd, session_path, generation) in targets {
+        let _ = launch_pane_session(
+            app.clone(),
+            label,
+            pane_id,
+            mode,
+            chat_agent,
+            cwd,
+            session_path,
+            generation,
+        );
     }
 }
 
@@ -3211,12 +10185,19 @@ fn recreate_all_window_sessions(app: tauri::AppHandle) {
 /// restore target so the webview skips the picker. Otherwise fall back to the
 /// single default `main` window at the boot cwd (the picker then shows).
 fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
-    let ws = read_workspace();
+    let ws = read_workspace(&app.config().identifier);
     let entries = filter_restorable(ws.windows, |c| Path::new(c).exists());
     if entries.is_empty() {
         // Fresh boot / nothing to restore: the usual single main window.
         build_app_window(app, "main")?;
-        start_window_session(app.clone(), "main".into(), default_cwd(), None);
+        start_window_session(
+            app.clone(),
+            "main".into(),
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            default_cwd(),
+            None,
+        );
         broadcast_window_order(app);
         return Ok(());
     }
@@ -3230,25 +10211,39 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
         } else {
             format!("project-{i}")
         };
-        let win = build_app_window(app, &label)?;
-        start_window_session(
-            app.clone(),
-            label.clone(),
-            PathBuf::from(&entry.cwd),
-            entry.session_path.clone(),
-        );
-        // Tell this window which project/session it was restored to, so it skips
-        // the picker and hydrates straight away.
+        // Register the target before constructing the webview: even a hidden
+        // webview may execute immediately after build() returns.
         {
             let state: State<RestoreTargets> = app.state();
-            state.map.lock().unwrap().insert(
-                label,
+            register_restore_target(
+                &mut state.map.lock().unwrap(),
+                label.clone(),
                 RestoreEntry {
+                    mode: entry.mode,
+                    chat_agent: entry.chat_agent,
                     cwd: entry.cwd.clone(),
                     session_path: entry.session_path.clone(),
                 },
             );
         }
+        let win = match build_app_window_with_visibility(app, &label, false) {
+            Ok(win) => win,
+            Err(error) => {
+                remove_restore_target(
+                    &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+                    &label,
+                );
+                return Err(error);
+            }
+        };
+        start_window_session(
+            app.clone(),
+            label.clone(),
+            entry.mode,
+            entry.chat_agent,
+            PathBuf::from(&entry.cwd),
+            entry.session_path.clone(),
+        );
         // Apply saved geometry when present; else we tile after the loop.
         if let (Some(x), Some(y)) = (entry.x, entry.y) {
             any_geometry = true;
@@ -3258,6 +10253,8 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
             any_geometry = true;
             let _ = win.set_size(tauri::PhysicalSize::new(w, h));
         }
+        win.show().map_err(|e| e.to_string())?;
+        apply_dev_smoke_window_state(&win)?;
     }
     if !any_geometry {
         arrange_windows(app, count);
@@ -3266,63 +10263,197 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Install the process-wide rustls crypto provider before constructing an HTTP client.
+///
+/// reqwest 0.13 is compiled with `rustls-no-provider` (tauri-plugin-updater
+/// asks for it, and cargo unifies features across the one shared build), and in
+/// that mode `ClientBuilder::build()` PANICS rather than returning an error if
+/// no provider has been installed. `unwrap_or_else` cannot catch that.
+///
+/// The updater installs `ring` lazily, but that may happen after another runtime
+/// path or a test constructs a client. Centralizing provider setup here keeps every
+/// client constructor safe; `ring` also matches the updater's provider.
+fn install_rustls_provider() {
+    // Fails only if a provider is already installed, which is the outcome we
+    // want anyway — so the result is deliberately ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+    install_rustls_provider();
+    reqwest::Client::builder()
+}
+
+/// A debug override replaces, rather than extends, the plugin's shared file targets.
+/// Release builds ignore the variable entirely, including invalid values.
+fn native_log_override_targets(
+    debug_enabled: bool,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<Option<[tauri_plugin_log::TargetKind; 2]>, String> {
+    if !debug_enabled {
+        return Ok(None);
+    }
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || value.as_encoded_bytes().contains(&0) {
+        return Err("GG_APP_DEV_LOG_DIR must be an absolute directory path without NUL bytes".into());
+    }
+    Ok(Some([
+        tauri_plugin_log::TargetKind::Stdout,
+        tauri_plugin_log::TargetKind::Folder {
+            path,
+            file_name: Some("gg-app".into()),
+        },
+    ]))
+}
+
+fn native_log_builder(
+    debug_enabled: bool,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<tauri_plugin_log::Builder, String> {
+    let builder = tauri_plugin_log::Builder::new().level(log::LevelFilter::Info);
+    match native_log_override_targets(debug_enabled, value)? {
+        Some(targets) => Ok(builder
+            .clear_targets()
+            .targets(targets.map(tauri_plugin_log::Target::new))),
+        None => Ok(builder
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Stdout,
+            ))
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("gg-app".into()),
+                },
+            ))),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    install_panic_diagnostics();
+    let logging = native_log_builder(
+        cfg!(debug_assertions),
+        std::env::var_os("GG_APP_DEV_LOG_DIR").as_deref(),
+    )
+    .expect("invalid native logging configuration");
+    let daemon_token =
+        generate_daemon_auth_token().expect("failed to generate per-launch daemon bearer token");
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert(
+        "x-gg-token",
+        reqwest::header::HeaderValue::from_str(&daemon_token)
+            .expect("generated token must be valid header ASCII"),
+    );
+    let http_client = http_client_builder()
+        .default_headers(default_headers)
+        .build()
+        .expect("failed to build authenticated loopback client");
+
+    let builder = tauri::Builder::default();
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    let builder = if phase26_macos_smoke_enabled() {
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    } else {
+        builder
+    };
+    builder
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Info)
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("gg-app".into()),
-                    },
-                ))
-                .build(),
-        )
-        .manage(Daemon::default())
+        .plugin(logging.build())
+        .manage(Daemon {
+            token: daemon_token,
+            ..Default::default()
+        })
         .manage(Windows::default())
         .manage(RestoreTargets::default())
+        .manage(PaneCopies::default())
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
-        .manage(reqwest::Client::new())
+        .manage(TrayState::default())
+        .manage(TrayIntents::default())
+        .manage(AzureConnectionMutations::default())
+        .manage(LocalPatchedUpdate::default())
+        .manage(http_client)
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
+            agent_pane_status,
+            agent_pane_create,
+            agent_pane_restore,
+            agent_pane_dispose,
+            agent_pane_copy,
+            agent_pane_copy_startup,
+            agent_pane_copy_restore,
+            agent_pane_copy_rollback,
             dropped_path_info,
             permissions_status,
             open_permissions_settings,
             read_dropped_file_attachment,
             open_project_path,
+            open_url,
             agent_state,
+            agent_notes_get,
+            agent_notes_diagnostics,
+            agent_notes_phase_binding,
+            agent_phase_start,
+            agent_phase_advancement_start,
+            agent_phase_cancel,
+            agent_roadmap_phase_draft_get,
+            agent_roadmap_phase_draft_approve,
+            agent_roadmap_phase_draft_reject,
+            agent_notes_migrate,
+            agent_notes_resolve_roadmap_blocker,
+            agent_notes_save,
+            agent_reminder_reserve,
+            agent_reminder_claim,
+            agent_reminder_release,
+            roadmap_reminder_notification_permission,
+            show_roadmap_reminder_notification,
+            agent_memories,
+            agent_delete_memory,
+            agent_jiwa,
+            agent_delete_jiwa,
             agent_progress,
+            agent_usage,
             agent_prompt,
+            agent_continuation_handoff,
+            agent_programmatic,
+            agent_commit_continuation,
             agent_cancel,
+            agent_cancel_roadmap_status_retry,
             agent_ken_prompt,
             agent_ken_cancel,
             agent_autopilot_set,
             agent_accept_plan,
+            agent_revise_plan,
             agent_new_session,
             agent_history,
+            agent_export_transcript,
             agent_auth_apikey,
             agent_auth_oauth_start,
             agent_auth_oauth_code,
+            agent_mcp_elicit,
+            agent_ask_user,
             agent_auth_logout,
             agent_kill_task,
+            agent_import_transcript,
+            agent_cancel_queued,
             agent_radio_state,
             agent_radio_set,
+            agent_radio_volume,
             agent_tasks,
             agent_run_tasks,
             agent_delete_task,
             agent_cycle_thinking,
             agent_models,
             agent_switch_model,
+            agent_set_context_profile,
+            agent_set_openai_codex_fast,
             agent_switch_ken_model,
             agent_enhance_prompt,
             agent_commands,
@@ -3335,18 +10466,38 @@ pub fn run() {
             agent_files,
             agent_settings,
             agent_save_settings,
+            agent_plugins,
+            agent_install_plugin,
+            agent_remove_plugin,
             agent_create_project,
+            agent_set_project_hidden,
             app_settings_get,
             app_settings_save,
             app_create_project,
+            app_verified_decisions,
+            app_local_patched_update_status,
+            app_local_patched_update_start,
             app_auth_status,
             app_auth_apikey,
             app_auth_logout,
+            azure_connection_status,
+            azure_connection_save,
+            azure_connection_remove,
             agent_telegram_get,
             agent_telegram_save,
+            agent_local,
+            agent_local_scan,
+            agent_local_endpoint_add,
+            agent_local_endpoint_remove,
+            agent_hf_search,
+            agent_hf_pull,
+            agent_hf_pull_status,
+            agent_hf_pull_cancel,
             agent_serve_status,
             agent_serve_start,
             agent_serve_stop,
+            agent_steroids_status,
+            agent_steroids_install,
             agent_mcp_list,
             agent_mcp_add,
             agent_mcp_remove,
@@ -3354,18 +10505,50 @@ pub fn run() {
             gaze_focus,
             focus_window_by_offset,
             arrange_all,
-            window_restore_target
+            window_restore_target,
+            window_tray_intent,
+            set_update_available,
+            set_remote_active
         ])
         .setup(|app| {
+            log::info!(
+                "{}",
+                lifecycle_message(
+                    "shell_start",
+                    &format!(
+                        "shell_pid={} app_version={}",
+                        std::process::id(),
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                )
+            );
+            let identifier = app.config().identifier.clone();
+            let identity_root = agent_data_root(&identifier);
+            // Sweep only orphaned sidecars from this exact Tauri identity before
+            // any identity migration can touch files they may have held open.
+            // The isolated Phase 25 dev fixture must never inspect or terminate
+            // a pre-existing host sidecar.
+            if !phase25_dev_fixture_enabled() {
+                sweep_orphan_sidecars(&identifier);
+            }
+            let bootstrapped = bootstrap_identity_data(&home_dir(), &identifier)?;
+            let sessions_bootstrapped =
+                bootstrap_identity_sessions(&home_dir(), &identifier)?;
+            let rank_bootstrapped =
+                bootstrap_identity_rank_progress_v2(&home_dir(), &identifier)?;
+            log::info!(
+                "identity data root: identity={identifier} root={} bootstrapped={bootstrapped} sessions_bootstrapped={sessions_bootstrapped} rank_bootstrapped={rank_bootstrapped}",
+                identity_root.display()
+            );
             // Windows-only: track per-window minimized state so restoring one
             // window can restore its siblings (macOS does this natively).
             #[cfg(target_os = "windows")]
             app.manage(MinimizeState::default());
-            // Sweep orphaned sidecars from previous (crashed/force-quit) app
-            // instances BEFORE spawning any new sidecars — they'd otherwise
-            // accumulate forever across launches. Best-effort + logged.
-            // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
-            sweep_orphan_sidecars();
+            // macOS menu-bar / Windows notification-area presence.
+            #[cfg(any(target_os = "macos", windows))]
+            if let Err(e) = init_tray(&app.handle().clone()) {
+                log::warn!("tray init failed: {e}");
+            }
             // Spawn the ONE shared Node daemon before any window asks for a
             // session. Window session creation (in restore/setup) awaits its
             // `GG_APP_LISTENING` port via `await_daemon_port`.
@@ -3380,25 +10563,86 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Destroyed => {
                 let app = window.app_handle();
+                // A target can remain pending when a webview closes before mount.
+                remove_restore_target(
+                    &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+                    window.label(),
+                );
+                // Rollback-created windows were never committed to the workspace;
+                // pruning by cwd could otherwise delete the still-open source copy.
+                let rolling_back = app
+                    .state::<PaneCopies>()
+                    .map
+                    .lock()
+                    .unwrap()
+                    .rolling_back
+                    .remove(window.label());
                 // A deliberate close (app NOT quitting) drops this window from the
                 // workspace so it doesn't reopen next launch. During quit the
                 // AppExiting flag is set, so the snapshot is preserved intact.
                 let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
-                if !exiting {
+                if !exiting && !rolling_back {
                     remove_window_from_workspace(app, window.label());
+                }
+                let stale_source_copies = {
+                    let copies: State<PaneCopies> = app.state();
+                    let mut registry = copies.map.lock().unwrap();
+                    if let Some(key) = registry.target_owners.get(window.label()).cloned() {
+                        let started = registry
+                            .operations
+                            .get(&key)
+                            .is_some_and(|operation| operation.started);
+                        if started {
+                            registry.target_owners.remove(window.label());
+                            registry.operations.remove(&key);
+                        }
+                    }
+                    let stale_keys: Vec<_> = registry
+                        .operations
+                        .iter()
+                        .filter(|(_, operation)| {
+                            operation.source_owner == window.label() && !operation.started
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    stale_keys
+                        .into_iter()
+                        .filter_map(|key| {
+                            let operation = registry.operations.remove(&key)?;
+                            registry.target_owners.remove(&operation.target_label);
+                            Some(operation)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for operation in stale_source_copies {
+                    remove_restore_target(
+                        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+                        &operation.target_label,
+                    );
+                    if let Some(path) = operation.cloned_session_path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    if let Some(copy_window) = app.get_webview_window(&operation.target_label) {
+                        let _ = copy_window.close();
+                    }
                 }
                 // Dispose only THIS window's session in the shared daemon so
                 // other projects keep running. The daemon process itself is
                 // never killed here (that happens only on app exit).
                 let state: State<Windows> = window.state();
-                let session_id = state.map.lock().unwrap().remove(window.label()).and_then(|w| w.session_id);
-                if let Some(id) = session_id {
-                    if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
-                        let app2 = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            daemon_delete_session(&app2, port, &id).await;
-                        });
-                    }
+                let panes = {
+                    let mut registry = state.map.lock().unwrap();
+                    take_window_panes(&mut registry, window.label())
+                };
+                if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
+                    let app2 = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        for pane in panes {
+                            if let Some(id) = pane.session_id {
+                                let _ = daemon_delete_session(&app2, port, &id).await;
+                            }
+                        }
+                    });
                 }
                 // Update peers: the closed window is gone from the reading order.
                 broadcast_window_order(app);
@@ -3446,21 +10690,62 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|app, event| {
-            if let RunEvent::ExitRequested { .. } = event {
+        .run(|app, event| match event {
+            RunEvent::Ready => {
+                for window in app.webview_windows().values() {
+                    if let Err(error) = apply_dev_smoke_window_state(window) {
+                        log::error!("failed to apply dev smoke window state: {error}");
+                        app.exit(1);
+                        break;
+                    }
+                }
+            }
+            RunEvent::ExitRequested { code, .. } => {
+                log::info!(
+                    "{}",
+                    lifecycle_message(
+                        "tauri_exit_requested",
+                        &format!(
+                            "shell_pid={} code={}",
+                            std::process::id(),
+                            code.map_or_else(|| "user".to_string(), |code| code.to_string())
+                        ),
+                    )
+                );
                 // Mark the quit BEFORE windows start tearing down, so the
                 // Destroyed handlers preserve the snapshot, then write the final
                 // snapshot (current geometry + each window's live cwd/session).
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
-                // Terminate the daemon's process group once — reaps every
-                // session's MCP/LSP children in one shot (no orphans).
-                let child = app.state::<Daemon>().child.lock().unwrap().take();
-                if let Some(child) = child {
-                    terminate_child(child);
+                // On Windows the daemon must stay owned until `RunEvent::Exit`,
+                // where it is synchronously reaped before bypassing Tauri/Tao cleanup.
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Terminate the daemon's process group once — reaps every
+                    // session's MCP/LSP children in one shot (no orphans).
+                    let child = app.state::<Daemon>().child.lock().unwrap().take();
+                    if let Some(child) = child {
+                        terminate_child(child, "tauri_exit_requested");
+                    }
                 }
             }
+            RunEvent::Exit => {
+                #[cfg(target_os = "windows")]
+                {
+                    let child = app.state::<Daemon>().child.lock().unwrap().take();
+                    if let Some(child) = child {
+                        terminate_child_synchronously(child, "tauri_exit_requested");
+                    }
+                }
+                log::info!(
+                    "{}",
+                    lifecycle_message("shell_exit", &format!("shell_pid={}", std::process::id()),)
+                );
+                #[cfg(target_os = "windows")]
+                std::process::exit(0);
+            }
+            _ => {}
         });
 }
 
@@ -3477,7 +10762,12 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
         let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.iter()
-            .filter_map(|(label, w)| w.session_id.clone().map(|id| (label.clone(), id)))
+            .filter_map(|(label, panes)| {
+                panes
+                    .get(PRIMARY_PANE_ID)
+                    .and_then(|pane| pane.session_id.clone())
+                    .map(|id| (label.clone(), id))
+            })
             .collect()
     };
     if targets.is_empty() {
@@ -3521,7 +10811,10 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
     let state: State<Windows> = app.state();
     let mut map = state.map.lock().unwrap();
     for (label, session_path, cwd) in results {
-        if let Some(inst) = map.get_mut(&label) {
+        if let Some(inst) = map
+            .get_mut(&label)
+            .and_then(|panes| panes.get_mut(PRIMARY_PANE_ID))
+        {
             if session_path.is_some() {
                 inst.session_path = session_path;
             }
@@ -3537,14 +10830,1752 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keep_for_snapshot_excludes_picker_windows() {
+    fn native_log_override_selects_only_stdout_and_requested_folder() {
+        let path = std::env::current_dir().unwrap().join("isolated-native-logs");
+        let targets = native_log_override_targets(true, Some(path.as_os_str()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(&targets[0], tauri_plugin_log::TargetKind::Stdout));
+        assert!(matches!(&targets[1], tauri_plugin_log::TargetKind::Folder {
+            path: selected, file_name: Some(name),
+        } if selected == &path && name == "gg-app"));
+        assert!(!targets
+            .iter()
+            .any(|target| matches!(target, tauri_plugin_log::TargetKind::LogDir { .. })));
+        assert!(native_log_builder(true, Some(path.as_os_str())).is_ok());
+    }
+
+    #[test]
+    fn native_log_override_unset_preserves_normal_logging() {
+        assert!(native_log_override_targets(true, None).unwrap().is_none());
+        assert!(native_log_builder(true, None).is_ok());
+    }
+
+    #[test]
+    fn native_log_override_rejects_empty_relative_and_nul_paths() {
+        let absolute = std::env::current_dir().unwrap().join("invalid\0logs");
+        for value in [
+            std::ffi::OsStr::new(""),
+            std::ffi::OsStr::new("relative/logs"),
+            std::ffi::OsStr::new("../logs"),
+            absolute.as_os_str(),
+        ] {
+            assert!(native_log_override_targets(true, Some(value)).is_err());
+            // Invalid overrides must propagate errors instead of returning the normal builder.
+            assert!(native_log_builder(true, Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn native_log_override_release_ignores_even_invalid_values() {
+        let absolute = std::env::current_dir().unwrap().join("isolated-native-logs");
+        for value in [
+            None,
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("relative")),
+            Some(absolute.as_os_str()),
+        ] {
+            assert!(native_log_override_targets(false, value).unwrap().is_none());
+            assert!(native_log_builder(false, value).is_ok());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_log_override_rejects_drive_relative_and_root_relative_paths() {
+        for value in [r"C:logs", r"\logs"] {
+            assert!(native_log_builder(true, Some(std::ffi::OsStr::new(value))).is_err());
+        }
+    }
+
+    /// Guards the startup crash from the reqwest 0.13 bump: the shared client is
+    /// built before anything else in `run()`, and without a rustls provider that
+    /// build PANICS, so the packaged app died on launch with no error of its
+    /// own. Asserting `build()` succeeds after `install_rustls_provider` catches
+    /// a provider that stops covering the feature set reqwest is compiled with.
+    ///
+    /// It cannot see the CALL being dropped from `run()` — that ordering is only
+    /// observable by launching the app, which is the Windows packaged smoke's job.
+    #[test]
+    fn shared_http_client_builds_after_provider_install() {
+        install_rustls_provider();
+        assert!(
+            reqwest::Client::builder().build().is_ok(),
+            "shared client must build once the rustls provider is installed",
+        );
+    }
+
+    #[test]
+    fn identity_storage_diagnostics_use_authenticated_identity_scoped_proxy() {
+        let home = Path::new("/tmp/gg-identity-diagnostics");
+        let production = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+        let local_fork = agent_data_root_for_home(home, "com.ggcoder.local-fork");
+
+        assert_eq!(NOTES_DIAGNOSTICS_PATH, "/notes/diagnostics");
+        assert_eq!(
+            sidecar_identity_arg("com.ggcoder.local-fork"),
+            "--gg-app-identity=com.ggcoder.local-fork"
+        );
+        assert_ne!(production, local_fork);
+    }
+
+    #[test]
+    fn roadmap_phase_binding_uses_current_pane_route_without_destination_fields() {
+        let request = serde_json::json!({
+            "version": 1,
+            "action": "bind-current",
+            "phaseId": "phase-1",
+            "expectedProjectKey": "c:/work/project",
+            "expectedRevision": 1,
+            "expectedPreviousSession": null,
+            "operationId": "operation-1",
+            "confirmRebind": false
+        });
+
+        assert_eq!("/notes/roadmap/phase-binding", NOTES_PHASE_BINDING_PATH);
+        assert!(request.get("destinationSession").is_none());
+    }
+
+
+    fn roadmap_proxy_result(
+        status: reqwest::StatusCode,
+        content_type: &str,
+        body: &str,
+        kind: RoadmapTypedResponseKind,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = body.to_string();
+        let response_content_type = content_type.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_content_type,
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let result = tauri::async_runtime::block_on(async {
+            let response = http_client_builder()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/roadmap"))
+                .send()
+                .await
+                .unwrap();
+            roadmap_typed_response(response, kind).await
+        });
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn roadmap_documented_typed_outcomes_cross_the_native_boundary() {
+        let session = serde_json::json!({ "sessionId": "session-1", "sessionPath": null });
+        let cases = [
+            (
+                reqwest::StatusCode::OK,
+                serde_json::json!({
+                    "status": "already-bound",
+                    "revision": 7,
+                    "phaseId": "phase-1",
+                    "session": session
+                }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({ "status": "phase-not-found" }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "stale-revision", "revision": 8 }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::OK,
+                serde_json::json!({
+                    "status": "reconciled",
+                    "revision": 8,
+                    "phaseId": "phase-1",
+                    "preservedStepIds": ["step-1"],
+                    "revalidationStepIds": ["step-2"],
+                    "revalidationEvidenceCount": 1,
+                    "reconciledAt": "2026-08-31T10:05:00.000Z"
+                }),
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "workspace-mismatch" }),
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+            ),
+        ];
+
+        for (status, body, kind) in cases {
+            assert_eq!(
+                roadmap_proxy_result(
+                    status,
+                    "application/json; charset=utf-8",
+                    &body.to_string(),
+                    kind
+                ),
+                Ok(body)
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_auth_malformed_content_type_and_undocumented_responses_reject() {
+        let cases = [
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"stale-revision"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "text/plain",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8,"extra":true}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "application/json",
+                r#"{"status":"corrupt","primary":"malformed-json","backup":null}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"workspace-mismatch","detail":"unexpected"}"#,
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+            ),
+        ];
+
+        for (status, content_type, body, kind) in cases {
+            assert!(roadmap_proxy_result(status, content_type, body, kind).is_err());
+        }
+    }
+
+    #[test]
+    fn roadmap_oversized_responses_reject() {
+        let body = "x".repeat(ROADMAP_TYPED_RESPONSE_MAX_BYTES + 1);
+        assert!(roadmap_proxy_result(
+            reqwest::StatusCode::OK,
+            "application/json",
+            &body,
+            RoadmapTypedResponseKind::PhaseBinding,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn roadmap_transport_failures_reject() {
+        let result = tauri::async_runtime::block_on(roadmap_typed_request(
+            http_client_builder()
+                .build()
+                .unwrap()
+                .get("http://127.0.0.1:0/roadmap")
+                .timeout(std::time::Duration::from_secs(1)),
+            RoadmapTypedResponseKind::PhaseBinding,
+        ));
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_termination_waits_until_the_daemon_is_reaped() {
+        let child = hide_console(&mut Command::new("cmd"))
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test daemon");
+        let pid = child.id() as i32;
+        let started = std::time::Instant::now();
+
+        terminate_child_synchronously(child, "test");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "termination should not wait for the child to exit naturally"
+        );
+        let tasklist = hide_console(&mut Command::new("tasklist"))
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("query test daemon status");
+        let output = String::from_utf8_lossy(&tasklist.stdout);
+        assert!(
+            !output.contains(&format!("\"{pid}\"")),
+            "daemon {pid} was still alive after synchronous termination: {output}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_diagnostic_includes_event_timestamp_and_process_details() {
+        let message = lifecycle_message_at(
+            "daemon_exit",
+            1_754_333_456_789,
+            "shell_pid=42 daemon_pid=99 reason=tauri_exit_requested status=exit code: 0",
+        );
+
+        assert_eq!(
+            message,
+            "lifecycle event=daemon_exit timestamp_ms=1754333456789 shell_pid=42 daemon_pid=99 reason=tauri_exit_requested status=exit code: 0"
+        );
+    }
+
+    #[test]
+    fn dev_fixture_flags_require_debug_builds_and_exact_opt_in() {
+        for value in [None, Some(""), Some("0"), Some("true")] {
+            assert!(!exact_fixture_opt_in(true, value));
+            assert!(!exact_fixture_opt_in(false, value));
+        }
+        assert!(exact_fixture_opt_in(true, Some("1")));
+        assert!(!exact_fixture_opt_in(false, Some("1")));
+    }
+
+    #[test]
+    fn release_builds_ignore_dev_fixture_environment_opt_in() {
+        assert!(!exact_fixture_opt_in(false, Some("1")));
+    }
+
+    #[test]
+    fn debug_dev_fixture_can_suppress_only_the_startup_sweep() {
+        assert!(exact_fixture_opt_in(true, Some("1")));
+    }
+
+    #[test]
+    fn windows_dev_smoke_window_mode_is_exact_and_fail_closed() {
+        assert_eq!(
+            dev_smoke_window_minimized(true, Some("minimized")),
+            Ok(true)
+        );
+        assert_eq!(dev_smoke_window_minimized(true, Some("visible")), Ok(false));
+        assert!(dev_smoke_window_minimized(true, None).is_err());
+        assert!(dev_smoke_window_minimized(true, Some("MINIMIZED")).is_err());
+        assert_eq!(
+            dev_smoke_window_minimized(false, Some("minimized")),
+            Ok(false)
+        );
+    }
+    fn openai_fast_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &str,
+    ) -> Result<serde_json::Value, String> {
+        session_json_proxy_result(status, response_body, "/openai-codex-fast", serde_json::json!({ "enabled": true }))
+    }
+
+    fn session_json_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &str,
+        route: &'static str,
+        request_body: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+        let expected_body = request_body.to_string();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = response_body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let request_lower = request.to_ascii_lowercase();
+            assert!(request.starts_with(&format!("POST {route} HTTP/1.1")));
+            assert!(request_lower.contains("x-gg-session: pane-session"));
+            assert!(request_lower.contains("x-gg-token: daemon-token"));
+            assert!(request.contains(&expected_body));
+
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
+        let client = http_client_builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let result = if route == "/autopilot" {
+            tauri::async_runtime::block_on(post_autopilot(
+                &client, &format!("http://{address}"), "pane-session",
+                request_body["enabled"].as_bool().unwrap(),
+            ))
+        } else {
+            tauri::async_runtime::block_on(post_session_json(
+                &client,
+                &format!("http://{address}"),
+                "pane-session",
+                route,
+                &request_body,
+            ))
+        };
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn agent_autopilot_set_validates_confirmations_and_errors() {
+        for enabled in [true, false] {
+            let response = serde_json::json!({ "autopilot": enabled });
+            assert_eq!(session_json_proxy_result(reqwest::StatusCode::OK, &response.to_string(),
+                "/autopilot", serde_json::json!({ "enabled": true })), Ok(response));
+        }
+        assert_eq!(session_json_proxy_result(reqwest::StatusCode::CONFLICT,
+            r#"{"error":"configuration refresh in progress"}"#, "/autopilot",
+            serde_json::json!({ "enabled": true })), Err("configuration refresh in progress".into()));
+        for body in ["{}", "null", r#"{"autopilot":"true"}"#, r#"{"autopilot":1}"#] {
+            assert_eq!(session_json_proxy_result(reqwest::StatusCode::OK, body,
+                "/autopilot", serde_json::json!({ "enabled": true })), Err("Invalid Autopilot response".into()));
+        }
+    }
+
+    #[test]
+    fn agent_autopilot_set_propagates_transport_rejection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || { drop(listener.accept().unwrap()); });
+        let client = http_client_builder().build().unwrap();
+        let result = tauri::async_runtime::block_on(post_autopilot(
+            &client, &format!("http://{address}"), "pane-session", true,
+        ));
+        server.join().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn agent_switch_ken_model_propagates_http_errors() {
+        for (status, message) in [
+            (reqwest::StatusCode::CONFLICT, "cannot switch Ken's model while running"),
+            (reqwest::StatusCode::NOT_FOUND, "unknown model: missing"),
+        ] {
+            assert_eq!(
+                session_json_proxy_result(status, &serde_json::json!({ "error": message }).to_string(), "/ken/model", serde_json::json!({ "model": "missing" })),
+                Err(message.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn agent_switch_ken_model_posts_pin_and_clear() {
+        for model in [Some("gpt"), None] {
+            let result = serde_json::json!({ "kenProvider": "openai", "kenModel": "gpt", "kenModelOverride": model.is_some() });
+            assert_eq!(
+                session_json_proxy_result(reqwest::StatusCode::OK, &result.to_string(), "/ken/model", serde_json::json!({ "model": model })),
+                Ok(result)
+            );
+        }
+    }
+
+    #[test]
+    fn agent_set_openai_codex_fast_posts_authenticated_pane_request() {
+        assert_eq!(
+            openai_fast_proxy_result(reqwest::StatusCode::OK, r#"{"openAICodexFast":true}"#,),
+            Ok(serde_json::json!({ "openAICodexFast": true }))
+        );
+    }
+
+    #[test]
+    fn agent_set_openai_codex_fast_propagates_sidecar_conflict() {
+        assert_eq!(
+            openai_fast_proxy_result(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"Cannot change Fast while the agent is running."}"#,
+            ),
+            Err("Cannot change Fast while the agent is running.".to_string())
+        );
+    }
+
+    fn prompt_proxy_result(
+        status: reqwest::StatusCode,
+        body: &str,
+    ) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /prompt HTTP/1.1"));
+            assert!(request.contains("x-gg-session: test-session"));
+
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let client = http_client_builder().build().unwrap();
+        let endpoint = format!("http://{address}/prompt");
+        let result = tauri::async_runtime::block_on(post_sidecar_prompt(
+            &client,
+            &endpoint,
+            "test-session",
+            "Ship the fix".to_string(),
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({ "kenSent": true })),
+        ));
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn daemon_session_response_preserves_resume_identity_rejections() {
+        for message in [
+            "Cannot resume a session from another project",
+            "Cannot resume phase context from another project",
+        ] {
+            assert_eq!(
+                parse_daemon_create_session_response(
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": message }),
+                ),
+                Err(message.to_string())
+            );
+        }
+        assert_eq!(
+            parse_daemon_create_session_response(
+                reqwest::StatusCode::OK,
+                &serde_json::json!({ "sessionId": "same-project-session" }),
+            ),
+            Ok("same-project-session".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_start_proxy_encodes_ids_and_preserves_typed_outcomes() {
+        assert_eq!(
+            phase_start_path("phase/21 review"),
+            "/phases/phase%2F21%20review/start"
+        );
+        assert_eq!(
+            phase_cancel_path("phase/21 review"),
+            "/phases/phase%2F21%20review/cancel"
+        );
+        assert_eq!(
+            phase_advancement_start_path("checkpoint/opaque?two"),
+            "/notes/roadmap/advancement/checkpoint%2Fopaque%3Ftwo/start"
+        );
+        assert_eq!(
+            phase_advancement_start_body("phase/next"),
+            serde_json::json!({
+                "action": "start-next-phase",
+                "nextPhaseId": "phase/next",
+            })
+        );
+        for (status, body) in [
+            (
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"status":"accepted","operationId":"op-1","session":{"sessionId":"s","sessionPath":"/s"},"packageTokenCount":42}"#,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"failed","code":"session-busy","operationId":null,"message":"Wait"}"#,
+            ),
+        ] {
+            let parsed = normalize_phase_start_response(status, body).unwrap();
+            assert!(matches!(
+                parsed.get("status").and_then(serde_json::Value::as_str),
+                Some("accepted" | "failed")
+            ));
+        }
+    }
+
+    #[test]
+    fn phase_start_proxy_rejects_transport_ambiguity() {
+        assert_eq!(
+            normalize_phase_start_response(reqwest::StatusCode::BAD_GATEWAY, "not json"),
+            Err("invalid phase-start response".to_string())
+        );
+        assert_eq!(
+            normalize_phase_start_response(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"unknown"}"#,
+            ),
+            Err("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_encodes_opaque_draft_ids() {
+        assert_eq!(
+            roadmap_phase_draft_approve_path("draft/one review?雪"),
+            "/roadmap/phase-drafts/draft%2Fone%20review%3F%E9%9B%AA/approve"
+        );
+        assert_eq!(
+            roadmap_phase_draft_reject_path("draft/one review?雪"),
+            "/roadmap/phase-drafts/draft%2Fone%20review%3F%E9%9B%AA/reject"
+        );
+    }
+
+    #[test]
+    fn roadmap_phase_draft_feedback_is_normalized_and_bounded() {
+        assert_eq!(
+            normalize_roadmap_draft_feedback(Some("  first\r\nsecond\r  ".to_string())),
+            Ok(Some("first\nsecond".to_string()))
+        );
+        assert_eq!(normalize_roadmap_draft_feedback(None), Ok(None));
+        assert_eq!(
+            normalize_roadmap_draft_feedback(Some("  ".to_string())),
+            Ok(None)
+        );
+        assert!(normalize_roadmap_draft_feedback(Some(
+            "x".repeat(ROADMAP_DRAFT_FEEDBACK_MAX_CHARS + 1)
+        ))
+        .is_err());
+
+        let audited = bounded_roadmap_draft_audit_field(&format!(
+            "{}\nproposal content",
+            "x".repeat(ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS)
+        ));
+        assert_eq!(audited.chars().count(), ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS);
+        assert!(!audited.contains("proposal content"));
+        assert!(!audited.contains('\n'));
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_preserves_typed_http_outcomes() {
+        let cases = [
+            (
+                reqwest::StatusCode::OK,
+                r#"{"status":"created","revision":2,"phaseIds":["phase-1"]}"#,
+                "created",
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"status":"proposal-not-found"}"#,
+                "proposal-not-found",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"stale-revision","expectedRevision":1,"currentRevision":2}"#,
+                "stale-revision",
+            ),
+            (
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                r#"{"status":"invalid-proposal","message":"invalid phase"}"#,
+                "invalid-proposal",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"status":"storage-failed","message":"write failed"}"#,
+                "storage-failed",
+            ),
+        ];
+
+        for (http_status, body, outcome) in cases {
+            let value = normalize_roadmap_phase_draft_response(
+                http_status,
+                body,
+                RoadmapPhaseDraftResponseKind::Approve,
+            )
+            .unwrap();
+            assert_eq!(
+                value.get("status").and_then(serde_json::Value::as_str),
+                Some(outcome)
+            );
+        }
+
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"status":"proposal-not-found"}"#,
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_err());
+
+        let conflict = normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"status":"already-decided","decision":"approved"}"#,
+            RoadmapPhaseDraftResponseKind::Reject,
+        )
+        .unwrap();
+        assert_eq!(conflict["status"], "already-decided");
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_validates_success_and_malformed_bodies() {
+        let pending = serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "id": "draft-1",
+                "projectKey": "/work/project",
+                "basedOnRevision": 1,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Two phases",
+                "phases": [{
+                    "phaseId": "phase-1",
+                    "title": "Implement validation",
+                    "goal": "Keep the native boundary aligned with the shared contract.",
+                    "doneWhen": ["Complete drafts pass", "Malformed drafts fail"],
+                    "sourcePrompt": "Validate pending Roadmap phase drafts.",
+                }],
+                "status": "pending",
+            },
+        });
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            &pending.to_string(),
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            r#"{"status":"ok","draft":null}"#,
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+
+        let mut incomplete_phase = pending.clone();
+        incomplete_phase["draft"]["phases"][0] = serde_json::json!({ "phaseId": "phase-1" });
+
+        let mut extra_envelope_field = pending.clone();
+        extra_envelope_field["extra"] = serde_json::json!(true);
+
+        let mut extra_draft_field = pending.clone();
+        extra_draft_field["draft"]["extra"] = serde_json::json!(true);
+
+        let mut extra_phase_field = pending.clone();
+        extra_phase_field["draft"]["phases"][0]["extra"] = serde_json::json!(true);
+
+        let mut invalid_timestamp = pending.clone();
+        invalid_timestamp["draft"]["createdAt"] = serde_json::json!("not-a-timestamp");
+
+        let mut duplicate_phase_ids = pending.clone();
+        let duplicate_phase = duplicate_phase_ids["draft"]["phases"][0].clone();
+        duplicate_phase_ids["draft"]["phases"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate_phase);
+
+        let mut blank_normalized_text = pending.clone();
+        blank_normalized_text["draft"]["phases"][0]["title"] = serde_json::json!(" \r\n ");
+
+        let mut oversized_summary = pending.clone();
+        oversized_summary["draft"]["summary"] = serde_json::json!("x".repeat(4_097));
+
+        let mut duplicate_normalized_criteria = pending.clone();
+        duplicate_normalized_criteria["draft"]["phases"][0]["doneWhen"] =
+            serde_json::json!(["criterion", " criterion "]);
+
+        let direct_draft = pending["draft"].clone();
+        for malformed in [
+            incomplete_phase,
+            extra_envelope_field,
+            extra_draft_field,
+            extra_phase_field,
+            invalid_timestamp,
+            duplicate_phase_ids,
+            blank_normalized_text,
+            oversized_summary,
+            duplicate_normalized_criteria,
+            direct_draft,
+        ] {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    reqwest::StatusCode::OK,
+                    &malformed.to_string(),
+                    RoadmapPhaseDraftResponseKind::Get,
+                ),
+                Err("invalid roadmap phase-draft response".to_string())
+            );
+        }
+
+        for (status, body) in [
+            (reqwest::StatusCode::OK, "not json"),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "<html>failed</html>",
+            ),
+            (reqwest::StatusCode::OK, r#"{"status":"created"}"#),
+        ] {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    status,
+                    body,
+                    RoadmapPhaseDraftResponseKind::Approve,
+                ),
+                Err("invalid roadmap phase-draft response".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_validates_reference_bearing_daemon_payloads() {
+        let pending = serde_json::json!({
+            "status": "ok", "draft": {
+                "id": "draft-1", "projectKey": "project-1", "basedOnRevision": 1,
+                "createdAt": "2026-01-01T00:00:00.000Z", "createdBySessionId": "session-1",
+                "summary": "Implement the referenced issue", "status": "pending",
+                "references": [{
+                    "id": "ref-1", "provider": "github", "tool": "get_issue",
+                    "canonicalUrl": "https://github.com/example/project/issues/42",
+                    "owner": "example", "repo": "project", "revision": null,
+                    "path": null, "range": null, "issue": 42, "pullRequest": null,
+                    "query": null, "anchor": null, "relevance": "Acceptance criteria"
+                }],
+                "phases": [{
+                    "phaseId": "phase-1", "title": "Implement", "goal": "Resolve issue 42",
+                    "doneWhen": ["Acceptance criteria pass"], "sourcePrompt": "Implement issue 42",
+                    "referenceIds": ["ref-1"]
+                }]
+            }
+        });
+        let validate = |value: &serde_json::Value| normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK, &value.to_string(), RoadmapPhaseDraftResponseKind::Get,
+        );
+        assert_eq!(validate(&pending).unwrap(), pending);
+        let mut empty = pending.clone();
+        empty["draft"]["references"] = serde_json::json!([]);
+        empty["draft"]["phases"][0]["referenceIds"] = serde_json::json!([]);
+        assert_eq!(validate(&empty).unwrap(), empty);
+        empty["draft"].as_object_mut().unwrap().remove("references");
+        empty["draft"]["phases"][0].as_object_mut().unwrap().remove("referenceIds");
+        assert!(validate(&empty).is_ok());
+        for (pointer, replacement) in [
+            ("/draft/references", serde_json::json!({})),
+            ("/draft/references", serde_json::json!(vec![pending["draft"]["references"][0].clone(); 21])),
+            ("/draft/references/0/provider", serde_json::json!(" ")),
+            ("/draft/references/0/tool", serde_json::json!(false)),
+            ("/draft/references/0/relevance", serde_json::json!("😀".repeat(2_049))),
+            ("/draft/references/0/owner", serde_json::json!("other")),
+            ("/draft/references/0/repo", serde_json::json!("other")),
+            ("/draft/references/0/repo", serde_json::json!("project.git.git")),
+            ("/draft/references/0/path", serde_json::json!("x".repeat(4_097))),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("file:///etc/passwd")),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("https://user:secret@github.com/example/project/issues/42")),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("https://example.com/example/project/issues/42")),
+            ("/draft/references/0/issue", serde_json::json!(43)),
+            ("/draft/references/0/issue", serde_json::json!(0)),
+            ("/draft/references/0/pullRequest", serde_json::json!(42)),
+            ("/draft/references/0/range", serde_json::json!({"startLine": 1, "endLine": 2})),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["missing"])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["ref-1", " ref-1 "])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(vec!["ref-1"; 21])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["x".repeat(129)])),
+            ("/draft/phases/0/referenceIds", serde_json::json!([])),
+            ("/draft/phases/0/referenceIds", serde_json::json!({})),
+        ] {
+            let mut invalid = pending.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert!(validate(&invalid).is_err(), "accepted malformed {pointer}");
+        }
+        for pointer in ["/draft", "/draft/phases/0", "/draft/references/0"] {
+            let mut invalid = pending.clone();
+            invalid.pointer_mut(pointer).unwrap()["unknown"] = serde_json::json!(true);
+            assert!(validate(&invalid).is_err(), "accepted unknown field at {pointer}");
+        }
+        for duplicate_id in [true, false] {
+            let mut invalid = pending.clone();
+            let mut duplicate = invalid["draft"]["references"][0].clone();
+            if !duplicate_id {
+                duplicate["id"] = serde_json::json!("ref-2");
+                duplicate["canonicalUrl"] = serde_json::json!("https://GITHUB.com:443/example/project/issues/42/");
+                invalid["draft"]["phases"][0]["referenceIds"] = serde_json::json!(["ref-1", "ref-2"]);
+            }
+            invalid["draft"]["references"].as_array_mut().unwrap().push(duplicate);
+            assert!(validate(&invalid).is_err());
+        }
+        let mut ranged = pending.clone();
+        ranged["draft"]["references"][0]["path"] = serde_json::json!("src/main.ts");
+        ranged["draft"]["references"][0]["range"] = serde_json::json!({"startLine": 1, "endLine": 2});
+        assert!(validate(&ranged).is_ok());
+        for range in [
+            serde_json::json!({"startLine": 2, "endLine": 1}),
+            serde_json::json!({"startLine": 0, "endLine": 2}),
+            serde_json::json!({"startLine": 1.5, "endLine": 2}),
+            serde_json::json!({"startLine": 1, "endLine": 2, "unknown": true}),
+        ] {
+            ranged["draft"]["references"][0]["range"] = range;
+            assert!(validate(&ranged).is_err());
+        }
+    }
+
+    #[test]
+    fn normalize_notes_response_preserves_expected_non_success_outcomes() {
+        for (status, body) in [
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "conflict", "snapshot": { "revision": 2 } }),
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({ "status": "missing" }),
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": { "path": "$", "message": "invalid request body" }
+                }),
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": { "path": "$", "message": "malformed JSON request body" }
+                }),
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": {
+                        "path": "phases[0].roadmapEvents[0].type",
+                        "message": "privileged roadmap events require their dedicated authority path"
+                    }
+                }),
+            ),
+            (
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": {
+                        "path": "$",
+                        "message": "notes request body exceeds 1048576 bytes"
+                    }
+                }),
+            ),
+        ] {
+            assert_eq!(
+                normalize_notes_response(status, body.clone()).unwrap(),
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_notes_response_rejects_untyped_server_failures() {
+        let error = normalize_notes_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "status": "error", "message": "notes request failed" }),
+        )
+        .unwrap_err();
+        assert_eq!(error, "notes request failed");
+    }
+
+    #[test]
+    fn roadmap_reminder_notification_is_fixed_private_and_uses_at_most_one_platform_sound() {
+        let muted = roadmap_reminder_notification_spec(false);
+        assert_eq!(muted.title, "Roadmap reminder due");
+        assert_eq!(muted.body, "Open Supah Coder to review it.");
+        assert_eq!(muted.sound, None);
+
+        let audible = roadmap_reminder_notification_spec(true);
+        assert_eq!(audible.title, muted.title);
+        assert_eq!(audible.body, muted.body);
+        assert_eq!(audible.sound, Some(roadmap_reminder_sound()));
+        #[cfg(target_os = "windows")]
+        assert_eq!(audible.sound, Some("Mail"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(audible.sound, Some("Submarine"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(audible.sound, Some("message-new-instant"));
+    }
+
+    #[test]
+    fn notification_availability_maps_enabled_disabled_and_unknown_without_drift() {
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Enabled),
+            RoadmapReminderNotificationPermission::Granted
+        );
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Disabled),
+            RoadmapReminderNotificationPermission::Denied
+        );
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Unknown),
+            RoadmapReminderNotificationPermission::Unavailable
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Granted).unwrap(),
+            serde_json::json!("granted")
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Denied).unwrap(),
+            serde_json::json!("denied")
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Unavailable).unwrap(),
+            serde_json::json!("unavailable")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_toast_setting_maps_enabled_disabled_and_unknown() {
+        use windows::UI::Notifications::NotificationSetting;
+
+        assert_eq!(
+            windows_notification_signal(Some(NotificationSetting::Enabled)),
+            NotificationAvailabilitySignal::Enabled
+        );
+        for setting in [
+            NotificationSetting::DisabledForApplication,
+            NotificationSetting::DisabledForUser,
+            NotificationSetting::DisabledByGroupPolicy,
+            NotificationSetting::DisabledByManifest,
+        ] {
+            assert_eq!(
+                windows_notification_signal(Some(setting)),
+                NotificationAvailabilitySignal::Disabled
+            );
+        }
+        assert_eq!(
+            windows_notification_signal(None),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_authorization_maps_enabled_disabled_and_unknown() {
+        use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSetting};
+
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::Authorized,
+                UNNotificationSetting::Enabled,
+            ),
+            NotificationAvailabilitySignal::Enabled
+        );
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::Denied,
+                UNNotificationSetting::Disabled,
+            ),
+            NotificationAvailabilitySignal::Disabled
+        );
+        assert_eq!(
+            macos_notification_state(
+                UNAuthorizationStatus::NotDetermined,
+                UNNotificationSetting::NotSupported,
+            ),
+            MacosNotificationState::NotDetermined
+        );
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::NotDetermined,
+                UNNotificationSetting::NotSupported,
+            ),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_policy_reports_unavailable_instead_of_granted() {
+        assert_eq!(
+            platform_notification_signal("com.ggcoder.app"),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[test]
+    fn reminder_proxy_preserves_only_route_typed_outcomes() {
+        let reserved = r#"{"status":"reserved","leaseToken":"lease-1"}"#;
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                reserved,
+                &["reserved", "deferred", "none"],
+            )
+            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(reserved).unwrap()
+        );
+        let denied = r#"{"status":"wrong-session"}"#;
+        assert_eq!(
+            normalize_reminder_response(reqwest::StatusCode::OK, denied, &["ok", "wrong-session"],)
+                .unwrap(),
+            serde_json::json!({ "status": "wrong-session" })
+        );
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                r#"{"status":"released"}"#,
+                &["reserved", "deferred", "none"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
+    }
+
+    #[test]
+    fn reminder_proxy_rejects_malformed_and_ambiguous_responses() {
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::BAD_GATEWAY,
+                "not json",
+                &["reserved"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                r#"{"status":"maybe"}"#,
+                &["reserved"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
+    }
+
+    #[test]
+    fn prompt_proxy_preserves_direct_and_queued_sidecar_202_results() {
+        assert_eq!(
+            prompt_proxy_result(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"queued":false,"count":0}"#,
+            ),
+            Ok(PromptSubmissionResult {
+                queued: false,
+                count: 0,
+                queue_id: None,
+            })
+        );
+        assert_eq!(
+            prompt_proxy_result(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"queued":true,"count":2,"queueId":"q19"}"#,
+            ),
+            Ok(PromptSubmissionResult {
+                queued: true,
+                count: 2,
+                queue_id: Some("q19".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_proxy_preserves_only_known_pre_execution_rejections() {
+        for (status, code) in [(400, "invalid_programmatic_selection"), (409, "programmatic_execution_busy"), (403, "programmatic_execution_plan_mode")] {
+            let body = serde_json::json!({"error": code, "message": "Wait for the current run.", "history": "private", "token": "private"}).to_string();
+            let failure = prompt_proxy_result(reqwest::StatusCode::from_u16(status).unwrap(), &body).unwrap_err();
+            assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
+                "category": "rejected", "code": code, "message": "Wait for the current run."
+            }));
+        }
+        let body = serde_json::json!({"error": "programmatic_execution_busy", "message": "x".repeat(257)}).to_string();
+        let failure = parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, &body).unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap()["message"], "Opportunity run rejected before execution. Refresh the report before retrying.");
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::OK, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"programmatic_execution_busy","message":"Wait"}"#), Err(PromptSubmissionFailure::Unknown(_))));
+    }
+
+    #[test]
+    fn prompt_proxy_keeps_lost_and_truncated_responses_unknown_without_retry() {
+        use std::io::{Read, Write};
+
+        for truncated in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /prompt HTTP/1.1"));
+                if truncated {
+                    // Even a known rejection code is uncertain if reading its body fails.
+                    stream.write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{\"error\":\"programmatic_execution_busy\"}").unwrap();
+                }
+                drop(stream);
+                listener
+            });
+            let client = http_client_builder().timeout(std::time::Duration::from_secs(5)).build().unwrap();
+            let result = tauri::async_runtime::block_on(post_sidecar_prompt(
+                &client, &format!("http://{address}/prompt"), "test-session",
+                "Run selected opportunity".to_string(), None, None,
+            ));
+            assert!(matches!(result, Err(PromptSubmissionFailure::Unknown(_))));
+            let listener = server.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        }
+    }
+
+    #[test]
+    fn prompt_proxy_rejects_malformed_success_shapes() {
+        for body in [
+            r#"{"accepted":true}"#,
+            r#"{"queued":true,"count":0}"#,
+            r#"{"queued":false,"count":1}"#,
+            r#"{"queued":true,"count":1}"#,
+            r#"{"queued":true,"count":1,"queueId":""}"#,
+            r#"{"queued":true,"count":1,"queueId":"q0"}"#,
+            r#"{"queued":true,"count":1,"queueId":"q1\n"}"#,
+            r#"{"queued":true,"count":1,"queueId":1}"#,
+            r#"{"queued":true,"count":1,"queueId":null}"#,
+            r#"{"queued":true,"count":0,"queueId":"q1"}"#,
+            r#"{"queued":true,"count":1.5,"queueId":"q1"}"#,
+            r#"{"queued":false,"count":0,"queueId":"q1"}"#,
+            r#"{"queued":false,"count":0,"queueId":null}"#,
+        ] {
+            assert_eq!(
+                prompt_proxy_result(reqwest::StatusCode::ACCEPTED, body),
+                Err(PromptSubmissionFailure::Unknown("invalid prompt submission response".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_proxy_rejects_sidecar_400_409_and_500_with_backend_text() {
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":"empty prompt"}"#,
+                "empty prompt",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"configuration refresh in progress"}"#,
+                "configuration refresh in progress",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"provider exploded"}"#,
+                "provider exploded",
+            ),
+        ] {
+            assert_eq!(prompt_proxy_result(status, body), Err(PromptSubmissionFailure::Unknown(expected.to_string())));
+        }
+    }
+
+    #[test]
+    fn ask_user_response_rejects_mocked_http_409() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /ask/expired HTTP/1.1"));
+            let body = r#"{"error":"no question is awaiting an answer"}"#;
+            write!(stream, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let result = tauri::async_runtime::block_on(async {
+            let response = http_client_builder().build().unwrap()
+                .post(format!("http://{address}/ask/expired"))
+                .send().await.unwrap();
+            ask_user_response(response).await
+        });
+        server.join().unwrap();
+        assert_eq!(result, Err("no question is awaiting an answer".to_string()));
+    }
+
+    #[test]
+    fn ask_user_response_requires_successful_acknowledgement() {
+        assert_eq!(
+            parse_ask_user_response(reqwest::StatusCode::CONFLICT, r#"{"error":"no question is awaiting an answer"}"#),
+            Err("no question is awaiting an answer".to_string())
+        );
+        for body in ["{}", "null", r#"{"ok":false}"#, r#"{"ok":true,"error":"refused"}"#] {
+            assert!(parse_ask_user_response(reqwest::StatusCode::OK, body).is_err());
+        }
+        assert_eq!(
+            parse_ask_user_response(reqwest::StatusCode::OK, r#"{"ok":true}"#),
+            Ok(serde_json::json!({ "ok": true }))
+        );
+    }
+
+    #[test]
+    fn sidecar_json_response_rejects_non_success_statuses() {
+        assert_eq!(
+            parse_sidecar_json_response(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"session mutation in progress"}"#,
+            ),
+            Err("session mutation in progress".to_string())
+        );
+        assert_eq!(
+            parse_sidecar_json_response(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"accepted":true,"operationId":"operation-1"}"#,
+            ),
+            Ok(serde_json::json!({
+                "accepted": true,
+                "operationId": "operation-1"
+            }))
+        );
+    }
+
+    #[test]
+    fn task_proxies_reject_non_success_list_and_delete_responses() {
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"task plan changed"}"#,
+                "task plan changed",
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"message":"task store unavailable"}"#,
+                "task store unavailable",
+            ),
+        ] {
+            assert_eq!(
+                parse_sidecar_json_response(status, body),
+                Err(expected.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mutation_response_preserves_structured_recovery_conflicts() {
+        let stale = parse_plan_mutation_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":"stale-plan-checkpoint","pendingPlanReview":{"checkpointId":"checkpoint-2","generation":2,"planPath":"/plans/latest.md","content":"latest","contentHash":"hash","state":"pending-review","reviewStatus":"ready","feedback":null}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stale).unwrap(),
+            serde_json::json!({
+                "error": "stale-plan-checkpoint",
+                "pendingPlanReview": {
+                    "checkpointId": "checkpoint-2",
+                    "generation": 2,
+                    "planPath": "/plans/latest.md",
+                    "content": "latest",
+                    "contentHash": "hash",
+                    "state": "pending-review",
+                    "reviewStatus": "ready",
+                    "feedback": null
+                }
+            })
+        );
+
+        let checkpoint_failure = parse_plan_mutation_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"status":"failed","operationId":"operation-7","code":"checkpoint-write-failed","message":"Could not persist the phase checkpoint.","guidance":"Fix Project Notes permissions, then retry.","retryable":true,"phaseId":"phase-1"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&checkpoint_failure).unwrap(),
+            serde_json::json!({
+                "status": "failed",
+                "operationId": "operation-7",
+                "code": "checkpoint-write-failed",
+                "message": "Could not persist the phase checkpoint.",
+                "guidance": "Fix Project Notes permissions, then retry.",
+                "retryable": true,
+                "phaseId": "phase-1"
+            })
+        );
+    }
+
+    #[test]
+    fn plan_mutation_response_preserves_structured_bad_requests() {
+        assert_eq!(
+            parse_plan_mutation_response(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":"invalid plan revision body"}"#,
+            ),
+            Err(r#"{"error":"invalid plan revision body"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn continuation_handoff_response_is_strict_and_preserves_errors() {
+        let valid = parse_continuation_handoff_response(
+            reqwest::StatusCode::OK,
+            r###"{"version":1,"prompt":"## Objective\nContinue","preparedId":"prepared-1","source":{"conversationId":"conversation-1","sessionId":"session-1","leafId":null,"fingerprint":"revision"},"expiresAt":1234}"###,
+        )
+        .unwrap();
+        assert_eq!(valid.version, 1);
+        assert_eq!(valid.prompt, "## Objective\nContinue");
+
+        for malformed in [
+            r#"{"version":2,"prompt":"Continue"}"#,
+            r#"{"version":1,"prompt":""}"#,
+            r#"{"version":1,"prompt":"Continue","extra":true}"#,
+            r#"{"version":1}"#,
+            "not-json",
+        ] {
+            assert_eq!(
+                parse_continuation_handoff_response(reqwest::StatusCode::OK, malformed),
+                Err("invalid continuation-handoff response".to_string())
+            );
+        }
+
+        assert_eq!(
+            parse_continuation_handoff_response(
+                reqwest::StatusCode::BAD_GATEWAY,
+                r#"{"error":"provider unavailable"}"#,
+            ),
+            Err("provider unavailable".to_string())
+        );
+    }
+
+    #[test]
+    fn new_session_response_forwards_operation_identity() {
+        assert_eq!(
+            parse_new_session_response(
+                reqwest::StatusCode::OK,
+                r#"{"ok":true,"operationId":"operation-42"}"#,
+            ),
+            Ok(serde_json::json!({ "operationId": "operation-42" }))
+        );
+        assert_eq!(
+            parse_new_session_response(reqwest::StatusCode::OK, r#"{"ok":true}"#),
+            Err("invalid new-session response: missing operationId".to_string())
+        );
+        let rejected = parse_new_session_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":"session is already resetting"}"#,
+        )
+        .unwrap_err();
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(
+            rejected,
+            serde_json::json!({
+                "kind": "creation-rejected",
+                "status": 409,
+                "message": "session is already resetting",
+            })
+        );
+        let unknown = parse_new_session_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"storage failed after reset"}"#,
+        )
+        .unwrap_err();
+        let unknown: serde_json::Value = serde_json::from_str(&unknown).unwrap();
+        assert_eq!(
+            unknown,
+            serde_json::json!({
+                "kind": "outcome-unknown",
+                "status": 500,
+                "message": "storage failed after reset",
+            })
+        );
+    }
+
+    #[test]
+    fn new_session_error_preserves_json_error_text() {
+        assert_eq!(
+            sidecar_error_text(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"message":"session is already resetting"}"#,
+            ),
+            "session is already resetting"
+        );
+        assert_eq!(
+            sidecar_error_text(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":{"code":"reset_failed","retryable":true}}"#,
+            ),
+            r#"{"error":{"code":"reset_failed","retryable":true}}"#
+        );
+    }
+
+    #[test]
+    fn cancel_response_accepts_acknowledged_success() {
+        let body = serde_json::json!({ "cancelled": true, "runState": "idle" });
+        assert_eq!(
+            parse_cancel_response(reqwest::StatusCode::OK, body.clone()).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn cancel_response_rejects_typed_non_success_body() {
+        let body = serde_json::json!({
+            "error": "cancel_failed",
+            "reason": "timeout",
+            "runState": "running"
+        });
+        let error = parse_cancel_response(reqwest::StatusCode::GATEWAY_TIMEOUT, body).unwrap_err();
+        assert!(error.contains("cancel_failed"));
+        assert!(error.contains("runState"));
+        assert!(error.contains("running"));
+    }
+
+    #[test]
+    fn daemon_respawns_with_bounded_exponential_backoff() {
+        let delays: Vec<u64> = (1..=DAEMON_MAX_RESPAWNS)
+            .map(|attempt| daemon_respawn_delay(attempt).unwrap().as_secs())
+            .collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn phase_reconciliation_native_boundary_rejects_malformed_requests() {
+        let repository = serde_json::json!({
+            "projectKey": "c:/project",
+            "identityHash": "a".repeat(64),
+            "rootCommit": "b".repeat(40)
+        });
+        let request = serde_json::json!({
+            "version": 3,
+            "action": "reconcile-execution",
+            "phaseId": "phase-1",
+            "expectedProjectKey": "c:/project",
+            "expectedRevision": 4,
+            "operationId": "reconcile-1",
+            "repository": repository.clone(),
+            "plan": {
+                "planId": "plan-1",
+                "contentHash": "c".repeat(64),
+                "snapshotPath": ".gg/plans/plan-1.md",
+                "approvedAt": "2026-08-31T10:00:00.000Z",
+                "approvedRevision": 3,
+                "baseCommit": "b".repeat(40)
+            },
+            "workspace": {
+                "version": 1,
+                "repository": repository.clone(),
+                "headCommit": "d".repeat(40),
+                "worktreeDigest": "e".repeat(64),
+                "clean": true
+            }
+        });
+        assert_eq!(validate_public_phase_binding_request(&request), Ok(()));
+
+        let mut malformed = request.clone();
+        malformed["workspace"]["clean"] = serde_json::json!("yes");
+        assert_eq!(
+            validate_public_phase_binding_request(&malformed),
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        );
+        let mut extra = request;
+        extra["unexpected"] = serde_json::json!(true);
+        assert_eq!(
+            validate_public_phase_binding_request(&extra),
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        );
+    }
+
+    #[test]
+    fn phase_lease_native_boundary_rejects_caller_predecessor_proof() {
+        let mut request = serde_json::json!({
+            "version": 2,
+            "predecessorProof": null
+        });
+        assert_eq!(validate_public_phase_binding_request(&request), Ok(()));
+
+        request["predecessorProof"] = serde_json::json!({
+            "daemonInstanceId": "daemon-a",
+            "processId": 42,
+            "processStartToken": "start-a",
+            "terminatedAt": "2026-08-30T10:00:00.000Z"
+        });
+        assert_eq!(
+            validate_public_phase_binding_request(&request),
+            Err(PHASE_LEASE_PREDECESSOR_PROOF_ERROR.to_string())
+        );
+    }
+
+    #[test]
+    fn phase_lease_native_boundary_rejects_cross_phase_and_extra_fields() {
+        let lease = serde_json::json!({
+            "version": 1,
+            "projectKey": "c:/project",
+            "phaseId": "phase-1",
+            "planId": null,
+            "leaseId": "lease-1",
+            "fence": 1,
+            "holder": {
+                "daemonInstanceId": "daemon-a",
+                "sessionId": "session-a",
+                "sessionPath": null,
+                "processId": 42
+            },
+            "runState": "idle",
+            "acquiredAt": "2026-08-30T10:00:00.000Z",
+            "renewedAt": "2026-08-30T10:00:30.000Z",
+            "expiresAt": "2026-08-30T10:02:30.000Z",
+            "operationId": "acquire-1"
+        });
+        let mut private_lease = lease.clone();
+        private_lease["holder"]["processStartToken"] = serde_json::json!("start-a");
+        assert!(!is_phase_lease(Some(&private_lease)));
+
+        let outcome = serde_json::json!({
+            "status": "inspected",
+            "roadmapRevision": 7,
+            "leaseRevision": 1,
+            "phaseId": "phase-1",
+            "lease": lease
+        });
+        assert!(is_roadmap_typed_outcome(
+            RoadmapTypedResponseKind::PhaseLease,
+            200,
+            &outcome,
+        ));
+
+        let mut mismatch = outcome.clone();
+        mismatch["phaseId"] = serde_json::json!("phase-2");
+        assert!(!is_phase_lease_outcome(&mismatch));
+        let mut extra = outcome;
+        extra["unexpected"] = serde_json::json!(true);
+        assert!(!is_phase_lease_outcome(&extra));
+    }
+
+    #[test]
+    fn supervised_restart_proof_preserves_exact_terminated_identity() {
+        let identity = DaemonProcessIdentity {
+            daemon_instance_id: "daemon-a".into(),
+            process_id: 42,
+            process_start_token: "start-a".into(),
+        };
+        let proof = DaemonPredecessorProof::from_terminated(identity);
+        let value = serde_json::to_value(proof).unwrap();
+        assert_eq!(value["daemonInstanceId"], "daemon-a");
+        assert_eq!(value["processId"], 42);
+        assert_eq!(value["processStartToken"], "start-a");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(value["terminatedAt"].as_str().unwrap()).is_ok()
+        );
+    }
+
+    #[test]
+    fn daemon_crash_loop_opens_circuit_breaker() {
+        assert!(daemon_respawn_delay(0).is_none());
+        assert!(daemon_respawn_delay(DAEMON_MAX_RESPAWNS + 1).is_none());
+    }
+
+    #[test]
+    fn selected_primary_restore_target_makes_window_snapshot_eligible() {
+        let mut targets = HashMap::new();
+        assert!(register_selected_primary_restore_target(
+            &mut targets,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Chat,
+            ChatAgent::Research,
+            "/project",
+            Some("/sessions/one.jsonl"),
+        ));
+
+        let target = restore_target(&targets, "main").expect("primary target registered");
+        assert_eq!(target.mode, WorkspaceMode::Chat);
+        assert_eq!(target.chat_agent, ChatAgent::Research);
+        assert_eq!(target.cwd, "/project");
+        assert_eq!(target.session_path.as_deref(), Some("/sessions/one.jsonl"));
+        assert!(keep_for_snapshot(
+            targets.contains_key("main"),
+            Some(Path::new(&target.cwd)),
+        ));
+    }
+
+    #[test]
+    fn selected_non_primary_restore_target_does_not_change_window_persistence() {
+        let existing = RestoreEntry {
+            mode: WorkspaceMode::Code,
+            chat_agent: ChatAgent::General,
+            cwd: "/existing".into(),
+            session_path: None,
+        };
+        let mut targets = HashMap::from([("main".to_string(), existing)]);
+
+        assert!(!register_selected_primary_restore_target(
+            &mut targets,
+            "main",
+            "secondary",
+            WorkspaceMode::Chat,
+            ChatAgent::Research,
+            "/secondary",
+            Some("/sessions/secondary.jsonl"),
+        ));
+
+        let target = restore_target(&targets, "main").expect("existing target preserved");
+        assert_eq!(target.cwd, "/existing");
+        assert_eq!(target.mode, WorkspaceMode::Code);
+        assert_eq!(target.chat_agent, ChatAgent::General);
+        assert!(target.session_path.is_none());
+    }
+
+    #[test]
+    fn keep_for_snapshot_excludes_only_unselected_picker_windows() {
         let default = Path::new("/home/user");
-        // No project chosen yet → excluded.
-        assert!(!keep_for_snapshot(None, default));
-        // Still on the default boot cwd (picker) → excluded.
-        assert!(!keep_for_snapshot(Some(Path::new("/home/user")), default));
-        // A real project → kept.
-        assert!(keep_for_snapshot(Some(Path::new("/home/user/proj")), default));
+        // Picker session exists at the boot cwd, but no workspace was chosen.
+        assert!(!keep_for_snapshot(false, Some(default)));
+        assert!(!keep_for_snapshot(false, None));
+        // Explicitly choosing that exact directory must still survive restart.
+        assert!(keep_for_snapshot(true, Some(default)));
+        assert!(keep_for_snapshot(true, Some(Path::new("/home/user/proj"))));
     }
 
     #[test]
@@ -3573,6 +12604,8 @@ mod tests {
         let ws = Workspace {
             windows: vec![
                 WorkspaceEntry {
+                    mode: WorkspaceMode::Chat,
+                    chat_agent: ChatAgent::Research,
                     cwd: "/p/a".into(),
                     session_path: Some("/s/a.jsonl".into()),
                     x: Some(0),
@@ -3589,24 +12622,70 @@ mod tests {
         let json = serde_json::to_string(&ws).unwrap();
         let back: Workspace = serde_json::from_str(&json).unwrap();
         assert_eq!(ws, back);
+        assert_eq!(back.windows[0].mode, WorkspaceMode::Chat);
+        assert_eq!(back.windows[0].chat_agent, ChatAgent::Research);
+        assert!(json.contains(r#""mode":"chat""#));
+        assert!(json.contains(r#""chatAgent":"research""#));
         // The second entry omits optional fields entirely (skip_serializing_if).
         assert!(!json.contains("\"sessionPath\":null"));
     }
 
     #[test]
-    fn workspace_parses_minimal_entry() {
-        // Forward/backward compat: a bare { cwd } entry still loads.
-        let ws: Workspace =
+    fn workspace_defaults_legacy_and_invalid_modes_to_code() {
+        let legacy: Workspace =
             serde_json::from_str(r#"{ "windows": [{ "cwd": "/p/a" }] }"#).unwrap();
-        assert_eq!(ws.windows.len(), 1);
-        assert_eq!(ws.windows[0].cwd, "/p/a");
-        assert_eq!(ws.windows[0].session_path, None);
+        assert_eq!(legacy.windows[0].mode, WorkspaceMode::Code);
+        assert_eq!(legacy.windows[0].chat_agent, ChatAgent::General);
+
+        let invalid: Workspace =
+            serde_json::from_str(r#"{ "windows": [{ "mode": "future", "cwd": "/p/a" }] }"#)
+                .unwrap();
+        assert_eq!(invalid.windows[0].mode, WorkspaceMode::Code);
+    }
+
+    #[test]
+    fn restore_target_serializes_mode_and_session_path() {
+        let target = RestoreEntry {
+            mode: WorkspaceMode::Chat,
+            chat_agent: ChatAgent::Therapist,
+            cwd: "/p/a".into(),
+            session_path: Some("/s/a.jsonl".into()),
+        };
+        let json = serde_json::to_value(target).unwrap();
+        assert_eq!(json["mode"], "chat");
+        assert_eq!(json["chatAgent"], "therapist");
+        assert_eq!(json["cwd"], "/p/a");
+        assert_eq!(json["sessionPath"], "/s/a.jsonl");
     }
 
     #[test]
     fn empty_or_missing_workspace_is_default() {
         let ws: Workspace = serde_json::from_str("{}").unwrap();
         assert!(ws.windows.is_empty());
+    }
+
+    #[test]
+    fn auth_providers_keep_regional_groups_and_openrouter_last() {
+        let values: Vec<&str> = AUTH_PROVIDERS
+            .iter()
+            .map(|provider| provider.value)
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                "anthropic",
+                "openai",
+                "gemini",
+                "xai",
+                "moonshot",
+                "glm",
+                "minimax",
+                "xiaomi",
+                "deepseek",
+                "sakana",
+                "openrouter",
+            ]
+        );
     }
 
     #[test]
@@ -3624,6 +12703,11 @@ mod tests {
         assert_eq!(
             resolve_apikey_target("moonshot", None),
             Some(("moonshot".to_string(), None)),
+        );
+        // xAI uses the public OpenAI-compatible API with a console.x.ai key.
+        assert_eq!(
+            resolve_apikey_target("xai", None),
+            Some(("xai".to_string(), None)),
         );
     }
 
@@ -3665,7 +12749,7 @@ mod tests {
     #[test]
     fn apply_logout_xiaomi_drops_both_variant_keys() {
         let existing = r#"{ "xiaomi": { "accessToken": "tp", "refreshToken": "", "expiresAt": 1 }, "xiaomi-credits": { "accessToken": "cr", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "xiaomi").unwrap();
+        let out = apply_logout(Some(existing), "xiaomi", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("xiaomi").is_none());
         assert!(v.get("xiaomi-credits").is_none());
@@ -3719,7 +12803,7 @@ mod tests {
     #[test]
     fn apply_logout_removes_provider() {
         let existing = r#"{ "glm": { "accessToken": "k", "refreshToken": "", "expiresAt": 1 }, "openai": { "accessToken": "o", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "glm").unwrap();
+        let out = apply_logout(Some(existing), "glm", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("glm").is_none());
         assert_eq!(v["openai"]["accessToken"], "o");
@@ -3728,15 +12812,51 @@ mod tests {
     #[test]
     fn apply_logout_moonshot_drops_both_keys() {
         let existing = r#"{ "moonshot": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "moonshot-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "moonshot").unwrap();
+        let out = apply_logout(Some(existing), "moonshot", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("moonshot").is_none());
         assert!(v.get("moonshot-oauth").is_none());
     }
 
     #[test]
+    fn apply_logout_xai_drops_both_keys() {
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "xai", None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert!(v.get("xai-oauth").is_none());
+    }
+
+    #[test]
+    fn apply_logout_scoped_to_one_method_keeps_the_other() {
+        // Disconnecting Grok OAuth must leave a configured API key usable, and
+        // dropping a spent API key must not sign the user out of the subscription.
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+
+        let out = apply_logout(Some(existing), "xai", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai-oauth").is_none());
+        assert_eq!(v["xai"]["accessToken"], "key");
+
+        let out = apply_logout(Some(existing), "xai", Some("apikey")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert_eq!(v["xai-oauth"]["accessToken"], "oauth");
+    }
+
+    #[test]
+    fn apply_logout_oauth_only_provider_uses_provider_id_key() {
+        // Anthropic has no distinct OAuth key — its credential IS `anthropic`.
+        let existing =
+            r#"{ "anthropic": { "accessToken": "t", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "anthropic", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("anthropic").is_none());
+    }
+
+    #[test]
     fn apply_logout_missing_file_is_empty_object() {
-        let out = apply_logout(None, "glm").unwrap();
+        let out = apply_logout(None, "glm", None).unwrap();
         assert_eq!(out.trim(), "{}");
     }
 
@@ -3747,6 +12867,61 @@ mod tests {
         // ...even in bundled mode with a present exe dir.
         let got = pick_node(Some("/opt/node".into()), false, Some(Path::new("/app")));
         assert_eq!(got, PathBuf::from("/opt/node"));
+    }
+
+    #[test]
+    fn resolve_project_path_preserves_literal_filenames() {
+        let root = std::env::temp_dir().join(format!(
+            "gg-path-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for name in ["report#Log.md", "report#L12", "my file.md", "README.md", " leading.md"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        std::fs::create_dir(root.join("project%20copy")).unwrap();
+        // Decoys make unintended decoding/truncation observable even when lookup succeeds.
+        std::fs::write(root.join("report"), "wrong").unwrap();
+        std::fs::create_dir(root.join("project copy")).unwrap();
+        for name in ["report#Log.md", "report#L12", "project%20copy", "my file.md", "README.md", " leading.md"] {
+            let expected = strip_extended_prefix(root.join(name).canonicalize().unwrap());
+            assert_eq!(resolve_project_path(&root, name).unwrap(), expected);
+            assert_eq!(resolve_project_path(&root, expected.to_str().unwrap()).unwrap(), expected);
+        }
+        assert!(resolve_project_path(&root, "").is_err());
+        assert!(resolve_project_path(&root, "https://example.com").is_err());
+        assert!(resolve_project_path(&root, "README.md#section").is_err());
+        #[cfg(not(windows))]
+        for name in ["report:12:3", "report?query", " padded "] {
+            std::fs::write(root.join(name), name).unwrap();
+            assert_eq!(resolve_project_path(&root, name).unwrap(), root.join(name).canonicalize().unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strip_extended_prefix_normalizes_windows_canonical_paths() {
+        // canonicalize() always returns the \\?\ form on Windows; nothing else
+        // in the app (discovery, workspace json, the picker) produces it, and
+        // ShellExecute rejects it outright.
+        assert_eq!(
+            strip_extended_prefix(PathBuf::from(r"\\?\C:\Users\dev\proj")),
+            PathBuf::from(r"C:\Users\dev\proj")
+        );
+        assert_eq!(
+            strip_extended_prefix(PathBuf::from(r"\\?\UNC\server\share\proj")),
+            PathBuf::from(r"\\server\share\proj")
+        );
+        // Unprefixed and POSIX paths pass through untouched.
+        assert_eq!(
+            strip_extended_prefix(PathBuf::from(r"C:\Users\dev")),
+            PathBuf::from(r"C:\Users\dev")
+        );
+        assert_eq!(
+            strip_extended_prefix(PathBuf::from("/Users/dev")),
+            PathBuf::from("/Users/dev")
+        );
     }
 
     #[test]
@@ -3803,6 +12978,31 @@ mod tests {
     }
 
     #[test]
+    fn pick_sidecar_bundled_normalizes_windows_resource_paths() {
+        let cases = [
+            (
+                r"\\?\C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+            ),
+            (
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+            ),
+            (
+                r"\\?\UNC\server\share\sidecar\app-sidecar.mjs",
+                r"\\server\share\sidecar\app-sidecar.mjs",
+            ),
+        ];
+
+        for (resource, expected) in cases {
+            assert_eq!(
+                pick_sidecar(None, false, Some(Path::new(resource))),
+                PathBuf::from(expected)
+            );
+        }
+    }
+
+    #[test]
     fn pick_sidecar_bundled_falls_back_without_resource() {
         let got = pick_sidecar(None, false, None);
         assert_eq!(got, workspace_sidecar());
@@ -3829,7 +13029,12 @@ mod tests {
 
     #[test]
     fn pick_cwd_dev_uses_workspace_root() {
-        let got = pick_cwd(None, true, PathBuf::from("/repo"), PathBuf::from("/home/user"));
+        let got = pick_cwd(
+            None,
+            true,
+            PathBuf::from("/repo"),
+            PathBuf::from("/home/user"),
+        );
         assert_eq!(got, PathBuf::from("/repo"));
     }
 
@@ -3863,7 +13068,10 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"data: one\n\ndata: two\n\ndata: par");
         let frames = drain_sse_frames(&mut buf);
-        assert_eq!(frames, vec!["data: one".to_string(), "data: two".to_string()]);
+        assert_eq!(
+            frames,
+            vec!["data: one".to_string(), "data: two".to_string()]
+        );
         // The unterminated "data: par" stays buffered for the next chunk.
         assert_eq!(buf, b"data: par");
     }
@@ -3890,7 +13098,11 @@ mod tests {
             frames.extend(drain_sse_frames(&mut buf));
         }
         assert_eq!(frames, vec![payload.to_string()]);
-        assert!(!frames[0].contains('\u{FFFD}'), "no replacement chars: {:?}", frames[0]);
+        assert!(
+            !frames[0].contains('\u{FFFD}'),
+            "no replacement chars: {:?}",
+            frames[0]
+        );
         assert!(buf.is_empty());
     }
 
@@ -3930,6 +13142,841 @@ mod tests {
     /// A ledger containing the given sidecar pgids.
     fn ledger(pgids: &[i32]) -> HashSet<i32> {
         pgids.iter().copied().collect()
+    }
+
+    #[test]
+    fn native_auth_override_is_debug_only_and_does_not_redirect_workspace() {
+        let root = agent_data_root_for_home(&PathBuf::from("/isolated"), "com.ggcoder.local-fork");
+        let default = root.join("auth.json");
+        let existing = std::env::current_exe().unwrap();
+        assert_eq!(native_auth_file_override(default.clone(), false, Some(existing.clone())).unwrap(), default);
+        assert_eq!(native_auth_file_override(default.clone(), true, Some(existing.clone())).unwrap(), existing);
+        assert_eq!(native_auth_file_override(default.clone(), true, None).unwrap(), default);
+        assert!(native_auth_file_override(default.clone(), true, Some(PathBuf::from("relative.json"))).is_err());
+        assert!(native_auth_file_override(default, true, Some(existing.parent().unwrap().to_path_buf())).is_err());
+        assert_eq!(root, agent_data_root_for_home(&PathBuf::from("/isolated"), "com.ggcoder.local-fork"));
+    }
+
+    #[test]
+    fn identity_data_paths_preserve_production_and_separate_local_fork() {
+        let home = PathBuf::from("/test-home");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+
+        assert_eq!(production_root, home.join(".gg"));
+        assert_eq!(
+            local_root,
+            home.join(".gg")
+                .join("identities")
+                .join("com.ggcoder.local-fork")
+        );
+        assert_ne!(production_root, local_root);
+        assert_eq!(
+            app_settings_path(PRODUCTION_APP_IDENTIFIER),
+            agent_data_root(PRODUCTION_APP_IDENTIFIER).join("gg-app.json")
+        );
+        assert_eq!(
+            auth_file_path("com.ggcoder.local-fork"),
+            agent_data_root("com.ggcoder.local-fork").join("auth.json")
+        );
+        assert_eq!(
+            app_workspace_path("com.ggcoder.local-fork"),
+            agent_data_root("com.ggcoder.local-fork").join("gg-app-workspace.json")
+        );
+    }
+
+    #[test]
+    fn identity_bootstrap_is_once_only_and_preserves_sources_and_targets() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "gg-app-identity-bootstrap-{}-{unique}",
+            std::process::id()
+        ));
+        let legacy_root = home.join(".gg");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        for filename in IDENTITY_BOOTSTRAP_FILES {
+            std::fs::write(legacy_root.join(filename), format!("production-{filename}")).unwrap();
+        }
+
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(local_root.join("settings.json"), "identity-settings").unwrap();
+
+        assert!(bootstrap_identity_data(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(local_root.join("settings.json")).unwrap(),
+            "identity-settings"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local_root.join("auth.json")).unwrap(),
+            "production-auth.json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy_root.join("auth.json")).unwrap(),
+            "production-auth.json"
+        );
+
+        std::fs::write(legacy_root.join("auth.json"), "production-changed").unwrap();
+        std::fs::remove_file(local_root.join("auth.json")).unwrap();
+        assert!(!bootstrap_identity_data(&home, "com.ggcoder.local-fork").unwrap());
+        assert!(!local_root.join("auth.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(legacy_root.join("auth.json")).unwrap(),
+            "production-changed"
+        );
+
+        assert!(!bootstrap_identity_data(&home, PRODUCTION_APP_IDENTIFIER).unwrap());
+        assert!(!legacy_root.join(IDENTITY_BOOTSTRAP_MARKER).exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    const SIGNED_PROGRESS_FIXTURE: &str = r#"{"v":1,"xp":56437,"createdAt":"2026-01-02T03:04:05.000Z","totals":{"prompts":7,"commits":2,"linesShipped":3,"projects":["abc"]},"xpBySource":{"prompts":70,"commits":20,"streakBonus":0},"streak":{"current":2,"best":4,"lastActiveDay":"2026-08-09"},"rolling":{"promptTimes":[1,2],"commitTimes":[],"dayXp":10,"dayKey":"2026-08-09"},"repos":{"abc":{"lastHead":"deadbeef"}},"patchIds":["p1"],"lastEvent":null,"sig":"6ec96988064d1d89c4366ee50257f1a05417f18658f14a5e6f1042f9b4c30f80"}"#;
+
+    fn identity_bootstrap_test_home(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gg-app-{label}-{}-{unique}", std::process::id()))
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_patched_installer_handoff_uses_canonical_launcher_and_revision() {
+        let repo = Path::new(r"C:\repo");
+        let source_revision = "0123456789abcdef0123456789abcdef01234567";
+        let command = local_patched_installer_handoff_command(repo, source_revision);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            Path::new(command.get_program()),
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        );
+        assert_eq!(
+            args,
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                r"C:\repo\gg-app\scripts\launch-local-patched.ps1",
+                "-MetadataPath",
+                r"C:\repo\.gg\local-fixes\latest-installer.json",
+                "-ExpectedVersion",
+                env!("CARGO_PKG_VERSION"),
+                "-ExpectedSourceRevision",
+                source_revision,
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_patched_installer_handoff_requires_revision_echo() {
+        let source_revision = "0123456789abcdef0123456789abcdef01234567";
+        for disposition in ["install-scheduled", "existing-and-verified"] {
+            let stdout = format!(
+                r#"{{"disposition":"{disposition}","expectedVersion":"{}","sourceRevision":"{source_revision}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            );
+            assert_eq!(
+                parse_local_patched_installer_handoff(
+                    stdout.as_bytes(),
+                    env!("CARGO_PKG_VERSION"),
+                    source_revision,
+                )
+                .expect("canonical launcher result"),
+                disposition
+            );
+        }
+        assert!(parse_local_patched_installer_handoff(
+            b"not-json",
+            env!("CARGO_PKG_VERSION"),
+            source_revision,
+        )
+        .is_err());
+        assert!(parse_local_patched_installer_handoff(
+            br#"{"disposition":"unexpected","expectedVersion":"0.53.9","sourceRevision":"0123456789abcdef0123456789abcdef01234567"}"#,
+            env!("CARGO_PKG_VERSION"),
+            source_revision,
+        )
+        .is_err());
+        let mismatched = format!(
+            r#"{{"disposition":"install-scheduled","expectedVersion":"{}","sourceRevision":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            "a".repeat(40),
+        );
+        assert!(parse_local_patched_installer_handoff(
+            mismatched.as_bytes(),
+            env!("CARGO_PKG_VERSION"),
+            source_revision,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn local_patched_update_notice_requires_a_real_source_difference() {
+        let full_sha = "0123456789abcdef0123456789abcdef01234567";
+        assert!(!local_patched_update_available(full_sha, full_sha, true));
+        assert!(!local_patched_update_available("0123456", full_sha, true));
+        assert!(local_patched_update_available(
+            "abcdef0123456789abcdef0123456789abcdef01",
+            full_sha,
+            true
+        ));
+        assert!(local_patched_update_available(full_sha, full_sha, false));
+        assert!(!local_patched_update_available("unknown", full_sha, true));
+    }
+
+    #[test]
+    fn project_root_write_preserves_unrelated_app_settings() {
+        let home = identity_bootstrap_test_home("app-settings-merge");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("gg-app.json");
+        std::fs::write(
+            &path,
+            r#"{"projectsRoot":"old","projectRoots":["extra"],"hiddenProjects":["hidden"],"autopilot":true,"future":{"keep":1}}"#,
+        )
+        .unwrap();
+
+        write_projects_root(&path, r"C:\ggcoder-projects").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["projectsRoot"], r"C:\ggcoder-projects");
+        assert_eq!(saved["projectRoots"], serde_json::json!(["extra"]));
+        assert_eq!(saved["hiddenProjects"], serde_json::json!(["hidden"]));
+        assert_eq!(saved["autopilot"], true);
+        assert_eq!(saved["future"], serde_json::json!({ "keep": 1 }));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_session_bootstrap_merges_history_without_overwriting_local_files() {
+        let home = identity_bootstrap_test_home("identity-session-bootstrap-v3");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        let production_sessions = production_root.join("sessions/project");
+        let local_sessions = local_root.join("sessions/project");
+        std::fs::create_dir_all(&production_sessions).unwrap();
+        std::fs::create_dir_all(&local_sessions).unwrap();
+        std::fs::write(production_sessions.join("shared.jsonl"), b"production").unwrap();
+        std::fs::write(production_sessions.join("missing.jsonl"), b"imported").unwrap();
+        std::fs::write(local_sessions.join("shared.jsonl"), b"local").unwrap();
+        std::fs::create_dir_all(production_root.join("chat-sessions/general/project")).unwrap();
+        std::fs::write(
+            production_root.join("chat-sessions/general/project/chat.jsonl"),
+            b"chat",
+        )
+        .unwrap();
+        std::fs::write(production_root.join("gg-app-workspace.json"), b"workspace").unwrap();
+
+        assert!(bootstrap_identity_sessions(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read(local_sessions.join("shared.jsonl")).unwrap(),
+            b"local"
+        );
+        assert_eq!(
+            std::fs::read(local_sessions.join("missing.jsonl")).unwrap(),
+            b"imported"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join("chat-sessions/general/project/chat.jsonl")).unwrap(),
+            b"chat"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join("gg-app-workspace.json")).unwrap(),
+            b"workspace"
+        );
+        assert!(!bootstrap_identity_sessions(&home, "com.ggcoder.local-fork").unwrap());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn restoring_a_concrete_session_replaces_a_fresh_runtime() {
+        let mut registry = PaneRegistry::default();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("project"),
+            None,
+        );
+        let pane = registry
+            .get_mut("main")
+            .and_then(|panes| panes.get_mut(PRIMARY_PANE_ID))
+            .unwrap();
+        pane.session_id = Some("fresh-runtime".to_string());
+
+        let (generation, should_launch, replaced) = restore_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("project"),
+            Some("saved-session.jsonl".to_string()),
+        )
+        .unwrap();
+        assert!(should_launch);
+        assert_eq!(replaced.as_deref(), Some("fresh-runtime"));
+        let restored = &registry["main"][PRIMARY_PANE_ID];
+        assert_eq!(restored.generation, generation);
+        assert_eq!(
+            restored.session_path.as_deref(),
+            Some("saved-session.jsonl")
+        );
+        assert!(restored.session_id.is_none());
+    }
+
+    #[test]
+    fn progress_signature_validation_matches_typescript_store() {
+        validate_progress_source(SIGNED_PROGRESS_FIXTURE.as_bytes()).unwrap();
+        let tampered = SIGNED_PROGRESS_FIXTURE.replace("\"xp\":56437", "\"xp\":56438");
+        assert!(validate_progress_source(tampered.as_bytes()).is_err());
+        assert_eq!(
+            stable_json(&serde_json::json!(1e20)).unwrap(),
+            "100000000000000000000"
+        );
+        assert_eq!(stable_json(&serde_json::json!(1e-6)).unwrap(), "0.000001");
+        assert_eq!(stable_json(&serde_json::json!(-0.0)).unwrap(), "0");
+        assert_eq!(
+            stable_json(&serde_json::json!({ "\u{e000}": 1, "\u{10000}": 2 })).unwrap(),
+            "{\"𐀀\":2,\"\":1}"
+        );
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_preserves_then_seeds_once_without_touching_production() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        let production_path = production_root.join(PROGRESS_FILE);
+        let local_path = local_root.join(PROGRESS_FILE);
+        let local_backup_path = local_root.join(PROGRESS_BACKUP_FILE);
+        std::fs::write(&production_path, SIGNED_PROGRESS_FIXTURE).unwrap();
+        std::fs::write(&local_path, b"local-progress-before-v2").unwrap();
+        std::fs::write(&local_backup_path, b"local-backup-before-v2").unwrap();
+        let production_before = std::fs::read(&production_path).unwrap();
+
+        assert!(bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read(local_root.join("progress.json.pre-v2")).unwrap(),
+            b"local-progress-before-v2"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join("progress.backup.json.pre-v2")).unwrap(),
+            b"local-backup-before-v2"
+        );
+        assert_eq!(std::fs::read(&local_path).unwrap(), production_before);
+        assert_eq!(
+            std::fs::read(&local_backup_path).unwrap(),
+            production_before
+        );
+        assert_eq!(
+            std::fs::read(local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER)).unwrap(),
+            b"v2\n"
+        );
+        assert_eq!(std::fs::read(&production_path).unwrap(), production_before);
+
+        std::fs::write(&local_path, b"identity-progress-after-v2").unwrap();
+        assert!(!bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read(&local_path).unwrap(),
+            b"identity-progress-after-v2"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join("progress.json.pre-v2")).unwrap(),
+            b"local-progress-before-v2"
+        );
+        assert_eq!(std::fs::read(&production_path).unwrap(), production_before);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_fails_closed_on_invalid_production_progress() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-invalid");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        let production_path = production_root.join(PROGRESS_FILE);
+        let local_path = local_root.join(PROGRESS_FILE);
+        let local_backup_path = local_root.join(PROGRESS_BACKUP_FILE);
+        let invalid_source = SIGNED_PROGRESS_FIXTURE.replace("\"xp\":56437", "\"xp\":999999");
+        std::fs::write(&production_path, invalid_source.as_bytes()).unwrap();
+        std::fs::write(&local_path, b"local-progress-unchanged").unwrap();
+        std::fs::write(&local_backup_path, b"local-backup-unchanged").unwrap();
+
+        let error =
+            bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap_err();
+        assert!(error.contains("signature is invalid"));
+        assert_eq!(
+            std::fs::read(&local_path).unwrap(),
+            b"local-progress-unchanged"
+        );
+        assert_eq!(
+            std::fs::read(&local_backup_path).unwrap(),
+            b"local-backup-unchanged"
+        );
+        assert!(!local_root.join("progress.json.pre-v2").exists());
+        assert!(!local_root.join("progress.backup.json.pre-v2").exists());
+        assert!(!local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).exists());
+        assert_eq!(
+            std::fs::read(&production_path).unwrap(),
+            invalid_source.as_bytes()
+        );
+
+        assert!(!bootstrap_identity_rank_progress_v2(&home, PRODUCTION_APP_IDENTIFIER).unwrap());
+        assert!(!production_root
+            .join(IDENTITY_RANK_BOOTSTRAP_MARKER)
+            .exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_uses_only_a_valid_production_backup() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-fallback");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        let invalid_main = SIGNED_PROGRESS_FIXTURE.replace("\"xp\":56437", "\"xp\":7");
+        let production_path = production_root.join(PROGRESS_FILE);
+        let production_backup_path = production_root.join(PROGRESS_BACKUP_FILE);
+        std::fs::write(&production_path, invalid_main.as_bytes()).unwrap();
+        std::fs::write(&production_backup_path, SIGNED_PROGRESS_FIXTURE).unwrap();
+        std::fs::write(local_root.join(PROGRESS_FILE), b"local-progress-before-v2").unwrap();
+
+        assert!(bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+            SIGNED_PROGRESS_FIXTURE.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(&production_path).unwrap(),
+            invalid_main.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(&production_backup_path).unwrap(),
+            SIGNED_PROGRESS_FIXTURE.as_bytes()
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_prefers_a_valid_primary_over_backup() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-primary");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        let primary = format!("\n{SIGNED_PROGRESS_FIXTURE}\n");
+        std::fs::write(production_root.join(PROGRESS_FILE), primary.as_bytes()).unwrap();
+        std::fs::write(
+            production_root.join(PROGRESS_BACKUP_FILE),
+            SIGNED_PROGRESS_FIXTURE,
+        )
+        .unwrap();
+
+        assert!(bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+            primary.as_bytes()
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_rejects_malformed_and_unsigned_sources() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-malformed");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(production_root.join(PROGRESS_FILE), b"{not-json").unwrap();
+        std::fs::write(
+            production_root.join(PROGRESS_BACKUP_FILE),
+            br#"{"v":1,"xp":1}"#,
+        )
+        .unwrap();
+        std::fs::write(local_root.join(PROGRESS_FILE), b"local-primary").unwrap();
+        std::fs::write(local_root.join(PROGRESS_BACKUP_FILE), b"local-backup").unwrap();
+
+        let error =
+            bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap_err();
+        assert!(error.contains("not valid JSON"));
+        assert!(error.contains("invalid shape"));
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+            b"local-primary"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_BACKUP_FILE)).unwrap(),
+            b"local-backup"
+        );
+        assert!(!local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_rolls_back_injected_partial_failures() {
+        for phase in [
+            "after-primary-backup",
+            "after-primary-seed",
+            "before-marker",
+        ] {
+            let home = identity_bootstrap_test_home(&format!(
+                "identity-rank-bootstrap-v2-fault-{}",
+                phase.replace('-', "_")
+            ));
+            let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+            let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+            std::fs::create_dir_all(&production_root).unwrap();
+            std::fs::create_dir_all(&local_root).unwrap();
+            std::fs::write(production_root.join(PROGRESS_FILE), SIGNED_PROGRESS_FIXTURE).unwrap();
+            std::fs::write(local_root.join(PROGRESS_FILE), b"local-primary").unwrap();
+            std::fs::write(local_root.join(PROGRESS_BACKUP_FILE), b"local-backup").unwrap();
+
+            let error = bootstrap_identity_rank_progress_v2_with_fault(
+                &home,
+                "com.ggcoder.local-fork",
+                |boundary| {
+                    if boundary == phase {
+                        Err(format!("injected failure at {phase}"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("injected failure"));
+            assert_eq!(
+                std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+                b"local-primary",
+                "primary changed after fault at {phase}"
+            );
+            assert_eq!(
+                std::fs::read(local_root.join(PROGRESS_BACKUP_FILE)).unwrap(),
+                b"local-backup",
+                "backup changed after fault at {phase}"
+            );
+            assert_eq!(
+                std::fs::read(local_root.join("progress.json.pre-v2")).unwrap(),
+                b"local-primary"
+            );
+            if phase == "after-primary-backup" {
+                assert!(!local_root.join("progress.backup.json.pre-v2").exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(local_root.join("progress.backup.json.pre-v2")).unwrap(),
+                    b"local-backup"
+                );
+            }
+            assert!(!local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).exists());
+
+            assert!(
+                bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap(),
+                "retry did not complete after fault at {phase}"
+            );
+            assert_eq!(
+                std::fs::read(local_root.join("progress.json.pre-v2")).unwrap(),
+                b"local-primary"
+            );
+            assert_eq!(
+                std::fs::read(local_root.join("progress.backup.json.pre-v2")).unwrap(),
+                b"local-backup"
+            );
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_directory_swap_cannot_touch_alias_target() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-directory-swap");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        let detached_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork-detached");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(production_root.join(PROGRESS_FILE), SIGNED_PROGRESS_FIXTURE).unwrap();
+        std::fs::write(local_root.join(PROGRESS_FILE), b"local-primary").unwrap();
+        std::fs::write(local_root.join(PROGRESS_BACKUP_FILE), b"local-backup").unwrap();
+        let mut swap_completed = false;
+        let mut swap_blocked = false;
+
+        assert!(bootstrap_identity_rank_progress_v2_with_fault(
+            &home,
+            "com.ggcoder.local-fork",
+            |boundary| {
+                if boundary != "after-source-validation" {
+                    return Ok(());
+                }
+                match std::fs::rename(&local_root, &detached_root) {
+                    Ok(()) => {
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(&production_root, &local_root).unwrap();
+                        #[cfg(windows)]
+                        assert!(Command::new("cmd")
+                            .arg("/C")
+                            .arg("mklink")
+                            .arg("/J")
+                            .arg(&local_root)
+                            .arg(&production_root)
+                            .status()
+                            .is_ok_and(|status| status.success()));
+                        swap_completed = true;
+                    }
+                    Err(_) => swap_blocked = true,
+                }
+                Ok(())
+            },
+        )
+        .unwrap());
+
+        #[cfg(unix)]
+        assert!(
+            swap_completed,
+            "directory swap should exercise the bound handle"
+        );
+        #[cfg(windows)]
+        assert!(
+            swap_blocked,
+            "open directory handles must block junction swaps"
+        );
+        assert_eq!(
+            std::fs::read(production_root.join(PROGRESS_FILE)).unwrap(),
+            SIGNED_PROGRESS_FIXTURE.as_bytes()
+        );
+        assert!(!production_root
+            .join(IDENTITY_RANK_BOOTSTRAP_MARKER)
+            .exists());
+        if swap_completed {
+            assert!(detached_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).is_file());
+            assert_eq!(
+                std::fs::read(detached_root.join("progress.json.pre-v2")).unwrap(),
+                b"local-primary"
+            );
+            #[cfg(unix)]
+            std::fs::remove_file(&local_root).unwrap();
+            #[cfg(windows)]
+            std::fs::remove_dir(&local_root).unwrap();
+        } else {
+            assert!(local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER).is_file());
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_rejects_stale_backups_and_markers() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-stale");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(production_root.join(PROGRESS_FILE), SIGNED_PROGRESS_FIXTURE).unwrap();
+        std::fs::write(local_root.join(PROGRESS_FILE), b"current-local").unwrap();
+        std::fs::write(local_root.join("progress.json.pre-v2"), b"stale-local").unwrap();
+
+        let error =
+            bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap_err();
+        assert!(error.contains("does not match current identity state"));
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+            b"current-local"
+        );
+
+        std::fs::remove_file(local_root.join("progress.json.pre-v2")).unwrap();
+        std::fs::write(
+            local_root.join(IDENTITY_RANK_BOOTSTRAP_MARKER),
+            b"incomplete",
+        )
+        .unwrap();
+        let error =
+            bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap_err();
+        assert!(error.contains("marker has invalid contents"));
+        assert_eq!(
+            std::fs::read(local_root.join(PROGRESS_FILE)).unwrap(),
+            b"current-local"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_serializes_concurrent_attempts() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-concurrent");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(production_root.join(PROGRESS_FILE), SIGNED_PROGRESS_FIXTURE).unwrap();
+        std::fs::write(local_root.join(PROGRESS_FILE), b"local-progress-before-v2").unwrap();
+        std::fs::write(
+            local_root.join(PROGRESS_BACKUP_FILE),
+            b"local-backup-before-v2",
+        )
+        .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let home = home.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    bootstrap_identity_rank_progress_v2(&home, "com.ggcoder.local-fork").unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let mut outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        outcomes.sort_unstable();
+
+        assert_eq!(outcomes, vec![false, true]);
+        assert_eq!(
+            std::fs::read(local_root.join("progress.json.pre-v2")).unwrap(),
+            b"local-progress-before-v2"
+        );
+        assert_eq!(
+            std::fs::read(local_root.join("progress.backup.json.pre-v2")).unwrap(),
+            b"local-backup-before-v2"
+        );
+        assert!(local_root.join(IDENTITY_RANK_BOOTSTRAP_LOCK).is_file());
+        let dirs =
+            open_identity_rank_bootstrap_dirs(&production_root, "com.ggcoder.local-fork").unwrap();
+        let recovered_lock = acquire_identity_progress_lock(&dirs.identity, &local_root).unwrap();
+        drop(recovered_lock);
+        drop(dirs);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn identity_rank_bootstrap_v2_rejects_non_isolated_identifier_paths() {
+        let home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-path");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        std::fs::create_dir_all(&production_root).unwrap();
+        std::fs::write(production_root.join(PROGRESS_FILE), SIGNED_PROGRESS_FIXTURE).unwrap();
+
+        let error = bootstrap_identity_rank_progress_v2(&home, "../escape").unwrap_err();
+        assert!(error.contains("invalid non-production identity"));
+        assert!(!home.join(".gg").join("escape").exists());
+
+        let first_identity = agent_data_root_for_home(&home, "first-identity");
+        std::fs::create_dir_all(&first_identity).unwrap();
+        let error = prepare_isolated_identity_root(
+            &home,
+            "second-identity",
+            &first_identity,
+            &production_root,
+        )
+        .unwrap_err();
+        assert!(error.contains("refusing non-isolated identity data root"));
+        std::fs::remove_dir_all(home).unwrap();
+
+        let alias_home = identity_bootstrap_test_home("identity-rank-bootstrap-v2-alias");
+        let alias_production = agent_data_root_for_home(&alias_home, PRODUCTION_APP_IDENTIFIER);
+        let alias_target = agent_data_root_for_home(&alias_home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(alias_target.parent().unwrap()).unwrap();
+        std::fs::write(
+            alias_production.join(PROGRESS_FILE),
+            SIGNED_PROGRESS_FIXTURE,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&alias_production, &alias_target).unwrap();
+        #[cfg(windows)]
+        assert!(Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&alias_target)
+            .arg(&alias_production)
+            .status()
+            .is_ok_and(|status| status.success()));
+        let error =
+            bootstrap_identity_rank_progress_v2(&alias_home, "com.ggcoder.local-fork").unwrap_err();
+        assert!(error.contains("refusing non-isolated identity data root"));
+        assert!(!alias_production
+            .join(IDENTITY_RANK_BOOTSTRAP_MARKER)
+            .exists());
+        assert_eq!(
+            std::fs::read(alias_production.join(PROGRESS_FILE)).unwrap(),
+            SIGNED_PROGRESS_FIXTURE.as_bytes()
+        );
+        #[cfg(unix)]
+        std::fs::remove_file(&alias_target).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(&alias_target).unwrap();
+        std::fs::remove_dir_all(alias_home).unwrap();
+    }
+
+    #[test]
+    fn runtime_identity_files_are_product_scoped() {
+        assert_eq!(
+            runtime_identity_slug("com.ggcoder.app"),
+            "gg-app-com-ggcoder-app"
+        );
+        assert_eq!(
+            runtime_identity_slug("com.ggcoder.local-fork"),
+            "gg-app-com-ggcoder-local-fork"
+        );
+        assert_eq!(
+            sidecar_log_filename("com.ggcoder.app"),
+            "gg-app-com-ggcoder-app-sidecar.log"
+        );
+        assert_eq!(
+            sidecar_log_filename("com.ggcoder.local-fork"),
+            "gg-app-com-ggcoder-local-fork-sidecar.log"
+        );
+        assert_eq!(
+            sidecar_ledger_path(PRODUCTION_APP_IDENTIFIER),
+            home_dir()
+                .join(".gg")
+                .join("gg-app-com-ggcoder-app-sidecars")
+        );
+        assert_eq!(
+            sidecar_ledger_path("com.ggcoder.local-fork"),
+            home_dir()
+                .join(".gg")
+                .join("identities")
+                .join("com.ggcoder.local-fork")
+                .join("gg-app-com-ggcoder-local-fork-sidecars")
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_only_matches_requested_product_identity() {
+        let production_arg = sidecar_identity_arg("com.ggcoder.app");
+        let local_arg = sidecar_identity_arg("com.ggcoder.local-fork");
+        let snapshot = vec![
+            proc(500, 1, &format!("node app-sidecar.mjs {production_arg}")),
+            proc(600, 1, &format!("node app-sidecar.mjs {local_arg}")),
+        ];
+
+        assert_eq!(
+            orphan_killset_for_identity(&snapshot, 100, &no_ledger(), &production_arg),
+            vec![500]
+        );
+        assert_eq!(
+            orphan_killset_for_identity(&snapshot, 100, &no_ledger(), &local_arg),
+            vec![600]
+        );
     }
 
     #[test]
@@ -3996,13 +14043,13 @@ mod tests {
 
     #[test]
     fn orphan_descendant_tree_is_collected() {
-        // sidecar(500, orphaned) → npm exec(501) → node kencode-search(502).
+        // sidecar(500, orphaned) → npm exec(501) → node some-mcp-server(502).
         // Children still linked to the in-snapshot dead sidecar are caught by
         // the descendant walk regardless of their names.
         let snap = vec![
             proc(500, 1, "node app-sidecar.js"),
-            proc(501, 500, "npm exec @kenkaiiii/kencode-search"),
-            proc(502, 501, "node kencode-search"),
+            proc(501, 500, "npm exec @scope/some-mcp-server"),
+            proc(502, 501, "node some-mcp-server"),
         ];
         let ks = orphan_killset(&snap, 100, &no_ledger());
         assert!(ks.contains(&500));
@@ -4025,7 +14072,10 @@ mod tests {
         // → excluded.
         let snap = vec![proc(800, 1, "node vite")];
         let ks = orphan_killset(&snap, 100, &ledger(&[500]));
-        assert!(ks.is_empty(), "non-matching process must not be killed: {ks:?}");
+        assert!(
+            ks.is_empty(),
+            "non-matching process must not be killed: {ks:?}"
+        );
     }
 
     #[test]
@@ -4101,7 +14151,7 @@ mod tests {
         // Real PowerShell CIM output: pid|ppid|CommandLine.
         let raw = "4|0|\n\
                    5204|5200|C:\\Program Files\\nodejs\\node.exe app-sidecar.mjs\n\
-                   5300|5204|C:\\Program Files\\nodejs\\node.exe kencode-search";
+                   5300|5204|C:\\Program Files\\nodejs\\node.exe some-mcp-server";
         let rows = parse_cim_output(raw);
         assert_eq!(rows.len(), 3);
         // Kernel process with empty CommandLine.
@@ -4110,9 +14160,9 @@ mod tests {
         assert_eq!(rows[0].command, "");
         // Sidecar with full path.
         assert!(rows[1].command.contains("app-sidecar.mjs"));
-        // kencode grandchild.
+        // MCP grandchild.
         assert_eq!(rows[2].ppid, 5204);
-        assert!(rows[2].command.contains("kencode-search"));
+        assert!(rows[2].command.contains("some-mcp-server"));
     }
 
     #[test]
@@ -4146,7 +14196,7 @@ mod tests {
         let raw = "4|0|\n\
                    1000|4|C:\\Windows\\System32\\cmd.exe\n\
                    5000|9999|C:\\nodejs\\node.exe app-sidecar.mjs\n\
-                   5001|5000|C:\\nodejs\\node.exe kencode-search\n\
+                   5001|5000|C:\\nodejs\\node.exe some-mcp-server\n\
                    6000|4|C:\\Program Files\\GG Coder\\gg-app.exe\n\
                    6001|6000|C:\\nodejs\\node.exe app-sidecar.mjs";
         let snapshot = parse_cim_output(raw);
@@ -4155,7 +14205,7 @@ mod tests {
         // Windows has no pgid (all 0), so classification relies on the sidecar
         // name (5000) + descendant walk (5001) — ledger is irrelevant here.
         let killset = orphan_killset(&snapshot, 6000, &no_ledger());
-        // Orphaned sidecar (5000, parent 9999 dead) + its kencode child (5001).
+        // Orphaned sidecar (5000, parent 9999 dead) + its MCP child (5001).
         assert!(killset.contains(&5000));
         assert!(killset.contains(&5001));
         // Live sidecar (6001) must NOT be killed.
@@ -4262,7 +14312,7 @@ mod tests {
         assert_eq!(rects.len(), 5);
         let cell_w = 3000 / 3; // 1000
         let cell_h = 1000 / 2; // 500
-        // Indices 3 & 4 are the bottom row — they must be sized to the cell.
+                               // Indices 3 & 4 are the bottom row — they must be sized to the cell.
         assert_eq!(rects[3], (0, cell_h, cell_w as u32, cell_h as u32));
         assert_eq!(rects[4], (cell_w, cell_h, cell_w as u32, cell_h as u32));
     }
@@ -4272,75 +14322,774 @@ mod tests {
         assert!(tile_rects(0, 0, 0, 1920, 1080).is_empty());
     }
 
-    // ── Window↔session map (daemon model) ──────────────────────────────────
-    // The `Windows` map replaces the old per-window `Sidecars` registry. These
-    // lock in the three mutations the lifecycle relies on: a window gets a
-    // session id once the daemon answers, `select_project` re-points it to a
-    // fresh session (old id taken so its SSE bridge retires), and a window
-    // close removes its entry entirely (peers untouched).
+    // ── Pane registry lifecycle ──────────────────────────────────────────────
 
-    #[test]
-    fn window_session_records_project_before_daemon_answers() {
-        // start_window_session records cwd/session_path up front, session_id None
-        // until POST /session returns — so snapshot/restore can see the target.
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession {
-                session_id: None,
-                cwd: Some(PathBuf::from("/p/a")),
-                session_path: Some("/s/a.jsonl".into()),
-            },
-        );
-        let w = map.get("main").unwrap();
-        assert!(w.session_id.is_none());
-        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/a")));
-        assert_eq!(w.session_path.as_deref(), Some("/s/a.jsonl"));
+    fn add_pane(registry: &mut PaneRegistry, window: &str, pane: &str, cwd: &str) -> u64 {
+        create_pane_target(
+            registry,
+            window,
+            pane,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from(cwd),
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn select_project_repoints_to_a_fresh_session() {
-        // Mirrors select_project: take the old id (retires its bridge), then the
-        // new session id + cwd land on the SAME window entry.
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession {
-                session_id: Some("old-id".into()),
-                cwd: Some(PathBuf::from("/p/a")),
-                session_path: None,
-            },
-        );
-        // select_project takes the old id so the old SSE bridge retires.
-        let old = map.get_mut("main").and_then(|w| w.session_id.take());
-        assert_eq!(old.as_deref(), Some("old-id"));
-        assert!(map.get("main").unwrap().session_id.is_none());
-        // start_window_session then records the new project + session id.
-        let entry = map.get_mut("main").unwrap();
-        entry.cwd = Some(PathBuf::from("/p/b"));
-        entry.session_id = Some("new-id".into());
-        let w = map.get("main").unwrap();
-        assert_eq!(w.session_id.as_deref(), Some("new-id"));
-        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/b")));
+    fn local_file_pane_cwds_distinguish_identical_relative_paths() {
+        let home = identity_bootstrap_test_home("pane-local-files");
+        let mut registry = PaneRegistry::default();
+        for (pane_id, directory) in [("primary", "one"), ("secondary", "two")] {
+            let cwd = home.join(directory);
+            std::fs::create_dir_all(&cwd).unwrap();
+            std::fs::write(cwd.join("same.md"), directory).unwrap();
+            add_pane(&mut registry, "main", pane_id, cwd.to_str().unwrap());
+        }
+        for (pane_id, expected) in [("primary", "one"), ("secondary", "two")] {
+            let cwd = resolve_owned_pane(&registry, "main", pane_id)
+                .unwrap()
+                .cwd
+                .as_ref()
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(cwd.join("same.md")).unwrap(), expected);
+            assert!(resolve_owned_pane(&registry, "other-window", pane_id).is_none());
+        }
+        assert!(resolve_owned_pane(&registry, "main", "missing").is_none());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn closing_one_window_leaves_peers_intact() {
-        // Destroyed removes only the closed window's entry; other windows keep
-        // their sessions (the shared daemon process is never touched here).
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession { session_id: Some("id-1".into()), cwd: Some(PathBuf::from("/p/a")), session_path: None },
+    fn arbitrary_panes_in_one_window_are_independent() {
+        let mut registry = PaneRegistry::default();
+        let left = add_pane(&mut registry, "main", "left", "/left");
+        let right = add_pane(&mut registry, "main", "right", "/right");
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "left",
+            left,
+            "sid-left".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "right",
+            right,
+            "sid-right".into()
+        ));
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "left")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("sid-left")
         );
-        map.insert(
-            "project-1".into(),
-            WindowSession { session_id: Some("id-2".into()), cwd: Some(PathBuf::from("/p/b")), session_path: None },
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "right")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("sid-right")
         );
-        let removed = map.remove("main").and_then(|w| w.session_id);
-        assert_eq!(removed.as_deref(), Some("id-1"));
-        assert!(map.get("main").is_none());
-        // Peer survives with its own session.
-        assert_eq!(map.get("project-1").unwrap().session_id.as_deref(), Some("id-2"));
+    }
+
+    #[test]
+    fn same_pane_ids_in_different_windows_do_not_collide() {
+        let mut registry = PaneRegistry::default();
+        let first = add_pane(&mut registry, "main", "chat", "/one");
+        let second = add_pane(&mut registry, "project-1", "chat", "/two");
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "chat",
+            first,
+            "one".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "project-1",
+            "chat",
+            second,
+            "two".into()
+        ));
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            resolve_owned_pane(&registry, "project-1", "chat")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("two")
+        );
+    }
+
+    #[test]
+    fn stale_create_or_select_bind_cannot_overwrite_newer_generation() {
+        let mut registry = PaneRegistry::default();
+        let stale = add_pane(&mut registry, "main", "chat", "/old");
+        dispose_pane_target(&mut registry, "main", "chat", true, Some(stale)).unwrap();
+        let current = add_pane(&mut registry, "main", "chat", "/new");
+        assert!(!bind_pane_session(
+            &mut registry,
+            "main",
+            "chat",
+            stale,
+            "stale".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "chat",
+            current,
+            "current".into()
+        ));
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("current")
+        );
+    }
+
+    #[test]
+    fn pane_selection_waits_for_delayed_daemon_success_and_exact_generation_bind() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let generation = add_pane(&mut initial_registry, "main", "chat", "/project");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (daemon_tx, daemon_rx) = tokio::sync::oneshot::channel();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            let startup = tauri::async_runtime::spawn(orchestrate_pane_session_startup(
+                "chat",
+                generation,
+                async move { daemon_rx.await.unwrap() },
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            ));
+            let mut selection = Box::pin(settle_pane_selection("chat", generation, completion_rx));
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut selection)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .session_id
+                    .is_none()
+            );
+
+            daemon_tx
+                .send(Ok((321, "exact-session".to_string())))
+                .unwrap();
+            assert_eq!(selection.await.unwrap(), generation);
+            assert_eq!(
+                startup.await.unwrap(),
+                PaneStartupOutcome::Ready {
+                    port: 321,
+                    session_id: "exact-session".to_string(),
+                }
+            );
+            assert_eq!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .session_id
+                    .as_deref(),
+                Some("exact-session")
+            );
+            assert!(deleted.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn pane_selection_reports_daemon_failure_after_recording_startup_error() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let generation = add_pane(&mut initial_registry, "main", "chat", "/project");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+            let outcome = orchestrate_pane_session_startup(
+                "chat",
+                generation,
+                std::future::ready(Err("resume failed".to_string())),
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            )
+            .await;
+
+            assert_eq!(
+                outcome,
+                PaneStartupOutcome::Failed("resume failed".to_string())
+            );
+            assert_eq!(
+                settle_pane_selection("chat", generation, completion_rx)
+                    .await
+                    .unwrap_err(),
+                "resume failed"
+            );
+            assert_eq!(
+                resolve_owned_pane(&registry.lock().unwrap(), "main", "chat")
+                    .unwrap()
+                    .startup_error
+                    .as_deref(),
+                Some("resume failed")
+            );
+            assert!(deleted.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn pane_selection_supersedes_stale_generation_and_deletes_created_session() {
+        tauri::async_runtime::block_on(async {
+            let mut initial_registry = PaneRegistry::default();
+            let stale_generation = add_pane(&mut initial_registry, "main", "chat", "/old");
+            dispose_pane_target(
+                &mut initial_registry,
+                "main",
+                "chat",
+                true,
+                Some(stale_generation),
+            )
+            .unwrap();
+            let current_generation = add_pane(&mut initial_registry, "main", "chat", "/new");
+            let registry = std::sync::Arc::new(Mutex::new(initial_registry));
+            let bind_registry = registry.clone();
+            let error_registry = registry.clone();
+            let deleted = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let deleted_for_startup = deleted.clone();
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+            let outcome = orchestrate_pane_session_startup(
+                "chat",
+                stale_generation,
+                std::future::ready(Ok((654, "stale-session".to_string()))),
+                move |session_id| {
+                    bind_pane_session(
+                        &mut bind_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        stale_generation,
+                        session_id.to_string(),
+                    )
+                },
+                move |message| {
+                    record_pane_startup_error(
+                        &mut error_registry.lock().unwrap(),
+                        "main",
+                        "chat",
+                        stale_generation,
+                        message.to_string(),
+                    )
+                },
+                move |port, session_id| async move {
+                    deleted_for_startup.lock().unwrap().push((port, session_id));
+                },
+                completion_tx,
+            )
+            .await;
+
+            assert_eq!(outcome, PaneStartupOutcome::Superseded);
+            assert_eq!(
+                settle_pane_selection("chat", stale_generation, completion_rx)
+                    .await
+                    .unwrap_err(),
+                format!("pane 'chat' generation {stale_generation} was superseded during startup")
+            );
+            assert_eq!(
+                deleted.lock().unwrap().as_slice(),
+                &[(654, "stale-session".to_string())]
+            );
+            let registry = registry.lock().unwrap();
+            let current = resolve_owned_pane(&registry, "main", "chat").unwrap();
+            assert_eq!(current.generation, current_generation);
+            assert!(current.session_id.is_none());
+            assert!(current.startup_error.is_none());
+        });
+    }
+
+    #[test]
+    fn pane_selection_rejects_cancelled_startup_orchestration() {
+        tauri::async_runtime::block_on(async {
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            let startup = orchestrate_pane_session_startup(
+                "chat",
+                42,
+                std::future::pending::<Result<(u16, String), String>>(),
+                |_| unreachable!(),
+                |_| unreachable!(),
+                |_, _| async {},
+                completion_tx,
+            );
+            drop(startup);
+
+            assert_eq!(
+                settle_pane_selection("chat", 42, completion_rx)
+                    .await
+                    .unwrap_err(),
+                "pane 'chat' generation 42 startup ended without settlement"
+            );
+        });
+    }
+
+    #[test]
+    fn pane_session_startup_times_out_when_daemon_does_not_respond() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /session HTTP/1.1"));
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"sessionId\":\"too-late\"}",
+            );
+        });
+
+        let request = http_client_builder()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/session"))
+            .header("x-gg-daemon-token", "test-token")
+            .json(&serde_json::json!({ "cwd": "/test" }));
+        let result = tauri::async_runtime::block_on(send_daemon_create_session_request(
+            request,
+            Duration::from_millis(50),
+        ));
+        server.join().unwrap();
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("agent daemon session startup timed out; retry selecting the project")
+        );
+    }
+
+    #[test]
+    fn pane_disposal_success_removes_acknowledged_generation() {
+        let mut registry = PaneRegistry::default();
+        let generation = add_pane(&mut registry, "main", "chat", "/project");
+        let target =
+            pane_disposal_target(&registry, "main", "chat", false, Some(generation)).unwrap();
+
+        complete_pane_disposal(&mut registry, "main", "chat", target.generation, Ok(())).unwrap();
+
+        assert!(resolve_owned_pane(&registry, "main", "chat").is_none());
+    }
+
+    #[test]
+    fn pane_disposal_failure_preserves_registry_for_retry() {
+        let mut registry = PaneRegistry::default();
+        let generation = add_pane(&mut registry, "main", "chat", "/project");
+
+        let error = complete_pane_disposal(
+            &mut registry,
+            "main",
+            "chat",
+            generation,
+            Err("daemon rejected disposal".into()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "daemon rejected disposal");
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .generation,
+            generation
+        );
+    }
+
+    #[test]
+    fn pane_disposal_stale_generation_preserves_replacement() {
+        let mut registry = PaneRegistry::default();
+        let stale = add_pane(&mut registry, "main", "chat", "/old");
+        dispose_pane_target(&mut registry, "main", "chat", true, Some(stale)).unwrap();
+        let current = add_pane(&mut registry, "main", "chat", "/new");
+
+        let error =
+            complete_pane_disposal(&mut registry, "main", "chat", stale, Ok(())).unwrap_err();
+
+        assert!(error.contains("generation is stale"));
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .generation,
+            current
+        );
+    }
+
+    #[test]
+    fn generation_mismatched_disposal_cannot_remove_replacement() {
+        let mut registry = PaneRegistry::default();
+        let stale = add_pane(&mut registry, "main", "chat", "/old");
+        dispose_pane_target(&mut registry, "main", "chat", true, Some(stale)).unwrap();
+        let current = add_pane(&mut registry, "main", "chat", "/new");
+        assert!(dispose_pane_target(&mut registry, "main", "chat", true, Some(stale)).is_err());
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .generation,
+            current
+        );
+    }
+
+    #[test]
+    fn window_close_drains_only_its_panes() {
+        let mut registry = PaneRegistry::default();
+        add_pane(&mut registry, "main", "one", "/one");
+        add_pane(&mut registry, "main", "two", "/two");
+        add_pane(&mut registry, "peer", "one", "/peer");
+        assert_eq!(take_window_panes(&mut registry, "main").len(), 2);
+        assert!(registry.get("main").is_none());
+        assert!(resolve_owned_pane(&registry, "peer", "one").is_some());
+    }
+
+    #[test]
+    fn recovery_enumerates_every_pane_target() {
+        let mut registry = PaneRegistry::default();
+        add_pane(&mut registry, "main", "one", "/one");
+        add_pane(&mut registry, "main", "two", "/two");
+        add_pane(&mut registry, "peer", "one", "/peer");
+        let targets = recovery_targets(&registry);
+        let identities: HashSet<_> = targets
+            .iter()
+            .map(|target| (target.0.as_str(), target.1.as_str()))
+            .collect();
+        assert_eq!(
+            identities,
+            HashSet::from([("main", "one"), ("main", "two"), ("peer", "one")])
+        );
+    }
+
+    #[test]
+    fn replacing_secondary_preserves_primary_identity_and_recovery_target() {
+        let mut registry = PaneRegistry::default();
+        let primary_generation = add_pane(&mut registry, "main", "primary", "/a");
+        let secondary_generation = add_pane(&mut registry, "main", "secondary", "/b");
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "primary",
+            primary_generation,
+            "sid-a".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            secondary_generation,
+            "sid-b".into()
+        ));
+        let primary_before = resolve_owned_pane(&registry, "main", "primary")
+            .unwrap()
+            .clone();
+
+        let (replacement_generation, relaunched, replaced_session_id) = restore_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/c"),
+            None,
+        )
+        .unwrap();
+        assert!(relaunched);
+        assert_eq!(replaced_session_id.as_deref(), Some("sid-b"));
+        assert!(replacement_generation > secondary_generation);
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            replacement_generation,
+            "sid-c".into()
+        ));
+
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "primary").unwrap(),
+            &primary_before
+        );
+        assert!(pane_identity_is_current(
+            &registry,
+            "main",
+            "primary",
+            primary_generation,
+            "sid-a"
+        ));
+        let targets = recovery_targets(&registry);
+        let primary_target = targets.iter().find(|target| target.1 == "primary").unwrap();
+        let secondary_target = targets
+            .iter()
+            .find(|target| target.1 == "secondary")
+            .unwrap();
+        assert_eq!(primary_target.4, PathBuf::from("/a"));
+        assert_eq!(primary_target.6, primary_generation);
+        assert_eq!(secondary_target.4, PathBuf::from("/c"));
+        assert_eq!(secondary_target.6, replacement_generation);
+    }
+
+    #[test]
+    fn event_forwarding_requires_matching_generation_session_and_envelope() {
+        let mut registry = PaneRegistry::default();
+        let generation = add_pane(&mut registry, "main", "chat", "/chat");
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "chat",
+            generation,
+            "sid".into()
+        ));
+        assert!(pane_identity_is_current(
+            &registry, "main", "chat", generation, "sid"
+        ));
+        assert!(!pane_identity_is_current(
+            &registry,
+            "main",
+            "chat",
+            generation + 1,
+            "sid"
+        ));
+        assert!(!pane_identity_is_current(
+            &registry, "main", "chat", generation, "other"
+        ));
+
+        let event = serde_json::json!({"sessionId": "sid", "type": "delta", "data": {"text": "ok"}, "paneId": "spoofed"});
+        let trusted = trusted_event_envelope("chat", "sid", &event).unwrap();
+        assert_eq!(trusted["paneId"], "chat");
+        assert_eq!(trusted["sessionId"], "sid");
+        assert_eq!(trusted["type"], "delta");
+        assert!(trusted_event_envelope("chat", "other", &event).is_none());
+        assert!(
+            trusted_event_envelope("chat", "sid", &serde_json::json!({"sessionId": "sid"}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restore_target_survives_repeated_webview_mounts_until_cleanup() {
+        let mut targets = HashMap::new();
+        let entry = RestoreEntry {
+            mode: WorkspaceMode::Code,
+            chat_agent: ChatAgent::General,
+            cwd: "/project".into(),
+            session_path: Some("/sessions/one.jsonl".into()),
+        };
+
+        register_restore_target(&mut targets, "main".into(), entry);
+        assert_eq!(
+            restore_target(&targets, "main").map(|target| target.cwd),
+            Some("/project".into())
+        );
+        assert_eq!(
+            restore_target(&targets, "main").map(|target| target.cwd),
+            Some("/project".into())
+        );
+        assert!(remove_restore_target(&mut targets, "main").is_some());
+        assert!(restore_target(&targets, "main").is_none());
+    }
+
+    fn copy_operation(owner: &str, target: &str) -> PaneCopyOperation {
+        PaneCopyOperation {
+            source_owner: owner.into(),
+            target_label: target.into(),
+            restore: RestoreEntry {
+                mode: WorkspaceMode::Code,
+                chat_agent: ChatAgent::General,
+                cwd: "/project".into(),
+                session_path: Some("/sessions/copy.jsonl".into()),
+            },
+            cloned_session_path: Some(PathBuf::from("/sessions/copy.jsonl")),
+            started: false,
+        }
+    }
+
+    #[test]
+    fn copy_restore_is_destination_scoped_and_consume_once() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies.target_owners.insert("copy-copy-id".into(), key);
+        let mut targets = HashMap::from([(
+            "copy-copy-id".into(),
+            copy_operation("main", "copy-copy-id").restore,
+        )]);
+
+        assert!(consume_copy_restore_target(&copies, &mut targets, "main").is_none());
+        assert!(consume_copy_restore_target(&copies, &mut targets, "copy-copy-id").is_some());
+        assert!(consume_copy_restore_target(&copies, &mut targets, "copy-copy-id").is_none());
+    }
+
+    #[test]
+    fn copy_rollback_is_source_owner_scoped() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies.target_owners.insert("copy-copy-id".into(), key);
+
+        assert!(remove_copy_operation(&mut copies, "peer", "copy-id").is_none());
+        assert!(copies.target_owners.contains_key("copy-copy-id"));
+        assert!(remove_copy_operation(&mut copies, "main", "copy-id").is_some());
+        assert!(copies.operations.is_empty());
+        assert!(copies.target_owners.is_empty());
+    }
+
+    #[test]
+    fn repeated_copy_id_reuses_the_reserved_window() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies
+            .target_owners
+            .insert("copy-copy-id".into(), key.clone());
+
+        let first = copies.operations.get(&key).unwrap().target_label.clone();
+        let second = copies.operations.get(&key).unwrap().target_label.clone();
+        assert_eq!(first, second);
+        assert_eq!(copy_window_label("copy-id"), "copy-copy-id");
+    }
+
+    #[test]
+    fn session_clone_validates_complete_jsonl_before_publish() {
+        let dir = std::env::temp_dir().join(format!("gg-copy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.jsonl");
+        std::fs::write(
+            &source,
+            "{\"type\":\"session\",\"id\":\"source\"}\n{\"type\":\"message\"}\n",
+        )
+        .unwrap();
+        let copied = clone_pane_session_file(&source, "valid").unwrap();
+        assert!(copied.is_file());
+        let copied_contents = std::fs::read_to_string(&copied).unwrap();
+        let copied_header: serde_json::Value =
+            serde_json::from_str(copied_contents.lines().next().unwrap()).unwrap();
+        assert_eq!(copied_header["id"], "valid");
+        assert!(!dir.join(".source-copy-valid.tmp").exists());
+
+        std::fs::write(&source, "{\"type\":\"session\"}\n{\"partial\":").unwrap();
+        assert!(clone_pane_session_file(&source, "partial").is_err());
+        assert!(!dir.join("source-copy-partial.jsonl").exists());
+        assert!(!dir.join(".source-copy-partial.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_patched_update_status_guard_is_single_flight_and_reuses_cache() {
+        let state = LocalPatchedUpdate::default();
+        assert!(
+            state.begin_status_check().is_none(),
+            "first caller is leader"
+        );
+        let follower = state
+            .begin_status_check()
+            .expect("follower gets immediate status");
+        assert_eq!(
+            follower.origin,
+            local_patched_update::StatusOrigin::Unavailable
+        );
+
+        let completed = local_patched_update::LocalPatchedUpdateStatus {
+            available: true,
+            current_source_sha: "aaaaaaa".to_string(),
+            upstream_integrated: false,
+            origin: local_patched_update::StatusOrigin::Cached,
+        };
+        state.finish_status_check(&Ok(completed.clone()));
+        assert!(
+            state.begin_status_check().is_none(),
+            "completed check releases guard"
+        );
+        let cached_follower = state
+            .begin_status_check()
+            .expect("next follower gets cache");
+        assert_eq!(cached_follower, completed);
+        state.finish_status_check(&Ok(completed));
+    }
+
+    #[test]
+    fn local_patched_update_spawn_blocking_keeps_async_runtime_responsive() {
+        tauri::async_runtime::block_on(async {
+            let worker = tauri::async_runtime::spawn_blocking(|| {
+                std::thread::sleep(Duration::from_millis(250));
+                1
+            });
+            let sentinel = tauri::async_runtime::spawn(async { 2 });
+            let sentinel_result = tokio::time::timeout(Duration::from_millis(100), sentinel)
+                .await
+                .expect("sentinel must not wait for blocking status work")
+                .expect("sentinel task succeeds");
+            assert_eq!(sentinel_result, 2);
+            assert_eq!(worker.await.unwrap(), 1);
+        });
     }
 }

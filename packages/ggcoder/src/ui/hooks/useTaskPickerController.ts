@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import {
-  getNextPendingTask,
+  getNextRunnableTask,
   loadTasksSync,
   markTaskInProgress,
   saveTasksSync,
@@ -61,7 +61,7 @@ export function useTaskPickerController({
       onRunAllTasksChange(true);
       const selected = task
         ? { id: task.id, title: task.title, prompt: task.prompt || task.text || task.title }
-        : getNextPendingTask(displayedCwd);
+        : getNextRunnableTask(displayedCwd);
       if (!selected) return;
       markTaskInProgress(displayedCwd, selected.id);
       refresh();

@@ -1,29 +1,60 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  clearRuntimeModels,
+  getDefaultThinkingLevel,
+  registerRuntimeModels,
+} from "./model-registry.js";
 import {
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
 } from "./thinking-level.js";
+import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
 
 describe("thinking-level helpers", () => {
-  it("cycles OpenAI GPT models through supported reasoning efforts", () => {
-    expect(getSupportedThinkingLevels("openai", "gpt-5.5")).toEqual(["medium", "high", "xhigh"]);
-    expect(getNextThinkingLevel("openai", "gpt-5.5", undefined)).toBe("medium");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "medium")).toBe("high");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "xhigh")).toBeUndefined();
+  it("cycles GPT-6 Astra through the full six-rung ladder up to ultra", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
+    expect(getDefaultThinkingLevel("gpt-6-astra")).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "low")).toBe("medium");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "medium")).toBe("high");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "ultra")).toBeUndefined();
+  });
+
+  it("keeps the legacy medium/high ladder for unregistered custom GPT ids", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-5.2")).toEqual(["medium", "high"]);
+    expect(getNextThinkingLevel("openai", "gpt-5.2", "high")).toBeUndefined();
+  });
+
+  it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {
+    const baseLevels = ["low", "medium", "high", "xhigh", "max"];
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-terra")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-luna")).toEqual(baseLevels);
+    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "ultra")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-opus-4-8")).toEqual([
+    expect(getSupportedThinkingLevels("anthropic", "claude-opus-5")).toEqual([
       "low",
       "medium",
       "high",
       "xhigh",
       "max",
     ]);
-    expect(getNextThinkingLevel("anthropic", "claude-opus-4-8", "xhigh")).toBe("max");
-    expect(getNextThinkingLevel("anthropic", "claude-opus-4-8", "max")).toBeUndefined();
+    expect(getNextThinkingLevel("anthropic", "claude-opus-5", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-opus-5", "max")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Sonnet models without xhigh", () => {
@@ -37,18 +68,196 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5", "xhigh")).toBe(false);
   });
 
+  it("cycles Claude Fable 5.1 through the adaptive ladder without xhigh", () => {
+    expect(getSupportedThinkingLevels("anthropic", "claude-fable-5-1")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("anthropic", "claude-fable-5-1", "high")).toBe("max");
+    expect(isThinkingLevelSupported("anthropic", "claude-fable-5-1", "xhigh")).toBe(false);
+  });
+
+  it("cycles xAI Grok 4.5 through low, medium, and high", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.5")).toEqual(["low", "medium", "high"]);
+    expect(getNextThinkingLevel("xai", "grok-4.5", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "low")).toBe("medium");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "medium")).toBe("high");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "high")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.5", "xhigh")).toBe(false);
+  });
+
+  it("cycles xAI Grok 4.6 through low, medium, high, and its new xhigh rung", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.6")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(getNextThinkingLevel("xai", "grok-4.6", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "xhigh")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "xhigh")).toBe(true);
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "max")).toBe(false);
+  });
+
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
-    expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh"]);
+    expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh", "max"]);
+    expect(getNextThinkingLevel("sakana", "fugu-ultra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("sakana", "fugu-ultra", "max")).toBeUndefined();
     expect(getNextThinkingLevel("sakana", "fugu", undefined)).toBe("high");
     expect(getNextThinkingLevel("sakana", "fugu", "high")).toBe("xhigh");
     expect(getNextThinkingLevel("sakana", "fugu", "xhigh")).toBeUndefined();
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
   });
 
-  it("keeps non-cycling providers binary at their model max", () => {
+  it.each(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+    "cycles %s through low, high, max and off",
+    (model) => {
+      expect(getSupportedThinkingLevels("deepseek", model)).toEqual(["low", "high", "max"]);
+      expect(getNextThinkingLevel("deepseek", model, undefined)).toBe("low");
+      expect(getNextThinkingLevel("deepseek", model, "low")).toBe("high");
+      expect(getNextThinkingLevel("deepseek", model, "high")).toBe("max");
+      expect(getNextThinkingLevel("deepseek", model, "max")).toBeUndefined();
+      expect(isThinkingLevelSupported("deepseek", model, "xhigh")).toBe(false);
+    },
+  );
+
+  it("cycles Kimi K3 through its server-declared low, high, max ladder", () => {
+    expect(getSupportedThinkingLevels("moonshot", "kimi-k3")).toEqual(["low", "high", "max"]);
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", undefined)).toBe("low");
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", "low")).toBe("high");
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", "high")).toBe("max");
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", "max")).toBeUndefined();
+    expect(isThinkingLevelSupported("moonshot", "kimi-k3", "medium")).toBe(false);
+  });
+
+  it("cycles GLM-5.3 through the endpoint's declared effort ladder", () => {
+    // Verified live: an unlisted effort 400s with `none, minimal, low, medium,
+    // high, xhigh, max`. `none` is what the thinking toggle already does and
+    // `minimal` has no ThinkingLevel counterpart, so five rungs are exposed.
+    expect(getSupportedThinkingLevels("glm", "glm-5.3")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("glm", "glm-5.3", undefined)).toBe("low");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "max")).toBeUndefined();
+    expect(isThinkingLevelSupported("glm", "glm-5.3", "ultra")).toBe(false);
+  });
+
+  it("keeps non-cycling providers at their model's sole supported effort", () => {
     expect(getSupportedThinkingLevels("moonshot", "kimi-k2.7-code")).toEqual(["high"]);
     expect(getNextThinkingLevel("moonshot", "kimi-k2.7-code", undefined)).toBe("high");
     expect(getNextThinkingLevel("moonshot", "kimi-k2.7-code", "high")).toBeUndefined();
+  });
+});
+
+describe("local models", () => {
+  const base = {
+    provider: "local" as const,
+    contextWindow: 32768,
+    maxOutputTokens: 4096,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "low" as const,
+    maxThinkingLevel: "high" as const,
+  };
+
+  afterEach(() => clearRuntimeModels());
+
+  it("offers no levels for a local model that does not reason", () => {
+    registerRuntimeModels([
+      { ...base, id: "local/ollama/plain", name: "plain", supportsThinking: false },
+    ]);
+
+    expect(getSupportedThinkingLevels("local", "local/ollama/plain")).toEqual([]);
+    // Toggling thinking is a no-op instead of sending a reasoning_effort the
+    // server would reject.
+    expect(getNextThinkingLevel("local", "local/ollama/plain", undefined)).toBeUndefined();
+    expect(isThinkingLevelSupported("local", "local/ollama/plain", "high")).toBe(false);
+  });
+
+  it("offers the generic ladder for a thinking-capable local model", () => {
+    registerRuntimeModels([
+      { ...base, id: "local/ollama/qwen3", name: "qwen3", supportsThinking: true },
+    ]);
+
+    expect(getSupportedThinkingLevels("local", "local/ollama/qwen3")).toEqual([
+      "low",
+      "medium",
+      "high",
+    ]);
+  });
+
+  it("cycles an Ollama model up to max, then off", () => {
+    // Ollama accepts low/medium/high/max on reasoning_effort (verified on 0.32),
+    // so discovery gives its models a "max" ceiling.
+    registerRuntimeModels([
+      {
+        ...base,
+        id: "local/ollama/qwen3",
+        name: "qwen3",
+        supportsThinking: true,
+        maxThinkingLevel: "max",
+      },
+    ]);
+    const next = (current: ThinkingLevel | undefined) =>
+      getNextThinkingLevel("local", "local/ollama/qwen3", current);
+
+    expect(getSupportedThinkingLevels("local", "local/ollama/qwen3")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "max",
+    ]);
+    expect(next(undefined)).toBe("low");
+    expect(next("low")).toBe("medium");
+    expect(next("medium")).toBe("high");
+    expect(next("high")).toBe("max");
+    expect(next("max")).toBeUndefined();
+  });
+
+  it("stops at high on servers that never declared max", () => {
+    registerRuntimeModels([
+      {
+        ...base,
+        id: "local/vllm/qwen3",
+        name: "qwen3",
+        supportsThinking: true,
+        maxThinkingLevel: "high",
+      },
+    ]);
+
+    const levels = getSupportedThinkingLevels("local", "local/vllm/qwen3");
+
+    expect(levels).toEqual(["low", "medium", "high"]);
+    expect(getNextThinkingLevel("local", "local/vllm/qwen3", "high")).toBeUndefined();
+    expect(isThinkingLevelSupported("local", "local/vllm/qwen3", "max")).toBe(false);
+  });
+
+  it("never offers xhigh on any local model — no local server accepts it", () => {
+    registerRuntimeModels([
+      {
+        ...base,
+        id: "local/ollama/qwen3",
+        name: "qwen3",
+        supportsThinking: true,
+        maxThinkingLevel: "max",
+      },
+    ]);
+
+    expect(getSupportedThinkingLevels("local", "local/ollama/qwen3")).not.toContain("xhigh");
+    expect(isThinkingLevelSupported("local", "local/ollama/qwen3", "xhigh")).toBe(false);
+  });
+
+  it("offers nothing for an unknown local id (never discovered)", () => {
+    expect(getSupportedThinkingLevels("local", "local/ollama/ghost")).toEqual([]);
   });
 });

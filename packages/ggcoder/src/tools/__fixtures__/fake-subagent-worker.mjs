@@ -1,0 +1,105 @@
+import path from "node:path";
+import { createInterface } from "node:readline";
+
+let running = false;
+let timer;
+let contextTurns = 0;
+let initializeOptions;
+let rejectInterrupt = false;
+
+const emit = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
+const ack = (frame, extra = {}) =>
+  emit({ type: "ack", request_id: frame.request_id, ok: true, ...extra });
+const complete = (status = "completed", output = `turn-${contextTurns}`) => {
+  clearTimeout(timer);
+  running = false;
+  emit({ type: "state", state: status === "interrupted" ? "interrupted" : "idle" });
+  emit({
+    type: "turn_complete",
+    status,
+    output,
+    ...(status === "interrupted" ? { error: "Interrupted" } : {}),
+  });
+};
+
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const frame = JSON.parse(line);
+  if (frame.command === "initialize") {
+    initializeOptions = frame.options;
+    // Named agents arrive as `agentPrompt` (composed with the standard prompt
+    // scaffolding); `systemPrompt` remains the full-replacement path.
+    const prompt = frame.options?.agentPrompt ?? frame.options?.systemPrompt;
+    if (prompt === "malformed") process.stdout.write("not-json\n");
+    else if (prompt === "die") process.exit(2);
+    else if (prompt === "hang") return;
+    else {
+      emit({ type: "state", state: "idle" });
+      const childSessionPath =
+        frame.options?.childSessionPath ??
+        path.join(frame.options?.sessionRootDir ?? process.cwd(), `fake-${process.pid}.jsonl`);
+      ack(frame, {
+        child_session_id: path.basename(childSessionPath, ".jsonl"),
+        child_session_path: childSessionPath,
+      });
+    }
+    return;
+  }
+  if (frame.command === "start" || frame.command === "followup") {
+    running = true;
+    contextTurns++;
+    ack(frame, { status: "running" });
+    emit({ type: "state", state: "running" });
+    emit({
+      type: "event",
+      event: "tool_call_start",
+      payload: { name: "read", args: { file_path: "a.ts" } },
+    });
+    emit({
+      type: "event",
+      event: "turn_end",
+      payload: {
+        usage: { inputTokens: 10, outputTokens: 2, cacheRead: 20, cacheWrite: 5 },
+      },
+    });
+    if (frame.task.includes("fixture:reject-interrupt")) {
+      rejectInterrupt = true;
+      return;
+    }
+    if (frame.task.includes("fixture:review-initialize")) {
+      timer = setTimeout(
+        () =>
+          complete(
+            "completed",
+            `VERDICT: ISSUES\nFINDINGS:\n- worker initialization: ${JSON.stringify(initializeOptions)}`,
+          ),
+        15,
+      );
+      return;
+    }
+    const delay = /slow/.test(frame.task) ? 150 : 15;
+    timer = setTimeout(() => complete("completed", `${frame.task}|context:${contextTurns}`), delay);
+    return;
+  }
+  if (frame.command === "queue_message") {
+    ack(frame, { queued: running ? 1 : 0 });
+    return;
+  }
+  if (frame.command === "interrupt") {
+    if (rejectInterrupt) {
+      emit({
+        type: "ack",
+        request_id: frame.request_id,
+        ok: false,
+        error: "fixture interruption refused",
+      });
+      return;
+    }
+    ack(frame);
+    complete("interrupted", "partial");
+    return;
+  }
+  if (frame.command === "shutdown") {
+    ack(frame);
+    process.exit(0);
+  }
+});

@@ -8,6 +8,7 @@ import { transcribeVoice, isModelLoaded, setProgressCallback } from "../core/voi
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
 import { log, closeLogger } from "../core/logger.js";
+import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
@@ -270,8 +271,13 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
       const turns = totalTurns === 1 ? "1 turn" : `${totalTurns} turns`;
 
       // Context usage percentage
-      const modelId = session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+        openAICodexContextProfile: sessionState.openAICodexContextProfile,
+      });
       const contextTokens = estimateConversationTokens(session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =
@@ -478,7 +484,11 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
 
       const sessionState = state.session.getState();
       const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-      const contextWindow = getContextWindow(sessionState.model);
+      const contextWindow = getContextWindow(sessionState.model, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+        openAICodexContextProfile: sessionState.openAICodexContextProfile,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const statusPctRaw = (contextTokens / contextWindow) * 100;
       const statusContextStr =
@@ -835,7 +845,8 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
 
 /**
  * CLI serve flow (`ggcoder serve`): prints the banner, starts the bot, wires
- * SIGINT/SIGTERM to a graceful shutdown, then blocks until the process exits.
+ * SIGINT/SIGTERM/SIGHUP to a deadline-bounded shutdown, then blocks until the
+ * process exits.
  */
 export async function runServeMode(options: ServeModeOptions): Promise<void> {
   let controller: ServeController;
@@ -847,14 +858,18 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     process.exit(1);
   }
 
-  const shutdown = async (): Promise<void> => {
-    console.log("\nShutting down...");
-    await controller.stop();
-    closeLogger();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  // A closed terminal delivers one SIGHUP and never a second key press, so the
+  // bot has to stop polling on the first signal — an orphaned poller keeps
+  // spending API calls with nobody attached. The deadline covers a Telegram
+  // long-poll or MCP server that refuses to close.
+  installTerminationHandlers({
+    scope: "serve",
+    onShutdownStart: () => console.log("\nShutting down..."),
+    teardown: async () => {
+      await controller.stop();
+      closeLogger();
+    },
+  });
 
   // Block forever — the bot polls in the background; shutdown exits the process.
   await new Promise<never>(() => {});

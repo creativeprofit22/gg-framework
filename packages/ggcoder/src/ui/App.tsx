@@ -15,8 +15,8 @@ import {
   expandTaskBar,
   collapseTaskBar,
   navigateTaskBar,
-  killTask,
 } from "./stores/taskbar-store.js";
+import { killTaskWithFeedback } from "./task-kill-feedback.js";
 import { playNotificationSound } from "../utils/sound.js";
 import {
   type Message,
@@ -25,7 +25,13 @@ import {
   type TextContent,
 } from "@kenkaiiii/gg-ai";
 import { downscaleForPreview, extractMediaPaths, type ImageAttachment } from "../utils/image.js";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool, AgentTurnTiming } from "@kenkaiiii/gg-agent";
+import {
+  buildSubAgentCompletionFollowUp,
+  type SubAgentManager,
+  type SubAgentSnapshot,
+} from "../core/subagent-manager.js";
+import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -42,23 +48,23 @@ import type { ProcessManager } from "../core/process-manager.js";
 import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
-import { SessionManager } from "../core/session-manager.js";
+import {
+  getAuthStorageKeys,
+  getModel,
+  getVideoByteLimit,
+  resolveModelMaxTokens,
+  type OpenAICodexContextProfile,
+} from "../core/model-registry.js";
+import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
   getPendingUpdate,
   startPeriodicUpdateCheck,
   stopPeriodicUpdateCheck,
 } from "../core/auto-update.js";
-import { generateSessionTitle } from "../utils/session-title.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
-import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
-import {
-  isFirstTimeSetup,
-  markSetupAudited,
-  getAnnouncedLanguages,
-  markLanguagesAnnounced,
-} from "../core/setup-history.js";
+import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { getAnnouncedLanguages, markLanguagesAnnounced } from "../core/setup-history.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { detectLanguages, type LanguageId } from "../core/language-detector.js";
 import { detectVerifyCommands } from "../core/verify-commands.js";
@@ -88,7 +94,7 @@ import {
   splitAssistantStreamingText,
   estimateRenderedRows,
 } from "./utils/assistant-stream-split.js";
-import { getNextPendingTask, markTaskInProgress } from "../core/tasks-store.js";
+import { getNextRunnableTask, markTaskInProgress } from "../core/tasks-store.js";
 import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
@@ -97,7 +103,9 @@ import {
   buildIdealReviewMessage,
   evaluateIdealReview,
   detectTestDrift,
+  type ReviewCoverageTracker,
 } from "../core/ideal-review.js";
+import type { LspManager } from "../core/lsp/manager.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -155,6 +163,11 @@ import {
   IDEAL_HOOK_NOTICE_TEXT,
   LOOP_BREAK_NOTICE_TEXT,
   REGROUNDING_NOTICE_TEXT,
+  TRUNCATED_CONTINUING_NOTICE_TEXT,
+  TRUNCATED_INCOMPLETE_NOTICE_TEXT,
+  TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT,
+  TRUNCATED_PROVIDER_ERROR_NOTICE_TEXT,
+  TRUNCATED_REFUSAL_NOTICE_TEXT,
   lastVisibleTranscriptItem,
 } from "./app-items.js";
 export type { DoneStatus } from "./layout-decisions.js";
@@ -182,15 +195,7 @@ export {
 } from "./item-helpers.js";
 
 /** Tools that get aggregated into a single compact group when possible. */
-const AGGREGATABLE_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "mcp__kencode-search__searchCode",
-  "mcp__kencode-search__referenceSources",
-  "mcp__kencode-search__discoverRepos",
-]);
+const AGGREGATABLE_TOOLS = new Set(["read", "grep", "find", "ls", "steroids"]);
 
 const RUNNING_INDICATOR_ANIMATION_MS = 1_200;
 
@@ -202,16 +207,20 @@ export interface AppProps {
   tools: AgentTool[];
   webSearch?: boolean;
   messages: Message[];
-  maxTokens: number;
+  maxTokens?: number;
+  maxTurns?: number;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
   projectId?: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
+  openAICodexFast?: boolean;
   cwd: string;
   version: string;
   showTokenUsage?: boolean;
   idealReviewEnabled?: boolean;
+  /** Kill switch for the pre-stop verification gate (default on). */
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
@@ -223,6 +232,9 @@ export interface AppProps {
   sessionPath?: string;
   sessionId?: string;
   processManager?: ProcessManager;
+  subAgentManager?: SubAgentManager;
+  lspManager?: LspManager;
+  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -236,7 +248,7 @@ export interface AppProps {
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
-    onExitPlan?: (planPath: string) => Promise<string>;
+    onExitPlan?: (planPath: string, content: string) => Promise<string>;
   };
   terminalHistoryPrinter?: TerminalHistoryPrinter;
   /**
@@ -308,14 +320,13 @@ export interface AppProps {
   sessionStore?: {
     messages: Message[];
     history: CompletedItem[];
+    turnMetrics?: TurnMetricPayload[];
     liveItems?: CompletedItem[];
     doneStatus?: DoneStatus | null;
     approvedPlanPath?: string;
     planSteps: PlanStep[];
     sessionPath?: string;
     sessionId?: string;
-    sessionTitle?: string;
-    sessionTitleGenerated: boolean;
     overlay?: "model" | "skills" | "plan" | "theme" | null;
     planAutoExpand?: boolean;
     pendingAction?: {
@@ -364,7 +375,6 @@ export function App(props: AppProps) {
   // oversized-item flush below.
   const liveLayoutRef = useRef({ columns, liveAreaRows: 0 });
 
-  // Hoisted before terminal title hook so it can reference them
   const [lastUserMessage, setLastUserMessage] = useState("");
   // Bumped on every prompt submit; the fullscreen transcript scroll controller
   // watches this to snap back to the bottom so the newest output is visible.
@@ -373,17 +383,8 @@ export function App(props: AppProps) {
   const [quittingSummary, setQuittingSummary] = useState<SessionSummaryItem["summary"] | null>(
     null,
   );
-  // Terminal title — updated later after agentLoop is created
-  // (hoisted here so the hook is always called in the same order)
+  // Native terminal title keeps the active project visible outside the app frame.
   const [titleRunning, setTitleRunning] = useState(false);
-  const [sessionTitle, setSessionTitle] = useState<string | undefined>(
-    () => props.sessionStore?.sessionTitle,
-  );
-  const sessionTitleGeneratedRef = useRef(props.sessionStore?.sessionTitleGenerated ?? false);
-  useTerminalTitle({
-    isRunning: titleRunning,
-    sessionTitle,
-  });
 
   // Completed transcript rows are kept as durable session data but are no longer
   // rendered through Ink history. They are serialized once into real terminal
@@ -405,6 +406,56 @@ export function App(props: AppProps) {
     const restoredHistoryIds = new Set(history.map((item) => item.id));
     return removeItemsWithIds(restoredLiveItems, restoredHistoryIds);
   });
+  useEffect(() => {
+    if (!props.subAgentManager) return;
+    return props.subAgentManager.subscribe((snapshot: SubAgentSnapshot) => {
+      const status: SubAgentInfo["status"] =
+        snapshot.state === "starting" || snapshot.state === "running"
+          ? "running"
+          : snapshot.state === "completed" || (snapshot.state === "closed" && !snapshot.error)
+            ? "done"
+            : snapshot.state === "interrupted"
+              ? "aborted"
+              : "error";
+      const agent: SubAgentInfo = {
+        toolCallId: snapshot.agent_id,
+        task: snapshot.task_name,
+        agentName: "async",
+        status,
+        toolUseCount: snapshot.tool_use_count,
+        tokenUsage: { ...snapshot.token_usage },
+        currentActivity: snapshot.current_activity,
+        result: snapshot.output ?? snapshot.error,
+        durationMs: snapshot.elapsed_ms,
+      };
+      setLiveItems((previous) => {
+        const containingGroupIndex = previous.findIndex(
+          (item) =>
+            item.kind === "subagent_group" &&
+            item.agents.some((existing) => existing.toolCallId === snapshot.agent_id),
+        );
+        const activeAsyncGroupIndex = previous.findIndex(
+          (item) =>
+            item.kind === "subagent_group" &&
+            item.agents.some(
+              (existing) => existing.agentName === "async" && existing.status === "running",
+            ),
+        );
+        const groupIndex = containingGroupIndex >= 0 ? containingGroupIndex : activeAsyncGroupIndex;
+        if (groupIndex === -1) {
+          return [...previous, { kind: "subagent_group", agents: [agent], id: getId() }];
+        }
+        const group = previous[groupIndex] as SubAgentGroupItem;
+        const agentIndex = group.agents.findIndex((item) => item.toolCallId === snapshot.agent_id);
+        const agents = [...group.agents];
+        if (agentIndex === -1) agents.push(agent);
+        else agents[agentIndex] = agent;
+        const next = [...previous];
+        next[groupIndex] = { ...group, agents };
+        return next;
+      });
+    });
+  }, [props.subAgentManager]);
   // Rolling feed of recent tool actions for the pinned LiveToolPanel. Kept
   // separate from `liveItems` (the scrollback record) so tool calls mutate in
   // place above the activity bar instead of spamming the transcript.
@@ -444,12 +495,17 @@ export function App(props: AppProps) {
   // Suppress "done" status when a plan overlay is about to open
   const planOverlayPendingRef = useRef(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
+  useTerminalTitle({ isRunning: titleRunning, cwd: displayedCwd, gitBranch });
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
   const currentProviderRef = useRef(props.provider);
+  const currentModelRef = useRef(props.model);
   const [currentTools, setCurrentTools] = useState(props.tools);
   const currentToolsRef = useRef(props.tools);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | undefined>(props.thinking);
+  const thinkingLevelRef = useRef<ThinkingLevel | undefined>(props.thinking);
+  currentModelRef.current = currentModel;
+  thinkingLevelRef.current = thinkingLevel;
   const [renderMarkdown, setRenderMarkdown] = useState(true);
   const messagesRef = useRef<Message[]>(props.sessionStore?.messages ?? props.messages);
   const [planAutoExpand, setPlanAutoExpand] = useState(props.sessionStore?.planAutoExpand ?? false);
@@ -460,7 +516,13 @@ export function App(props: AppProps) {
   // times we've nudged the agent to continue the same step. Reset whenever a
   // new [DONE:n] marker advances progress (see onTurnText). Caps at 2 nudges
   // so a genuinely stuck agent surfaces instead of looping forever.
-  const followUpNudgesRef = useRef<{ step: number; count: number }>({ step: 0, count: 0 });
+  // Background-process completion gate bookkeeping. Keyed by the loop's run
+  // start timestamp so the injection budget resets itself on each new run
+  // without needing a run-start callback.
+  const processGateRef = useRef<{ runStartedAt: number; injected: number }>({
+    runStartedAt: 0,
+    injected: 0,
+  });
   // Seed the per-item ID counter so it doesn't collide with IDs already in
   // sessionStore.history (which survives remount). Without this, a remount
   // (resize, overlay toggle, task pane open, etc.) starts the counter at 0
@@ -478,6 +540,7 @@ export function App(props: AppProps) {
   );
   const sessionPathRef = useRef(props.sessionStore?.sessionPath ?? props.sessionPath);
   const persistedIndexRef = useRef(messagesRef.current.length);
+  const turnMetricsRef = useRef<TurnMetricPayload[]>(props.sessionStore?.turnMetrics ?? []);
   const sessionStatsRef = useRef(
     props.sessionStore?.sessionStats ??
       createSessionStats({ sessionId: props.sessionStore?.sessionId ?? props.sessionId }),
@@ -486,10 +549,6 @@ export function App(props: AppProps) {
     props.sessionStore?.idealReviewEnabled ?? props.idealReviewEnabled ?? true,
   );
   const idealReviewEnabledRef = useRef(idealReviewEnabled);
-  /** Last actual API-reported input token count (from turn_end). */
-  const lastActualTokensRef = useRef(0);
-  /** Timestamp (ms) when lastActualTokensRef was last updated by turn_end. */
-  const lastActualTokensTimestampRef = useRef(0);
   /**
    * Languages whose style packs are currently injected into the system prompt.
    * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
@@ -498,19 +557,6 @@ export function App(props: AppProps) {
    * than invalidating prompt caching, and stale guidance is harmless).
    */
   const injectedLanguagesRef = useRef<Set<LanguageId>>(new Set());
-  /**
-   * True until the first style-pack badge is pushed. Used to gate the
-   * one-time "/setup" hint so users learn the slash command without being
-   * spammed on every subsequent pack swap.
-   */
-  const setupHintShownRef = useRef(false);
-  /**
-   * Callback that fires `/setup` programmatically. Assigned later in the
-   * component once `agentLoop` is in scope. Called from the initial
-   * language-detection path when this cwd has never been audited before.
-   */
-  const triggerAutoSetupRef = useRef<() => Promise<void>>(async () => {});
-
   const getId = () => `ui-${nextIdRef.current++}`;
 
   // Session persistence failures (e.g. ENOSPC disk-full) must not crash the
@@ -547,6 +593,8 @@ export function App(props: AppProps) {
       cwdRef,
       currentToolsRef,
       providerRef: currentProviderRef,
+      modelRef: currentModelRef,
+      thinkingLevelRef,
       approvedPlanPathRef,
       injectedLanguagesRef,
       messagesRef,
@@ -578,8 +626,6 @@ export function App(props: AppProps) {
       cwd: displayedCwd,
     },
     writeStdout,
-    sessionPathRef,
-    sessionManagerRef,
     sessionStore,
     history,
     setHistory,
@@ -628,9 +674,6 @@ export function App(props: AppProps) {
     if (sessionStore) sessionStore.planSteps = planSteps;
   }, [planSteps, sessionStore]);
   useEffect(() => {
-    if (sessionStore) sessionStore.sessionTitle = sessionTitle;
-  }, [sessionTitle, sessionStore]);
-  useEffect(() => {
     if (sessionStore) sessionStore.overlay = overlay;
   }, [overlay, sessionStore]);
   useEffect(() => {
@@ -653,13 +696,19 @@ export function App(props: AppProps) {
     .map((key) => props.credentialsByProvider?.[key])
     .find((c) => c !== undefined);
   const activeApiKey = currentCreds?.accessToken ?? props.apiKey;
-  const activeAccountId = currentCreds?.accountId ?? props.accountId;
-  const activeProjectId = currentCreds?.projectId ?? props.projectId;
+  const activeAccountId = currentCreds ? currentCreds.accountId : props.accountId;
+  const activeProjectId = currentCreds ? currentCreds.projectId : props.projectId;
   const activeBaseUrl =
-    currentProvider === "gemini" ? undefined : (currentCreds?.baseUrl ?? props.baseUrl);
+    currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
+  const openAICodexContextProfile = props.openAICodexContextProfile ?? "stable";
+  const openAICodexFast = props.openAICodexFast ?? false;
   const contextWindowOptions = useMemo(
-    () => ({ provider: currentProvider, accountId: activeAccountId }),
-    [currentProvider, activeAccountId],
+    () => ({
+      provider: currentProvider,
+      accountId: activeAccountId,
+      openAICodexContextProfile,
+    }),
+    [currentProvider, activeAccountId, openAICodexContextProfile],
   );
 
   // Load git branch — re-runs whenever the displayed cwd changes.
@@ -736,25 +785,11 @@ export function App(props: AppProps) {
       if (!injectedLanguagesRef.current.has(id)) added.push(id);
     }
     if (added.length === 0) {
-      // No new packs to inject. The empty-detection hint + auto-run are
-      // first-time-per-cwd only — once the user has been shown the box and
-      // /setup has had a chance to run, re-showing on every session is noise.
-      // The with-packs path below is gated the same way via
+      // No new packs to inject. The with-packs path below is gated via
       // getAnnouncedLanguages / markLanguagesAnnounced: badge fires once per
       // (cwd, language) and stays silent on subsequent sessions / /clear.
-      if (
-        source === "initial" &&
-        !setupHintShownRef.current &&
-        injectedLanguagesRef.current.size === 0 &&
-        isFirstTimeSetup(cwd)
-      ) {
-        setupHintShownRef.current = true;
-        markSetupAudited(cwd);
+      if (source === "initial" && injectedLanguagesRef.current.size === 0) {
         log("INFO", "language", `No style packs detected for ${cwd}`, { source });
-        setLiveItems((prev) => [...prev, { kind: "setup_hint", id: getId() }]);
-        // /setup handles the empty / parent-folder / scratch-dir case via
-        // its brand-new-empty-project branch in the prompt template.
-        void triggerAutoSetupRef.current();
       }
       return;
     }
@@ -777,19 +812,7 @@ export function App(props: AppProps) {
       const toAnnounce = added.filter((id) => !alreadyAnnounced.has(id));
       if (toAnnounce.length > 0) {
         markLanguagesAnnounced(cwd, toAnnounce);
-        const showSetupHint = !setupHintShownRef.current;
-        setupHintShownRef.current = true;
-        setLiveItems((prev) => [
-          ...prev,
-          { kind: "style_pack", added: toAnnounce, showSetupHint, id: getId() },
-        ]);
-      }
-      // First-time-per-project auto-run. Fires only on the initial mount
-      // detection path — not on tool/input triggers — so we don't surprise
-      // users mid-session. Persisted across sessions via setup-history.json.
-      if (source === "initial" && isFirstTimeSetup(cwd)) {
-        markSetupAudited(cwd);
-        void triggerAutoSetupRef.current();
+        setLiveItems((prev) => [...prev, { kind: "style_pack", added: toAnnounce, id: getId() }]);
       }
     } catch (err) {
       log("WARN", "language", `Detection apply failed (${source}): ${(err as Error).message}`);
@@ -803,16 +826,25 @@ export function App(props: AppProps) {
     void applyLanguageDetectionRef.current("initial");
   }, []);
 
+  const rebindSubagentsAfterCompaction = useCallback(
+    (sessionId: string) =>
+      props.subAgentManager?.rebindParentSession(sessionId) ?? Promise.resolve(),
+    [props.subAgentManager],
+  );
   const { persistCompactedSession, persistNewMessages } = useSessionPersistence({
     sessionManagerRef,
     sessionPathRef,
     sessionStatsRef,
     persistedIndexRef,
     messagesRef,
+    turnMetricsRef,
     cwdRef,
     currentProvider,
     currentModel,
+    openAICodexContextProfile,
+    openAICodexFast,
     sessionStore,
+    onCompactedSession: rebindSubagentsAfterCompaction,
   });
 
   /**
@@ -851,25 +883,23 @@ export function App(props: AppProps) {
     }
   }, [props.settingsFile]);
 
-  const { compactionAbortRef, compactConversation, transformContext } = useContextCompaction({
-    currentModel,
-    currentProvider,
-    maxTokens: props.maxTokens,
-    authStorage: props.authStorage,
-    contextWindowOptions,
-    activeApiKey,
-    activeAccountId,
-    activeProjectId,
-    activeBaseUrl,
-    setLiveItems,
-    getId,
-    approvedPlanPathRef,
-    settingsRef,
-    messagesRef,
-    lastActualTokensRef,
-    lastActualTokensTimestampRef,
-    persistCompactedSession,
-  });
+  const { compactionAbortRef, compactConversation, transformContext, recordProviderUsage } =
+    useContextCompaction({
+      currentModel,
+      currentProvider,
+      authStorage: props.authStorage,
+      contextWindowOptions,
+      activeApiKey,
+      activeAccountId,
+      activeProjectId,
+      activeBaseUrl,
+      setLiveItems,
+      getId,
+      approvedPlanPathRef,
+      settingsRef,
+      messagesRef,
+      persistCompactedSession,
+    });
 
   // ── Background task bar state (external store) ──────────
   const {
@@ -885,8 +915,11 @@ export function App(props: AppProps) {
   const handleTaskBarExpand = useCallback(() => expandTaskBar(), []);
   const handleTaskBarCollapse = useCallback(() => collapseTaskBar(), []);
   const handleTaskKill = useCallback(
-    (id: string) => {
-      if (props.processManager) killTask(props.processManager, id);
+    async (id: string): Promise<void> => {
+      if (!props.processManager) return;
+      await killTaskWithFeedback(props.processManager, id, getId(), (item) => {
+        setLiveItems((previous) => [...previous, item]);
+      });
     },
     [props.processManager],
   );
@@ -895,7 +928,7 @@ export function App(props: AppProps) {
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
   const resolveCredentials = useCallback(
-    async (opts?: { forceRefresh?: boolean }) => {
+    async (opts?: { forceRefresh?: boolean; rejectedToken?: string }) => {
       if (props.authStorage) {
         const creds = await props.authStorage.resolveCredentials(currentProvider, {
           ...opts,
@@ -919,6 +952,9 @@ export function App(props: AppProps) {
     ],
   );
 
+  // Back-reference to the loop, so callbacks defined in its own options object
+  // (which run long after mount) can read loop-owned refs such as runStartRef.
+  const agentLoopRef = useRef<ReturnType<typeof useAgentLoop> | null>(null);
   const agentLoop = useAgentLoop(
     messagesRef,
     {
@@ -926,7 +962,8 @@ export function App(props: AppProps) {
       model: currentModel,
       tools: currentTools,
       webSearch: props.webSearch,
-      maxTokens: props.maxTokens,
+      maxTokens: resolveModelMaxTokens(currentModel, props.maxTokens),
+      maxTurns: props.maxTurns,
       supportsImages: getModel(currentModel)?.supportsImages ?? true,
       supportsVideo: getModel(currentModel)?.supportsVideo ?? false,
       thinking: thinkingLevel,
@@ -936,6 +973,8 @@ export function App(props: AppProps) {
       projectId: activeProjectId,
       resolveCredentials,
       transformContext,
+      lspManager: props.lspManager,
+      reviewCoverageTracker: props.reviewCoverageTracker,
       getIdealReviewMessage: (stats, touchedFiles) => {
         if (!idealReviewEnabledRef.current) return null;
         const decision = evaluateIdealReview(stats);
@@ -954,18 +993,19 @@ export function App(props: AppProps) {
         ]);
         return buildIdealReviewMessage(decision.reasons, driftedFiles);
       },
-      getLoopBreakMessage: (stats) => {
+      getLoopBreakMessage: (stats, stage) => {
         if (!idealReviewEnabledRef.current) return null;
         const decision = evaluateLoopBreak(stats);
         if (!decision.shouldBreak) return null;
         log("INFO", "loop-break", "Injecting loop-break nudge", {
+          stage: String(stage),
           reasons: decision.reasons.join(", "),
         });
         setLiveItems((prev) => [
           ...prev,
           { kind: "ideal_hook", text: LOOP_BREAK_NOTICE_TEXT, tone: "warning", id: getId() },
         ]);
-        return buildLoopBreakMessage(decision.reasons);
+        return buildLoopBreakMessage(decision.reasons, stage === 2);
       },
       getRegroundingMessage: (originalRequest) => {
         if (!idealReviewEnabledRef.current) return null;
@@ -989,62 +1029,7 @@ export function App(props: AppProps) {
           // Rebuild system prompt to remove the completed plan from context
           void replaceSystemPrompt({ clearApprovedPlan: true });
         }
-
-        // Generate session title after the first turn (background, best-effort)
-        if (!sessionTitleGeneratedRef.current) {
-          sessionTitleGeneratedRef.current = true;
-          const msgs = messagesRef.current;
-          // Find the first user message and first assistant text
-          const userMsg = msgs.find((m) => m.role === "user");
-          const assistantMsg = msgs.find((m) => m.role === "assistant");
-          const userText =
-            typeof userMsg?.content === "string"
-              ? userMsg.content
-              : Array.isArray(userMsg?.content)
-                ? userMsg.content
-                    .filter((c): c is { type: "text"; text: string } => c.type === "text")
-                    .map((c) => c.text)
-                    .join(" ")
-                : "";
-          const assistantText =
-            typeof assistantMsg?.content === "string"
-              ? assistantMsg.content
-              : Array.isArray(assistantMsg?.content)
-                ? assistantMsg.content
-                    .filter((c): c is { type: "text"; text: string } => c.type === "text")
-                    .map((c) => c.text)
-                    .join(" ")
-                : "";
-          if (userText) {
-            generateSessionTitle({
-              provider: currentProvider,
-              userMessage: userText,
-              assistantPreview: assistantText.slice(0, 200),
-              apiKey: activeApiKey,
-              baseUrl: activeBaseUrl,
-              accountId: activeAccountId,
-              resolveCredentials,
-            }).then(
-              (title) => {
-                setSessionTitle(title);
-                log("INFO", "title", `Session title generated: ${title}`);
-              },
-              () => {
-                // Best-effort — silently ignore failures
-              },
-            );
-          }
-        }
-      }, [
-        persistNewMessages,
-        props.cwd,
-        props.skills,
-        currentProvider,
-        activeApiKey,
-        activeAccountId,
-        activeBaseUrl,
-        resolveCredentials,
-      ]),
+      }, [persistNewMessages, props.cwd, props.skills]),
       onTurnText: useCallback(
         (text: string, thinking: string, thinkingMs: number) => {
           const hadStreamedAssistantFlush = streamedAssistantFlushRef.current.flushedChars > 0;
@@ -1082,7 +1067,6 @@ export function App(props: AppProps) {
               }
               // Real progress happened — reset the stuck-guard so the next
               // step gets its own fresh nudge budget.
-              followUpNudgesRef.current = { step: 0, count: 0 };
             }
           }
 
@@ -1174,6 +1158,12 @@ export function App(props: AppProps) {
         },
         [queueFlush],
       ),
+      onRunStart: useCallback(
+        (startedAt: number) => {
+          processGateRef.current = { runStartedAt: startedAt, injected: 0 };
+        },
+        [props.processManager],
+      ),
       onToolStart: useCallback(
         (
           toolCallId: string,
@@ -1208,7 +1198,10 @@ export function App(props: AppProps) {
             return remaining;
           };
 
-          if (name === "subagent") {
+          if (name === "spawn_agent") {
+            // The manager lifecycle creates the keyed row; the spawn acknowledgement is not completion.
+            setLiveItems(appendToolStart);
+          } else if (name === "subagent") {
             setLiveItems(appendToolStart);
             // Create or update the sub-agent group item
             const newAgent: SubAgentInfo = {
@@ -1594,22 +1587,39 @@ export function App(props: AppProps) {
             cacheRead?: number;
             cacheWrite?: number;
           },
+          timing: AgentTurnTiming,
         ) => {
+          recordProviderUsage(usage, messagesRef.current);
           recordTurnEnd(sessionStatsRef.current, usage);
+          const metric: TurnMetricPayload = {
+            version: 1,
+            turn,
+            provider: currentProvider,
+            model: currentModel,
+            stopReason,
+            usage: { ...usage },
+            timing: { ...timing },
+            cost: {
+              status: "unavailable",
+              reason: "No authoritative effective-dated provider pricing is available",
+            },
+          };
+          turnMetricsRef.current.push(metric);
+          if (sessionStore) sessionStore.turnMetrics = [...turnMetricsRef.current];
+          const metricSessionPath = sessionPathRef.current;
+          const metricManager = sessionManagerRef.current;
+          if (metricSessionPath && metricManager) {
+            void metricManager.appendTurnMetric(metricSessionPath, metric);
+          }
           log("INFO", "turn", `Turn ${turn} ended`, {
             stopReason,
             inputTokens: String(usage.inputTokens),
             outputTokens: String(usage.outputTokens),
             ...(usage.cacheRead != null && { cacheRead: String(usage.cacheRead) }),
             ...(usage.cacheWrite != null && { cacheWrite: String(usage.cacheWrite) }),
+            providerDurationMs: String(timing.providerDurationMs),
+            ...(timing.ttftMs != null && { ttftMs: String(timing.ttftMs) }),
           });
-          // Track actual token count for compaction decisions.
-          // Anthropic has separate input/output limits — only count input.
-          // All other providers share the context window — count both.
-          const inputContext = usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-          lastActualTokensRef.current =
-            currentProvider === "anthropic" ? inputContext : inputContext + usage.outputTokens;
-          lastActualTokensTimestampRef.current = Date.now();
           // For tool-only turns (no text), flush completed items to finalized
           // history so liveItems doesn't grow unbounded across consecutive turns.
           setLiveItems((prev) => {
@@ -1620,7 +1630,7 @@ export function App(props: AppProps) {
             return remaining;
           });
         },
-        [queueFlush],
+        [currentModel, currentProvider, queueFlush, recordProviderUsage, sessionStore],
       ),
       onDone: useCallback(
         (
@@ -1663,17 +1673,17 @@ export function App(props: AppProps) {
             });
           }
 
-          // Run-all: auto-start next pending task after a short delay.
+          // Run-all: auto-start the next runnable task after a short delay.
           if (runAllTasksRef.current) {
             setTimeout(() => {
               const cwd = cwdRef.current;
-              const next = getNextPendingTask(cwd);
+              const next = getNextRunnableTask(cwd);
               if (next) {
                 markTaskInProgress(cwd, next.id);
                 startTaskRef.current(next.title, next.prompt, next.id);
               } else {
                 setRunAllTasks(false);
-                log("INFO", "tasks", "Run-all complete — no more pending tasks");
+                log("INFO", "tasks", "Run-all complete — no more runnable tasks");
               }
             }, 500);
           }
@@ -1764,28 +1774,26 @@ export function App(props: AppProps) {
       // natural completion boundary regardless. The stuck-guard caps
       // nudges per step so a genuinely blocked agent surfaces.
       getFollowUpMessages: useCallback(() => {
-        const steps = planStepsRef.current;
-        if (steps.length === 0 || !approvedPlanPathRef.current) return null;
-        const next = steps.find((s) => !s.completed);
-        if (!next) return null;
-        const r = followUpNudgesRef.current;
-        if (r.step !== next.step) {
-          r.step = next.step;
-          r.count = 0;
+        const childCompletionFollowUp = buildSubAgentCompletionFollowUp(props.subAgentManager);
+        if (childCompletionFollowUp) return childCompletionFollowUp;
+
+        // Background processes started this run and never read block
+        // completion: their progress/exit checkpoints only reach the agent on
+        // the steering path, which a run about to stop never reaches.
+        const runStartedAt = agentLoopRef.current?.runStartRef.current ?? 0;
+        const gate = processGateRef.current;
+        const processFollowUp = buildProcessCompletionFollowUp(
+          props.processManager?.list() ?? [],
+          runStartedAt,
+          gate.injected,
+        );
+        if (processFollowUp) {
+          gate.injected += 1;
+          return processFollowUp;
         }
-        if (r.count >= 2) return null;
-        r.count++;
-        return [
-          {
-            role: "user" as const,
-            content:
-              `Continue with step ${next.step}: ${next.text}. ` +
-              `Emit [DONE:${next.step}] when done, then proceed to step ${next.step + 1} ` +
-              `in the same turn. Only stop when every step in \`## Steps\` is complete ` +
-              `or you genuinely need user input.`,
-          },
-        ];
-      }, []),
+
+        return null;
+      }, [props.subAgentManager, props.processManager]),
       onRetry: useCallback(() => {
         // Roll back any pending progressive flushes from the aborted attempt.
         // Without this, a stall retry regenerates the preamble and the old
@@ -1795,47 +1803,31 @@ export function App(props: AppProps) {
         );
         streamedAssistantFlushRef.current = { flushedChars: 0, text: "" };
       }, []),
+      onTruncated: useCallback(
+        (
+          reason: "max_tokens" | "refusal" | "provider_error" | "empty_response",
+          continued: boolean,
+        ) => {
+          const text =
+            reason === "max_tokens"
+              ? continued
+                ? TRUNCATED_CONTINUING_NOTICE_TEXT
+                : TRUNCATED_INCOMPLETE_NOTICE_TEXT
+              : reason === "refusal"
+                ? TRUNCATED_REFUSAL_NOTICE_TEXT
+                : reason === "empty_response"
+                  ? TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT
+                  : TRUNCATED_PROVIDER_ERROR_NOTICE_TEXT;
+          setLiveItems((prev) => [
+            ...prev,
+            { kind: "ideal_hook", text, tone: "warning", id: getId() },
+          ]);
+        },
+        [],
+      ),
     },
   );
-
-  // First-time-per-project auto-run of /setup. Bound after `agentLoop` is in
-  // scope so the ref closure can dispatch to it. Called from the initial
-  // language-detection path when `isFirstTimeSetup(cwd)` is true. Pushes a
-  // notice item explaining what's happening, then runs the audit prompt.
-  triggerAutoSetupRef.current = async () => {
-    const setupCmd = getPromptCommand("setup");
-    if (!setupCmd) {
-      log("WARN", "setup", "Auto-setup skipped — /setup command not found in registry.");
-      return;
-    }
-    log("INFO", "setup", `Auto-running /setup (first session for ${cwdRef.current})`);
-    setLiveItems((prev) => [
-      ...prev,
-      {
-        kind: "info",
-        text:
-          "First time in this project — auto-running /setup to audit hygiene, tooling, and style-pack alignment. " +
-          "Press Esc to cancel.",
-        id: getId(),
-      },
-      { kind: "user", text: "/setup", id: getId() },
-    ]);
-    setLastUserMessage("/setup");
-    setDoneStatus(null);
-    try {
-      await agentLoop.run(setupCmd.prompt);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isAbort = msg.includes("aborted") || msg.includes("abort");
-      log(isAbort ? "INFO" : "ERROR", "setup", `Auto-setup ended: ${msg}`);
-      setLiveItems((prev) => [
-        ...prev,
-        isAbort
-          ? { kind: "stopped", text: "Auto-setup cancelled.", id: getId() }
-          : toErrorItem(err, getId()),
-      ]);
-    }
-  };
+  agentLoopRef.current = agentLoop;
 
   // Sync terminal title with agent loop state
   useEffect(() => {
@@ -2040,8 +2032,6 @@ export function App(props: AppProps) {
               persistedIndexRef.current = messagesRef.current.length;
             })();
             agentLoop.reset();
-            setSessionTitle(undefined);
-            sessionTitleGeneratedRef.current = false;
             setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
           },
           openThemeSelector: () => setOverlay("theme"),
@@ -2109,6 +2099,7 @@ export function App(props: AppProps) {
         inputImages,
         modelSupportsImages,
         modelSupportsVideo,
+        modelInfo?.provider,
       );
 
       // ── Queue message if agent is already running ──
@@ -2235,12 +2226,19 @@ export function App(props: AppProps) {
         setComposerInject({ text: queuedText, nonce: nextIdRef.current++ });
       }
       agentLoop.abort();
+      void props.subAgentManager?.interruptAll();
+    } else if (
+      props.subAgentManager
+        ?.list()
+        .some((agent) => agent.state === "starting" || agent.state === "running")
+    ) {
+      void props.subAgentManager.interruptAll();
     } else if (compactionAbortRef.current) {
       compactionAbortRef.current.abort();
     } else {
       handleDoubleExit();
     }
-  }, [agentLoop, handleDoubleExit, setLiveItems]);
+  }, [agentLoop, handleDoubleExit, props.subAgentManager, setLiveItems]);
 
   const handleToggleThinking = useCallback(() => {
     setThinkingLevel((prev) => {
@@ -2296,8 +2294,8 @@ export function App(props: AppProps) {
           // Reconnect MCP servers ONLY when the resolved server set actually
           // changes. GLM is the only provider with a different set (Z.AI
           // servers), so a switch that doesn't involve GLM on either side
-          // keeps the identical set — tearing down a live stdio child (e.g.
-          // kencode-search) and re-spawning `npx` there only risks a failed
+          // keeps the identical set — tearing down a live stdio child and
+          // re-spawning `npx` there only risks a failed
           // re-spawn that would silently drop the tools.
           const glmInvolved = newProvider === "glm" || prevProvider === "glm";
           if (props.mcpManager && glmInvolved) {
@@ -2392,7 +2390,9 @@ export function App(props: AppProps) {
               | "xiaomi"
               | "deepseek"
               | "openrouter"
-              | "sakana",
+              | "huggingface"
+              | "sakana"
+              | "xai",
           );
           await sm.set("defaultModel", newModelId);
         });
@@ -2443,10 +2443,10 @@ export function App(props: AppProps) {
       // Project audits / one-shot analysis
       "init",
       "expand",
-      "bullet-proof",
       "compare",
       // Setup / installers
       "setup-commit",
+      "setup-ci",
       "setup-skills",
     ];
     const orderedPromptCommands = promptOrder
@@ -2573,6 +2573,9 @@ export function App(props: AppProps) {
             try {
               const session = await sm.create(taskCwd, currentProvider, currentModel);
               newSessionPath = session.path;
+              sessionStatsRef.current.sessionId = session.id;
+              if (props.sessionStore) props.sessionStore.sessionId = session.id;
+              await props.subAgentManager?.resetParentSession(session.id);
               log("INFO", "tasks", "New session for task", { path: session.path });
             } catch {
               // Session creation is best-effort.
@@ -2597,22 +2600,25 @@ export function App(props: AppProps) {
       agentLoop.reset();
       persistedIndexRef.current = messagesRef.current.length;
       const sm = sessionManagerRef.current;
-      if (sm) {
-        void sm.create(taskCwd, currentProvider, currentModel).then((session) => {
-          sessionPathRef.current = session.path;
-          log("INFO", "tasks", "New session for task", { path: session.path });
-        });
-      }
       const taskItem: TaskItem = { kind: "task", title, id: getId() };
       setLastUserMessage(title);
       setDoneStatus(null);
       setLiveItems([taskItem]);
-      void agentLoop.run(fullPrompt).catch((err: unknown) => {
-        if (agentLoop.isRunning) {
-          agentLoop.reset();
+      void (async () => {
+        try {
+          if (sm) {
+            const session = await sm.create(taskCwd, currentProvider, currentModel);
+            sessionPathRef.current = session.path;
+            sessionStatsRef.current.sessionId = session.id;
+            await props.subAgentManager?.resetParentSession(session.id);
+            log("INFO", "tasks", "New session for task", { path: session.path });
+          }
+          await agentLoop.run(fullPrompt);
+        } catch (err) {
+          if (agentLoop.isRunning) agentLoop.reset();
+          setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
         }
-        setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
-      });
+      })();
     },
     [agentLoop, currentModel, currentProvider, props],
   );
@@ -2953,7 +2959,7 @@ export function App(props: AppProps) {
   );
 
   const handleExitPlanMode = useCallback(
-    async (_planPath: string): Promise<string> => {
+    async (_planPath: string, _content: string): Promise<string> => {
       await setPlanModeAndPrompt(false);
       planOverlayPendingRef.current = true;
       setPlanAutoExpand(true);
@@ -3017,6 +3023,9 @@ export function App(props: AppProps) {
         if (sm) {
           const s = await sm.create(props.cwd, currentProvider, currentModel);
           newSessionPath = s.path;
+          sessionStatsRef.current.sessionId = s.id;
+          if (props.sessionStore) props.sessionStore.sessionId = s.id;
+          await props.subAgentManager?.resetParentSession(s.id);
         }
 
         if (props.resetUI && props.sessionStore) {

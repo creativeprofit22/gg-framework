@@ -210,22 +210,25 @@ function renderLsGroup(
   ];
 }
 
-function renderKencodeQueryGroup(
+/** The one argument that identifies a steroids call, whichever action it is. */
+export function steroidsQuery(args: Record<string, unknown>): string {
+  if (Array.isArray(args.repos)) return args.repos.map(String).join(", ");
+  return String(args.pattern ?? args.symbol ?? args.query ?? args.path ?? args.repo ?? "");
+}
+
+function renderSteroidsGroup(
   tools: readonly ToolGroupSummaryTool[],
   allDone: boolean,
-  labels: { running: string; done: string },
 ): SummarySegment[][] {
   const count = tools.length;
   return [
     [
-      { text: allDone ? labels.done : labels.running, bold: true, tone: "web" },
+      { text: allDone ? "Read real code" : "Reading real code", bold: true, tone: "search" },
       { text: " with ", bold: false },
-      { text: String(count), bold: true, tone: "web" },
+      { text: String(count), bold: true, tone: "search" },
       {
         text: ` ${plural(count, "query", "queries")}${detailSuffix(
-          tools.map((tool) =>
-            String(tool.args.query ?? tool.args.domain ?? tool.args.category ?? ""),
-          ),
+          tools.map((tool) => steroidsQuery(tool.args)),
           { quote: true, maxLength: MAX_LONG_DETAIL_LENGTH },
         )}`,
         bold: false,
@@ -234,45 +237,13 @@ function renderKencodeQueryGroup(
   ];
 }
 
-function renderSearchCodeGroup(
-  tools: readonly ToolGroupSummaryTool[],
-  allDone: boolean,
-): SummarySegment[][] {
-  return renderKencodeQueryGroup(tools, allDone, {
-    running: "Searching code",
-    done: "Searched code",
-  });
-}
-
-function renderReferenceSourcesGroup(
-  tools: readonly ToolGroupSummaryTool[],
-  allDone: boolean,
-): SummarySegment[][] {
-  return renderKencodeQueryGroup(tools, allDone, {
-    running: "Finding references",
-    done: "Found references",
-  });
-}
-
-function renderDiscoverReposGroup(
-  tools: readonly ToolGroupSummaryTool[],
-  allDone: boolean,
-): SummarySegment[][] {
-  return renderKencodeQueryGroup(tools, allDone, {
-    running: "Discovering repos",
-    done: "Discovered repos",
-  });
-}
-
 /** Registry of group renderers by tool name. Add entries to support new grouped summaries. */
 const GROUP_RENDERERS: Record<string, GroupRenderer> = {
   grep: renderGrepGroup,
   read: renderReadGroup,
   find: renderFindGroup,
   ls: renderLsGroup,
-  "mcp__kencode-search__searchCode": renderSearchCodeGroup,
-  "mcp__kencode-search__referenceSources": renderReferenceSourcesGroup,
-  "mcp__kencode-search__discoverRepos": renderDiscoverReposGroup,
+  steroids: renderSteroidsGroup,
 };
 
 export function buildToolGroupSummary(

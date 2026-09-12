@@ -176,6 +176,39 @@ const TS_LANGUAGE_IDS: Readonly<Record<string, string>> = {
   ".jsx": "javascriptreact",
 };
 
+/**
+ * tsserver tuning applied to every TypeScript/JavaScript project root.
+ *
+ * Shape verified against typescript-language-server 5.3.0's `initialize`
+ * handler: `disableAutomaticTypingAcquisition` and `maxTsServerMemory` are
+ * read from the TOP level of initializationOptions, while `useSyntaxServer`
+ * is read from the nested `tsserver` object.
+ *
+ * Untuned, one root costs FOUR processes: the language-server bridge, the
+ * semantic tsserver, a second `--serverMode partialSemantic` tsserver, and
+ * `typingsInstaller`. Both extras exist for an interactive editor, not for us:
+ *
+ *  - The syntax server keeps completions and highlighting responsive while the
+ *    semantic server loads a project. We only ever call
+ *    `diagnosticsAfterWrite`, so it is a whole second tsserver holding a second
+ *    copy of the program for features we never request. `"never"` collapses the
+ *    pair into a single server (CompositeServerType.Single).
+ *  - Automatic typing acquisition downloads `@types` packages over the network
+ *    for untyped JS. This catalog never installs anything at runtime (see the
+ *    module header), so it only costs the `typingsInstaller` process.
+ *
+ * Net effect: four processes per root become two.
+ */
+const TS_INITIALIZATION_OPTIONS = {
+  disableAutomaticTypingAcquisition: true,
+  /**
+   * Emitted as `--max-old-space-size`. A blast-radius guard rather than a
+   * saving — measured roots sit well under this — matching the VS Code default.
+   */
+  maxTsServerMemory: 3072,
+  tsserver: { useSyntaxServer: "never" },
+} as const;
+
 export const LSP_SERVER_CATALOG: readonly LspServerSpec[] = [
   {
     id: "typescript",
@@ -199,10 +232,20 @@ export const LSP_SERVER_CATALOG: readonly LspServerSpec[] = [
       if (!command) return null;
       // Prefer the project's own typescript (correct version semantics); fall
       // back to ggcoder's bundled copy so bare projects still get diagnostics.
-      if (projectTsserverPath(projectRoot)) return command;
+      // Tuning applies to BOTH paths: a project with its own TypeScript is the
+      // common case, so skipping it there would leave the flags nearly dead.
+      if (projectTsserverPath(projectRoot)) {
+        return { ...command, initializationOptions: TS_INITIALIZATION_OPTIONS };
+      }
       const tsserver = bundledTsserverPath();
       if (!tsserver) return null;
-      return { ...command, initializationOptions: { tsserver: { path: tsserver } } };
+      return {
+        ...command,
+        initializationOptions: {
+          ...TS_INITIALIZATION_OPTIONS,
+          tsserver: { ...TS_INITIALIZATION_OPTIONS.tsserver, path: tsserver },
+        },
+      };
     },
   },
   {

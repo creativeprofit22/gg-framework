@@ -1,0 +1,31 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # pnpm workspace — directories mirror pnpm-workspace.yaml globs so per-package
+  # manifests get updates too (the shared root pnpm-lock.yaml is regenerated
+  # with each PR).
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /packages/*
+      - /experiments/*
+      - /gg-app
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Tauri desktop app (gg-app).
+  - package-ecosystem: cargo
+    directory: /gg-app/src-tauri
+    schedule:
+      interval: weekly

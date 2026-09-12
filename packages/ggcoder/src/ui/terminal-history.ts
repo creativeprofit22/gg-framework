@@ -11,7 +11,7 @@ import { BLACK_CIRCLE, RETURN_SYMBOL } from "./constants/figures.js";
 import { SPINNER_FRAMES } from "./spinner-frames.js";
 import type { Theme } from "./theme/theme.js";
 import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
-import { buildToolGroupSummary } from "./tool-group-summary.js";
+import { buildToolGroupSummary, steroidsQuery } from "./tool-group-summary.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
@@ -44,7 +44,6 @@ import {
   renderCompacted,
   renderCompacting,
   renderError,
-  renderSetupHint,
   renderStatusLine,
   renderStepDone,
   renderStylePack,
@@ -352,9 +351,7 @@ export function serializeCompletedItemToTerminalHistory(
       );
     }
     case "style_pack":
-      return renderStylePack(item.added, item.showSetupHint, context);
-    case "setup_hint":
-      return renderSetupHint(context);
+      return renderStylePack(item.added, context);
     case "update_notice":
       return renderUpdateNotice(item.text, context);
     case "compacting":
@@ -751,7 +748,12 @@ function renderSubAgentGroup(
   agents: readonly {
     status: "running" | "done" | "error" | "aborted" | string;
     task: string;
-    tokenUsage?: { input: number; output: number };
+    tokenUsage?: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
     currentActivity?: string;
     result?: string;
     durationMs?: number;
@@ -800,7 +802,12 @@ function renderSubAgentRows(
   agent: {
     status: "running" | "done" | "error" | "aborted" | string;
     task: string;
-    tokenUsage?: { input: number; output: number };
+    tokenUsage?: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
     currentActivity?: string;
     durationMs?: number;
   },
@@ -821,14 +828,18 @@ function renderSubAgentRows(
         : "";
   const taskLine = `${dim(context, `   ${branch.padEnd(3)}`)}${taskPrefix}${color(agent.status === "done" ? context.theme.success : context.theme.text, taskDisplay, isRunning)}`;
 
-  const totalTokens = agent.tokenUsage ? agent.tokenUsage.input + agent.tokenUsage.output : 0;
+  const freshInput = agent.tokenUsage
+    ? agent.tokenUsage.input + (agent.tokenUsage.cacheWrite ?? 0)
+    : 0;
+  const totalTokens = freshInput + (agent.tokenUsage?.output ?? 0);
+  const cachedTokens = agent.tokenUsage?.cacheRead ?? 0;
   let detail: string;
   if (isRunning) {
     detail = `${color(context.theme.primary, "· ")}${dim(context, agent.currentActivity ?? "Starting…")}`;
   } else if (agent.status === "done") {
     detail = dim(
       context,
-      `${formatCompactTokens(totalTokens)} tokens${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
+      `${formatCompactTokens(totalTokens)} tokens${cachedTokens > 0 ? ` · ${formatCompactTokens(cachedTokens)} cached` : ""}${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
     );
   } else {
     detail = color(
@@ -1021,6 +1032,7 @@ function getToolHeaderParts(
     case "tasks":
       return { label: displayName, detail: String(args.action ?? "") };
     default:
+      if (name === "steroids") return { label: displayName, detail: steroidsQuery(args) };
       return { label: displayName, detail: name.startsWith("mcp__") ? getMCPDetailArg(args) : "" };
   }
 }
@@ -1178,7 +1190,7 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
     }
     default: {
-      if (!name.startsWith("mcp__")) return "";
+      if (name !== "steroids" && !name.startsWith("mcp__")) return "";
       const lines = result.split("\n").filter((lineText) => lineText.length > 0);
       if (lines.length === 0) return "no results";
       const first = lines[0] ?? "";

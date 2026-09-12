@@ -12,22 +12,69 @@
  * unchanged via AgentSession — this file is only a network seam.
  */
 import http from "node:http";
+import { nativeDevAuthFile } from "./app-sidecar-native-auth.js";
 import fs from "node:fs/promises";
 import { watch as fsWatch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
-import { formatError, type ToolResultContent } from "@kenkaiiii/gg-ai";
+import { spawn, type ChildProcess } from "node:child_process";
+import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { appSettingsFile } from "./app-sidecar-paths.js";
+import {
+  createAppSidecarKenLifecycle,
+  createKenSessionInitializer,
+  parseKenPromptInput,
+  parseKenRunIdentity,
+} from "./app-sidecar-ken-lifecycle.js";
+import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
+import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
+import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
+import type { DesktopContextSnapshot, DesktopSessionUXState } from "@kenkaiiii/gg-core";
+import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
+import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
+import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
+import { collectPersistedMcpToolFailures } from "./app-sidecar-tool-failures.js";
+import { restoreToolImages } from "./app-sidecar-image-history.js";
+import {
+  AppSidecarContinuationHandoffService,
+  type ContinuationSynthesisSessionOptions,
+} from "./app-sidecar-continuation-handoff.js";
+import {
+  AppSidecarDecisionSummaryService,
+  DECISION_SUMMARY_CONTEXT_MAX_BYTES,
+  type DecisionSummarySessionOptions,
+} from "./app-sidecar-decision-summary.js";
+import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-route.js";
+import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
+import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
+import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
+import {
+  createRunEndPayload,
+  extractImageWarnings,
+  normalizePromptMeta,
+  type PromptMeta,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
+import { RunClaim } from "./core/run-claim.js";
+import {
+  CHAT_AGENT_IDS,
+  chatAgentSessionsDir,
+  createChatAgent,
+  parseChatAgentId,
+  switchChatAgent,
+  type ChatAgentId,
+} from "./chat-agents/index.js";
+import { buildJiwaTools, JiwaStore } from "./chat-agents/jiwa.js";
+import { buildMemoryTools, MemoryStore } from "./chat-agents/memory.js";
 import { buildKenSystemPrompt, buildKenAutopilotSystemPrompt } from "./core/ken-prompt.js";
 import {
-  buildKenDigest,
-  buildKenAutopilotContext,
-  buildKenAutopilotPlanContext,
+  buildKenInteractiveSessionContext,
+  runKenAutopilotSessionReview,
 } from "./core/ken-context.js";
 import { parseAutopilotVerdict, type AutopilotVerdict } from "./core/autopilot-verdict.js";
 import {
@@ -39,49 +86,151 @@ import {
   type WorkflowCommandSpec,
 } from "./core/autopilot-gate.js";
 import { driveAutopilotCycle, frameAutopilotInjection } from "./core/autopilot-cycle.js";
+import {
+  createContinuationPromptAdapter,
+  createStrandedQueueDrain,
+  runUserTurn,
+  type UserTurnDeps,
+  type UserTurnOutcome,
+} from "./app-sidecar-user-turn.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
-import type { KenTurnPayload, AppMarkerPayload } from "./core/session-manager.js";
+import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
 import {
   normalizeAutopilotMarkersForHistory,
   normalizeAppMarkersForHistory,
   normalizeKenTurnsForHistory,
+  getHistoryMessageVisibility,
+  replayMessagesInOrder,
   restoreUserRow,
   restoreAssistantTexts,
+  resolveRestoredCommand,
   autopilotMarkerCopySeed,
 } from "./core/session-history.js";
+import {
+  sessionToMarkdown,
+  defaultExportFilename,
+  type ToolDetail,
+} from "./core/session-export.js";
 import { AuthStorage } from "./core/auth-storage.js";
-import { MOONSHOT_OAUTH_KEY, XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import {
+  advancesPhase,
+  explainPullFailure,
+  isGgufShard,
+  isValidHfRepoId,
+  parseOllamaPullLine,
+  pickGgufQuant,
+  SHARDED_MESSAGE,
+  toHfSearchRow,
+  type GgufFile,
+  type HfSearchRow,
+  type PullPhase,
+} from "./hf-pull.js";
+import { cleanupToolOutputs } from "./tools/overflow.js";
+import { readCappedBody } from "./utils/http-body.js";
+import {
+  fetchSubscriptionUsage,
+  SubscriptionUsageError,
+  XIAOMI_CREDITS_KEY,
+  dualAuthProvider,
+  oauthStorageKey,
+  discoverLocalModels,
+  findProbedModel,
+  formatLocalModelId,
+  isManuallyRunnableTaskStatus,
+  parseLocalModelId,
+  probeEndpoint,
+  toModelInfo as localModelInfo,
+  type LocalEndpoint,
+  type LocalEndpointProbe,
+  type PlanAcceptResult,
+  type PlanMutationFailure,
+  type PlanRevisionResult,
+  type SubscriptionUsageProvider,
+  type SubscriptionUsageSnapshot,
+} from "@kenkaiiii/gg-core";
+import {
+  LocalEndpointError,
+  addCustomEndpoint,
+  listAllEndpoints,
+  removeCustomEndpoint,
+  syncEndpointCredentials,
+} from "./core/local-endpoint-store.js";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import { loginGemini } from "./core/oauth/gemini.js";
 import { loginKimi } from "./core/oauth/kimi.js";
+import { loginXai } from "./core/oauth/xai.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
-import { AUTH_PROVIDERS, type AuthProviderMeta } from "./core/auth-providers.js";
-import { ensureAppDirs, loadSavedSettings } from "./config.js";
-import { SettingsManager, type Settings } from "./core/settings-manager.js";
-import { getModel, getMaxThinkingLevel, getContextWindow, MODELS } from "./core/model-registry.js";
-import { resolveStartOrFallback } from "./core/resolve-start.js";
-import { getGitBranch, isGitRepo } from "./utils/git.js";
 import {
+  AUTH_PROVIDERS,
+  authPriorityNote,
+  describeAuthMethods,
+  type AuthMethod,
+  type AuthMethodMeta,
+  type AuthProviderMeta,
+} from "./core/auth-providers.js";
+import { ensureAppDirs, loadSavedSettings, projectScopeAllowed } from "./config.js";
+import { SettingsManager, type Settings } from "./core/settings-manager.js";
+import {
+  installPlugin,
+  listInstalledPlugins,
+  removePlugin,
+} from "./core/extensions/plugin-bundles.js";
+import {
+  getModel,
+  getDefaultThinkingLevel,
+  getAllModels,
+  clearRuntimeModels,
+  registerRuntimeModels,
+} from "./core/model-registry.js";
+import { resolveStartOrFallback } from "./core/resolve-start.js";
+import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
+import { getGitHubOpenCounts, getGitHubRepoSlug } from "./utils/github.js";
+import { startGitHubCIPoll, type GitHubCI } from "./utils/github-ci.js";
+import { extractPlanSteps } from "./utils/plan-steps.js";
+import {
+  clampThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
+  resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
+import { AppSidecarProgrammaticChat } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { discoverProjects, listRecentSessions } from "./core/project-discovery.js";
+import {
+  handleAppSidecarProgrammaticExecution,
+  settleProgrammaticRun,
+} from "./app-sidecar-programmatic-execution.js";
+import {
+  executeProgrammaticOpportunity,
+  type ProgrammaticExecutionOutcome,
+} from "./core/programmatic/execution.js";
+import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
+import { discoverProjects } from "./core/project-discovery.js";
+import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
   loadTasksSync,
   saveTasksSync,
   pruneDoneTasksSync,
-  getNextPendingTask,
+  getNextRunnableTask,
   markTaskInProgress,
+  finalizeTaskRun,
 } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
-import { RADIO_STATIONS, getCurrentStation, playRadio, stopRadio } from "./core/radio.js";
+import { installTerminationHandlers } from "./core/shutdown.js";
+import {
+  RADIO_STATIONS,
+  getCurrentStation,
+  getRadioVolume,
+  playRadio,
+  setRadioVolume,
+  stopRadio,
+} from "./core/radio.js";
 import { enrichProcessPath } from "./core/shell-path.js";
-import { downscaleForPreview, validateVisionImage } from "./utils/image.js";
+import { shrinkToFit, validateVisionImage } from "./utils/image.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
+import { installSteroids, probeSteroids } from "./core/steroids.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
 import {
   loadServers,
@@ -91,27 +240,181 @@ import {
   parseMcpAddCommand,
   MCPClientManager,
   McpOAuthStore,
+  createElicitationBridge,
   type MCPScope,
   type MCPServerConfig,
 } from "./core/mcp/index.js";
+import type { ElicitResult } from "@modelcontextprotocol/client";
+import { createAskUserBridge, type AskUserResult, type AskUserPrompt } from "./core/ask-user.js";
+import { createAskUserTool } from "./tools/ask-user.js";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
 import { awardPrompt, awardCommits } from "./core/progress/engine.js";
 import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
+import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
+import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
+import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
+import {
+  createAppSidecarStorageDiagnostics,
+  parseAppIdentityArgument,
+  type AppSidecarStorageDiagnostics,
+} from "./app-sidecar-storage-diagnostics.js";
+import {
+  createAppSidecarPhaseBindingService,
+  type AppSidecarPhaseBindingService,
+} from "./app-sidecar-phase-binding.js";
+import {
+  isRoadmapPhaseLeasePredecessorProofV1,
+  PHASE_LEASE_RENEW_INTERVAL_MS,
+  RoadmapPhaseLeaseRepository,
+  type RoadmapPhaseLeasePredecessorProofV1,
+} from "./roadmap-phase-lease-repository.js";
+import {
+  captureGitWorkspaceSnapshot,
+  createApprovedPlan,
+  PlanSnapshotResumeError,
+  RepositoryUnverifiableError,
+} from "./roadmap-phase-execution.js";
+import {
+  isPhaseBindingRoute,
+  parsePhaseBindingBody,
+  phaseBindingHttpStatus,
+} from "./app-sidecar-phase-binding-route.js";
+import {
+  AppSidecarReminderCoordinator,
+  createAppSidecarReminderHandler,
+  type AppSidecarReminderHandler,
+} from "./app-sidecar-reminders.js";
+import {
+  ProjectNotesRepository,
+  canonicalProjectKey,
+  type ProjectNotesSnapshot,
+} from "./project-notes-repository.js";
+import {
+  launchBoundPhase,
+  type BoundPhaseCandidate,
+  type PhaseStartResponseBody,
+} from "./app-sidecar-phase-launch.js";
+import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
+import {
+  AppSidecarPlanGate,
+  approvedPlanArtifactContent,
+  hasPlanOnlyBoundary,
+  planGateConflictCode,
+  type PersistedPlanReviewCheckpoint,
+} from "./app-sidecar-plan-gate.js";
+import {
+  moveApprovedPhaseLeaseToFreshSession,
+  persistApprovedPlanSnapshot,
+} from "./app-sidecar-approved-plan.js";
+import {
+  executePlanRevisionRequest,
+  isPlanRevisionSessionBusy,
+  parsePlanRevisionBody,
+} from "./app-sidecar-plan-revision.js";
+import {
+  AppSidecarPlanHandoff,
+  type ApprovedPlanConsumptionIdentity,
+} from "./app-sidecar-plan-handoff.js";
+import {
+  parsePhaseAdvancementStartBody,
+  parsePhaseAdvancementStartRoute,
+} from "./app-sidecar-phase-advancement-route.js";
+import { AppSidecarJsonBodyError, readJsonBody } from "./app-sidecar-http-json.js";
+import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
+import { AppSidecarPhaseImplementationPlanTracker } from "./app-sidecar-phase-completion.js";
+import {
+  AppSidecarPhaseCancellationCoordinator,
+  type ActiveOperationCancellationResult,
+} from "./app-sidecar-phase-cancellation.js";
+import {
+  commitImplementationRunStart,
+  commitPlanApprovalCheckpoint,
+  PhaseCheckpointError,
+  phaseCheckpointFailurePayload,
+} from "./app-sidecar-phase-checkpoint.js";
+import { AppSidecarPhaseLifecycleCoordinator } from "./app-sidecar-phase-lifecycle.js";
+import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
+import {
+  APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
+  AppSidecarRoadmapToolHost,
+} from "./app-sidecar-roadmap-tool-host.js";
+import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
+import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
+import {
+  commitChatResearchTransition,
+  resolveChatResearchCommandRoute,
+} from "./app-sidecar-chat-research-handoff.js";
+import {
+  appSidecarChatCommandsResponse,
+  handleAppSidecarChatResearchPrompt,
+} from "./app-sidecar-chat-research-route.js";
+import {
+  createAppSidecarChatRoadmapSessionOptions,
+  createAppSidecarCodingRoadmapSessionOptions,
+} from "./app-sidecar-roadmap-session-options.js";
+import { createRoadmapBindTool } from "./tools/roadmap-bind.js";
+import {
+  AppSidecarRoadmapDraftDecisionService,
+  parseRoadmapPhaseDraftRejectBody,
+  parseRoadmapPhaseDraftRoute,
+  roadmapPhaseDraftApprovalHttpStatus,
+  roadmapPhaseDraftRejectionHttpStatus,
+} from "./app-sidecar-roadmap-draft-route.js";
+import {
+  AppSidecarSessionMutationCoordinator,
+  isAppSidecarSessionBusy,
+  appSidecarSessionBusyConflictBody,
+  runAppSidecarNewSessionMutation,
+  runAppSidecarPromptStartup,
+  type SessionMutationOwner,
+} from "./app-sidecar-session-mutation.js";
+import {
+  AppSidecarContinuationSession,
+  parseContinuationCommitRequest,
+} from "./app-sidecar-continuation-session.js";
+import type {
+  AskUserAcknowledgement,
+  ContinuationCommitResponse,
+  KenState,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
+import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
+import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
+import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
+import {
+  captureSidecarError,
+  flushSidecarErrors,
+  shouldCaptureToolFailure,
+  wrapSidecarHandler,
+} from "./core/sidecar-error-reporter.js";
+
+const AUTOMATION_PROVENANCE: MessageProvenance = {
+  source: "runtime",
+  kind: "automation",
+  visibility: "hidden",
+};
 
 const ALL_PROVIDERS: Provider[] = [
+  // US
   "anthropic",
-  "xiaomi",
   "openai",
+  "azure",
   "gemini",
-  "glm",
+  "xai",
+  // China
   "moonshot",
+  "glm",
   "minimax",
+  "xiaomi",
   "deepseek",
-  "openrouter",
+  // Open-community gateway, before the provider-agnostic one
+  "huggingface",
+  // Japan, then provider-agnostic gateway last
   "sakana",
+  "openrouter",
 ];
 
 // ── gg-app settings (~/.gg/gg-app.json) ────────────────────
@@ -141,10 +444,16 @@ interface AppSettings {
    *  GG Coder's model (the historical behavior). Set → Ken (chat + autopilot)
    *  uses this model regardless of GG Coder's. */
   kenModels?: Record<string, KenModelPref>;
+  /** Extra folders scanned for projects alongside `projectsRoot`. */
+  projectRoots?: string[];
+  /** Project paths dismissed from the picker, as normalized cwds. */
+  hiddenProjects?: string[];
 }
 
-function appSettingsFile(): string {
-  return path.join(os.homedir(), ".gg", "gg-app.json");
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  return out.length > 0 ? out : undefined;
 }
 
 function defaultProjectsRoot(): string {
@@ -171,6 +480,8 @@ async function loadAppSettings(): Promise<AppSettings> {
         raw.projectModels && typeof raw.projectModels === "object" ? raw.projectModels : undefined,
       autopilot: raw.autopilot && typeof raw.autopilot === "object" ? raw.autopilot : undefined,
       kenModels: raw.kenModels && typeof raw.kenModels === "object" ? raw.kenModels : undefined,
+      projectRoots: stringArray(raw.projectRoots),
+      hiddenProjects: stringArray(raw.hiddenProjects),
     };
   } catch {
     return { projectsRoot: defaultProjectsRoot() };
@@ -315,7 +626,10 @@ interface HistoryEntryForWire {
   error?: { scope: string; headline: string; message?: string; guidance?: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Image previews; `text` carries verbatim warnings rendered once before them. */
   toolImages?: Array<{ src: string; path?: string }>;
+  /** Failed MCP result restored as a durable transcript row. */
+  mcpToolFailure?: { name: string; result: string };
   subagentGroup?: Array<{
     agentName?: string;
     status: "done" | "error";
@@ -351,22 +665,39 @@ async function prepareAttachments(
     const fileName = `${Date.now().toString(36)}-${safe}`;
     const filePath = path.join(dir, fileName);
     const buf = Buffer.from(a.data, "base64");
-    // Validate image attachments before they become native image content blocks.
-    // A corrupt or unsupported-format image (e.g. a malformed .ico, or a .png
-    // with a bad IDAT) makes the provider reject the ENTIRE turn ("image data
-    // ... not a valid image") before the agent can respond. Downgrade such files
-    // to a plain "file" attachment so the model gets a path note and inspects
-    // them with its tools instead of the request 400ing.
+    // Validate and cap image attachments before they become native image content
+    // blocks. Anthropic applies a 2000 px per-dimension cap once conversation
+    // history contains more than 20 images, so every attachment must be safe for
+    // later turns too. Keep the original on disk, but send the resized bytes.
+    // Corrupt or unsupported images become plain files so they cannot reject the
+    // entire provider request.
     let prepared: PreparedAttachment = { ...a };
     if (a.kind === "image") {
-      const validatedType = await validateVisionImage(buf).catch(() => null);
-      if (validatedType) prepared = { ...a, mediaType: validatedType };
-      else prepared = { ...a, kind: "file" };
+      try {
+        const resized = await shrinkToFit(buf, a.mediaType);
+        const validatedType = await validateVisionImage(resized.buffer);
+        prepared = validatedType
+          ? {
+              ...a,
+              mediaType: validatedType,
+              data: resized.buffer.toString("base64"),
+            }
+          : { ...a, kind: "file" };
+      } catch {
+        prepared = { ...a, kind: "file" };
+      }
     }
     try {
       await fs.writeFile(filePath, buf);
+      await fs.access(filePath, fs.constants.R_OK);
       out.push({ ...prepared, path: filePath });
     } catch {
+      // Only validated images retain usable inline bytes. Videos use the read tool.
+      if (prepared.kind !== "image") {
+        throw new Error(
+          `Could not save attachment "${safe}" for reading. Nothing was sent; retry after checking the project upload folder.`,
+        );
+      }
       out.push({ ...prepared });
     }
   }
@@ -385,6 +716,9 @@ interface FileHit {
 }
 
 const FILE_SEARCH_LIMIT = 20;
+// Upper bound on files walked per search (baseline #8 memory cap). Far above the
+// 20-result output limit, so relevance/recency ranking is unaffected in practice.
+const FILE_SEARCH_SCAN_CAP = 50_000;
 
 /** Score a candidate path against a lowercased query. Higher is better; a
  *  negative score means "no match". Basename hits beat path hits; prefix beats
@@ -432,8 +766,13 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
   const ig = ignore.default().add(gitignore);
 
   // `stats: true` gives mtime without a second stat pass, so the empty-query
-  // "recent files" path is a single walk.
-  const entries = await fg.default("**/*", {
+  // "recent files" path is a single walk. Stream + hard scan cap (baseline #8):
+  // collecting the full result array retained ~0.9 MB per 1k files (18.5 MB at
+  // 20k), unbounded. Bail after FILE_SEARCH_SCAN_CAP entries so a giant repo
+  // can't balloon RSS; the newest/most-relevant matches still surface because
+  // the cap is far above the 20-result output limit.
+  const entries: { path: string; stats?: { mtimeMs: number } }[] = [];
+  const scanStream = fg.default.stream("**/*", {
     cwd,
     dot: false,
     onlyFiles: true,
@@ -442,6 +781,17 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
     followSymbolicLinks: false,
     stats: true,
   });
+  for await (const entry of scanStream) {
+    entries.push(entry as unknown as { path: string; stats?: { mtimeMs: number } });
+    if (entries.length >= FILE_SEARCH_SCAN_CAP) {
+      (scanStream as unknown as { destroy: () => void }).destroy();
+      log("DEBUG", "app-sidecar", "file search scan cap hit", {
+        cap: String(FILE_SEARCH_SCAN_CAP),
+        cwd,
+      });
+      break;
+    }
+  }
   const files = entries.filter((e) => !ig.ignores(e.path));
 
   if (!query) {
@@ -466,38 +816,17 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
  * hook prompt, by its distinctive opening phrase. Returns the hook kind so the
  * webview can render the short notice line instead of the full prompt body.
  */
+/** `?tools=` on /export. Anything unrecognised (including absent) falls back to
+ *  the human-facing `summary` default rather than dumping every payload. */
+function parseToolDetail(value: string | null): ToolDetail {
+  return value === "none" || value === "full" ? value : "summary";
+}
+
 function detectHookKind(text: string): "ideal" | "loop_break" | "regrounding" | null {
   const t = text.trimStart();
   if (t.startsWith("Ideal? Review the actual work")) return "ideal";
   if (t.startsWith("Stuck? You've repeated essentially")) return "loop_break";
   if (t.startsWith("Re-ground. The conversation was just compacted")) return "regrounding";
-  return null;
-}
-
-// Separator AgentSession.prompt() inserts between a command's prompt body and
-// the user's trailing args. Must stay in sync with the expansion there.
-const COMMAND_ARGS_SEP = "\n\n## User Instructions\n\n";
-
-/**
- * Reverse a prompt-template command's expansion. When a `/name` command runs,
- * the agent persists the FULL expanded prompt body as the user message — so on
- * resume the raw body would render instead of the short `/name` chip the user
- * saw live. Given the candidate commands (built-in + custom) and a restored
- * message body, recover the original `/name [args]` invocation. Returns null
- * when the text isn't a known command body (an ordinary user message).
- */
-function detectPromptCommand(
-  text: string,
-  candidates: ReadonlyArray<{ name: string; prompt: string }>,
-): string | null {
-  for (const c of candidates) {
-    if (!c.prompt) continue;
-    if (text === c.prompt) return `/${c.name}`;
-    if (text.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
-      const args = text.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
-      return args ? `/${c.name} ${args}` : `/${c.name}`;
-    }
-  }
   return null;
 }
 
@@ -528,27 +857,58 @@ function mcpRowSummary(config: MCPServerConfig): string {
 
 /** Load + connect every server, returning one wire row per server. Mirrors the
  *  CLI dashboard's buildRows (connectAllDetailed, then dispose). Empty list
- *  short-circuits before spawning any stdio process / opening any HTTP conn. */
-async function buildMcpRows(cwd: string): Promise<McpWireRow[]> {
+ *  short-circuits before spawning any stdio process / opening any HTTP conn.
+ *  Project-scope servers run repo-controlled commands, so unless the user
+ *  trusts them (trustProjectMcpServers) they are reported blocked WITHOUT
+ *  being connected — even a status probe would spawn the process. */
+async function buildMcpRows(cwd: string, settingsFile: string): Promise<McpWireRow[]> {
   const scoped = await loadServers(cwd);
   if (scoped.length === 0) return [];
 
+  const settings = loadSavedSettings(settingsFile);
+  const allowProject = projectScopeAllowed(
+    settings.trustProjectMcpServers,
+    settings.trustedProjects,
+    cwd,
+  );
+  const connectable = scoped.filter((s) => allowProject || s.scope !== "project");
+  const blocked = scoped.filter((s) => !allowProject && s.scope === "project");
+
   const manager = new MCPClientManager();
   try {
-    const results = await manager.connectAllDetailed(scoped.map((s) => s.config));
-    return scoped.map((s): McpWireRow => {
-      const result = results.find((r) => r.name === s.config.name);
-      return {
-        name: s.config.name,
-        scope: s.scope,
-        ok: result?.ok ?? false,
-        toolCount: result?.toolCount ?? 0,
-        error: result?.error,
-        kind: s.config.url ? "http" : "stdio",
-        summary: mcpRowSummary(s.config),
-        requiresAuth: result?.requiresAuth,
-      };
-    });
+    const results =
+      connectable.length > 0
+        ? await manager.connectAllDetailed(connectable.map((s) => s.config))
+        : [];
+    return [
+      ...connectable.map((s): McpWireRow => {
+        const result = results.find((r) => r.name === s.config.name);
+        return {
+          name: s.config.name,
+          scope: s.scope,
+          ok: result?.ok ?? false,
+          toolCount: result?.toolCount ?? 0,
+          error: result?.error,
+          kind: s.config.url ? "http" : "stdio",
+          summary: mcpRowSummary(s.config),
+          requiresAuth: result?.requiresAuth,
+        };
+      }),
+      ...blocked.map(
+        (s): McpWireRow => ({
+          name: s.config.name,
+          scope: s.scope,
+          ok: false,
+          toolCount: 0,
+          error:
+            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+            "repo-controlled commands. Add or re-add a server in this project via " +
+            "the MCP modal to trust it.",
+          kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
+          summary: mcpRowSummary(s.config),
+        }),
+      ),
+    ];
   } finally {
     await manager.dispose();
   }
@@ -598,7 +958,10 @@ async function runJsonModeIfRequested(): Promise<boolean> {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      "agent-prompt": { type: "string" },
+      "agent-context": { type: "string" },
       tools: { type: "string" },
+      "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
     },
     allowPositionals: true,
@@ -615,16 +978,28 @@ async function runJsonModeIfRequested(): Promise<boolean> {
         .filter(Boolean)
     : [];
   const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
+  // MCP servers the agent definition asked for. Without forwarding these, an
+  // allow-listed child connects no MCP at all and loses live code search.
+  const parsedMcpServers = values["mcp-servers"]
+    ? values["mcp-servers"]
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
   await runJsonMode({
     message: positionals[0] ?? "",
     provider: (values.provider ?? "anthropic") as Provider,
-    model: values.model ?? "claude-opus-4-8",
+    model: values.model ?? "claude-opus-5",
     cwd: process.cwd(),
     systemPrompt: values["system-prompt"],
+    agentPrompt: values["agent-prompt"],
+    agentContext: values["agent-context"] === "none" ? "none" : undefined,
     maxTurns: maxTurnsRaw ? parseInt(maxTurnsRaw, 10) : undefined,
     allowedTools,
+    allowedMcpServers,
     promptCacheKey: values["prompt-cache-key"],
-  }).catch((err: unknown) => {
+  }).catch(async (err: unknown) => {
     process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
     process.exit(1);
   });
@@ -634,24 +1009,57 @@ async function runJsonModeIfRequested(): Promise<boolean> {
 // ── Daemon-level HTTP helpers (shared by the session-management routes) ─────
 // The per-session route table has its own local copies; these serve the
 // daemon's own POST /session / DELETE /session routes.
-function daemonReadBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c as Buffer));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    req.on("error", reject);
-  });
+function daemonReadBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<string | null> {
+  return readCappedBody(req, res);
 }
 
 function daemonJson(res: http.ServerResponse, status: number, body: unknown): void {
+  // No CORS headers: only the Rust proxy (no Origin) should call this daemon.
+  // Granting origins would let any web page read responses from loopback.
   res.writeHead(status, {
     "content-type": "application/json",
-    "access-control-allow-origin": "*",
   });
   res.end(JSON.stringify(body));
 }
 
+function hasDaemonAuth(req: http.IncomingMessage, expectedToken: string): boolean {
+  const provided = req.headers["x-gg-daemon-token"];
+  return typeof provided === "string" && provided === expectedToken;
+}
+
+type RoadmapDurabilityDiagnostic =
+  | "legacy-plan-missing"
+  | "legacy-plan-identity-mismatch"
+  | "phase-lease-lost";
+const roadmapDurabilityDiagnostics = new Map<RoadmapDurabilityDiagnostic, number>();
+
+function recordRoadmapDurabilityDiagnostic(code: RoadmapDurabilityDiagnostic): void {
+  const count = (roadmapDurabilityDiagnostics.get(code) ?? 0) + 1;
+  roadmapDurabilityDiagnostics.set(code, count);
+  log("INFO", "roadmap-durability", "typed compatibility diagnostic", { code, count });
+}
+
+function parseDaemonPredecessorProof(
+  raw: string | undefined,
+): RoadmapPhaseLeasePredecessorProofV1 | undefined {
+  if (!raw) return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return isRoadmapPhaseLeasePredecessorProofV1(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
+  // Hidden persistent-worker dispatch must win before strict JSON/server parsing.
+  if (process.argv.includes("--subagent-worker")) {
+    await runSubagentWorkerMode();
+    return;
+  }
   // Sub-agent JSON-mode dispatch must win before any sidecar/server setup.
   if (await runJsonModeIfRequested()) return;
 
@@ -660,12 +1068,64 @@ async function main(): Promise<void> {
   // GG_APP_LISTENING handshake and consumed by the shell.
   const port = Number(process.env.GG_APP_PORT ?? 0);
   const host = "127.0.0.1";
+  const daemonAuthToken = process.env.GG_APP_AUTH_TOKEN?.trim();
+  // Never leak the bootstrap credential to MCP servers, shells, or other child processes.
+  delete process.env.GG_APP_AUTH_TOKEN;
+  if (!daemonAuthToken) throw new Error("GG_APP_AUTH_TOKEN is required");
+
+  // Per-launch bearer token. The Rust shell generates one and passes it via
+  // GG_APP_TOKEN; spawned any other way (dev, tests, smoke) we mint our own
+  // and report it on the GG_APP_LISTENING line. Every request must carry it
+  // as x-gg-token: this daemon creates sessions for arbitrary cwds, runs
+  // prompts, and installs plugins, so an unauthenticated loopback port lets
+  // any local process drive the agent as the user.
+  const configuredAuthToken = process.env.GG_APP_TOKEN?.trim();
+  delete process.env.GG_APP_TOKEN;
+  const authToken = configuredAuthToken || randomUUID();
 
   const paths = await ensureAppDirs();
-  // Own log file so the app sidecar never clobbers the interactive CLI's
-  // ~/.gg/debug.log (initLogger truncates on each start).
-  const sidecarLog = path.join(paths.agentDir, "gg-app-sidecar.log");
+  const applicationIdentity = parseAppIdentityArgument(process.argv.slice(2));
+  // The shell scopes this filename to its Tauri product identity so production
+  // and local-fork daemons never interleave or race log rotation.
+  const sidecarLogFile = path.basename(
+    process.env.GG_APP_SIDECAR_LOG_FILE?.trim() || "gg-app-sidecar.log",
+  );
+  const sidecarLog = path.join(paths.agentDir, sidecarLogFile);
   initLogger(sidecarLog);
+  const shellPid = process.ppid;
+  log("INFO", "app-sidecar", "daemon lifecycle start", {
+    daemonPid: process.pid,
+    shellPid,
+    applicationIdentity: applicationIdentity ?? "invalid-or-missing",
+  });
+  // The desktop sidecar previously omitted the stream diagnostic hook used by
+  // the CLI, leaving device-specific provider stalls impossible to distinguish from
+  // event-loop starvation or a broken streaming network path. Keep routine
+  // phases lightweight; timeout phases include non-sensitive runtime context.
+  setStreamDiagnostic((phase, data) => {
+    const includeRuntime =
+      phase === "idle_timeout_fired" ||
+      phase === "hard_timeout_fired" ||
+      phase === "stall_exhausted";
+    // A session stuck on the non-streaming fallback costs real money and real
+    // latency; it does not belong in the INFO noise floor.
+    log(phase === "non_streaming_session" ? "WARN" : "INFO", "stream", phase, {
+      ...(data ?? {}),
+      ...(includeRuntime
+        ? {
+            platform: process.platform,
+            arch: process.arch,
+            osRelease: os.release(),
+            node: process.version,
+            logicalCpus: os.cpus().length,
+            totalMemoryMb: Math.round(os.totalmem() / 1024 / 1024),
+            freeMemoryMb: Math.round(os.freemem() / 1024 / 1024),
+            rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+            processUptimeSec: Math.round(process.uptime()),
+          }
+        : {}),
+    });
+  });
 
   // Global last-resort guards, installed as early as the logger allows so they
   // cover the WHOLE lifecycle — including startup/initialize, the phase the
@@ -694,14 +1154,124 @@ async function main(): Promise<void> {
   // inherit it). Best-effort — never blocks startup beyond its internal cap.
   await enrichProcessPath();
 
-  const auth = new AuthStorage(paths.authFile);
+  // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
+  // Fire-and-forget: cleanup must never delay or break startup.
+  void cleanupToolOutputs().catch(() => {});
+
+  const auth = new AuthStorage(nativeDevAuthFile(paths.authFile));
   await auth.load();
 
   // Every window's session lives here as an in-process object, keyed by the id
   // the daemon hands back from POST /session. The Rust shell routes each proxy
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
-  const sessions = new Map<string, SessionContext>();
+  const sessions = new AppSidecarSessionRouter<SessionContext>();
+  const sharedMcpPool = new SharedMcpClientPool();
+  const reloadCoordinator = new AppSidecarReloadCoordinator();
+
+  const broadcastAll = (type: string, data: unknown): void => {
+    for (const context of sessions.values()) context.broadcast(type, data);
+  };
+  const refreshOpenAIAuthSessions = async (): Promise<void> => {
+    const contexts = [...sessions.values()].filter(
+      (context) => context.session.getState().provider === "openai",
+    );
+    await Promise.all(contexts.map((context) => context.refreshOpenAIAuthState()));
+  };
+
+  const oauthInFlightProviders = new Set<string>();
+  const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  // Mutation fencing is standard, independent of historical completion rollout settings.
+  const durableRoadmapExecution = true;
+  const phaseLeaseRepository = new RoadmapPhaseLeaseRepository(paths.agentDir);
+  const daemonInstanceId = process.env.GG_DAEMON_INSTANCE_ID?.trim() || randomUUID();
+  const processStartToken =
+    process.env.GG_PROCESS_START_TOKEN?.trim() || `${process.pid}:${Date.now()}`;
+  const predecessorProof = parseDaemonPredecessorProof(process.env.GG_DAEMON_PREDECESSOR_PROOF);
+  const storageDiagnostics = createAppSidecarStorageDiagnostics({
+    applicationIdentity,
+    agentDataRoot: paths.agentDir,
+    repository: notesRepository,
+  });
+  const roadmapReconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+  const roadmapDrafts = new AppSidecarRoadmapDraftCoordinator({
+    onChange: (projectKey, draft) => {
+      for (const context of sessions.values()) {
+        if (canonicalProjectKey(context.cwd) === projectKey) {
+          context.broadcast("roadmap_phase_draft_change", draft);
+        }
+      }
+    },
+  });
+  const projectAutopilot = new AppSidecarProjectAutopilotState();
+  const broadcastNotesSnapshot = (snapshot: ProjectNotesSnapshot): void => {
+    reminderCoordinator?.observeSnapshot(snapshot);
+    for (const context of sessions.values()) {
+      if (canonicalProjectKey(context.cwd) === snapshot.projectKey) {
+        context.broadcastNotesChange(snapshot);
+      }
+    }
+  };
+  const phaseBinding = createAppSidecarPhaseBindingService({
+    repository: notesRepository,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+    leaseRepository: phaseLeaseRepository,
+    daemonInstanceId,
+    processId: process.pid,
+    processStartToken,
+    predecessorProof,
+  });
+  const roadmapDraftDecisions = new AppSidecarRoadmapDraftDecisionService({
+    drafts: roadmapDrafts,
+    repository: notesRepository,
+    reconciliations: roadmapReconciliations,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+  });
+  const phaseCancellations = new AppSidecarPhaseCancellationCoordinator({
+    repository: notesRepository,
+    sessions: () => sessions.values(),
+    broadcastSnapshot: broadcastNotesSnapshot,
+  });
+  const reminderCoordinator = new AppSidecarReminderCoordinator({
+    repository: notesRepository,
+    onReminderDue: (projectKey) => {
+      for (const context of sessions.values()) {
+        if (canonicalProjectKey(context.cwd) === projectKey) {
+          context.broadcast("roadmap_reminder_due", {});
+        }
+      }
+    },
+    onCommitted: broadcastNotesSnapshot,
+    onError: (error) => captureSidecarError(error, "app-sidecar.reminders.coordinator"),
+  });
+  const reminders = createAppSidecarReminderHandler(reminderCoordinator, (error) =>
+    captureSidecarError(error, "app-sidecar.reminders.request"),
+  );
+  const notes = createAppSidecarNotesHandler({
+    repository: notesRepository,
+    diagnostics: storageDiagnostics,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+    onError: (error) => {
+      captureSidecarError(error, "app-sidecar.notes.request");
+      log("ERROR", "app-sidecar", "notes request failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const memoryStore = new MemoryStore({
+    onChange: ({ memories }) => {
+      for (const ctx of sessions.values()) {
+        ctx.broadcast("memory_change", { count: memories.length });
+      }
+    },
+  });
+  const jiwaStore = new JiwaStore({
+    onChange: ({ jiwa }) => {
+      for (const ctx of sessions.values()) {
+        ctx.broadcast("jiwa_change", { count: jiwa.length });
+      }
+    },
+  });
 
   // XP/rank progress — loaded once per daemon; awards fan out to every window.
   // Each frame is tagged `origin: true` only for the session that earned the
@@ -711,128 +1281,481 @@ async function main(): Promise<void> {
       ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
   });
 
-  /** Resolve the target session id: the `x-gg-session` header, else a
-   *  `?session=` query param (used by the SSE /events connection). */
-  function sessionIdFromReq(req: http.IncomingMessage, url: string): string | null {
-    const header = req.headers["x-gg-session"];
-    if (typeof header === "string" && header.length > 0) return header;
+  type UsageResult =
+    | (SubscriptionUsageSnapshot & { connected: true; error?: never; stale?: boolean })
+    | {
+        provider: SubscriptionUsageProvider;
+        displayName: string;
+        connected: boolean;
+        windows: [];
+        fetchedAt: number;
+        error?: string;
+        stale?: boolean;
+      };
+  const usageCache = new Map<
+    SubscriptionUsageProvider,
+    { expiresAt: number; result: UsageResult }
+  >();
+  const usageRequests = new Map<SubscriptionUsageProvider, Promise<UsageResult>>();
+  // Last snapshot that actually carried windows, per provider. Replayed while a
+  // fetch is failing so the title meter never blinks out of existence. Bounded
+  // by USAGE_LAST_GOOD_MAX_AGE_MS — a provider that never recovers must stop
+  // reporting rather than freeze a percentage (and a long-past reset time) on
+  // screen forever. The 429 backoff alone runs to 24h, far past any usefulness.
+  const usageLastGood = new Map<SubscriptionUsageProvider, UsageResult>();
+  const USAGE_LAST_GOOD_MAX_AGE_MS = 30 * 60_000;
+  // 429 backoff: quota endpoints are auxiliary UI data. Honor Retry-After when
+  // provided; otherwise retain the unavailable snapshot for 30 minutes. Clamp
+  // the provider value so a malformed header can neither hammer the endpoint
+  // nor suppress usage data forever.
+  const usageRateLimitedUntil = new Map<SubscriptionUsageProvider, number>();
+  const USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS = 30 * 60_000;
+  const USAGE_RATE_LIMIT_MIN_BACKOFF_MS = 60_000;
+  const USAGE_RATE_LIMIT_MAX_BACKOFF_MS = 24 * 60 * 60_000;
+
+  async function fetchUsageProvider(provider: SubscriptionUsageProvider): Promise<UsageResult> {
+    const displayName =
+      provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
+    // Kimi plan usage is tracked on the OAuth credential specifically — the
+    // Moonshot platform API key is metered per-token, not per plan window.
+    const authKey = oauthStorageKey(provider) ?? provider;
+    if (!(await auth.hasProviderAuth(authKey))) {
+      // Logged out: drop the replay cache so a later login on a DIFFERENT
+      // account can never inherit the previous one's numbers.
+      usageLastGood.delete(provider);
+      return { provider, displayName, connected: false, windows: [], fetchedAt: Date.now() };
+    }
     try {
-      return new URL(url, `http://${host}`).searchParams.get("session");
-    } catch {
-      return null;
+      let credentials = await auth.resolveCredentials(authKey);
+      try {
+        const snapshot = {
+          ...(await fetchSubscriptionUsage(provider, credentials)),
+          connected: true as const,
+        };
+        usageRateLimitedUntil.delete(provider);
+        return snapshot;
+      } catch (error) {
+        // A provider can revoke an access token before its stored expiry. Refresh
+        // once on 401, matching inference auth recovery, then retry the usage call.
+        if (error instanceof SubscriptionUsageError && error.status === 401) {
+          // Name the rejected token. This poller runs on a timer alongside live
+          // agent runs, so an unconditional refresh here would invalidate the
+          // token those runs are holding and fail them mid-turn — a background
+          // status check must never be able to log out the foreground.
+          credentials = await auth.resolveCredentials(authKey, {
+            forceRefresh: true,
+            rejectedToken: credentials.accessToken,
+          });
+          const snapshot = {
+            ...(await fetchSubscriptionUsage(provider, credentials)),
+            connected: true as const,
+          };
+          usageRateLimitedUntil.delete(provider);
+          return snapshot;
+        }
+        throw error;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      let backoffMs: number | undefined;
+      if (error instanceof SubscriptionUsageError && error.status === 429) {
+        backoffMs = Math.min(
+          USAGE_RATE_LIMIT_MAX_BACKOFF_MS,
+          Math.max(
+            USAGE_RATE_LIMIT_MIN_BACKOFF_MS,
+            error.retryAfterMs ?? USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS,
+          ),
+        );
+        usageRateLimitedUntil.set(provider, Date.now() + backoffMs);
+      }
+      log("WARN", "app-sidecar", "subscription usage fetch failed", {
+        provider,
+        message,
+        ...(backoffMs !== undefined && { backoffMs: String(backoffMs) }),
+      });
+
+      const connected = await auth.hasProviderAuth(authKey);
+      // Transient failures (notably the 429s these auxiliary quota endpoints
+      // hand out) must not blank the meter. Keep serving the last good
+      // snapshot, flagged `stale`, so the bar stays put instead of flickering
+      // out for the whole backoff window and back in on the next success.
+      // Past the max age it's dropped — no data beats confidently wrong data.
+      const lastGood = usageLastGood.get(provider);
+      if (lastGood && Date.now() - lastGood.fetchedAt >= USAGE_LAST_GOOD_MAX_AGE_MS) {
+        usageLastGood.delete(provider);
+      } else if (connected && lastGood) {
+        return { ...lastGood, stale: true };
+      }
+      return {
+        provider,
+        displayName,
+        connected,
+        windows: [],
+        fetchedAt: Date.now(),
+        error: connected ? "Usage is temporarily unavailable." : undefined,
+      };
     }
   }
 
-  const server = http.createServer((req, res) => {
-    const url = req.url ?? "/";
-    const method = req.method ?? "GET";
-
-    // CORS preflight — the webview origin differs from 127.0.0.1.
-    if (method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-        "access-control-allow-headers": "content-type, x-gg-session",
-      });
-      res.end();
-      return;
-    }
-
-    // ── Daemon-level routes (session lifecycle) ──────────────────────────
-    // Create a session for a window: { cwd, sessionPath? } → { sessionId }.
-    if (method === "POST" && url === "/session") {
-      void daemonReadBody(req).then(async (raw) => {
-        let body: { cwd?: unknown; sessionPath?: unknown } = {};
-        try {
-          body = raw ? (JSON.parse(raw) as typeof body) : {};
-        } catch {
-          /* empty/invalid body → defaults below */
-        }
-        const sessionCwd =
-          typeof body.cwd === "string" && body.cwd
-            ? body.cwd
-            : (process.env.GG_APP_CWD ?? process.cwd());
-        const sessionPath =
-          typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
-        const id = randomUUID();
-        try {
-          const ctx = await createSession(
-            { auth, paths, progress },
-            { id, cwd: sessionCwd, sessionPath },
-          );
-          sessions.set(id, ctx);
-          log("INFO", "app-sidecar", "session created", { id, cwd: sessionCwd });
-          daemonJson(res, 200, { sessionId: id });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          log("ERROR", "app-sidecar", "session create failed", { message });
-          daemonJson(res, 500, { error: message });
-        }
-      });
-      return;
-    }
-
-    // Dispose a session: DELETE /session/:id.
-    if (method === "DELETE" && url.startsWith("/session/")) {
-      const id = decodeURIComponent(url.slice("/session/".length));
-      const ctx = sessions.get(id);
-      if (ctx) {
-        sessions.delete(id);
-        void ctx.dispose().catch(() => {});
-        log("INFO", "app-sidecar", "session disposed", { id });
+  async function subscriptionUsage(provider: SubscriptionUsageProvider): Promise<UsageResult> {
+    const cached = usageCache.get(provider);
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    const inFlight = usageRequests.get(provider);
+    if (inFlight) return inFlight;
+    const request = fetchUsageProvider(provider);
+    usageRequests.set(provider, request);
+    try {
+      const result = await request;
+      // Never re-store a replay — it would keep its original `fetchedAt`, but
+      // writing it back muddies the "last GOOD" contract for no gain.
+      if (result.connected && !result.error && !result.stale && result.windows.length > 0) {
+        usageLastGood.set(provider, result);
       }
-      daemonJson(res, 200, { ok: true });
-      return;
+      // Anthropic can return utilization before it assigns reset timestamps
+      // (notably before the account's first active request). Retry that partial
+      // snapshot quickly; complete snapshots keep the normal one-minute cache.
+      const missingReset =
+        result.connected &&
+        result.windows.length > 0 &&
+        result.windows.some((window) => window.resetsAt === undefined);
+      const rateLimitedUntil = usageRateLimitedUntil.get(provider) ?? 0;
+      usageCache.set(provider, {
+        result,
+        expiresAt:
+          rateLimitedUntil > Date.now()
+            ? rateLimitedUntil
+            : Date.now() + (missingReset ? 10_000 : 60_000),
+      });
+      return result;
+    } finally {
+      if (usageRequests.get(provider) === request) usageRequests.delete(provider);
     }
+  }
 
-    // Progress is daemon-level so the Home screen can paint before a project
-    // session exists; per-session callers still work through the same endpoint.
-    if (method === "GET" && url === "/progress") {
-      daemonJson(res, 200, progress.snapshot());
-      return;
-    }
+  const server = http.createServer(
+    wrapSidecarHandler((req: http.IncomingMessage, res: http.ServerResponse) => {
+      const url = req.url ?? "/";
+      const method = req.method ?? "GET";
 
-    // ── Per-session delegation ───────────────────────────────────────────
-    const id = sessionIdFromReq(req, url);
-    const ctx = id ? sessions.get(id) : undefined;
-    if (!ctx) {
-      daemonJson(res, 404, { error: "unknown session" });
-      return;
-    }
-    ctx.handle(req, res, url, method);
-  });
+      // Answer preflights with a bare 204 but grant NO origins — the webview
+      // reaches the daemon through the Rust proxy, never cross-origin, so any
+      // browser page's preflight must fail here.
+      if (method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
+      // Host blocks DNS rebinding, where a web page's request arrives with
+      // the attacker's hostname (browsers cannot spoof Host).
+      const reqHost = req.headers.host ?? "";
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
+        daemonJson(res, 403, { error: "forbidden host" });
+        return;
+      }
+
+      if (req.headers["x-gg-token"] !== authToken) {
+        daemonJson(res, 401, { error: "unauthorized" });
+        return;
+      }
+
+      // ── Daemon-level routes (session lifecycle) ──────────────────────────
+      // Secret-free two-phase reload: reserve while Rust persists native config,
+      // then dispose every session and exit only if no pane has active work.
+      if (method === "POST" && url === "/admin/reload/prepare") {
+        const decision = reloadCoordinator.prepare(sessions.values());
+        daemonJson(
+          res,
+          decision.ok ? 200 : 409,
+          decision.ok ? { ok: true } : { error: decision.reason },
+        );
+        return;
+      }
+      if (method === "POST" && url === "/admin/reload/cancel") {
+        reloadCoordinator.cancel();
+        daemonJson(res, 200, { ok: true });
+        return;
+      }
+      if (method === "POST" && url === "/admin/reload") {
+        const decision = reloadCoordinator.begin(sessions.values());
+        if (!decision.ok) {
+          daemonJson(res, 409, { error: decision.reason });
+          return;
+        }
+        daemonJson(res, 202, { ok: true });
+        setImmediate(() => shutdown("configuration_refresh"));
+        return;
+      }
+      const releaseMutation = reloadCoordinator.tryAcquireSessionMutation(method);
+      if (!releaseMutation) {
+        daemonJson(res, 409, { error: "configuration refresh in progress" });
+        return;
+      }
+      // Keep the lease through asynchronous body reads and route completion. Both
+      // events may fire; coordinator releases are intentionally idempotent.
+      res.once("finish", releaseMutation);
+      res.once("close", releaseMutation);
+
+      // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
+      // Session UUIDs are capabilities, so minting them requires the native shell secret.
+      if (method === "POST" && url === "/session") {
+        if (!hasDaemonAuth(req, daemonAuthToken)) {
+          daemonJson(res, 401, { error: "daemon authentication required" });
+          return;
+        }
+        void daemonReadBody(req, res).then(async (raw) => {
+          if (raw === null) return;
+          let body: { mode?: unknown; chatAgent?: unknown; cwd?: unknown; sessionPath?: unknown } =
+            {};
+          try {
+            body = raw ? (JSON.parse(raw) as typeof body) : {};
+          } catch {
+            /* empty/invalid body → defaults below */
+          }
+          const mode: WorkspaceMode = body.mode === "chat" ? "chat" : "code";
+          const chatAgent = parseChatAgentId(body.chatAgent);
+          const sessionCwd =
+            typeof body.cwd === "string" && body.cwd
+              ? body.cwd
+              : (process.env.GG_APP_CWD ?? process.cwd());
+          const sessionPath =
+            typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
+          const id = randomUUID();
+          try {
+            const ctx = await createSession(
+              {
+                auth,
+                nativeAuthorityToken: daemonAuthToken,
+                paths,
+                progress,
+                memoryStore,
+                jiwaStore,
+                broadcastAll,
+                refreshOpenAIAuthSessions,
+                oauthInFlightProviders,
+                reloadCoordinator,
+                notes,
+                reminders,
+                reminderCoordinator,
+                notesRepository,
+                storageDiagnostics,
+                phaseBinding,
+                roadmapReconciliations,
+                roadmapDrafts,
+                roadmapDraftDecisions,
+                projectAutopilot,
+                broadcastNotesSnapshot,
+                sharedMcpPool,
+                durableRoadmapExecution,
+              },
+              { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
+            );
+            sessions.add(id, ctx);
+            await reminderCoordinator.watchSession({ id, cwd: sessionCwd });
+            log("INFO", "app-sidecar", "session created", {
+              id,
+              mode,
+              chatAgent,
+              cwd: sessionCwd,
+            });
+            daemonJson(res, 200, { sessionId: id });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            captureSidecarError(err, "app-sidecar.session.create");
+            log("ERROR", "app-sidecar", "session create failed", { message });
+            if (err instanceof PlanSnapshotResumeError) {
+              daemonJson(res, 409, {
+                error: message,
+                code: err.code,
+                snapshotPath: err.snapshotPath,
+              });
+            } else if (err instanceof RepositoryUnverifiableError) {
+              daemonJson(res, 409, { error: message, code: err.code });
+            } else {
+              daemonJson(res, 500, { error: message });
+            }
+          }
+        });
+        return;
+      }
+
+      // Dispose a session: DELETE /session/:id.
+      if (method === "DELETE" && url.startsWith("/session/")) {
+        const id = decodeURIComponent(url.slice("/session/".length));
+        // deleteAndDispose takes ownership out of the registry synchronously before
+        // awaiting disposal, so peer requests fail closed instead of reaching a
+        // context that is shutting down.
+        void sessions
+          .deleteAndDispose(id)
+          .then((disposed) => {
+            if (disposed) log("INFO", "app-sidecar", "session disposed", { id });
+            daemonJson(res, 200, { ok: true });
+          })
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.session.dispose");
+            log("ERROR", "app-sidecar", "session disposal failed", {
+              id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            daemonJson(res, 500, { error: "session disposal failed" });
+          });
+        return;
+      }
+
+      // Progress is daemon-level so the Home screen can paint before a project
+      // session exists; per-session callers still work through the same endpoint.
+      if (method === "GET" && url === "/progress") {
+        daemonJson(res, 200, progress.snapshot());
+        return;
+      }
+
+      // Subscription quota is account-wide, not project/session-specific. OAuth
+      // tokens stay in this daemon; only the active provider's normalized snapshot
+      // reaches the webview.
+      if (method === "GET" && (url === "/usage" || url.startsWith("/usage?"))) {
+        void (async () => {
+          const provider = new URL(url, `http://${host}`).searchParams.get("provider");
+          if (provider !== "anthropic" && provider !== "openai" && provider !== "moonshot") {
+            daemonJson(res, 400, { error: "unsupported usage provider" });
+            return;
+          }
+          daemonJson(res, 200, await subscriptionUsage(provider));
+        })().catch((error) => {
+          captureSidecarError(error, "app-sidecar.usage.request");
+          log("ERROR", "app-sidecar", "subscription usage request failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          daemonJson(res, 500, { error: "Usage is temporarily unavailable." });
+        });
+        return;
+      }
+
+      // ── Per-session delegation ───────────────────────────────────────────
+      const isEventStream = method === "GET" && (url === "/events" || url.startsWith("/events?"));
+      const ctx = sessions.resolveRequest(req, url, { allowQuery: isEventStream, host });
+      if (!ctx) {
+        daemonJson(res, 404, { error: "unknown session" });
+        return;
+      }
+
+      const phaseCancellationMatch =
+        method === "POST" ? /^\/phases\/([^/]+)\/cancel$/.exec(url) : null;
+      if (phaseCancellationMatch) {
+        let phaseId: string;
+        try {
+          phaseId = decodeURIComponent(phaseCancellationMatch[1] ?? "");
+        } catch {
+          daemonJson(res, 400, { error: "invalid phase id" });
+          return;
+        }
+        void phaseCancellations
+          .cancel(ctx.cwd, phaseId)
+          .then((result) => daemonJson(res, 200, result))
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.phase.cancel");
+            daemonJson(res, 500, { error: "phase cancellation failed" });
+          });
+        return;
+      }
+
+      ctx.handle(req, res, url, method);
+    }, "app-sidecar.http"),
+  );
   server.listen(port, host, () => {
     const addr = server.address() as AddressInfo;
-    // The Rust shell reads this line to learn the daemon port.
-    process.stdout.write(`GG_APP_LISTENING ${addr.port}\n`);
+    // The Rust shell reads this line to learn the daemon port (it already
+    // knows the token — it set GG_APP_TOKEN; the field serves other spawners).
+    process.stdout.write(`GG_APP_LISTENING ${addr.port} ${authToken}\n`);
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
-  const shutdown = async (): Promise<void> => {
-    // Radio playback is app-wide (one stream across all windows), so it stops
-    // at the daemon level, not per session.
-    stopRadio();
-    await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
-    server.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
-}
+  type ShutdownReason =
+    | "configuration_refresh"
+    | "SIGINT"
+    | "SIGTERM"
+    | "SIGHUP"
+    | "parent_unavailable";
+  let terminationReason: ShutdownReason | "event_loop_exit" = "event_loop_exit";
+  let shutdownRequested = false;
+  let shutdownSessionCount = 0;
 
-/** Ken's read-only tool allow-list. Excludes every mutating tool (write/edit/
- *  bash/tasks/subagent/generate_image/enter_plan/exit_plan/task_*) so the mentor
- *  agent can research + see, but never change the repo. */
-const KEN_ALLOWED_TOOLS = [
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "source_path",
-  "web_fetch",
-  "web_search",
-  "screenshot",
-];
+  // Session teardown awaits MCP servers, LSP servers and third-party extension
+  // `deactivate()` hooks. Any of those can hang, and an unbounded await here
+  // means the daemon never exits: the app looks quit while this process keeps
+  // the port and the radio stream alive. The deadline exits regardless.
+  const requestShutdown = installTerminationHandlers({
+    scope: "app-sidecar",
+    onShutdownStart: (signal) => {
+      shutdownRequested = true;
+      if (signal) terminationReason = signal;
+      shutdownSessionCount = [...sessions.values()].length;
+      log("INFO", "app-sidecar", "daemon termination requested", {
+        daemonPid: process.pid,
+        shellPid,
+        reason: terminationReason,
+      });
+    },
+    teardown: async () => {
+      clearInterval(parentWatch);
+      // Radio playback is app-wide (one stream across all windows), so it stops
+      // at the daemon level, not per session.
+      stopRadio();
+      // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
+      progress.dispose();
+      reminderCoordinator.dispose();
+      await sessions.disposeAll();
+      await sharedMcpPool.dispose();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      log("INFO", "app-sidecar", "daemon shutdown complete", {
+        daemonPid: process.pid,
+        shellPid,
+        reason: terminationReason,
+      });
+    },
+    onTimeout: (timeoutMs) => {
+      // Radio is audible, so it must stop even when the rest is wedged.
+      stopRadio();
+      log("WARN", "app-sidecar", "daemon teardown hung; exiting on deadline", {
+        timeoutMs: String(timeoutMs),
+        sessions: String(shutdownSessionCount),
+      });
+    },
+  });
+
+  function shutdown(reason: ShutdownReason): void {
+    if (shutdownRequested) return;
+    shutdownRequested = true;
+    terminationReason = reason;
+    requestShutdown(0);
+  }
+
+  process.once("exit", (code) => {
+    stopRadio();
+    log("INFO", "app-sidecar", "daemon lifecycle exit", {
+      daemonPid: process.pid,
+      shellPid,
+      reason: terminationReason,
+      exitCode: code,
+    });
+  });
+
+  // Tauri can disappear without delivering a signal (force-quit, dev runner
+  // teardown, crash). Detect reparenting or a dead shell so the daemon and its
+  // radio player do not survive as audible orphans.
+  const parentWatch = setInterval(() => {
+    let parentAlive = process.ppid === shellPid;
+    if (parentAlive && shellPid > 1) {
+      try {
+        process.kill(shellPid, 0);
+      } catch (error) {
+        parentAlive = (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    if (!parentAlive) shutdown("parent_unavailable");
+  }, 1_000);
+  parentWatch.unref?.();
+}
 
 /** MCP servers Ken is allowed to use. kencode-search lets him look into real
  *  public repos / verify against actual code instead of assuming — core to how
@@ -870,14 +1793,15 @@ function buildKenContext(
   question: string,
   workflowCommands: readonly WorkflowCommandSpec[],
   injectedPrompts: readonly string[],
+  pendingQuestions: readonly AskUserPrompt[],
 ): string {
-  return buildKenDigest({
+  return buildKenInteractiveSessionContext(buildSession, {
     question,
     cwd,
     gitBranch,
-    messages: buildSession.getMessages(),
     workflowCommands,
     injectedPrompts,
+    pendingQuestions,
   });
 }
 
@@ -893,14 +1817,23 @@ interface ProgressManager {
   snapshot: () => ProgressSnapshot;
   /** Award XP for one successfully completed run (prompt + any new commits). */
   awardRun: (cwd: string, runStartedAt: number, originId?: string) => Promise<void>;
+  /** Close the ~/.gg fs.watch + clear any pending debounce (leak-free shutdown). */
+  dispose: () => void;
 }
 
 async function createProgressManager(
   agentDir: string,
   broadcastAll: (snapshot: ProgressSnapshot, originId?: string) => void,
 ): Promise<ProgressManager> {
-  // Boot: recovery chain main → backup → one-time session-history rebuild → empty.
-  let file: ProgressFile = await loadProgress({ rebuild: () => rebuildFromSessions() });
+  // Boot: recovery chain main → backup → coding + chat session rebuild → empty.
+  const coderSessionsDir = path.join(agentDir, "sessions");
+  let file: ProgressFile = await loadProgress({
+    rebuild: () =>
+      rebuildFromSessions([
+        coderSessionsDir,
+        ...CHAT_AGENT_IDS.map((agentId) => chatAgentSessionsDir(coderSessionsDir, agentId)),
+      ]),
+  });
   // Don't re-celebrate an old levelUp event on boot.
   let lastSeenNonce: string | null = file.lastEvent?.nonce ?? null;
   log("INFO", "app-sidecar", "progress loaded", {
@@ -956,6 +1889,7 @@ async function createProgressManager(
   // Watch ~/.gg (dir watch survives the atomic tmp+rename) for progress.json
   // writes from other daemon processes; debounce, reload read-only, dedupe by nonce.
   let watchDebounce: NodeJS.Timeout | null = null;
+  let progressWatcher: ReturnType<typeof fsWatch> | null = null;
   try {
     const watcher = fsWatch(agentDir, (_event, filename) => {
       if (filename !== "progress.json") return;
@@ -973,22 +1907,46 @@ async function createProgressManager(
       }, 150);
     });
     watcher.unref();
+    progressWatcher = watcher;
   } catch (err) {
     log("DEBUG", "app-sidecar", "progress watch unavailable", {
       message: err instanceof Error ? err.message : String(err),
     });
   }
 
-  return { snapshot, awardRun };
+  // Dispose closes the fs.watch handle (baseline #8: it was previously never
+  // closed — a per-daemon leak) and clears any pending debounce timer.
+  function dispose(): void {
+    if (watchDebounce) {
+      clearTimeout(watchDebounce);
+      watchDebounce = null;
+    }
+    try {
+      progressWatcher?.close();
+    } catch {
+      // Already closed / never opened — nothing to do.
+    }
+    progressWatcher = null;
+  }
+
+  return { snapshot, awardRun, dispose };
 }
+
+type WorkspaceMode = "code" | "chat";
 
 interface SessionContext {
   id: string;
+  mode: WorkspaceMode;
+  chatAgent: ChatAgentId;
   cwd: string;
   sessionPath?: string;
   session: AgentSession;
   clients: Set<SseClient>;
   broadcast: (type: string, data: unknown) => void;
+  refreshOpenAIAuthState: () => Promise<void>;
+  broadcastNotesChange: (snapshot: ProjectNotesSnapshot) => void;
+  getActivePhaseContext: () => ReturnType<AgentSession["getActivePhaseContext"]>;
+  cancelActiveOperation: () => Promise<ActiveOperationCancellationResult>;
   /** Handle one HTTP request for this session. Owns its own 404 fallthrough. */
   handle: (
     req: http.IncomingMessage,
@@ -997,6 +1955,7 @@ interface SessionContext {
     method: string,
   ) => void;
   dispose: () => Promise<void>;
+  isRunning: () => boolean;
 }
 
 /**
@@ -1009,19 +1968,83 @@ interface SessionContext {
 async function createSession(
   deps: {
     auth: AuthStorage;
+    nativeAuthorityToken: string;
     paths: Awaited<ReturnType<typeof ensureAppDirs>>;
     progress: ProgressManager;
+    memoryStore: MemoryStore;
+    jiwaStore: JiwaStore;
+    /** Fan one frame out to EVERY window, not just this session's. */
+    broadcastAll: (type: string, data: unknown) => void;
+    refreshOpenAIAuthSessions: () => Promise<void>;
+    /** Providers with an OAuth flow in progress in some window. */
+    oauthInFlightProviders: Set<string>;
+    reloadCoordinator: AppSidecarReloadCoordinator;
+    notes: AppSidecarNotesHandler;
+    reminders: AppSidecarReminderHandler;
+    reminderCoordinator: AppSidecarReminderCoordinator;
+    notesRepository: ProjectNotesRepository;
+    storageDiagnostics: AppSidecarStorageDiagnostics;
+    phaseBinding: AppSidecarPhaseBindingService;
+    roadmapReconciliations: AppSidecarRoadmapReconciliationCoordinator;
+    roadmapDrafts: AppSidecarRoadmapDraftCoordinator;
+    roadmapDraftDecisions: AppSidecarRoadmapDraftDecisionService;
+    projectAutopilot: AppSidecarProjectAutopilotState;
+    broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
+    sharedMcpPool: SharedMcpClientPool;
+    durableRoadmapExecution: boolean;
   },
-  opts: { id: string; cwd: string; sessionPath?: string },
+  opts: {
+    id: string;
+    mode: WorkspaceMode;
+    chatAgent: ChatAgentId;
+    cwd: string;
+    sessionPath?: string;
+  },
 ): Promise<SessionContext> {
-  const { auth, progress } = deps;
+  const {
+    auth,
+    nativeAuthorityToken,
+    progress,
+    memoryStore,
+    jiwaStore,
+    broadcastAll,
+    refreshOpenAIAuthSessions,
+    oauthInFlightProviders,
+    reloadCoordinator,
+    notes,
+    reminders,
+    reminderCoordinator,
+    notesRepository,
+    storageDiagnostics,
+    phaseBinding,
+    roadmapReconciliations,
+    roadmapDrafts,
+    roadmapDraftDecisions,
+    projectAutopilot,
+    broadcastNotesSnapshot,
+    sharedMcpPool,
+    durableRoadmapExecution,
+  } = deps;
   const paths = deps.paths;
+  const mode = opts.mode;
+  let chatAgent = opts.chatAgent;
   const cwd = opts.cwd;
   // Base host for parsing request-URL query params (value is irrelevant to
   // parsing); the daemon owns the real listen host.
   const host = "127.0.0.1";
+  const sessionMutations = new AppSidecarSessionMutationCoordinator();
+  const captureVerificationWorkspace = async () => {
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
+    return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+  };
+  const phaseImplementationPlans = new AppSidecarPhaseImplementationPlanTracker();
 
   const saved = loadSavedSettings(paths.settingsFile);
+  // Native login/logout and other live sessions share auth.json. Refresh the
+  // daemon-level snapshot before choosing this session's provider so a project
+  // never boots against credentials that were just replaced or disconnected.
+  await auth.load();
   // Per-project model/thinking prefs win over the shared global settings.json:
   // each window (one project cwd) restores its own selection instead of every
   // window reading the same single global slot that the last writer clobbered
@@ -1046,18 +2069,94 @@ async function createSession(
   }
 
   // Per-project thinking prefs win over the global settings.json fallback.
+  // Restore the endpoint-aware upstream default, then clamp it against the
+  // resolved deployment identity so an Azure reload cannot retain an invalid level.
   const thinkEnabled = projectPrefs?.thinkingEnabled ?? saved.thinkingEnabled;
-  const thinkingLevel: ThinkingLevel | undefined = thinkEnabled
-    ? (projectPrefs?.thinkingLevel ?? saved.thinkingLevel ?? getMaxThinkingLevel(model))
+  const restoredThinkingLevel: ThinkingLevel | undefined = thinkEnabled
+    ? (projectPrefs?.thinkingLevel ??
+      saved.thinkingLevel ??
+      getDefaultThinkingLevel(model, { baseUrl: auth.getStoredBaseUrl(provider) }))
     : undefined;
+  const thinkingLevel = resolveInitialThinkingLevel(
+    provider,
+    model,
+    thinkEnabled,
+    restoredThinkingLevel,
+  );
+  if (
+    projectPrefs &&
+    projectPrefs.provider === provider &&
+    thinkingLevel !== restoredThinkingLevel
+  ) {
+    await saveProjectModelPrefs(cwd, {
+      provider,
+      model,
+      thinkingEnabled: !!thinkingLevel,
+      thinkingLevel,
+    });
+  }
 
   // ── SSE fan-out (declared before the session so plan callbacks can use it) ─
   const clients = new Set<SseClient>();
   let clientSeq = 0;
 
+  function sseFrame(type: string, data: unknown): string {
+    const taggedPayload = sessionEventFrame(opts.id, type, data);
+    const safePayload = redactValue(taggedPayload, { secrets: environmentSecrets(process.env) });
+    return `data: ${JSON.stringify(safePayload)}\n\n`;
+  }
+
+  let readKenState: () => KenState | null = () => null;
   function broadcast(type: string, data: unknown): void {
-    const frame = `data: ${JSON.stringify({ type, data })}\n\n`;
-    for (const c of clients) c.res.write(frame);
+    if (type === "session_reset") data = { ...(data as object), kenState: readKenState() };
+    const frame = sseFrame(type, data);
+    for (const client of clients) {
+      try {
+        if (client.res.destroyed) clients.delete(client);
+        else client.res.write(frame);
+      } catch {
+        clients.delete(client);
+      }
+    }
+  }
+
+  function broadcastNotesChange(snapshot: ProjectNotesSnapshot): void {
+    broadcast("notes_change", snapshot);
+  }
+
+  // Replace CLI-specific guidance (slash commands, CLI tool names) with
+  // desktop-app equivalents so the webview never shows "run ggcoder login".
+  // Applied to BOTH the message and guidance fields — the auth "Not logged in…
+  // Run "ggcoder login"" string lives in `message`, not `guidance`.
+  function desktopGuidance(guidance: string): string {
+    return (
+      guidance
+        // Auth: `Run "ggcoder login"` / `Run 'ggcoder login'` / `Run `ggcoder login``
+        // (any quote style, or none) → button. Do this first so the whole phrase
+        // is rewritten cleanly instead of leaving a dangling `Run "…"`.
+        .replaceAll(/Run ["'`]?ggcoder login["'`]?/gi, "Use the Login to AI Providers button")
+        // Any remaining bare mention.
+        .replaceAll(/ggcoder login/gi, "the Login to AI Providers button")
+        // /compact: the app has NO manual compact command or button — it only
+        // auto-compacts (and now auto-recovers on overflow). If this guidance is
+        // reached, auto-compaction already couldn't reduce enough, so the only
+        // real affordance is a fresh session. Don't tell the user to run a
+        // command that doesn't exist in the app.
+        .replaceAll(
+          /Run \/compact to shrink history, or start a new session\./gi,
+          "Start a new session to reset the context.",
+        )
+        // /model: handle each phrasing pattern
+        .replaceAll(/switch to (\S+) with \/model/gi, "switch to $1 using the model selector")
+        .replaceAll(/Switch with \/model\./gi, "Switch using the model selector.")
+        .replaceAll(
+          /try a different model with \/model\./gi,
+          "try a different model using the model selector.",
+        )
+        .replaceAll(/Use \/model to switch/gi, "Use the model selector to switch")
+        // /help
+        .replaceAll(/see \/help/gi, "check the help menu")
+    );
   }
 
   // Turn any thrown value into the same clear headline/message/guidance shape
@@ -1066,113 +2165,672 @@ async function createSession(
   // Without this the webview only ever saw a raw provider string like
   // `400 {"code":"400",...}` with no "is this me or them / when does it reset"
   // context that the CLI has always given.
+  const sidecarErrorSecrets = sidecarSensitiveValues(process.env);
+
   function broadcastError(
     type: "error" | "ken_error" | "autopilot_error",
     logLabel: string,
     err: unknown,
+    display?: { headline: string; message: string; guidance: string },
   ): void {
-    const f = formatError(err);
-    log("ERROR", "app-sidecar", logLabel, {
-      headline: f.headline,
-      source: f.source,
-      ...(f.message ? { message: f.message } : {}),
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: String(f.statusCode) } : {}),
-      ...(f.requestId ? { requestId: f.requestId } : {}),
+    const formatted = formatSidecarError(err, desktopGuidance, sidecarErrorSecrets);
+    // Fixed task guidance keeps local setup paths and task prompts out of the UI.
+    if (display) formatted.event = display;
+    captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
+      scope: type,
     });
-    broadcast(type, {
-      headline: f.headline,
-      ...(f.message ? { message: f.message } : {}),
-      guidance: f.guidance,
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: f.statusCode } : {}),
-      ...(f.resetsAt != null ? { resetsAt: f.resetsAt } : {}),
-    });
+    log("ERROR", "app-sidecar", logLabel, formatted.logFields);
+    broadcast(type, formatted.event);
     // Persist the error row (display-only marker) so a resumed session shows
     // the same headline/message/guidance the live run did. Best-effort.
     void session
       .persistAppMarker("error", {
         scope: type,
-        headline: f.headline,
-        ...(f.message ? { message: f.message } : {}),
-        guidance: f.guidance,
+        headline: formatted.event.headline,
+        ...(formatted.event.message ? { message: formatted.event.message } : {}),
+        guidance: formatted.event.guidance,
       })
       .catch(() => {});
   }
+
+  // ── MCP elicitation bridge ─────────────────────────────────
+  // An MCP server can ask for user input in the middle of a tool call. The
+  // bridge parks the promise; we broadcast the prompt over SSE and resolve it
+  // when the webview POSTs /mcp/elicit/:id.
+  const elicitations = createElicitationBridge({
+    broadcast: (prompt) => broadcast("mcp_elicit", prompt),
+    onTimeout: (prompt) =>
+      log("WARN", "app-sidecar", "MCP elicitation timed out", {
+        id: prompt.id,
+        server: prompt.server,
+      }),
+  });
+
+  // ── ask_user bridge ────────────────────────────────────────
+  // The `ask_user` tool parks the turn on a human answer. Same shape as the
+  // MCP bridge above: broadcast over SSE, resolved when the webview POSTs
+  // /ask/:id. Registered ONLY here — a TUI/headless/subagent run has nobody to
+  // answer, so the tool is absent there rather than hanging on a dead channel.
+  const asks = createAskUserBridge({
+    broadcast: (prompt) => broadcast("ask_user", prompt),
+    onSettled: (event) => broadcast("ask_user_settled", event),
+    onTimeout: (prompt) => log("WARN", "app-sidecar", "ask_user timed out", { id: prompt.id }),
+  });
+  const askUserTool = createAskUserTool(asks.park);
+  let programmaticExecutionActive = false;
 
   // The session file path to resume (passed by the daemon's POST /session);
   // empty/unset starts a fresh session.
   const resumeSessionPath = opts.sessionPath;
 
   let abort = new AbortController();
-  const session = new AgentSession({
+  const baseSessionOptions = {
     provider,
     model,
     cwd,
     thinkingLevel,
     sessionId: resumeSessionPath,
     signal: abort.signal,
-    // The shell gates window readiness on the GG_APP_LISTENING handshake, which
-    // can't fire until initialize() resolves. Connect MCP in the background so a
-    // slow or hanging stdio server (e.g. a first-run `npx -y @playwright/mcp`
-    // download) can't delay the sidecar past the webview's startup timeout
-    // ("sidecar did not start in time"). Tools attach when the servers come up.
+    // Keep MCP startup off the readiness path in both modes.
     backgroundMcpConnect: true,
-    // Plan mode: the agent's enter_plan/exit_plan tools drive these. We flip
-    // session plan state (rebuilds the system prompt + enforces read-only
-    // tools) and surface the transition to the webview.
-    onEnterPlan: async (reason) => {
-      await session.setPlanMode(true);
-      broadcast("plan_enter", { reason: reason ?? "" });
-      // Persist the plan-mode banner so a resumed session still shows it.
-      void session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
-    },
-    onExitPlan: async (planPath: string) => {
-      await session.setPlanMode(false);
-      // Surface the plan's path + markdown so the webview can show the review
-      // modal (Accept / Feedback / Reject). Best-effort content read.
-      let content: string;
-      try {
-        content = await fs.readFile(planPath, "utf-8");
-      } catch {
-        content = "";
+    sharedMcpPool,
+    onMcpElicit: elicitations.onElicit,
+    // Keep restore-time auto-compaction off the readiness path too: its summary
+    // LLM call (30s timeout) used to freeze waitForReady — and with it the whole
+    // window (project picker, session list) — whenever a resumed session was
+    // over the context threshold. First prompt compacts instead, with UI events.
+    deferLoadCompaction: true,
+  };
+  let session!: AgentSession;
+  let planGate!: AppSidecarPlanGate;
+  const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
+    session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
+  let deferredPhaseLeaseReleaseOperationId: string | null = null;
+  async function releaseCurrentPhaseLease(operationId: string): Promise<void> {
+    if (!session.getRoadmapPhaseLeaseMarker()) return;
+    if (session.getPhaseLeaseRunState() === "running") {
+      deferredPhaseLeaseReleaseOperationId = operationId;
+      throw new Error("Phase lease release deferred until the provider run settles.");
+    }
+    const outcome = await phaseBinding.releaseCurrent(operationId, session);
+    if (
+      outcome.status === "released" ||
+      (outcome.status === "duplicate" && outcome.lease === null)
+    ) {
+      if (deferredPhaseLeaseReleaseOperationId === operationId) {
+        deferredPhaseLeaseReleaseOperationId = null;
       }
-      // Record the submitted plan so the autopilot gate can route this turn
-      // into a PLAN review instead of a stale work review (plan mode is
-      // already false here, so the gate's planMode check alone never catches
-      // a submission). setPendingPlan bumps planGeneration, which invalidates
-      // any in-flight Ken plan review racing a user action.
-      setPendingPlan(planPath, content);
-      broadcast("plan_exit", { planPath, content });
-      return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
-    },
-  });
-  await session.initialize();
-  log("INFO", "app-sidecar", "session ready", { provider, model, cwd });
-
-  // Footer extras (context window, git branch, background tasks). The git
-  // branch is resolved once at startup and refreshed lazily; the context
-  // window follows the active model.
-  let gitBranch: string | null = await getGitBranch(cwd).catch(() => null);
-  let gitIsRepo: boolean = await isGitRepo(cwd).catch(() => false);
-  function currentContextWindow(): number {
-    const st = session.getState();
-    return getContextWindow(st.model, { provider: st.provider, accountId: st.accountId });
+      return;
+    }
+    throw new Error(`Phase lease release failed: ${outcome.status}`);
   }
-  // Shared shape merged into /state + the SSE `ready` frame so the footer can
-  // render context %, branch, and tasks immediately on connect.
-  function footerExtras(): {
-    contextWindow: number;
-    gitBranch: string | null;
-    isGitRepo: boolean;
-    tasks: ReturnType<typeof session.listBackgroundProcesses>;
+  async function releaseOrDeferPhaseLease(operationId: string): Promise<void> {
+    if (session.getPhaseLeaseRunState() === "running") {
+      deferredPhaseLeaseReleaseOperationId = operationId;
+      return;
+    }
+    await releaseCurrentPhaseLease(operationId);
+  }
+  async function settleDeferredPhaseLeaseRelease(): Promise<boolean> {
+    const operationId = deferredPhaseLeaseReleaseOperationId;
+    if (!operationId) return false;
+    await releaseCurrentPhaseLease(operationId);
+    deferredPhaseLeaseReleaseOperationId = null;
+    return true;
+  }
+  const roadmapToolHost = new AppSidecarRoadmapToolHost({
+    cwd,
+    repository: notesRepository,
+    reconciliations: roadmapReconciliations,
+    projectAutopilot,
+    captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
+    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    mutateStatusWithLeaseFence: (phaseId, operation) =>
+      phaseBinding.withStatusLease(session, phaseId, operation),
+    broadcastNotesSnapshot,
+    onError: (error, metadata) =>
+      captureSidecarError(error, "app-sidecar.roadmap-status", metadata),
+  });
+  const roadmapDraftToolHost = new AppSidecarRoadmapDraftToolHost({
+    cwd,
+    repository: notesRepository,
+    drafts: roadmapDrafts,
+    getOwningSession: () => session,
+  });
+  const createCodingSession = (
+    sessionPath?: string,
+    active?: { provider: Provider; model: string; thinkingLevel?: ThinkingLevel },
+  ): AgentSession => {
+    const created: AgentSession = new AgentSession({
+      ...baseSessionOptions,
+      ...(active ?? {}),
+      sessionId: sessionPath,
+      signal: abort.signal,
+      deferApprovedPlanHydration: durableRoadmapExecution,
+      captureVerificationWorkspace,
+      onEnterPlan: async (reason) => {
+        deactivateApprovedPlan();
+        await created.setPlanMode(true);
+        broadcast("plan_progress", { total: 0, completed: [] });
+        broadcast("plan_enter", { reason: reason ?? "" });
+        void created.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
+      },
+      onExitPlan: async (planPath: string, content: string) => {
+        const checkpoint = await planGate.submit(planPath, content);
+        await created.setPlanMode(false);
+        broadcast("plan_exit", {
+          checkpointId: checkpoint.checkpointId,
+          generation: checkpoint.generation,
+          planPath: checkpoint.planPath,
+          content: checkpoint.content,
+          contentHash: checkpoint.contentHash,
+        });
+        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
+      },
+      ...createAppSidecarCodingRoadmapSessionOptions(
+        [askUserTool, ...roadmapToolHost.createSessionTools("coding", () => created)],
+        roadmapDraftToolHost.createSessionTools(),
+        [
+          createRoadmapBindTool(async (input) => {
+            if (input.action === "inspect") {
+              const state = created.getState();
+              return storageDiagnostics.inspect({
+                cwd,
+                logicalSessionId: opts.id,
+                currentSession: {
+                  sessionId: state.sessionId,
+                  sessionPath: state.sessionPath,
+                },
+                activePhaseContext: created.getActivePhaseContext(),
+              });
+            }
+            return input.version === 2
+              ? phaseBinding.lease(input, created)
+              : phaseBinding.bind(input, created);
+          }),
+        ],
+      ),
+    });
+    return created;
+  };
+  if (mode === "chat") {
+    session = createChatAgent(chatAgent, {
+      ...baseSessionOptions,
+      sessionsDir: paths.sessionsDir,
+      additionalTools: [
+        askUserTool,
+        ...buildMemoryTools(memoryStore),
+        ...buildJiwaTools(jiwaStore),
+      ],
+      ...createAppSidecarChatRoadmapSessionOptions(roadmapDraftToolHost.createSessionTools()),
+      getSystemPromptTail: () =>
+        `${memoryStore.renderForPrompt()}\n\n${jiwaStore.renderForPrompt()}`,
+      onAgentChange: async (nextAgent) => {
+        chatAgent = nextAgent;
+        broadcast("chat_agent_change", { chatAgent: nextAgent });
+        await session.persistAppMarker("agent_handoff", { chatAgent: nextAgent }).catch((error) => {
+          log("WARN", "app-sidecar", "agent handoff marker persist failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      },
+    });
+  } else {
+    session = createCodingSession(resumeSessionPath);
+  }
+  await session.initialize();
+  planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
+  const phaseLifecycle = new AppSidecarPhaseLifecycleCoordinator({
+    cwd,
+    repository: notesRepository,
+    getActivePhase: () => {
+      const active = session.getActivePhaseContext();
+      return active
+        ? {
+            phaseId: active.phase.id,
+            session: active.session,
+            executionStage: active.executionStage,
+          }
+        : undefined;
+    },
+    broadcastSnapshot: broadcastNotesSnapshot,
+    onError: (error, signal) =>
+      captureSidecarError(error, "app-sidecar.phase.lifecycle", { signal: signal.type }),
+  });
+  const phaseCandidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<AgentSession>>();
+  if (mode === "chat") {
+    const restoredAgent = [...session.getAppMarkers()]
+      .reverse()
+      .find((marker) => marker.kind === "agent_handoff")?.data.chatAgent;
+    if (typeof restoredAgent === "string") {
+      chatAgent = parseChatAgentId(restoredAgent);
+      await switchChatAgent(session, chatAgent, false);
+    }
+  }
+  log("INFO", "app-sidecar", "session ready", { provider, model, mode, chatAgent, cwd });
+
+  // ── Local models (Ollama, plus user-added custom endpoints) ──
+  // Probing endpoints must never delay readiness, so this runs in the
+  // background (same shape as backgroundMcpConnect) and pushes a models_change
+  // frame when it lands.
+  let localProbes: LocalEndpointProbe[] = [];
+
+  async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
+    const endpoints = await listAllEndpoints();
+    const { probes, models } = await discoverLocalModels(endpoints, { force });
+    localProbes = probes;
+    // Only endpoints that answered get a credential: writing one for a server
+    // that isn't running would make `hasProviderAuth("local")` true forever.
+    await syncEndpointCredentials(
+      probes.filter((probe) => probe.reachable).map((probe) => probe.endpoint),
+    );
+    clearRuntimeModels((m) => m.provider === "local");
+    registerRuntimeModels(models);
+    log("INFO", "app-sidecar", "local model scan", {
+      reachable: probes.filter((p) => p.reachable).length + "/" + probes.length,
+      models: String(models.length),
+    });
+    return probes;
+  }
+
+  /** Endpoint rows + models, in the shape the Local models UI renders. */
+  function localStatePayload(): {
+    endpoints: {
+      id: string;
+      label: string;
+      baseUrl: string;
+      kind: LocalEndpoint["kind"];
+      custom: boolean;
+      reachable: boolean;
+      reason?: string;
+      models: {
+        id: string;
+        rawId: string;
+        contextWindow: number;
+        contextWindowKnown: boolean;
+        supportsTools: boolean;
+        supportsImages: boolean;
+        supportsThinking: boolean;
+        loaded?: boolean;
+      }[];
+    }[];
   } {
     return {
-      contextWindow: currentContextWindow(),
+      endpoints: localProbes.map((probe) => ({
+        id: probe.endpoint.id,
+        label: probe.endpoint.label,
+        baseUrl: probe.endpoint.baseUrl,
+        kind: probe.endpoint.kind,
+        custom: probe.endpoint.custom === true,
+        reachable: probe.reachable,
+        ...(probe.reason ? { reason: probe.reason } : {}),
+        models: probe.models.map((m) => ({
+          id: formatLocalModelId(probe.endpoint.id, m.rawId),
+          rawId: m.rawId,
+          contextWindow: m.contextWindow,
+          contextWindowKnown: m.contextWindowKnown,
+          supportsTools: m.supportsTools,
+          supportsImages: m.supportsImages,
+          supportsThinking: m.supportsThinking,
+          ...(m.loaded === undefined ? {} : { loaded: m.loaded }),
+        })),
+      })),
+    };
+  }
+
+  // ── Hugging Face → Ollama pulls (the "Add from Hugging Face" modal) ──
+  // One pull at a time: multi-GB downloads, one progress surface. State lives
+  // here (not in the webview) so a closed modal or app restart mid-pull keeps
+  // streaming; the terminal state is kept until the next pull so reopening the
+  // modal shows how the last one ended.
+  interface HfPullState {
+    repo: string;
+    model: string;
+    tag: string | null;
+    file: string;
+    sizeBytes: number;
+    phase: PullPhase;
+    percent: number;
+    detail?: string;
+    error?: string;
+    child: ChildProcess | null;
+  }
+  let hfPull: HfPullState | null = null;
+
+  const hfPullPayload = (s: HfPullState): Record<string, unknown> => ({
+    repo: s.repo,
+    model: s.model,
+    tag: s.tag,
+    file: s.file,
+    sizeBytes: s.sizeBytes,
+    phase: s.phase,
+    percent: s.percent,
+    ...(s.detail ? { detail: s.detail } : {}),
+    ...(s.error ? { error: s.error } : {}),
+  });
+
+  /** Stored HF token, if the user connected the huggingface provider. */
+  async function hfToken(): Promise<string | undefined> {
+    try {
+      const auth = new AuthStorage(paths.authFile);
+      const creds = await auth.resolveCredentials("huggingface");
+      return creds.accessToken || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function hfHubJson(pathname: string): Promise<unknown> {
+    const token = await hfToken();
+    const res = await fetch(`https://huggingface.co${pathname}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`Hugging Face responded ${res.status}`);
+    return res.json();
+  }
+
+  /** Search the Hub for GGUF repos (what Ollama can pull). */
+  async function hfSearch(query: string): Promise<HfSearchRow[]> {
+    // `filter=gguf` (the tag the Hub applies to repos that actually contain
+    // GGUF files) — `library=gguf` also matches safetensors-only base repos,
+    // which then fail at pull time. `expand[]=gguf` confirms per row.
+    const params = new URLSearchParams({
+      search: query,
+      filter: "gguf",
+      sort: "downloads",
+      direction: "-1",
+      limit: "12",
+    });
+    for (const field of ["gguf", "downloads", "likes", "lastModified"]) {
+      params.append("expand[]", field);
+    }
+    const data = (await hfHubJson(`/api/models?${params.toString()}`)) as {
+      id?: unknown;
+      downloads?: unknown;
+      likes?: unknown;
+      lastModified?: unknown;
+      gguf?: unknown;
+    }[];
+    return (Array.isArray(data) ? data : [])
+      .map(toHfSearchRow)
+      .filter((r): r is HfSearchRow => r !== null);
+  }
+
+  /**
+   * Start `ollama pull hf.co/<repo>[:quant]`. Resolves once the child is
+   * spawned; progress streams as `hf_pull` events. The chosen quant comes from
+   * the repo's real file list — the client only ever sends a repo id, so there
+   * is no injection surface into argv.
+   */
+  async function startHfPull(repo: string): Promise<Record<string, unknown>> {
+    if (hfPull?.child) {
+      throw Object.assign(new Error("A download is already running."), { status: 409 });
+    }
+    // `recursive=true`: many repos (unsloth, mradermacher) keep quants in
+    // per-quant subfolders, and a flat listing reports them as GGUF-less.
+    const tree = (await hfHubJson(`/api/models/${repo}/tree/main?recursive=true`)) as unknown[];
+    const files: GgufFile[] = (Array.isArray(tree) ? tree : []).flatMap((entry) => {
+      const e = entry as {
+        path?: unknown;
+        type?: unknown;
+        size?: unknown;
+        lfs?: { size?: unknown };
+      };
+      // `type` guards a directory entry (size 0) from beating real files in the
+      // size fallback; the Hub marks folders as "directory".
+      if (e.type !== undefined && e.type !== "file") return [];
+      if (typeof e.path !== "string" || !e.path.toLowerCase().endsWith(".gguf")) return [];
+      const size = Number(e.lfs?.size ?? e.size ?? 0);
+      return [{ path: e.path, sizeBytes: Number.isFinite(size) ? size : 0 }];
+    });
+    const choice = pickGgufQuant(files);
+    if (!choice) {
+      const sharded = files.some((f) => isGgufShard(f.path));
+      throw Object.assign(
+        new Error(sharded ? SHARDED_MESSAGE : "That repo has no GGUF file for Ollama to pull."),
+        { status: 400 },
+      );
+    }
+    const model = `hf.co/${repo}${choice.tag ? `:${choice.tag}` : ""}`;
+    const token = await hfToken();
+    const state: HfPullState = {
+      repo,
+      model,
+      tag: choice.tag,
+      file: choice.file.path,
+      sizeBytes: choice.file.sizeBytes,
+      phase: "preparing",
+      percent: 0,
+      child: null,
+    };
+    hfPull = state;
+    broadcast("hf_pull", hfPullPayload(state));
+
+    // ollama prints progress to stderr (stdout on some builds); parse both.
+    let stderrTail = "";
+    let lastBroadcast = "";
+    const feed = (chunk: string): void => {
+      // Once the pull is terminal (success, failure, or user cancel) stop
+      // parsing: a killed ollama dumps a burst of stderr that would otherwise
+      // spam the modal with garbage frames after the outcome is already shown.
+      if (state.phase === "success" || state.phase === "error") return;
+      for (const line of chunk.split(/\r\n|\r|\n/)) {
+        const parsed = parseOllamaPullLine(line);
+        if (!parsed) continue;
+        // A redrawn frame repeats `pulling manifest` next to live progress; it
+        // must not drag the modal back to "Contacting Ollama…".
+        if (!advancesPhase(state.phase, parsed.phase)) continue;
+        if (parsed.phase !== "error") {
+          state.phase = parsed.phase;
+          if (parsed.percent !== undefined) state.percent = parsed.percent;
+          state.detail = parsed.detail;
+        }
+        // ollama redraws its TUI frame several times a second, mostly with
+        // identical numbers. Broadcasting each one re-rendered the modal for no
+        // visible change; only a frame that actually reads differently ships.
+        const next = JSON.stringify(hfPullPayload(state));
+        if (next === lastBroadcast) continue;
+        lastBroadcast = next;
+        broadcast("hf_pull", hfPullPayload(state));
+      }
+    };
+
+    try {
+      const child = spawn("ollama", ["pull", model], {
+        env: { ...process.env, ...(token ? { HF_TOKEN: token } : {}) },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      state.child = child;
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      child.stdout?.on("data", feed);
+      child.stderr?.on("data", (d: string) => {
+        stderrTail = (stderrTail + d).slice(-2000);
+        feed(d);
+      });
+      child.on("error", (err: NodeJS.ErrnoException) => {
+        state.child = null;
+        state.phase = "error";
+        state.error =
+          err.code === "ENOENT"
+            ? "Ollama isn't installed (or isn't on PATH). Install it from ollama.com, then retry."
+            : `Could not start Ollama: ${err.message}`;
+        broadcast("hf_pull", hfPullPayload(state));
+      });
+      child.on("close", (code: number | null) => {
+        state.child = null;
+        if (state.phase === "success" || state.phase === "error") return; // cancelled
+        if (code === 0) {
+          state.phase = "success";
+          state.percent = 100;
+          state.detail = undefined;
+          broadcast("hf_pull", hfPullPayload(state));
+          // The new model only exists to the app once Ollama lists it. Ollama's
+          // library is machine-wide, like the shared auth file, so every window
+          // gets the refresh — not just the one that ran the download.
+          void scanLocalModels(true)
+            .then(() => broadcastAll("models_change", { local: localStatePayload() }))
+            .catch(() => undefined);
+        } else {
+          state.phase = "error";
+          state.error = state.error ?? explainPullFailure(stderrTail);
+          broadcast("hf_pull", hfPullPayload(state));
+        }
+      });
+    } catch (err) {
+      state.child = null;
+      state.phase = "error";
+      state.error = `Could not start Ollama: ${err instanceof Error ? err.message : String(err)}`;
+      broadcast("hf_pull", hfPullPayload(state));
+    }
+    return hfPullPayload(state);
+  }
+
+  function cancelHfPull(): boolean {
+    const child = hfPull?.child;
+    if (!child) return false;
+    // Terminal state FIRST, then the kill: the child's death rattle must not
+    // overwrite the clean "cancelled" outcome with raw stderr.
+    if (hfPull) {
+      hfPull.phase = "error";
+      hfPull.error = "Download cancelled.";
+      hfPull.detail = undefined;
+      hfPull.child = null;
+      broadcast("hf_pull", hfPullPayload(hfPull));
+    }
+    child.kill("SIGTERM");
+    return true;
+  }
+
+  /**
+   * Why `modelId` can't be selected right now, or `undefined` when it can.
+   * Two real footguns get a clear answer instead of a mid-run provider error:
+   * a model with no tool calling (can't drive the agent at all), and a server
+   * that has since been shut down.
+   */
+  async function localModelBlocker(modelId: string): Promise<string | undefined> {
+    const parsed = parseLocalModelId(modelId);
+    if (!parsed) return undefined;
+    const endpoints = await listAllEndpoints();
+    const endpoint = endpoints.find((e) => e.id === parsed.endpointId);
+    if (!endpoint)
+      return `Unknown local endpoint "${parsed.endpointId}" — re-scan for local models.`;
+
+    const probe = await probeEndpoint(endpoint);
+    // Keep the cached view honest: this probe is fresher than the last scan.
+    localProbes = localProbes.map((p) => (p.endpoint.id === endpoint.id ? probe : p));
+    if (!probe.reachable) {
+      return `${endpoint.label} isn't running at ${endpoint.baseUrl}. Start it and scan again.`;
+    }
+    const model = probe.models.find((m) => m.rawId === parsed.rawId);
+    if (!model) {
+      return `${endpoint.label} no longer serves "${parsed.rawId}".`;
+    }
+    if (!model.supportsTools) {
+      return `${parsed.rawId} has no tool calling, so it can't run the agent. Pick a tool-capable model.`;
+    }
+    registerRuntimeModels(probe.models.map((m) => localModelInfo(m, endpoint)));
+    return undefined;
+  }
+
+  /**
+   * A restored per-project pref can ask for thinking on a local model that
+   * turns out not to reason (capabilities are only known after a probe). Drop
+   * the level once we know, so the first prompt doesn't carry a
+   * `reasoning_effort` the server rejects.
+   */
+  function clampLocalThinking(): void {
+    const st = session.getState();
+    const level = session.getThinkingLevel();
+    if (!level || st.provider !== "local") return;
+    if (isThinkingLevelSupported(st.provider, st.model, level)) return;
+    session.setThinkingLevel(undefined);
+    broadcast("thinking_change", {
+      thinkingLevel: null,
+      supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+    });
+  }
+
+  // Workspace extras (context window, git status, background tasks). Git state
+  // is resolved once at startup and refreshed after every run; the context
+  // window follows the active model.
+  const [initialGitBranch, initialGitIsRepo, initialDirtyFileCount, initialGitHubSlug] =
+    await Promise.all([
+      getGitBranch(cwd).catch(() => null),
+      isGitRepo(cwd).catch(() => false),
+      getGitDirtyFileCount(cwd).catch(() => 0),
+      getGitHubRepoSlug(cwd).catch(() => null),
+    ]);
+  let gitBranch: string | null = initialGitBranch;
+  let gitIsRepo: boolean = initialGitIsRepo;
+  let gitDirtyFileCount = initialDirtyFileCount;
+  // Open issue/PR counts for the origin repo's GitHub slug, via the `gh` CLI's
+  // auth. null = unknown (gh missing/unauthed, non-GitHub origin) → chips hidden.
+  const gitHubSlug: string | null = initialGitHubSlug;
+  let gitHubIssues: number | null = null;
+  let gitHubPRs: number | null = null;
+  let gitHubCI: GitHubCI | null = null;
+  // Shared shape merged into /state + the SSE `ready` frame so the footer can
+  // render context %, branch, and tasks immediately on connect.
+  function footerExtras(): DesktopContextSnapshot & {
+    gitBranch: string | null;
+    isGitRepo: boolean;
+    gitDirtyFileCount: number;
+    gitHubIssues: number | null;
+    gitHubPRs: number | null;
+    gitHubRepoUrl: string | null;
+    gitHubCI: GitHubCI | null;
+    tasks: ReturnType<typeof session.listBackgroundProcesses>;
+    additionalRoots: string[];
+    kenState: KenState | null;
+  } {
+    return {
+      kenState: readKenState(),
+      ...getAgentSessionContextSnapshot(session),
       gitBranch,
       isGitRepo: gitIsRepo,
+      gitDirtyFileCount,
+      gitHubIssues,
+      gitHubPRs,
+      gitHubCI,
+      gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
+      // Roots added with /add-dir — the header shows a badge when non-empty.
+      additionalRoots: session.getAdditionalRoots(),
     };
+  }
+
+  async function refreshOpenAIAuthState(): Promise<void> {
+    await session.refreshStoredAuthState();
+    broadcast("extras", footerExtras());
+  }
+
+  void scanLocalModels(false)
+    .then(() => {
+      clampLocalThinking();
+      broadcast("extras", footerExtras());
+    })
+    .then(() => broadcast("models_change", { local: localStatePayload() }))
+    .catch((err: unknown) => {
+      // A discovery failure is never fatal — the user simply has no local
+      // models. Log it; don't push an error row into the transcript.
+      log("WARN", "app-sidecar", "local model scan failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+  // Refresh the GitHub counts and broadcast only on change. Transient failures
+  // keep the last-known numbers so the chips don't flicker off on a timeout.
+  async function refreshGitHubCounts(): Promise<void> {
+    if (!gitHubSlug) return;
+    const counts = await getGitHubOpenCounts(gitHubSlug);
+    if (!counts) return;
+    if (counts.issues !== gitHubIssues || counts.prs !== gitHubPRs) {
+      gitHubIssues = counts.issues;
+      gitHubPRs = counts.prs;
+      broadcast("extras", footerExtras());
+    }
   }
 
   // tool_call_end carries no tool name (only the id), so remember each call's
@@ -1182,50 +2840,312 @@ async function createSession(
   // fatal-abort path with no forensic trail.
   const toolCallNames = new Map<string, string>();
 
-  // Forward every relevant bus event to the webview.
-  session.eventBus.on("text_delta", (d) => broadcast("text_delta", d));
-  session.eventBus.on("thinking_delta", (d) => broadcast("thinking_delta", d));
-  session.eventBus.on("tool_call_start", (d) => {
-    toolCallNames.set(d.toolCallId, d.name);
-    broadcast("tool_call_start", d);
-  });
-  session.eventBus.on("tool_call_update", (d) => broadcast("tool_call_update", d));
-  session.eventBus.on("tool_call_end", (d) => {
-    const name = toolCallNames.get(d.toolCallId) ?? "unknown";
-    toolCallNames.delete(d.toolCallId);
-    log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
-      id: d.toolCallId,
-      durationMs: String(d.durationMs),
-      isError: String(d.isError),
-      ...(d.isError ? { result: d.result.slice(0, 500) } : {}),
+  // Approved-plan progress belongs beside the plan file, not in the webview.
+  // The implementation can rewrite/expand that file mid-run, so a step count
+  // frozen at approval time becomes dishonest for legacy path-only plans. Durable
+  // human approvals always use their server-owned exact snapshot, so edits to the
+  // display file cannot alter either the prompt contract or progress totals.
+  let approvedPlanPath: string | null = null;
+  let approvedPlanTotal = 0;
+  let approvedPlanMarkers = new Set<number>();
+  let approvedPlanGeneration = 0;
+  let planMarkerTail = "";
+  let planProgressSync: Promise<boolean> = Promise.resolve(false);
+
+  function planProgressPayload(): { total: number; completed: number[] } {
+    const completed = [...approvedPlanMarkers]
+      .filter((step) => step >= 1 && step <= approvedPlanTotal)
+      .sort((a, b) => a - b);
+    return { total: approvedPlanTotal, completed };
+  }
+
+  async function syncApprovedPlanProgress(generation: number): Promise<boolean> {
+    const planPath = approvedPlanPath;
+    if (planPath === null || generation !== approvedPlanGeneration) return false;
+    const durableApproval = session.getApprovedPlanConsumption();
+    const content =
+      durableApproval?.approvedPlanPath === planPath
+        ? durableApproval.content
+        : await fs.readFile(planPath, "utf-8").catch(() => null);
+    if (approvedPlanPath !== planPath || generation !== approvedPlanGeneration) return false;
+    if (content !== null) {
+      const freshTotal = extractPlanSteps(content).length;
+      // During an in-place rewrite the step section can briefly disappear.
+      // Keep the last real total instead of flashing 0 or declaring completion.
+      if (freshTotal > 0 || approvedPlanTotal === 0) approvedPlanTotal = freshTotal;
+    }
+    broadcast("plan_progress", planProgressPayload());
+    return (
+      approvedPlanTotal > 0 &&
+      Array.from({ length: approvedPlanTotal }, (_, index) => index + 1).every((step) =>
+        approvedPlanMarkers.has(step),
+      )
+    );
+  }
+
+  async function durableApprovedPlanComplete(): Promise<boolean> {
+    const activePhase = session.getActivePhaseContext();
+    if (!activePhase) return false;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") return false;
+    const plan = loaded.snapshot.document.phases.find((phase) => phase.id === activePhase.phase.id)
+      ?.execution?.plan;
+    return (
+      plan != null &&
+      plan.steps.length === approvedPlanTotal &&
+      plan.steps.every((step) => step.state === "completed")
+    );
+  }
+
+  function queueApprovedPlanProgressSync(): Promise<boolean> {
+    const generation = approvedPlanGeneration;
+    planProgressSync = planProgressSync
+      .catch(() => false)
+      .then(() => syncApprovedPlanProgress(generation))
+      .catch((error) => {
+        log("WARN", "app-sidecar", "plan progress refresh failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      });
+    return planProgressSync;
+  }
+
+  async function activateApprovedPlan(
+    planPath: string | undefined,
+    exactContent?: string,
+  ): Promise<number> {
+    deactivateApprovedPlan();
+    if (exactContent === undefined) await session.setApprovedPlan(planPath);
+    if (!planPath) return exactContent ? extractPlanSteps(exactContent).length : 0;
+    approvedPlanPath = planPath;
+    approvedPlanTotal = exactContent ? extractPlanSteps(exactContent).length : 0;
+    await queueApprovedPlanProgressSync();
+    return approvedPlanTotal;
+  }
+
+  function deactivateApprovedPlan(options?: { retainImplementationEvidence?: boolean }): void {
+    approvedPlanGeneration++;
+    approvedPlanPath = null;
+    approvedPlanTotal = 0;
+    approvedPlanMarkers = new Set();
+    planMarkerTail = "";
+    planProgressSync = Promise.resolve(false);
+    if (!options?.retainImplementationEvidence) phaseImplementationPlans.clear();
+  }
+
+  // Opening a session does not import, revalidate, or settle historical Roadmap execution.
+
+  const restoredApprovedPlan = session.getApprovedPlanConsumption();
+  const restoredApprovedPlanPath =
+    restoredApprovedPlan?.approvedPlanPath ??
+    (durableRoadmapExecution ? undefined : session.getActivePhaseContext()?.approvedPlanPath);
+  if (restoredApprovedPlanPath || restoredApprovedPlan) {
+    await activateApprovedPlan(restoredApprovedPlanPath, restoredApprovedPlan?.content);
+    for (const message of session.getMessages()) {
+      const text =
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .map((content) => (content.type === "text" && "text" in content ? content.text : ""))
+              .join("");
+      recordApprovedPlanMarkers(text);
+    }
+  }
+
+  function recordApprovedPlanMarkers(text: string): void {
+    if (approvedPlanPath === null || !text) return;
+    const candidate = planMarkerTail + text;
+    let changed = false;
+    for (const match of candidate.matchAll(/\[DONE:(\d+)\]/gi)) {
+      const step = Number.parseInt(match[1], 10);
+      if (step >= 1 && !approvedPlanMarkers.has(step)) {
+        approvedPlanMarkers.add(step);
+        changed = true;
+      }
+    }
+    planMarkerTail = candidate.slice(-32);
+    if (changed) void queueApprovedPlanProgressSync();
+  }
+
+  // Bind the complete event surface to both initial and phase-replacement sessions.
+  function bindSessionEvents(target: AgentSession): void {
+    target.eventBus.on("text_delta", (data) => {
+      broadcast("text_delta", data);
+      recordApprovedPlanMarkers(data.text);
     });
-    broadcast("tool_call_end", d);
-  });
-  // Native server tools (e.g. Anthropic web_search) do NOT end the turn — text
-  // streams before and after them in the SAME turn. The webview must reset its
-  // streaming bubble here, or the two text blocks concatenate with no separator
-  // ("…command.Let me pull…"). Mirrors the TUI's server_tool_call handling.
-  session.eventBus.on("server_tool_call", (d) => broadcast("server_tool_call", d));
-  session.eventBus.on("turn_end", (d) => broadcast("turn_end", d));
-  session.eventBus.on("agent_done", (d) => broadcast("agent_done", d));
-  session.eventBus.on("error", (d) => {
-    broadcastError("error", "agent error", d.error);
-  });
-  session.eventBus.on("model_change", (d) => broadcast("model_change", d));
-  session.eventBus.on("hook", (d) => broadcast("hook", d));
-  session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
-  session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
+    target.eventBus.on("thinking_delta", (data) => broadcast("thinking_delta", data));
+    target.eventBus.on("queue_drained", (data) =>
+      broadcast("queued", { count: data.count, messages: target.listQueuedMessages() }),
+    );
+    target.eventBus.on("tool_call_start", (data) => {
+      toolCallNames.set(data.toolCallId, data.name);
+      broadcast("tool_call_start", data);
+    });
+    target.eventBus.on("tool_call_update", (data) => broadcast("tool_call_update", data));
+    target.eventBus.on("tool_call_end", (data) => {
+      const name = toolCallNames.get(data.toolCallId) ?? "unknown";
+      toolCallNames.delete(data.toolCallId);
+      if (data.isError && shouldCaptureToolFailure(name, data.result)) {
+        captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
+      }
+      log(data.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
+        id: data.toolCallId,
+        durationMs: String(data.durationMs),
+        isError: String(data.isError),
+        ...(data.isError ? { result: data.result.slice(0, 500) } : {}),
+        ...(data.invalidArgAttempt === undefined
+          ? {}
+          : { invalidArgAttempt: String(data.invalidArgAttempt) }),
+      });
+      broadcast("tool_call_end", data);
+      if (approvedPlanPath !== null) void queueApprovedPlanProgressSync();
+    });
+    target.eventBus.on("server_tool_call", (data) => broadcast("server_tool_call", data));
+    target.eventBus.on("turn_end", (data) => broadcast("turn_end", data));
+    target.eventBus.on("agent_done", (data) => broadcast("agent_done", data));
+    target.eventBus.on("truncated", (data) => {
+      if (data.reason === "empty_response") {
+        broadcastError(
+          "error",
+          "empty response",
+          new Error("The model returned an empty response after retries — try sending again."),
+        );
+        return;
+      }
+      broadcast("truncated", data);
+    });
+    target.eventBus.on("error", (data) => broadcastError("error", "agent error", data.error));
+    target.eventBus.on("model_change", (data) => broadcast("model_change", data));
+    target.eventBus.on("hook", (data) => broadcast("hook", data));
+    target.eventBus.on("hook_armed", (data) => broadcast("hook_armed", data));
+    target.eventBus.on("subagent_state", (data) => broadcast("subagent_state", data));
+    target.eventBus.on("mcp_server_state", (data) => broadcast("mcp_server_state", data));
+    target.eventBus.on("compaction_start", (data) => broadcast("compaction_start", data));
+    target.eventBus.on("compaction_end", (data) => {
+      broadcast("compaction_end", data);
+      broadcast("extras", footerExtras());
+    });
+  }
+  bindSessionEvents(session);
 
   let running = false;
-  let titleGenerated = false;
+  // Closes the window between `/prompt` deciding to start a run and `runAgent`
+  // flipping `running` — that stretch awaits, so Node yields inside it. See
+  // RunClaim.
+  const runClaim = new RunClaim();
+  // Separate from provider claims: held across task resets, reviews, cadence and queue drain.
+  const taskSweepClaim = new RunClaim();
+  let runJournalPersistence: Promise<void> = Promise.resolve();
+  const runLifecycle = new RunLifecycle(
+    (runState) => {
+      running = runState !== "idle";
+      session.setPhaseLeaseRunState(running ? "running" : "idle");
+      if (runState === "cancelling") broadcast("run_cancelling", { runState });
+    },
+    // Durable run journal. Fire-and-forget on purpose: an unwritten journal
+    // entry is a missed crash hint, while a journal write that throws inside
+    // begin()/settle() would break run ownership itself.
+    {
+      started: (generation) => {
+        runJournalPersistence = runJournalPersistence
+          .then(() => session.persistRunStarted(generation))
+          .catch((err) => {
+            log("WARN", "app-sidecar", "failed to journal run start", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      },
+      finished: (generation, outcome) => {
+        runJournalPersistence = runJournalPersistence
+          .then(() => session.persistRunFinished(generation, outcome))
+          .catch((err) => {
+            log("WARN", "app-sidecar", "failed to journal run finish", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      },
+    },
+  );
+  async function renewCurrentPhaseLease(operationId: string): Promise<void> {
+    const marker = session.getRoadmapPhaseLeaseMarker();
+    const active = session.getActivePhaseContext();
+    if (!marker || !active) return;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Project Notes unavailable for lease renewal.");
+    const outcome = await phaseBinding.lease(
+      {
+        version: 2,
+        action: "renew",
+        phaseId: marker.phaseId,
+        expectedProjectKey: loaded.snapshot.projectKey,
+        expectedRevision: loaded.snapshot.revision,
+        planId: marker.planId,
+        operationId: `${operationId}:${marker.leaseId}`,
+        lease: { leaseId: marker.leaseId, fence: marker.fence },
+        confirmTakeover: false,
+        takeoverReason: null,
+        predecessorProof: null,
+      },
+      session,
+    );
+    if (outcome.status === "renewed" || outcome.status === "duplicate") return;
+    if (outcome.status === "phase-lease-lost") {
+      recordRoadmapDurabilityDiagnostic("phase-lease-lost");
+      await session.clearActivePhaseContext("phase-rebound");
+    }
+    throw new Error(`Phase lease renewal failed: ${outcome.status}`);
+  }
+
+  const phaseLeaseHeartbeat = durableRoadmapExecution
+    ? setInterval(() => {
+        const marker = session.getRoadmapPhaseLeaseMarker();
+        const active = session.getActivePhaseContext();
+        if (!marker || !active) return;
+        void notesRepository
+          .load(cwd)
+          .then(async (loaded) => {
+            if (loaded.status !== "ok") return;
+            const outcome = await phaseBinding.lease(
+              {
+                version: 2,
+                action: "renew",
+                phaseId: marker.phaseId,
+                expectedProjectKey: loaded.snapshot.projectKey,
+                expectedRevision: loaded.snapshot.revision,
+                planId: marker.planId,
+                operationId: `heartbeat:${marker.leaseId}:${randomUUID()}`,
+                lease: { leaseId: marker.leaseId, fence: marker.fence },
+                confirmTakeover: false,
+                takeoverReason: null,
+                predecessorProof: null,
+              },
+              session,
+            );
+            if (outcome.status === "phase-lease-lost") {
+              recordRoadmapDurabilityDiagnostic("phase-lease-lost");
+              await session.clearActivePhaseContext("phase-rebound");
+              broadcast("error", {
+                message: "Roadmap phase lease lost; this session is now read-only.",
+              });
+            }
+          })
+          .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-heartbeat"));
+      }, PHASE_LEASE_RENEW_INTERVAL_MS)
+    : null;
+  phaseLeaseHeartbeat?.unref();
+  const cancelledRunEndGenerations = new Set<number>();
+  let pendingCancelDrain: { generation: number; text: string } | null = null;
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
   // Autopilot (auto-review) toggle for THIS window's project. Loaded from
   // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
   // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
-  // and drives the review→prompt→review loop.
-  let autopilot = await loadAutopilot(cwd);
+  // and drives the review→prompt→review loop. Ken is the sole verification
+  // owner in this mode, so suppress the build session's redundant Ideal hook.
+  if (mode === "code") await projectAutopilot.initialize(cwd, () => loadAutopilot(cwd));
+  const isAutopilotEnabled = () => mode === "code" && projectAutopilot.isEnabled(cwd);
   // True while an autopilot review is in flight (used to defer kenAuto model
   // switches, like kenRunning does for chat Ken, and to drive the spinner).
   let autopilotReviewing = false;
@@ -1235,39 +3155,58 @@ async function createSession(
   // of starting a run that would collide with an injected one on the same
   // session (AgentSession.prompt has no concurrency guard).
   let autopilotActive = false;
+  const unsubscribeAutopilot =
+    mode === "code"
+      ? projectAutopilot.subscribe(cwd, (enabled) => {
+          // Finish the active cycle before restoring Ideal, even after a remote toggle-off.
+          session.setIdealReviewSuppressed(enabled || autopilotActive);
+          broadcast("autopilot", { autopilot: enabled });
+        })
+      : () => {};
+  // Subscribe and read synchronously after loading: no mutation can be lost between them.
+  session.setIdealReviewSuppressed(isAutopilotEnabled());
+  const sessionBusyState = () => ({
+    running: running || runClaim.active || taskSweepClaim.active,
+    autopilotActive,
+    runLifecycleRunning: runLifecycle.running,
+  });
   // Set by /cancel to break out of an in-flight autopilot cycle between steps.
   let autopilotCancelled = false;
   // Hard cap on review→prompt→review rounds per user turn (loop safety).
   const MAX_AUTOPILOT_ROUNDS = 3;
+  const CANCEL_TIMEOUT_MS = 5_000;
   // Prompt bodies Autopilot Ken injected into the BUILD session this
   // conversation. Passed into every Ken digest so injected prompts render as
   // "Ken autopilot (injected)" instead of `**User:**` — otherwise multi-round
   // cycles drift into Ken reviewing against his own last prompt. Cleared
   // whenever the conversation resets (new session / plan accept / task run).
   let injectedAutopilotPrompts: string[] = [];
-  // The plan GG Coder submitted via exit_plan that still awaits a decision
-  // (Ken's auto-review in autopilot, or the user's modal). Path + the content
-  // read at submission time (fallback if the file becomes unreadable).
-  let pendingPlanPath: string | null = null;
-  let pendingPlanContent = "";
-  // Bumped on EVERY pending-plan set/clear. Ken's plan review captures it
-  // before reviewing and re-checks it before acting on the verdict, so a user
-  // Accept/Reject racing an in-flight review always wins — the stale verdict
-  // is discarded silently.
-  let planGeneration = 0;
-
-  function setPendingPlan(planPath: string, content: string): void {
-    pendingPlanPath = planPath;
-    pendingPlanContent = content;
-    planGeneration++;
-  }
-
-  function clearPendingPlan(): void {
-    if (pendingPlanPath === null) return;
-    pendingPlanPath = null;
-    pendingPlanContent = "";
-    planGeneration++;
-  }
+  const planGateConflict = () => {
+    const checkpoint = planGate.current();
+    if (!checkpoint) return null;
+    const gateConflict = planGateConflictCode(checkpoint);
+    if (gateConflict) {
+      return {
+        error: gateConflict,
+        checkpointId: checkpoint.checkpointId,
+        generation: checkpoint.generation,
+        state: checkpoint.state,
+      };
+    }
+    const consumption = session.getApprovedPlanConsumption();
+    const handoffCommitted =
+      checkpoint.state === "human-approved" &&
+      consumption?.checkpointId === checkpoint.checkpointId &&
+      consumption.generation === checkpoint.generation &&
+      consumption.state === "implementation-prompt-started";
+    if (handoffCommitted || checkpoint.state !== "human-approved") return null;
+    return {
+      error: "plan-approval-handoff-pending",
+      checkpointId: checkpoint.checkpointId,
+      generation: checkpoint.generation,
+      state: checkpoint.state,
+    };
+  };
 
   // Workflow (prompt-template) commands: built-in + the project's custom
   // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
@@ -1293,10 +3232,81 @@ async function createSession(
   // first `@Ken` so windows that never use Ken pay zero cost. His events ride the
   // SAME SSE stream with `ken_`-prefixed types, routed to the Ken bubble.
   let kenSession: AgentSession | null = null;
-  let kenAbort = new AbortController();
-  let kenRunning = false;
-  let pendingKenModel: { provider: Provider; model: string } | null = null;
+  const ensureKenSession = createKenSessionInitializer({
+    create: createKenSession,
+    initialize: async (ken: AgentSession) => {
+      await ken.initialize();
+    },
+  });
   const kenToolCallNames = new Map<string, string>();
+  const kenLifecycle = createAppSidecarKenLifecycle({
+    mutations: sessionMutations,
+    getBuildSession: () => session,
+    ensureSession: ensureKenSession,
+    currentModel: kenCurrentModel,
+    buildContext: async (build, text) =>
+      buildKenContext(
+        build,
+        cwd,
+        gitBranch,
+        text,
+        await loadWorkflowCommandSpecs(),
+        injectedAutopilotPrompts,
+        asks.pendingRequests,
+      ),
+    replyText: (ken) => lastAssistantText(ken.getMessages()),
+    listen: (ken, publish) => {
+      const off = [
+        ken.eventBus.on("text_delta", (d) => {
+          publish("ken_text_delta", d);
+        }),
+        ken.eventBus.on("thinking_delta", (d) => {
+          publish("ken_thinking_delta", d);
+        }),
+        ken.eventBus.on("tool_call_start", (d) => {
+          if (publish("ken_tool_call_start", d)) kenToolCallNames.set(d.toolCallId, d.name);
+        }),
+        ken.eventBus.on("tool_call_update", (d) => {
+          publish("ken_tool_call_update", d);
+        }),
+        ken.eventBus.on("tool_call_end", (d) => {
+          if (publish("ken_tool_call_end", d)) kenToolCallNames.delete(d.toolCallId);
+        }),
+        ken.eventBus.on("server_tool_call", (d) => {
+          publish("ken_server_tool_call", d);
+        }),
+        ken.eventBus.on("turn_end", (d) => {
+          publish("ken_turn_end", d);
+        }),
+        ken.eventBus.on("error", (d) => {
+          publish(
+            "ken_error",
+            formatSidecarError(d.error, desktopGuidance, sidecarErrorSecrets).event,
+          );
+        }),
+      ];
+      return () => {
+        for (const detach of off) detach();
+      };
+    },
+    footerExtras,
+    broadcast,
+    reportError: (error) => {
+      const formatted = formatSidecarError(error, desktopGuidance, sidecarErrorSecrets);
+      captureSidecarError(error, "app-sidecar.ken-run-failed", { scope: "ken_error" });
+      log("ERROR", "app-sidecar", "ken run failed", formatted.logFields);
+      return formatted.event;
+    },
+    switchModel: async (ken, target: { provider: Provider; model: string }) => {
+      const state = ken.getState();
+      if (state.provider !== target.provider || state.model !== target.model) {
+        await ken.switchModel(target.provider, target.model);
+      }
+    },
+    clearPendingState: () => kenToolCallNames.clear(),
+  });
+  readKenState = () => kenLifecycle.state;
+  bindKenTransitions(session);
 
   // Ken's per-project model override. null → Ken (chat + autopilot) follows GG
   // Coder's model, including live switches (the historical behavior). Set → Ken
@@ -1330,57 +3340,44 @@ async function createSession(
   }
 
   async function syncKenModel(provider: Provider, model: string): Promise<void> {
-    if (kenRunning) {
-      pendingKenModel = { provider, model };
-      return;
-    }
-    if (!kenSession) return;
-    const st = kenSession.getState();
-    if (st.provider === provider && st.model === model) return;
-    await kenSession.switchModel(provider, model);
-    log("INFO", "app-sidecar", "ken session model synced", { provider, model });
+    await kenLifecycle.syncModel({ provider, model });
   }
 
-  async function ensureKenSession(): Promise<AgentSession> {
-    if (kenSession) return kenSession;
+  function bindKenTransitions(build: AgentSession): void {
+    build.setBeforeConversationTransition((kind) => {
+      if (build !== session) return () => {};
+      return kenLifecycle.beginTransition(kind === "checkpoint");
+    });
+  }
+
+  async function createKenSession(signal: AbortSignal): Promise<AgentSession> {
     const target = kenCurrentModel();
     const ken = new AgentSession({
       provider: target.provider,
       model: target.model,
       cwd,
       systemPrompt: await buildKenSystemPrompt(cwd),
-      allowedTools: KEN_ALLOWED_TOOLS,
+      allowedTools: [...APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES],
+      additionalTools: [],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      sharedMcpPool,
       transient: true,
-      signal: kenAbort.signal,
+      signal,
+      // Ken belongs to THIS window, so its window is where an MCP prompt
+      // should appear. Passing the bridge also keeps every session in the
+      // daemon uniformly interactive, which is what lets them share ONE pooled
+      // MCP connection: the pool separates interactive from headless callers,
+      // because a connection declares its elicitation capability once, at
+      // initialize (see core/mcp/shared-pool.ts).
+      onMcpElicit: elicitations.onElicit,
       // Ken's bursty, spread-out turns (chat) outlast the default 5-min cache
       // TTL regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
     });
-    await ken.initialize();
-    // Bridge Ken's bus to the shared SSE fan-out with ken_-prefixed types so the
-    // webview routes them to the Ken bubble, never GG Coder's.
-    ken.eventBus.on("text_delta", (d) => broadcast("ken_text_delta", d));
-    ken.eventBus.on("thinking_delta", (d) => broadcast("ken_thinking_delta", d));
-    ken.eventBus.on("tool_call_start", (d) => {
-      kenToolCallNames.set(d.toolCallId, d.name);
-      broadcast("ken_tool_call_start", d);
-    });
-    ken.eventBus.on("tool_call_update", (d) => broadcast("ken_tool_call_update", d));
-    ken.eventBus.on("tool_call_end", (d) => {
-      kenToolCallNames.delete(d.toolCallId);
-      broadcast("ken_tool_call_end", d);
-    });
-    // Native server tools (Anthropic web_search) stream text both before AND
-    // after them in the same turn; forward so the webview can break the bubble
-    // (otherwise "...work.Local tools..." glues together). Mirrors the build bus.
-    ken.eventBus.on("server_tool_call", (d) => broadcast("ken_server_tool_call", d));
-    ken.eventBus.on("turn_end", (d) => broadcast("ken_turn_end", d));
-    ken.eventBus.on("error", (d) => {
-      broadcastError("ken_error", "ken error", d.error);
-    });
     kenSession = ken;
-    log("INFO", "app-sidecar", "ken session ready", {
+    // Initialization is owned by the single-instance initializer. Interactive
+    // listeners are attached only after it succeeds, per run by kenLifecycle.
+    log("INFO", "app-sidecar", "ken session allocated", {
       provider: target.provider,
       model: target.model,
     });
@@ -1418,14 +3415,23 @@ async function createSession(
       model: target.model,
       cwd,
       systemPrompt: await buildKenAutopilotSystemPrompt(cwd),
-      allowedTools: KEN_ALLOWED_TOOLS,
+      allowedTools: [...APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES],
+      additionalTools: [],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      sharedMcpPool,
       transient: true,
       signal: kenAutoAbort.signal,
+      // Same as Ken chat: this reviewer belongs to a window, so route prompts
+      // there, and keep the daemon's sessions uniformly interactive so they
+      // share one pooled MCP connection.
+      onMcpElicit: elicitations.onElicit,
       // Autopilot review rounds routinely span the injected GG Coder run
       // (often >5 min) regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
     });
+    // Ken is already the independent autopilot reviewer; recursively running
+    // his own Ideal self-review adds latency and can corrupt the verdict shape.
+    ken.setIdealReviewSuppressed(true);
     await ken.initialize();
     // Deliberately no bus bridge: the review is silent. Errors surface via the
     // runAutopilotReview try/catch as autopilot_error frames.
@@ -1437,103 +3443,439 @@ async function createSession(
     return ken;
   }
 
-  // Resumed session: if it already has a conversation, generate its title now so
-  // the title bar shows it immediately on load (not just after the next prompt).
-  {
-    const hasHistory = session
-      .getMessages()
-      .some((m) => m.role === "user" || m.role === "assistant");
-    if (hasHistory) {
-      titleGenerated = true;
-      void session.generateTitle().then((title) => {
-        if (title) broadcast("session_title", { title });
-      });
-    }
+  function abortOwnedWork(): void {
+    cancelGeneration++;
+    abort.abort();
+    // An MCP tool call parked on user input is not cancelled by the signal —
+    // the promise lives in the bridge. Release it, or the aborted turn's tool
+    // call never returns. Same for a question parked on the user.
+    elicitations.cancelAll();
+    asks.cancelAll();
+    // Stop a run-all sweep and every async child through AgentSession's signal.
+    taskRunAll = false;
+    autopilotCancelled = true;
+    kenAutoAbort.abort();
   }
 
-  // Core run lifecycle shared by /prompt and the task runner: flips `running`,
-  // brackets the run with run_start/run_end, refreshes the footer extras, and
-  // generates the session title once. `label` is the text shown live with the
-  // run_start frame.
-  async function runAgent(label: string, run: () => Promise<void>): Promise<void> {
-    running = true;
+  function installFreshRunControllers(): void {
+    abort = new AbortController();
+    session.setSignal(abort.signal);
+    kenAutoAbort = new AbortController();
+    kenAutoSession?.setSignal(kenAutoAbort.signal);
+  }
+
+  function finishOwnedGeneration(
+    generation: number,
+    emitCancelledFallback: boolean,
+    outcome: RunOutcome = "completed",
+  ): boolean {
+    const cancelled = runLifecycle.isCancellationRequested(generation);
+    const settlement = runLifecycle.settle(generation, outcome);
+    if (!settlement.settled) return cancelled;
+    // A replacement signal is safe only after the provider-backed owner settled.
+    installFreshRunControllers();
+    if (cancelled && emitCancelledFallback && !cancelledRunEndGenerations.has(generation)) {
+      cancelledRunEndGenerations.add(generation);
+      broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state));
+    }
+    return cancelled;
+  }
+
+  async function commitActivePhaseImplementationStart(): Promise<void> {
+    await commitImplementationRunStart({
+      session,
+      reconcileLifecycle: (signal, active) =>
+        phaseLifecycle.enqueue(signal, {
+          phaseId: active.phase.id,
+          session: active.session,
+          executionStage: active.executionStage,
+        }),
+    });
+  }
+
+  async function promptActiveSession(...args: Parameters<AgentSession["prompt"]>): Promise<void> {
+    if (await session.willStartAgentRun(args[0])) {
+      await commitActivePhaseImplementationStart();
+    }
+    await session.prompt(...args);
+  }
+
+  async function promptActiveSessionWithAttachments(
+    ...args: Parameters<AgentSession["promptWithAttachments"]>
+  ): Promise<void> {
+    await commitActivePhaseImplementationStart();
+    await session.promptWithAttachments(...args);
+  }
+
+  // Core provider-run bracket. Standalone runs own a lifecycle generation;
+  // injected autopilot runs share the cycle's outer generation.
+  async function runAgent(
+    label: string,
+    run: () => Promise<void | ProgrammaticExecutionOutcome>,
+  ): Promise<void> {
+    const ownsGeneration = !runLifecycle.running;
+    const generation = ownsGeneration
+      ? runLifecycle.begin(abortOwnedWork).generation
+      : runLifecycle.generation;
+    if (ownsGeneration) pendingCancelDrain = null;
     // Progress (Ranks): completed, non-canceled runs with ≥1 assistant turn earn
     // XP — prompt + any commits authored during the run window.
     const runStartedAt = Date.now();
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
-    broadcast("run_start", { text: label });
+    let programmaticSettlement: ReturnType<typeof settleProgrammaticRun>;
+    broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
-      await run();
-      runSucceeded = true;
+      if (ownsGeneration) {
+        await renewCurrentPhaseLease(`run:${generation}:running`);
+      }
+      if (!runLifecycle.isCancellationRequested(generation)) {
+        programmaticSettlement = settleProgrammaticRun(await run());
+        runSucceeded = programmaticSettlement?.succeeded ?? true;
+      }
     } catch (err) {
-      broadcastError("error", "run failed", err);
+      if (!runLifecycle.isCancellationRequested(generation)) {
+        broadcastError("error", "run failed", err);
+      }
     } finally {
-      running = false;
+      let cancelled =
+        runLifecycle.isCancellationRequested(generation) ||
+        programmaticSettlement?.cancelled === true;
+      let outcome: RunOutcome = cancelled
+        ? "aborted"
+        : (programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed"));
       if (
         runSucceeded &&
+        !cancelled &&
         cancelGeneration === cancelGenAtStart &&
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
       ) {
         // Fire-and-forget — XP must never delay or break run teardown.
         void progress.awardRun(cwd, runStartedAt, opts.id);
       }
-      // A run may have switched branches (git checkout) or spawned/finished
-      // background tasks — refresh the footer extras once it settles.
-      gitBranch = await getGitBranch(cwd).catch(() => gitBranch);
-      gitIsRepo = await isGitRepo(cwd).catch(() => gitIsRepo);
-      broadcast("run_end", {});
-      // Autopilot's review loop is driven explicitly from POST /prompt (see
-      // runAutopilotCycle), NOT from this shared finally — that keeps the
-      // injected GG Coder runs this cycle triggers from recursively re-entering
-      // the loop through the same bracket.
-      // The agent may have marked project tasks done during the run — prune the
-      // completed ones so they drop out of the Tasks modal automatically (users
-      // never have to delete finished tasks by hand).
-      broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
-      // Queue drains into the run as steering, so it's empty by run_end —
-      // sync the webview indicator.
-      broadcast("queued", { count: session.getQueuedCount() });
-      broadcast("extras", footerExtras());
-      // Generate a session title once, after the first run, for the title bar
-      // (best-effort, async — don't block the response).
-      if (!titleGenerated) {
-        titleGenerated = true;
-        void session.generateTitle().then((title) => {
-          if (title) broadcast("session_title", { title });
+      // A run may have switched branches, changed files, or spawned/finished
+      // background tasks. Refresh the workspace extras once it settles.
+      [gitBranch, gitIsRepo, gitDirtyFileCount] = await Promise.all([
+        getGitBranch(cwd).catch(() => gitBranch),
+        isGitRepo(cwd).catch(() => gitIsRepo),
+        getGitDirtyFileCount(cwd).catch(() => gitDirtyFileCount),
+      ]);
+      // A run may have opened/closed issues or PRs — refresh fire-and-forget so
+      // teardown isn't delayed by the network. Broadcasts itself on change.
+      void refreshGitHubCounts();
+      void ciPoll.refresh();
+      // Cancellation may have arrived during the workspace refresh above.
+      cancelled ||= runLifecycle.isCancellationRequested(generation);
+      if (cancelled) outcome = "aborted";
+      runLifecycle.recordOutcome(generation, outcome);
+      // Persist the real run outcome independently of explicit Roadmap status updates.
+      if (ownsGeneration) {
+        finishOwnedGeneration(generation, false, outcome);
+        await runJournalPersistence;
+        if (!(await settleDeferredPhaseLeaseRelease())) {
+          if (
+            (outcome === "aborted" || outcome === "failed") &&
+            session.getActivePhaseContext()?.executionStage === "planning" &&
+            !planGate.pending()
+          ) {
+            // A failed launch without a submitted plan has no handoff to preserve.
+            await releaseCurrentPhaseLease(`run:${generation}:release`);
+          } else {
+            // Keep planning association and authority while waiting for user approval.
+            await renewCurrentPhaseLease(`run:${generation}:idle`);
+          }
+        }
+      }
+      let terminalPlanComplete = false;
+      if (approvedPlanPath !== null) {
+        const markerComplete = await queueApprovedPlanProgressSync();
+        terminalPlanComplete = durableRoadmapExecution
+          ? await durableApprovedPlanComplete()
+          : markerComplete;
+      }
+      // Once every canonical step is complete, remove the approved plan from
+      // future system prompts and clear the widget before run_end paints idle.
+      if (runSucceeded && !cancelled && approvedPlanPath !== null && terminalPlanComplete) {
+        try {
+          await session.completeApprovedPlanConsumption();
+          deactivateApprovedPlan({ retainImplementationEvidence: true });
+          broadcast("plan_progress", { total: 0, completed: [] });
+        } catch (error) {
+          // Keep tracking when prompt cleanup fails; hiding the widget here
+          // would claim completion while the approved-plan contract remained.
+          log("WARN", "app-sidecar", "completed plan cleanup failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      // A cancelled injected run is still owned by the surrounding autopilot
+      // cycle; its outer finalizer emits the one terminal cancelled run_end.
+      cancelled ||= runLifecycle.isCancellationRequested(generation);
+      if (cancelled) outcome = "aborted";
+      if (!(cancelled && !ownsGeneration)) {
+        if (cancelled) cancelledRunEndGenerations.add(generation);
+        broadcast("run_end", {
+          ...programmaticSettlement?.event,
+          ...createRunEndPayload(outcome, runLifecycle.state),
         });
       }
+      // Autopilot's review loop is driven explicitly from POST /prompt (see
+      // runAutopilotCycle), NOT from this shared finally — that keeps injected
+      // runs from recursively entering the same review loop.
+      broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
+      broadcast("queued", {
+        count: session.getQueuedCount(),
+        messages: session.listQueuedMessages(),
+      });
+      broadcast("extras", footerExtras());
     }
   }
 
+  const planHandoff = new AppSidecarPlanHandoff({
+    approve: (checkpointId, generation) => planGate.approve(checkpointId, generation),
+    currentConsumption: (): ApprovedPlanConsumptionIdentity | null => {
+      const consumption = session.getApprovedPlanConsumption();
+      if (!consumption) return null;
+      return {
+        checkpointId: consumption.checkpointId,
+        generation: consumption.generation,
+        state: consumption.state,
+      };
+    },
+    commitApproval: async (checkpoint) => {
+      const previousActivePhase = session.getActivePhaseContext();
+      if (durableRoadmapExecution && previousActivePhase) {
+        if (!session.getRoadmapPhaseLeaseMarker()) {
+          throw new Error("Phase plan approval requires authenticated lease ownership.");
+        }
+        // Approval may arrive after a long idle planning pause. Renew the same
+        // fenced owner before committing the plan; never acquire over a competitor.
+        await renewCurrentPhaseLease(`${checkpoint.checkpointId}:approval`);
+      }
+      const approvalWorkspace =
+        durableRoadmapExecution && previousActivePhase
+          ? await (async () => {
+              const loaded = await notesRepository.load(cwd);
+              if (loaded.status !== "ok") {
+                throw new Error("Project Notes are unavailable for durable plan approval.");
+              }
+              return {
+                loaded,
+                workspace: await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey),
+              };
+            })()
+          : undefined;
+      const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
+      if (hasPlanOnlyBoundary(checkpoint.content)) {
+        const committed = await session.persistApprovedPlanConsumption({
+          checkpointId: checkpoint.checkpointId,
+          generation: checkpoint.generation,
+          content: checkpoint.content,
+          contentHash: checkpoint.contentHash,
+          approvedPlanPath,
+        });
+        await session.completeApprovedPlanConsumption();
+        await planGate.clearConsumed({
+          checkpointId: committed.checkpointId,
+          generation: committed.generation,
+          state: "completed",
+        });
+        await releaseOrDeferPhaseLease(`${checkpoint.checkpointId}:phase-lease-release`);
+        return {
+          checkpointId: committed.checkpointId,
+          generation: committed.generation,
+          state: "completed" as const,
+        };
+      }
+
+      const previousPhaseSessionPath = previousActivePhase?.session.sessionPath;
+      const previousPhaseConversationId = session.getConversationIdentity().conversationId;
+      const previousLeaseMarker = session.getRoadmapPhaseLeaseMarker();
+      const durablePlan =
+        previousActivePhase && approvalWorkspace
+          ? await (async () => {
+              const { loaded, workspace } = approvalWorkspace;
+              const relativePlanPath = path
+                .relative(cwd, approvedPlanPath)
+                .split(path.sep)
+                .join("/");
+              const plan = createApprovedPlan({
+                planId: checkpoint.checkpointId,
+                content: approvedPlanArtifactContent(checkpoint.content),
+                snapshotPath: relativePlanPath,
+                approvedAt: checkpoint.timestamp,
+                approvedRevision: loaded.snapshot.revision + 1,
+                baseCommit: workspace.headCommit,
+              });
+              return {
+                request: {
+                  operationId: checkpoint.checkpointId,
+                  phaseId: previousActivePhase.phase.id,
+                  expectedRevision: loaded.snapshot.revision,
+                  repository: workspace.repository,
+                  plan,
+                  lastSession: previousActivePhase.session,
+                },
+                mutateWithLeaseFence: <T>(operation: () => Promise<T>) =>
+                  phaseBinding.withLeaseFence(session, operation),
+                moveLeaseToFreshSession: async (snapshot: ProjectNotesSnapshot) => {
+                  if (!previousLeaseMarker)
+                    throw new Error("Phase lease missing before approved handoff.");
+                  return moveApprovedPhaseLeaseToFreshSession({
+                    binding: phaseBinding,
+                    repository: notesRepository,
+                    session,
+                    snapshot,
+                    phaseId: previousActivePhase.phase.id,
+                    checkpoint,
+                    previousLease: previousLeaseMarker,
+                  });
+                },
+              };
+            })()
+          : undefined;
+      await commitPlanApprovalCheckpoint({
+        session,
+        repository: notesRepository,
+        cwd,
+        planPath: approvedPlanPath,
+        prepareFreshSession: async () => {
+          await session.newSession(true);
+          injectedAutopilotPrompts = [];
+          const promptContent = durablePlan
+            ? approvedPlanArtifactContent(checkpoint.content)
+            : checkpoint.content;
+          await session.persistApprovedPlanConsumption({
+            checkpointId: checkpoint.checkpointId,
+            generation: checkpoint.generation,
+            content: promptContent,
+            contentHash: durablePlan?.request.plan.contentHash ?? checkpoint.contentHash,
+            approvedPlanPath,
+          });
+          return activateApprovedPlan(approvedPlanPath, promptContent);
+        },
+        durablePlan,
+        restorePreviousSession: previousPhaseSessionPath
+          ? async () => {
+              await session.loadSessionCheckpoint(
+                previousPhaseSessionPath,
+                previousPhaseConversationId,
+              );
+              deactivateApprovedPlan();
+            }
+          : undefined,
+        onSnapshot: broadcastNotesSnapshot,
+      });
+      const consumption = session.getApprovedPlanConsumption();
+      if (!consumption || consumption.state === "completed") {
+        throw new Error("Approved plan consumption was not committed.");
+      }
+      return {
+        checkpointId: consumption.checkpointId,
+        generation: consumption.generation,
+        state: consumption.state,
+      };
+    },
+    launchImplementation: async (consumption) => {
+      if (!runClaim.claim()) throw new Error("Another provider run already owns the session.");
+      try {
+        await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
+          await commitActivePhaseImplementationStart();
+          await session.runApprovedPlanImplementation(
+            IMPLEMENT_PLAN_PROMPT,
+            runLifecycle.generation,
+          );
+        });
+      } finally {
+        try {
+          const current = session.getApprovedPlanConsumption();
+          if (
+            !current ||
+            (current.checkpointId === consumption.checkpointId &&
+              current.generation === consumption.generation)
+          ) {
+            await planGate.clearConsumed(
+              current ?? { ...consumption, state: "completed" as const },
+            );
+          }
+        } finally {
+          runClaim.release();
+        }
+      }
+    },
+    onLaunchFailure: (error) => {
+      captureSidecarError(error, "app-sidecar.plan.resume-implementation");
+      log("ERROR", "app-sidecar", "approved plan implementation resume failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const resumedApprovedPlan = planHandoff.resumePending();
+  const recoverableApproval = planGate.current();
+  if (!resumedApprovedPlan) {
+    // Older builds could durably commit the human decision and Draft snapshot,
+    // then fail before consumption/session persistence. There is no remaining UI
+    // action in that state, so finish the idempotent handoff on session restore.
+    void planHandoff
+      .recoverApproved(recoverableApproval)
+      .then((recovered) => {
+        if (!recovered || recoverableApproval?.state !== "human-approved") return;
+        broadcast("plan_accepted", {
+          checkpointId: recoverableApproval.checkpointId,
+          generation: recoverableApproval.generation,
+          recovered: true,
+        });
+        if (!hasPlanOnlyBoundary(recoverableApproval.content)) {
+          broadcast("session_reset", { planTotal: approvedPlanTotal, recovered: true });
+          broadcast("plan_progress", planProgressPayload());
+        }
+      })
+      .catch((error) => {
+        captureSidecarError(error, "app-sidecar.plan.recover-approval");
+        log("ERROR", "app-sidecar", "approved plan handoff recovery failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
   // ── Autopilot orchestration ─────────────────────────────────
-  // One review = prompt the kenAuto session with the review digest, read its
-  // final assistant text, parse a verdict. Returns null on failure (surfaced as
-  // an autopilot_error frame) so the cycle stops rather than looping blind.
-  // `originalRequest` is the user prompt that started the turn under review —
-  // pinned in the digest so it can't scroll out during multi-round cycles.
+  // Ordinary Autopilot review remains independent from Roadmap completion.
   async function runAutopilotReview(originalRequest: string): Promise<AutopilotVerdict | null> {
+    const reviewConversation = session.getConversationIdentity().conversationId;
+    const destinationChanged = () =>
+      session.getConversationIdentity().conversationId !== reviewConversation;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      const ken = await ensureKenAutoSession();
-      const digest = buildKenAutopilotContext({
-        cwd,
-        gitBranch,
-        messages: session.getMessages(),
-        originalRequest,
-        injectedPrompts: [...injectedAutopilotPrompts],
-        workflowCommands: await loadWorkflowCommandSpecs(),
-      });
-      await ken.prompt(digest);
-      return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
-    } catch (err) {
-      broadcastError("autopilot_error", "autopilot review failed", err);
+      return await runKenAutopilotSessionReview(
+        () => session,
+        async () => {
+          const ken = await ensureKenAutoSession();
+          const workflowCommands = await loadWorkflowCommandSpecs();
+          return {
+            input: {
+              cwd,
+              gitBranch,
+              originalRequest,
+              injectedPrompts: [...injectedAutopilotPrompts],
+              workflowCommands,
+            },
+            review: async (digest) => {
+              await ken.prompt(digest);
+              return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+            },
+          };
+        },
+        () => !autopilotCancelled,
+      );
+    } catch (error) {
+      if (!autopilotCancelled && !destinationChanged()) {
+        broadcastError("autopilot_error", "autopilot review failed", error);
+      }
       return null;
     } finally {
       autopilotReviewing = false;
-      // Apply any model switch that landed mid-review.
       const pending = pendingKenAutoModel;
       pendingKenAutoModel = null;
       if (pending) await syncKenAutoModel(pending.provider, pending.model);
@@ -1544,35 +3886,56 @@ async function createSession(
   // submitted plan's markdown (`## Plan under review`) and the plan-review
   // instruction — Ken judges the plan itself, not finished work. Returns null
   // on failure; a failure caused by the user's own action racing the review
-  // (cancel or a manual Accept/Reject that bumped planGeneration) stays
-  // SILENT — no autopilot_error — because the user's decision already won.
+  // SILENT when a human action wins the checkpoint race.
   async function runAutopilotPlanReview(originalRequest: string): Promise<AutopilotVerdict | null> {
-    const planPath = pendingPlanPath;
-    if (planPath === null) return null;
-    const genAtStart = planGeneration;
+    const reviewConversation = session.getConversationIdentity().conversationId;
+    const destinationChanged = () =>
+      session.getConversationIdentity().conversationId !== reviewConversation;
+    const checkpoint = planGate.current();
+    if (!checkpoint || checkpoint.state !== "pending-review") return null;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
-      const ken = await ensureKenAutoSession();
-      // Re-read the plan file (the run may have revised it in place); fall
-      // back to the content captured at exit_plan time.
-      const planContent = await fs.readFile(planPath, "utf-8").catch(() => pendingPlanContent);
-      const digest = buildKenAutopilotPlanContext({
-        cwd,
-        gitBranch,
-        messages: session.getMessages(),
-        originalRequest,
-        injectedPrompts: [...injectedAutopilotPrompts],
-        workflowCommands: await loadWorkflowCommandSpecs(),
-        planContent,
-      });
-      await ken.prompt(digest);
-      if (autopilotCancelled || planGeneration !== genAtStart) return null;
-      return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+      return await runKenAutopilotSessionReview(
+        () => session,
+        async () => {
+          const ken = await ensureKenAutoSession();
+          const workflowCommands = await loadWorkflowCommandSpecs();
+          return {
+            input: {
+              cwd,
+              gitBranch,
+              originalRequest,
+              injectedPrompts: [...injectedAutopilotPrompts],
+              workflowCommands,
+              planContent: checkpoint.content,
+            },
+            review: async (digest) => {
+              await ken.prompt(digest);
+              return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
+            },
+          };
+        },
+        () => {
+          const current = planGate.current();
+          return (
+            !autopilotCancelled &&
+            current?.checkpointId === checkpoint.checkpointId &&
+            current.generation === checkpoint.generation &&
+            current.state === "pending-review"
+          );
+        },
+      );
     } catch (err) {
-      // User action mid-review (manual Accept aborts the kenAuto run): drop
-      // the review silently — the user's decision supersedes Ken's.
-      if (autopilotCancelled || planGeneration !== genAtStart) return null;
+      const current = planGate.current();
+      if (
+        autopilotCancelled ||
+        destinationChanged() ||
+        current?.checkpointId !== checkpoint.checkpointId ||
+        current.generation !== checkpoint.generation ||
+        current.state !== "pending-review"
+      )
+        return null;
       broadcastError("autopilot_error", "autopilot plan review failed", err);
       return null;
     } finally {
@@ -1584,74 +3947,164 @@ async function createSession(
     }
   }
 
-  // The prompt fed to the fresh session after a plan is accepted — the SAME
-  // string the webview sends on a manual Accept (see PlanReviewModal's accept
-  // handler in gg-app/src/App.tsx). Keep the two in lockstep so auto- and
-  // manual approval produce identical implementation turns.
+  // Keep this base prompt aligned with the webview's manual Accept copy.
   const IMPLEMENT_PLAN_PROMPT =
     "The plan has been approved. Implement it now, following each step in order.";
 
+  async function startRoadmapPhase(
+    phaseId: string,
+    respond: (status: number, body: PhaseStartResponseBody) => void,
+    advancementConfirmation?: {
+      checkpointId: string;
+      nextPhaseId: string;
+      action: "start-next-phase";
+    },
+  ): Promise<void> {
+    const gateConflict = planGateConflict();
+    if (gateConflict) {
+      respond(409, {
+        status: "failed",
+        code: "session-busy",
+        message: "Resolve the pending plan review before replacing this session.",
+        operationId: "plan-gate",
+      });
+      return;
+    }
+    // launchBoundPhase acquires its phase-start lease synchronously. Fence the
+    // mentor before the launcher's first await, not only at replaceSession.
+    if (sessionMutations.owner) {
+      respond(409, {
+        status: "failed",
+        code: "session-busy",
+        message: "A session mutation is in progress; retry shortly.",
+        operationId: sessionMutations.owner.operationId,
+      });
+      return;
+    }
+    const finishKenTransition = kenLifecycle.beginTransition(false, true);
+    try {
+      await launchBoundPhase({
+        phaseId,
+        advancementConfirmation,
+        mode,
+        busyState: sessionBusyState(),
+        mutations: sessionMutations,
+        reconciliations: roadmapReconciliations,
+        repository: notesRepository,
+        cwd,
+        candidates: phaseCandidates,
+        getSession: () => session,
+        getThinkingLevel: () => session.getThinkingLevel(),
+        createSession: (active) => createCodingSession(undefined, active),
+        acquirePhaseLease: (candidate, snapshot, id) =>
+          phaseBinding.acquireForLaunch(candidate, snapshot, id),
+        releasePhaseLease: async (candidate, operationId) => {
+          const released = await phaseBinding.releaseCurrent(operationId, candidate);
+          if (
+            released.status !== "released" &&
+            !(released.status === "duplicate" && released.lease === null)
+          ) {
+            throw new Error(`Phase launch cleanup failed: ${released.status}`);
+          }
+        },
+        replaceSession: (replacement) => {
+          session = replacement;
+          session.setIdealReviewSuppressed(isAutopilotEnabled() || autopilotActive);
+          bindKenTransitions(replacement);
+          planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
+        },
+        bindSessionEvents,
+        autopilotEnabled: projectAutopilot.isEnabled(cwd),
+        broadcastNotesSnapshot,
+        broadcast,
+        resetSessionState: () => {
+          deactivateApprovedPlan();
+          injectedAutopilotPrompts = [];
+        },
+        enterPlanMode: async (reason) => {
+          await session.setPlanMode(true);
+          broadcast("plan_progress", { total: 0, completed: [] });
+          broadcast("plan_enter", { reason });
+        },
+        startPrompt: (label, run, onFailure) => {
+          void runAgent(label, async () => {
+            try {
+              await run();
+            } catch (error) {
+              await onFailure(error);
+              throw error;
+            }
+          });
+        },
+        respond,
+        onLaunchFailure: (error, metadata) =>
+          captureSidecarError(error, "app-sidecar.phase.launch", metadata),
+        onAttentionFailure: (error, metadata) =>
+          captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata),
+      });
+    } finally {
+      finishKenTransition();
+    }
+  }
+
   // Drive the review→prompt→review loop for one finished user turn. Only ever
   // called after shouldStartAutopilotCycle approves the turn (POST /prompt or
-  // the stranded-queue drain) — never from the task runner, resume, /ken, or
+  // the task user-turn or stranded-queue drain) — never from resume, /ken, or
   // error paths, so there's no recursion and no guard tangle. The loop's
   // control flow lives in driveAutopilotCycle (core/autopilot-cycle.ts) so
   // every exit path is unit-tested; this only wires the real dependencies.
-  async function runAutopilotCycle(originalRequest: string): Promise<void> {
-    if (!autopilot || autopilotCancelled) return;
+
+  async function runAutopilotCycle(originalRequest: string): Promise<UserTurnOutcome> {
+    if (autopilotCancelled) return "cancelled";
+    if (!isAutopilotEnabled()) return "no-review";
+    const generation = runLifecycle.begin(abortOwnedWork).generation;
+    pendingCancelDrain = null;
     autopilotActive = true;
-    // Generation captured by the last plan review; acceptPlan re-checks it so
-    // a user Accept/Reject landing mid-review always wins.
-    let planGenAtReview = -1;
+    session.setIdealReviewSuppressed(true);
+    let planReviewIdentity: { checkpointId: string; generation: number } | null = null;
+    let outcome: UserTurnOutcome = "review-failed";
     try {
-      await driveAutopilotCycle({
-        // A plan-pending cycle needs extra rounds: approve+implement and the
-        // post-implement work review each consume one, so +2 keeps a real fix
-        // round available.
-        maxRounds: pendingPlanPath !== null ? MAX_AUTOPILOT_ROUNDS + 2 : MAX_AUTOPILOT_ROUNDS,
+      outcome = await driveAutopilotCycle({
+        maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
         // An injected run entering plan mode WITHOUT submitting (enter_plan,
         // no exit_plan) halts the cycle — Ken never prompts into a read-only
         // plan-mode session. A submitted plan takes the planPending branch.
         isPlanMode: () => session.getPlanMode(),
-        planPending: () => pendingPlanPath !== null,
+        planPending: () => planGate.pending()?.state === "pending-review",
         reviewPlan: async () => {
-          planGenAtReview = planGeneration;
+          const checkpoint = planGate.current();
+          planReviewIdentity = checkpoint
+            ? { checkpointId: checkpoint.checkpointId, generation: checkpoint.generation }
+            : null;
           return runAutopilotPlanReview(originalRequest);
         },
-        // Auto-accept: the inlined POST /plan/accept body. Returns false when
-        // the plan generation moved since the review (user acted) — the cycle
-        // exits silently and the user's action stands.
-        acceptPlan: async () => {
-          if (pendingPlanPath === null || planGeneration !== planGenAtReview) return false;
-          const planPath = pendingPlanPath;
-          try {
-            await session.newSession();
-            injectedAutopilotPrompts = [];
-            titleGenerated = false;
-            await session.setApprovedPlan(planPath);
-          } catch (err) {
-            broadcastError("autopilot_error", "autopilot plan accept failed", err);
-            return false;
-          }
-          clearPendingPlan();
-          // Ordering is load-bearing: the webview reads its still-open plan
-          // modal state (step count) on autopilot_plan_accepted, and
-          // session_reset clears it — accepted must land first.
-          broadcast("autopilot_plan_accepted", {});
-          broadcast("session_reset", {});
-          // Persisted into the NEW session so a resume shows the marker.
-          void session.persistAutopilotMarker("plan_approved");
-          return true;
+        markPlanReady: async (reason) => {
+          const identity = planReviewIdentity;
+          if (!identity) return null;
+          const result = await planGate.markReady(
+            identity.checkpointId,
+            identity.generation,
+            reason,
+          );
+          return result.status === "committed" ? identity : null;
         },
-        runImplement: () => {
-          // Autopilot-injected run: frame it so GG Coder knows no human is
-          // watching the implementation. Record the framed string so Ken's
-          // digest labels it as injected, not as the user's ask. The run_start
-          // label stays the clean prompt.
-          const framed = frameAutopilotInjection(IMPLEMENT_PLAN_PROMPT);
-          injectedAutopilotPrompts.push(framed);
-          return runAgent(IMPLEMENT_PLAN_PROMPT, () => session.prompt(framed));
+        requestPlanRevision: async (feedback) => {
+          if (!planReviewIdentity) return false;
+          const result = await planGate.requestRevision(
+            planReviewIdentity.checkpointId,
+            planReviewIdentity.generation,
+            "ken-autopilot",
+            feedback,
+          );
+          if (result.status !== "committed") return false;
+          broadcast("plan_revision_requested", {
+            checkpointId: planReviewIdentity.checkpointId,
+            generation: planReviewIdentity.generation,
+            feedback,
+            actor: "ken-autopilot",
+          });
+          return true;
         },
         // Lean context per user turn: wipe prior review history so each new
         // turn starts cheap, while within this cycle the few review messages
@@ -1666,10 +4119,6 @@ async function createSession(
         // streams normally; the shared finally never re-triggers autopilot,
         // so this can't recurse.
         onInjected: (body, round) => {
-          // A revision injection supersedes the pending plan — if the run
-          // resubmits via exit_plan, onExitPlan re-sets it (no-op for work-
-          // branch injections, where nothing is pending).
-          clearPendingPlan();
           // Record the FRAMED string (what actually lands in the build session,
           // see runPrompt) so Ken's digest matches and labels it as injected.
           // The webview marker + persisted body stay the CLEAN prompt so the UI
@@ -1680,22 +4129,32 @@ async function createSession(
         },
         // Autopilot-injected run: GG Coder receives the framed prompt (no human
         // is watching this turn) while run_start keeps the clean label.
-        runPrompt: (body) => runAgent(body, () => session.prompt(frameAutopilotInjection(body))),
+        runPrompt: async (body) => {
+          let completed = false;
+          await runAgent(body, async () => {
+            await promptActiveSession(frameAutopilotInjection(body), AUTOMATION_PROVENANCE);
+            completed = true;
+          });
+          return completed;
+        },
         emit: (event) => {
           // Persist the terminal verdict marker so a resumed session renders the
           // same Ken bubble the live run showed instead of dropping it or
           // falling back to the raw verdict text (e.g. ALL_CLEAR).
           if (event.type === "autopilot_done") {
             // Broadcast the SAME copySeed the persisted marker will produce on
-            // resume, so the live all-clear wording matches the resumed one
-            // (computed before persist — same synchronous message count).
+            // resume, so the live all-clear wording matches the resumed one.
+            // Must use the PERSISTED count — that's what persistAutopilotMarker
+            // anchors against, and it trails the in-memory list after a run
+            // whose messages never made it to disk.
             const seed = autopilotMarkerCopySeed({
               version: 1,
               phase: "done",
-              afterMessageCount: session.getMessages().filter((m) => m.role !== "system").length,
+              afterMessageCount: session.getPersistedTranscriptCount(),
+              ...event.data,
             });
             broadcast(event.type, { ...event.data, copySeed: seed });
-            void session.persistAutopilotMarker("done");
+            void session.persistAutopilotMarker("done", event.data);
             return;
           }
           broadcast(event.type, event.data);
@@ -1707,8 +4166,25 @@ async function createSession(
           // autopilot_ignored renders nothing live, so nothing is persisted either.
         },
       });
+      return outcome;
+    } catch (error) {
+      broadcastError("autopilot_error", "autopilot cycle failed", error);
+      return outcome;
     } finally {
       autopilotActive = false;
+      session.setIdealReviewSuppressed(isAutopilotEnabled());
+      finishOwnedGeneration(
+        generation,
+        true,
+        autopilotCancelled
+          ? "aborted"
+          : outcome === "review-failed" || outcome === "run-failed"
+            ? "failed"
+            : "completed",
+      );
+      queueMicrotask(() => {
+        void runStrandedQueue();
+      });
     }
   }
 
@@ -1721,20 +4197,18 @@ async function createSession(
   // unrelated run. Drain it here as a fresh turn of its own (with its own
   // gated review). Also covers the non-autopilot tail window: a message queued
   // after the run's last steering drain but before run_end.
-  let drainingStrandedQueue = false;
-  async function runStrandedQueue(): Promise<void> {
-    if (drainingStrandedQueue) return;
-    drainingStrandedQueue = true;
-    try {
+  const runStrandedQueue = createStrandedQueueDrain(
+    () => taskTurnActive || planGate.pending() !== null,
+    async () => {
       for (;;) {
         if (running || autopilotActive) return;
         const next = session.takeNextQueuedMessage();
         if (!next) return;
-        broadcast("queued", { count: session.getQueuedCount() });
+        broadcast("queued", {
+          count: session.getQueuedCount(),
+          messages: session.listQueuedMessages(),
+        });
         if (!next.text.trim() && next.attachments.length === 0) continue;
-        // A queued message draining as a fresh turn supersedes any pending
-        // plan, exactly like a direct POST /prompt turn.
-        clearPendingPlan();
         const workflowCommand =
           next.attachments.length === 0 &&
           isWorkflowCommandText(next.text, await loadWorkflowCommandSpecs());
@@ -1742,18 +4216,20 @@ async function createSession(
         const messagesBefore = session.getMessages().length;
         await runAgent(next.text, async () => {
           if (next.attachments.length > 0) {
-            await session.promptWithAttachments(next.text, next.attachments);
+            await promptActiveSessionWithAttachments(next.text, next.attachments, {
+              meta: next.meta,
+            });
           } else {
-            await session.prompt(next.text);
+            await promptActiveSession(next.text, undefined, { meta: next.meta });
           }
         });
         const decision = shouldStartAutopilotCycle({
-          enabled: autopilot,
+          enabled: isAutopilotEnabled(),
           cancelled: autopilotCancelled,
           planMode: session.getPlanMode(),
           // A submitted plan (exit_plan fired) routes into the PLAN review
           // branch — the cycle reviews the plan itself instead of skipping.
-          planPending: pendingPlanPath !== null,
+          planPending: planGate.pending() !== null,
           workflowCommand,
           assistantMessagesAdded: countAssistantMessages(session.getMessages()) - assistantsBefore,
           // Skip the review API call outright for turns that only started a
@@ -1769,33 +4245,42 @@ async function createSession(
             kind: decision.kind,
           });
           await runAutopilotCycle(next.text);
-        } else if (autopilot) {
+        } else if (isAutopilotEnabled()) {
           log("INFO", "app-sidecar", "autopilot skipped (queued turn)", {
             reason: decision.reason,
           });
         }
       }
-    } finally {
-      drainingStrandedQueue = false;
-    }
-  }
+    },
+  );
 
   // ── Task runner (project task list → sessions) ──────────────
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
   // completion hint instructing the agent to mark the task done via the tasks
-  // tool. Run-all advances to the next pending task after each run finishes.
+  // tool. Run-all advances only after an explicit successful terminal outcome.
   let taskRunAll = false;
+  let taskTurnActive = false;
 
   async function runTaskById(taskId: string): Promise<boolean> {
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
-    if (!task) return false;
+    if (
+      !task ||
+      !isManuallyRunnableTaskStatus(task.status) ||
+      running ||
+      autopilotActive ||
+      session.getQueuedCount() > 0 ||
+      session.getPlanMode() ||
+      planGateConflict() !== null
+    )
+      return false;
     // Fresh session per task so one task's context never bleeds into the next.
     await session.newSession();
+    if (autopilotCancelled) return false;
+    deactivateApprovedPlan();
     injectedAutopilotPrompts = [];
-    clearPendingPlan();
-    titleGenerated = false;
+    planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
     broadcast("session_reset", {});
-    markTaskInProgress(cwd, task.id);
+    markTaskInProgress(cwd, task.id, true);
     broadcast("tasks_list", { tasks: loadTasksSync(cwd) });
     broadcast("task_start", { id: task.id, title: task.title });
     // Persist the task header so a resumed task session shows what ran.
@@ -1804,26 +4289,50 @@ async function createSession(
     const completionHint =
       `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
       `tasks({ action: "done", id: "${shortId}" })`;
-    await runAgent(task.title, () => session.prompt(task.prompt + completionHint));
-    // The agent typically marks the task done via the tasks tool during the run;
-    // prune completed tasks and push the refreshed list so the modal drops them.
-    broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
-    return true;
+    let succeeded = false;
+    taskTurnActive = true;
+    try {
+      const outcome = await runUserTurn(
+        userTurnDeps,
+        task.prompt,
+        () => promptActiveSession(task.prompt + completionHint, AUTOMATION_PROVENANCE),
+        isWorkflowCommandText(task.prompt, await loadWorkflowCommandSpecs()),
+      );
+      succeeded =
+        (outcome === "all-clear" || outcome === "ignored" || outcome === "no-review") &&
+        !autopilotCancelled &&
+        !session.getPlanMode() &&
+        planGateConflict() === null &&
+        session.getQueuedCount() === 0;
+      return succeeded;
+    } finally {
+      taskTurnActive = false;
+      // Agent-marked completion stays provisional through work AND review.
+      // Unresolved work remains retryable rather than disappearing on /tasks.
+      finalizeTaskRun(cwd, task.id, succeeded);
+      broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
+    }
   }
 
   async function runTasks(startId: string | null, all: boolean): Promise<void> {
+    autopilotCancelled = false;
     taskRunAll = all;
-    let currentId: string | null = startId ?? getNextPendingTask(cwd)?.id ?? null;
-    while (currentId) {
-      const ran = await runTaskById(currentId);
-      if (!ran || !taskRunAll) break;
-      const next = getNextPendingTask(cwd);
-      currentId = next ? next.id : null;
-      // Brief pause between tasks (mirrors the CLI cadence).
-      if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
+      while (currentId) {
+        const ran = await runTaskById(currentId);
+        if (!ran || !taskRunAll) break;
+        const next = getNextRunnableTask(cwd);
+        currentId = next ? next.id : null;
+        // Cancellation during the cadence must not start a fresh task/clear its flag.
+        if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!taskRunAll || autopilotCancelled) break;
+      }
+    } finally {
+      taskRunAll = false;
+      broadcast("tasks_run_done", {});
+      await runStrandedQueue();
     }
-    taskRunAll = false;
-    broadcast("tasks_run_done", {});
   }
 
   // ── Provider auth (login) bridge ───────────────────────────
@@ -1847,13 +4356,65 @@ async function createSession(
   }
 
   async function authStatusPayload(): Promise<{
-    providers: (AuthProviderMeta & { connected: boolean })[];
+    providers: (AuthProviderMeta & {
+      connected: boolean;
+      connectedMethods: AuthMethod[];
+      activeMethod?: AuthMethod;
+      oauthExhaustedUntil?: number;
+      priorityNote?: string;
+      methodGuidance: AuthMethodMeta[];
+    })[];
   }> {
     const providers = await Promise.all(
-      AUTH_PROVIDERS.map(async (p) => ({
-        ...p,
-        connected: await auth.hasProviderAuth(p.value),
-      })),
+      AUTH_PROVIDERS.map(async (p) => {
+        const dual = dualAuthProvider(p.value);
+        // Which methods hold a credential right now. Dual-auth providers can hold
+        // both at once, and the app needs them separately: one "connected" bit
+        // cannot express "OAuth signed in, key also on file as backup", nor offer
+        // a per-method disconnect.
+        const oauthKey = dual?.oauthKey;
+        const hasOAuth = oauthKey ? await auth.hasCredentials(oauthKey) : false;
+        const apiKeyKeys = p.apiKeyVariants?.map((v) => v.key) ?? [p.value];
+        const hasApiKey = p.methods.includes("apikey")
+          ? (await Promise.all(apiKeyKeys.map((k) => auth.hasCredentials(k)))).some(Boolean)
+          : false;
+        const connectedMethods: AuthMethod[] = [];
+        // OAuth-only providers (Anthropic/OpenAI/Gemini) store under the provider
+        // id itself, so `hasProviderAuth` is what proves their OAuth connection.
+        if (
+          p.methods.includes("oauth") &&
+          (hasOAuth || (!dual && (await auth.hasCredentials(p.value))))
+        )
+          connectedMethods.push("oauth");
+        if (hasApiKey) connectedMethods.push("apikey");
+
+        // Which one a request would actually use, mirroring AuthStorage's
+        // resolution: OAuth wins unless its usage window is exhausted AND a key
+        // is configured to cover it.
+        const exhaustedUntil = oauthKey
+          ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
+          : 0;
+        const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
+        const activeMethod = connectedMethods.includes("oauth")
+          ? oauthSidelined
+            ? ("apikey" as const)
+            : ("oauth" as const)
+          : connectedMethods[0];
+
+        // `methodDetails` is the server-side lookup table behind
+        // `methodGuidance` — shipping both would duplicate every string on the
+        // wire for no consumer.
+        const { methodDetails: _table, ...wireMeta } = p;
+        return {
+          ...wireMeta,
+          connected: await auth.hasProviderAuth(p.value),
+          connectedMethods,
+          ...(activeMethod ? { activeMethod } : {}),
+          ...(oauthSidelined ? { oauthExhaustedUntil: exhaustedUntil } : {}),
+          ...(authPriorityNote(p.value) ? { priorityNote: authPriorityNote(p.value)! } : {}),
+          methodGuidance: describeAuthMethods(p.value),
+        };
+      }),
     );
     return { providers };
   }
@@ -1883,22 +4444,207 @@ async function createSession(
   };
   scheduleTasksPoll(1500);
 
-  function readBody(req: http.IncomingMessage): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c as Buffer));
-      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-      req.on("error", reject);
+  // Files can change outside the agent (editor saves, terminal commits), so keep
+  // the dirty count current while idle. Branch/repo state already refreshes after
+  // agent runs; polling only the count avoids spawning three git processes per tick.
+  let gitPoll: NodeJS.Timeout | undefined;
+  let gitPollStopped = false;
+  const scheduleGitPoll = (delay: number): void => {
+    if (gitPollStopped) return;
+    gitPoll = setTimeout(() => {
+      void getGitDirtyFileCount(cwd)
+        .catch(() => gitDirtyFileCount)
+        .then((nextDirtyFileCount) => {
+          if (gitPollStopped) return;
+          if (nextDirtyFileCount !== gitDirtyFileCount) {
+            gitDirtyFileCount = nextDirtyFileCount;
+            broadcast("extras", footerExtras());
+          }
+          scheduleGitPoll(5000);
+        });
+    }, delay);
+    gitPoll.unref?.();
+  };
+  scheduleGitPoll(5000);
+
+  // GitHub issue/PR counts change outside the app (web UI, teammates), so poll
+  // on a slow cadence. Network-bound, so keep it well under the search API's
+  // rate budget (2 calls per tick). No-op when the origin isn't a GitHub repo.
+  let gitHubPoll: NodeJS.Timeout | undefined;
+  let gitHubPollStopped = false;
+  const scheduleGitHubPoll = (delay: number): void => {
+    if (gitHubPollStopped) return;
+    gitHubPoll = setTimeout(() => {
+      void refreshGitHubCounts().finally(() => scheduleGitHubPoll(60_000));
+    }, delay);
+    gitHubPoll.unref?.();
+  };
+  scheduleGitHubPoll(2000);
+  const ciPoll = startGitHubCIPoll(cwd, (next) => {
+    gitHubCI = next;
+    broadcast("extras", footerExtras());
+  });
+
+  const continuationHandoffService = new AppSidecarContinuationHandoffService({
+    createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
+      new AgentSession(options),
+  });
+  let lastNewSessionReset: DesktopSessionUXState["lastNewSessionReset"];
+  // Shared reset bookkeeping: ordinary reset and continuation use the same owner/event path.
+  async function resetBuildSession(mutation: SessionMutationOwner): Promise<void> {
+    programmaticChat.reset();
+    await session.newSession(false);
+    if (mode === "chat") await session.persistAppMarker("agent_handoff", { chatAgent });
+    deactivateApprovedPlan();
+    injectedAutopilotPrompts = [];
+    planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
+    const { conversationId, sessionId } = session.getConversationIdentity();
+    if (mutation.kind === "new-session") {
+      lastNewSessionReset = { operationId: mutation.operationId, conversationId, sessionId };
+    }
+    log("INFO", "app-sidecar", "new session accepted", {
+      logicalSessionId: opts.id,
+      operationId: mutation.operationId,
     });
+    broadcast("session_reset", {
+      operationId: mutation.operationId,
+      kind: mutation.kind,
+      conversationId,
+      sessionId,
+    });
+    broadcast("extras", footerExtras());
+  }
+  const userTurnDeps: UserTurnDeps = {
+    runAgent,
+    getMessages: () => session.getMessages(),
+    clearCancelled: () => {
+      autopilotCancelled = false;
+    },
+    gateState: () => ({
+      enabled: isAutopilotEnabled(),
+      cancelled: autopilotCancelled,
+      planMode: session.getPlanMode(),
+      planPending: planGate.pending() !== null,
+    }),
+    review: runAutopilotCycle,
+    drainQueue: runStrandedQueue,
+    decision: (decision) => {
+      if (decision.start) {
+        log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
+      } else if (isAutopilotEnabled()) {
+        log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+      }
+    },
+  };
+  const continuationSession = new AppSidecarContinuationSession({
+    session,
+    mutations: sessionMutations,
+    runClaim,
+    busy: () => isAppSidecarSessionBusy(sessionBusyState()) || planGateConflict() !== null,
+    prepare: (instruction) => continuationHandoffService.prepare(session, instruction),
+    reset: resetBuildSession,
+    prompt: createContinuationPromptAdapter({
+      prompt: (prompt, onAccepted) => promptActiveSession(prompt, undefined, { onAccepted }),
+      userTurn: userTurnDeps,
+      workflowCommand: async (text) =>
+        isWorkflowCommandText(text, await loadWorkflowCommandSpecs()),
+    }),
+    accepted: (event) => {
+      broadcast("continuation_accepted", event);
+      broadcast("extras", footerExtras());
+    },
+  });
+  const programmaticChat = new AppSidecarProgrammaticChat(
+    () => ({
+      identity: JSON.stringify(session.getConversationIdentity()),
+      cwd,
+      codeMode: mode === "code",
+      planMode: session.getPlanMode(),
+      busy: isAppSidecarSessionBusy(sessionBusyState()) || planGateConflict() !== null,
+    }),
+    () => runClaim.claim(),
+    () => runClaim.release(),
+  );
+  const decisionSummaryService = new AppSidecarDecisionSummaryService(
+    (options: DecisionSummarySessionOptions) => new AgentSession(options),
+  );
+
+  function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
+    return readCappedBody(req, res);
   }
 
   function json(res: http.ServerResponse, status: number, body: unknown): void {
-    const payload = JSON.stringify(body);
+    const payload = JSON.stringify(redactValue(body, { secrets: environmentSecrets(process.env) }));
     res.writeHead(status, {
       "content-type": "application/json",
-      "access-control-allow-origin": "*",
     });
     res.end(payload);
+  }
+
+  async function cancelActiveOperation(): Promise<
+    ActiveOperationCancellationResult & { drained: string; runState: RunState }
+  > {
+    // A task/autopilot sweep remains an active operation between provider runs,
+    // even though RunLifecycle is briefly idle during that gap.
+    const operationWasActive = isAppSidecarSessionBusy(sessionBusyState());
+    // Even between task runs, cancellation stops the sweep. Active provider
+    // ownership invokes the full abort hook exactly once through lifecycle.
+    taskRunAll = false;
+    autopilotCancelled = true;
+    if (!runLifecycle.running) {
+      kenAutoAbort.abort();
+      kenAutoAbort = new AbortController();
+      kenAutoSession?.setSignal(kenAutoAbort.signal);
+    }
+
+    const generation = runLifecycle.generation;
+    if (!pendingCancelDrain || pendingCancelDrain.generation !== generation) {
+      pendingCancelDrain = { generation, text: session.drainQueue() };
+      broadcast("queued", { count: 0, messages: [] });
+    }
+    const result = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
+    const drained = pendingCancelDrain.text;
+    if (result.status === "failed") {
+      broadcast("cancel_failed", {
+        error: "cancel_failed",
+        reason: result.reason,
+        runState: runLifecycle.state,
+      });
+      return {
+        status: "failed",
+        reason: result.reason,
+        runState: runLifecycle.state,
+        drained,
+      };
+    }
+    return {
+      status: result.status === "idle" && operationWasActive ? "cancelled" : result.status,
+      runState: runLifecycle.state,
+      drained,
+    };
+  }
+
+  function stateSnapshot(): Record<string, unknown> {
+    const state = session.getState();
+    return {
+      ...state,
+      ...(lastNewSessionReset?.conversationId === state.conversationId &&
+      lastNewSessionReset?.sessionId === state.sessionId
+        ? { lastNewSessionReset }
+        : {}),
+      mode,
+      chatAgent,
+      running,
+      runState: runLifecycle.state,
+      ready: true,
+      thinkingLevel: session.getThinkingLevel() ?? null,
+      supportedThinkingLevels: getSupportedThinkingLevels(state.provider, state.model),
+      supportsVideo: getModel(state.model)?.supportsVideo ?? false,
+      autopilot: isAutopilotEnabled(),
+      ...kenStatePayload(),
+      ...footerExtras(),
+      pendingPlanReview: planGate.pending(),
+    };
   }
 
   // OPTIONS/CORS preflight is handled at the daemon level before delegation.
@@ -1908,19 +4654,102 @@ async function createSession(
     url: string,
     method: string,
   ): void {
+    if (isPhaseBindingRoute(method, url)) {
+      if (mode !== "code") {
+        json(res, 403, { status: "coding-mode-required" });
+        return;
+      }
+      void readJsonBody(req, 64 * 1024)
+        .then((body) => {
+          const request = parsePhaseBindingBody(body);
+          if (!request) {
+            json(res, 400, { status: "invalid-request" });
+            return;
+          }
+          const binding =
+            request.version === 3
+              ? phaseBinding.reconcilePhaseExecution(request, session)
+              : request.version === 2
+                ? phaseBinding.lease(request, session)
+                : phaseBinding.bind(request, session);
+          return binding.then((outcome) => {
+            json(res, phaseBindingHttpStatus(outcome), outcome);
+          });
+        })
+        .catch((error) => {
+          if (error instanceof AppSidecarJsonBodyError) {
+            json(res, error.kind === "too-large" ? 413 : 400, { status: "invalid-request" });
+            return;
+          }
+          captureSidecarError(error, "app-sidecar.phase-binding");
+          json(res, 500, { status: "failed" });
+        });
+      return;
+    }
+
+    const sessionState = session.getState();
+    if (
+      notes.handle(
+        req,
+        res,
+        {
+          cwd,
+          logicalSessionId: opts.id,
+          currentSession: {
+            sessionId: sessionState.sessionId,
+            sessionPath: sessionState.sessionPath,
+          },
+          activePhaseContext: session.getActivePhaseContext(),
+        },
+        url,
+        method,
+      )
+    ) {
+      return;
+    }
+    if (reminders.handle(req, res, { id: opts.id, cwd }, url, method)) return;
+
+    const draftRoute = parseRoadmapPhaseDraftRoute(method, url);
+    if (draftRoute.status === "invalid-path") {
+      json(res, 400, { error: "invalid draft id" });
+      return;
+    }
+    if (draftRoute.status === "matched") {
+      if (draftRoute.route.action === "pending") {
+        json(res, 200, { status: "ok", draft: roadmapDraftDecisions.pending(cwd) });
+        return;
+      }
+      if (draftRoute.route.action === "approve") {
+        void roadmapDraftDecisions
+          .approve(cwd, draftRoute.route.draftId)
+          .then((result) => json(res, roadmapPhaseDraftApprovalHttpStatus(result), result))
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.roadmap-draft.approve");
+            json(res, 500, { status: "storage-failed", message: "phase creation failed" });
+          });
+        return;
+      }
+      const draftId = draftRoute.route.draftId;
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          const parsed = parseRoadmapPhaseDraftRejectBody(raw);
+          if (parsed.status === "invalid") {
+            json(res, 422, { error: parsed.message });
+            return;
+          }
+          const result = await roadmapDraftDecisions.reject(cwd, draftId, parsed.feedback);
+          json(res, roadmapPhaseDraftRejectionHttpStatus(result), result);
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.roadmap-draft.reject");
+          json(res, 500, { error: "phase rejection failed" });
+        });
+      return;
+    }
+
     if (method === "GET" && url === "/state") {
-      const st = session.getState();
-      json(res, 200, {
-        ...st,
-        running,
-        ready: true,
-        thinkingLevel: session.getThinkingLevel() ?? null,
-        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-        supportsVideo: getModel(st.model)?.supportsVideo ?? false,
-        autopilot,
-        ...kenStatePayload(),
-        ...footerExtras(),
-      });
+      json(res, 200, stateSnapshot());
       return;
     }
 
@@ -1929,37 +4758,128 @@ async function createSession(
       return;
     }
 
+    if (method === "GET" && url === "/memories") {
+      void memoryStore
+        .snapshot()
+        .then((snapshot) => json(res, 200, snapshot))
+        .catch((error) => {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/memories/")) {
+      const id = decodeURIComponent(url.slice("/memories/".length));
+      if (!id) {
+        json(res, 400, { error: "memory id is required" });
+        return;
+      }
+      void memoryStore
+        .forget(id)
+        .then(() => memoryStore.snapshot())
+        .then((snapshot) => json(res, 200, snapshot))
+        .catch((error) => {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "GET" && url === "/jiwa") {
+      void jiwaStore
+        .snapshot()
+        .then((snapshot) => json(res, 200, snapshot))
+        .catch((error) => {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/jiwa/")) {
+      const id = decodeURIComponent(url.slice("/jiwa/".length));
+      if (!id) {
+        json(res, 400, { error: "Jiwa entry id is required" });
+        return;
+      }
+      void jiwaStore
+        .forget(id)
+        .then(() => jiwaStore.snapshot())
+        .then((snapshot) => json(res, 200, snapshot))
+        .catch((error) => {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
     if (method === "GET" && (url === "/events" || url.startsWith("/events?"))) {
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
-        "access-control-allow-origin": "*",
       });
       res.write(`retry: 1000\n\n`);
       const client: SseClient = { id: ++clientSeq, res };
       clients.add(client);
-      const st = session.getState();
-      res.write(
-        `data: ${JSON.stringify({
-          type: "ready",
-          data: {
-            ...st,
-            running,
-            thinkingLevel: session.getThinkingLevel() ?? null,
-            supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-            supportsVideo: getModel(st.model)?.supportsVideo ?? false,
-            autopilot,
-            ...kenStatePayload(),
-            ...footerExtras(),
-          },
-        })}\n\n`,
-      );
-      const keepAlive = setInterval(() => res.write(`: ping\n\n`), 15000);
-      req.on("close", () => {
-        clearInterval(keepAlive);
+      let keepAlive: NodeJS.Timeout | undefined;
+      let closed = false;
+      const cleanup = (): void => {
+        closed = true;
+        if (keepAlive) clearInterval(keepAlive);
         clients.delete(client);
+      };
+      res.once("error", cleanup);
+      res.once("close", cleanup);
+      try {
+        res.write(sseFrame("ready", stateSnapshot()));
+      } catch {
+        cleanup();
+      }
+      if (!closed) {
+        keepAlive = setInterval(() => {
+          try {
+            if (res.destroyed) cleanup();
+            else res.write(`: ping\n\n`);
+          } catch {
+            cleanup();
+          }
+        }, 15000);
+      }
+      req.once("close", cleanup);
+      return;
+    }
+
+    if (method === "GET" && url === "/plugins") {
+      void listInstalledPlugins(paths.extensionsDir)
+        .then((plugins) => json(res, 200, { plugins }))
+        .catch((error) => {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/plugins/install") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        try {
+          const bundlePath = (JSON.parse(raw) as { bundlePath?: unknown }).bundlePath;
+          if (typeof bundlePath !== "string" || !path.isAbsolute(bundlePath)) {
+            json(res, 400, { error: "bundlePath must be an absolute path" });
+            return;
+          }
+          const plugin = await installPlugin(bundlePath, paths.extensionsDir);
+          json(res, 200, { plugin, restartRequired: true });
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
       });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/plugins/")) {
+      const pluginId = decodeURIComponent(url.slice("/plugins/".length));
+      void removePlugin(pluginId, paths.extensionsDir)
+        .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
+        .catch((error) => {
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        });
       return;
     }
 
@@ -1986,7 +4906,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/settings") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let projectsRoot: string;
         try {
           projectsRoot = (JSON.parse(raw) as { projectsRoot?: string }).projectsRoot ?? "";
@@ -2009,7 +4930,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/create-project") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         try {
           name = (JSON.parse(raw) as { name?: string }).name ?? "";
@@ -2045,9 +4967,51 @@ async function createSession(
       return;
     }
 
+    // Dismiss a project from the picker (or restore it with hidden:false). The
+    // path is kept rather than the row: sessions in scratch dirs keep
+    // re-surfacing, so the user's decision has to outlive any one scan.
+    if (method === "POST" && url === "/projects/hidden") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { path?: string; hidden?: boolean };
+        try {
+          body = JSON.parse(raw) as { path?: string; hidden?: boolean };
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const target = body.path?.trim();
+        if (!target) {
+          json(res, 400, { error: "path is required" });
+          return;
+        }
+        const key = path.resolve(target);
+        try {
+          const settings = await loadAppSettings();
+          const current = new Set((settings.hiddenProjects ?? []).map((p) => path.resolve(p)));
+          if (body.hidden === false) current.delete(key);
+          else current.add(key);
+          settings.hiddenProjects = current.size > 0 ? Array.from(current) : undefined;
+          await saveAppSettings(settings);
+          json(res, 200, { hidden: Array.from(current) });
+        } catch (err) {
+          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+      return;
+    }
+
     if (method === "GET" && url === "/projects") {
-      // Scan ggcoder + Claude Code + Codex session stores for known projects.
-      void discoverProjects()
+      // Session stores plus configured/inferred filesystem roots, with hidden
+      // projects filtered by the canonical discovery implementation.
+      void loadAppSettings()
+        .then(({ projectsRoot, projectRoots, hiddenProjects }) =>
+          discoverProjects({
+            projectsRoot,
+            extraRoots: projectRoots,
+            hiddenPaths: hiddenProjects,
+          }),
+        )
         .then((projects) => json(res, 200, { projects }))
         .catch((err) => {
           log("ERROR", "app-sidecar", "discoverProjects failed", {
@@ -2064,7 +5028,10 @@ async function createSession(
         json(res, 400, { error: "missing cwd query param" });
         return;
       }
-      void listRecentSessions(target, 5)
+      const requestedAgent = new URL(url, `http://${host}`).searchParams.get("chatAgent");
+      // An omitted chatAgent means coding history; chat callers identify one
+      // agent or request the combined, recency-sorted "all" listing.
+      void listSidecarSessions(target, requestedAgent, paths.sessionsDir)
         .then((sessions) => json(res, 200, { sessions }))
         .catch(() => json(res, 200, { sessions: [] }));
       return;
@@ -2083,6 +5050,35 @@ async function createSession(
       return;
     }
 
+    // Markdown transcript export for the app's download button. Serialized
+    // here rather than in the webview because the webview's transcript model
+    // deliberately keeps tool activity in the LiveToolPanel — exporting from
+    // there would hand the user a coding session with the coding missing.
+    // `?name=1` asks for the suggested filename only (the save dialog needs it
+    // before there is a path), so the markdown never crosses IPC twice.
+    if (method === "GET" && (url === "/export" || url.startsWith("/export?"))) {
+      const query = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+      const st = session.getState();
+      const filename = defaultExportFilename(mode);
+      if (query.get("name") === "1") {
+        json(res, 200, { filename });
+        return;
+      }
+      const markdown = sessionToMarkdown(
+        {
+          mode,
+          cwd,
+          provider: st.provider,
+          model: st.model,
+          ...(st.sessionId ? { sessionId: st.sessionId } : {}),
+        },
+        session.getMessages(),
+        { toolDetail: parseToolDetail(query.get("tools")) },
+      );
+      json(res, 200, { filename, markdown });
+      return;
+    }
+
     if (method === "GET" && url === "/history") {
       // Reconstruct the transcript from persisted messages so resume is 1:1 with
       // the live SSE stream. Walks ALL message types (not just user/assistant):
@@ -2090,13 +5086,25 @@ async function createSession(
       // generate_image) that must re-render inline, and assistant tool_call
       // blocks carry sub-agent delegations that must re-appear as group items.
       //
-      // The `details` object (imagePreviews with path + downscaled preview) is
-      // event-only and never persisted — we reconstruct from the raw
-      // ImageContent in the tool result, downsampling on the sidecar side and
-      // extracting the path from the text block ("Generated image → /path").
+      // Generated image results persist display-only previews and exact original
+      // paths. Older results fall back to their model-visible ImageContent;
+      // only unambiguous, existing single-image paths regain an open action.
       void (async () => {
         const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(cwd))];
         const messages = session.getMessages();
+
+        // An Ideal hook is injected immediately after the assistant's candidate
+        // no-tool response. That response is review scratch, not a user-visible
+        // final answer. Live SSE drops it when the hook event arrives; mark the
+        // same assistant message here so resumed history stays identical.
+        const hiddenIdealDrafts = new Set<(typeof messages)[number]>();
+        for (let i = 0; i < messages.length - 1; i++) {
+          const draft = messages[i];
+          const hookPrompt = messages[i + 1];
+          if (draft?.role !== "assistant" || hookPrompt?.role !== "user") continue;
+          const restored = restoreUserRow(hookPrompt.content);
+          if (detectHookKind(restored.text) === "ideal") hiddenIdealDrafts.add(draft);
+        }
 
         // Pre-index tool results by toolCallId so we can pair tool calls with
         // their results (for sub-agent status + image extraction).
@@ -2111,6 +5119,10 @@ async function createSession(
           }
         }
 
+        const persistedMcpFailures = collectPersistedMcpToolFailures(
+          messages,
+          environmentSecrets(process.env),
+        );
         const history: HistoryEntryForWire[] = [];
 
         // Ken (mentor) turns to interleave: group by the non-system message count
@@ -2142,9 +5154,9 @@ async function createSession(
         // Autopilot verdict markers to interleave, same anchor scheme as Ken
         // turns — each becomes a single assistant row the webview renders
         // exactly like the live `autopilot` item (never a raw verdict string).
-        // Compact/continuation rewrites can carry old markers whose original
-        // afterMessageCount is beyond the restored message list; dropping those
-        // prevents stale all-clear bubbles from bunching at the bottom on resume.
+        // Normalization pulls anchors left over from an unrebased compaction
+        // back to where the marker was actually written, so stale all-clear
+        // bubbles no longer bunch at the bottom of a reopened session.
         const restoredMessageCount = messages.filter((m) => m.role !== "system").length;
         const autopilotByCount = new Map<
           number,
@@ -2233,6 +5245,22 @@ async function createSession(
                   ...(typeof d.guidance === "string" ? { guidance: d.guidance } : {}),
                 },
               });
+            } else if (marker.kind === "interrupted_run") {
+              // Rendered as an error row: the run's tools already changed the
+              // repo, so the user needs to see it and decide what to do. We
+              // never replay it — that would duplicate those changes.
+              history.push({
+                role: "assistant",
+                text: "",
+                error: {
+                  scope: "interrupted_run",
+                  headline: "A run was interrupted",
+                  message:
+                    "Supah Coder stopped mid-run, so this turn is incomplete. Any files its tools already changed are still on disk.",
+                  guidance:
+                    "Review the working tree, then re-send the request if you still want it.",
+                },
+              });
             }
           }
         };
@@ -2243,140 +5271,169 @@ async function createSession(
         flushAutopilot(0);
         flushAppMarkers(0);
 
-        for (const msg of messages) {
-          if (msg.role === "system") continue;
-          nonSystemCount++;
+        await replayMessagesInOrder(
+          messages,
+          async (msg, count) => {
+            nonSystemCount = count;
+            const visibility = getHistoryMessageVisibility(msg);
+            if (visibility === "hidden") return;
 
-          if (msg.role === "tool") {
-            // Tool result messages: check for ImageContent blocks (screenshots,
-            // generated images) and emit a toolImages entry.
-            for (const tr of msg.content) {
-              if (typeof tr.content === "string") continue;
-              const imageBlocks = tr.content.filter((c) => c.type === "image");
-              if (imageBlocks.length === 0) continue;
-              // Extract the path from the text block (e.g. "Generated image → /path").
-              const textBlock = tr.content.find(
-                (c) => c.type === "text" && "text" in c && typeof c.text === "string",
-              );
-              const textContent = textBlock && textBlock.type === "text" ? textBlock.text : "";
-              const pathMatch = textContent.match(/→\s*(\S+)/);
-              const imgPath = pathMatch?.[1];
-
-              // Downscale each image for the webview preview.
-              const toolImages: Array<{ src: string; path?: string }> = [];
-              for (const block of imageBlocks) {
-                if (block.type !== "image") continue;
-                try {
-                  const rawBuf = Buffer.from(block.data, "base64");
-                  const previewBuf = await downscaleForPreview(rawBuf);
-                  toolImages.push({
-                    src: `data:${block.mediaType};base64,${previewBuf.toString("base64")}`,
-                    path: imgPath,
-                  });
-                } catch {
-                  // Downscale failed — use the raw data.
-                  toolImages.push({
-                    src: `data:${block.mediaType};base64,${block.data}`,
-                    path: imgPath,
+            if (msg.role === "tool") {
+              // Explicit MCP failures stay visible after the temporary live-tool
+              // panel clears and after a full session reload.
+              for (const tr of msg.content) {
+                const failure = persistedMcpFailures.get(tr.toolCallId);
+                if (failure) {
+                  history.push({
+                    role: "assistant",
+                    text: "",
+                    mcpToolFailure: { name: failure.name, result: failure.result },
                   });
                 }
               }
-              if (toolImages.length > 0) {
+              // Tool result messages: check for ImageContent blocks (screenshots,
+              // generated images) and emit a toolImages entry.
+              for (const tr of msg.content) {
+                const toolImages = await restoreToolImages(tr);
+                const textContent =
+                  typeof tr.content === "string"
+                    ? tr.content
+                    : tr.content
+                        .filter((c) => c.type === "text")
+                        .map((c) => c.text)
+                        .join("\n");
+                const imageWarnings = extractImageWarnings(textContent);
+                if (toolImages.length > 0 || imageWarnings) {
+                  history.push({
+                    role: "assistant",
+                    text: imageWarnings,
+                    toolImages,
+                  });
+                }
+              }
+              return;
+            }
+
+            // User or assistant message — text/hook/command/compacted extraction,
+            // plus sub-agent group detection for assistant tool_calls.
+            if (msg.role === "user") {
+              // Rebuild the live bubble: strip the steering wrapper, drop
+              // attachment/file notes the model saw but the bubble never showed.
+              const restored = restoreUserRow(msg.content, msg.provenance);
+              const text = restored.text;
+              const hook = msg.provenance ? null : detectHookKind(text);
+              const compacted =
+                visibility === "summary" ||
+                (!msg.provenance && !hook && text.startsWith("[Previous conversation summary]"));
+              const hint = userHintByCount.get(nonSystemCount);
+              // The typed invocation persisted alongside the prompt is
+              // authoritative. Reversing the expanded body only works while the
+              // template is byte-identical, and templates drift (edited
+              // `.gg/commands/*.md`, reworded built-ins, app-vs-CLI phrasing) —
+              // after which the resumed session dumped the raw multi-KB body
+              // instead of the `/name` chip. Older sessions have no hint, so the
+              // body match stays as the fallback.
+              const command =
+                !hook && !compacted
+                  ? resolveRestoredCommand(
+                      typeof hint?.command === "string" ? hint.command : null,
+                      text,
+                      commandCandidates,
+                    )
+                  : null;
+              // Autopilot injected this turn — live showed only the Ken-tinted
+              // marker for it, never a user bubble. Emitting one here would print
+              // the injected instruction a second time, unstyled.
+              //
+              // Pushed background-status updates are skipped for the same reason:
+              // the live run rendered no bubble for them, so showing them here
+              // would fill a reopened session with machine-facing status lines
+              // the user never saw while working.
+              if (
+                (!msg.provenance || (!restored.autopilotInjected && !restored.notification)) &&
+                (text.trim() || restored.images.length > 0)
+              ) {
+                history.push({
+                  role: "user",
+                  text: command ?? text,
+                  images: restored.images,
+                  hook,
+                  command: command !== null,
+                  compacted,
+                  // Markers accumulate across continuation files (each rewrite
+                  // re-persists prior ones) but only the LATEST summary row
+                  // survives compaction — so consume from the newest end.
+                  ...(compacted && compactionCounts.length > 0
+                    ? { compactionCounts: compactionCounts.pop() }
+                    : {}),
+                  ...(hint?.kenSent === true ? { kenSent: true } : {}),
+                  ...(Array.isArray(hint?.enhancements) ? { enhancements: hint.enhancements } : {}),
+                });
+                // Live showed the video-capability warning right after the bubble.
+                if (restored.videoWarning) {
+                  history.push({ role: "assistant", text: "", infoKind: "video_warning" });
+                }
+              }
+            } else if (!hiddenIdealDrafts.has(msg)) {
+              // Assistant: one wire row per persisted text block — live streaming
+              // splits bubbles at server_tool_call boundaries, and the persisted
+              // content keeps those blocks separate. Ideal-review candidate drafts
+              // are intentionally omitted to match the live pre-final hook flow.
+              for (const blockText of restoreAssistantTexts(msg.content)) {
                 history.push({
                   role: "assistant",
-                  text: "",
-                  toolImages,
+                  text: blockText,
+                  images: [],
+                  hook: null,
+                  command: false,
+                  compacted: false,
                 });
               }
             }
-            continue;
-          }
 
-          // User or assistant message — text/hook/command/compacted extraction,
-          // plus sub-agent group detection for assistant tool_calls.
-          if (msg.role === "user") {
-            // Rebuild the live bubble: strip the steering wrapper, drop
-            // attachment/file notes the model saw but the bubble never showed.
-            const restored = restoreUserRow(msg.content);
-            const text = restored.text;
-            const hook = detectHookKind(text);
-            const compacted = !hook && text.startsWith("[Previous conversation summary]");
-            const command =
-              !hook && !compacted ? detectPromptCommand(text, commandCandidates) : null;
-            if (text.trim() || restored.images.length > 0) {
-              const hint = userHintByCount.get(nonSystemCount);
-              history.push({
-                role: "user",
-                text: command ?? text,
-                images: restored.images,
-                hook,
-                command: command !== null,
-                compacted,
-                // Markers accumulate across continuation files (each rewrite
-                // re-persists prior ones) but only the LATEST summary row
-                // survives compaction — so consume from the newest end.
-                ...(compacted && compactionCounts.length > 0
-                  ? { compactionCounts: compactionCounts.pop() }
-                  : {}),
-                ...(hint?.kenSent === true ? { kenSent: true } : {}),
-                ...(Array.isArray(hint?.enhancements) ? { enhancements: hint.enhancements } : {}),
-              });
-              // Live showed the video-capability warning right after the bubble.
-              if (restored.videoWarning) {
-                history.push({ role: "assistant", text: "", infoKind: "video_warning" });
+            // Assistant tool_call blocks: detect sub-agent delegations.
+            if (msg.role === "assistant" && typeof msg.content !== "string") {
+              const subagentCalls = msg.content.filter(
+                (
+                  c,
+                ): c is typeof c & {
+                  type: "tool_call";
+                  id: string;
+                  name: string;
+                  args: Record<string, unknown>;
+                } => c.type === "tool_call" && (c.name === "subagent" || c.name === "spawn_agent"),
+              );
+              if (subagentCalls.length > 0) {
+                const agents = subagentCalls.map((c) => {
+                  const result = toolResultMap.get(c.id);
+                  return {
+                    agentName:
+                      c.name === "spawn_agent" && typeof c.args?.task_name === "string"
+                        ? c.args.task_name
+                        : typeof c.args?.agent === "string"
+                          ? c.args.agent
+                          : undefined,
+                    // Async workers are intentionally non-resumable; restored rows are historical.
+                    status: result?.isError ? ("error" as const) : ("done" as const),
+                    toolUseCount: 0,
+                  };
+                });
+                history.push({
+                  role: "assistant",
+                  text: "",
+                  subagentGroup: agents,
+                });
               }
             }
-          } else {
-            // Assistant: one wire row per persisted text block — live streaming
-            // splits bubbles at server_tool_call boundaries, and the persisted
-            // content keeps those blocks separate.
-            for (const blockText of restoreAssistantTexts(msg.content)) {
-              history.push({
-                role: "assistant",
-                text: blockText,
-                images: [],
-                hook: null,
-                command: false,
-                compacted: false,
-              });
-            }
-          }
-
-          // Assistant tool_call blocks: detect sub-agent delegations.
-          if (msg.role === "assistant" && typeof msg.content !== "string") {
-            const subagentCalls = msg.content.filter(
-              (
-                c,
-              ): c is typeof c & {
-                type: "tool_call";
-                id: string;
-                name: string;
-                args: Record<string, unknown>;
-              } => c.type === "tool_call" && c.name === "subagent",
-            );
-            if (subagentCalls.length > 0) {
-              const agents = subagentCalls.map((c) => {
-                const result = toolResultMap.get(c.id);
-                return {
-                  agentName: typeof c.args?.agent === "string" ? c.args.agent : undefined,
-                  status: result?.isError ? ("error" as const) : ("done" as const),
-                  toolUseCount: 0,
-                };
-              });
-              history.push({
-                role: "assistant",
-                text: "",
-                subagentGroup: agents,
-              });
-            }
-          }
-
-          // Interleave any Ken turns / autopilot / app markers recorded right
-          // after this message.
-          flushKen(nonSystemCount);
-          flushAutopilot(nonSystemCount);
-          flushAppMarkers(nonSystemCount);
-        }
+          },
+          (count) => {
+            // Markers flush after every physical message, including tools and
+            // provenance-hidden runtime context.
+            flushKen(count);
+            flushAutopilot(count);
+            flushAppMarkers(count);
+          },
+        );
 
         // Flush remaining Ken turns whose anchor is at/after the message count so
         // none are dropped. Autopilot/app markers beyond the restored message
@@ -2393,148 +5450,419 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/commands") {
-      // Workflow commands with agent functionality: built-in prompt templates +
-      // the user's own `.gg/commands/*.md`. UI commands (model/quit/etc.) are
-      // handled webview-side and intentionally excluded.
-      void (async () => {
-        const builtins = PROMPT_COMMANDS.map((c) => ({
-          name: c.name,
-          aliases: c.aliases,
-          description: c.description,
-          source: "built-in" as const,
-        }));
-        const custom = (await loadCustomCommands(cwd))
-          // A custom command can't shadow a built-in name.
-          .filter((c) => !PROMPT_COMMANDS.some((b) => b.name === c.name))
-          .map((c) => ({
-            name: c.name,
-            aliases: [] as string[],
-            description: c.description,
-            source: "custom" as const,
-          }));
-        json(res, 200, { commands: [...builtins, ...custom] });
-      })();
+      const chatCommands = appSidecarChatCommandsResponse(mode);
+      if (chatCommands) {
+        json(res, 200, chatCommands);
+        return;
+      }
+      void appSidecarCodeCommandsResponse(cwd).then((response) => json(res, 200, response));
+      return;
+    }
+
+    if (method === "POST" && url === "/programmatic") {
+      const targetIdentity = JSON.stringify(session.getConversationIdentity());
+      void readCappedBody(req, res, 2_048)
+        .then(async (raw) => {
+          if (raw === null) return;
+          if (targetIdentity !== JSON.stringify(session.getConversationIdentity())) {
+            json(res, 409, { error: "Project session changed." });
+            return;
+          }
+          let input: unknown;
+          try {
+            input = JSON.parse(raw);
+          } catch {
+            input = null;
+          }
+          const response = await programmaticChat.handle(input);
+          json(res, response.status, response.body);
+        })
+        .catch(() => json(res, 500, { error: "Programmatic action unavailable." }));
+      return;
+    }
+
+    if (method === "POST" && url === "/decision-summary") {
+      void readCappedBody(req, res, DECISION_SUMMARY_CONTEXT_MAX_BYTES)
+        .then(async (raw) => {
+          if (raw === null) return;
+          const response = await handleDecisionSummaryRequest(raw, session, decisionSummaryService);
+          json(res, response.status, response.body);
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.decision-summary.route");
+          json(res, 500, { error: "decision summary unavailable" });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/continuation-handoff") {
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let nextInstruction: string;
+          try {
+            const body = JSON.parse(raw) as { nextInstruction?: unknown };
+            nextInstruction = typeof body.nextInstruction === "string" ? body.nextInstruction : "";
+          } catch {
+            json(res, 400, { error: "invalid JSON body" });
+            return;
+          }
+          if (!nextInstruction.trim()) {
+            json(res, 400, { error: "empty next instruction" });
+            return;
+          }
+          if (nextInstruction.length > CONTINUATION_HANDOFF_LIMITS.nextInstructionChars) {
+            json(res, 413, { error: "next instruction is too long" });
+            return;
+          }
+          try {
+            const prepared = await continuationSession.prepare(nextInstruction);
+            json(res, 200, prepared);
+          } catch (error) {
+            captureSidecarError(error, "app-sidecar.continuation-handoff");
+            json(res, 502, {
+              error: error instanceof Error ? error.message : "continuation handoff failed",
+            });
+          }
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.continuation-handoff.route");
+          json(res, 500, { error: "continuation handoff failed" });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/continuation-commit") {
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let body: unknown;
+          try {
+            body = JSON.parse(raw);
+          } catch {
+            body = null;
+          }
+          const request = parseContinuationCommitRequest(body);
+          if (!request) {
+            json(res, 400, {
+              operationId: "",
+              preparedId: "",
+              outcome: "rejected",
+              accepted: false,
+              resetAttempted: false,
+              error: "invalid_continuation_commit",
+              message: "Expected preparedId, operationId and optional profile only.",
+            } satisfies ContinuationCommitResponse);
+            return;
+          }
+          const result = await continuationSession.commit(request);
+          json(res, result.status, result.body);
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.continuation-commit");
+          if (!res.headersSent)
+            json(res, 500, {
+              operationId: "",
+              preparedId: "",
+              outcome: "outcome-unknown",
+              accepted: null,
+              resetAttempted: true,
+              error: "continuation_outcome_unknown",
+              message: "Inspect the current session. Do not automatically reset or resend.",
+            } satisfies ContinuationCommitResponse);
+        });
       return;
     }
 
     if (method === "POST" && url === "/prompt") {
-      void readBody(req).then(async (raw) => {
-        let text: string;
-        let attachments: AppAttachment[];
-        let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
-        try {
-          const body = JSON.parse(raw) as {
-            text?: string;
-            attachments?: AppAttachment[];
-            meta?: { kenSent?: boolean; enhancements?: unknown[] };
-          };
-          text = body.text ?? "";
-          attachments = Array.isArray(body.attachments) ? body.attachments : [];
-          meta = typeof body.meta === "object" && body.meta !== null ? body.meta : undefined;
-        } catch {
-          json(res, 400, { error: "invalid JSON body" });
-          return;
-        }
-        if (!text.trim() && attachments.length === 0) {
-          json(res, 400, { error: "empty prompt" });
-          return;
-        }
-        if (running || autopilotActive) {
-          // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
-          // an autopilot cycle is active but between injected runs (build idle,
-          // Ken reviewing) so the message never starts a run that collides with
-          // an injected one on the same session. Attachments are persisted to
-          // .gg/uploads first so the queued media rides the same native-block
-          // path as a non-queued attachment prompt when it drains.
-          const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-          const count = session.queueMessage(text, prepared);
-          broadcast("queued", { count });
-          json(res, 202, { queued: true, count });
-          return;
-        }
-        json(res, 202, { accepted: true });
-        // Webview display hint for this prompt's user bubble (kenSent shimmer
-        // label / enhancer highlight segments). Anchored +1 so it attaches to
-        // the user message the prompt below is about to push. Queued prompts
-        // skip this (their position in the run is unpredictable).
-        if (meta && (meta.kenSent === true || Array.isArray(meta.enhancements))) {
-          void session
-            .persistAppMarker(
-              "user_hint",
-              {
-                ...(meta.kenSent === true ? { kenSent: true } : {}),
-                ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
-              },
-              1,
-            )
-            .catch(() => {});
-        }
-        // Fresh user turn: clear any cancel flag left from a prior cycle so this
-        // turn's autopilot review can run.
-        autopilotCancelled = false;
-        // A typed message while a plan modal/review is pending (reject,
-        // feedback, anything) supersedes the pending plan — the bump also
-        // invalidates any in-flight Ken plan review.
-        clearPendingPlan();
-        // Gate inputs captured around the run: whether this turn is a workflow
-        // slash command (attachment prompts skip slash expansion entirely), and
-        // how many assistant messages the run actually adds. Computed even when
-        // autopilot is currently off — the toggle can flip ON mid-run, and the
-        // gate reads the post-run value.
-        const workflowCommand =
-          attachments.length === 0 && isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
-        const assistantsBefore = countAssistantMessages(session.getMessages());
-        const messagesBefore = session.getMessages().length;
-        await runAgent(text, async () => {
-          if (attachments.length > 0) {
-            // Persist each attachment under .gg/uploads so files are inspectable
-            // by the agent's tools, then prompt with the media as native blocks.
-            const prepared = await prepareAttachments(cwd, attachments);
-            await session.promptWithAttachments(text, prepared);
-          } else {
-            // Pass the raw text straight through. AgentSession.prompt() is the
-            // single source of truth for slash-command expansion (built-in +
-            // `.gg/commands/*.md` custom), so the agent gets the right body
-            // while the webview keeps showing the short `/name`.
-            await session.prompt(text);
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
+      // Per-request: only the prompt that actually claimed the start may release
+      // it. A bare release would let an early-returning request (bad JSON, or a
+      // prompt that queued) clear a claim another request is still holding.
+      let claimedStart = false;
+      const rejectUnaccepted = (error?: unknown) => {
+        if (!res.writableEnded)
+          json(res, 500, {
+            error: "prompt_not_accepted",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Prompt was not accepted. Your draft can be retried.",
+          });
+      };
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let text: string;
+          let attachments: AppAttachment[];
+          let meta: PromptMeta | undefined;
+          try {
+            const body = JSON.parse(raw) as {
+              text?: string;
+              attachments?: AppAttachment[];
+              meta?: unknown;
+            };
+            text = body.text ?? "";
+            attachments = Array.isArray(body.attachments) ? body.attachments : [];
+            meta = normalizePromptMeta(body.meta);
+          } catch {
+            json(res, 400, { error: "invalid JSON body" });
+            return;
           }
+          if (!text.trim() && attachments.length === 0) {
+            json(res, 400, { error: "empty prompt" });
+            return;
+          }
+          const inputPolicyError = session.promptInputPolicyError(text, attachments.length);
+          if (inputPolicyError) {
+            json(res, 400, { error: "command_input_not_allowed", message: inputPolicyError });
+            return;
+          }
+          await runAppSidecarPromptStartup({
+            mutations: sessionMutations,
+            conflict: (body) => json(res, 409, body),
+            perform: async (onAccepted) => {
+              // Capture before any await: acceptance must not dismiss a newer question.
+              const supersededAskIds = asks.pendingRequests.map(({ id }) => id);
+              const supersedeCapturedAsks = () => {
+                for (const id of supersededAskIds) {
+                  asks.settle(id, { action: "cancel", superseded: true });
+                }
+              };
+              if (programmaticExecutionActive) {
+                json(res, 409, {
+                  error: "programmatic_execution_busy",
+                  message:
+                    "Finish or cancel the isolated opportunity first; messages are not forwarded to it.",
+                });
+                return;
+              }
+              const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
+                text,
+                attachmentCount: attachments.length,
+                busy: isAppSidecarSessionBusy(sessionBusyState()),
+                automated: meta?.kenSent === true,
+                codeMode: mode !== "chat",
+                planMode: session.getPlanMode(),
+                claimStart: () => {
+                  if (runClaim.active) return false;
+                  claimedStart = runClaim.claim();
+                  return claimedStart;
+                },
+                respond: (status, body) => {
+                  if (status === 202) supersedeCapturedAsks();
+                  json(res, status, body);
+                },
+                runAgent,
+                execute: async (selection) => {
+                  programmaticExecutionActive = true;
+                  try {
+                    const active = session.getState();
+                    const result = await executeProgrammaticOpportunity({
+                      ...selection,
+                      cwd,
+                      provider: active.provider,
+                      model: active.model,
+                      signal: abort.signal,
+                      ask: asks.park,
+                      cancelQuestions: () => asks.cancelAll(),
+                      progress: (text) => broadcast("text_delta", { text }),
+                    });
+                    broadcast("text_delta", {
+                      text: `\n${result.status === "rejected" ? result.reason : result.summary}\n`,
+                    });
+                    return result;
+                  } finally {
+                    programmaticExecutionActive = false;
+                  }
+                },
+              });
+              if (handledProgrammatic) return;
+              // Classify the raw, case-sensitive built-in token before any generic
+              // workflow/custom-command lookup can expand a conflicting research.md.
+              const researchRoute = resolveChatResearchCommandRoute({
+                mode,
+                text,
+                attachmentCount: attachments.length,
+                busy: isAppSidecarSessionBusy(sessionBusyState()),
+              });
+              const handledResearch = await handleAppSidecarChatResearchPrompt({
+                route: researchRoute,
+                claimStart: () => {
+                  // `/research` is a fail-fast transition, never mid-run steering. Claim
+                  // synchronously before any switch or persistence operation can yield.
+                  claimedStart = runClaim.claim();
+                  return claimedStart;
+                },
+                respond: ({ status, body }) => {
+                  if (status === 202) supersedeCapturedAsks();
+                  json(res, status, body);
+                },
+                runAgent,
+                operations: {
+                  session,
+                  commitResearchTransition: (activeSession) =>
+                    commitChatResearchTransition({
+                      session: activeSession,
+                      previousAgent: chatAgent,
+                      researchAgent: "research" as const,
+                      switchAgent: (targetSession, nextAgent) =>
+                        switchChatAgent(targetSession, nextAgent, false),
+                      persistAgentHandoff: (targetSession) =>
+                        targetSession.persistAppMarker("agent_handoff", {
+                          chatAgent: "research",
+                        }),
+                      onCommitted: (changed) => {
+                        chatAgent = "research";
+                        if (changed) broadcast("chat_agent_change", { chatAgent });
+                      },
+                    }),
+                  persistUserHint: (activeSession, displayText) =>
+                    activeSession.persistAppMarker("user_hint", { command: displayText }, 1),
+                  prompt: async (activeSession, continuationPrompt) => {
+                    if (activeSession !== session) {
+                      throw new Error("Research handoff changed logical sessions");
+                    }
+                    await promptActiveSession(continuationPrompt, undefined, { onAccepted });
+                  },
+                },
+              });
+              if (handledResearch) return;
+              if (
+                runLifecycle.running &&
+                runLifecycle.isCancellationRequested(runLifecycle.generation)
+              ) {
+                json(res, 409, {
+                  error: runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
+                  runState: runLifecycle.state,
+                });
+                return;
+              }
+              // `runClaim` covers the gap before `runAgent` flips `running`: a
+              // prompt arriving in that window must queue, not start a second run.
+              if (isAppSidecarSessionBusy(sessionBusyState())) {
+                // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
+                // an autopilot cycle is active but between injected runs (build idle,
+                // Ken reviewing) so the message never starts a run that collides with
+                // an injected one on the same session. Attachments are persisted to
+                // .gg/uploads first so the queued media rides the same native-block
+                // path as a non-queued attachment prompt when it drains.
+                const prepared =
+                  attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+                const count = session.queueMessage(text, prepared, meta);
+                // Queue before releasing the blocked ask; awaiting the run would deadlock.
+                supersedeCapturedAsks();
+                const messages = session.listQueuedMessages();
+                const queueId = messages[count - 1]!.id;
+                broadcast("queued", { count, messages });
+                json(res, 202, { queued: true, count, queueId });
+                return;
+              }
+              // Claim the run NOW, synchronously. Everything below this line may
+              // yield, and `running` does not flip until runAgent begins.
+              claimedStart = runClaim.claim();
+              // Fail preparation before runAgent can swallow errors or record user hints.
+              const prepared =
+                attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+              const acceptFreshPrompt = () => {
+                supersedeCapturedAsks();
+                onAccepted();
+                if (!res.writableEnded) json(res, 202, { queued: false, count: 0 });
+              };
+              // Commands return without the persistence callback; only a successful
+              // non-generating command may use completion as its acceptance boundary.
+              const startsAgentRun =
+                attachments.length > 0 || (await session.willStartAgentRun(text));
+              // Gate inputs captured around the run: whether this turn is a workflow
+              // slash command (attachment prompts skip slash expansion entirely), and
+              // how many assistant messages the run actually adds. Computed even when
+              // autopilot is currently off — the toggle can flip ON mid-run, and the
+              // gate reads the post-run value.
+              const workflowCommand =
+                attachments.length === 0 &&
+                isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
+              // Does this input actually expand into a persisted user message? Asked
+              // of the session itself, because only it knows whether the command
+              // resolves here (name/alias casing, custom `.gg/commands`, non-coder
+              // agents that don't expand at all). A looser guess would anchor the
+              // hint at +1 with no message to land on — decorating an unrelated
+              // later bubble with the wrong `/name`.
+              const expandsToTemplate =
+                attachments.length === 0 && (await session.willExpandPromptTemplate(text));
+              // Webview display hint for this prompt's user bubble (kenSent shimmer
+              // label / enhancer highlight segments / the `/name` a command was typed
+              // as). Anchored +1 so it attaches to the user message the prompt below
+              // is about to push. Queued hints instead travel with the queue entry
+              // and are anchored by AgentSession when the accepted message persists.
+              //
+              // Recording the invocation matters because the agent persists the
+              // EXPANDED template as the user message. Resume used to recover
+              // `/name` by matching that body against the current templates, which
+              // silently fails the moment a template is edited or reworded — the
+              // reopened session then rendered the raw multi-KB prompt instead of
+              // the command chip.
+              if (
+                expandsToTemplate ||
+                (meta && (meta.kenSent === true || Array.isArray(meta.enhancements)))
+              ) {
+                void session
+                  .persistAppMarker(
+                    "user_hint",
+                    {
+                      ...(expandsToTemplate ? { command: text.trim() } : {}),
+                      ...(meta?.kenSent === true ? { kenSent: true } : {}),
+                      ...(Array.isArray(meta?.enhancements)
+                        ? { enhancements: meta.enhancements }
+                        : {}),
+                    },
+                    1,
+                  )
+                  .catch(() => {});
+              }
+              // Fresh user turn: clear any cancel flag left from a prior cycle so this
+              // turn's autopilot review can run.
+              await runUserTurn(
+                userTurnDeps,
+                text,
+                async () => {
+                  if (attachments.length > 0) {
+                    // Persist each attachment under .gg/uploads so files are inspectable
+                    // by the agent's tools, then prompt with the media as native blocks.
+                    await promptActiveSessionWithAttachments(text, prepared, {
+                      onAccepted: acceptFreshPrompt,
+                    });
+                  } else {
+                    // Pass the raw text straight through. AgentSession.prompt() is the
+                    // single source of truth for slash-command expansion (built-in +
+                    // `.gg/commands/*.md` custom), so the agent gets the right body
+                    // while the webview keeps showing the short `/name`.
+                    await promptActiveSession(text, undefined, { onAccepted: acceptFreshPrompt });
+                  }
+                  if (!startsAgentRun) acceptFreshPrompt();
+                },
+                workflowCommand,
+                () => {
+                  onAccepted();
+                  // runAgent swallows startup errors and can skip cancelled runs.
+                  // Never mistake settlement for durable acceptance.
+                  rejectUnaccepted();
+                },
+              );
+            },
+          });
+        })
+        .catch((error) => {
+          rejectUnaccepted(error);
+          broadcastError("error", "prompt failed", error);
+        })
+        .finally(() => {
+          if (claimedStart) runClaim.release();
         });
-        // After the user's run settles, kick off Ken's auto-review loop — but
-        // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-        // workflow commands (/compare, /bullet-proof, …) end with reports or
-        // A/B/C choices reserved for the USER; registry commands (/help) and
-        // failed runs add no assistant work to judge; a turn that ended in plan
-        // mode has a pending Accept/Reject modal Ken must not preempt. This is
-        // the ONLY entry point into the cycle besides the stranded-queue drain —
-        // it drives any follow-up GG Coder runs itself, so the shared runAgent
-        // finally never recurses.
-        const decision = shouldStartAutopilotCycle({
-          enabled: autopilot,
-          cancelled: autopilotCancelled,
-          planMode: session.getPlanMode(),
-          // A submitted plan (exit_plan fired) routes into the PLAN review
-          // branch — the cycle reviews the plan itself instead of skipping.
-          planPending: pendingPlanPath !== null,
-          workflowCommand,
-          assistantMessagesAdded: countAssistantMessages(session.getMessages()) - assistantsBefore,
-          // Skip the review API call outright for turns that only started a
-          // background process (dev server/watcher), ran a read-only lookup, or
-          // committed/pushed — Ken's autopilot contract already IGNOREs these,
-          // so there's no reason to pay for that verdict.
-          mechanicalOnly: isMechanicalOnlyTurn(
-            extractTurnToolCalls(session.getMessages(), messagesBefore),
-          ),
-        });
-        if (decision.start) {
-          log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
-          await runAutopilotCycle(text);
-        } else if (autopilot) {
-          log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
-        }
-        // A prompt sent while Ken was reviewing (build idle) queued but had no
-        // run to steer into — run it now as a fresh turn so it never strands.
-        await runStrandedQueue();
-      });
       return;
     }
 
@@ -2543,66 +5871,67 @@ async function createSession(
     // webview keeps the bubbles separate. The context digest is assembled fresh
     // from the BUILD session's transcript each turn (one-way mirror).
     if (method === "POST" && url === "/ken/prompt") {
-      void readBody(req).then(async (raw) => {
-        let text: string;
+      if (mode === "chat") {
+        json(res, 404, { error: "Ken is not available in GG Chat." });
+        return;
+      }
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let input: ReturnType<typeof parseKenPromptInput>;
         try {
-          text = (JSON.parse(raw) as { text?: string }).text ?? "";
+          input = parseKenPromptInput(JSON.parse(raw));
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (!text.trim()) {
-          json(res, 400, { error: "empty prompt" });
+        if (input === null) {
+          json(res, 400, {
+            error: "invalid_ken_prompt",
+            retryable: false,
+            message: "Non-empty text and target conversationId and activationEpoch are required.",
+          });
           return;
         }
-        if (kenRunning) {
-          json(res, 409, { error: "Ken is already thinking — wait for his reply." });
+        const result = kenLifecycle.prompt(input.text, input.target);
+        if (result.status !== 202) {
+          json(res, result.status, result.body);
           return;
         }
-        json(res, 202, { accepted: true });
-        kenRunning = true;
-        broadcast("ken_run_start", { text });
-        try {
-          const ken = await ensureKenSession();
-          const digest = await buildKenContext(
-            session,
-            cwd,
-            gitBranch,
-            text,
-            await loadWorkflowCommandSpecs(),
-            injectedAutopilotPrompts,
-          );
-          await ken.prompt(digest);
-          // Record the turn against the BUILD session so it persists + survives
-          // resume (advisory custom entry, never an LLM message). Reply is Ken's
-          // last assistant message; skip persistence if he produced nothing.
-          const reply = lastAssistantText(ken.getMessages());
-          if (reply.trim()) await session.persistKenTurn(text, reply);
-        } catch (err) {
-          broadcastError("ken_error", "ken run failed", err);
-        } finally {
-          kenRunning = false;
-          broadcast("ken_run_end", {});
-          const pending = pendingKenModel;
-          pendingKenModel = null;
-          if (pending) await syncKenModel(pending.provider, pending.model);
-        }
+        json(res, 202, { accepted: true, ken: result.identity });
+        await result.completion;
       });
       return;
     }
 
     if (method === "POST" && url === "/ken/cancel") {
-      kenAbort.abort();
-      kenAbort = new AbortController();
-      kenSession?.setSignal(kenAbort.signal);
-      kenRunning = false;
-      broadcast("ken_run_end", { cancelled: true });
-      json(res, 200, { cancelled: true });
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let identity;
+        try {
+          const body: unknown = JSON.parse(raw);
+          identity = parseKenRunIdentity(
+            body && typeof body === "object" && "ken" in body ? body.ken : null,
+          );
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!identity) {
+          json(res, 400, { error: "ken conversationId, activationEpoch and runId are required" });
+          return;
+        }
+        json(res, 200, { cancelled: kenLifecycle.cancel(identity) });
+      });
       return;
     }
 
     if (method === "POST" && url === "/autopilot") {
-      void readBody(req).then(async (raw) => {
+      if (mode === "chat") {
+        json(res, 404, { error: "Autopilot is not available in GG Chat." });
+        return;
+      }
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let enabled: boolean;
         try {
           enabled = Boolean((JSON.parse(raw) as { enabled?: boolean }).enabled);
@@ -2610,33 +5939,29 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        autopilot = enabled;
+        projectAutopilot.set(cwd, enabled);
         await saveAutopilot(cwd, enabled);
         log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
-        broadcast("autopilot", { autopilot: enabled });
-        json(res, 200, { autopilot: enabled });
+        json(res, 200, { autopilot: projectAutopilot.isEnabled(cwd) });
       });
       return;
     }
 
     if (method === "POST" && url === "/enhance") {
-      void readBody(req).then(async (raw) => {
-        let text: string;
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
         try {
-          text = (JSON.parse(raw) as { text?: string }).text ?? "";
+          body = JSON.parse(raw) as unknown;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (!text.trim()) {
-          json(res, 400, { error: "empty prompt" });
-          return;
-        }
-        // An independent read-only LLM call — touches no session state, so it's
-        // allowed even while a run is in flight.
+        // Enhancement is read-only, but validate its untrusted body before the
+        // model call so malformed or oversized prompts cannot reach the provider.
         try {
-          const result = await session.enhancePrompt(text);
-          json(res, 200, result);
+          const result = await runEnhancePromptRequest(body, (text) => session.enhancePrompt(text));
+          json(res, result.status, result.body);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           log("ERROR", "app-sidecar", "enhance failed", { message });
@@ -2660,12 +5985,41 @@ async function createSession(
     // duplicate audio across windows (the original per-window goal), now for
     // free. (To restore per-window radio, key playback by sessionId.)
     if (method === "GET" && url === "/radio") {
-      json(res, 200, { stations: RADIO_STATIONS, current: getCurrentStation() });
+      json(res, 200, {
+        stations: RADIO_STATIONS,
+        current: getCurrentStation(),
+        volume: getRadioVolume(),
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/radio/volume") {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let volume: number;
+        try {
+          volume = Number((JSON.parse(raw) as { volume?: number }).volume);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!Number.isFinite(volume)) {
+          json(res, 400, { error: "volume must be a number" });
+          return;
+        }
+        const result = setRadioVolume(volume);
+        if (!result.ok) {
+          json(res, 400, { error: result.error ?? "Radio volume failed to update." });
+          return;
+        }
+        json(res, 200, { current: getCurrentStation(), volume: getRadioVolume() });
+      });
       return;
     }
 
     if (method === "POST" && url === "/radio") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let station: string;
         try {
           station = (JSON.parse(raw) as { station?: string }).station ?? "";
@@ -2689,7 +6043,14 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/tasks/run") {
-      void readBody(req).then((raw) => {
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let id: string | null;
         let all: boolean;
         try {
@@ -2700,18 +6061,50 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (running) {
-          json(res, 409, { error: "cannot run a task while the agent is running" });
+        const busy = sessionBusyState();
+        if (isAppSidecarSessionBusy(busy)) {
+          json(res, 409, appSidecarSessionBusyConflictBody(busy));
+          return;
+        }
+        if (sessionMutations.owner) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
+        // No await between admission and claiming ownership. Internal review/plan
+        // transitions still use sessionMutations; the sweep owns their outer lifetime.
+        if (!taskSweepClaim.claim()) {
+          json(res, 409, appSidecarSessionBusyConflictBody(sessionBusyState()));
+          return;
+        }
+        const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
+        if (!releaseOperation) {
+          taskSweepClaim.release();
+          json(res, 409, { error: "configuration refresh in progress" });
           return;
         }
         json(res, 202, { accepted: true });
-        void runTasks(id, all);
+        void runTasks(id, all)
+          .catch((error) => {
+            // Provider failures are reported and swallowed by runAgent; this is
+            // the remaining accepted orchestration rejection, not a provider run.
+            broadcastError("error", "accepted task continuation failed", error, {
+              headline: all ? "Run All stopped" : "Task run stopped",
+              message: "Task setup or execution could not finish.",
+              guidance:
+                "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+            });
+          })
+          .finally(() => {
+            taskSweepClaim.release();
+            releaseOperation();
+          });
       });
       return;
     }
 
     if (method === "POST" && url === "/tasks/delete") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let id: string;
         try {
           id = (JSON.parse(raw) as { id?: string }).id ?? "";
@@ -2737,19 +6130,38 @@ async function createSession(
           if (await auth.hasProviderAuth(p)) loggedIn.push(p);
         }
         // Just the names, grouped by provider in registry order — the UI shows
-        // a clean multi-column list of model ids.
-        const models = MODELS.filter((m) => loggedIn.includes(m.provider)).map((m) => ({
-          id: m.id,
-          name: m.name,
-          provider: m.provider,
-        }));
+        // a clean multi-column list of model ids. Local models come from the
+        // runtime registry (populated by the background scan) and are always
+        // listed: their "login" is the endpoint answering a probe.
+        const models = getAllModels()
+          .filter((m) => m.provider === "local" || loggedIn.includes(m.provider))
+          .map((m) => {
+            if (m.provider !== "local") {
+              return { id: m.id, name: m.name, provider: m.provider };
+            }
+            const probed = findProbedModel(localProbes, m.id);
+            return {
+              id: m.id,
+              name: m.name,
+              provider: m.provider,
+              local: true,
+              endpoint: probed?.endpoint.label ?? parseLocalModelId(m.id)?.endpointId,
+              // A local model that can't call tools can't run the agent — the UI
+              // renders it disabled rather than hiding it, so the user learns why.
+              supportsTools: probed?.model.supportsTools ?? true,
+              contextWindow: m.contextWindow,
+              contextWindowKnown: probed?.model.contextWindowKnown ?? false,
+              supportsThinking: m.supportsThinking,
+            };
+          });
         json(res, 200, { models });
       })();
       return;
     }
 
     if (method === "POST" && url === "/model") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let modelId: string;
         try {
           modelId = (JSON.parse(raw) as { model?: string }).model ?? "";
@@ -2766,6 +6178,13 @@ async function createSession(
           json(res, 409, { error: "cannot switch model while running" });
           return;
         }
+        if (target.provider === "local") {
+          const problem = await localModelBlocker(target.id);
+          if (problem) {
+            json(res, 409, { error: problem });
+            return;
+          }
+        }
         await session.switchModel(target.provider, target.id);
         // Ken follows GG Coder's model only while un-pinned; a user-set Ken
         // override survives GG model switches untouched.
@@ -2777,9 +6196,8 @@ async function createSession(
         // CLI): keep thinking on at the first supported tier if it was on but
         // the prior level is unsupported here; leave it off if it was off.
         const prevLevel = session.getThinkingLevel();
-        if (prevLevel && !isThinkingLevelSupported(target.provider, target.id, prevLevel)) {
-          session.setThinkingLevel(getNextThinkingLevel(target.provider, target.id, undefined));
-        }
+        const clampedLevel = clampThinkingLevel(target.provider, target.id, prevLevel);
+        if (clampedLevel !== prevLevel) session.setThinkingLevel(clampedLevel);
         // Persist per-project so THIS window/project restores its own model on
         // restart (not the single global slot every window shares). Keep the
         // global write too as a "last used" fallback for never-opened projects
@@ -2812,18 +6230,80 @@ async function createSession(
       return;
     }
 
+    if (method === "POST" && url === "/context-profile") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const result = await runContextProfileRequest({
+          body,
+          state: session.getState(),
+          running: isAppSidecarSessionBusy(sessionBusyState()),
+          activeUsage: session.getContextUsage().used,
+          mutations: sessionMutations,
+          switchProfile: (nextProfile) => session.switchOpenAICodexContextProfile(nextProfile),
+        });
+        if (result.status === 200) {
+          broadcast("context_profile_change", result.body);
+          broadcast("extras", footerExtras());
+        }
+        json(res, result.status, result.body);
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/openai-codex-fast") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const result = await runOpenAICodexFastRequest({
+          body,
+          state: session.getState(),
+          running: isAppSidecarSessionBusy(sessionBusyState()),
+          mutations: sessionMutations,
+          switchFast: (enabled) => session.switchOpenAICodexFast(enabled),
+        });
+        if (result.status === 200) {
+          broadcast("fast_change", result.body);
+          broadcast("extras", footerExtras());
+        }
+        json(res, result.status, result.body);
+      });
+      return;
+    }
+
     // Set or clear Ken's model pin. Body: { model: "<id>" } to pin, or
     // { model: null } / "" to clear (Ken resumes following GG Coder). Applies
     // to BOTH Ken sessions (chat + autopilot reviewer); a switch landing while
     // either is mid-run defers via the pending-model mechanics.
     if (method === "POST" && url === "/ken/model") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let modelId: string | null;
         try {
           const parsed = (JSON.parse(raw) as { model?: string | null }).model;
           modelId = typeof parsed === "string" && parsed.trim() ? parsed.trim() : null;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        // Same lock as POST /model, for the same reason: this retargets Ken's
+        // chat session AND the autopilot reviewer, and `switchModel` on a
+        // session mid-turn races the stream it is already consuming. The
+        // footer picker is disabled to match; this is the enforcement.
+        if (running || kenLifecycle.running || autopilotReviewing) {
+          json(res, 409, { error: "cannot switch Ken's model while running" });
           return;
         }
         if (modelId === null) {
@@ -2859,8 +6339,41 @@ async function createSession(
       return;
     }
 
+    // Pending queued steering, for the composer's cancel affordance.
+    if (method === "GET" && url === "/queued") {
+      json(res, 200, { queued: session.listQueuedMessages() });
+      return;
+    }
+
+    // Cancel one pending queued message by id.
+    if (method === "POST" && url === "/queued/cancel") {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let id: string;
+        try {
+          id = (JSON.parse(raw) as { id?: string }).id ?? "";
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!id.trim()) {
+          json(res, 400, { error: "missing queued message id" });
+          return;
+        }
+        // `false` means it already drained into the run between render and
+        // click. That is a race, not an error, so report it as a normal result
+        // and let the client reconcile from the fresh list.
+        const cancelled = session.cancelQueuedMessage(id);
+        const queued = session.listQueuedMessages();
+        broadcast("queued", { count: queued.length, messages: queued });
+        json(res, 200, { cancelled, queued });
+      });
+      return;
+    }
+
     if (method === "POST" && url === "/kill") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let id: string;
         try {
           id = (JSON.parse(raw) as { id?: string }).id ?? "";
@@ -2880,120 +6393,359 @@ async function createSession(
       return;
     }
 
-    if (method === "POST" && url === "/thinking") {
-      const st = session.getState();
-      const next = getNextThinkingLevel(st.provider, st.model, session.getThinkingLevel());
-      session.setThinkingLevel(next);
-      // Persist per-project so THIS window restores its thinking state on
-      // restart; keep the global write as a fallback (mirrors the CLI).
-      void saveProjectModelPrefs(cwd, {
-        provider: st.provider,
-        model: st.model,
-        thinkingEnabled: !!next,
-        thinkingLevel: next ?? undefined,
-      }).then(() => persistThinkingLevel(paths.settingsFile, next));
-      const payload = {
-        thinkingLevel: next ?? null,
-        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-      };
-      broadcast("thinking_change", payload);
-      json(res, 200, payload);
-      return;
-    }
-
-    if (method === "POST" && url === "/cancel") {
-      cancelGeneration++;
-      abort.abort();
-      abort = new AbortController();
-      session.setSignal(abort.signal);
-      running = false;
-      // Stop a run-all sweep so the next pending task isn't auto-started.
-      taskRunAll = false;
-      // Stop any in-flight autopilot cycle: flag it so the loop bails between
-      // steps, and abort a review that's mid-prompt on the kenAuto session.
-      autopilotCancelled = true;
-      kenAutoAbort.abort();
-      kenAutoAbort = new AbortController();
-      kenAutoSession?.setSignal(kenAutoAbort.signal);
-      autopilotReviewing = false;
-      // Drop any queued steering and return it so the webview can restore it to
-      // the composer.
-      const drained = session.drainQueue();
-      broadcast("run_end", { cancelled: true });
-      broadcast("queued", { count: 0 });
-      json(res, 200, { cancelled: true, drained });
-      return;
-    }
-
-    if (method === "POST" && url === "/new-session") {
-      if (running) {
-        json(res, 409, { error: "cannot start a new session while running" });
-        return;
-      }
-      void session
-        .newSession()
-        .then(() => {
-          injectedAutopilotPrompts = [];
-          clearPendingPlan();
-          broadcast("session_reset", {});
-          json(res, 200, { ok: true });
-        })
-        .catch((err) => {
-          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-        });
-      return;
-    }
-
-    // Accept an approved plan and begin implementation in a FRESH session
-    // (mirrors the CLI's handleApprovePlan). The plan-mode conversation — all the
-    // research, file reads, and exploration done while drafting — must NOT bleed
-    // into the build, or it bloats the context and distracts the model. So:
-    //   1. newSession() wipes history + starts a new session file.
-    //   2. setApprovedPlan() bakes the plan into the fresh system prompt so the
-    //      model emits `[DONE:n]` markers the plan-progress widget reads.
-    //   3. session_reset tells the webview to clear its transcript; it then runs
-    //      the "implement it now" prompt in the clean session.
-    if (method === "POST" && url === "/plan/accept") {
-      void readBody(req).then(async (raw) => {
-        let planPath: string | undefined;
+    // Import a Claude Code / Codex / Cursor transcript into a resumable GG
+    // Coder session. The importer never throws — it returns a typed failure so
+    // the app can show the reason verbatim.
+    if (method === "POST" && url === "/import-transcript") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { path?: string; cwd?: string };
         try {
-          planPath = (JSON.parse(raw) as { planPath?: string }).planPath || undefined;
+          body = JSON.parse(raw) as { path?: string; cwd?: string };
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        if (running) {
-          json(res, 409, { error: "cannot accept a plan while the agent is running" });
+        const filePath = body.path?.trim();
+        if (!filePath) {
+          json(res, 400, { error: "missing transcript path" });
           return;
         }
-        // Manual accept, possibly racing Ken's autopilot plan review: the user
-        // always wins. Bump the plan generation (invalidates any in-flight
-        // review's verdict), stop the cycle, abort a mid-prompt review on the
-        // kenAuto session, and clear the spinner — autopilot_ignored renders
-        // nothing, so no stale "approve or reject" bubble ever lands. The
-        // webview's follow-up "implement" /prompt arrives as a fresh turn
-        // (resetting autopilotCancelled), so the implementation still gets its
-        // normal post-run review; if it lands while the cycle is winding down
-        // it queues and runStrandedQueue drains it as a fresh turn.
-        clearPendingPlan();
-        autopilotCancelled = true;
-        kenAutoAbort.abort();
-        kenAutoAbort = new AbortController();
-        kenAutoSession?.setSignal(kenAutoAbort.signal);
-        if (autopilotReviewing) {
-          autopilotReviewing = false;
-          broadcast("autopilot_ignored", {});
+        const result = await session.importForeignTranscript(filePath, {
+          ...(body.cwd ? { cwd: body.cwd } : {}),
+        });
+        json(res, result.ok ? 200 : 400, result);
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/thinking") {
+      // The in-flight request already carries its reasoning config, so a
+      // mid-run cycle cannot affect the turn the user is watching — it just
+      // persists a level the footer then reports for a run that never used it.
+      // Locked like POST /model; the footer button is disabled to match.
+      if (running) {
+        json(res, 409, { error: "cannot change reasoning level while running" });
+        return;
+      }
+      const st = session.getState();
+      const previous = session.getThinkingLevel();
+      const next = getNextThinkingLevel(st.provider, st.model, previous);
+      const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
+      if (!releaseOperation) {
+        json(res, 409, { error: "configuration refresh in progress" });
+        return;
+      }
+      session.setThinkingLevel(next);
+      // Report completion only after both project and global preferences persist.
+      void (async () => {
+        try {
+          await saveProjectModelPrefs(cwd, {
+            provider: st.provider,
+            model: st.model,
+            thinkingEnabled: !!next,
+            thinkingLevel: next ?? undefined,
+          });
+          await persistThinkingLevel(paths.settingsFile, next);
+          const payload = {
+            thinkingLevel: next ?? null,
+            supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+          };
+          broadcast("thinking_change", payload);
+          json(res, 200, payload);
+        } catch (error) {
+          session.setThinkingLevel(previous);
+          log("ERROR", "app-sidecar", "thinking preference persistence failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          json(res, 500, { error: "thinking preference persistence failed" });
+        } finally {
+          releaseOperation();
+        }
+      })();
+      return;
+    }
+
+    if (method === "POST" && url === "/cancel") {
+      void cancelActiveOperation()
+        .then((result) => {
+          if (result.status === "failed") {
+            json(res, 504, {
+              error: "cancel_failed",
+              reason: result.reason,
+              runState: result.runState,
+              drained: result.drained,
+            });
+            return;
+          }
+          json(res, 200, {
+            cancelled: result.status === "cancelled",
+            runState: result.runState,
+            drained: result.drained,
+          });
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.run.cancel");
+          broadcast("cancel_failed", { error: "cancel_failed", runState: runLifecycle.state });
+          json(res, 500, {
+            error: "cancel_failed",
+            message: error instanceof Error ? error.message : String(error),
+            runState: runLifecycle.state,
+          });
+        });
+      return;
+    }
+
+    const advancementRoute = parsePhaseAdvancementStartRoute(method, url);
+    if (advancementRoute) {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
+      void (async () => {
+        try {
+          const body = parsePhaseAdvancementStartBody(await readJsonBody(req, 8_192));
+          if (!body) {
+            json(res, 400, { error: "invalid Start next phase confirmation" });
+            return;
+          }
+          await startRoadmapPhase(
+            body.nextPhaseId,
+            (status, responseBody) => json(res, status, responseBody),
+            { checkpointId: advancementRoute.checkpointId, ...body },
+          );
+        } catch (error) {
+          if (error instanceof AppSidecarJsonBodyError) {
+            json(res, error.kind === "too-large" ? 413 : 400, {
+              error: `JSON request body ${error.kind}`,
+            });
+            return;
+          }
+          captureSidecarError(error, "app-sidecar.phase.advancement-confirmation");
+          json(res, 500, { error: "Start next phase failed" });
+        }
+      })();
+      return;
+    }
+
+    if (
+      handlePhaseStartRoute({
+        method,
+        url,
+        host,
+        respond: (status, body) => json(res, status, body),
+        start: (phaseId) => {
+          void startRoadmapPhase(phaseId, (status, body) => json(res, status, body));
+        },
+      })
+    ) {
+      return;
+    }
+
+    if (method === "POST" && url === "/new-session") {
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
+      void runAppSidecarNewSessionMutation({
+        busyState: sessionBusyState(),
+        mutations: sessionMutations,
+        perform: resetBuildSession,
+      }).then((result) => {
+        if (result.status === 500) {
+          captureSidecarError(result.error, "app-sidecar.session.new");
+        }
+        json(res, result.status, result.body);
+      });
+      return;
+    }
+
+    // Accept an approved plan and begin implementation in a FRESH session
+    // Only a human IPC carrying the exact persisted checkpoint identity may approve.
+    if (method === "POST" && url === "/plan/accept") {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let checkpointId: string;
+        let generation: number;
+        try {
+          const body = JSON.parse(raw) as Record<string, unknown>;
+          if (
+            Object.keys(body).length !== 2 ||
+            typeof body.checkpointId !== "string" ||
+            !Number.isSafeInteger(body.generation)
+          ) {
+            throw new Error("invalid");
+          }
+          checkpointId = body.checkpointId;
+          generation = body.generation as number;
+        } catch {
+          json(res, 400, { error: "invalid plan approval body" } satisfies PlanMutationFailure);
+          return;
+        }
+        if (isAppSidecarSessionBusy(sessionBusyState())) {
+          json(res, 409, {
+            error: "cannot accept a plan while the agent is running",
+          } satisfies PlanMutationFailure);
+          return;
+        }
+        const mutation = sessionMutations.tryAcquire("manual-plan-accept");
+        if (!mutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
         }
         try {
-          await session.newSession();
-          injectedAutopilotPrompts = [];
-          titleGenerated = false;
-          await session.setApprovedPlan(planPath);
-          broadcast("session_reset", {});
-          json(res, 200, { ok: true });
+          autopilotCancelled = true;
+          kenAutoAbort.abort();
+          kenAutoAbort = new AbortController();
+          kenAutoSession?.setSignal(kenAutoAbort.signal);
+          if (autopilotReviewing) {
+            autopilotReviewing = false;
+            broadcast("autopilot_ignored", {});
+          }
+          const accepted = await planHandoff.accept(checkpointId, generation);
+          if (accepted.status !== "committed") {
+            json(res, 409, {
+              error: "stale-plan-checkpoint",
+              pendingPlanReview: planGate.pending(),
+            } satisfies PlanMutationFailure);
+            return;
+          }
+          const planTotal = approvedPlanTotal;
+          const approvedCheckpoint = planGate.current();
+          const planOnly =
+            approvedCheckpoint?.state === "human-approved" &&
+            hasPlanOnlyBoundary(approvedCheckpoint.content);
+          broadcast("plan_accepted", {
+            checkpointId,
+            generation,
+            operationId: mutation.operationId,
+          });
+          if (!planOnly) {
+            broadcast("session_reset", { planTotal, operationId: mutation.operationId });
+            broadcast("plan_progress", planProgressPayload());
+          }
+          json(res, 200, {
+            ok: true,
+            planTotal,
+            operationId: mutation.operationId,
+          } satisfies PlanAcceptResult);
         } catch (err) {
-          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          captureSidecarError(err, "app-sidecar.plan.accept");
+          const activePhase = session.getActivePhaseContext();
+          if (err instanceof PhaseCheckpointError) {
+            json(res, 409, {
+              status: "failed",
+              operationId: mutation.operationId,
+              ...phaseCheckpointFailurePayload(err),
+            } satisfies PlanMutationFailure);
+          } else if (err instanceof RepositoryUnverifiableError && activePhase) {
+            json(res, 409, {
+              status: "failed",
+              code: err.code,
+              operationId: mutation.operationId,
+              message: err.message,
+              guidance: "Open this project from a Git repository, then retry approval.",
+              retryable: true,
+              phaseId: activePhase.phase.id,
+            } satisfies PlanMutationFailure);
+          } else {
+            json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          }
+        } finally {
+          mutation.release();
         }
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/plan/revise") {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        const body = parsePlanRevisionBody(raw);
+        if (body === null) {
+          json(res, 400, { error: "invalid plan revision body" } satisfies PlanMutationFailure);
+          return;
+        }
+        const { checkpointId, generation, feedback } = body;
+        if (isPlanRevisionSessionBusy({ running, autopilotActive, autopilotReviewing })) {
+          json(res, 409, { error: "session_busy" } satisfies PlanMutationFailure);
+          return;
+        }
+        const mutation = sessionMutations.tryAcquire("plan-revise");
+        if (!mutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
+        void executePlanRevisionRequest(
+          { checkpointId, generation, actor: "user", feedback },
+          {
+            requestRevision: planGate.requestRevision.bind(planGate),
+            supersedeAutopilot: async () => {
+              if (!autopilotActive) return;
+              // The exact checkpoint transition committed first, so a stale
+              // feedback request can never cancel the authoritative review.
+              // Cancellation then waits for the Autopilot lifecycle owner to
+              // settle and install fresh controllers before runAgent starts.
+              autopilotCancelled = true;
+              if (autopilotReviewing) {
+                autopilotReviewing = false;
+                broadcast("autopilot_ignored", {});
+              }
+              const cancellation = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
+              if (cancellation.status === "failed") {
+                throw new Error("Autopilot review did not settle before plan revision");
+              }
+            },
+            onCommitted: (checkpoint) => {
+              // Persisted feedback is the run identity. Exact retries reuse it
+              // without writing another authority marker.
+              broadcast("plan_revision_requested", {
+                checkpointId: checkpoint.checkpointId,
+                generation: checkpoint.generation,
+                feedback: checkpoint.feedback,
+              });
+              json(res, 202, {
+                ok: true,
+                operationId: mutation.operationId,
+              } satisfies PlanRevisionResult);
+            },
+            run: async (prompt) => {
+              await runAgent(prompt, async () => {
+                await session.setPlanMode(true);
+                broadcast("plan_enter", { reason: "Revise the submitted plan" });
+                await promptActiveSession(prompt);
+              });
+            },
+          },
+        )
+          .then((result) => {
+            if (result.status === "conflict") {
+              json(res, 409, {
+                error: "stale-plan-checkpoint",
+                pendingPlanReview: planGate.pending(),
+              } satisfies PlanMutationFailure);
+            }
+          })
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.plan.revise");
+            if (!res.headersSent) {
+              json(res, 500, { error: "plan-revision-failed" });
+            }
+          })
+          .finally(() => mutation.release());
       });
       return;
     }
@@ -3005,7 +6757,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/apikey") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let provider = "";
         let key: string;
         let variant: string | undefined;
@@ -3042,14 +6795,26 @@ async function createSession(
           ...(baseUrl ? { baseUrl } : {}),
         };
         await auth.setCredentials(storageKey, creds);
-        broadcast("auth_done", { provider });
+        if (provider === "openai") await refreshOpenAIAuthSessions();
+        // auth.json is shared by every window, so this is a global change:
+        // close their login modals and refresh their provider lists too.
+        broadcastAll("auth_done", { provider });
+        // `auth_done` means "a login succeeded" (modals close on it).
+        // `auth_change` means "auth.json changed" — which a DISCONNECT also is,
+        // so connection state has one signal that covers both directions.
+        broadcastAll("auth_change", { provider });
+        // A newly connected provider unlocks its models. `/models` filters on
+        // who is logged in, so every window's picker is now stale — without
+        // this the new models don't appear until the session is reopened.
+        broadcastAll("models_change", {});
         json(res, 200, { ok: true });
       });
       return;
     }
 
     if (method === "POST" && url === "/auth/oauth/start") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let provider = "";
         try {
           provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
@@ -3066,7 +6831,18 @@ async function createSession(
           json(res, 409, { error: "a login is already in progress" });
           return;
         }
+        // A login writes the shared ~/.gg/auth.json, so two windows racing the
+        // same provider means two browser tabs and two token exchanges whose
+        // writes clobber each other. The per-session flag above cannot see
+        // that — guard the provider daemon-wide as well.
+        if (oauthInFlightProviders.has(provider)) {
+          json(res, 409, {
+            error: `a ${meta.label} login is already in progress in another window`,
+          });
+          return;
+        }
         oauthInFlight = true;
+        oauthInFlightProviders.add(provider);
         json(res, 202, { accepted: true });
         void (async () => {
           const cb = authCallbacks();
@@ -3076,21 +6852,34 @@ async function createSession(
             if (provider === "anthropic") creds = await loginAnthropic(cb);
             else if (provider === "openai") creds = await loginOpenAI(cb);
             else if (provider === "gemini") creds = await loginGemini(cb);
-            else if (provider === "moonshot") {
-              creds = await loginKimi(cb);
-              storageKey = MOONSHOT_OAUTH_KEY;
+            else if (provider === "moonshot" || provider === "xai") {
+              // Subscription OAuth (Kimi plan / SuperGrok-X Premium) stores under
+              // a distinct key so it can coexist with the provider's API key.
+              creds = provider === "moonshot" ? await loginKimi(cb) : await loginXai(cb);
+              storageKey = dualAuthProvider(provider)!.oauthKey;
             } else {
               throw new Error(`OAuth not implemented for ${provider}`);
             }
             await auth.setCredentials(storageKey, creds);
-            broadcast("auth_done", { provider });
+            if (provider === "openai") await refreshOpenAIAuthSessions();
+            // Terminal outcome of a GLOBAL change: every window's login modal
+            // should close and its provider list refresh, not just the one
+            // that started the flow.
+            broadcastAll("auth_done", { provider });
+            broadcastAll("auth_change", { provider });
+            // The OAuth provider's models just became selectable everywhere.
+            broadcastAll("models_change", {});
           } catch (err) {
+            // Deliberately session-scoped: this is the outcome of ONE window's
+            // attempt. Another window that never pressed Connect has nothing to
+            // show an error about, and its modal correctly still offers login.
             broadcast("auth_error", {
               provider,
               message: err instanceof Error ? err.message : String(err),
             });
           } finally {
             oauthInFlight = false;
+            oauthInFlightProviders.delete(provider);
             pendingCode = null;
           }
         })();
@@ -3099,7 +6888,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/oauth/code") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let code: string;
         try {
           code = (JSON.parse(raw) as { code?: string }).code ?? "";
@@ -3118,29 +6908,279 @@ async function createSession(
       return;
     }
 
-    if (method === "POST" && url === "/auth/logout") {
-      void readBody(req).then(async (raw) => {
-        let provider: string;
+    if (method === "POST" && url.startsWith("/mcp/elicit/")) {
+      const id = decodeURIComponent(url.slice("/mcp/elicit/".length));
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let result: ElicitResult;
         try {
-          provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
+          const parsed = JSON.parse(raw) as {
+            action?: string;
+            content?: Record<string, unknown>;
+          };
+          if (
+            parsed.action !== "accept" &&
+            parsed.action !== "decline" &&
+            parsed.action !== "cancel"
+          ) {
+            json(res, 400, { error: "action must be accept, decline, or cancel" });
+            return;
+          }
+          result =
+            parsed.action === "accept"
+              ? ({ action: "accept", content: parsed.content ?? {} } as ElicitResult)
+              : { action: parsed.action };
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        await auth.clearCredentials(provider);
-        // Moonshot's OAuth credential lives under a distinct key — clear both so
-        // "disconnect" fully removes Kimi OAuth and the API key.
-        if (provider === "moonshot") await auth.clearCredentials(MOONSHOT_OAUTH_KEY);
-        // Xiaomi's API Credits credential lives under a distinct key — clear it
-        // too so "disconnect" fully removes both the Token Plan and Credits keys.
-        if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        // Unknown id means it already timed out or was cancelled by an abort —
+        // the tool call has moved on, so the answer has nowhere to go.
+        if (!elicitations.settle(id, result)) {
+          json(res, 409, { error: "no elicitation is awaiting a response" });
+          return;
+        }
+        json(res, 200, { ok: true });
+      });
+      return;
+    }
+
+    // Answer (or dismiss) an `ask_user` question band. The turn is blocked on
+    // this, so both paths must land: "answer" carries the picked values,
+    // "cancel" releases the tool call with no answer.
+    if (method === "POST" && url.startsWith("/ask/")) {
+      const id = decodeURIComponent(url.slice("/ask/".length));
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let result: AskUserResult;
+        try {
+          const parsed = JSON.parse(raw) as {
+            action?: string;
+            answers?: Record<string, unknown>;
+          };
+          if (parsed.action !== "answer" && parsed.action !== "cancel") {
+            json(res, 400, { error: "action must be answer or cancel" });
+            return;
+          }
+          if (parsed.action === "cancel") {
+            result = { action: "cancel" };
+          } else {
+            // Only strings and string arrays are answers; anything else is a
+            // malformed client, not a value to hand the model.
+            const answers: Record<string, string | string[]> = {};
+            for (const [key, value] of Object.entries(parsed.answers ?? {})) {
+              if (typeof value === "string") answers[key] = value;
+              else if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
+                answers[key] = value as string[];
+              }
+            }
+            result = { action: "answer", answers };
+          }
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!asks.settle(id, result)) {
+          json(res, 409, { error: "no question is awaiting an answer" });
+          return;
+        }
+        json(res, 200, { ok: true } satisfies AskUserAcknowledgement);
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/auth/logout") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let provider: string;
+        let logoutMethod: AuthMethod | undefined;
+        try {
+          const body = JSON.parse(raw) as { provider?: string; method?: string };
+          provider = body.provider ?? "";
+          logoutMethod =
+            body.method === "oauth" || body.method === "apikey" ? body.method : undefined;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const dual = dualAuthProvider(provider);
+        // A dual-auth provider can be disconnected one method at a time: dropping
+        // a spent API key should not sign the user out of their subscription, and
+        // vice versa. Omitting `method` still clears everything (the plain
+        // "Disconnect" action).
+        if (logoutMethod !== "apikey") {
+          await auth.clearCredentials(dual ? dual.oauthKey : provider);
+        }
+        if (logoutMethod !== "oauth") {
+          // Non-dual providers store their only credential under the provider id,
+          // so this covers both them and a dual provider's API key.
+          await auth.clearCredentials(provider);
+          // Xiaomi's API Credits credential lives under a distinct key — clear it
+          // too so "disconnect" fully removes both the Token Plan and Credits keys.
+          if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        }
+        if (provider === "openai") await refreshOpenAIAuthSessions();
         broadcast("auth_done", { provider });
+        broadcastAll("auth_change", { provider });
+        broadcastAll("models_change", {});
         json(res, 200, { ok: true });
       });
       return;
     }
 
     // ── Telegram config (mirrors `ggcoder telegram`) ─────────
+    // ── Local models ──────────────────────────────────────
+    // GET returns the last scan (cheap, no probing) so opening the modal is
+    // instant; POST /local/scan is the explicit refresh.
+    if (method === "GET" && url === "/local") {
+      json(res, 200, localStatePayload());
+      return;
+    }
+
+    if (method === "POST" && url === "/local/scan") {
+      void scanLocalModels(true)
+        .then(() => {
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, localStatePayload());
+        })
+        .catch((err: unknown) => {
+          broadcastError("error", "local model scan failed", err);
+          json(res, 500, { error: "Local model scan failed — see the sidecar log." });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/local/endpoints") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { label?: string; baseUrl?: string; apiKey?: string };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        try {
+          const endpoint = await addCustomEndpoint({
+            baseUrl: body.baseUrl ?? "",
+            ...(body.label ? { label: body.label } : {}),
+            ...(body.apiKey ? { apiKey: body.apiKey } : {}),
+          });
+          await scanLocalModels(true);
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, {
+            endpoint: { id: endpoint.id, label: endpoint.label },
+            ...localStatePayload(),
+          });
+        } catch (err) {
+          // Validation errors are the user's typo, not a system fault — 400 with
+          // the exact reason, and nothing in the transcript.
+          if (err instanceof LocalEndpointError) {
+            json(res, 400, { error: err.message });
+            return;
+          }
+          broadcastError("error", "add local endpoint failed", err);
+          json(res, 500, { error: "Could not save the endpoint — see the sidecar log." });
+        }
+      });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/local/endpoints/")) {
+      const id = decodeURIComponent(url.slice("/local/endpoints/".length));
+      void (async () => {
+        try {
+          await removeCustomEndpoint(id);
+          clearRuntimeModels(
+            (m) => m.provider === "local" && parseLocalModelId(m.id)?.endpointId === id,
+          );
+          await scanLocalModels(true);
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, localStatePayload());
+        } catch (err) {
+          if (err instanceof LocalEndpointError) {
+            json(res, 400, { error: err.message });
+            return;
+          }
+          broadcastError("error", "remove local endpoint failed", err);
+          json(res, 500, { error: "Could not remove the endpoint — see the sidecar log." });
+        }
+      })();
+      return;
+    }
+
+    // ── Hugging Face search & pull (the "Add from Hugging Face" modal) ──
+    if (method === "GET" && url === "/hf/pull") {
+      json(res, 200, hfPull ? { active: hfPullPayload(hfPull) } : { active: null });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/search") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { query?: unknown };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        // Strip control characters and cap length — this goes into a URL query.
+        const query = String(body.query ?? "")
+          // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+          .replace(/[\u0000-\u001f]/g, "")
+          .trim()
+          .slice(0, 100);
+        if (!query) {
+          json(res, 400, { error: "Type something to search for." });
+          return;
+        }
+        try {
+          json(res, 200, { models: await hfSearch(query) });
+        } catch (err) {
+          broadcastError("error", "hugging face search failed", err);
+          json(res, 502, {
+            error: `Hugging Face search failed — ${err instanceof Error ? err.message : "network error"}.`,
+          });
+        }
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/pull") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { repo?: unknown };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const repo = String(body.repo ?? "").trim();
+        if (!isValidHfRepoId(repo)) {
+          json(res, 400, { error: 'Expected a Hugging Face repo like "org/model".' });
+          return;
+        }
+        try {
+          json(res, 200, await startHfPull(repo));
+        } catch (err) {
+          const status =
+            err instanceof Error && "status" in err && typeof err.status === "number"
+              ? err.status
+              : 502;
+          if (status >= 500) broadcastError("error", "hugging face pull failed", err);
+          json(res, status, { error: err instanceof Error ? err.message : "Pull failed." });
+        }
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/pull/cancel") {
+      json(res, 200, { ok: cancelHfPull() });
+      return;
+    }
+
     if (method === "GET" && url === "/telegram") {
       void loadTelegramConfig().then((cfg) => {
         if (!cfg) {
@@ -3157,7 +7197,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/telegram") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let botTokenInput: string;
         let userIdInput: string;
         try {
@@ -3246,25 +7287,46 @@ async function createSession(
       return;
     }
 
+    // ── Agent Steroids (local code corpus) ───────────────────────────────
+    if (method === "GET" && url === "/steroids") {
+      void probeSteroids().then((status) => json(res, 200, status));
+      return;
+    }
+
+    if (method === "POST" && url === "/steroids/install") {
+      void installSteroids()
+        .then((status) => {
+          broadcast("steroids_change", status);
+          log("INFO", "app-sidecar", "steroids installed", { version: status.version });
+          json(res, 200, status);
+        })
+        .catch((err: unknown) => {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        });
+      return;
+    }
+
     // ── MCP server management (mirrors `ggcoder mcp`) ──────────────────
     // `targetCwd` (project scope) overrides the window cwd so a server can be
     // added/removed for ANY discovered project, not just this window's. Global
     // scope ignores it (always ~/.gg/mcp.json).
     if (method === "GET" && (url === "/mcp" || url.startsWith("/mcp?"))) {
       const targetCwd = new URL(url, `http://${host}`).searchParams.get("cwd") ?? cwd;
-      void buildMcpRows(targetCwd)
+      void buildMcpRows(targetCwd, paths.settingsFile)
         .then((servers) => json(res, 200, { servers }))
         .catch((err) => {
           log("ERROR", "app-sidecar", "buildMcpRows failed", {
             message: err instanceof Error ? err.message : String(err),
           });
-          json(res, 200, { servers: [] });
+          const failure = mcpManagementRouteFailure("list", err);
+          json(res, failure.status, { error: failure.error });
         });
       return;
     }
 
     if (method === "POST" && url === "/mcp/add") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let line: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -3300,10 +7362,20 @@ async function createSession(
           // persist step so a write failure returns a 500 instead of becoming
           // an unhandled rejection that would crash the sidecar.
           const probe = await probeMcp(config);
-          const saved = await addServer(config, scope, targetCwd, true);
+          const saved = await applyDesktopMcpMutation(
+            () => session,
+            () => addServer(config, scope, targetCwd, true),
+            (result) => result.ok,
+          );
           if (!saved.ok) {
             json(res, 400, { error: saved.error });
             return;
+          }
+          // Adding a project-scope server is an explicit trust signal — the
+          // user chose to put a server in this repo's .gg/mcp.json. Auto-trust
+          // the project so all project-scope servers connect on next load.
+          if (scope === "project") {
+            await session.trustProject(targetCwd);
           }
           json(res, 200, {
             ok: true,
@@ -3314,16 +7386,17 @@ async function createSession(
             requiresAuth: probe.requiresAuth,
           });
         } catch (err) {
-          json(res, 500, {
-            error: err instanceof Error ? err.message : String(err),
-          });
+          captureSidecarError(err, "app-sidecar.mcp.add", { server: config.name });
+          const failure = mcpManagementRouteFailure("add", err);
+          json(res, failure.status, { error: failure.error });
         }
       });
       return;
     }
 
     if (method === "POST" && url === "/mcp/remove") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -3350,10 +7423,24 @@ async function createSession(
           return;
         }
         const targetCwd = bodyCwd ?? cwd;
-        const removed = await removeServer(name, scope, targetCwd);
-        // Drop any saved OAuth tokens for this server so a re-add starts clean.
-        await new McpOAuthStore().clear(name).catch(() => {});
-        json(res, 200, { removed });
+        try {
+          const { removed } = await applyDesktopMcpMutation(
+            () => session,
+            async () => {
+              // Clear OAuth first: if credential cleanup fails, preserve the
+              // server config rather than reporting a partial removal as success.
+              await new McpOAuthStore().clear(name);
+              const removed = await removeServer(name, scope, targetCwd);
+              return { removed };
+            },
+            (result) => result.removed,
+          );
+          json(res, 200, { removed });
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.mcp.remove", { server: name });
+          const failure = mcpManagementRouteFailure("remove", err);
+          json(res, failure.status, { error: failure.error });
+        }
       });
       return;
     }
@@ -3364,7 +7451,8 @@ async function createSession(
     // `mcp_auth_error`. Responds 202 immediately and runs the flow in the
     // background (the browser round-trip can take a while).
     if (method === "POST" && url === "/mcp/login") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -3383,7 +7471,15 @@ async function createSession(
         }
         const scope: MCPScope = scopeValue === "project" ? "project" : "global";
         const targetCwd = bodyCwd ?? cwd;
-        const scoped = await getServer(name, targetCwd);
+        let scoped: Awaited<ReturnType<typeof getServer>>;
+        try {
+          scoped = await getServer(name, targetCwd);
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.mcp.login.config", { server: name });
+          const failure = mcpManagementRouteFailure("login", err);
+          json(res, failure.status, { error: failure.error });
+          return;
+        }
         if (!scoped || scoped.scope !== scope) {
           json(res, 404, { error: `No "${name}" server found.` });
           return;
@@ -3396,18 +7492,26 @@ async function createSession(
         broadcast("mcp_auth_status", { name, message: "Starting login\u2026" });
         const manager = new MCPClientManager();
         try {
-          const result = await manager.login(scoped.config, (authUrl) => {
-            broadcast("mcp_auth_url", { name, url: authUrl });
-          });
+          const result = await applyDesktopMcpMutation(
+            () => session,
+            () =>
+              manager.login(scoped.config, (authUrl) => {
+                broadcast("mcp_auth_url", { name, url: authUrl });
+              }),
+            (loginResult) => loginResult.ok,
+          );
           if (result.ok) {
             broadcast("mcp_auth_done", { name, toolCount: result.toolCount });
           } else {
-            broadcast("mcp_auth_error", { name, message: result.error ?? "Login failed." });
+            broadcast("mcp_auth_error", {
+              name,
+              message: "The OAuth flow did not complete. Retry sign-in.",
+            });
           }
-        } catch (err) {
+        } catch {
           broadcast("mcp_auth_error", {
             name,
-            message: err instanceof Error ? err.message : String(err),
+            message: "The OAuth flow did not complete. Retry sign-in.",
           });
         } finally {
           await manager.dispose().catch(() => {});
@@ -3420,31 +7524,71 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    programmaticChat.dispose();
+    unsubscribeAutopilot();
+    reminderCoordinator.unwatchSession(opts.id);
+    await phaseCandidates.dispose();
+    elicitations.cancelAll();
+    asks.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
+    gitPollStopped = true;
+    if (gitPoll) clearTimeout(gitPoll);
+    gitHubPollStopped = true;
+    if (gitHubPoll) clearTimeout(gitHubPoll);
+    if (phaseLeaseHeartbeat) clearInterval(phaseLeaseHeartbeat);
+    ciPoll.stop();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();
-    kenAbort.abort();
+    kenLifecycle.abort();
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});
-    await session.dispose().catch(() => {});
+    const disposalLease = session.getRoadmapPhaseLeaseMarker();
+    await session
+      .dispose(
+        disposalLease
+          ? () =>
+              releaseCurrentPhaseLease(
+                `session-dispose:${disposalLease.leaseId}:${disposalLease.fence}`,
+              )
+          : undefined,
+      )
+      .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-disposal"));
   }
 
   return {
     id: opts.id,
+    mode,
+    get chatAgent() {
+      return chatAgent;
+    },
     cwd,
     sessionPath: opts.sessionPath,
     session,
     clients,
     broadcast,
+    refreshOpenAIAuthState,
+    broadcastNotesChange,
+    getActivePhaseContext: () => session.getActivePhaseContext(),
+    cancelActiveOperation,
     handle,
     dispose,
+    isRunning: () => isAppSidecarSessionBusy(sessionBusyState()),
   };
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
+  log("ERROR", "app-sidecar", "daemon lifecycle exit", {
+    daemonPid: process.pid,
+    shellPid: process.ppid,
+    reason: "startup_failure",
+    message: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
+  captureSidecarError(err, "app-sidecar.main", { severity: "fatal" });
+  await flushSidecarErrors();
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`GG_APP_FATAL ${message}\n`);
   process.exit(1);

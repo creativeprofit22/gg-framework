@@ -1,0 +1,819 @@
+import { createHash } from "node:crypto";
+import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
+import {
+  NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
+  type NotesWorkspaceSnapshotV1,
+} from "@kenkaiiii/gg-core/project-notes";
+import { hasUnsafeShellSyntax, splitShellCommandSegments } from "../tools/read-only-bash.js";
+import { getSafeToolEnv } from "../tools/safe-env.js";
+
+export interface VerificationCommandClassification {
+  accepted: boolean;
+  /** False for ordinary shell work that was never plausibly a verification attempt. */
+  candidate: boolean;
+  /** True when the command can rewrite files (fixers, builders, emitters): the
+   *  verification gate bumps its mutation revision when such a check STARTS,
+   *  because earlier in-flight evidence cannot cover files it may change. A
+   *  rejected-but-non-mutating check (an unrecognized runner like `make test`)
+   * must NOT poison the revision — its green output is merely not evidence. */
+  mayMutate: boolean;
+  reason: string;
+}
+
+export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v2";
+
+export interface VerificationEvidence {
+  command: string;
+  status: "passed" | "failed" | "rejected" | "unavailable";
+  reason: string;
+}
+
+const LONG_RUNNING_FLAGS = new Set([
+  "--watch",
+  "--watchall",
+  "--watchall=false",
+  "--ui",
+  "--inspect",
+  "--inspect-brk",
+  "-w",
+]);
+const MUTATING_FLAGS = new Set([
+  "--init",
+  "--build",
+  "-b",
+  "--clean",
+  "--fix",
+  "--write",
+  "--update",
+  "-u",
+  "--updatesnapshot",
+  "--incremental",
+  "--tsbuildinfofile",
+  "--emitdeclarationonly",
+]);
+const AMBIGUOUS_FLAGS = new Set([
+  "--nocheck",
+  "--listfilesonly",
+  "--showconfig",
+  "--help",
+  "-h",
+  "--version",
+  "--generatetrace",
+  "--traceresolution",
+  "--diagnostics",
+  "--extendeddiagnostics",
+  "--generatecpuprofile",
+  "--collect-only",
+  "--listtests",
+]);
+const SAFE_PACKAGE_SCRIPTS =
+  /^(?:test(?::(?:unit|integration|e2e))?|check|typecheck|type-check|lint(?::check)?|format(?::check|-check)|prettier:check)$/i;
+const UNSAFE_PACKAGE_SCRIPTS =
+  /^(?:build|clean|dev|serve|start|watch|preview|prepare|install|format(?!:check$)|lint:fix|test:watch)(?::|$)/i;
+const VERIFIER_EXECUTABLES = new Set([
+  "tsc",
+  "vitest",
+  "jest",
+  "pytest",
+  "eslint",
+  "prettier",
+  "pyright",
+  "mypy",
+  "ruff",
+  "cargo",
+  "go",
+  "shellcheck",
+]);
+
+function tokenize(segment: string): string[] {
+  return segment
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
+function executableBasename(token: string | undefined): string {
+  return (
+    token
+      ?.replace(/^.*[\\/]/, "")
+      .replace(/\.exe$/i, "")
+      .toLowerCase() ?? ""
+  );
+}
+
+function hasVerifierExecutable(command: string): boolean {
+  return tokenize(command).some((token) => VERIFIER_EXECUTABLES.has(executableBasename(token)));
+}
+
+function lowerFlags(tokens: readonly string[]): Set<string> {
+  return new Set(
+    tokens.filter((token) => token.startsWith("-")).map((token) => token.toLowerCase()),
+  );
+}
+
+function hasFlag(flags: ReadonlySet<string>, denied: ReadonlySet<string>): boolean {
+  for (const flag of flags) {
+    const name = flag.split("=")[0];
+    if (denied.has(flag) || denied.has(name)) return true;
+  }
+  return false;
+}
+
+function rejected(
+  candidate: boolean,
+  reason: string,
+  mayMutate = false,
+): VerificationCommandClassification {
+  return { accepted: false, candidate, reason, mayMutate };
+}
+
+function accepted(reason: string): VerificationCommandClassification {
+  return { accepted: true, candidate: true, reason, mayMutate: false };
+}
+
+function classifyTsc(tokens: readonly string[]): VerificationCommandClassification {
+  const flags = lowerFlags(tokens);
+  if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running watch/debug mode");
+  if (hasFlag(flags, MUTATING_FLAGS))
+    return rejected(true, "mutating or artifact-producing mode", true);
+  if (hasFlag(flags, AMBIGUOUS_FLAGS) || flags.has("-v")) {
+    return rejected(true, "does not prove type correctness");
+  }
+  if (!flags.has("--noemit"))
+    // Without --noEmit tsc EMITS files, so it is both unproven and rewriting.
+    return rejected(true, "tsc must explicitly use --noEmit", true);
+  return accepted("bounded TypeScript no-emit check");
+}
+
+function classifyTestRunner(
+  executable: string,
+  tokens: readonly string[],
+): VerificationCommandClassification {
+  const flags = lowerFlags(tokens);
+  if (hasFlag(flags, LONG_RUNNING_FLAGS) || flags.has("--watch=false")) {
+    return rejected(true, "long-running or interactive test mode");
+  }
+  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating test/update mode", true);
+  if (hasFlag(flags, AMBIGUOUS_FLAGS)) return rejected(true, "does not execute the test suite");
+  if (executable === "vitest") {
+    const positional = tokens.slice(1).filter((token) => !token.startsWith("-"));
+    if (!positional.includes("run") && !flags.has("--run")) {
+      return rejected(true, "vitest must explicitly use one-shot run mode");
+    }
+  }
+  return accepted("bounded one-shot test check");
+}
+
+function classifyDirect(tokens: readonly string[]): VerificationCommandClassification {
+  const executable = executableBasename(tokens[0]);
+  if (!executable) return rejected(false, "empty command");
+  if (executable === "tsc") return classifyTsc(tokens);
+  if ((executable === "node" || executable === "node.exe") && tokens.includes("--test")) {
+    // simplification: require --test first; supporting preceding Node options
+    // needs option-arity parsing so script arguments cannot masquerade as flags.
+    if (tokens[1] !== "--test") return rejected(true, "--test must lead Node arguments");
+    if (tokens.some((token) => ["-e", "--eval", "-p", "--print"].includes(token))) {
+      return rejected(true, "inline evaluation is not verification");
+    }
+    return classifyTestRunner("node", tokens);
+  }
+  if (
+    /^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable) &&
+    tokens[1] === "-m" &&
+    ["pytest", "unittest"].includes(tokens[2])
+  ) {
+    return classifyTestRunner(tokens[2], tokens.slice(2));
+  }
+  if (executable === "vitest" || executable === "jest" || executable === "pytest") {
+    return classifyTestRunner(executable, tokens);
+  }
+
+  const flags = lowerFlags(tokens);
+  if (["eslint", "prettier", "ruff"].includes(executable)) {
+    if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running mode");
+    if (hasFlag(flags, MUTATING_FLAGS))
+      return rejected(true, "mutating formatter/linter mode", true);
+    if (hasFlag(flags, AMBIGUOUS_FLAGS)) return rejected(true, "does not execute a static check");
+    if (executable === "prettier" && !flags.has("--check")) {
+      return rejected(true, "prettier must explicitly use --check");
+    }
+    if (executable === "ruff" && tokens[1] === "format" && !flags.has("--check")) {
+      return rejected(true, "ruff format must explicitly use --check");
+    }
+    return accepted("bounded static check");
+  }
+  if (["pyright", "mypy", "shellcheck"].includes(executable)) {
+    if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running mode");
+    if (hasFlag(flags, AMBIGUOUS_FLAGS)) return rejected(true, "does not execute a static check");
+    return accepted("bounded static check");
+  }
+  if (executable === "cargo") {
+    const subcommand = tokens[1]?.toLowerCase();
+    if (subcommand === "build" || subcommand === "clean" || subcommand === "run") {
+      return rejected(true, "artifact-producing Cargo command", true);
+    }
+    if (subcommand === "fmt" && !flags.has("--check")) {
+      return rejected(true, "cargo fmt must explicitly use --check", true);
+    }
+    return ["check", "clippy", "test", "fmt"].includes(subcommand)
+      ? accepted("bounded Cargo check")
+      : rejected(false, "not a recognized verification command");
+  }
+  if (executable === "go") {
+    const subcommand = tokens[1]?.toLowerCase();
+    return subcommand === "test" || subcommand === "vet"
+      ? accepted("bounded Go check")
+      : rejected(
+          subcommand === "build" || subcommand === "clean",
+          "not a bounded Go check",
+          subcommand === "build", // go build writes artifacts; clean removes them
+        );
+  }
+  return rejected(hasVerifierExecutable(tokens.join(" ")), "not a recognized verification command");
+}
+
+function classifyPackageRunner(tokens: readonly string[]): VerificationCommandClassification {
+  const runner = tokens[0].toLowerCase();
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index].toLowerCase();
+    if (["--filter", "-f", "--dir", "-c"].includes(token)) {
+      index += 2;
+      continue;
+    }
+    if (
+      token === "--workspace-root" ||
+      token === "-w" ||
+      token.startsWith("--filter=") ||
+      token.startsWith("--dir=")
+    ) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  const action = tokens[index]?.toLowerCase();
+  if (!action) return rejected(false, "package runner has no command");
+  if (["exec", "x", "dlx"].includes(action)) return classifyDirect(tokens.slice(index + 1));
+
+  const scriptIndex = action === "run" ? index + 1 : index;
+  const script = tokens[scriptIndex]?.toLowerCase();
+  if (!script) return rejected(false, "package runner has no script");
+  if (UNSAFE_PACKAGE_SCRIPTS.test(script)) {
+    return rejected(true, "mutating, artifact-producing, or long-running package script", true);
+  }
+  if (!SAFE_PACKAGE_SCRIPTS.test(script)) {
+    // pnpm permits omitting exec for installed binaries, e.g. pnpm vitest run.
+    if (runner === "pnpm" && action !== "run") return classifyDirect(tokens.slice(index));
+    return rejected(false, "package script is not a recognized verification check");
+  }
+
+  const scriptArgs = tokens.slice(scriptIndex + 1).filter((token) => token !== "--");
+  const flags = lowerFlags(scriptArgs);
+  if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running package-script mode");
+  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating package-script mode", true);
+  if (hasFlag(flags, AMBIGUOUS_FLAGS))
+    return rejected(true, "package script does not prove correctness");
+  return accepted(`bounded ${runner} verification script`);
+}
+
+function classifySegment(segment: string): VerificationCommandClassification {
+  const candidate =
+    hasVerifierExecutable(segment) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(segment);
+  if (hasUnsafeShellSyntax(segment))
+    return rejected(candidate, "unsafe shell syntax or redirection");
+  const tokens = tokenize(segment);
+  const first = tokens[0]?.toLowerCase();
+  if (["pnpm", "npm", "yarn", "bun"].includes(first)) return classifyPackageRunner(tokens);
+  if (["npx", "bunx"].includes(first)) return classifyDirect(tokens.slice(1));
+  return classifyDirect(tokens);
+}
+
+/** tail/head with at most a line-count argument: pure output limiters. They
+ * cannot rewrite, filter, or otherwise transform what the check proved — the
+ * exit status (pipefail-protected) and the kept tail are the full evidence. */
+const PIPE_LIMITER = /^(?:tail|head)(?:\s+(?:-[1-9]\d*|-n\s*\d+|--lines(?:=|\s+)\d+))?\s*$/;
+
+/** Fail-closed classifier: bounded checks with narrowly allowed non-check preludes. */
+export function classifyVerificationCommand(command: string): VerificationCommandClassification {
+  const candidate =
+    hasVerifierExecutable(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
+  // Only && preserves fail-closed evidence across a chain. OR, semicolons, and
+  // newlines can still hide a failed check behind a later zero exit status.
+  if (command.includes("||") || command.includes(";") || command.includes("\n")) {
+    return rejected(candidate, "shell control operator can hide a failed check");
+  }
+  // Pipes are evidence ONLY as `check | tail/head`: the agent shell runs with
+  // pipefail, so the pipeline reports the check's own status, and a limiter
+  // cannot transform results. Any other pipe stage can (grep, tee, wc…) — rejected.
+  if (/(^|[^|])\|([^|]|$)/.test(command)) {
+    const stages = command.split("|");
+    const check = stages[0]!.replace(/\s*2>&1\s*$/, "").trim();
+    const limitersOk = stages.slice(1).every((stage) => PIPE_LIMITER.test(stage.trim()));
+    if (!limitersOk || !check) {
+      return rejected(candidate, "pipe stage can transform check results");
+    }
+    const head = classifyVerificationCommand(check);
+    return head.accepted
+      ? accepted("piped check with output limiter (pipefail)")
+      : rejected(head.candidate || candidate, head.reason, head.mayMutate);
+  }
+  const segments = splitShellCommandSegments(command);
+  if (segments.length === 0) return rejected(false, "empty command");
+  const results = segments.map((segment, index) => {
+    const tokens = tokenize(segment);
+    // A leading directory change is not itself evidence. && ensures it must
+    // succeed, and a real bounded check must still follow it.
+    if (
+      index < segments.length - 1 &&
+      tokens[0] === "cd" &&
+      tokens.length === 2 &&
+      !hasUnsafeShellSyntax(segment)
+    )
+      return accepted("working-directory prelude");
+    // Status is not evidence itself; a real check must follow through &&.
+    // simplification: only basic status flags; expand with vetted flags, not arbitrary Git commands.
+    if (
+      index < segments.length - 1 &&
+      /^git\s+status(?:\s+(?:--short|-s|--branch|-b|--porcelain(?:=[12])?))*$/.test(segment.trim())
+    )
+      return accepted("git status prelude");
+    return classifySegment(segment);
+  });
+  const firstRejected = results.find((result) => !result.accepted);
+  if (firstRejected) {
+    return rejected(
+      results.some((result) => result.candidate),
+      firstRejected.reason,
+      firstRejected.mayMutate,
+    );
+  }
+  return accepted(segments.length === 1 ? results[0].reason : "bounded verification command chain");
+}
+
+function resultText(result: ToolResult): string {
+  if (typeof result.content === "string") return result.content;
+  return result.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+const GENERIC_VERIFICATION_COMMAND_DISPLAY = "Approved verification command";
+const REDACTED_COMMAND_VALUE = "[REDACTED]";
+const SENSITIVE_COMMAND_NAME =
+  /(?:^|[-_])(?:auth(?:orization)?|token|password|passwd|passphrase|secret|credential|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|key|user(?:name)?|cookie)(?:$|[-_])/i;
+
+interface VerificationDisplayToken {
+  value: string;
+  quoted: boolean;
+}
+
+function tokenizeVerificationDisplay(command: string): VerificationDisplayToken[] | null {
+  if (!command || /[^\x20-\x7e]/.test(command)) return null;
+  const tokens: VerificationDisplayToken[] = [];
+  let value = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let quoted = false;
+  let started = false;
+  const flush = () => {
+    if (!started) return;
+    tokens.push({ value, quoted });
+    value = "";
+    quoted = false;
+    started = false;
+  };
+
+  for (const character of command) {
+    if (escaped) {
+      value += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      else if (character === "\\" && quote === '"') escaped = true;
+      else value += character;
+      started = true;
+      quoted = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      quoted = true;
+      started = true;
+    } else if (character === "\\") {
+      escaped = true;
+      started = true;
+    } else if (/\s/.test(character)) {
+      flush();
+    } else {
+      value += character;
+      started = true;
+    }
+  }
+  if (quote || escaped) return null;
+  flush();
+  return tokens.length > 0 ? tokens : null;
+}
+
+function isSensitiveCommandName(value: string): boolean {
+  const name = value.replace(/^--?/, "");
+  return (
+    SENSITIVE_COMMAND_NAME.test(name) || /(?:Auth|Token|Password|Secret|Credential|Key)$/.test(name)
+  );
+}
+
+function renderVerificationDisplayToken(token: VerificationDisplayToken): string {
+  return token.quoted || /\s/.test(token.value) ? JSON.stringify(token.value) : token.value;
+}
+
+/** Format untrusted verifier commands for durable Notes without exposing credential arguments. */
+export function formatVerificationCommandDisplay(command: string): string {
+  const tokens = tokenizeVerificationDisplay(command);
+  if (!tokens) return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+  const display: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const assignmentIndex = token.value.indexOf("=");
+    if (assignmentIndex > 0) {
+      display.push(`${token.value.slice(0, assignmentIndex)}=${REDACTED_COMMAND_VALUE}`);
+      continue;
+    }
+
+    const headerName = /^([^:]+):/.exec(token.value)?.[1];
+    if (headerName && isSensitiveCommandName(headerName)) {
+      display.push(`${headerName}: ${REDACTED_COMMAND_VALUE}`);
+      continue;
+    }
+
+    const isHeaderFlag = token.value === "-H" || token.value.toLowerCase() === "--header";
+    const isSensitiveShortFlag = /^-[pPktu]$/.test(token.value);
+    if (isHeaderFlag || isSensitiveShortFlag || isSensitiveCommandName(token.value)) {
+      const next = tokens[index + 1];
+      if (next?.value === "=" || next?.value === ":") {
+        return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+      }
+      display.push(renderVerificationDisplayToken(token));
+      if (next) {
+        display.push(REDACTED_COMMAND_VALUE);
+        index += 1;
+      }
+      continue;
+    }
+
+    if (/^(?:bearer|basic)$/i.test(token.value)) {
+      display.push(token.value, REDACTED_COMMAND_VALUE);
+      if (tokens[index + 1]) index += 1;
+      continue;
+    }
+    if (token.quoted || /:\/\/[^/\s@]+@/.test(token.value)) {
+      return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+    }
+    display.push(renderVerificationDisplayToken(token));
+  }
+
+  const formatted = display.join(" ").slice(0, NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH);
+  return formatted || GENERIC_VERIFICATION_COMMAND_DISPLAY;
+}
+/** Extract harness-owned evidence from completed bash calls in a transcript. */
+export function collectVerificationEvidence(
+  messages: readonly Message[],
+  includeMissingResults = false,
+): VerificationEvidence[] {
+  const calls = new Map<
+    string,
+    { command: string; classification: VerificationCommandClassification; background: boolean }
+  >();
+  const evidence: VerificationEvidence[] = [];
+
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const part of message.content as ContentPart[]) {
+        if (part.type !== "tool_call" || part.name !== "bash") continue;
+        const command = typeof part.args.command === "string" ? part.args.command.trim() : "";
+        const background = part.args.run_in_background === true || part.args.persist === true;
+        calls.set(part.id, {
+          command,
+          classification: classifyVerificationCommand(command),
+          background,
+        });
+      }
+    }
+    if (message.role !== "tool") continue;
+    for (const result of message.content as ToolResult[]) {
+      const call = calls.get(result.toolCallId);
+      if (!call || !call.classification.candidate) continue;
+      calls.delete(result.toolCallId);
+      if (call.background) {
+        evidence.push({
+          command: call.command,
+          status: "rejected",
+          reason: "background or persistent commands are not bounded evidence",
+        });
+        continue;
+      }
+      if (!call.classification.accepted) {
+        evidence.push({
+          command: call.command,
+          status: "rejected",
+          reason: call.classification.reason,
+        });
+        continue;
+      }
+      const exit = /^Exit code:\s*(-?\d+)(?:\s|$)/i.exec(resultText(result).trim());
+      const passed = !result.isError && exit?.[1] === "0";
+      evidence.push({
+        command: call.command,
+        status: passed ? "passed" : exit ? "failed" : "unavailable",
+        reason: passed
+          ? call.classification.reason
+          : exit
+            ? "bounded check did not exit successfully"
+            : "execution outcome unavailable from retained transcript",
+      });
+    }
+  }
+  if (includeMissingResults) {
+    for (const call of calls.values()) {
+      if (!call.classification.candidate) continue;
+      evidence.push({
+        command: call.command,
+        status: "unavailable",
+        reason: "execution outcome unavailable from retained transcript",
+      });
+    }
+  }
+  return evidence;
+}
+
+export type RoadmapShellEvidence = Omit<VerificationEvidence, "status"> & {
+  status: VerificationEvidence["status"] | "unclassified";
+  executionId?: string;
+  observedAt?: string;
+  cwd?: string;
+  safeToolEnvironmentDigest?: string;
+  workspace?: NotesWorkspaceSnapshotV1;
+  classifierVersion?: string;
+  terminalReason?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  elapsedMs?: number;
+  timeoutMs?: number;
+  logPath?: string;
+};
+
+export function safeToolEnvironmentDigest(
+  environment: Readonly<Record<string, string>> = getSafeToolEnv(),
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.entries(environment).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      ),
+    )
+    .digest("hex");
+}
+
+const READ_ONLY_OR_METADATA_TOOLS = new Set([
+  "code_nav",
+  "code_search",
+  "find",
+  "grep",
+  "ls",
+  "read",
+  "roadmap_bind",
+  "roadmap_checkpoint",
+  "roadmap_inspect",
+  "roadmap_phase_draft",
+  "roadmap_status",
+  "skill",
+  "task_output",
+  "tasks",
+  "tool_search",
+  "web_fetch",
+  "web_search",
+]);
+
+function isWorkspaceMutation(call: { name: string; args: Record<string, unknown> }): boolean {
+  if (call.name === "bash") {
+    const command = typeof call.args.command === "string" ? call.args.command.trim() : "";
+    return !classifyVerificationCommand(command).accepted;
+  }
+  return !READ_ONLY_OR_METADATA_TOOLS.has(call.name);
+}
+
+export interface SessionVerificationEvidenceLedgerSnapshot {
+  currentEvidence: RoadmapShellEvidence[];
+  staleEvidence: RoadmapShellEvidence[];
+}
+
+interface BashExecutionDiagnostics {
+  executionId?: unknown;
+  command?: unknown;
+  reason?: unknown;
+  exitCode?: unknown;
+  cwd?: unknown;
+  startedAt?: unknown;
+  signal?: unknown;
+  elapsedMs?: unknown;
+  timeoutMs?: unknown;
+  logPath?: unknown;
+}
+
+// simplification: Retain 100 executions; persist per-phase evidence if deeper history is required.
+const SESSION_VERIFICATION_LEDGER_MAX_ENTRIES = 100;
+const SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH = 128;
+
+/** Session-owned harness evidence; transcript compaction cannot rewrite this ledger. */
+export class SessionVerificationEvidenceLedger {
+  private generation = 0;
+  private readonly entries = new Map<
+    string,
+    { generation: number; evidence: RoadmapShellEvidence }
+  >();
+
+  get revision(): number {
+    return this.generation;
+  }
+
+  recordToolResult(input: {
+    /** Captured by the host at tool start, never from model arguments. */
+    evidenceRevision?: number;
+    name: string;
+    args: Record<string, unknown>;
+    isError: boolean;
+    details?: unknown;
+    workspace?: NotesWorkspaceSnapshotV1;
+  }): void {
+    if (isWorkspaceMutation(input)) this.generation += 1;
+    if (input.name !== "bash") return;
+
+    const details = input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined;
+    const diagnostics = details?.bashDiagnostics;
+    const executionId =
+      typeof diagnostics?.executionId === "string" ? diagnostics.executionId.trim() : "";
+    const command = typeof diagnostics?.command === "string" ? diagnostics.command.trim() : "";
+    const requestedCommand =
+      typeof input.args.command === "string" ? input.args.command.trim() : "";
+    const cwd = typeof diagnostics?.cwd === "string" ? diagnostics.cwd.trim() : "";
+    const startedAt = typeof diagnostics?.startedAt === "number" ? diagnostics.startedAt : NaN;
+    if (
+      !executionId ||
+      executionId.length > SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH ||
+      !command ||
+      command.length > NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH ||
+      command !== requestedCommand ||
+      !cwd ||
+      !Number.isFinite(startedAt)
+    ) {
+      return;
+    }
+
+    const background = input.args.run_in_background === true || input.args.persist === true;
+    let evidence: RoadmapShellEvidence;
+    if (background) {
+      evidence = {
+        command,
+        status: "unavailable",
+        reason: "final outcome unavailable from this background or persistent command response",
+      };
+    } else {
+      const passed =
+        !input.isError && diagnostics?.reason === "completed" && diagnostics.exitCode === 0;
+      evidence = {
+        command,
+        status: passed
+          ? "passed"
+          : ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
+                String(diagnostics?.reason),
+              )
+            ? "failed"
+            : "unavailable",
+        reason: passed
+          ? "command exited successfully; requirement coverage is not certified"
+          : diagnostics?.reason === "spawnError"
+            ? "launch failed"
+            : diagnostics?.reason === "timedOut"
+              ? "timed out"
+              : diagnostics?.reason === "aborted"
+                ? "cancelled"
+                : typeof diagnostics?.exitCode === "number" &&
+                    Number.isInteger(diagnostics.exitCode) &&
+                    diagnostics.exitCode !== 0
+                  ? `failed (exit ${diagnostics.exitCode})`
+                  : diagnostics?.reason === "nonZeroExit"
+                    ? "failed (no numeric exit code)"
+                    : diagnostics?.reason === "completed"
+                      ? "inconsistent completion metadata"
+                      : "execution outcome unavailable",
+      };
+    }
+    Object.assign(evidence, {
+      executionId,
+      observedAt: new Date(startedAt).toISOString(),
+      cwd,
+      safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
+    });
+    if (
+      ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
+        String(diagnostics?.reason),
+      )
+    ) {
+      evidence.terminalReason = String(diagnostics?.reason);
+    }
+    if (
+      diagnostics?.exitCode === null ||
+      (typeof diagnostics?.exitCode === "number" && Number.isSafeInteger(diagnostics.exitCode))
+    ) {
+      evidence.exitCode = diagnostics.exitCode;
+    }
+    if (
+      diagnostics?.signal === null ||
+      (typeof diagnostics?.signal === "string" && /^SIG[A-Z0-9]{1,20}$/.test(diagnostics.signal))
+    ) {
+      evidence.signal = diagnostics.signal;
+    }
+    for (const key of ["elapsedMs", "timeoutMs"] as const) {
+      const value = diagnostics?.[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) evidence[key] = value;
+    }
+    if (
+      typeof diagnostics?.logPath === "string" &&
+      diagnostics.logPath.length <= 2048 &&
+      !Array.from(diagnostics.logPath).some((character) => character.charCodeAt(0) < 32)
+    ) {
+      evidence.logPath = diagnostics.logPath;
+    }
+    if (input.workspace) {
+      evidence.workspace = structuredClone(input.workspace);
+      evidence.classifierVersion = ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
+    }
+    const existing = this.entries.get(executionId);
+    if (existing) return;
+    this.entries.set(executionId, {
+      generation: input.evidenceRevision ?? this.generation,
+      evidence,
+    });
+    while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
+      const oldestExecutionId = this.entries.keys().next().value;
+      if (oldestExecutionId === undefined) break;
+      this.entries.delete(oldestExecutionId);
+    }
+  }
+
+  snapshot(): SessionVerificationEvidenceLedgerSnapshot {
+    const currentEvidence: RoadmapShellEvidence[] = [];
+    const staleEvidence: RoadmapShellEvidence[] = [];
+    for (const entry of this.entries.values()) {
+      (entry.generation === this.generation ? currentEvidence : staleEvidence).push({
+        ...entry.evidence,
+      });
+    }
+    return { currentEvidence, staleEvidence };
+  }
+
+  clear(): void {
+    this.generation = 0;
+    this.entries.clear();
+  }
+}
+
+/** Partition evidence after the latest conservative workspace-mutation boundary. */
+export function partitionVerificationMessagesForWorkspaceMutation(messages: readonly Message[]): {
+  currentMessages: Message[];
+  staleMessages: Message[];
+} {
+  const calls = new Map<
+    string,
+    { name: string; args: Record<string, unknown>; messageIndex: number }
+  >();
+  let boundary = 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const part of message.content as ContentPart[]) {
+        if (part.type !== "tool_call") continue;
+        calls.set(part.id, { name: part.name, args: part.args, messageIndex: index });
+      }
+    }
+    if (message.role !== "tool") continue;
+    for (const result of message.content as ToolResult[]) {
+      const call = calls.get(result.toolCallId);
+      if (call && isWorkspaceMutation(call)) boundary = Math.max(boundary, call.messageIndex);
+    }
+  }
+
+  return {
+    staleMessages: messages.slice(0, boundary),
+    currentMessages: messages.slice(boundary),
+  };
+}

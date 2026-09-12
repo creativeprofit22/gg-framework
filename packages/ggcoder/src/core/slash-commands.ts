@@ -1,3 +1,5 @@
+import { isGgApp } from "./runtime-mode.js";
+
 // ── Types ──────────────────────────────────────────────────
 
 export interface SlashCommandContext {
@@ -14,6 +16,14 @@ export interface SlashCommandContext {
   branch: (stepsBack?: number) => Promise<string>;
   /** List all branches in the current session. */
   listBranches: () => Promise<string>;
+  /** Add another workspace root (tools + write guard + system prompt). */
+  addDirectory: (dir: string) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Remove an exact workspace root previously added this session. */
+  removeDirectory: (
+    dir: string,
+  ) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Extra workspace roots added this session. */
+  getAdditionalRoots: () => string[];
 }
 
 export interface SlashCommand {
@@ -65,9 +75,10 @@ export class SlashCommandRegistry {
   parse(input: string): { name: string; args: string } | null {
     const trimmed = input.trim();
     if (!trimmed.startsWith("/")) return null;
-    const spaceIndex = trimmed.indexOf(" ");
-    const name = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex);
-    const args = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+    const commandText = trimmed.slice(1);
+    const separatorIndex = commandText.search(/\s/);
+    const name = separatorIndex === -1 ? commandText : commandText.slice(0, separatorIndex);
+    const args = separatorIndex === -1 ? "" : commandText.slice(separatorIndex + 1).trim();
     return { name, args };
   }
 
@@ -147,13 +158,9 @@ export function createBuiltinCommands(): SlashCommand[] {
     {
       name: "session",
       aliases: ["s"],
-      description: "List sessions or create new",
-      usage: "/session [list|new]",
-      async execute(args, ctx) {
-        if (args === "new" || args === "n") {
-          await ctx.newSession();
-          return "New session created.";
-        }
+      description: "List sessions (use /new for a new session)",
+      usage: "/session",
+      async execute(_args, ctx) {
         return ctx.listSessions();
       },
     },
@@ -190,13 +197,49 @@ export function createBuiltinCommands(): SlashCommand[] {
       },
     },
     {
+      name: "add-dir",
+      aliases: ["adddir"],
+      description: "Add another project folder to this workspace",
+      usage: "/add-dir [path] — no path lists the current roots",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots. Use /add-dir <path> to add one."
+            : `Additional roots:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.addDirectory(args);
+        return result.ok ? `Added workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
+      name: "remove-dir",
+      aliases: ["removedir"],
+      description: "Remove an added project folder from this workspace",
+      usage: "/remove-dir [path] — no path lists roots available to remove",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots to remove."
+            : `Choose a root to remove:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.removeDirectory(args);
+        return result.ok ? `Removed workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
       name: "rewind",
       aliases: [],
       description: "Restore files/conversation to an earlier checkpoint",
       usage: "/rewind — pick a checkpoint, then code / conversation / both",
       execute() {
-        // Handled in App.tsx (needs React state); listed here for /help.
-        return "Use /rewind to open the checkpoint picker.";
+        // The real implementation lives in App.tsx (it needs React state to
+        // drive the picker) and intercepts before the registry, so this only
+        // runs where no picker exists — today that's the gg-app sidecar.
+        return isGgApp()
+          ? "/rewind is only available in the ggcoder terminal app — the desktop app has no checkpoint picker yet."
+          : "Checkpoint picker unavailable in this context.";
       },
     },
     {

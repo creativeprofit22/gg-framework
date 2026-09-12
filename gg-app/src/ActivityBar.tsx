@@ -21,6 +21,31 @@ export const SPINNER_FRAME_MS = 80;
 const FRAMES = SPINNER_FRAMES;
 const FRAME_MS = SPINNER_FRAME_MS;
 
+/**
+ * Idle-line variations for the ready state — rotated so the quiet line under
+ * the transcript isn't always the same "Ready for work". Re-rolled each time
+ * the bar returns to the bare idle state (never the same phrase twice in a
+ * row). Tone: deadpan, a little self-deprecating about being an idle AI —
+ * funny like the wake screen, never meme-speak. The original stays first.
+ */
+const READY_PHRASES = [
+  "Ready for work",
+  "Ready when you are",
+  "Your move",
+  "Standing by. Obviously.",
+  "Waiting on you, as usual",
+  "Doing nothing, expertly",
+  "Napping, but professionally",
+  "Polishing my tokens",
+  "Idling at 0 tokens/sec",
+  "Stretching my context window",
+] as const;
+
+function pickReadyPhrase(exclude?: string): string {
+  const pool = exclude ? READY_PHRASES.filter((p) => p !== exclude) : READY_PHRASES;
+  return pool[Math.floor(Math.random() * pool.length)] ?? "Ready for work";
+}
+
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -39,6 +64,8 @@ export function formatTokenCount(n: number): string {
 
 interface Props {
   running: boolean;
+  /** Cancellation was requested and is awaiting provider settlement. */
+  cancelling?: boolean;
   /** Accumulated output tokens for the current/just-finished run. */
   tokens: number;
   /** Done-status phrase shown when a run just finished (e.g. "Brewed up a response in 12s"). */
@@ -103,6 +130,7 @@ function ToolsToggle({
  */
 export function ActivityBar({
   running,
+  cancelling = false,
   tokens,
   doneStatus,
   isThinking,
@@ -125,6 +153,14 @@ export function ActivityBar({
   const [elapsed, setElapsed] = useState(0);
   const [, setNow] = useState(0);
   const startRef = useRef(0);
+  // Idle ready-line phrase: random per mount, re-rolled every time the bar
+  // comes back to the bare idle state (excluding the current one, so it
+  // actually changes).
+  const [readyPhrase, setReadyPhrase] = useState(() => pickReadyPhrase());
+  const bareIdle = !running && !doneStatus;
+  useEffect(() => {
+    if (bareIdle) setReadyPhrase((cur) => pickReadyPhrase(cur));
+  }, [bareIdle]);
 
   useEffect(() => {
     if (!running) {
@@ -145,10 +181,11 @@ export function ActivityBar({
     };
   }, [running]);
 
-  // Plan-step progress (amber "Plan Steps n/total"), shown whenever an approved
-  // plan is being implemented — mirrors the ggcoder CLI activity bar.
+  // Plan-step progress is live run feedback, not durable idle status. Keeping
+  // it mounted after run_end made a blocked/malformed marker sequence look like
+  // active work forever, including the misleading "x/x" stale state.
   const planBadge =
-    planTotal > 0 ? (
+    running && planTotal > 0 && planDone < planTotal ? (
       <span className="plan-steps-badge">
         <span style={{ color: theme.warning }}>{"Plan Steps"}</span>{" "}
         <span style={{ color: theme.textDim }}>
@@ -178,12 +215,11 @@ export function ActivityBar({
             <span className="statusrow-icon" style={{ color: theme.accent }}>
               {"\u276f"}
             </span>
-            <span>Ready for work</span>
+            <span>{readyPhrase}</span>
           </span>
         )}
-        {planBadge && <span style={{ marginLeft: "auto" }}>{planBadge}</span>}
         {showToolsToggle && onToggleTools && (
-          <span className="statusrow-tools-toggle" style={{ marginLeft: planBadge ? 8 : "auto" }}>
+          <span className="statusrow-tools-toggle" style={{ marginLeft: "auto" }}>
             <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
           </span>
         )}
@@ -211,9 +247,18 @@ export function ActivityBar({
   if (thinkingLabel) meta.push({ text: thinkingLabel, thinking: true });
 
   return (
-    <div className="statusrow running" style={{ color: theme.textMuted }}>
+    <div
+      className="statusrow running"
+      style={{ color: theme.textMuted }}
+      role="status"
+      aria-live="polite"
+    >
       <span className="statusrow-left">
-        <span className="statusrow-icon spinner" style={{ color: theme.primary }}>
+        <span
+          className="statusrow-icon spinner"
+          style={{ color: theme.primary }}
+          aria-hidden="true"
+        >
           {FRAMES[frame]}
         </span>
         <span className="working" style={{ color: theme.text }}>
@@ -245,8 +290,14 @@ export function ActivityBar({
         {showToolsToggle && onToggleTools && (
           <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
         )}
-        <button className="cancel" style={{ color: theme.error }} onClick={onCancel}>
-          esc to cancel
+        <button
+          className="cancel"
+          style={{ color: cancelling ? theme.textMuted : theme.error }}
+          onClick={onCancel}
+          disabled={cancelling}
+          aria-label={cancelling ? "Cancellation in progress" : "Cancel agent run"}
+        >
+          {cancelling ? "Cancelling..." : "esc to cancel"}
         </button>
       </span>
     </div>

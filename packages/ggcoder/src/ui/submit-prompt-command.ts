@@ -53,6 +53,7 @@ export async function submitPromptCommand({
     inputImages,
     modelSupportsImages,
     modelSupportsVideo,
+    modelInfo?.provider,
   );
 
   const userItem: UserItem = {

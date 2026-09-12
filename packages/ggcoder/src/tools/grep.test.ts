@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createGrepTool } from "./grep.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 function context() {
   return { signal: new AbortController().signal, toolCallId: "test" };
@@ -22,5 +23,105 @@ describe("createGrepTool", () => {
     expect(result).toContain("a.txt:1:needle");
     expect(result).not.toContain("z.txt:1:needle");
     expect(result).toContain("[Truncated at 1 matches]");
+  });
+
+  it("accepts a leading (?i) as a case-insensitive regex flag", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-inline-flag-"));
+    await fs.writeFile(path.join(tmpDir, "deploy.txt"), "Deploy to Railway\n");
+
+    const result = await createGrepTool(tmpDir).execute(
+      { pattern: "(?i)deploy|railway", include: "*.txt" },
+      context(),
+    );
+
+    expect(result).toContain("deploy.txt:1:Deploy to Railway");
+  });
+
+  it.each(["(a+)+$", "(\\w+\\s?)*$", "(x*){2,}", "((ab)+)+"])(
+    "rejects nested-quantifier pattern %s before touching the filesystem",
+    async (pattern) => {
+      let touched = false;
+      const ops: ToolOperations = {
+        ...localOperations,
+        stat: (p) => {
+          touched = true;
+          return localOperations.stat(p);
+        },
+      };
+
+      await expect(
+        createGrepTool("/nonexistent-root", ops).execute({ pattern }, context()),
+      ).rejects.toThrow(/nested quantifier/);
+      expect(touched).toBe(false);
+    },
+  );
+
+  it("allows a quantified group whose body has no quantifier", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-safe-quant-"));
+    await fs.writeFile(path.join(tmpDir, "a.txt"), "abab\n");
+
+    const result = await createGrepTool(tmpDir).execute(
+      { pattern: "(ab)+", include: "*.txt" },
+      context(),
+    );
+
+    expect(result).toContain("a.txt:1:abab");
+  });
+
+  it.each(["(?:ab)+", "(?:ab|ba)+", "(?:a|b)*b", "(\\d+)?ab", "(a+){1,3}"])(
+    "allows benign pattern %s",
+    async (pattern) => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-benign-"));
+      await fs.writeFile(path.join(tmpDir, "a.txt"), "abab\n");
+
+      const result = await createGrepTool(tmpDir).execute({ pattern, include: "*.txt" }, context());
+
+      expect(result).toContain("a.txt:1:abab");
+    },
+  );
+
+  it("rejects an oversize pattern", async () => {
+    await expect(
+      createGrepTool("/nonexistent-root").execute({ pattern: "a".repeat(1001) }, context()),
+    ).rejects.toThrow(/exceeds the 1000-character limit/);
+  });
+
+  it("returns partial results plus a notice when the deadline expires", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-deadline-"));
+    // More candidates than the scan pool is wide, so the files past the first
+    // wave are genuinely never reached once the budget expires.
+    const names = Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.txt`);
+    for (const name of names) await fs.writeFile(path.join(tmpDir, name), "needle\n");
+
+    const slowOps: ToolOperations = {
+      ...localOperations,
+      stat: async (p) => {
+        const stat = await localOperations.stat(p);
+        if (stat.isFile()) await new Promise((resolve) => setTimeout(resolve, 400));
+        return stat;
+      },
+    };
+
+    const result = await createGrepTool(tmpDir, slowOps, { deadlineMs: 300 }).execute(
+      { pattern: "needle", include: "*.txt", max_results: 100 },
+      context(),
+    );
+
+    expect(result).toContain("f00.txt:1:needle");
+    expect(result).not.toContain("f39.txt:1:needle");
+    expect(result).toContain("Stopped after 0.3s");
+  });
+
+  it("reports the deadline notice when nothing matched", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-deadline-empty-"));
+    await fs.writeFile(path.join(tmpDir, "a.txt"), "needle\n");
+
+    const result = await createGrepTool(tmpDir, localOperations, { deadlineMs: 0 }).execute(
+      { pattern: "needle", include: "*.txt" },
+      context(),
+    );
+
+    expect(result).toContain("No matches found.");
+    expect(result).toContain("narrow the pattern");
   });
 });

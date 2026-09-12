@@ -1,0 +1,5356 @@
+// @vitest-environment jsdom
+import fs from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { imageOriginals } from "../../packages/ggcoder/src/test-support/image-originals";
+import path from "node:path";
+import { useCallback, useState } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, onTestFailed, vi } from "vitest";
+import type * as AgentModule from "./agent";
+import type { PaneEventEnvelope } from "./pane-routing";
+import type * as MentorModule from "./useKenMentor";
+import type * as EventsModule from "./useAgentEvents";
+import type * as ToastModule from "./toast";
+import { Toaster } from "./Toaster";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import type { NotesDocumentV3 } from "./notes-types";
+import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
+import { withRealSidecar } from "../../packages/ggcoder/src/test-support/real-sidecar";
+import { queuedPromptMetadataRoundTrip } from "../../packages/ggcoder/src/test-support/queued-prompt-metadata";
+
+HTMLElement.prototype.scrollTo = vi.fn();
+Element.prototype.scrollIntoView = vi.fn();
+
+const nativeMocks = vi.hoisted(() => ({
+  invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => undefined),
+  onDragDropEvent: vi.fn(async () => vi.fn()),
+  openDialog: vi.fn(),
+  saveDialog: vi.fn(),
+  setWindowTitle: vi.fn(),
+  getDroppedPathInfo: vi.fn(async (paths: string[]) =>
+    paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
+  ),
+  agentEvent: null as null | ((event: { payload: PaneEventEnvelope }) => void),
+  modelsChanged: null as null | (() => void),
+  modelsUnlisten: vi.fn(),
+  onSessionReset: null as null | ((operationId?: string) => void),
+  kenStateRef: null as null | { current: AgentModule.AgentState | null },
+  kenRunning: false,
+  realMentor: false,
+  toast: vi.fn(),
+  appUpdate: {
+    phase: "idle",
+    progressLines: [] as string[],
+    localPatched: true,
+    installLabel: "Update local fork",
+    installTitle: "Build patched installer",
+    statusMessage: null as string | null,
+    install: vi.fn(async (_options?: { summarizeDecisions?: boolean }) => {}),
+  },
+  readDroppedFileAttachment: vi.fn(async (path: string) => ({
+    path,
+    name: "file.txt",
+    mime: "text/plain",
+    size: 4,
+    data: "dGVzdA==",
+  })),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeMocks.invoke }));
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: nativeMocks.onDragDropEvent }),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: nativeMocks.openDialog,
+  save: nativeMocks.saveDialog,
+}));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({
+    label: "main",
+    listen: vi.fn(async (name: string, receive: (event: { payload: PaneEventEnvelope }) => void) => {
+      if (name === "agent-event") nativeMocks.agentEvent = receive;
+      return vi.fn();
+    }),
+    setTitle: vi.fn(),
+  }),
+}));
+vi.mock("./useKenMentor", async (importOriginal) => {
+  const actual = await importOriginal<typeof MentorModule>();
+  const captureKenHydration = () => vi.fn();
+  const clearKenStream = vi.fn();
+  return {
+    useKenMentor: (opts: Parameters<typeof MentorModule.useKenMentor>[0]) => {
+      const real = actual.useKenMentor(opts);
+      return nativeMocks.realMentor
+        ? real
+        : {
+            kenRunning: nativeMocks.kenRunning,
+            kenTokens: 0,
+            kenRunStartTs: null,
+            kenIsThinking: false,
+            kenThinkingStartTs: null,
+            kenThinkingAccumMs: 0,
+            handleKenEvent: vi.fn(),
+            hydrateKen: vi.fn(),
+            captureKenHydration,
+            clearKenStream,
+            captureKenTarget: () => ({ conversationId: "conversation", activationEpoch: "epoch" }),
+            captureKenRun: () => ({
+              conversationId: "conversation",
+              activationEpoch: "epoch",
+              runId: "run",
+            }),
+            captureKenOperation: () => () => true,
+          };
+    },
+  };
+});
+vi.mock("./useProgress", () => ({
+  useProgress: () => ({ snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false }),
+}));
+vi.mock("./useAgentEvents", async (importOriginal) => {
+  const actual = await importOriginal<typeof EventsModule>();
+  return {
+    HOOK_PRESENTATION: actual.HOOK_PRESENTATION,
+    useAgentEvents: (deps: Parameters<typeof EventsModule.useAgentEvents>[0]) => {
+      const real = actual.useAgentEvents(deps);
+      const { planReviewPathRef, setPlanReview } = deps;
+      nativeMocks.onSessionReset = deps.onSessionReset ?? null;
+      nativeMocks.kenStateRef = deps.stateRef;
+      const replacePlanReview = useCallback(
+        (review: AgentModule.PendingPlanReview | null) => {
+          planReviewPathRef.current = review?.planPath ?? null;
+          setPlanReview(review);
+        },
+        [planReviewPathRef, setPlanReview],
+      );
+      return nativeMocks.realMentor
+        ? real
+        : {
+            handleEvent: (event: AgentModule.SidecarEvent) => {
+              if (event.type === "continuation_accepted") {
+                deps.onContinuationAccepted?.(event.data);
+                return true;
+              }
+              if (event.type === "ken_text") {
+                deps.setItems((current) => [
+                  ...current,
+                  { kind: "ken", id: 99999, text: String((event.data as { text: string }).text) },
+                ]);
+                return true;
+              }
+              if (event.type === "roadmap_phase_draft_change") {
+                deps.onRoadmapPhaseDraftChange?.(
+                  event.data as AgentModule.RoadmapPhaseDraftChangeEvent["data"],
+                );
+                return true;
+              }
+              if (event.type === "plan_exit") {
+                const data = event.data as Record<string, unknown>;
+                deps.planReviewPathRef.current =
+                  typeof data.planPath === "string" ? data.planPath : null;
+                deps.setPlanReview({
+                  checkpointId:
+                    typeof data.checkpointId === "string" ? data.checkpointId : "checkpoint-1",
+                  generation: typeof data.generation === "number" ? data.generation : 1,
+                  planPath: deps.planReviewPathRef.current ?? "",
+                  content: String(data.content ?? ""),
+                  contentHash: "",
+                  state: "pending-review",
+                  reviewStatus: "unreviewed",
+                  feedback: null,
+                });
+                return true;
+              }
+              if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
+              const data = event.data as Record<string, unknown>;
+              if (deps.shouldApplySessionReset && !deps.shouldApplySessionReset(data)) return;
+              deps.setItems([]);
+              deps.onSessionReset?.(
+                typeof data.operationId === "string" ? data.operationId : undefined,
+              );
+            },
+            pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
+            acceptSubmission: real.acceptSubmission,
+            endStreamingText: vi.fn(),
+            replacePlanReview,
+          };
+    },
+  };
+});
+vi.mock("./HomeScreen", () => ({
+  HomeScreen: (props: {
+    onProjects?: () => void;
+    waitForAgentReady?: () => Promise<unknown>;
+    loadProgress?: () => Promise<unknown>;
+  }) => (
+    <div
+      data-testid="home-screen"
+      data-has-pane-ready={String(typeof props.waitForAgentReady === "function")}
+      data-has-pane-progress={String(typeof props.loadProgress === "function")}
+    >
+      <button onClick={props.onProjects}>Open projects</button>
+    </div>
+  ),
+}));
+vi.mock("./ProjectPicker", () => ({
+  ProjectPicker: (props: {
+    bindProject: (cwd: string, sessionPath?: string) => Promise<unknown>;
+    onChosen: (cwd: string) => void;
+  }) => (
+    <button
+      onClick={() =>
+        void Promise.resolve(props.bindProject("/chosen", "/chosen.jsonl")).then(() =>
+          props.onChosen("/chosen"),
+        )
+      }
+    >
+      Bind project
+    </button>
+  ),
+}));
+vi.mock("./update", () => ({ useAppUpdate: () => nativeMocks.appUpdate }));
+vi.mock("./build-info", () => ({
+  formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
+}));
+vi.mock("./sounds", () => ({ playSound: vi.fn(), isSoundEnabled: () => true }));
+vi.mock("./toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof ToastModule>()),
+  toast: nativeMocks.toast,
+}));
+vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
+vi.mock("./agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof AgentModule>();
+  return {
+    ...actual,
+    restoreTarget: vi.fn(async () => null),
+    setWindowTitle: nativeMocks.setWindowTitle,
+    onWindowOrder: vi.fn(async () => vi.fn()),
+    onModelsChanged: vi.fn(async (callback: () => void) => {
+      nativeMocks.modelsChanged = callback;
+      return nativeMocks.modelsUnlisten;
+    }),
+    isSecondaryWindow: false,
+    windowLabel: "main",
+    createPaneAgentClient: vi.fn((paneId: string) => client(paneId, 1)),
+    getDroppedPathInfo: nativeMocks.getDroppedPathInfo,
+    readDroppedFileAttachment: nativeMocks.readDroppedFileAttachment,
+  };
+});
+
+import {
+  AgentPane,
+  noInputSlashSubmissionError,
+  preferredRoadmapPhaseSession,
+  resolveRoadmapPhaseResume,
+  resolveRoadmapPhaseResumeFromNotes,
+} from "./AgentPane";
+import { PlanMutationError, PromptSubmissionError } from "./agent";
+import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
+import type {
+  AgentState,
+  PaneAgentClient,
+  PaneSessionTarget,
+  ProjectTask,
+  SidecarEvent,
+} from "./agent";
+
+const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
+const chatTarget: PaneSessionTarget = {
+  mode: "chat",
+  chatAgent: "general",
+  cwd: "/work",
+  sessionPath: "/chat-session",
+};
+const roadmapDraft: RoadmapPhaseDraft = {
+  id: "draft-research",
+  projectKey: "/work",
+  basedOnRevision: 12,
+  createdAt: "2026-08-08T12:00:00.000Z",
+  createdBySessionId: "research-session",
+  summary: "Add the researched delivery phase.",
+  references: [
+    {
+      id: "reference-1",
+      provider: "github",
+      tool: "code-search",
+      canonicalUrl: "https://github.com/example/project/blob/abc123/src/research.ts",
+      owner: "example",
+      repo: "project",
+      revision: "abc123",
+      path: "src/research.ts",
+      range: { startLine: 10, endLine: 24 },
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Supports the researched implementation boundary.",
+    },
+  ],
+  phases: [
+    {
+      phaseId: "phase-research",
+      title: "Implement researched workflow",
+      goal: "Deliver the approved researched workflow without starting it.",
+      doneWhen: ["The workflow is available for a later explicit start"],
+      sourcePrompt: "Implement the researched workflow after approval.",
+      referenceIds: ["reference-1"],
+    },
+  ],
+  status: "pending",
+};
+const agentState = (model: string): AgentState => ({
+  accountId: null,
+  openAICodexContextProfileEligibility: { canChange: true },
+  openAICodexContextProfile: "stable",
+  openAICodexFast: false,
+  contextTokens: 0,
+  contextWindow: 200_000,
+  provider: "azure",
+  model,
+  cwd: "/work",
+  mode: "code",
+  running: false,
+});
+const projectTask: ProjectTask = {
+  id: "task-1",
+  title: "Keep this task visible",
+  prompt: "Preserve task state when requests fail",
+  status: "pending",
+  createdAt: "2026-09-04T00:00:00.000Z",
+};
+const KEN_PROMPT = "Implement the guarded session action\n  Preserve this indentation";
+const CONTINUATION_PROMPT = `## Objective
+Continue safely.
+
+## Ken’s next instruction
+${KEN_PROMPT}`;
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+const paneEmitters = new WeakMap<PaneAgentClient, (event: SidecarEvent) => void>();
+// [DBG-hydration-7c91] Registered only by the stale-hydration diagnostic test.
+const paneListenerObservers = new WeakMap<
+  PaneAgentClient,
+  (action: "attach" | "detach", count: number) => void
+>();
+let hydrationCleanupObserver: ((phase: "cleanup-start" | "cleanup-end" | "release") => void) | undefined;
+
+// Mirror native fan-out to active subscribers, not whichever hook subscribed last.
+function paneEvents(pane: PaneAgentClient): (event: SidecarEvent) => void {
+  const existing = paneEmitters.get(pane);
+  if (existing) return existing;
+  const listeners = new Set<(event: SidecarEvent) => void>();
+  vi.mocked(pane.subscribe).mockImplementation((receive) => {
+    listeners.add(receive);
+    paneListenerObservers.get(pane)?.("attach", listeners.size);
+    return () => {
+      listeners.delete(receive);
+      paneListenerObservers.get(pane)?.("detach", listeners.size);
+    };
+  });
+  const emit = (event: SidecarEvent) => {
+    for (const receive of listeners) receive(event);
+  };
+  paneEmitters.set(pane, emit);
+  return emit;
+}
+
+function liveEvents(pane: PaneAgentClient) {
+  const emit = paneEvents(pane);
+  return (type: string, data: object) => emit({ type, data });
+}
+
+function client(paneId: string, generation: number): PaneAgentClient {
+  const pane = {
+    paneId,
+    programmatic: vi.fn(async () => ({
+      version: 1,
+      action: "report",
+      ok: true,
+      report: {
+        status: "setup-required",
+        reason: "Inspect setup",
+        scan: { available: false, reason: "Approve current setup." },
+        snapshot: null,
+        fingerprint: null,
+        offset: 0,
+        total: 0,
+        rows: [],
+      },
+    })),
+    create: vi.fn(async () => generation),
+    restore: vi.fn(async () => generation),
+    dispose: vi.fn(async () => {}),
+    subscribe: vi.fn(() => vi.fn()),
+    waitForReady: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
+    status: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
+    selectWorkspace: vi.fn(async () => generation),
+    getState: vi.fn(async () => ({ running: false })),
+    getNotes: vi.fn(async () => ({ status: "missing" as const })),
+    getNotesDiagnostics: vi.fn(async () => ({
+      version: 1 as const,
+      applicationIdentity: "com.ggcoder.local-fork",
+      daemonOwner: "node-sidecar" as const,
+      agentDataRoot: "/tmp/agent",
+      canonicalCwd: "/work",
+      projectKey: "/work",
+      projectNotesStore: {
+        primaryPath: "/tmp/agent/project-notes/project.json",
+        backupPath: "/tmp/agent/project-notes/project.backup.json",
+      },
+      logicalSessionId: paneId,
+      currentSession: { sessionId: paneId, sessionPath: null },
+      activePhaseContext: null,
+      persistedPhaseBinding: null,
+      consistency: "unbound" as const,
+    })),
+    bindRoadmapPhase: vi.fn(async () => ({ status: "missing" as const })),
+    previewManualCompletionApproval: vi.fn(async () => ({ status: "missing" as const })),
+    commitManualCompletionApproval: vi.fn(async () => ({ status: "nonce-not-found" as const })),
+    migrateNotes: vi.fn(async (document: NotesDocumentV3) => ({
+      status: "ok" as const,
+      migrated: true,
+      snapshot: { projectKey: "/work", revision: 1, document },
+    })),
+    saveNotes: vi.fn(async (expectedRevision: number, document: NotesDocumentV3) => ({
+      status: "ok" as const,
+      snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
+    })),
+    startPhase: vi.fn(),
+    cancelPhaseRun: vi.fn(),
+    getRoadmapPhaseDraft: vi.fn(async () => null),
+    approveRoadmapPhaseDraft: vi.fn(),
+    rejectRoadmapPhaseDraft: vi.fn(),
+    listModels: vi.fn(async () => []),
+    listCommands: vi.fn(async () => []),
+    listTasks: vi.fn(async () => []),
+    listHistory: vi.fn(async () => []),
+    getProgress: vi.fn(async () => null),
+    listMemories: vi.fn(),
+    deleteMemory: vi.fn(),
+    listJiwa: vi.fn(),
+    deleteJiwa: vi.fn(),
+    getSubscriptionUsage: vi.fn(),
+    enhancePrompt: vi.fn(),
+    sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
+    commitContinuation: vi.fn(),
+    prepareContinuationHandoff: vi.fn(async () => ({
+      version: 1 as const,
+      preparedId: "prepared-1",
+      source: {
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+        leafId: null,
+        fingerprint: "fingerprint-1",
+      },
+      expiresAt: Date.now() + 60_000,
+      prompt: CONTINUATION_PROMPT,
+    })),
+    cancel: vi.fn(),
+    answerAskUser: vi.fn(async () => {}),
+    sendKenPrompt: vi.fn().mockResolvedValue(undefined),
+    cancelKen: vi.fn().mockResolvedValue(undefined),
+    setAutopilot: vi.fn(),
+    acceptPlan: vi.fn(async () => ({ ok: true, planTotal: 0, operationId: "plan-accept-1" })),
+    revisePlan: vi.fn(async () => ({ ok: true, operationId: "plan-revise-1" })),
+    authOAuthStart: vi.fn(),
+    authOAuthCode: vi.fn(),
+    newSession: vi.fn(async () => ({ operationId: "operation-1" })),
+    getRadioState: vi.fn(),
+    setRadio: vi.fn(),
+    setRadioVolume: vi.fn(),
+    runTask: vi.fn(),
+    runAllTasks: vi.fn(),
+    deleteTask: vi.fn(),
+    killTask: vi.fn(),
+    cycleThinking: vi.fn(),
+    switchModel: vi.fn(),
+    setOpenAICodexContextProfile: vi.fn(),
+    setOpenAICodexFast: vi.fn(),
+    switchKenModel: vi.fn(),
+    getSettings: vi.fn(),
+    saveSettings: vi.fn(),
+    listProjects: vi.fn(),
+    searchFiles: vi.fn(async () => []),
+    listSessions: vi.fn(),
+    getTelegramStatus: vi.fn(),
+    saveTelegramConfig: vi.fn(),
+    getServeStatus: vi.fn(),
+    startServe: vi.fn(),
+    stopServe: vi.fn(),
+    listMcpServers: vi.fn(),
+    addMcpServer: vi.fn(),
+    loginMcpServer: vi.fn(),
+    removeMcpServer: vi.fn(),
+  } as unknown as PaneAgentClient;
+  paneEvents(pane);
+  return pane;
+}
+
+async function renderKenPromptPane(
+  pane: PaneAgentClient,
+  running = false,
+  prompt = KEN_PROMPT,
+  onGenerationChange?: (generation: number) => void,
+  stateOverrides: Partial<AgentState> = {},
+): Promise<HTMLButtonElement> {
+  vi.mocked(pane.getState).mockResolvedValue({
+    ...agentState("azure:gpt-test"),
+    running,
+    runState: running ? "running" : "idle",
+    ...stateOverrides,
+  });
+  vi.mocked(pane.listHistory).mockResolvedValue([
+    {
+      role: "assistant",
+      text: `\`\`\`prompt\n${prompt}\n\`\`\``,
+      ken: true,
+    },
+  ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
+  render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+  return (await screen.findAllByRole("button", { name: "Continue here" }))[0] as HTMLButtonElement;
+}
+
+afterEach(() => {
+  const observe = hydrationCleanupObserver;
+  try {
+    observe?.("cleanup-start");
+    cleanup();
+    observe?.("cleanup-end");
+  } finally {
+    hydrationCleanupObserver = undefined;
+    observe?.("release");
+  }
+  vi.clearAllMocks();
+  nativeMocks.invoke.mockResolvedValue(undefined);
+  nativeMocks.modelsChanged = null;
+  nativeMocks.modelsUnlisten.mockReset();
+  nativeMocks.onSessionReset = null;
+  nativeMocks.kenRunning = false;
+  nativeMocks.realMentor = false;
+  nativeMocks.toast.mockReset();
+  nativeMocks.appUpdate.phase = "idle";
+  nativeMocks.appUpdate.localPatched = true;
+  nativeMocks.appUpdate.install.mockReset();
+  vi.useRealTimers();
+});
+
+describe("pane-local opening (mocked native transport)", () => {
+  beforeAll(async () => {
+    // Exercise hydration against the real renderer, without cold Markdown imports
+    // consuming the first render's act flush. Keep module I/O in fixture setup.
+    await import("./Markdown");
+  }, 0);
+
+  it("gates submissions with drafts intact until history and buffered live events are applied", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-hydrating", 1);
+    const emit = liveEvents(pane);
+    const history = deferred<AgentModule.HistoryEntry[]>();
+    vi.mocked(pane.listHistory).mockReturnValue(history.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "Draft during connection" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(input.value).toBe("Draft during connection");
+    expect(
+      (screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText(/connecting to agent/)).toBeTruthy();
+    act(() => {
+      emit("text_delta", { text: "Live answer" });
+      emit("text_delta", { text: " still streaming" });
+      emit("run_end", {});
+    });
+    await act(async () => history.resolve([{ role: "user", text: "Existing prompt" }]));
+    expect(await screen.findByText("Existing prompt")).toBeTruthy();
+    expect(await screen.findByText("Live answer still streaming")).toBeTruthy();
+    expect(input.value).toBe("Draft during connection");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+    expect(screen.getAllByText("Draft during connection")).toHaveLength(1);
+    await waitFor(() => expect(input.value).toBe(""));
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.value).toBe("Draft during connection");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.value).toBe("Existing prompt");
+  });
+
+  it.each([
+    { clock: "", pausedTimers: false },
+    { clock: " with paused application timers", pausedTimers: true },
+  ])("discards stale hydration and its events without opening a newer generation's gate$clock", async ({ pausedTimers }) => {
+    // Hydration uses promises; readiness must not depend on polling application timers.
+    if (pausedTimers) {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    }
+    // [DBG-hydration-7c91] Scalar-only, bounded, synchronous observations: no scheduling.
+    const started = performance.now();
+    const ledger: Array<Record<string, unknown>> = [];
+    let overflow = 0;
+    let sequence = 0;
+    let active = true;
+    let stage = "test-entry";
+    let completed = "none";
+    let bodyComplete = false;
+    let cleanupEnd = false;
+    const cleanupSnapshots: Partial<Record<"cleanup-start" | "cleanup-end", Record<string, unknown>>> = {};
+    let requestedGeneration = 1;
+    let oldResolution = "not-resolved";
+    let newResolution = "not-resolved";
+    let mainContainer: HTMLElement | undefined;
+    let otherContainer: HTMLElement | undefined;
+    const listenerCounts = { main: 0, other: 0 };
+    const generations: { main: number | null; other: number | null } = { main: null, other: null };
+    onTestFailed(() => {
+      try {
+        console.error("[DBG-hydration-7c91]", JSON.stringify({
+          ledger, overflow, stage, completed, bodyComplete, cleanupEnd, cleanupSnapshots,
+          cleanupEndMissing: !cleanupEnd,
+        }));
+      } finally {
+        active = false;
+        ledger.length = 0;
+      }
+    });
+    nativeMocks.realMentor = true;
+    const pane = client("pane-stale-history", 1);
+    const other = client("pane-independent-history", 1);
+    const calls = (value: PaneAgentClient) => ({
+      restore: vi.mocked(value.restore).mock.calls.length,
+      waitForReady: vi.mocked(value.waitForReady).mock.calls.length,
+      getState: vi.mocked(value.getState).mock.calls.length,
+      listModels: vi.mocked(value.listModels).mock.calls.length,
+      listCommands: vi.mocked(value.listCommands).mock.calls.length,
+      listTasks: vi.mocked(value.listTasks).mock.calls.length,
+      listHistory: vi.mocked(value.listHistory).mock.calls.length,
+      sendPrompt: vi.mocked(value.sendPrompt).mock.calls.length,
+    });
+    const dom = (container: HTMLElement | undefined) => {
+      const text = container?.textContent ?? "";
+      return {
+        connected: container?.isConnected ?? false,
+        modelButton: !!container?.querySelector(".footer .model-button"),
+        sendDisabled: container?.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')?.disabled ?? null,
+        connecting: text.includes("connecting to agent"),
+        currentStored: text.includes("Current stored prompt"),
+        currentLive: text.includes("Current live answer"),
+        staleStored: text.includes("Stale stored prompt"),
+        staleLive: text.includes("Stale live answer"),
+      };
+    };
+    const record = (label: string, coarse = false) => {
+      if (!active) return;
+      const seq = ++sequence;
+      if (ledger.length === 64) { overflow++; return; }
+      ledger.push({
+        seq, elapsedMs: performance.now() - started, label, stage, completed,
+        bodyComplete, requestedGeneration, oldResolution, newResolution,
+        generations: { ...generations }, listeners: { ...listenerCounts },
+        mainCalls: calls(pane), otherCalls: calls(other),
+        ...(coarse ? { mainDom: dom(mainContainer), otherDom: dom(otherContainer) } : {}),
+      });
+    };
+    const begin = (label: string) => {
+      if (!active) return;
+      stage = label;
+      record(`${label}:start`, true);
+    };
+    const end = (label: string) => {
+      if (!active) return;
+      completed = label;
+      record(`${label}:complete`, true);
+    };
+    const mainGeneration = (generation: number) => {
+      if (!active) return;
+      generations.main = generation;
+      record("main-generation");
+    };
+    const otherGeneration = (generation: number) => {
+      if (!active) return;
+      generations.other = generation;
+      record("other-generation");
+    };
+    paneListenerObservers.set(pane, (action, count) => {
+      listenerCounts.main = count;
+      record(`main-listener-${action}`);
+    });
+    paneListenerObservers.set(other, (action, count) => {
+      listenerCounts.other = count;
+      record(`other-listener-${action}`);
+    });
+    hydrationCleanupObserver = (phase) => {
+      if (phase === "release") {
+        active = false;
+        paneListenerObservers.delete(pane);
+        paneListenerObservers.delete(other);
+        mainContainer = undefined;
+        otherContainer = undefined;
+        return;
+      }
+      if (phase === "cleanup-end") cleanupEnd = true;
+      cleanupSnapshots[phase] = {
+        stage, completed, bodyComplete, requestedGeneration, oldResolution, newResolution,
+        generations: { ...generations }, listeners: { ...listenerCounts },
+        mainCalls: calls(pane), otherCalls: calls(other),
+        mainDom: dom(mainContainer), otherDom: dom(otherContainer),
+      };
+      record(phase, true);
+    };
+    record("test-entry");
+    const emit = liveEvents(pane);
+    const oldHistory = deferred<AgentModule.HistoryEntry[]>();
+    const newHistory = deferred<AgentModule.HistoryEntry[]>();
+    vi.mocked(pane.listHistory)
+      .mockReturnValueOnce(oldHistory.promise)
+      .mockReturnValueOnce(newHistory.promise);
+    begin("render");
+    const view = await act(async () => render(
+      <AgentPane client={pane} target={target} generation={1} onGenerationChange={mainGeneration} workspaceOwnsSessionLifecycle />,
+    ));
+    mainContainer = view.container;
+    end("render");
+    begin("first-history");
+    expect(pane.listHistory).toHaveBeenCalledTimes(1);
+    end("first-history");
+    begin("stale-event");
+    act(() => emit("text_delta", { text: "Stale live answer" }));
+    end("stale-event");
+    vi.mocked(pane.restore).mockResolvedValue(2);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: pane.paneId,
+    });
+    requestedGeneration = 2;
+    begin("rerender");
+    await act(async () => view.rerender(
+      <AgentPane
+        client={pane}
+        target={{ ...target, sessionPath: "/new.jsonl" }}
+        generation={2}
+        onGenerationChange={mainGeneration}
+        workspaceOwnsSessionLifecycle
+      />,
+    ));
+    end("rerender");
+    begin("second-history");
+    expect(pane.listHistory).toHaveBeenCalledTimes(2);
+    end("second-history");
+    begin("independent-render");
+    const otherView = await act(async () => render(
+      <AgentPane client={other} target={target} onGenerationChange={otherGeneration} workspaceOwnsSessionLifecycle />,
+    ));
+    otherContainer = otherView.container;
+    end("independent-render");
+    begin("independent-ready");
+    expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull();
+    end("independent-ready");
+    begin("independent-input");
+    const otherInput = within(otherView.container).getByRole("textbox");
+    await act(async () => {
+      fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
+      fireEvent.keyDown(otherInput, { key: "Enter" });
+    });
+    end("independent-input");
+    begin("independent-submit");
+    expect(other.sendPrompt).toHaveBeenCalledTimes(1);
+    end("independent-submit");
+    begin("old-history-act");
+    oldResolution = "resolve-invoked";
+    record("old-history-resolve-invoked");
+    await act(async () => oldHistory.resolve([{ role: "user", text: "Stale stored prompt" }]));
+    end("old-history-act");
+    begin("gate-assertions");
+    const input = within(view.container).getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "New generation draft" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(input.value).toBe("New generation draft");
+    expect(within(view.container).getByText(/connecting to agent/)).toBeTruthy();
+    end("gate-assertions");
+    begin("current-event");
+    act(() => emit("text_delta", { text: "Current live answer" }));
+    end("current-event");
+    begin("new-history-act");
+    newResolution = "resolve-invoked";
+    record("new-history-resolve-invoked");
+    await act(async () => newHistory.resolve([{ role: "user", text: "Current stored prompt" }]));
+    end("new-history-act");
+    begin("current-transcript");
+    expect(within(view.container).getByText("Current stored prompt")).toBeTruthy();
+    end("current-transcript");
+    begin("transcript-assertions");
+    expect(within(view.container).getAllByText("Current live answer")).toHaveLength(1);
+    expect(screen.queryByText("Stale stored prompt")).toBeNull();
+    expect(screen.queryByText("Stale live answer")).toBeNull();
+    end("transcript-assertions");
+    begin("current-input");
+    await act(async () => fireEvent.keyDown(input, { key: "Enter" }));
+    end("current-input");
+    begin("current-submit");
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    end("current-submit");
+    if (active) bodyComplete = true;
+    end("test-body");
+  }, 0); // No deadline: both clock variants must finish their full assertion sequence.
+
+  it.each(["1536x1024", "1254x1254", "1024x1024"])(
+    "restores %s sizing evidence once alongside its image after live rendering",
+    async (actual) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`image-${actual}`, 1);
+      const emit = liveEvents(pane);
+      const warning =
+        actual === "1024x1024"
+          ? ""
+          : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${actual}. Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (/saved/original.png)`;
+      const view = render(
+        <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />,
+      );
+      await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+      await act(async () => {
+        emit("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} });
+        emit("tool_call_end", {
+          toolCallId: "image",
+          result: `Generated image → /saved/original.png\n${warning}`,
+          details: {
+            imagePreviews: [
+              { base64: "AA==", mediaType: "image/png", path: "/saved/original.png" },
+            ],
+          },
+        });
+      });
+      expect(view.container.querySelectorAll(".img-card")).toHaveLength(1);
+      expect(view.container.querySelectorAll(".line.info")).toHaveLength(warning ? 1 : 0);
+      if (warning) expect(screen.getAllByText(warning)).toHaveLength(1);
+      view.unmount();
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        {
+          role: "assistant",
+          text: warning,
+          toolImages: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }],
+        },
+      ]);
+      for (let reopen = 0; reopen < 2; reopen++) {
+        const restored = render(
+          <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />,
+        );
+        await waitFor(() =>
+          expect(restored.container.querySelectorAll(".img-card")).toHaveLength(1),
+        );
+        expect(restored.container.querySelectorAll(".line.info")).toHaveLength(warning ? 1 : 0);
+        if (warning) expect(screen.getAllByText(warning)).toHaveLength(1);
+        else expect(screen.queryByText(/Exact-size verification failed/)).toBeNull();
+        expect(screen.getByRole("img").getAttribute("src")).toBe("data:image/png;base64,AA==");
+        restored.unmount();
+      }
+    },
+  );
+
+  it("opens each exact original from real reopened multi-image history (mocked native open)", async () => {
+    await withRealSidecar(async ({ project, manager, open, request }) => {
+      const { result, images, hashes } = await imageOriginals(project);
+      expect(hashes[0]).not.toBe(hashes[1]);
+      const saved = await manager.create(project, "openai", "gpt-5", {
+        openAICodexContextProfile: "stable",
+      });
+      await manager.appendRequiredMessage(saved.path, {
+        type: "message",
+        id: randomUUID(),
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: { role: "tool", content: [result] },
+      });
+      for (let reopen = 0; reopen < 2; reopen++) {
+        const sessionId = await open(saved.path);
+        const response = await request("/history", sessionId);
+        expect(response.ok).toBe(true);
+        const { history } = (await response.json()) as { history: AgentModule.HistoryEntry[] };
+        expect(history.flatMap((row) => row.toolImages ?? [])).toEqual(
+          images.map((image) => ({
+            src: `data:${image.mediaType};base64,${image.data}`,
+            path: image.path,
+          })),
+        );
+        const pane = client(`originals-${reopen}`, 1);
+        vi.mocked(pane.listHistory).mockResolvedValue(history);
+        const view = render(
+          <AgentPane
+            client={pane}
+            target={{ ...target, cwd: project }}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+        await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(2));
+        for (const [index, image] of images.entries()) {
+          nativeMocks.invoke.mockClear();
+          fireEvent.click(within(view.container).getByTitle(`Open ${image.path}`));
+          await waitFor(() =>
+            expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+              paneId: pane.paneId,
+              path: image.path,
+            }),
+          );
+          expect(
+            createHash("sha256")
+              .update(await fs.readFile(image.path))
+              .digest("hex"),
+          ).toBe(hashes[index]);
+        }
+        view.unmount();
+      }
+    });
+  }, 60_000);
+
+  it("keeps submission unavailable when history restoration fails", async () => {
+    const pane = client("pane-history-failure", 1);
+    vi.mocked(pane.listHistory).mockRejectedValue(new Error("History unavailable"));
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(input.value).toBe("Keep this draft");
+    expect(
+      (screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+  it("keeps transcript, lazy plan links, and image cards tied to their source pane", async () => {
+    const panes = [client("primary", 1), client("pane-secondary", 1)];
+    const roots = ["/projects/one", "/projects/two"];
+    const emitters = panes.map(liveEvents);
+    panes.forEach((pane, index) => {
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("test"), cwd: roots[index] });
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "[Transcript file](same.md)" },
+        {
+          role: "assistant",
+          text: "",
+          toolImages: [{ src: "data:image/png;base64,AA==", path: "same.md" }],
+        },
+      ]);
+    });
+    const view = render(
+      <>
+        {panes.map((pane, index) => (
+          <AgentPane
+            key={pane.paneId}
+            client={pane}
+            focused={index === 0}
+            target={{ ...target, cwd: roots[index] }}
+            workspaceOwnsSessionLifecycle
+          />
+        ))}
+      </>,
+    );
+    // Flush the real lazy parser load inside React's async boundary.
+    await act(async () => {
+      await import("./Markdown");
+    });
+    await waitFor(() =>
+      expect(screen.getAllByRole("link", { name: "Transcript file" })).toHaveLength(2),
+    );
+    await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(2));
+    act(() =>
+      emitters.forEach((emit) =>
+        emit("plan_exit", {
+          checkpointId: "plan",
+          generation: 1,
+          planPath: "plan.md",
+          content: "[Plan file](same.md)",
+        }),
+      ),
+    );
+    for (const reviews of screen.getAllByRole("region", { name: "Pending reviews" })) {
+      fireEvent.click(within(reviews).getByRole("button", { name: /^Plan approval required/ }));
+    }
+    await screen.findAllByRole("link", { name: "Plan file" });
+    const slots = view.container.querySelectorAll<HTMLElement>(".agent-pane");
+    // Click the unfocused pane first; focus must never choose the destination.
+    for (const index of [1, 0]) {
+      const slot = slots[index];
+      for (const name of ["Transcript file", "Plan file"]) {
+        nativeMocks.invoke.mockClear();
+        fireEvent.click(within(slot).getByRole("link", { name }));
+        await waitFor(() =>
+          expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+            paneId: panes[index].paneId,
+            path: "same.md",
+          }),
+        );
+      }
+      nativeMocks.invoke.mockClear();
+      fireEvent.click(within(slot).getByTitle("Open same.md"));
+      await waitFor(() =>
+        expect(nativeMocks.invoke).toHaveBeenCalledWith("open_project_path", {
+          paneId: panes[index].paneId,
+          path: "same.md",
+        }),
+      );
+    }
+  });
+});
+
+describe("completed verification task (mocked native transport)", () => {
+  it.each(["agent_done", "run_end"])(
+    "renders the held final answer after %s and after reloading saved history",
+    async (completion) => {
+      nativeMocks.realMentor = true;
+      const pane = client("completed-verification-task", 1);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      const history = completedVerificationTask.history as AgentModule.HistoryEntry[];
+      vi.mocked(pane.listHistory).mockResolvedValue(history.slice(0, 2));
+      const view = render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      await screen.findByText("Preserve existing changes and update only the sample window.");
+
+      await act(async () => {
+        for (const event of completedVerificationTask.events) {
+          if (event.type !== "agent_done" && event.type !== "run_end") emit(event.type, event.data);
+        }
+      });
+      expect(screen.queryByText(completedVerificationTask.finalAnswer)).toBeNull();
+      await act(async () => {
+        emit(completion, { outcome: "completed", cancelled: false });
+      });
+      expect(
+        screen.getByText(completedVerificationTask.finalAnswer).closest(".assistant-msg"),
+      ).not.toBeNull();
+      await act(async () => {
+        emit("run_end", { outcome: "completed", cancelled: false });
+      });
+      expect(screen.getAllByText(completedVerificationTask.finalAnswer)).toHaveLength(1);
+      expect(screen.queryByText("Initial implementation draft.")).toBeNull();
+      expect(screen.queryByText("Verification completed draft.")).toBeNull();
+      expect(screen.getAllByText(/Hook engaged/)).toHaveLength(2);
+
+      view.unmount();
+      vi.mocked(pane.listHistory).mockResolvedValue(history);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      expect(
+        (await screen.findByText(completedVerificationTask.finalAnswer)).closest(".assistant-msg"),
+      ).not.toBeNull();
+      expect(screen.getByText("Update sample window")).toBeTruthy();
+    },
+  );
+});
+
+describe("enhancement composer outcomes (mocked native transport)", () => {
+  const draft = "Make search wait 300 ms after typing in SearchBox.tsx";
+  const enhanced = "Debounce search by 300 ms after typing in SearchBox.tsx";
+
+  async function renderHydratedComposer(pane: PaneAgentClient, running = false): Promise<void> {
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      running,
+      runState: running ? "running" : "idle",
+    });
+    // Keep project selection and real history hydration, without making composer
+    // tests depend on the unrelated lazy Ken Markdown/action renderer.
+    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Existing search request" }]);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await screen.findByText("Existing search request")).toBeTruthy();
+    // This footer branch uses readyRef, the same gate as submission, and appears
+    // after history replay and setHydrated (which gates enhancement). Do not type
+    // a readiness probe: that would start/stop the placeholder timers under test.
+    // Finish this real-clock wait before any test starts its animation clock.
+    await waitFor(() => expect(document.querySelector(".footer .footer-left")).not.toBeNull());
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([false, true])(
+    "keeps successful output editable without sending (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: reduced && query === "(prefers-reduced-motion: reduce)",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-success", 1);
+      vi.mocked(pane.enhancePrompt).mockResolvedValue({
+        enhanced,
+        segments: [
+          {
+            kind: "term",
+            text: "Debounce",
+            original: "Make search wait",
+            note: "Delay until typing pauses",
+          },
+          { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
+        ],
+      });
+      await renderHydratedComposer(pane, true);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: draft } });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      // Flush each React phase before advancing the next phase's RAF clock.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(32);
+      });
+      expect(pane.enhancePrompt).toHaveBeenCalledWith(draft);
+      expect(input.value).toBe(enhanced);
+      expect(document.activeElement).toBe(input);
+      expect(input.disabled).toBe(false);
+      expect(input.readOnly).toBe(false);
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      fireEvent.change(input, { target: { value: `${enhanced} and keep it cancellable` } });
+      expect(input.value).toBe(`${enhanced} and keep it cancellable`);
+    },
+  );
+
+  it.each([false, true].flatMap((reduced) =>
+    ["x".repeat(12_000), "😀".repeat(6_000)].map((text) => ({ reduced, text })),
+  ))("enforces UTF-16 enhancement limits (case %#)", async ({ reduced, text }) => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: reduced,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const pane = client("enhance-limit", 1);
+    vi.mocked(pane.enhancePrompt).mockReturnValue(new Promise(() => {}));
+    await renderHydratedComposer(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    const oversized = `${text}x`;
+    expect(text.length).toBe(12_000);
+    expect(oversized.length).toBe(12_001);
+    fireEvent.change(input, { target: { value: oversized } });
+    const unavailable = screen.getByRole("button", { name: "Enhance?" }) as HTMLButtonElement;
+    expect(unavailable.disabled).toBe(true);
+    const reason = document.getElementById(unavailable.getAttribute("aria-describedby")!);
+    expect(reason?.textContent).toContain("12,000");
+    expect(reason?.textContent).toContain("You can still send this draft");
+    fireEvent.click(unavailable);
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+    expect(document.querySelector(".enh-diss, .enhance-pill.enhancing, .input-anim")).toBeNull();
+    expect(input.value).toBe(oversized);
+    expect(input.disabled).toBe(false);
+    expect(input.readOnly).toBe(false);
+    expect(input.hasAttribute("maxlength")).toBe(false);
+    fireEvent.change(input, { target: { value: text } });
+    const available = screen.getByRole("button", { name: "Enhance?" }) as HTMLButtonElement;
+    expect(available.disabled).toBe(false);
+    expect(available.hasAttribute("aria-describedby")).toBe(false);
+    fireEvent.click(available);
+    expect(pane.enhancePrompt).toHaveBeenCalledExactlyOnceWith(text);
+    expect(Boolean(document.querySelector(".enh-diss"))).toBe(!reduced);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "preserves rejected drafts and permits retry (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", () => ({
+        matches: reduced,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-failure", 1);
+      vi.mocked(pane.enhancePrompt).mockRejectedValue(new Error("Invalid enhancement response"));
+      await renderHydratedComposer(pane);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: draft } });
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      await waitFor(() =>
+        expect(nativeMocks.toast).toHaveBeenCalledWith("Invalid enhancement response", "error"),
+      );
+      expect(input.value).toBe(draft);
+      expect(input.disabled).toBe(false);
+      expect(document.querySelector(".enh-diss")).toBeNull();
+      fireEvent.click(await screen.findByRole("button", { name: "Enhance?" }));
+      await waitFor(() => expect(pane.enhancePrompt).toHaveBeenCalledTimes(2));
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "preserves exact input and ignores stale enhancement results (reduced=%s)",
+    async (reduced) => {
+      vi.stubGlobal("matchMedia", () => ({
+        matches: reduced,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+      const pane = client("enhance-stale", 1);
+      let resolve!: (result: AgentModule.EnhanceResult) => void;
+      vi.mocked(pane.enhancePrompt).mockReturnValue(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await renderHydratedComposer(pane);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      const original = `  ${draft}\n`;
+      fireEvent.change(input, { target: { value: original } });
+      fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+      await waitFor(() => expect(pane.enhancePrompt).toHaveBeenCalledWith(original));
+      fireEvent.change(input, { target: { value: "A newer draft" } });
+      await act(async () => {
+        resolve({ enhanced, segments: [{ kind: "text", text: enhanced }] });
+      });
+      expect(input.value).toBe("A newer draft");
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it("renders corrected terms when the user explicitly sends the enhanced draft", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    const pane = client("enhance-segments", 1);
+    const segments: AgentModule.PromptSegment[] = [
+      {
+        kind: "term",
+        text: "Debounce",
+        original: "Make search wait",
+        note: "Delay until typing pauses",
+      },
+      { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
+    ];
+    vi.mocked(pane.enhancePrompt).mockResolvedValue({ enhanced, segments });
+    await renderHydratedComposer(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+    await waitFor(() => expect(input.value).toBe(enhanced));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    // Corrected terms render in the sent bubble, not inside the plain textarea.
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(enhanced, [], { enhancements: segments }),
+    );
+    expect(screen.getByText("Debounce")).toBeTruthy();
+  });
+
+  it.each(["steering", "stranded"] as const)(
+    "renders exact queued highlights and Ken labels after %s consumption and disk reopen",
+    async (mode) => {
+      const { history } = await queuedPromptMetadataRoundTrip(mode);
+      const pane = client(`queue-metadata-${mode}`, 1);
+      vi.mocked(pane.listHistory).mockResolvedValue(history);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      await waitFor(() => expect(document.querySelectorAll(".user-msg")).toHaveLength(3));
+      const bubbles = Array.from(document.querySelectorAll(".user-msg"));
+      expect(bubbles[0].classList.contains("user-ken-sent")).toBe(true);
+      expect(bubbles[1].classList.contains("user-ken-sent")).toBe(false);
+      expect(bubbles[1].querySelector(".enh-term")?.firstChild?.textContent).toBe("TypeScript");
+      expect(bubbles[1].querySelector(".enh-tip-orig")?.textContent).toBe("“type script”");
+      expect(bubbles[1].querySelector(".enh-tip-note")?.textContent).toBe("Language name");
+      expect(bubbles[2].classList.contains("user-ken-sent")).toBe(true);
+      expect(bubbles[2].textContent).toBe(bubbles[0].textContent);
+      expect(bubbles[2].textContent).toContain("Sent to");
+      expect(screen.queryByText("Cancelled prompt")).toBeNull();
+      expect(screen.queryByText("Ken queued prompt")).toBeNull();
+      expect(document.querySelector(".queued-pill")).toBeNull();
+    },
+    60_000,
+  );
+
+  it("never offers enhancement for schedule drafts", async () => {
+    const pane = client("enhance-schedule", 1);
+    await renderHydratedComposer(pane);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "/schedule Check search | 15m" },
+    });
+    expect(screen.queryByRole("button", { name: "Enhance?" })).toBeNull();
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+  });
+
+  it("stops and resumes placeholder timers across blur and typed drafts", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const interval = vi.spyOn(window, "setInterval");
+    const clear = vi.spyOn(window, "clearInterval");
+    await renderHydratedComposer(client("placeholder-focus", 1));
+    const timer = interval.mock.calls.findIndex(([, delay]) => delay === 12000);
+    expect(timer).toBeGreaterThanOrEqual(0);
+    const id = interval.mock.results[timer].value;
+    fireEvent.blur(window);
+    expect(clear).toHaveBeenCalledWith(id);
+    interval.mockClear();
+    fireEvent.focus(window);
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000)).toBe(true);
+    interval.mockClear();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: draft } });
+    fireEvent.blur(window);
+    fireEvent.focus(window);
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000 || delay === 24)).toBe(false);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+    expect(interval.mock.calls.some(([, delay]) => delay === 12000)).toBe(true);
+  });
+});
+
+describe("preferredRoadmapPhaseSession", () => {
+  it("prefers the execution transcript and falls back to the compatibility session", () => {
+    const compatibility = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    const implementation = { sessionId: "implementation", sessionPath: "/implementation.jsonl" };
+
+    expect(
+      preferredRoadmapPhaseSession(
+        { session: compatibility, execution: { lastSession: implementation } },
+        compatibility,
+      ),
+    ).toBe(implementation);
+    expect(preferredRoadmapPhaseSession({ session: compatibility }, implementation)).toBe(
+      compatibility,
+    );
+  });
+
+  it("resumes the preferred session without treating historical reconciliation as a gate", () => {
+    const stale = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    const implementation = { sessionId: "implementation", sessionPath: "/implementation.jsonl" };
+
+    const blocked = resolveRoadmapPhaseResume(
+      {
+        session: stale,
+        execution: { state: "needs-reconciliation", lastSession: implementation },
+      },
+      stale,
+    );
+    expect(blocked).toEqual({ status: "ready", session: implementation });
+    expect(
+      resolveRoadmapPhaseResume(
+        { session: stale, execution: { state: "implementing", lastSession: implementation } },
+        stale,
+      ),
+    ).toEqual({ status: "ready", session: implementation });
+    expect(resolveRoadmapPhaseResume({ session: stale }, implementation)).toEqual({
+      status: "ready",
+      session: stale,
+    });
+  });
+
+  it("fails closed when Notes state cannot be verified while preserving missing legacy Notes", async () => {
+    const pane = client("resume-preflight", 1);
+    const compatibility = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    vi.mocked(pane.getNotes).mockRejectedValueOnce(new Error("Notes unavailable"));
+
+    await expect(
+      resolveRoadmapPhaseResumeFromNotes(pane, "phase-1", compatibility),
+    ).resolves.toEqual({
+      status: "blocked",
+      message:
+        "Couldn’t verify whether this phase needs reconciliation. Open Project Notes and retry Resume.",
+    });
+
+    vi.mocked(pane.getNotes).mockResolvedValueOnce({ status: "missing" });
+    await expect(
+      resolveRoadmapPhaseResumeFromNotes(pane, "legacy-phase", compatibility),
+    ).resolves.toEqual({ status: "ready", session: compatibility });
+  });
+});
+
+async function openTasksModal(pane: PaneAgentClient): Promise<void> {
+  vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+  render(<AgentPane client={pane} target={target} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Tasks (1)" }));
+  await screen.findByRole("dialog", { name: "Tasks" });
+}
+
+describe("AgentPane question acknowledgement", () => {
+  const question = {
+    id: "approval",
+    kind: "choice",
+    question: "Allow this action?",
+    options: [{ label: "Allow action", value: "allow" }],
+  };
+
+  it.each(["click", "typed"] as const)(
+    "does not submit a cleared multi-select when the next answer arrives by %s",
+    async (source) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`ask-clear-${source}`, 1);
+      const emit = liveEvents(pane);
+      const acknowledgement = deferred<void>();
+      vi.mocked(pane.answerAskUser).mockReturnValueOnce(acknowledgement.promise);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+      act(() =>
+        emit("ask_user", {
+          id: "ask-clear",
+          questions: [
+            {
+              id: "checks",
+              kind: "multi",
+              question: "Which checks?",
+              options: [{ label: "Typecheck" }, { label: "Tests" }],
+            },
+            {
+              id: "then",
+              kind: "choice",
+              question: "Then what?",
+              options: [{ label: "Continue" }, { label: "Stop" }],
+            },
+          ],
+        }),
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Typecheck" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+      // Capture the second question's composer target before reopening the first.
+      if (source === "typed") fireEvent.keyDown(document, { key: "C" });
+      fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
+      if (source === "typed") {
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue" } });
+        fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+      }
+      expect(pane.answerAskUser).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(
+        container.querySelector('[data-ask-question="checks"]')?.hasAttribute("data-ask-answered"),
+      ).toBe(false);
+      expect(screen.getByRole("button", { name: /Continue/ })).toHaveProperty(
+        "ariaPressed",
+        "true",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Tests" }));
+      expect(pane.answerAskUser).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+      expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-clear", "answer", {
+        checks: ["Tests"],
+        then: "Continue",
+      });
+      expect(container.querySelector(".ask-band.is-done")).toBeNull();
+      await act(async () => acknowledgement.resolve());
+      expect(container.querySelector(".ask-band.is-done")).not.toBeNull();
+    },
+  );
+
+  it("does not show sent until acknowledged, and leaves refusal unsent", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-ack", 1);
+    const emit = liveEvents(pane);
+    const acknowledgement = deferred<void>();
+    vi.mocked(pane.answerAskUser).mockReturnValueOnce(acknowledgement.promise);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+    fireEvent.click(await screen.findByRole("button", { name: /Allow action/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".ask-band.is-done")).toBeNull();
+    await act(async () => acknowledgement.reject(new Error("no question is awaiting an answer")));
+    expect(container.querySelector(".ask-band.is-done")).toBeNull();
+    expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
+  });
+
+  it.each([
+    ["typed", false],
+    ["toolbar", false],
+    ["typed", true],
+    ["toolbar", true],
+  ] as const)(
+    "settles live approval only after %s send acceptance=%s",
+    async (source, accepted) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`ask-rejected-${source}`, 1);
+      const emit = liveEvents(pane);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      // Toolbar sends can race the running-state event from the host.
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running: source === "typed",
+        runState: source === "typed" ? "running" : "idle",
+      });
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name: "commit",
+          aliases: [],
+          description: "Commit changes",
+          source: "built-in",
+          input: { text: "optional", references: "optional", attachments: "optional" },
+        },
+      ]);
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+      await screen.findByRole("button", { name: /Allow action/ });
+      if (source === "typed") {
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "Change direction" } });
+        fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      } else {
+        fireEvent.click(await screen.findByTitle("Run /commit"));
+      }
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+      expect(container.querySelector(".user-msg")).toBeNull();
+      if (accepted) {
+        act(() =>
+          emit("ask_user", {
+            id: "ask-2",
+            questions: [{ ...question, options: [{ label: "Allow next action" }] }],
+          }),
+        );
+        await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+        expect(screen.getByRole("button", { name: /Allow next action/ })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+        expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+        expect(container.querySelector(".queued-pill")).toBeNull();
+        expect(pane.answerAskUser).not.toHaveBeenCalled();
+        return;
+      }
+      await act(async () => submission.reject(new Error("HTTP 409: programmatic_execution_busy")));
+      expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+      expect(container.querySelector(".queued-pill")).toBeNull();
+      expect(container.querySelector(".user-msg")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+      await waitFor(() =>
+        expect(pane.answerAskUser).toHaveBeenCalledWith("ask-1", "answer", { approval: "allow" }),
+      );
+      await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
+    },
+  );
+
+  it.each([false, true])(
+    "replays real controller question settlement on acceptance=%s",
+    async (accepted) => {
+      vi.useRealTimers();
+      nativeMocks.realMentor = true;
+      const { requirePromptSubmissionResult } =
+        await vi.importActual<typeof AgentModule>("./agent");
+      await withRealSidecar(
+        async ({ project, manager, open, request, subscribe }) => {
+          const saved = await manager.create(project, "openai", "gpt-5", {
+            openAICodexContextProfile: "stable",
+          });
+          const logicalId = await open(saved.path, "chat");
+          const pane = client(logicalId, 1);
+          const emit = liveEvents(pane);
+          vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+          vi.mocked(pane.sendPrompt).mockImplementation(async (text, attachments, meta) => {
+            const response = await request("/prompt", logicalId, { text, attachments, meta });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return requirePromptSubmissionResult(await response.json());
+          });
+          vi.mocked(pane.answerAskUser).mockImplementation(async (id, action, answers) => {
+            const response = await request(`/ask/${id}`, logicalId, { action, answers });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          });
+          try {
+            const { container } = render(<AgentPane client={pane} target={target} />);
+            await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+            const stream = await subscribe(logicalId, (event) =>
+              act(() => emit(event.type, event.data)),
+            );
+            await act(async () => {
+              expect(
+                (await request("/prompt", logicalId, { text: "Ask for approval" })).status,
+              ).toBe(202);
+              await stream.waitFor("ask_user");
+            });
+            await screen.findByRole("button", { name: /Allow action/ });
+            const text = accepted ? "Change direction" : "/research";
+            const input = screen.getByRole("textbox");
+            fireEvent.change(input, { target: { value: text } });
+            fireEvent.keyDown(input, { key: "Enter" });
+            if (accepted) {
+              await waitFor(() =>
+                expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull(),
+              );
+              await act(async () => {
+                await stream.waitFor("ask_user_settled");
+              });
+              expect(
+                stream.events
+                  .filter((event) => event.type === "ask_user_settled")
+                  .map((event) => event.data),
+              ).toEqual([{ id: "ask-1", action: "cancel" }]);
+              expect(pane.answerAskUser).not.toHaveBeenCalled();
+            } else {
+              await screen.findByText("Prompt wasn’t sent");
+              expect((input as HTMLTextAreaElement).value).toBe(text);
+              expect(container.querySelector(".ask-band.is-done")).toBeNull();
+              expect(stream.events.filter((event) => event.type === "ask_user_settled")).toEqual(
+                [],
+              );
+              fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+              await waitFor(() =>
+                expect(container.querySelector(".ask-band.is-done")).not.toBeNull(),
+              );
+              // The HTTP receipt can update the card before its SSE notification arrives.
+              await act(async () => {
+                await stream.waitFor("ask_user_settled");
+              });
+              expect(
+                stream.events
+                  .filter((event) => event.type === "ask_user_settled")
+                  .map((event) => event.data),
+              ).toEqual([{ id: "ask-1", action: "answer" }]);
+            }
+          } finally {
+            cleanup();
+          }
+        },
+        { parkQuestion: true },
+      );
+    },
+    60_000,
+  );
+
+  it("preserves live approval when Ken's Continue here send is rejected", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-rejected-ken", 1);
+    const emit = liveEvents(pane);
+    const submission = deferred<AgentModule.PromptSubmissionResult>();
+    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+    const sendButton = await renderKenPromptPane(pane, true);
+    act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
+    await act(async () => submission.reject(new Error("HTTP 409: programmatic_execution_busy")));
+    expect(document.querySelector(".user-ken-sent")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    await waitFor(() =>
+      expect(pane.answerAskUser).toHaveBeenCalledWith("ask-1", "answer", { approval: "allow" }),
+    );
+    await waitFor(() => expect(document.querySelector(".ask-band.is-done")).not.toBeNull());
+  });
+
+  it("host expiry closes only its card and disables click and keyboard answers", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-expiry", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    // Exercise live expiry after initial hydration, not merely listener setup.
+    await waitFor(() => expect(container.querySelector(".footer .model-button")).not.toBeNull());
+    act(() => {
+      emit("ask_user", { id: "ask-1", questions: [question] });
+      emit("ask_user", {
+        id: "ask-2",
+        questions: [{ ...question, options: [{ label: "Other action" }] }],
+      });
+      emit("ask_user_settled", { id: "ask-1", action: "cancel" });
+      emit("run_end", {});
+    });
+    expect(container.querySelectorAll(".ask-band.is-closed")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Other action/ })).toBeTruthy();
+    act(() => emit("ask_user_settled", { id: "ask-2", action: "cancel" }));
+    fireEvent.keyDown(document, { key: "1" });
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentPane Autopilot confirmation", () => {
+  it("keeps failures off, reports an error, blocks duplicates, and permits retry", async () => {
+    const realToast = await vi.importActual<typeof ToastModule>("./toast");
+    nativeMocks.toast.mockImplementation(realToast.toast);
+    const pane = client("autopilot-failure", 1);
+    let reject!: (error: Error) => void;
+    vi.mocked(pane.setAutopilot).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const { container } = render(
+      <>
+        <AgentPane client={pane} target={target} />
+        <Toaster />
+      </>,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+    fireEvent.click(toggle);
+    expect(toggle).toMatchObject({ checked: false, disabled: true });
+    expect(container.querySelector(".ken-power-overlay")).toBeNull();
+    fireEvent.click(toggle);
+    expect(pane.setAutopilot).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("configuration refresh in progress")));
+    expect(toggle).toMatchObject({ checked: false, disabled: false });
+    expect(container.querySelector(".ken-power-overlay")).toBeNull();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("configuration refresh in progress"),
+      "error",
+    );
+    expect(
+      screen.getByText("Could not change Autopilot: configuration refresh in progress. Try again."),
+    ).toBeTruthy();
+    act(() => realToast.dismissToast(nativeMocks.toast.mock.results[0].value));
+    vi.mocked(pane.setAutopilot).mockResolvedValueOnce(true);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toMatchObject({ checked: true, disabled: false }));
+    expect(container.querySelector(".ken-power-banner-on")).not.toBeNull();
+  });
+
+  it("honors returned false and reflects valid server events", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("autopilot-false", 1);
+    const emit = paneEvents(pane);
+    vi.mocked(pane.setAutopilot).mockResolvedValue(false);
+    const { container } = render(
+      <>
+        <AgentPane client={pane} target={target} />
+        <Toaster />
+      </>,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(container.querySelector(".ken-power-banner-off")).not.toBeNull());
+    expect(pane.setAutopilot).toHaveBeenCalledWith(true);
+    expect(toggle).toMatchObject({ checked: false });
+    expect(container.querySelector(".ken-power-banner-on")).toBeNull();
+    act(() => emit?.({ type: "autopilot", data: { autopilot: true } }));
+    expect(toggle).toMatchObject({ checked: true });
+    act(() => emit?.({ type: "autopilot", data: { autopilot: "false" } }));
+    expect(toggle).toMatchObject({ checked: true });
+    act(() => emit?.({ type: "autopilot", data: { autopilot: false } }));
+    expect(toggle).toMatchObject({ checked: false });
+  });
+
+  it.each(["resolve", "reject"])(
+    "ignores stale %s after replacing the pane session",
+    async (outcome) => {
+      const pane = client("autopilot-stale", 1);
+      let resolve!: (value: boolean) => void;
+      let reject!: (error: Error) => void;
+      vi.mocked(pane.setAutopilot).mockImplementation(
+        () =>
+          new Promise((ok, fail) => {
+            resolve = ok;
+            reject = fail;
+          }),
+      );
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+      await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
+      fireEvent.click(toggle);
+      view.rerender(
+        <AgentPane
+          client={pane}
+          target={{ ...target, sessionPath: "/replacement.jsonl" }}
+          generation={2}
+          workspaceOwnsSessionLifecycle
+        />,
+      );
+      await act(async () => {
+        if (outcome === "resolve") resolve(true);
+        else reject(new Error("old failure"));
+      });
+      expect(toggle).toMatchObject({ checked: false });
+      expect(view.container.querySelector(".ken-power-overlay")).toBeNull();
+      expect(nativeMocks.toast).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("AgentPane task request failures", () => {
+  it.each([false, true])(
+    "renders an accepted task failure and allows retry (all=%s)",
+    async (all) => {
+      nativeMocks.realMentor = true; // Exercise the real event hook and error renderer.
+      const pane = client("accepted-task-failure", 1);
+      vi.mocked(pane.runTask).mockResolvedValue(undefined);
+      vi.mocked(pane.runAllTasks).mockResolvedValue(undefined);
+      const emit = paneEvents(pane);
+      vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+      await openTasksModal(pane);
+      fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+      act(() => {
+        emit?.({ type: "tasks_run_done", data: {} });
+        emit?.({
+          type: "error",
+          data: {
+            headline: all ? "Run All stopped" : "Task run stopped",
+            message: "Task setup or execution could not finish.",
+            guidance:
+              "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+          },
+        });
+      });
+      expect(await screen.findByText(all ? "Run All stopped" : "Task run stopped")).toBeTruthy();
+      expect(screen.getByText("Task setup or execution could not finish.")).toBeTruthy();
+      expect(
+        screen.getByText(
+          "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+        ),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
+      await screen.findByRole("dialog", { name: "Tasks" });
+      const retry = screen.getByRole("button", { name: "Run" });
+      expect(retry).toMatchObject({ disabled: false });
+      fireEvent.click(retry);
+      await waitFor(() => expect(pane.runTask).toHaveBeenCalledTimes(all ? 1 : 2));
+      expect(pane.runTask).toHaveBeenLastCalledWith(projectTask.id);
+    },
+  );
+  it("disables task launches while Autopilot reviews, then enables them after settlement", async () => {
+    const pane = client("task-autopilot-review", 1);
+    const emit = paneEvents(pane);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    await openTasksModal(pane);
+    act(() => emit?.({ type: "autopilot_review_start", data: {} }));
+    const single = screen.getByRole("button", { name: "Run" });
+    const all = screen.getByRole("button", { name: "Run all (1)" });
+    expect(single).toMatchObject({ disabled: true });
+    expect(all).toMatchObject({ disabled: true });
+    fireEvent.click(single);
+    fireEvent.click(all);
+    expect(pane.runTask).not.toHaveBeenCalled();
+    expect(pane.runAllTasks).not.toHaveBeenCalled();
+    act(() => emit?.({ type: "autopilot_done", data: {} }));
+    expect(single).toMatchObject({ disabled: false });
+    expect(all).toMatchObject({ disabled: false });
+  });
+  it("keeps the current tasks visible when refreshing the list fails", async () => {
+    const pane = client("pane-task-list-failure", 1);
+    let rejectRefresh = false;
+    vi.mocked(pane.listTasks).mockImplementation(async () => {
+      if (rejectRefresh) throw new Error("task list unavailable");
+      return [projectTask];
+    });
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+    const tasksButton = await screen.findByRole("button", { name: "Tasks (1)" });
+
+    rejectRefresh = true;
+    fireEvent.click(tasksButton);
+
+    await screen.findByRole("dialog", { name: "Tasks" });
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task list unavailable", "error"),
+    );
+  });
+
+  it("keeps the modal and tasks visible when run-one is rejected", async () => {
+    const pane = client("pane-task-run-one-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.runTask).mockRejectedValue(new Error("task cannot start"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task cannot start", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it("keeps the modal and tasks visible when run-all is rejected", async () => {
+    const pane = client("pane-task-run-all-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.runAllTasks).mockRejectedValue(new Error("task batch cannot start"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run all (1)" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task batch cannot start", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it("keeps the current tasks visible when delete is rejected", async () => {
+    const pane = client("pane-task-delete-failure", 1);
+    vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
+    vi.mocked(pane.deleteTask).mockRejectedValue(new Error("task delete refused"));
+    await openTasksModal(pane);
+
+    fireEvent.click(screen.getByTitle("Delete task"));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith("task delete refused", "error"),
+    );
+    expect(screen.getByText(projectTask.title)).toBeTruthy();
+  });
+});
+
+describe("AgentPane automatic update footer banner", () => {
+  it("hides local-patched updates while showing official releases", async () => {
+    nativeMocks.appUpdate.phase = "available";
+    const localPane = client("pane-local-update", 1);
+    vi.mocked(localPane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={localPane} target={target} />);
+    await screen.findByRole("textbox");
+
+    expect(screen.queryByRole("button", { name: /click to review/u })).toBeNull();
+
+    cleanup();
+    nativeMocks.appUpdate.localPatched = false;
+    const officialPane = client("pane-official-update", 1);
+    vi.mocked(officialPane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={officialPane} target={target} />);
+
+    expect(await screen.findByRole("button", { name: /just updated/u })).toBeTruthy();
+  });
+});
+
+describe("AgentPane lifecycle", () => {
+  it("rehydrates a durable accessible MCP failure transcript row", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      {
+        role: "assistant",
+        text: "",
+        mcpToolFailure: {
+          name: "mcp__acceptance__fixture_is_error",
+          result: "fixture-is-error",
+        },
+      },
+    ]);
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+
+    const failedRow = await screen.findByRole("status", {
+      name: "Failed MCP tool: acceptance / fixture_is_error",
+    });
+    expect(failedRow.textContent).toContain("Failed");
+    expect(failedRow.textContent).toContain("fixture-is-error");
+  });
+
+  it.each([false, undefined])(
+    "locks context without authority (%s), retaining value and Fast",
+    async (canChange) => {
+      const pane = client("astra-locked", 1);
+      const reason =
+        "Context mode is fixed after this session starts. Start a new session to change it.";
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("gpt-6-astra"),
+        provider: "openai",
+        accountId: "account-1",
+        openAICodexContextProfile: "experimental",
+        openAICodexContextProfileEligibility:
+          canChange === false ? { canChange: false, reason } : undefined,
+      } as unknown as AgentState);
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      const selector = (await screen.findByRole("combobox", {
+        name: "OpenAI Codex context profile",
+      })) as HTMLSelectElement;
+      expect(selector.disabled).toBe(true);
+      expect(selector.value).toBe("experimental");
+      expect(selector.title).toBe(reason);
+      expect(document.getElementById(selector.getAttribute("aria-describedby")!)?.textContent).toBe(
+        reason,
+      );
+      fireEvent.change(selector, { target: { value: "stable" } });
+      expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+      expect((screen.getByRole("switch", { name: /Fast off/ }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    },
+  );
+
+  it("shows context profiles only for GPT-6 Astra using Codex OAuth", async () => {
+    const oauthPane = client("astra-oauth", 1);
+    vi.mocked(oauthPane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextTokens: 136_000,
+      contextWindow: 272_000,
+    });
+    const mounted = render(
+      <AgentPane client={oauthPane} target={target} workspaceOwnsSessionLifecycle />,
+    );
+    expect(
+      await screen.findByRole("combobox", { name: "OpenAI Codex context profile" }),
+    ).toBeDefined();
+    expect(
+      screen
+        .getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+    expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
+
+    mounted.unmount();
+    const apiKeyPane = client("astra-api-key", 1);
+    vi.mocked(apiKeyPane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      openAICodexContextProfile: "stable",
+      contextWindow: 1_050_000,
+    });
+    render(<AgentPane client={apiKeyPane} target={target} workspaceOwnsSessionLifecycle />);
+    await screen.findAllByText("gpt-6-astra");
+    expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /Fast (on|off) · 2.5× credits/ })).toBeNull();
+  });
+
+  it("keeps Astra controls independent across panes", async () => {
+    const left = client("astra-left", 1);
+    const right = client("astra-right", 1);
+    vi.mocked(left.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "left-account",
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 136_000,
+      contextWindow: 272_000,
+    });
+    vi.mocked(right.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "right-account",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
+      contextTokens: 300_000,
+      contextWindow: 872_000,
+    });
+
+    render(
+      <>
+        <AgentPane client={left} target={target} workspaceOwnsSessionLifecycle />
+        <AgentPane client={right} target={target} workspaceOwnsSessionLifecycle />
+      </>,
+    );
+    const selectors = await screen.findAllByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    const fastSwitches = screen.getAllByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
+    expect(selectors.map((selector) => (selector as HTMLSelectElement).value)).toEqual([
+      "stable",
+      "experimental",
+    ]);
+    expect(fastSwitches.map((button) => button.textContent)).toEqual([
+      "Fast off · 2.5× credits",
+      "Fast on · 2.5× credits",
+    ]);
+    expect(fastSwitches.map((button) => button.title)).toEqual([
+      "Fast mode is off. Turn on to use Fast mode at 2.5× credits.",
+      "Fast mode is on. Uses 2.5× credits. Click to turn off.",
+    ]);
+    expect(fastSwitches.map((button) => button.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "true",
+    ]);
+    expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
+    expect(screen.getByText("300,000 / 872K · 34%")).toBeDefined();
+  });
+
+  it.each([
+    "cannot switch Ken's model while running",
+    "unknown model: missing",
+    "invalid Ken model response",
+  ])("preserves all Ken fields and displays rejected selection: %s", async (message) => {
+    const pane = client("ken-selection", 1);
+    const prior = { kenProvider: "anthropic", kenModel: "claude-prior", kenModelOverride: true };
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("gpt"), ...prior });
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "claude-prior", provider: "anthropic", name: "Prior" },
+      { id: "missing", provider: "openai", name: "Missing" },
+    ]);
+    vi.mocked(pane.switchKenModel).mockRejectedValue(message);
+    await act(async () => {
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    });
+    const picker = await screen.findByTitle(/is pinned to a separate model/);
+    fireEvent.click(picker);
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));
+    await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(message, "error"));
+    expect(pane.switchKenModel).toHaveBeenCalledExactlyOnceWith("missing");
+    expect(nativeMocks.kenStateRef?.current).toMatchObject(prior);
+    expect(picker.textContent).toContain("Prior");
+    expect(picker.title).toContain("pinned");
+  });
+
+  it("disables the context profile selector while running", async () => {
+    const pane = client("astra-running", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+      running: true,
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    expect(
+      (await screen.findByRole("combobox", {
+        name: "OpenAI Codex context profile",
+      })) as HTMLSelectElement,
+    ).toMatchObject({ disabled: true });
+  });
+
+  it("disables Astra controls while Autopilot owns the session", async () => {
+    const pane = client("astra-autopilot", 1);
+    const emit = paneEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    const fast = screen.getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
+
+    act(() => emit?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() => expect(selector).toMatchObject({ disabled: true }));
+    expect(fast).toMatchObject({ disabled: true });
+
+    act(() => emit?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+    expect(fast).toMatchObject({ disabled: false });
+  });
+
+  it.each([false, true])("restores context profile focus unless moved (%s)", async (moved) => {
+    const pane = client("astra-switch", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      contextWindow: 272_000,
+    });
+    const mutation = deferred<{
+      openAICodexContextProfile: "experimental";
+      contextWindow: number;
+    }>();
+    vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
+    render(
+      <>
+        <button>Other control</button>
+        <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />
+      </>,
+    );
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    const fast = screen.getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
+    selector.focus();
+    fireEvent.change(selector, { target: { value: "experimental" } });
+    // WebView2 drops focus when a focused select is disabled; jsdom does not.
+    const other = screen.getByRole("button", { name: "Other control" });
+    other.focus();
+    if (!moved) other.blur();
+    expect(document.activeElement).toBe(moved ? other : document.body);
+    expect((selector as HTMLSelectElement).value).toBe("experimental");
+    expect(selector).toMatchObject({ disabled: true });
+    expect(fast).toMatchObject({ disabled: true });
+    await waitFor(() =>
+      expect(pane.setOpenAICodexContextProfile).toHaveBeenCalledWith("experimental"),
+    );
+    mutation.resolve({ openAICodexContextProfile: "experimental", contextWindow: 872_000 });
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+    expect(document.activeElement).toBe(moved ? other : selector);
+  });
+
+  it("optimistically settles and rolls back Fast mutations", async () => {
+    const pane = client("astra-fast", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextWindow: 272_000,
+    });
+    const mutation = deferred<{ openAICodexFast: boolean }>();
+    vi.mocked(pane.setOpenAICodexFast).mockReturnValueOnce(mutation.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const fast = await screen.findByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
+    const selector = screen.getByRole("combobox", { name: "OpenAI Codex context profile" });
+
+    fireEvent.click(fast);
+    expect(fast.getAttribute("aria-checked")).toBe("true");
+    expect(fast.textContent).toBe("Fast on · 2.5× credits");
+    expect(fast).toMatchObject({ disabled: true });
+    expect(pane.setOpenAICodexFast).toHaveBeenCalledWith(true);
+    expect(selector).toMatchObject({ disabled: true });
+    mutation.resolve({ openAICodexFast: true });
+    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
+
+    vi.mocked(pane.setOpenAICodexFast).mockRejectedValueOnce(new Error("Fast unavailable"));
+    fireEvent.click(fast);
+    await waitFor(() => expect(fast.getAttribute("aria-checked")).toBe("true"));
+    expect(nativeMocks.toast).toHaveBeenCalledWith("Fast unavailable", "error");
+    expect(pane.setOpenAICodexFast).toHaveBeenLastCalledWith(false);
+    expect(fast.textContent).toBe("Fast on · 2.5× credits");
+  });
+
+  it("preserves newer authoritative state when a profile mutation fails", async () => {
+    const pane = client("astra-stale", 1);
+    const emit = paneEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: false,
+      contextWindow: 872_000,
+    });
+    const mutation = deferred<{
+      openAICodexContextProfile: "stable" | "experimental";
+      contextWindow: number;
+    }>();
+    vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    fireEvent.change(selector, { target: { value: "stable" } });
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() =>
+      emit?.({
+        type: "context_profile_change",
+        data: { openAICodexContextProfile: "stable", contextWindow: 272_000 },
+      }),
+    );
+    mutation.reject(new Error("stale refusal"));
+
+    await waitFor(() => expect((selector as HTMLSelectElement).value).toBe("stable"));
+  });
+
+  it("displays a refused context-profile change without mutating the selector", async () => {
+    const pane = client("astra-refusal", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    vi.mocked(pane.setOpenAICodexContextProfile).mockRejectedValue(
+      new Error("Compact or start a new session first."),
+    );
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const selector = await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    });
+    fireEvent.change(selector, { target: { value: "stable" } });
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        "Compact or start a new session first.",
+        "error",
+      ),
+    );
+    expect((selector as HTMLSelectElement).value).toBe("experimental");
+  });
+
+  it("wires the restored home UI through the pane-scoped catalog client", async () => {
+    const pane = client("primary", 1);
+    render(<AgentPane client={pane} />);
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="home-screen"]')).not.toBeNull(),
+    );
+    const home = document.querySelector('[data-testid="home-screen"]');
+    expect(home?.getAttribute("data-has-pane-ready")).toBe("true");
+    expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
+    expect(pane.create).not.toHaveBeenCalled();
+  });
+
+  it("renders the local-build identity in the agent footer", async () => {
+    const pane = client("pane-1", 1);
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect((await screen.findByText("◆ Supah Coder Local Fork · abc1234")).className).toBe(
+      "footer-custom-build",
+    );
+  });
+
+  it("presents the compatible general chat agent as Brainstorm", async () => {
+    const pane = client("pane-brainstorm", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      mode: "chat",
+      chatAgent: "general",
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    expect(await screen.findByText("Brainstorm")).toBeDefined();
+    expect(screen.queryByText("General Agent")).toBeNull();
+  });
+
+  it("adopts a switched pane generation before the next selection", async () => {
+    const pane = client("pane-1", 3);
+    vi.mocked(pane.selectWorkspace).mockResolvedValueOnce(4).mockResolvedValueOnce(5);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 4,
+      sessionId: "pane-1",
+    });
+    const onUserTargetChange = vi.fn();
+    const onGenerationChange = vi.fn();
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+        onUserTargetChange={onUserTargetChange}
+        onGenerationChange={onGenerationChange}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(4));
+    fireEvent.click(await screen.findByRole("button", { name: /Back to this project's sessions/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    await waitFor(() =>
+      expect(pane.selectWorkspace).toHaveBeenLastCalledWith(
+        { mode: "code", cwd: "/chosen", sessionPath: "/chosen.jsonl" },
+        4,
+      ),
+    );
+    expect(onGenerationChange).toHaveBeenCalledWith(5);
+    expect(onUserTargetChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloads and replaces the pane model catalog after a native refresh", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "azure:gpt-old", name: "Azure old", provider: "azure" },
+    ]);
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    vi.mocked(pane.listModels).mockClear().mockResolvedValue([]);
+    vi.mocked(pane.waitForReady).mockClear();
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(pane.listModels).toHaveBeenCalledOnce());
+    expect(pane.waitForReady).toHaveBeenCalledOnce();
+  });
+
+  it("closes an open model menu even when the refreshed catalog compares equal", async () => {
+    const pane = client("pane-1", 1);
+    const catalog = [{ id: "azure:gpt-old", name: "Azure old", provider: "azure" }];
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-old"));
+    vi.mocked(pane.listModels).mockResolvedValue(catalog);
+    const view = render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    await waitFor(() => expect((modelButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(modelButton);
+    expect(screen.getByRole("menu", { name: "Switch Supah Coder's model" })).toBeTruthy();
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "Switch Supah Coder's model" })).toBeNull(),
+    );
+    view.unmount();
+    await waitFor(() => expect(nativeMocks.modelsUnlisten).toHaveBeenCalledOnce());
+  });
+
+  it("adopts the recovered generation after daemon respawn", async () => {
+    const pane = client("pane-1", 1);
+    const onGenerationChange = vi.fn();
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-old"));
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "azure:gpt-old", name: "Azure old", provider: "azure" },
+    ]);
+    render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    await waitFor(() => expect(modelButton.textContent).toContain("Azure old"));
+    onGenerationChange.mockClear();
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: "pane-1",
+    });
+    vi.mocked(pane.getState).mockReset().mockResolvedValue(agentState("azure:gpt-new"));
+    vi.mocked(pane.listModels)
+      .mockReset()
+      .mockResolvedValue([{ id: "azure:gpt-new", name: "Azure new", provider: "azure" }]);
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(2));
+    expect(screen.getByTitle("Switch Supah Coder's model").textContent).toContain("Azure new");
+  });
+
+  it("separate pane clients create and subscribe independently", async () => {
+    const left = client("left", 1),
+      right = client("right", 2);
+    const view = render(
+      <>
+        <AgentPane client={left} target={target} />
+        <AgentPane client={right} target={target} />
+      </>,
+    );
+    await waitFor(() => expect(left.create).toHaveBeenCalledWith(target));
+    expect(right.create).toHaveBeenCalledWith(target);
+    expect(left.subscribe).toHaveBeenCalled();
+    expect(right.subscribe).toHaveBeenCalled();
+    view.unmount();
+    await waitFor(() => expect(left.dispose).toHaveBeenCalledWith(1));
+    expect(right.dispose).toHaveBeenCalledWith(2);
+  });
+
+  it("reports autopilot review as active work until a terminal autopilot event", async () => {
+    const pane = client("pane-1", 7);
+    const onSnapshot = vi.fn<(snapshot: PaneSnapshot) => void>();
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        target={target}
+        workspaceOwnsSessionLifecycle
+        onSnapshot={onSnapshot}
+      />,
+    );
+    await waitFor(() => {
+      expect(pane.subscribe).toHaveBeenCalled();
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: false }),
+      );
+    });
+    const handleEvent = paneEvents(pane);
+    expect(handleEvent).toBeDefined();
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() =>
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: true }),
+      ),
+    );
+
+    act(() => handleEvent?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() =>
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: false }),
+      ),
+    );
+  });
+
+  it("hydrates a pending Roadmap draft in chat and keeps it reopenable after close", async () => {
+    const pane = client("pane-chat-hydration", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
+    const trigger = screen.getByRole("button", {
+      name: "Review Roadmap draft with 1 proposed phase",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Roadmap draft.*Collapse/ }));
+    expect(screen.queryByRole("region", { name: "Review Roadmap draft" })).toBeNull();
+    expect(trigger).toBeTruthy();
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(pane.approveRoadmapPhaseDraft).not.toHaveBeenCalled();
+    expect(pane.rejectRoadmapPhaseDraft).not.toHaveBeenCalled();
+  });
+
+  it("opens and exposes Roadmap drafts received live in chat", async () => {
+    const pane = client("pane-chat-live-draft", 7);
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce());
+    const handleEvent = paneEvents(pane);
+
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: roadmapDraft,
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("discovers /research and carries its submission into pending draft review", async () => {
+    const pane = client("pane-chat-research-command", 7);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "research",
+        aliases: [],
+        description: "Research this conversation and draft net-new Roadmap phases",
+        input: { text: "optional", references: "optional", attachments: "optional" },
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    const input = await screen.findByRole("textbox");
+
+    fireEvent.change(input, { target: { value: "/res" } });
+    expect(await screen.findByText("/research")).toBeTruthy();
+    expect(
+      screen.getByText("Research this conversation and draft net-new Roadmap phases"),
+    ).toBeTruthy();
+
+    const command = "/research approval UX";
+    fireEvent.change(input, { target: { value: command } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(command, [], undefined));
+
+    const handleEvent = paneEvents(pane);
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: roadmapDraft,
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("surfaces prompt submission failures in the transcript", async () => {
+    const pane = client("pane-prompt-failure", 7);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("plan approval handoff failed"));
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    const input = await screen.findByRole("textbox");
+
+    fireEvent.change(input, { target: { value: "continue after the plan" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(await screen.findByText("plan approval handoff failed")).toBeTruthy();
+  });
+
+  it("approves a chat Roadmap draft without starting implementation or a coding session", async () => {
+    const pane = client("pane-chat-approve", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.approveRoadmapPhaseDraft).mockResolvedValue({
+      status: "created",
+      revision: 13,
+      phaseIds: ["phase-research"],
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
+
+    await waitFor(() =>
+      expect(pane.approveRoadmapPhaseDraft).toHaveBeenCalledWith("draft-research"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeNull();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects and discards a chat Roadmap draft without starting other workflows", async () => {
+    const pane = client("pane-chat-reject", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.rejectRoadmapPhaseDraft).mockResolvedValue({ status: "rejected" });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reject draft" }));
+
+    await waitFor(() =>
+      expect(pane.rejectRoadmapPhaseDraft).toHaveBeenCalledWith("draft-research"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeNull();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+  });
+
+  it("shows stale chat drafts without allowing approval", async () => {
+    const pane = client("pane-chat-stale", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue({
+      ...roadmapDraft,
+      status: "stale",
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect((await screen.findByRole("alert")).textContent).toContain("This draft is out of date.");
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Create phases with references",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("keeps a chat draft reviewable when approval fails", async () => {
+    const pane = client("pane-chat-approval-error", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.approveRoadmapPhaseDraft).mockRejectedValue(
+      new Error("approval transport failed"),
+    );
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("approval transport failed");
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("preserves coding-mode Roadmap draft hydration and review", async () => {
+    const pane = client("pane-code-draft", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notes" })).toBeTruthy();
+  });
+
+  it("shows an approval draft after an unqualified natural-language Roadmap request", async () => {
+    const pane = client("pane-roadmap-intent", 7);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    const input = await screen.findByRole("textbox");
+
+    const request = "Add release hardening to our roadmap.";
+    fireEvent.change(input, { target: { value: request } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(request, [], undefined));
+
+    const handleEvent = paneEvents(pane);
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: {
+          id: "draft-intent-proof",
+          projectKey: "/work",
+          basedOnRevision: 8,
+          createdAt: "2026-08-05T12:00:00.000Z",
+          createdBySessionId: "pane-roadmap-intent",
+          summary: "Add release hardening without duplicating existing delivery work.",
+          phases: [
+            {
+              phaseId: "phase-release-hardening",
+              title: "Release hardening",
+              goal: "Prove the release is safe to ship and recover.",
+              doneWhen: ["Critical release checks pass", "Rollback is rehearsed"],
+              sourcePrompt: request,
+            },
+          ],
+          status: "pending",
+        },
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(screen.getByText("Proposed from Project Notes revision 8")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Release hardening" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
+  });
+
+  it.each([
+    ["selection", "C:\\picked"],
+    ["cancellation", null],
+  ] as const)("restores composer focus after add-dir picker %s", async (_outcome, selected) => {
+    const pane = client("pane-add-dir-focus", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "add-dir",
+        aliases: [],
+        description: "Add project folder",
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    const picker = deferred<string | null>();
+    nativeMocks.openDialog.mockReturnValueOnce(picker.promise);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    input.focus();
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("/add-dir"));
+    await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
+    expect(document.activeElement).not.toBe(input);
+
+    await act(async () => picker.resolve(selected));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(selected === null ? 0 : 1);
+  });
+
+  it.each([false, true])(
+    "retains rejected composer submissions while running=%s",
+    async (running) => {
+      const pane = client("pane-send-recovery", 8);
+      vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), running });
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      render(
+        <AgentPane
+          client={pane}
+          target={target}
+          registerInput={(_id, actions) => {
+            actionsRef.current = actions;
+          }}
+        />,
+      );
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
+      await screen.findByRole("button", { name: "Remove file.txt" });
+      fireEvent.change(input, { target: { value: "@context" } });
+      fireEvent.click(await screen.findByText("context.ts"));
+      await screen.findByRole("button", { name: "Remove src/context.ts" });
+      fireEvent.change(input, { target: { value: "Keep this prompt" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      await act(async () => submission.reject(new Error("send rejected")));
+      expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+      expect((input as HTMLTextAreaElement).value).toBe("Keep this prompt");
+      expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
+      vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+        running ? { queued: true, count: 1, queueId: "q1" } : { queued: false, count: 0 },
+      );
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(pane.sendPrompt).mock.calls[1]).toEqual(
+        vi.mocked(pane.sendPrompt).mock.calls[0],
+      );
+      await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+    },
+  );
+
+  it.each(
+    [false, true].flatMap((busy) => ["", "Keep this file draft"].map((text) => ({ busy, text }))),
+  )(
+    "retains attachments after upload rejection (busy=$busy, text='$text')",
+    async ({ busy, text }) => {
+      await withRealSidecar(async ({ project, manager, open, request, generation }) => {
+        const saved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: "stable",
+        });
+        const logicalId = await open(saved.path);
+        if (busy) {
+          expect((await request("/prompt", logicalId, { text: "Hold generation" })).status).toBe(
+            202,
+          );
+          await generation.started;
+        }
+        await fs.mkdir(path.join(project, ".gg"), { recursive: true });
+        await fs.writeFile(path.join(project, ".gg", "uploads"), "blocked");
+        const pane = client(logicalId, 8);
+        vi.mocked(pane.getState).mockResolvedValue({ ...agentState("gpt-5"), running: busy });
+        vi.mocked(pane.sendPrompt).mockImplementation(async (submitted, attachments) => {
+          const response = await request("/prompt", logicalId, { text: submitted, attachments });
+          expect(response.status).toBe(500);
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.message);
+          throw new Error("Unexpected acceptance");
+        });
+        const actionsRef: { current: PaneInputActions | null } = { current: null };
+        try {
+          const view = render(
+            <AgentPane
+              client={pane}
+              target={target}
+              registerInput={(_id, actions) => {
+                actionsRef.current = actions;
+              }}
+            />,
+          );
+          const input = await screen.findByRole("textbox");
+          await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+          await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
+          await screen.findByRole("button", { name: "Remove file.txt" });
+          fireEvent.change(input, { target: { value: text } });
+          fireEvent.keyDown(input, { key: "Enter" });
+          await screen.findByText("Prompt wasn’t sent", {}, { timeout: 20_000 });
+          expect(await screen.findByText(/Could not save attachment/)).toBeTruthy();
+          expect((input as HTMLTextAreaElement).value).toBe(text);
+          expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+          expect(view.container.querySelector(".user-msg")).toBeNull();
+          expect(pane.sendPrompt).toHaveBeenCalledOnce();
+        } finally {
+          cleanup();
+        }
+      });
+    },
+    60_000,
+  );
+
+  it("retains composer text, references and attachments after a real required-append rejection", async () => {
+    vi.useRealTimers();
+    const { requirePromptSubmissionResult } = await vi.importActual<typeof AgentModule>("./agent");
+    await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
+      const saved = await manager.create(project, "openai", "gpt-5", {
+        openAICodexContextProfile: "stable",
+      });
+      const logicalId = await open(saved.path);
+      const pane = client(logicalId, 8);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      let responseStatus: number | undefined;
+      // Mock only the native transport: the response comes from the real /prompt route.
+      vi.mocked(pane.sendPrompt).mockImplementation(async (text, attachments, meta) => {
+        const response = await request("/prompt", logicalId, { text, attachments, meta });
+        responseStatus = response.status;
+        if (!response.ok) throw new Error(`Prompt rejected: ${response.status}`);
+        return requirePromptSubmissionResult(await response.json());
+      });
+      const emit = liveEvents(pane);
+      await subscribe(logicalId, (event) => act(() => emit(event.type, event.data)));
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      try {
+        render(
+          <AgentPane
+            client={pane}
+            target={target}
+            registerInput={(_id, actions) => {
+              actionsRef.current = actions;
+            }}
+          />,
+        );
+        const input = await screen.findByRole("textbox");
+        await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+        await act(async () => actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]));
+        await screen.findByRole("button", { name: "Remove file.txt" });
+        fireEvent.change(input, { target: { value: "@context" } });
+        fireEvent.click(await screen.findByText("context.ts"));
+        await screen.findByRole("button", { name: "Remove src/context.ts" });
+        fireEvent.change(input, { target: { value: "Keep this durable draft" } });
+        await fs.rename(saved.path, `${saved.path}.backup`);
+        await fs.mkdir(saved.path);
+        fireEvent.keyDown(input, { key: "Enter" });
+        expect(await screen.findByText("Prompt wasn’t sent", {}, { timeout: 20_000 })).toBeTruthy();
+        expect(responseStatus).toBe(500);
+        expect(pane.sendPrompt).toHaveBeenCalledOnce();
+        expect((input as HTMLTextAreaElement).value).toBe("Keep this durable draft");
+        expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
+      } finally {
+        cleanup();
+      }
+    });
+  }, 60_000);
+
+  it.each([false, true])("preserves newer typing after send acceptance=%s", async (accepted) => {
+    const pane = client("pane-send-newer-draft", 8);
+    const submission = deferred<AgentModule.PromptSubmissionResult>();
+    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: "Original prompt" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    fireEvent.change(input, { target: { value: "Newer draft" } });
+    await act(async () => {
+      if (accepted) submission.resolve({ queued: false, count: 0 });
+      else submission.reject(new Error("send rejected"));
+    });
+    expect((input as HTMLTextAreaElement).value).toBe("Newer draft");
+  });
+
+  it.each(["add-dir", "remove-dir"])(`reports failed /%s picker submissions`, async (name) => {
+    const pane = client(`pane-${name}-failure`, 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name,
+        aliases: [],
+        description: "Change workspace folders",
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("agent_prompt failed"));
+    nativeMocks.openDialog.mockResolvedValueOnce("C:\\picked");
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    input.focus();
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText(`/${name}`));
+
+    expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+    expect(await screen.findByText("agent_prompt failed")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+
+  it.each(["add-dir", "remove-dir"])(`rejects staged inputs for typed /%s`, (name) => {
+    expect(
+      noInputSlashSubmissionError(
+        `/${name} C:\\typed`,
+        [
+          {
+            name,
+            aliases: [],
+            description: "Change workspace folders",
+            input: { text: "optional", references: "none", attachments: "none" },
+            source: "built-in",
+          },
+        ],
+        1,
+        1,
+      ),
+    ).toBe(
+      `/${name} does not accept file references, attachments. Remove them and send the command again.`,
+    );
+  });
+
+  it.each(["add-dir", "remove-dir"])(
+    `clears staged inputs before opening the /%s picker`,
+    async (name) => {
+      const pane = client(`pane-${name}-inputs`, 8);
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name,
+          aliases: [],
+          description: "Change workspace folders",
+          input: { text: "optional", references: "none", attachments: "none" },
+          source: "built-in",
+        },
+      ]);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const picker = deferred<string | null>();
+      nativeMocks.openDialog.mockReturnValueOnce(picker.promise);
+      const actionsRef: { current: PaneInputActions | null } = { current: null };
+      render(
+        <AgentPane
+          client={pane}
+          target={target}
+          registerInput={(_paneId, actions) => {
+            actionsRef.current = actions;
+          }}
+        />,
+      );
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+      fireEvent.change(input, { target: { value: "@context" } });
+      await waitFor(() => expect(pane.searchFiles).toHaveBeenCalledWith("context"));
+      fireEvent.click(await screen.findByText("context.ts"));
+      expect(await screen.findByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
+      await act(async () => {
+        actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+        await Promise.resolve();
+      });
+      expect(await screen.findByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+      act(() => actionsRef.current?.setNativeFileDragOver(true));
+      expect(document.querySelector(".inputwrap.dragover")).not.toBeNull();
+
+      fireEvent.change(input, { target: { value: "/" } });
+      fireEvent.click(await screen.findByText(`/${name}`));
+      await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
+
+      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      expect(document.querySelector(".inputwrap.dragover")).toBeNull();
+      expect((input as HTMLTextAreaElement).value).toBe("");
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => picker.resolve("C:\\picked"));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(`/${name} C:\\picked`));
+    },
+  );
+
+  it("opens one code-only opportunity section without changing the composer draft", async () => {
+    const pane = client("pane-opportunities", 8);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await waitFor(() =>
+      expect(pane.programmatic).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 }),
+    );
+    expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
+  });
+
+  async function deferredOpportunityRun(
+    completeBeforeReceipt = true,
+    configurePane?: (pane: PaneAgentClient) => void,
+  ) {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-opportunity-race", 8);
+    const emit = liveEvents(pane);
+    configurePane?.(pane);
+    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["sendPrompt"]>>>();
+    vi.mocked(pane.sendPrompt).mockReturnValue(receipt.promise);
+    const id = "a".repeat(64);
+    let completed = false;
+    vi.mocked(pane.programmatic).mockImplementation(async (request) => {
+      const summary = {
+        id, expectedOutput: "Review packaging", state: completed ? "completed" as const : "discovered" as const,
+        presence: "present" as const, mutationPaths: [],
+        actions: { run: { available: !completed, reason: completed ? "Completed" : "Can run" },
+          dismiss: { available: !completed, reason: completed ? "Completed" : "Can dismiss" } },
+        route: { available: !completed, command: "research" as const,
+          reason: completed ? "Execution completed" : "Available", machineLocal: true },
+      };
+      const snapshot = (completed ? "b" : "a").repeat(64);
+      if (request.action === "report") return {
+        version: 1, action: "report", ok: true,
+        report: { status: "current", reason: "Current", scan: { available: true, reason: "Approved" },
+          snapshot, fingerprint: id, offset: 0, total: 1, rows: [summary] },
+      };
+      if (request.action === "detail") return {
+        version: 1, action: "detail", ok: true, snapshot,
+        detail: { summary, trigger: "Manifest change", verification: completed ? "Verified completion" : "Not yet run",
+          risks: [], evidence: [], evidenceTruncated: false },
+      };
+      throw new Error(`Unexpected mutation: ${request.action}`);
+    });
+    const view = render(<AgentPane client={pane} target={target} />);
+    await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review packaging/ }));
+    const run = await screen.findByRole("button", { name: "Review task approval" });
+    await waitFor(() => expect((run as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(run);
+    expect(pane.sendPrompt).toHaveBeenCalledExactlyOnceWith(`/programmatic-run ${id} ${id}`);
+    if (!completeBeforeReceipt) return { pane, emit, receipt, view, id };
+    act(() => emit("run_start", {}));
+    completed = true;
+    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+    act(() => emit("agent_done", {}));
+    act(() => emit("ready", { running: false, runState: "idle" }));
+    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    return { pane, emit, receipt, view, id };
+  }
+
+  it("renders specialist approval buffered during pane identity lookup across a run receipt", async () => {
+    const realAgent = await vi.importActual<typeof AgentModule>("./agent");
+    const identity = deferred<AgentModule.PaneStartupStatus>();
+    nativeMocks.invoke.mockImplementation(async (command) => {
+      if (command === "agent_pane_status") return identity.promise;
+      return undefined;
+    });
+    const { pane, receipt } = await deferredOpportunityRun(false, (pane) => {
+      pane.subscribe = realAgent.createPaneAgentClient(pane.paneId).subscribe;
+    });
+    const question = {
+      id: "ask-1",
+      questions: [{
+        id: "specialist-approval", kind: "choice", question: "Allow /research to work on this task?",
+        allowOther: false,
+        options: [
+          { label: "Approve and start task", value: "approved-snapshot" },
+          { label: "Cancel", value: "cancel", recommended: true },
+        ],
+      }],
+    };
+    expect(nativeMocks.agentEvent).not.toBeNull();
+    act(() => nativeMocks.agentEvent!({ payload: {
+      paneId: pane.paneId, sessionId: "opportunity-session", type: "ask_user", data: question,
+    } }));
+    // The real transport buffers the frame until native identity resolves.
+    expect(screen.queryByText(question.questions[0].question)).toBeNull();
+    await act(async () => receipt.resolve({ queued: false, count: 0 }));
+    await act(async () => identity.resolve({
+      ready: true, error: null, generation: 8, sessionId: "opportunity-session",
+    }));
+    expect(await screen.findByText(question.questions[0].question)).toBeTruthy();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "1Approve and start task" }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith(
+      "ask-1", "answer", { "specialist-approval": "approved-snapshot" },
+    ));
+  });
+
+  it.each(["programmatic_execution_busy", "invalid_programmatic_selection"])("shows definite %s rejection without uncertain reconciliation or retry", async (code) => {
+    const { pane, receipt } = await deferredOpportunityRun(false);
+    await act(async () => receipt.reject(new PromptSubmissionError({
+      category: "rejected", code, message: "Wait for the current run to finish.",
+    })));
+    expect(await screen.findByText("Run rejected: Wait for the current run to finish.")).toBeTruthy();
+    expect(screen.queryByText(/We could not confirm whether the task started/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Network response lost", "invalid prompt submission response"])("keeps %s uncertain without retrying execution", async (message) => {
+    const { pane, receipt } = await deferredOpportunityRun(false);
+    await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
+    expect(await screen.findByText(/We could not confirm whether the task started/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces terminal invalidations before a deferred opportunity receipt into report and detail refresh", async () => {
+    const { pane, receipt, id } = await deferredOpportunityRun();
+    await act(async () => receipt.resolve({ queued: false, count: 0 }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(4));
+    expect(await screen.findByText("Verified completion")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Review packaging.*Completed/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+    ]);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["rejected", "uncertain"] as const)("refreshes authoritative completion after a %s opportunity receipt without retrying the run", async (outcome) => {
+    const { pane, receipt, id } = await deferredOpportunityRun();
+    await act(async () => {
+      if (outcome === "rejected") receipt.reject(new Error("Opportunity run rejected"));
+      else receipt.reject(new Error("Native acknowledgement lost"));
+    });
+    expect(await screen.findByText("Verified completion")).toBeTruthy();
+    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+    ]);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["resolve", "reject"] as const)("discards queued opportunity refresh on unmount before receipt %s", async (outcome) => {
+    const { pane, receipt, view } = await deferredOpportunityRun();
+    view.unmount();
+    await act(async () => {
+      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+      else receipt.reject(new Error("Late acknowledgement failure"));
+    });
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["resolve", "reject"] as const)("does not drain a reset session's queued opportunity refresh on receipt %s", async (outcome) => {
+    const { pane, receipt, emit } = await deferredOpportunityRun();
+    act(() => emit("session_reset", {}));
+    expect(screen.queryByRole("heading", { name: "Opportunities" })).toBeNull();
+    // A new report owner must survive the old receipt's finally block.
+    const report = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+    vi.mocked(pane.programmatic).mockReturnValueOnce(report.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+      else receipt.reject(new Error("Late acknowledgement failure"));
+    });
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    await act(async () => report.resolve({ version: 1, action: "report", ok: true,
+      report: { status: "current", reason: "Fresh session report", scan: { available: true, reason: "Approved" },
+        snapshot: "c".repeat(64), fingerprint: "c".repeat(64), offset: 0, total: 0, rows: [] } }));
+    expect(await screen.findByText("Fresh session report")).toBeTruthy();
+    expect(screen.queryByText("Verified completion")).toBeNull();
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not expose opportunities in chat mode", async () => {
+    const pane = client("pane-chat-opportunities", 8);
+    render(<AgentPane client={pane} target={{ ...target, mode: "chat" }} />);
+    await screen.findByRole("textbox");
+    expect(screen.queryByRole("button", { name: "Opportunities" })).toBeNull();
+    expect(pane.programmatic).not.toHaveBeenCalled();
+  });
+
+  it("inserts fixed-input commands exactly and disables composer additions", async () => {
+    const pane = client("pane-no-input-select", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "programmatic",
+        aliases: [],
+        description: "Scan programmatic opportunities",
+        input: { text: "none", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("/programmatic"));
+
+    expect((input as HTMLTextAreaElement).value).toBe("/programmatic");
+    expect((input as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/programmatic", [], undefined),
+    );
+  });
+
+  it("blocks malformed fixed-input submissions with actionable guidance", async () => {
+    const pane = client("pane-no-input-submit", 9);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "programmatic",
+        aliases: [],
+        description: "Scan programmatic opportunities",
+        input: { text: "none", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "/programmatic caller instructions" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Command input blocked")).toBeTruthy();
+    expect(screen.getByText(/does not accept additional text/)).toBeTruthy();
+    expect((input as HTMLTextAreaElement).value).toBe("/programmatic");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "arguments",
+      "/programmatic caller instructions",
+      { text: "none", references: "optional", attachments: "optional" } as const,
+      0,
+      0,
+      "additional text",
+    ],
+    [
+      "attachments",
+      "/programmatic",
+      { text: "optional", references: "optional", attachments: "none" } as const,
+      1,
+      0,
+      "attachments",
+    ],
+    [
+      "referenced files",
+      "/programmatic",
+      { text: "optional", references: "none", attachments: "optional" } as const,
+      0,
+      1,
+      "file references",
+    ],
+  ])(
+    "independently rejects fixed-input submission %s",
+    (_kind, text, inputPolicy, attachments, references, expected) => {
+      expect(
+        noInputSlashSubmissionError(
+          text,
+          [
+            {
+              name: "programmatic",
+              aliases: [],
+              description: "Scan",
+              input: inputPolicy,
+              source: "built-in",
+            },
+          ],
+          attachments,
+          references,
+        ),
+      ).toContain(expected);
+    },
+  );
+
+  it("rehydrates a persisted plan review before any SSE event", async () => {
+    const pane = client("pane-plan-restart", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-restart",
+        generation: 5,
+        planPath: "/plans/restart.md",
+        content: "## Steps\n1. Verify restart hydration",
+        contentHash: "hash",
+        state: "pending-review",
+        reviewStatus: "ready",
+        feedback: "Corpus unavailable. Review this limitation before approval.",
+      },
+    });
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(await screen.findByText(/Your approval is still required/i)).toBeTruthy();
+    expect(
+      screen.getByText("Corpus unavailable. Review this limitation before approval."),
+    ).toBeTruthy();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+    expect(pane.revisePlan).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-restart", 5));
+  });
+
+  it("replaces a stale accepted checkpoint with the backend checkpoint", async () => {
+    const pane = client("pane-plan-stale-accept", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-old",
+        generation: 2,
+        planPath: "/plans/old.md",
+        content: "## Old plan",
+        contentHash: "old-hash",
+        state: "pending-review",
+        reviewStatus: "unreviewed",
+        feedback: null,
+      },
+    });
+    const latest = {
+      checkpointId: "checkpoint-latest",
+      generation: 3,
+      planPath: "/plans/latest.md",
+      content: "## Latest backend plan",
+      contentHash: "latest-hash",
+      state: "pending-review" as const,
+      reviewStatus: "ready" as const,
+      feedback: null,
+    };
+    vi.mocked(pane.acceptPlan).mockRejectedValue(
+      new PlanMutationError(
+        "The plan changed before this action completed. Review the latest checkpoint and try again.",
+        { error: "stale-plan-checkpoint", pendingPlanReview: latest },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await screen.findByText("Latest backend plan");
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(screen.getByText("Latest backend plan")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("Review the latest checkpoint"),
+      "error",
+      7_000,
+    );
+  });
+
+  it("replaces a stale revision request with the backend checkpoint", async () => {
+    const pane = client("pane-plan-stale-revise", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-old",
+        generation: 4,
+        planPath: "/plans/old.md",
+        content: "## Old revision target",
+        contentHash: "old-hash",
+        state: "pending-review",
+        reviewStatus: "unreviewed",
+        feedback: null,
+      },
+    });
+    const latest = {
+      checkpointId: "checkpoint-latest",
+      generation: 5,
+      planPath: "/plans/latest.md",
+      content: "## Latest revision target",
+      contentHash: "latest-hash",
+      state: "revision-requested" as const,
+      reviewStatus: "ready" as const,
+      feedback: "Preserve the recovery contract",
+    };
+    vi.mocked(pane.revisePlan).mockRejectedValue(
+      new PlanMutationError(
+        "The plan changed before this action completed. Review the latest checkpoint and try again.",
+        { error: "stale-plan-checkpoint", pendingPlanReview: latest },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
+    fireEvent.change(screen.getByPlaceholderText("What should change about this plan?"), {
+      target: { value: "Revise this plan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
+
+    await screen.findByText("Latest revision target");
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(screen.getByText("Latest revision target")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry revision" })).toBeTruthy();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("Review the latest checkpoint"),
+      "error",
+      7_000,
+    );
+  });
+
+  it("keeps the gate open and shows actionable checkpoint failure guidance", async () => {
+    const pane = client("pane-plan-checkpoint-failure", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-failure",
+        generation: 7,
+        planPath: "/plans/failure.md",
+        content: "## Plan remains authoritative",
+        contentHash: "failure-hash",
+        state: "pending-review",
+        reviewStatus: "ready",
+        feedback: null,
+      },
+    });
+    vi.mocked(pane.acceptPlan).mockRejectedValue(
+      new PlanMutationError(
+        "Could not persist the phase checkpoint. Fix Project Notes permissions, then retry.",
+        {
+          status: "failed",
+          operationId: "operation-7",
+          code: "checkpoint-write-failed",
+          message: "Could not persist the phase checkpoint.",
+          guidance: "Fix Project Notes permissions, then retry.",
+          retryable: true,
+          phaseId: "phase-1",
+        },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        "Could not persist the phase checkpoint. Fix Project Notes permissions, then retry.",
+        "error",
+        7_000,
+      ),
+    );
+    expect(screen.getByText("Plan remains authoritative")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+  });
+
+  it("retries the exact persisted revision after restart while prompts stay blocked", async () => {
+    const pane = client("pane-plan-revision-retry", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-revision-retry",
+        generation: 6,
+        planPath: "/plans/retry.md",
+        content: "## Steps\n1. Recover the revision run",
+        contentHash: "hash",
+        state: "revision-requested",
+        reviewStatus: "ready",
+        feedback: "Add crash recovery coverage",
+      },
+    });
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Retry revision" })).toBeTruthy();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));
+    await waitFor(() =>
+      expect(pane.revisePlan).toHaveBeenCalledWith(
+        "checkpoint-revision-retry",
+        6,
+        "Add crash recovery coverage",
+      ),
+    );
+  });
+
+  it("sends checkpoint identity for ordinary plan acceptance without a prompt bypass", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    const handleEvent = paneEvents(pane);
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: {
+          checkpointId: "checkpoint-ordinary",
+          generation: 4,
+          planPath: "/plans/ordinary.md",
+          content: "## Steps\n1. Build\n2. Verify",
+        },
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-ordinary", 4));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("holds an implemented /commit action at the inline plan gate, then resumes after approval", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
+
+    const continueButton = await renderKenPromptPane(pane, false, "/commit");
+    const handleEvent = paneEvents(pane);
+    fireEvent.click(continueButton);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/commit", [], { kenSent: true }),
+    );
+    vi.mocked(pane.sendPrompt).mockClear();
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: {
+          checkpointId: "checkpoint-commit",
+          generation: 2,
+          planPath: "/plans/blocked-commit.md",
+          content: "## Steps\n1. Build\n2. Verify",
+        },
+      }),
+    );
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
+
+    fireEvent.click(continueButton);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-commit", 2));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "Plan approval required" })).toBeNull();
+  });
+
+  it("keeps the active approval-resume prompt when later steering is queued", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "assistant", text: "```prompt\n/commit\n```", ken: true },
+      { role: "assistant", text: "```prompt\nqueued steering\n```", ken: true },
+    ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
+    vi.mocked(pane.sendPrompt)
+      .mockResolvedValueOnce({ queued: false, count: 0 })
+      .mockResolvedValueOnce({ queued: true, count: 1, queueId: "q1" });
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    const continueButtons = await screen.findAllByRole("button", { name: "Continue here" });
+    fireEvent.click(continueButtons[0]!);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/commit", [], { kenSent: true }),
+    );
+    fireEvent.click(continueButtons[1]!);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("queued steering", [], { kenSent: true }),
+    );
+    vi.mocked(pane.sendPrompt).mockClear();
+
+    const handleEvent = paneEvents(pane);
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: {
+          checkpointId: "checkpoint-active",
+          generation: 3,
+          planPath: "/plans/active-commit.md",
+          content: "## Steps\n1. Commit",
+        },
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-active", 3));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("managed panes restore an existing native session without owning its disposal", async () => {
+    const pane = client("pane-1", 7);
+    const view = render(
+      <AgentPane
+        client={pane}
+        target={target}
+        workspaceOwnsSessionLifecycle
+        reclaimNativeSession
+      />,
+    );
+    await waitFor(() => expect(pane.restore).toHaveBeenCalledWith(target));
+    expect(pane.create).not.toHaveBeenCalled();
+    view.unmount();
+    expect(pane.dispose).not.toHaveBeenCalled();
+  });
+
+  it("does not restart or dispose when generation callback updates parent", async () => {
+    const pane = client("pane-1", 7);
+    function Harness() {
+      const [generation, setGeneration] = useState<number | null>(null);
+      return (
+        <AgentPane
+          client={pane}
+          target={target}
+          generation={generation}
+          onGenerationChange={setGeneration}
+        />
+      );
+    }
+    const view = render(<Harness />);
+    await waitFor(() => expect(pane.create).toHaveBeenCalledTimes(1));
+    expect(pane.restore).not.toHaveBeenCalled();
+    expect(pane.dispose).not.toHaveBeenCalled();
+    view.unmount();
+    await waitFor(() => expect(pane.dispose).toHaveBeenCalledWith(7));
+  });
+
+  it("disposes each generation it owns across a target replacement", async () => {
+    const pane = client("pane-1", 9);
+    vi.mocked(pane.restore).mockResolvedValueOnce(10);
+    const nextTarget = { ...target, sessionPath: "/next" };
+    const view = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.create).toHaveBeenCalledWith(target));
+    view.rerender(<AgentPane client={pane} target={nextTarget} generation={10} />);
+    await waitFor(() => expect(pane.dispose).toHaveBeenCalledWith(9));
+    expect(pane.restore).toHaveBeenCalledWith(nextTarget);
+
+    view.unmount();
+    await waitFor(() => expect(pane.dispose).toHaveBeenCalledWith(10));
+  });
+
+  it("reports failed restore and remains recoverable after a target change", async () => {
+    const pane = client("pane-1", 9);
+    vi.mocked(pane.restore).mockRejectedValueOnce(new Error("restore failed"));
+    const onError = vi.fn();
+    const view = render(
+      <AgentPane client={pane} target={target} generation={4} onLifecycleError={onError} />,
+    );
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(pane.dispose).not.toHaveBeenCalled();
+    const recoverTarget = { ...target, sessionPath: null };
+    view.rerender(
+      <AgentPane client={pane} target={recoverTarget} generation={4} onLifecycleError={onError} />,
+    );
+    await waitFor(() => expect(pane.restore).toHaveBeenCalledWith(recoverTarget));
+  });
+
+  it.each(["@Supah question", "@Ken question"])(
+    "routes %s to the mentor client",
+    async (prompt) => {
+      const pane = client("pane-1", 1);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
+      fireEvent.change(input, { target: { value: prompt } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() =>
+        expect(pane.sendKenPrompt).toHaveBeenCalledWith("question", {
+          conversationId: "conversation",
+          activationEpoch: "epoch",
+        }),
+      );
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps reset authority over pending initial hydration and reconnects to the announced run", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-ken-hydration", 1);
+    const emit = liveEvents(pane);
+    const pending = deferred<AgentModule.AgentState>();
+    vi.mocked(pane.getState).mockReturnValue(pending.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.getState).toHaveBeenCalled());
+    const ken = { conversationId: "new", activationEpoch: "new", runId: "new-run" };
+    act(() => emit("session_reset", { kenState: { ...ken, activeRunId: null } }));
+    await act(async () =>
+      pending.resolve({
+        running: false,
+        provider: "anthropic",
+        model: "test",
+        cwd: "/work",
+        mode: "code",
+        kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" },
+      } as AgentModule.AgentState),
+    );
+    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+    act(() => {
+      emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
+      emit("ken_text_delta", { ken, text: "reconnected mentor output" });
+    });
+    expect(await screen.findByText("reconnected mentor output")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "esc to cancel" }));
+    expect(pane.cancelKen).toHaveBeenCalledWith(ken);
+  });
+
+  it.each([false, true])(
+    "scopes real mentor cancel rejection across a newer run (replacement=%s)",
+    async (replace) => {
+      nativeMocks.realMentor = true;
+      const pane = client("pane-real-ken", 1);
+      const emit = liveEvents(pane);
+      const identity = {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+        runId: "old-run",
+      };
+      vi.mocked(pane.getState).mockResolvedValue({
+        running: false,
+        provider: "anthropic",
+        model: "test",
+        cwd: "/work",
+        mode: "code",
+        kenState: {
+          conversationId: identity.conversationId,
+          activationEpoch: identity.activationEpoch,
+          activeRunId: identity.runId,
+        },
+      } as AgentModule.AgentState);
+      const pending = deferred<void>();
+      vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      const cancel = await screen.findByRole("button", { name: "esc to cancel" });
+      fireEvent.click(cancel);
+      expect(pane.cancelKen).toHaveBeenCalledWith(identity);
+      act(() =>
+        emit("extras", {
+          kenState: { ...identity, activeRunId: replace ? "new-run" : identity.runId },
+        }),
+      );
+      await act(async () => {
+        pending.reject(new Error("cancel rejected for captured run"));
+      });
+      expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
+      expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+      if (replace) {
+        act(() => emit("ken_run_end", { ken: identity }));
+        expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+      }
+    },
+  );
+
+  it.each(
+    ["same", "new-conversation", "rewind", "epoch-return"].flatMap((change) =>
+      ["quick", "composer", "edited-composer"].map((source) => ({ change, source })),
+    ),
+  )("scopes delayed mentor transport rejection ($change, $source)", async ({ change, source }) => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-real-ken-send", 1);
+    const emit = liveEvents(pane);
+    const kenState = {
+      conversationId: "conversation",
+      activationEpoch: "epoch",
+      activeRunId: null,
+    };
+    vi.mocked(pane.getState).mockResolvedValue({
+      running: false,
+      provider: "anthropic",
+      model: "test",
+      cwd: "/work",
+      mode: "code",
+      kenState,
+    } as AgentModule.AgentState);
+    const pending = deferred<void>();
+    vi.mocked(pane.sendKenPrompt).mockReturnValue(pending.promise);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    const quick = await screen.findByRole("button", { name: "Ken, next?" });
+    await waitFor(() => expect((quick as HTMLButtonElement).disabled).toBe(false));
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, {
+      target: { value: source === "quick" ? "Keep this draft" : "@Ken next?" },
+    });
+    if (source === "quick") fireEvent.click(quick);
+    else fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+      conversationId: "conversation",
+      activationEpoch: "epoch",
+    });
+    if (source === "edited-composer") fireEvent.change(input, { target: { value: "New draft" } });
+    act(() => {
+      if (change === "same") emit("extras", { kenState });
+      else {
+        emit("session_reset", {
+          kenState: {
+            ...kenState,
+            conversationId: change === "new-conversation" ? "NEW" : kenState.conversationId,
+            activationEpoch: "reset",
+          },
+        });
+        if (change === "epoch-return") emit("session_reset", { kenState });
+      }
+    });
+    await act(async () => {
+      pending.reject(new Error("send rejected for captured target"));
+    });
+    const current = change === "same";
+    expect(screen.queryByText(/send rejected for captured target/) !== null).toBe(current);
+    if (current)
+      expect(input.value).toBe(
+        source === "quick"
+          ? "Keep this draft"
+          : source === "edited-composer"
+            ? "New draft"
+            : "@Ken next?",
+      );
+    else expect(input.value).not.toBe("@Ken next?");
+    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+  });
+
+  it("reports a rejected mentor send without claiming a run started", async () => {
+    const pane = client("pane-ken-rejected", 1);
+    vi.mocked(pane.sendKenPrompt).mockRejectedValue(new Error("mentor busy; retry"));
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
+    expect(await screen.findByText(/mentor busy; retry/)).toBeTruthy();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("sends the Ken next quick action directly and adds a Ken-addressed bubble", async () => {
+    const pane = client("pane-ken-next", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
+
+    await waitFor(() =>
+      expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+      }),
+    );
+    expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe("@Ken next?");
+  });
+
+  it("preserves the current draft and attachments when asking Ken what is next", async () => {
+    const pane = client("pane-ken-next-draft", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_paneId, nextActions) => {
+          actionsRef.current = nextActions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    await waitFor(() => expect(actionsRef.current).toBeTruthy());
+
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
+
+    await waitFor(() =>
+      expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?", {
+        conversationId: "conversation",
+        activationEpoch: "epoch",
+      }),
+    );
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+  });
+
+  it("disables the Ken next quick action while Ken is running", async () => {
+    nativeMocks.kenRunning = true;
+    const pane = client("pane-ken-next-running", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    const quickAction = await screen.findByRole("button", { name: "Ken, next?" });
+    expect((quickAction as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(quickAction);
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
+
+  it("disables the Ken next quick action while plan review blocks input", async () => {
+    const pane = client("pane-ken-next-plan", 1);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    const handleEvent = paneEvents(pane);
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: { planPath: "/plans/next.md", content: "## Steps\n1. Continue" },
+      }),
+    );
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
+    const quickAction = screen.getByRole("button", { name: "Ken, next?" });
+    expect((quickAction as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(quickAction);
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
+
+  it("registers pane-local native-drop staging without subscribing or mutating the title", async () => {
+    const pane = client("pane-1", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_paneId, nextActions) => {
+          actionsRef.current = nextActions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(actionsRef.current).toBeTruthy());
+
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/folder", "/dropped/file.txt"]);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toContain("/dropped/folder"));
+    expect(nativeMocks.readDroppedFileAttachment).toHaveBeenCalledWith("/dropped/file.txt");
+    expect(nativeMocks.onDragDropEvent).not.toHaveBeenCalled();
+    expect(nativeMocks.setWindowTitle).not.toHaveBeenCalled();
+  });
+
+  it("continues with the exact hydrated Ken prompt and persists kenSent metadata", async () => {
+    const pane = client("pane-ken-current", 1);
+    const send = await renderKenPromptPane(pane);
+
+    fireEvent.click(send);
+
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
+    );
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
+  });
+
+  it.each(
+    (["typed-queued", "typed-idle", "toolbar", "ken"] as const).flatMap((source) =>
+      (["reset", "anonymous-reset", "generation"] as const).flatMap((replacement) =>
+        (["queued", "accepted", "rejected"] as const).map((outcome) => ({
+          source,
+          replacement,
+          outcome,
+        })),
+      ),
+    ),
+  )(
+    "ignores stale $source $outcome settlement after $replacement",
+    async ({ source, replacement, outcome }) => {
+      nativeMocks.realMentor = true;
+      const pane = client("stale-submission", 1);
+      const emit = liveEvents(pane);
+      const running = source === "typed-queued" || source === "ken";
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running,
+        runState: running ? "running" : "idle",
+      });
+      vi.mocked(pane.listCommands).mockResolvedValue([
+        {
+          name: "commit",
+          aliases: [],
+          description: "Commit changes",
+          source: "custom",
+          input: { text: "optional", references: "optional", attachments: "optional" },
+        },
+      ]);
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
+      ]);
+      const old = deferred<AgentModule.PromptSubmissionResult>();
+      const fresh = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt)
+        .mockReturnValueOnce(old.promise)
+        .mockReturnValueOnce(fresh.promise);
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      const input = (await screen.findByRole("textbox")) as HTMLTextAreaElement;
+      await waitFor(() => expect(input.disabled).toBe(false));
+      if (source === "ken")
+        fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
+      else if (source === "toolbar")
+        fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
+      else {
+        fireEvent.change(input, { target: { value: "Old typed prompt" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      }
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+      if (replacement === "generation") {
+        vi.mocked(pane.listHistory).mockResolvedValue([
+          { role: "assistant", text: "Replacement conversation" },
+        ]);
+        vi.mocked(pane.waitForReady).mockResolvedValue({
+          ready: true,
+          error: null,
+          generation: 2,
+          sessionId: pane.paneId,
+        });
+        view.rerender(
+          <AgentPane
+            client={pane}
+            target={{ ...target, sessionPath: "/replacement.jsonl" }}
+            generation={2}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+        await screen.findByText("Replacement conversation");
+        await waitFor(() => expect(input.disabled).toBe(false));
+      } else {
+        act(() =>
+          emit(
+            "session_reset",
+            replacement === "reset"
+              ? {
+                  operationId: "replacement",
+                  conversationId: "new-conversation",
+                  sessionId: "new-session",
+                }
+              : {},
+          ),
+        );
+      }
+      // A replacement conversation can send immediately, even while the old request is pending.
+      fireEvent.change(input, { target: { value: "New conversation prompt" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      const transcript = view.container.querySelector(".transcript")?.textContent;
+      await act(async () => {
+        if (outcome === "rejected") old.reject(new Error("Obsolete submission failure"));
+        else
+          old.resolve(
+            outcome === "queued"
+              ? { queued: true, count: 9, queueId: "old-queue" }
+              : { queued: false, count: 0 },
+          );
+      });
+      expect(view.container.querySelector(".transcript")?.textContent).toBe(transcript);
+      expect(view.container.querySelector(".queued-pill")).toBeNull();
+      expect(screen.queryByText("Obsolete submission failure")).toBeNull();
+      expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
+      expect(view.container.querySelectorAll(".user-msg")).toHaveLength(running ? 0 : 1);
+      expect(input.value).toBe("New conversation prompt");
+      // The old finally must not unlock the new request.
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => fresh.resolve({ queued: false, count: 0 }));
+      expect(input.value).toBe("");
+      expect(view.container.querySelectorAll(".user-msg")).toHaveLength(1);
+    },
+  );
+
+  it.each(
+    (["reset", "generation"] as const).flatMap((replacement) =>
+      [false, true].map((rejected) => ({ replacement, rejected })),
+    ),
+  )(
+    "keeps the new Ken send locked after old settlement ($replacement, rejected=$rejected)",
+    async ({ replacement, rejected }) => {
+      const pane = client("ken-reset-lock", 1);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        { role: "assistant", text: "```prompt\nOld Ken prompt\n```", ken: true },
+      ]);
+      const old = deferred<AgentModule.PromptSubmissionResult>();
+      const fresh = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt)
+        .mockReturnValueOnce(old.promise)
+        .mockReturnValueOnce(fresh.promise);
+      const view = render(
+        <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+      const newPrompts = "```prompt\nNew Ken prompt\n```\n\n```prompt\nAnother Ken prompt\n```";
+      if (replacement === "generation") {
+        vi.mocked(pane.listHistory).mockResolvedValue([
+          { role: "assistant", text: newPrompts, ken: true },
+        ]);
+        vi.mocked(pane.waitForReady).mockResolvedValue({
+          ready: true,
+          error: null,
+          generation: 2,
+          sessionId: pane.paneId,
+        });
+        view.rerender(
+          <AgentPane
+            client={pane}
+            target={{ ...target, sessionPath: "/new-ken.jsonl" }}
+            generation={2}
+            workspaceOwnsSessionLifecycle
+          />,
+        );
+      } else {
+        act(() => {
+          emit("session_reset", { conversationId: "new-conversation", sessionId: "new-session" });
+          emit("ken_text", { text: newPrompts });
+        });
+      }
+      await screen.findByText("New Ken prompt");
+      const buttons = await screen.findAllByRole("button", { name: "Continue here" });
+      fireEvent.click(buttons[0]);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
+      expect(pane.sendPrompt).toHaveBeenLastCalledWith("New Ken prompt", [], { kenSent: true });
+      await act(async () => {
+        if (rejected) old.reject(new Error("obsolete"));
+        else old.resolve({ queued: false, count: 0 });
+      });
+      expect(view.container.querySelector(".user-ken-sent")).toBeNull();
+      expect(screen.queryByText("Couldn’t send the prompt. Try again.")).toBeNull();
+      fireEvent.click(buttons[1]);
+      await screen.findByText("This prompt is already being sent.");
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => fresh.resolve({ queued: false, count: 0 }));
+      expect(view.container.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      fireEvent.click(buttons[1]);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(3));
+    },
+  );
+
+  it.each([false, true])(
+    "reconciles a delayed queued receipt after drain (UI running=%s)",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("delayed-queue", 1);
+      vi.mocked(pane.searchFiles).mockResolvedValue([
+        { path: "src/context.ts", name: "context.ts" },
+      ]);
+      const emit = liveEvents(pane);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running,
+        runState: running ? "running" : "idle",
+      });
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const { container } = render(<AgentPane client={pane} target={target} />);
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+      fireEvent.change(input, { target: { value: "@context" } });
+      fireEvent.click(await screen.findByText("context.ts"));
+      await screen.findByRole("button", { name: "Remove src/context.ts" });
+      fireEvent.change(input, { target: { value: "Queued follow-up" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      const wireText = "Queued follow-up\n\nReferenced files:\n- src/context.ts";
+      expect(vi.mocked(pane.sendPrompt).mock.calls[0]?.[0]).toBe(wireText);
+      act(() => {
+        emit("queued", { count: 1, messages: [{ id: "q1", text: wireText }] });
+        emit("queued", { count: 0, messages: [] });
+        emit("run_end", {});
+      });
+      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+      expect(container.querySelector(".user-msg.queued")).toBeNull();
+      expect(container.querySelector(".user-msg")?.textContent).toContain("Queued follow-up");
+      expect(container.querySelector(".user-msg")?.textContent).toContain("context.ts");
+      expect(container.querySelector(".user-msg")?.textContent).not.toContain("Referenced files:");
+      expect(container.querySelector(".queued-pill")).toBeNull();
+    },
+  );
+
+  it.each([false, true])("uses typed receipt instead of stale UI running=%s", async (running) => {
+    nativeMocks.realMentor = true;
+    const pane = client("typed-stale-running", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      running,
+      runState: running ? "running" : "idle",
+    });
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+      running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+    );
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "Server decides" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+    expect(container.querySelector(".user-msg")?.classList.contains("queued")).toBe(!running);
+    if (!running) {
+      act(() => {
+        emit("queued", { count: 1, messages: [{ id: "q1", text: "Server decides" }] });
+        emit("queued", { count: 0, messages: [] });
+      });
+      expect(container.querySelector(".user-msg.queued")).toBeNull();
+    }
+  });
+
+  it.each([false, true])(
+    "uses Ken's queued receipt despite stale UI running=%s",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("ken-stale-running", 1);
+      vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
+        running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+      );
+      const send = await renderKenPromptPane(pane, running);
+      fireEvent.click(send);
+      await waitFor(() => expect(document.querySelector(".user-ken-sent")).not.toBeNull());
+      expect(document.querySelector(".user-ken-sent")?.classList.contains("queued")).toBe(!running);
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])(
+    "does not resurrect Ken's consumed queue after a delayed receipt (running=%s)",
+    async (running) => {
+      nativeMocks.realMentor = true;
+      const pane = client("ken-delayed-queue", 1);
+      const emit = liveEvents(pane);
+      const submission = deferred<AgentModule.PromptSubmissionResult>();
+      vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+      const send = await renderKenPromptPane(pane, running);
+      fireEvent.click(send);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+      act(() => {
+        emit("queued", { count: 1, messages: [{ id: "q1", text: KEN_PROMPT }] });
+        emit("queued", { count: 0, messages: [] });
+        emit("run_end", {});
+      });
+      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      expect(document.querySelector(".user-ken-sent.queued")).toBeNull();
+      expect(document.querySelector(".queued-pill")).toBeNull();
+    },
+  );
+
+  it("reconciles a toolbar submission against events before its receipt", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("toolbar-delayed-queue", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "commit",
+        aliases: [],
+        description: "Commit changes",
+        source: "custom",
+        input: { text: "optional", references: "optional", attachments: "optional" },
+      },
+    ]);
+    const submission = deferred<AgentModule.PromptSubmissionResult>();
+    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    act(() => {
+      emit("queued", { count: 1, messages: [{ id: "q1", text: "/commit" }] });
+      emit("queued", { count: 0, messages: [] });
+      emit("run_end", {});
+    });
+    await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+    expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
+    expect(container.querySelector(".user-msg.queued")).toBeNull();
+    expect(container.querySelector(".queued-pill")).toBeNull();
+  });
+
+  it("queues a Ken current-send during an active run with authoritative queue metadata", async () => {
+    const pane = client("pane-ken-queued", 1);
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({ queued: true, count: 2, queueId: "q2" });
+    const send = await renderKenPromptPane(pane, true);
+
+    fireEvent.click(send);
+
+    await waitFor(() => expect(document.querySelector(".user-ken-sent.queued")).not.toBeNull());
+    expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true });
+    expect(document.querySelector(".queued-pill")?.textContent).toBe("queued");
+  });
+
+  it.each([
+    ["oversized", "x".repeat(8001), "8001"],
+    ["whitespace-only", " \r\n\t ", "nonblank"],
+    ["emoji oversized", "🙂".repeat(4000) + "x", "8001"],
+  ])(
+    "blocks %s fresh instructions before confirmation or mutation",
+    async (_name, prompt, error) => {
+      const pane = client("pane-invalid-instruction", 1);
+      await renderKenPromptPane(pane, false, prompt);
+      const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: "unsent draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      expect((await screen.findByRole("alert")).textContent).toContain(error);
+      expect(screen.getByRole("alert").textContent).toContain("8000");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(input.value).toBe("unsent draft");
+      expect(input.disabled).toBe(false);
+      expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+      expect(pane.commitContinuation).not.toHaveBeenCalled();
+      expect(pane.newSession).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["8000 units", "x".repeat(8000)],
+    ["CRLF and emoji", "  🙂\r\n\tKeep outer whitespace  \r\n"],
+  ])("prepares a valid raw instruction unchanged: %s", async (_name, prompt) => {
+    const pane = client("pane-valid-instruction", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) =>
+      emitContinuation(pane, request),
+    );
+    await renderKenPromptPane(pane, false, prompt);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(prompt);
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledExactlyOnceWith(prompt);
+    expect(pane.commitContinuation).toHaveBeenCalledOnce();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("opens a side-effect-free non-Astra confirmation and cancels without changing the composer", async () => {
+    const pane = client("pane-confirm-cancel", 1);
+    await renderKenPromptPane(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "unsent draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(KEN_PROMPT);
+    expect(screen.queryByLabelText("Destination context mode")).toBeNull();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Continue in a new session" })).toBeNull(),
+    );
+    expect(input.value).toBe("unsent draft");
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  const destination = {
+    conversationId: "conversation-2",
+    sessionId: "session-2",
+    profile: "stable" as const,
+  };
+  function emitContinuation(
+    pane: PaneAgentClient,
+    request: AgentModule.ContinuationCommitRequest,
+    emitAccepted = true,
+  ) {
+    const emit = paneEvents(pane);
+    const actual = { ...destination, profile: request.profile ?? ("stable" as const) };
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra"),
+      ...actual,
+      openAICodexContextProfile: actual.profile,
+    });
+    emit({ type: "session_reset", data: { ...actual, operationId: request.operationId } });
+    if (emitAccepted)
+      emit({
+        type: "continuation_accepted",
+        data: {
+          ...request,
+          destination: actual,
+          acceptedMessageId: "message-1",
+          prompt: CONTINUATION_PROMPT,
+          kenSent: true,
+        },
+      });
+    return {
+      ...request,
+      outcome: "accepted" as const,
+      accepted: true as const,
+      resetAttempted: true as const,
+      destination: actual,
+      acceptedMessageId: "message-1",
+    };
+  }
+
+  it.each(["stable", "experimental"] as const)(
+    "commits %s atomically after confirmation despite a locked source",
+    async (profile) => {
+      const pane = client("pane-atomic", 1);
+      const receipt = deferred<AgentModule.ContinuationCommitResponse>();
+      vi.mocked(pane.commitContinuation).mockReturnValueOnce(receipt.promise);
+      const sourceProfile = profile === "stable" ? "experimental" : "stable";
+      await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+        provider: "openai",
+        model: "gpt-6-astra",
+        accountId: "account-1",
+        openAICodexContextProfile: sourceProfile,
+        openAICodexContextProfileEligibility: { canChange: false, reason: "Started" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+      const selector = screen.getByLabelText("Destination context mode") as HTMLSelectElement;
+      expect(selector.value).toBe(sourceProfile);
+      expect(selector.disabled).toBe(false);
+      fireEvent.change(selector, { target: { value: profile } });
+      const confirm = screen.getByRole("button", { name: "Continue" });
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+      await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
+      const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+      expect(request).toEqual({
+        preparedId: "prepared-1",
+        operationId: expect.any(String),
+        profile,
+      });
+      expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+      expect(pane.newSession).not.toHaveBeenCalled();
+      expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      await act(async () => receipt.resolve(emitContinuation(pane, request)));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+      act(() => emitContinuation(pane, request));
+      expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    },
+  );
+
+  it("captures the selected block once despite later mentor output", async () => {
+    const pane = client("pane-exact-block", 1);
+    vi.mocked(pane.commitContinuation).mockRejectedValueOnce(new Error("lost ack"));
+    const selected =
+      "Selected café 日本語\\n literal\n  keep indentation <script>not markup</script>";
+    await renderKenPromptPane(
+      pane,
+      false,
+      `First instruction\n\`\`\`\n\n\`\`\`prompt\n${selected}`,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "New session" })[1]);
+    act(() =>
+      paneEvents(pane)({
+        type: "ken_text",
+        data: { text: "```prompt\nLater instruction\n```" },
+      }),
+    );
+    expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(selected);
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(pane.prepareContinuationHandoff).toHaveBeenCalledWith(selected));
+    await screen.findByRole("button", { name: "Check outcome" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("retries a lost receipt explicitly with the same operation and never duplicates the accepted bubble", async () => {
+    const pane = client("pane-receipt", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      emitContinuation(pane, request);
+      throw new Error("lost ack");
+    });
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const retry = await screen.findByRole("button", { name: "Check outcome" });
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+    vi.mocked(pane.commitContinuation).mockResolvedValueOnce({
+      ...request,
+      outcome: "accepted",
+      accepted: true,
+      resetAttempted: true,
+      destination,
+      acceptedMessageId: "message-1",
+    });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.commitContinuation).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pane.commitContinuation).mock.calls[1][0]).toEqual(request);
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["rejected", "partial", "outcome-unknown"] as const)(
+    "recovers complete text and selected mode after %s without resending",
+    async (outcome) => {
+      const pane = client("pane-recovery", 1);
+      vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+        const base = { ...request, message: "Controlled failure" };
+        if (outcome === "rejected")
+          return { ...base, outcome, accepted: false, resetAttempted: false };
+        if (outcome === "partial")
+          return { ...base, outcome, accepted: false, resetAttempted: true };
+        return { ...base, outcome, accepted: null, resetAttempted: true };
+      });
+      await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+        provider: "openai",
+        model: "gpt-6-astra",
+        accountId: "account-1",
+        openAICodexContextProfile: "experimental",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      await waitFor(() =>
+        expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+          CONTINUATION_PROMPT,
+        ),
+      );
+      expect((screen.getByLabelText("Destination context mode") as HTMLSelectElement).value).toBe(
+        "experimental",
+      );
+      expect(screen.getByRole("dialog").textContent).toContain(
+        outcome === "outcome-unknown" ? "Acceptance is unknown" : "No continuation was accepted",
+      );
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(pane.newSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "provider failure",
+    "malformed synthesis",
+    "next instruction is too long",
+    "HTTP 413: Request body too large",
+    "Session is busy. Retry preparation when idle.",
+  ])("fails closed before commit on %s", async (message) => {
+    const pane = client("pane-prepare-failure", 1);
+    vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(
+      message.startsWith("HTTP") ? message : new Error(message),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "No reset or submission was requested",
+    );
+    expect(screen.getByRole("alert").textContent).toContain(message);
+    expect(screen.getByRole("dialog").textContent).toContain(message);
+    if (message.includes("413") || message === "next instruction is too long") {
+      for (const surface of [screen.getByRole("alert"), screen.getByRole("dialog")]) {
+        expect(surface.textContent).toContain("Shorten the continuation instruction");
+        expect(surface.textContent).toContain(`current length: ${KEN_PROMPT.length}`);
+        expect(surface.textContent).toContain("maximum: 8000");
+        expect(surface.textContent).toContain("Nothing has been truncated");
+      }
+    }
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect(pane.commitContinuation).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0],
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+  });
+
+  it("ignores wrong-operation and wrong-destination resets and late duplicate resets around acceptance", async () => {
+    const pane = client("pane-reset-identity", 1);
+    const receipt = deferred<AgentModule.ContinuationCommitResponse>();
+    vi.mocked(pane.commitContinuation).mockReturnValueOnce(receipt.promise);
+    await renderKenPromptPane(pane);
+    vi.mocked(pane.waitForReady).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
+    const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
+    const emit = paneEvents(pane);
+    act(() =>
+      emit({ type: "session_reset", data: { ...destination, operationId: "wrong-operation" } }),
+    );
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    // A forged/mismatched accepted event cannot insert into the source transcript.
+    act(() =>
+      emit({
+        type: "continuation_accepted",
+        data: {
+          ...request,
+          destination,
+          acceptedMessageId: "wrong-message",
+          prompt: CONTINUATION_PROMPT,
+          kenSent: true,
+        },
+      }),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    await act(async () =>
+      receipt.resolve({
+        ...request,
+        outcome: "accepted",
+        accepted: true,
+        resetAttempted: true,
+        destination,
+        acceptedMessageId: "message-1",
+      }),
+    );
+    await waitFor(() => expect(pane.waitForReady).toHaveBeenCalled());
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: {
+          ...destination,
+          conversationId: "wrong-destination",
+          operationId: request.operationId,
+        },
+      }),
+    );
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    act(() => emitContinuation(pane, request));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    act(() =>
+      emit({ type: "session_reset", data: { ...destination, operationId: request.operationId } }),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes selected and actual modes after a partial persistence failure", async () => {
+    const pane = client("pane-partial-mode", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => ({
+      ...request,
+      outcome: "partial",
+      accepted: false,
+      resetAttempted: true,
+      destination,
+      selectedProfile: "experimental",
+      recoveryPrompt: CONTINUATION_PROMPT,
+      error: "profile-persistence-failed",
+      message: "Saving the destination mode failed",
+    }));
+    await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
+      provider: "openai",
+      model: "gpt-6-astra",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "Reported destination context mode: stable",
+      ),
+    );
+    expect(screen.getByRole("dialog").textContent).toContain("No continuation was accepted");
+    expect((screen.getByLabelText("Destination context mode") as HTMLSelectElement).value).toBe(
+      "experimental",
+    );
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
+  });
+
+  it("does not attribute an accepted receipt to a different authoritative destination", async () => {
+    const pane = client("pane-mismatched-receipt", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      const receipt = emitContinuation(pane, request, false);
+      return {
+        ...receipt,
+        destination: { ...destination, conversationId: "another-conversation" },
+      };
+    });
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "different destination than the observed reset",
+      ),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("preserves known acceptance when the subsequent destination refresh fails", async () => {
+    const pane = client("pane-refresh-failure", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) => {
+      const receipt = emitContinuation(pane, request, false);
+      vi.mocked(pane.getState).mockRejectedValueOnce(new Error("state unavailable"));
+      return receipt;
+    });
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "The server accepted the continuation, but refreshing the destination failed",
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Check outcome" })).toBeNull();
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("reports acceptance without inserting a late bubble when its SSE event is missing", async () => {
+    const pane = client("pane-missing-event", 1);
+    vi.mocked(pane.commitContinuation).mockImplementationOnce(async (request) =>
+      emitContinuation(pane, request, false),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain("transcript event was not observed"),
+    );
+    expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(0);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["stable", "experimental"] as const)(
+    "recovers a withheld real source-daemon reset and ignores its late SSE notification (%s)",
+    async (profile) => {
+      vi.useRealTimers();
+      nativeMocks.realMentor = true;
+      await withRealSidecar(async ({ project, manager, open, request, subscribe }) => {
+        const saved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: profile,
+        });
+        await manager.appendRequiredMessage(saved.path, {
+          type: "message",
+          id: "old-message",
+          parentId: null,
+          timestamp: new Date().toISOString(),
+          message: { role: "user", content: "Old real transcript" },
+        });
+        const logicalId = await open(saved.path);
+        const otherSaved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: profile,
+        });
+        const otherId = await open(otherSaved.path);
+        const readState = async (id: string): Promise<AgentState> => {
+          const response = await request("/state", id);
+          expect(response.status).toBe(200);
+          return response.json();
+        };
+        const original = await readState(logicalId);
+        const otherOriginal = await readState(otherId);
+        expect(original.openAICodexContextProfile).toBe(profile);
+        expect(otherOriginal.lastNewSessionReset).toBeUndefined();
+        const pane = client(logicalId, 1);
+        vi.mocked(pane.getState).mockImplementation(() => readState(logicalId));
+        vi.mocked(pane.listHistory).mockImplementation(async () => {
+          const response = await request("/history", logicalId);
+          expect(response.status).toBe(200);
+          const body = (await response.json()) as {
+            history: Awaited<ReturnType<PaneAgentClient["listHistory"]>>;
+          };
+          return body.history;
+        });
+        vi.mocked(pane.newSession).mockImplementation(async () => {
+          const response = await request("/new-session", logicalId, {});
+          expect(response.status).toBe(200);
+          return response.json();
+        });
+        const emit = liveEvents(pane);
+        const stream = await subscribe(logicalId, (event) => {
+          // The sole dropped notification is captured unchanged for late delivery below.
+          if (event.type !== "session_reset") act(() => emit(event.type, event.data));
+        });
+        try {
+          render(<AgentPane client={pane} />);
+          fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+          fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+          expect(await screen.findByText("Old real transcript")).toBeTruthy();
+          const filesBefore = await manager.list(project);
+          vi.mocked(pane.getState).mockClear();
+          fireEvent.click(screen.getByTitle("Start a new session for this project"));
+          fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+          const late = await stream.waitFor("session_reset");
+          expect(late.sessionId).toBe(logicalId);
+          await waitFor(
+            () => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull(),
+            { timeout: 20_000 },
+          );
+          const current = await readState(logicalId);
+          expect(current.lastNewSessionReset).toMatchObject({
+            operationId: late.data.operationId,
+            conversationId: current.conversationId,
+            sessionId: current.sessionId,
+          });
+          expect(pane.getState).toHaveBeenCalled();
+          expect(screen.queryByText("Old real transcript")).toBeNull();
+          expect(nativeMocks.kenStateRef?.current?.conversationId).toBe(current.conversationId);
+          expect(nativeMocks.kenStateRef?.current?.sessionId).toBe(current.sessionId);
+          expect(current.conversationId).not.toBe(original.conversationId);
+          expect(current.sessionId).not.toBe(original.sessionId);
+          expect(pane.newSession).toHaveBeenCalledOnce();
+          const filesAfter = await manager.list(project);
+          expect(filesAfter).toHaveLength(filesBefore.length + 1);
+          expect(
+            filesAfter.filter((file) => !filesBefore.some((old) => old.id === file.id)),
+          ).toHaveLength(1);
+          expect(nativeMocks.toast).not.toHaveBeenCalled();
+          const input = screen.getByRole("textbox");
+          fireEvent.change(input, { target: { value: "Keep this real recovery message" } });
+          fireEvent.keyDown(input, { key: "Enter" });
+          await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+          // Send remains mocked: no generation route or model invocation is allowed.
+          act(() => emit(late.type, late.data));
+          expect(screen.getByText("Keep this real recovery message")).toBeTruthy();
+          expect(pane.newSession).toHaveBeenCalledOnce();
+          expect(await manager.list(project)).toHaveLength(filesAfter.length);
+          const otherCurrent = await readState(otherId);
+          expect(otherCurrent.lastNewSessionReset).toBeUndefined();
+          expect(otherCurrent.conversationId).toBe(otherOriginal.conversationId);
+          expect(otherCurrent.sessionId).toBe(otherOriginal.sessionId);
+        } finally {
+          cleanup();
+        }
+      });
+    },
+    90_000,
+  );
+
+  it.each(["stable", "experimental"] as const)(
+    "recovers a missing toolbar reset event in %s mode without creating another session",
+    async (profile) => {
+      nativeMocks.realMentor = true;
+      const pane = client("pane-reset-recovery", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        openAICodexContextProfile: profile,
+      });
+      vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Old transcript" }]);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      expect(await screen.findByText("Old transcript")).toBeTruthy();
+      const snapshot: AgentState = {
+        ...agentState("azure:gpt-test"),
+        conversationId: "fresh-conversation",
+        sessionId: "fresh-session",
+        openAICodexContextProfile: profile,
+        lastNewSessionReset: {
+          operationId: "operation-1",
+          conversationId: "fresh-conversation",
+          sessionId: "fresh-session",
+        },
+      };
+      vi.mocked(pane.getState).mockResolvedValue(snapshot);
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByTitle("Start a new session for this project"));
+      fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_001);
+      });
+      expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+      expect(nativeMocks.toast).not.toHaveBeenCalled();
+      expect(screen.queryByText("Old transcript")).toBeNull();
+      expect(nativeMocks.kenStateRef?.current?.conversationId).toBe("fresh-conversation");
+      expect(pane.newSession).toHaveBeenCalledOnce();
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "Keep this new message" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(pane.sendPrompt).toHaveBeenCalledOnce();
+      const emit = paneEvents(pane);
+      act(() => emit({ type: "session_reset", data: snapshot.lastNewSessionReset! }));
+      expect(screen.getByText("Keep this new message")).toBeTruthy();
+    },
+  );
+
+  it.each(
+    (["stable", "experimental"] as const).flatMap((profile) =>
+      [
+        "missing",
+        "wrong-operation",
+        "wrong-conversation",
+        "wrong-session",
+        "unavailable",
+        "hung",
+      ].map((failure) => ({ profile, failure })),
+    ),
+  )("refuses sends in $profile when reset recovery is $failure", async ({ profile, failure }) => {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-reset-unconfirmed", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      openAICodexContextProfile: profile,
+    });
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "Preserve old transcript" },
+    ]);
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_id, actions) => {
+          actionsRef.current = actions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await screen.findByText("Preserve old transcript")).toBeTruthy();
+    const snapshot: AgentState = {
+      ...agentState("azure:gpt-test"),
+      conversationId: "fresh-conversation",
+      sessionId: "fresh-session",
+      lastNewSessionReset:
+        failure === "missing"
+          ? undefined
+          : {
+              operationId: failure === "wrong-operation" ? "other" : "operation-1",
+              conversationId: failure === "wrong-conversation" ? "other" : "fresh-conversation",
+              sessionId: failure === "wrong-session" ? "other" : "fresh-session",
+            },
+    };
+    vi.mocked(pane.getState).mockImplementation(() =>
+      failure === "unavailable"
+        ? Promise.reject(new Error("disconnected"))
+        : failure === "hung"
+          ? new Promise(() => {})
+          : Promise.resolve(snapshot),
+    );
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("confirm which session is active"),
+      "error",
+      7000,
+    );
+    expect(screen.getByText("Preserve old transcript")).toBeTruthy();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Keep my draft" } });
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+    });
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    const emit = paneEvents(pane);
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "other", conversationId: "other", sessionId: "other" },
+      }),
+    );
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    const receipt = {
+      operationId: "operation-1",
+      conversationId: "fresh-conversation",
+      sessionId: "fresh-session",
+    };
+    act(() => emit({ type: "session_reset", data: receipt }));
+    expect(screen.queryByText("Preserve old transcript")).toBeNull();
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    act(() => emit({ type: "session_reset", data: receipt }));
+    expect(screen.getByText("Keep my draft")).toBeTruthy();
+  });
+
+  it("keeps other panes usable and only restores reset authority after successful reopen hydration", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("unresolved-reopen", 1);
+    const other = client("independent", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(other.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const first = render(<AgentPane client={pane} />);
+    fireEvent.click(await within(first.container).findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await within(first.container).findByRole("textbox");
+    const second = render(<AgentPane client={other} />);
+    fireEvent.click(await within(second.container).findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const otherInput = await within(second.container).findByRole("textbox");
+    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+    vi.useFakeTimers();
+    fireEvent.click(within(first.container).getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
+    fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
+    fireEvent.keyDown(otherInput, { key: "Enter" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(other.sendPrompt).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    // A generation change alone and a failed state read cannot restore authority.
+    vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: pane.paneId,
+    });
+    fireEvent.click(
+      within(first.container).getByRole("button", { name: /Back to this project's sessions/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    let input = await within(first.container).findByRole("textbox");
+    const emit = paneEvents(pane);
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "operation-1", conversationId: "late", sessionId: "late" },
+      }),
+    );
+    fireEvent.change(input, { target: { value: "Recovered draft" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      conversationId: "reopened",
+      sessionId: "reopened",
+    });
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "Authoritative reopened history" },
+    ]);
+    fireEvent.click(
+      within(first.container).getByRole("button", { name: /Back to this project's sessions/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await within(first.container).findByText("Authoritative reopened history")).toBeTruthy();
+    input = within(first.container).getByRole("textbox");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    act(() =>
+      emit({
+        type: "session_reset",
+        data: { operationId: "operation-1", conversationId: "late", sessionId: "late" },
+      }),
+    );
+    expect(within(first.container).getByText("Recovered draft")).toBeTruthy();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(["stable", "experimental"] as const)(
+    "enforces the shared New Chat gate in %s mode",
+    async (profile) => {
+      nativeMocks.realMentor = true;
+      const pane = client("unresolved-chat", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        mode: "chat",
+        openAICodexContextProfile: profile,
+      });
+      render(<AgentPane client={pane} initialTarget={chatTarget} />);
+      const input = await screen.findByRole("textbox");
+      vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByTitle("Start a new chat"));
+      fireEvent.click(screen.getByRole("button", { name: "New Chat" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16_001);
+      });
+      fireEvent.change(input, { target: { value: "Keep chat draft" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect((input as HTMLTextAreaElement).value).toBe("Keep chat draft");
+      expect(pane.newSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("blocks Ken current, fresh and quick sends after unresolved toolbar reset", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("unresolved-ken", 1);
+    const continueHere = await renderKenPromptPane(pane);
+    vi.mocked(pane.getState).mockRejectedValue(new Error("unavailable"));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_001);
+    });
+    fireEvent.click(continueHere);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
+    expect(pane.commitContinuation).not.toHaveBeenCalled();
+    expect(pane.newSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not poison prompt authority after a rejected 409 reset", async () => {
+    nativeMocks.realMentor = true;
+    const { NewSessionError } = await vi.importActual<typeof AgentModule>("./agent");
+    const pane = client("rejected-reset", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.newSession).mockRejectedValue(
+      new NewSessionError("creation-rejected", "HTTP 409: busy"),
+    );
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.click(screen.getByTitle("Start a new session for this project"));
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        expect.stringContaining("current session is unchanged"),
+        "error",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.change(input, { target: { value: "Still usable" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+  });
+
+  it("blocks fresh resets during Autopilot review and shares correlation with the toolbar modal", async () => {
+    const pane = client("pane-ken-autopilot", 1);
+    await renderKenPromptPane(pane);
+    const handleEvent = paneEvents(pane);
+    const fresh = screen.getByRole("button", { name: "New session" });
+    const toolbar = screen.getByTitle("Start a new session for this project");
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() => expect((fresh as HTMLButtonElement).disabled).toBe(true));
+    expect((toolbar as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(fresh);
+    expect(pane.newSession).not.toHaveBeenCalled();
+
+    act(() => handleEvent?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() => expect((toolbar as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(toolbar);
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    act(() => nativeMocks.onSessionReset?.("unrelated-operation"));
+    expect(screen.getByRole("dialog", { name: "New Session" })).toBeTruthy();
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull());
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary @file mentions on file search", async () => {
+    const pane = client("pane-1", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Review @src/brand" } });
+    await waitFor(() => expect(pane.searchFiles).toHaveBeenCalled());
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
+});

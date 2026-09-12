@@ -46,12 +46,7 @@ const VERBS: Record<string, VerbPair> = {
   screenshot: { running: "Capturing", done: "Captured" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
-  "mcp__kencode-search__searchCode": { running: "Searching code", done: "Searched code" },
-  "mcp__kencode-search__referenceSources": {
-    running: "Finding references",
-    done: "Found references",
-  },
-  "mcp__kencode-search__discoverRepos": { running: "Discovering repos", done: "Discovered repos" },
+  steroids: { running: "Reading real code", done: "Read real code" },
 };
 
 function humanizeName(name: string): VerbPair {
@@ -65,18 +60,19 @@ function humanizeName(name: string): VerbPair {
 
 export function getToolTone(name: string): ToolTone {
   if (["read", "ls"].includes(name)) return "read";
-  if (["grep", "find", "mcp__kencode-search__searchCode"].includes(name)) return "search";
-  if (["write", "edit"].includes(name)) return "write";
-  if (["bash", "task_output", "task_stop"].includes(name)) return "run";
   if (
     [
-      "web_fetch",
-      "web_search",
-      "mcp__kencode-search__referenceSources",
+      "grep",
+      "find",
+      "steroids",
+      "mcp__kencode-search__searchCode",
       "mcp__kencode-search__discoverRepos",
     ].includes(name)
   )
-    return "web";
+    return "search";
+  if (["write", "edit"].includes(name)) return "write";
+  if (["bash", "task_output", "task_stop"].includes(name)) return "run";
+  if (["web_fetch", "web_search"].includes(name)) return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
   if (["tasks"].includes(name)) return "state";
   if (["source_path"].includes(name)) return "source";
@@ -112,8 +108,14 @@ function shorten(value: string, max = MAX_DETAIL): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function basename(p: string): string {
-  const parts = p.split("/").filter(Boolean);
+/**
+ * Last path segment, for BOTH separators. The webview has no `node:path`, and
+ * splitting on "/" alone left every Windows path (`C:\repo\src\a.ts`) as one
+ * segment — so tool rows showed the whole absolute path instead of the file
+ * name.
+ */
+export function basename(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
 
@@ -150,7 +152,17 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
       return { text: hostOf(String(args.url ?? "")), quote: false };
     case "web_search":
     case "mcp__kencode-search__searchCode":
+    case "mcp__kencode-search__discoverRepos":
       return { text: shorten(String(args.query ?? "")), quote: true };
+    case "steroids":
+      return {
+        text: shorten(
+          Array.isArray(args.repos)
+            ? args.repos.map(String).join(", ")
+            : String(args.pattern ?? args.symbol ?? args.query ?? args.path ?? args.repo ?? ""),
+        ),
+        quote: true,
+      };
     case "subagent":
       return { text: shorten(String(args.agent ?? "")), quote: false };
     case "skill":
@@ -211,9 +223,23 @@ function inlineSummary(name: string, result: string, details: unknown): string {
 export function buildToolLineParts(
   name: string,
   args: Record<string, unknown>,
-  input: { done: boolean; isError?: boolean; result?: string; details?: unknown },
+  input: {
+    done: boolean;
+    isError?: boolean;
+    result?: string;
+    details?: unknown;
+    /** Presentation-only label; behavior still dispatches on `name`. */
+    displayName?: string;
+  },
 ): ToolLinePart[] {
-  const verbs = VERBS[name] ?? humanizeName(name);
+  const indexing =
+    name === "steroids" &&
+    (args.action === "add" || (args.action === "discover" && args.add === true));
+  const verbs = input.displayName
+    ? { running: input.displayName, done: input.displayName }
+    : indexing
+      ? { running: "Indexing repos", done: "Indexed repos" }
+      : (VERBS[name] ?? humanizeName(name));
   const tone = getToolTone(name);
   const verb = input.done ? verbs.done : verbs.running;
   const { text: detail, quote } = toolDetail(name, args);

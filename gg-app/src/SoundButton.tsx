@@ -8,7 +8,11 @@ import { isSoundEnabled, setSoundEnabled, playSound } from "./sounds";
  * per-machine in localStorage (see sounds.ts), so the choice survives restarts.
  * Plays a confirmation click when turning sound back on.
  */
-export function SoundButton(): React.ReactElement {
+export function SoundButton({
+  variant = "icon",
+}: {
+  variant?: "icon" | "settings";
+}): React.ReactElement {
   const [on, setOn] = useState(isSoundEnabled());
 
   function toggle(): void {
@@ -18,14 +22,22 @@ export function SoundButton(): React.ReactElement {
     if (next) playSound("click");
   }
 
+  const settingsVariant = variant === "settings";
   return (
     <button
-      className="btn btn-ghost btn-icon home-settings"
+      className={
+        settingsVariant ? "modal-btn" : "btn btn-ghost btn-icon btn-nav-icon home-settings"
+      }
       title={on ? "Sound effects on — click to mute" : "Sound effects muted — click to enable"}
       style={on ? undefined : { color: theme.textMuted }}
       onClick={toggle}
     >
-      {on ? <Volume2 size={20} /> : <VolumeOff size={20} />}
+      {on ? (
+        <Volume2 size={settingsVariant ? 16 : 20} />
+      ) : (
+        <VolumeOff size={settingsVariant ? 16 : 20} />
+      )}
+      {settingsVariant ? (on ? "Sound on" : "Sound off") : null}
     </button>
   );
 }

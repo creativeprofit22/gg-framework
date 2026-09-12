@@ -1,6 +1,6 @@
 [package]
 name = "gg-app"
-version = "0.14.10"
+version = "0.63.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -14,21 +14,53 @@ edition = "2021"
 name = "gg_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Test-only packaged WebView instrumentation. Release artifacts never enable this.
+native-smoke = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+# `tray-icon` + `image-png` are NOT default tauri features: the first adds the
+# macOS menu-bar status item, the second lets `Image::from_bytes` decode the PNG
+# tray mark (icons/tray-mac.png).
+tauri = { version = "2", features = [
+  "macos-private-api",
+  "tray-icon",
+  "image-png",
+] }
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+chrono = "0.4.45"
+unicode-normalization = "0.1.25"
+# `query` became an opt-in feature in 0.13. We ask for no TLS feature of our
+# own — every request goes to the local sidecar over plain http://127.0.0.1 —
+# but tauri-plugin-updater turns on reqwest's `rustls-no-provider`, and cargo
+# unifies features across the shared 0.13 build. So OUR client is a rustls
+# client too, and building one panics unless a crypto provider is installed
+# first. See `install_rustls_provider` in lib.rs.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream"] }
+# Only to install that provider. `ring` is the same backend (and version) the
+# updater already pulls in, so this adds no crates to the build.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures-util = "0.3"
+keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
+atomic-write-file = { version = "=0.3.0", default-features = false }
+cap-std = "=4.0.2"
+cap-tempfile = "=4.0.2"
+hmac = "=0.12.1"
+ryu-js = "=1.0.2"
+sha2 = "=0.10.9"
 tokio = { version = "1", features = ["time"] }
-base64 = "0.22"
+base64 = "0.23"
+getrandom = "=0.3.4"
+fs2 = "=0.4.3"
+tauri-plugin-notification = "2"
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't
 # build for mobile targets.
@@ -38,4 +70,20 @@ tauri-plugin-process = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.61.3", features = [
+  "UI_Notifications",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_WinRT",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSError"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["block2", "UNNotificationSettings", "UNUserNotificationCenter"] }
+tauri-plugin-wdio-webdriver = "=1.2.0"
 

@@ -28,6 +28,9 @@ export class JsonRpcRequestError extends Error {
 
 export type NotificationHandler = (params: unknown) => void;
 
+/** Observer for every framed message crossing the wire, in both directions. */
+export type WireTracer = (direction: "out" | "in", message: JsonRpcMessage) => void;
+
 const HEADER_SEPARATOR = "\r\n\r\n";
 
 /**
@@ -48,6 +51,14 @@ export class JsonRpcConnection {
   constructor(
     input: Readable,
     private readonly output: Writable,
+    /**
+     * Optional wire tracer. Diagnosing a server that accepts a document and
+     * then never publishes requires seeing whether our notification actually
+     * went out and whether anything came back — indistinguishable from outside,
+     * because LSP failures are silent by design. Off unless a caller passes
+     * one, so the normal path is byte-identical.
+     */
+    private readonly trace?: WireTracer,
   ) {
     input.on("data", (chunk: Buffer) => this.onData(chunk));
     // Writing to a dead server's stdin must never crash the host process.
@@ -99,6 +110,7 @@ export class JsonRpcConnection {
 
   private send(msg: JsonRpcMessage): void {
     if (this.disposed) return;
+    this.trace?.("out", msg);
     const body = JSON.stringify(msg);
     try {
       this.output.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
@@ -134,6 +146,7 @@ export class JsonRpcConnection {
   }
 
   private onMessage(msg: JsonRpcMessage): void {
+    this.trace?.("in", msg);
     // Response to one of our requests.
     if (msg.id !== undefined && msg.method === undefined) {
       const settle = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;

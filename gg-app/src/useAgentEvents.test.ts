@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { createRef } from "react";
 import type { MutableRefObject } from "react";
+import type * as AgentModule from "./agent";
 
 // playSound builds an <audio> element and ./agent calls Tauri APIs at module
 // scope (getCurrentWebviewWindow) which blow up in jsdom. Fully stub both. The
@@ -10,19 +11,107 @@ import type { MutableRefObject } from "react";
 // erased), so the mock just provides that, resolving empty so run_end's command
 // refresh is a no-op.
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
-vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main", listen: vi.fn().mockResolvedValue(() => {}) }),
+}));
+vi.mock("./agent", async (importOriginal) => ({
+  parseContextProfileEligibility: (await importOriginal<typeof AgentModule>())
+    .parseContextProfileEligibility,
+  listCommands: vi.fn().mockResolvedValue([]),
+  listModels: vi.fn().mockResolvedValue([]),
+  isRoadmapPhaseDraftChangeEvent: (event: SidecarEvent) =>
+    event.type === "roadmap_phase_draft_change",
+}));
 
+import { listModels } from "./agent";
+import { playSound } from "./sounds";
+import { createRunEndPayload, type RunOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { useAutopilot } from "./useAutopilot";
+import { useKenMentor } from "./useKenMentor";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
-import type { AgentState, SidecarEvent } from "./agent";
+import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
+
+it.each([
+  "Image generation failed: OpenAI Image API (400): unsupported tool",
+  "Image generation failed: Astra image request failed (response.failed).",
+  "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
+  "OpenAI is not connected. Connect OpenAI to use image generation.",
+  "Image generation aborted.",
+])("keeps image failures visible and removes the generating placeholder: %s", (result) => {
+  const { hook, getItems, getLiveToolFeed } = setup();
+  act(() =>
+    hook.result.current.handleEvent(
+      ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} }),
+    ),
+  );
+  expect(getItems().some((item) => item.kind === "generating_image")).toBe(true);
+  act(() =>
+    hook.result.current.handleEvent(
+      ev("tool_call_end", { toolCallId: "image", result, isError: true }),
+    ),
+  );
+  expect(getLiveToolFeed()).toEqual([
+    expect.objectContaining({ name: "generate_image", status: "done", isError: true, result }),
+  ]);
+  expect(
+    getItems().some((item) => item.kind === "generating_image" || item.kind === "images"),
+  ).toBe(false);
+});
+
+it.each(["1536x1024", "1254x1254", "1024x1024"])(
+  "surfaces %s sizing warnings once alongside the accessible original image path",
+  (actual) => {
+    const { hook, getItems } = setup();
+    const warning =
+      actual === "1024x1024"
+        ? ""
+        : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${actual}. Exact-size verification failed.`;
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "image", name: "generate_image", args: {} }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "image",
+          result: `Generated image\n${warning}`,
+          details: {
+            imagePreviews: [
+              { base64: "AA==", mediaType: "image/png", path: "/saved/original.png" },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(getItems()).toEqual([
+      ...(warning ? [expect.objectContaining({ kind: "info", text: warning })] : []),
+      expect.objectContaining({
+        kind: "images",
+        images: [{ src: "data:image/png;base64,AA==", path: "/saved/original.png" }],
+      }),
+    ]);
+  },
+);
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
 
+// subagent_state snapshots are buffered and flushed on a 150ms timer (burst
+// coalescing). Tests that assert on subagent groups let the flush fire first.
+const flushSubagents = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+};
+
 function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
   initialState: Partial<AgentState> = {},
+  onSessionReset?: AgentEventsDeps["onSessionReset"],
+  onRoadmapPhaseDraftChange?: AgentEventsDeps["onRoadmapPhaseDraftChange"],
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -33,7 +122,7 @@ function setup(
 
   // Track the outputs the assertions read; spy the rest so nothing throws.
   let liveToolFeed: LiveToolEntry[] = [];
-  let planReview: string | null = null;
+  let planReview: PendingPlanReview | null = null;
   const setLiveToolFeed = vi.fn(
     (u: LiveToolEntry[] | ((p: LiveToolEntry[]) => LiveToolEntry[])) => {
       liveToolFeed = typeof u === "function" ? u(liveToolFeed) : u;
@@ -41,6 +130,10 @@ function setup(
   ) as unknown as AgentEventsDeps["setLiveToolFeed"];
   const setRunning = vi.fn() as unknown as AgentEventsDeps["setRunning"];
   const setTokens = vi.fn() as unknown as AgentEventsDeps["setTokens"];
+  let contextTokens = initialState.contextTokens ?? 0;
+  const setContextTokens = ((update: number | ((previous: number) => number)) => {
+    contextTokens = typeof update === "function" ? update(contextTokens) : update;
+  }) as AgentEventsDeps["setContextTokens"];
 
   // Real reducer-style state holder so functional setState updates (used by
   // model_change / ken_model_change spreads) apply against a base state.
@@ -57,6 +150,12 @@ function setup(
     stateRef.current = agentState;
   }) as AgentEventsDeps["setState"];
 
+  let models: unknown[] = [];
+  const setModels = ((u: unknown) => {
+    models =
+      typeof u === "function" ? (u as (p: unknown[]) => unknown[])(models) : (u as unknown[]);
+  }) as unknown as AgentEventsDeps["setModels"];
+
   const noop = (): void => {};
   stateRef.current = agentState;
   const deps: AgentEventsDeps = {
@@ -71,26 +170,33 @@ function setup(
     setRunning,
     setLiveToolFeed,
     setTokens,
-    setContextTokens: noop as unknown as AgentEventsDeps["setContextTokens"],
-    setDoneStatus: noop as unknown as AgentEventsDeps["setDoneStatus"],
+    setContextTokens,
+    setDoneStatus: vi.fn<AgentEventsDeps["setDoneStatus"]>(),
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
-    setPlanTotal: noop as unknown as AgentEventsDeps["setPlanTotal"],
-    setPlanDone: noop as unknown as AgentEventsDeps["setPlanDone"],
-    setSessionTitle: noop as unknown as AgentEventsDeps["setSessionTitle"],
-    setPlanReview: ((u: string | null | ((p: string | null) => string | null)) => {
+    setPlanTotal: vi.fn<AgentEventsDeps["setPlanTotal"]>(),
+    setPlanDone: vi.fn<AgentEventsDeps["setPlanDone"]>(),
+    setPlanReview: ((
+      u: PendingPlanReview | null | ((p: PendingPlanReview | null) => PendingPlanReview | null),
+    ) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
+    setQueuedMessages: noop as unknown as AgentEventsDeps["setQueuedMessages"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
+    setModels,
+    onRoadmapPhaseDraftChange,
+    onRoadmapPhaseDraftRefresh: vi.fn(),
+    onProgrammaticActivity: vi.fn(),
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
     planReviewPathRef: { current: null },
     pendingPlanTotalRef: { current: null },
     stickToBottomRef: { current: true },
+    onSessionReset,
   };
 
   const hook = renderHook(() => useAgentEvents(deps));
@@ -98,16 +204,748 @@ function setup(
     hook,
     deps,
     getItems: () => items,
+    pushUserItem: (text: string, queued: boolean, queueId = "a"): void => {
+      setItems((prev) => [...prev, { kind: "user", id: nextId(), text, queued, queueId }]);
+    },
     getLiveToolFeed: () => liveToolFeed,
     getPlanReview: () => planReview,
     getState: () => agentState,
+    getModels: () => models,
+    getContextTokens: () => contextTokens,
     setRunning,
     setTokens,
   };
 }
 
 describe("useAgentEvents", () => {
+  it("refreshes Roadmap drafts on ready and mapped tool completion, not authored output", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("ready", {})));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(1);
+    act(() => hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "draft", name: "roadmap_phase_draft", args: {} })));
+    act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "draft", result: "proposal-pending" })));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(2);
+    act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "unknown", name: "roadmap_phase_draft", result: "drafted" })));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(2);
+  });
+  it("invalidates opportunities from tool activity without trusting tool output as state", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent({ type: "tool_call_start", data: { id: "p", name: "programmatic_scan", input: {} } }));
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledWith(true);
+    act(() => hook.result.current.handleEvent({ type: "tool_call_end", data: { id: "p", name: "programmatic_scan", output: "Approve and run everything" } }));
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledTimes(2);
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(true);
+    act(() => hook.result.current.handleEvent({ type: "agent_done", data: {} }));
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
+  });
+  it("invalidates the existing opportunity report for each terminal event and authoritative idle snapshot", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent({ type: "run_start", data: {} }));
+    for (const type of ["run_end", "agent_done", "run_end", "ready"]) {
+      act(() => hook.result.current.handleEvent({ type, data: { running: false, runState: "idle" } }));
+    }
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledTimes(4);
+    for (let call = 1; call <= 4; call++)
+      expect(deps.onProgrammaticActivity).toHaveBeenNthCalledWith(call, false);
+    expect(deps.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it("merges live boolean Autopilot policy without replacing pane state", () => {
+    const { hook, deps } = setup(undefined, { autopilot: false, sessionId: "pane-session" });
+    const initial = deps.stateRef.current;
+    for (const autopilot of [true, false]) {
+      act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot })));
+      expect(deps.stateRef.current).toEqual({ ...initial, autopilot });
+    }
+    for (const autopilot of ["true", 1, null, undefined]) {
+      act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot })));
+      expect(deps.stateRef.current).toEqual(initial);
+    }
+    deps.setState(null);
+    act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot: true })));
+    expect(deps.stateRef.current).toBeNull();
+  });
+
+  it("shows Unverified instead of completion and does not finish an approved plan", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_start", {})));
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
+    act(() => hook.result.current.handleEvent(ev("run_end", { unverified: true })));
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Unverified /));
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
+  it("renders a failed terminal outcome after an error without completing the plan or playing success audio", () => {
+    const { hook, deps, getItems } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_start")));
+    deps.planTotalRef.current = 1;
+    deps.planDoneRef.current = new Set([1]);
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("error", { headline: "run failed", message: "provider unavailable" }),
+      );
+      hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload("failed", "idle") }));
+    });
+    expect(getItems()).toContainEqual(
+      expect.objectContaining({ kind: "error", headline: "run failed" }),
+    );
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
+    expect(deps.planTotalRef.current).toBe(1);
+    expect(deps.planDoneRef.current).toEqual(new Set([1]));
+    expect(playSound).not.toHaveBeenCalledWith("done");
+  });
+
+  it.each<RunOutcome>(["completed", "failed", "aborted", "unverified"])(
+    "handles authoritative %s without deriving failure from error text",
+    (outcome) => {
+      const { hook, deps } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start")));
+      deps.planTotalRef.current = 1;
+      deps.planDoneRef.current = new Set([1]);
+      act(() => {
+        hook.result.current.handleEvent(ev("error", { message: "a recoverable tool error" }));
+        hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
+      });
+      expect(deps.planTotalRef.current).toBe(1);
+      expect(deps.planDoneRef.current).toEqual(new Set([1]));
+      if (outcome === "completed") expect(playSound).toHaveBeenCalledWith("done");
+      else expect(playSound).not.toHaveBeenCalledWith("done");
+      if (outcome === "aborted") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+      if (outcome === "failed" || outcome === "unverified") {
+        expect(deps.setDoneStatus).toHaveBeenLastCalledWith(
+          expect.stringMatching(outcome === "failed" ? /^Failed / : /^Unverified /),
+        );
+      }
+    },
+  );
+
+  it.each([{ outcome: "failed", unverified: true, cancelled: true }, { outcome: "unknown" }])(
+    "never turns an explicit failure or unknown outcome into success: %j",
+    (data) => {
+      const { hook, deps } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_end", data)));
+      expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Failed /));
+      expect(playSound).not.toHaveBeenCalledWith("done");
+    },
+  );
+
+  it("keeps autopilot review alive across injected failures and settles explicit cancellation", () => {
+    const { result } = renderHook(() => useAutopilot({ setItems: vi.fn(), nextId: () => 1 }));
+    act(() => result.current.handleAutopilotEvent(ev("autopilot_review_start")));
+    expect(result.current.autopilotReviewing).toBe(true);
+    act(() =>
+      result.current.handleAutopilotEvent(
+        ev("run_end", { ...createRunEndPayload("failed", "running") }),
+      ),
+    );
+    expect(result.current.autopilotReviewing).toBe(true);
+    act(() =>
+      result.current.handleAutopilotEvent(
+        ev("run_end", { outcome: "cancelled", runState: "idle" }),
+      ),
+    );
+    expect(result.current.autopilotReviewing).toBe(false);
+  });
+
   beforeEach(() => vi.clearAllMocks());
+
+  it("correlates resets before applying real mentor authority", () => {
+    const mentor = renderHook(() => useKenMentor({ setItems: vi.fn(), nextId: () => 1 }));
+    const old = { conversationId: "old", activationEpoch: "old", activeRunId: "run" };
+    act(() => mentor.result.current.hydrateKen(old));
+    const { hook, deps } = setup((event) => mentor.result.current.handleKenEvent(event));
+    deps.hydrateKen = (value, replace) => mentor.result.current.hydrateKen(value, replace);
+    deps.shouldApplySessionReset = () => false;
+    hook.rerender();
+    const reset = ev("session_reset", {
+      operationId: "reset",
+      kenState: { conversationId: "new", activationEpoch: "new", activeRunId: null },
+    });
+    act(() => hook.result.current.handleEvent(reset));
+    expect(mentor.result.current.captureKenRun()).toEqual({
+      conversationId: "old",
+      activationEpoch: "old",
+      runId: "run",
+    });
+    deps.shouldApplySessionReset = () => true;
+    hook.rerender();
+    act(() => hook.result.current.handleEvent(reset));
+    expect(mentor.result.current.captureKenRun()).toBeNull();
+    expect(mentor.result.current.kenRunning).toBe(false);
+  });
+
+  it("filters stale resets before clearing the transcript and forwards accepted events without ending text", () => {
+    const { hook, deps, pushUserItem, getItems } = setup();
+    deps.shouldApplySessionReset = vi.fn(() => false);
+    deps.onContinuationAccepted = vi.fn();
+    hook.rerender();
+    pushUserItem("accepted handoff", false);
+    act(() => hook.result.current.handleEvent(ev("session_reset", { operationId: "stale" })));
+    expect(getItems()).toHaveLength(1);
+    const accepted = { operationId: "operation-1" };
+    act(() => hook.result.current.handleEvent(ev("continuation_accepted", accepted)));
+    expect(deps.onContinuationAccepted).toHaveBeenCalledWith(accepted);
+    expect(getItems()).toHaveLength(1);
+    deps.shouldApplySessionReset = () => true;
+    hook.rerender();
+    act(() => hook.result.current.handleEvent(ev("session_reset", { operationId: "current" })));
+    expect(getItems()).toEqual([]);
+  });
+
+  it("forwards a validated Roadmap draft event without touching transcript state", () => {
+    const onDraft = vi.fn();
+    const { hook, getItems } = setup(() => false, {}, undefined, onDraft);
+    const draft = { id: "draft-1", basedOnRevision: 3 };
+
+    act(() => hook.result.current.handleEvent(ev("roadmap_phase_draft_change", draft)));
+
+    expect(onDraft).toHaveBeenCalledWith(draft);
+    expect(getItems()).toEqual([]);
+  });
+
+  it.each(["ready", "extras"])(
+    "validates eligibility from %s, failing closed without history inference",
+    (type) => {
+      const { hook, getState, getItems } = setup();
+      const send = (eligibility: unknown) =>
+        act(() =>
+          hook.result.current.handleEvent(
+            ev(type, {
+              openAICodexContextProfileEligibility: eligibility,
+            }),
+          ),
+        );
+      send({ canChange: true });
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual({ canChange: true });
+      for (const malformed of [undefined, null, [], { canChange: "true" }, { canChange: false }]) {
+        send(malformed);
+        expect(getState()?.openAICodexContextProfileEligibility.canChange).toBe(false);
+      }
+      send({ canChange: false, reason: "authoritative lock" });
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual({
+        canChange: false,
+        reason: "authoritative lock",
+      });
+      expect(getItems()).toEqual([]);
+      send({ canChange: true });
+      expect(getState()?.openAICodexContextProfileEligibility.canChange).toBe(true);
+    },
+  );
+
+  it("preserves authoritative eligibility during unrelated partial extras", () => {
+    const { hook, getState } = setup();
+    for (const eligibility of [{ canChange: true }, { canChange: false, reason: "started" }]) {
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("extras", { openAICodexContextProfileEligibility: eligibility }),
+        ),
+      );
+      act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 2 })));
+      expect(getState()?.openAICodexContextProfileEligibility).toEqual(eligibility);
+    }
+  });
+
+  it("applies validated context profile change events", () => {
+    const { hook, getState } = setup();
+
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("context_profile_change", {
+          openAICodexContextProfile: "experimental",
+          contextWindow: 872_000,
+        }),
+      ),
+    );
+
+    expect(getState()).toMatchObject({
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+  });
+
+  it("applies live connect and disconnect extras as authoritative Astra state", () => {
+    const { hook, getState, getContextTokens } = setup();
+
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: null,
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("extras", {
+          accountId: "account-live",
+          openAICodexContextProfile: "experimental",
+          openAICodexFast: true,
+          contextTokens: 300_000,
+          contextWindow: 872_000,
+        }),
+      ),
+    );
+    expect(getState()).toMatchObject({
+      accountId: "account-live",
+      openAICodexContextProfile: "experimental",
+      openAICodexFast: true,
+      contextTokens: 300_000,
+      contextWindow: 872_000,
+    });
+    expect(getContextTokens()).toBe(300_000);
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", {
+          accountId: null,
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+        }),
+      );
+    });
+    expect(getState()).toMatchObject({
+      accountId: null,
+      openAICodexContextProfile: "stable",
+      openAICodexFast: false,
+      contextTokens: 136_000,
+      contextWindow: 272_000,
+    });
+    expect(getContextTokens()).toBe(136_000);
+  });
+
+  it("applies pane-scoped Fast changes", () => {
+    const { hook, getState } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: "account-live",
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 0,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() => hook.result.current.handleEvent(ev("fast_change", { openAICodexFast: true })));
+    expect(getState()?.openAICodexFast).toBe(true);
+  });
+
+  it("keeps authoritative context usage when turn_end reports token usage", () => {
+    const { hook, getContextTokens } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "openai",
+          model: "gpt-6-astra",
+          accountId: "account-live",
+          openAICodexContextProfile: "stable",
+          openAICodexFast: false,
+          contextTokens: 136_000,
+          contextWindow: 272_000,
+          cwd: "/tmp/proj",
+          running: false,
+          tasks: [],
+        }),
+      ),
+    );
+    act(() => hook.result.current.handleEvent(ev("turn_end", { usage: { inputTokens: 999_999 } })));
+    expect(getContextTokens()).toBe(136_000);
+  });
+
+  describe("queued pill lifecycle", () => {
+    it.each([false, true])(
+      "correlates references and duplicate receipts after drain, run ended=%s",
+      (ended) => {
+        const { hook, getItems } = setup();
+        act(() => {
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 2,
+              messages: [
+                { id: "q1", text: "same\n\nReferenced files:\n- src/a.ts" },
+                { id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" },
+              ],
+            }),
+          );
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 1,
+              messages: [{ id: "q2", text: "same\n\nReferenced files:\n- src/a.ts" }],
+            }),
+          );
+          if (ended) hook.result.current.handleEvent(ev("run_end"));
+          // Receipts may complete in reverse order. Only q1 was consumed.
+          hook.result.current.acceptSubmission(
+            { kind: "user", id: 2, text: "same", files: ["src/a.ts"] },
+            { queued: true, count: 2, queueId: "q2" },
+          );
+          hook.result.current.acceptSubmission(
+            { kind: "user", id: 1, text: "same", files: ["src/a.ts"] },
+            { queued: true, count: 1, queueId: "q1" },
+          );
+        });
+        expect(getItems()).toEqual([
+          expect.objectContaining({ id: 2, queueId: "q2", queued: true, files: ["src/a.ts"] }),
+          expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
+        ]);
+      },
+    );
+
+    it("updates an existing idle bubble without duplicates and settles a referenced queue ID", () => {
+      const { hook, getItems } = setup();
+      const item = { kind: "user" as const, id: 1, text: "read", files: ["src/a.ts"] };
+      act(() => {
+        hook.result.current.pushItem(item);
+        hook.result.current.acceptSubmission(item, { queued: true, count: 1, queueId: "q1" });
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems()).toHaveLength(1);
+      expect(getItems()[0]).toMatchObject({ queued: true });
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "q1", text: "read\n\nReferenced files:\n- src/a.ts" }],
+          }),
+        );
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ queued: false, promoted: true, files: ["src/a.ts"] }),
+      ]);
+    });
+    it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first queued", true);
+      pushUserItem("second queued", true, "b");
+
+      // The sidecar acknowledges both enqueues.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "first queued" },
+              { id: "b", text: "second queued" },
+            ],
+          }),
+        );
+      });
+      // The agent drains ONE message at the turn boundary: the sidecar
+      // re-broadcasts queue_drained as `queued` with the remaining list.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "second queued" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      expect(users[0]?.queued).toBe(false);
+      // Marked for the queued→sent morph, so the bubble animates out of the dim
+      // dashed look instead of snapping.
+      expect(users[0]?.promoted).toBe(true);
+      // The still-pending one keeps its pill.
+      expect(users[1]?.queued).toBe(true);
+      expect(users[1]?.promoted).toBeUndefined();
+    });
+
+    it("drops the morph flag once the animation beat is over", async () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("only queued", true);
+
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "only queued" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems().find((it) => it.kind === "user")?.promoted).toBe(true);
+
+      // Left set, the flag would replay the collapse whenever the transcript
+      // remounts (a picker view taking the window and coming back).
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 400));
+      });
+      expect(getItems().find((it) => it.kind === "user")?.promoted).toBe(false);
+    });
+
+    it("clears the rest once the queue fully drains, still mid-run", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first queued", true);
+      pushUserItem("second queued", true, "b");
+
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "first queued" },
+              { id: "b", text: "second queued" },
+            ],
+          }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "second queued" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(
+        getItems()
+          .filter((it) => it.kind === "user")
+          .every((it) => it.queued === false),
+      ).toBe(true);
+    });
+
+    it("keeps the pill while the message is still pending", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("still waiting", true);
+
+      // A fresh enqueue (depth grew) must not clear anything.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "still waiting" }] }),
+        );
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(true);
+    });
+
+    it("clears exactly one of two identical queued messages", () => {
+      // Set membership would leave BOTH lit here: the text is still present in
+      // the pending list, so nothing would ever clear until the queue emptied.
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("same text", true, "a");
+      pushUserItem("same text", true, "b");
+
+      // Both acknowledged as queued.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "same text" },
+              { id: "b", text: "same text" },
+            ],
+          }),
+        );
+      });
+      // One consumed.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "same text" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      // FIFO: the older bubble is the one the agent took.
+      expect(users[0]?.queued).toBe(false);
+      expect(users[1]?.queued).toBe(true);
+    });
+
+    it("keeps the pill on a message the sidecar has not acknowledged yet", () => {
+      // The bubble is marked queued optimistically. A queue snapshot that
+      // predates the enqueue must not clear it, because nothing re-sets the flag.
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first", true);
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "first" }] }),
+        );
+      });
+
+      // User sends a second message; its bubble exists before the sidecar acks.
+      pushUserItem("second", true, "b");
+      // A stale snapshot arrives listing only the first message.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "first" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      expect(users[1]?.queued).toBe(true);
+    });
+
+    it("forgets acknowledged queue IDs on session reset", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("recycled", true);
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "recycled" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("session_reset"));
+      });
+
+      // Same text queued again in the FRESH session, not yet acked.
+      pushUserItem("recycled", true);
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(true);
+    });
+
+    it("leaves already-sent bubbles untouched", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("sent normally", false);
+
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(false);
+    });
+  });
+
+  it("reports the correlated reset after clearing the existing transcript", () => {
+    const onSessionReset = vi.fn();
+    const { hook, getItems, pushUserItem } = setup(() => false, {}, onSessionReset);
+    pushUserItem("old session", false);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset", { operationId: "reset-42" }));
+    });
+
+    expect(getItems()).toEqual([]);
+    expect(onSessionReset).toHaveBeenCalledOnce();
+    expect(onSessionReset).toHaveBeenCalledWith("reset-42");
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset"));
+    });
+    expect(onSessionReset).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("removes the notice when compaction is skipped", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: false, originalCount: 466, newCount: 466 }),
+      );
+    });
+
+    expect(getItems()).toEqual([]);
+  });
+
+  it("completes the notice when messages were compacted", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: true, originalCount: 466, newCount: 42 }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "compaction",
+        status: "done",
+        originalCount: 466,
+        newCount: 42,
+      }),
+    ]);
+  });
+
+  it("keeps the run owned while cancellation is pending", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "running",
+    });
+    act(() => hook.result.current.handleEvent(ev("run_cancelling", { runState: "cancelling" })));
+    expect(getState()).toMatchObject({ running: true, runState: "cancelling" });
+    expect(setRunning).toHaveBeenLastCalledWith(true);
+  });
+
+  it("restores the running affordance after cancellation failure", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "cancelling",
+    });
+    act(() => hook.result.current.handleEvent(ev("cancel_failed", { runState: "running" })));
+    expect(getState()).toMatchObject({ running: true, runState: "running" });
+    expect(setRunning).toHaveBeenLastCalledWith(true);
+  });
+
+  it("becomes idle only when the owning run emits run_end", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "cancelling",
+    });
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it("refreshes branch and uncommitted-file count from workspace extras", () => {
+    const { hook, getState } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", { gitBranch: "feature/dirty", isGitRepo: true, gitDirtyFileCount: 4 }),
+      );
+    });
+
+    expect(getState()).toMatchObject({
+      gitBranch: "feature/dirty",
+      isGitRepo: true,
+      gitDirtyFileCount: 4,
+    });
+  });
+
+  it("merges CI updates, preserves them in partial frames, and clears them on null", () => {
+    const { hook, getState } = setup();
+    const ci: NonNullable<AgentState["gitHubCI"]> = {
+      key: "repo:sha:1.1",
+      url: "https://github.com/owner/repo/actions/runs/1",
+      active: true,
+      total: 6,
+      completed: 4,
+      failed: 0,
+      conclusion: null,
+    };
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: ci })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 1 })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: null })));
+    expect(getState()?.gitHubCI).toBeNull();
+  });
 
   it("text_delta streams assistant text into a single item", () => {
     const { hook, getItems } = setup();
@@ -128,6 +966,301 @@ describe("useAgentEvents", () => {
     items = getItems();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
+  });
+
+  it("discards a draft the late-arming fallback could not hold back", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: " tail" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("shows an asynchronous prompt-failed phase error and deduplicates run failed", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+    });
+    expect(getItems()).toEqual([]);
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-1",
+          phaseId: "phase-1",
+          code: "prompt-failed",
+          message: "The phase prompt failed. Resume the phase to retry.",
+          detail: "provider unavailable",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("error", {
+          headline: "Provider unavailable.",
+          message: "provider unavailable",
+          guidance: "Try again.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase prompt failed. Resume the phase to retry.",
+        message: "provider unavailable",
+      }),
+    ]);
+  });
+
+  it("shows a launch-failed phase error without waiting for a run error", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-2",
+          phaseId: "phase-2",
+          code: "launch-failed",
+          message: "The phase could not be launched. Review its attention note and retry.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase could not be launched. Review its attention note and retry.",
+      }),
+    ]);
+  });
+
+  it("discards every repeated draft but shows the review notice once", () => {
+    // One review injects up to four times. Each injection must kill its draft,
+    // while duplicate notices remain collapsed.
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft two" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft three" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("distinguishes a post-edit recheck while deduplicating repeated recheck notices", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+    });
+    expect(getItems()).toHaveLength(2);
+    expect(getItems()[1]).toMatchObject({ hook: "verification", verificationReason: "recheck" });
+  });
+
+  it("keeps check-review notices distinct and shows the completed outcome after the hook", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.handleEvent(
+        ev("text_delta", {
+          text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+        }),
+      );
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({
+        kind: "hook",
+        hook: "verification",
+        verificationReason: "check_review",
+      }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+      }),
+    ]);
+  });
+
+  it("retains a readiness evidence limitation without approving the pending plan", () => {
+    const { hook, getItems, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          content: "Plan content",
+          planPath: ".gg/plan.md",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          reason: "Corpus unavailable.",
+        }),
+      );
+    });
+    expect(getItems()).toContainEqual(
+      expect.objectContaining({
+        kind: "info",
+        text: "Plan ready for your approval.\n\nCorpus unavailable.",
+      }),
+    );
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      state: "pending-review",
+      reviewStatus: "ready",
+      feedback: "Corpus unavailable.",
+    });
+  });
+
+  it("still shows a second notice when a DIFFERENT hook follows", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+    ]);
+  });
+
+  it("never paints the draft while the Ideal review is armed", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: " tail" }));
+    });
+    // Held, never rendered: the user cannot read text the review will replace.
+    expect(getItems()).toEqual([]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: false }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("keeps holding the draft when one of two armed hooks disarms", () => {
+    const { hook, getItems } = setup();
+
+    // Both pre-final hooks armed in the same run: verification is owed AND the
+    // ideal review would fire. The sidecar arms each once, on its own edge.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unverified draft" }));
+    });
+    expect(getItems()).toEqual([]);
+
+    // Verification fires and disarms. Ideal is still armed and will NOT be
+    // re-armed (edge-triggered), so releasing here would paint a draft the
+    // review is about to delete.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Verified draft" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "verification" })]);
+
+    // Only the last disarm releases.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: false }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("never paints the draft while the verification gate is armed", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unverified draft" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "verification" })]);
+  });
+
+  it("releases text held under arming when the turn calls a tool instead of stopping", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Checking the file" }));
+      hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "t1", name: "read" }));
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "assistant", text: "Checking the file" }),
+    ]);
+  });
+
+  it("releases held text when the run ends without the review firing", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Done here" }));
+      hook.result.current.handleEvent(ev("agent_done", { totalTurns: 3 }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "assistant", text: "Done here" })]);
   });
 
   it("error with a structured payload (headline/message/guidance) pushes a structured error item", () => {
@@ -180,6 +1313,72 @@ describe("useAgentEvents", () => {
     expect(feed[0]).toMatchObject({ toolCallId: "t1", status: "done" });
   });
 
+  it("moves MCP isError completions from the temporary panel into durable transcript rows", () => {
+    const { hook, getItems, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "thrown", name: "mcp__id__thrown", args: {} }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "reported", name: "mcp__id__reported", args: {} }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "thrown",
+          result: "transport exploded",
+          isError: true,
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "reported",
+          result: "fixture-is-error",
+          isError: true,
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()).toEqual([]);
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "mcp_tool_failure",
+        name: "mcp__id__thrown",
+        result: "transport exploded",
+      }),
+      expect.objectContaining({
+        kind: "mcp_tool_failure",
+        name: "mcp__id__reported",
+        result: "fixture-is-error",
+      }),
+    ]);
+  });
+
+  it("retains exact MCP source identity while keying an opaque alias", () => {
+    const { hook, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "opaque-call",
+          name: "mcp__id__opaquehash",
+          args: { query: "needle" },
+          displayName: "server name / tool:name",
+          mcpServerName: "server name",
+          mcpToolName: "tool:name",
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]).toEqual({
+      toolCallId: "opaque-call",
+      name: "mcp__id__opaquehash",
+      args: { query: "needle" },
+      displayName: "server name / tool:name",
+      mcpServerName: "server name",
+      mcpToolName: "tool:name",
+      status: "running",
+    });
+  });
+
   it("turn_end accumulates output tokens across turns", () => {
     const { hook, setTokens } = setup();
     act(() => {
@@ -193,14 +1392,27 @@ describe("useAgentEvents", () => {
     expect(setTokens).toHaveBeenLastCalledWith(15);
   });
 
+  it("updates the active chat agent after a handoff", () => {
+    const { hook, getState } = setup(() => false, { chatAgent: "general" });
+    act(() => {
+      hook.result.current.handleEvent(ev("chat_agent_change", { chatAgent: "therapist" }));
+    });
+    expect(getState()).toMatchObject({ chatAgent: "therapist" });
+  });
   it("delegates ken_ events to handleKenEvent and does not handle them locally", () => {
     const handleKenEvent = vi.fn(() => true);
-    const { hook, getItems, setRunning } = setup(handleKenEvent);
+    const { hook, getItems, setRunning, deps } = setup(handleKenEvent, { running: true });
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
     act(() => {
       hook.result.current.handleEvent(ev("ken_text_delta", { text: "from ken" }));
       hook.result.current.handleEvent(ev("ken_run_start"));
+      hook.result.current.handleEvent(ev("ken_run_end", { unverified: true }));
     });
-    expect(handleKenEvent).toHaveBeenCalledTimes(2);
+    expect(handleKenEvent).toHaveBeenCalledTimes(3);
+    expect(deps.setDoneStatus).not.toHaveBeenCalled();
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
     // Nothing handled locally: no assistant item, run state untouched.
     expect(getItems()).toHaveLength(0);
     expect(setRunning).not.toHaveBeenCalled();
@@ -246,66 +1458,716 @@ describe("useAgentEvents", () => {
     const { hook, getPlanReview } = setup(() => false, { autopilot: false });
     act(() => {
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
       );
     });
-    expect(getPlanReview()).toBe("# Plan");
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      content: "# Plan",
+    });
   });
 
-  it("plan_exit hides the human review modal when autopilot is on", () => {
-    const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
+  it("restores the exact persisted plan review from a reconnect ready snapshot", () => {
+    const { hook, getPlanReview, deps } = setup();
+    const persistedReview: PendingPlanReview = {
+      checkpointId: "checkpoint-persisted",
+      generation: 7,
+      planPath: "/tmp/persisted.md",
+      content: "# Persisted plan\n\n1. Resume without reload",
+      contentHash: "persisted-hash",
+      state: "revision-requested",
+      reviewStatus: "ready",
+      feedback: "Keep the durable gate visible",
+    };
+
     act(() => {
+      // plan_exit was dropped with the disconnected SSE stream. The reconnect
+      // ready frame must recover the server-owned gate by itself.
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("ready", {
+          provider: "anthropic",
+          model: "claude-opus-5",
+          cwd: "/tmp/proj",
+          running: false,
+          runState: "idle",
+          tasks: [],
+          pendingPlanReview: persistedReview,
+        }),
+      );
+      // A delayed event from the disconnected generation must not clear the
+      // recovered checkpoint.
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-old", generation: 6 }),
       );
     });
-    // The content/path are still stashed for Ken auto-review + auto-accept step
-    // counting, but the human overlay stays hidden while autopilot owns review.
+
+    expect(getPlanReview()).toEqual(persistedReview);
+    expect(deps.planReviewPathRef.current).toBe(persistedReview.planPath);
+  });
+
+  it("clears a local plan review only when ready explicitly reports null", () => {
+    const { hook, getPlanReview, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("ready", { running: false, runState: "idle", tasks: [], pendingPlanReview: null }),
+      );
+    });
+
     expect(getPlanReview()).toBeNull();
+    expect(deps.planReviewPathRef.current).toBeNull();
+  });
+
+  it("preserves a local plan review when a legacy ready snapshot omits the projection", () => {
+    const { hook, getPlanReview, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(ev("ready", { running: false, runState: "idle", tasks: [] }));
+    });
+
+    expect(getPlanReview()).toMatchObject({ checkpointId: "checkpoint-1", generation: 1 });
     expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
-  it("autopilot_plan_accepted seeds the plan step count and pushes the marker", () => {
-    const { hook, deps, getItems } = setup();
-    const plan =
-      "# Plan\n\n## Steps\n\n1. Add the provider config module\n2. Wire the callback route";
+  it("plan_exit keeps the human review modal available while autopilot reviews", () => {
+    const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
     act(() => {
-      // plan_exit stashes the plan content the accepted-frame reads.
-      hook.result.current.handleEvent(ev("plan_exit", { planPath: "/tmp/p.md", content: plan }));
-      hook.result.current.handleEvent(ev("autopilot_plan_accepted", {}));
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
     });
-    // Step count seeded for the accept-driven session_reset to carry over.
-    expect(deps.pendingPlanTotalRef.current).toBe(2);
-    // The approved marker lands in the transcript (rendered as a Ken bubble).
-    const marker = getItems().find((i) => i.kind === "autopilot");
-    expect(marker).toMatchObject({ kind: "autopilot", phase: "plan_approved" });
+    // Plan approval remains a blocking human-visible gate while Ken reviews;
+    // either Ken or the user can resolve it, and the submitted path stays available.
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      content: "# Plan",
+    });
+    expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
-  it("autopilot_prompted closes the stale plan modal after Ken asks for revision", () => {
+  it("autopilot_plan_ready keeps the modal open for human approval", () => {
     const { hook, getPlanReview } = setup();
     act(() => {
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", { checkpointId: "checkpoint-1", generation: 1 }),
       );
     });
-    expect(getPlanReview()).toBe("# Plan");
-    act(() => {
-      hook.result.current.handleEvent(ev("autopilot_prompted", { round: 1, body: "revise it" }));
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      reviewStatus: "ready",
+      state: "pending-review",
     });
-    // Autopilot-only: a revision prompt means Ken took over the plan review;
-    // the human modal should disappear. Non-autopilot never emits this frame.
+  });
+
+  it("plan_accepted seeds step progress and closes the modal", () => {
+    const { hook, deps, getPlanReview } = setup();
+    const plan = "# Plan\n\n## Steps\n\n1. Complete first\n2. Complete second\n\n## Verification";
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: plan,
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-1", generation: 1 }),
+      );
+    });
+    expect(deps.pendingPlanTotalRef.current).toBe(2);
     expect(getPlanReview()).toBeNull();
   });
 
-  it("run_end clears running state", () => {
-    const { hook, setRunning } = setup();
+  it("uses sidecar plan progress as the authoritative live-file snapshot", () => {
+    const { hook, deps } = setup();
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1]);
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_progress", { total: 4, completed: [1, 2, 4, 99, "3"] }),
+      );
+    });
+
+    expect(deps.planTotalRef.current).toBe(4);
+    expect([...deps.planDoneRef.current]).toEqual([1, 2, 4]);
+  });
+
+  it("seeds an accepted plan from the canonical total on session reset", () => {
+    const { hook, deps } = setup();
+    deps.pendingPlanTotalRef.current = 2;
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset", { planTotal: 5 }));
+    });
+
+    expect(deps.pendingPlanTotalRef.current).toBeNull();
+    expect(deps.planTotalRef.current).toBe(5);
+    expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
+  it("revision events keep the durable gate visible", () => {
+    const { hook, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          feedback: "Add restart coverage",
+        }),
+      );
+      hook.result.current.handleEvent(ev("autopilot_prompted", { round: 1, body: "revise it" }));
+    });
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      state: "revision-requested",
+      feedback: "Add restart coverage",
+    });
+  });
+
+  it("ignores delayed readiness warnings for an older plan identity", () => {
+    const { hook, getPlanReview, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-new",
+          generation: 1,
+          reason: "Stale generation warning",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", {
+          checkpointId: "checkpoint-old",
+          generation: 2,
+          reason: "Stale checkpoint warning",
+        }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      reviewStatus: "unreviewed",
+      state: "pending-review",
+      feedback: null,
+    });
+    expect(getItems()).toEqual([]);
+  });
+
+  it.each(["revision", "reset"] as const)(
+    "does not project a delayed readiness warning after %s",
+    (transition) => {
+      const { hook, getPlanReview, getItems, deps } = setup();
+      const identity = { checkpointId: "checkpoint-1", generation: 1 };
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("plan_exit", {
+            ...identity,
+            planPath: "/tmp/plan.md",
+            content: "# Plan",
+          }),
+        );
+        hook.result.current.handleEvent(
+          transition === "revision"
+            ? ev("plan_revision_requested", { ...identity, feedback: "Human revision request" })
+            : ev("session_reset"),
+        );
+      });
+      const gateBefore = getPlanReview();
+      const itemsBefore = [...getItems()];
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("autopilot_plan_ready", {
+            ...identity,
+            reason: "Delayed corpus warning",
+          }),
+        ),
+      );
+      expect(getPlanReview()).toEqual(gateBefore);
+      expect(getItems()).toEqual(itemsBefore);
+      expect(deps.pendingPlanTotalRef.current).toBeNull();
+      if (transition === "revision") {
+        expect(getPlanReview()).toMatchObject({
+          ...identity,
+          state: "revision-requested",
+          feedback: "Human revision request",
+          reviewStatus: "unreviewed",
+        });
+      } else {
+        expect(getPlanReview()).toBeNull();
+      }
+    },
+  );
+
+  it("ignores delayed revision events for an older plan generation", () => {
+    const { hook, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-new",
+          generation: 1,
+          feedback: "Stale generation feedback",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-old",
+          generation: 2,
+          feedback: "Stale checkpoint feedback",
+        }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      state: "pending-review",
+      feedback: null,
+    });
+  });
+
+  it("ignores delayed accepted events for an older plan generation", () => {
+    const { hook, deps, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan\n\n## Steps\n\n1. Keep this gate",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-new", generation: 1 }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-old", generation: 2 }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      state: "pending-review",
+    });
+    expect(deps.pendingPlanTotalRef.current).toBeNull();
+  });
+
+  it("authoritative consumption clears plan progress before run_end paints idle", () => {
+    const { hook, deps, setRunning, getState } = setup();
+
     act(() => {
       hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [1, 2, 3] }));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 0, completed: [] }));
     });
-    expect(setRunning).toHaveBeenLastCalledWith(true);
+    expect(deps.planTotalRef.current).toBe(0);
+    expect(deps.planDoneRef.current.size).toBe(0);
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(0);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set());
+    expect(getState()?.running).toBe(true);
+
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));
+
+    expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(deps.planTotalRef.current).toBe(0);
+    expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
+  it.each([
+    { cancelled: false },
+    { outcome: "completed", runState: "idle" },
+    { unverified: true },
+    { cancelled: true },
+  ])("retains fully displayed progress without consumption confirmation: %j", (terminal) => {
+    const { hook, deps, setRunning, getState } = setup();
     act(() => {
-      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2] [DONE:3]" }));
+    });
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1, 2, 3]));
+
+    // Cleanup failure leaves the canonical completed snapshot, but emits no clear.
+    act(() => {
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [1, 2, 3] }));
+      hook.result.current.handleEvent(ev("run_end", terminal));
     });
     expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(deps.planTotalRef.current).toBe(3);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(3);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1, 2, 3]));
+  });
+
+  it("retains streamed completion without any canonical consumption event", () => {
+    const { hook, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 2, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2]" }));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+    });
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
+  it("canonical corrections replace streamed completion and survive run_end", () => {
+    const { hook, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("plan_progress", { total: 3, completed: [] }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:1] [DONE:2] [DONE:3]" }));
+    });
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2, 3]));
+    act(() => {
+      hook.result.current.handleEvent(ev("plan_progress", { total: 2, completed: [1] }));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+    });
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1]));
+    expect(deps.setPlanTotal).toHaveBeenLastCalledWith(2);
+    expect(deps.setPlanDone).toHaveBeenLastCalledWith(new Set([1]));
+  });
+
+  it("upserts persistent async agents by agent_id through idle and interrupted states", async () => {
+    const { hook, getItems } = setup();
+    const base = {
+      agent_id: "abcd1234",
+      task_name: "scan auth",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 0,
+      token_usage: { input: 0, output: 0 },
+    };
+    act(() =>
+      hook.result.current.handleEvent(ev("subagent_state", { ...base, state: "starting" })),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...base,
+          state: "completed",
+          elapsed_ms: 30,
+          tool_use_count: 2,
+          token_usage: { input: 10, output: 3, cacheRead: 20, cacheWrite: 5 },
+        }),
+      ),
+    );
+    await flushSubagents();
+    const groups = getItems().filter((item) => item.kind === "subagent_group");
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    expect(group?.kind === "subagent_group" ? group.agents : []).toMatchObject([
+      {
+        toolCallId: "abcd1234",
+        status: "idle",
+        async: true,
+        toolUseCount: 2,
+        tokenUsage: { input: 10, output: 3, cacheRead: 20, cacheWrite: 5 },
+      },
+    ]);
+  });
+
+  it("preserves distinct subagent activities coalesced within one flush", async () => {
+    const { hook, getItems } = setup();
+    const base = {
+      agent_id: "abcd1234",
+      task_name: "scan auth",
+      state: "running",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 1,
+      token_usage: { input: 0, output: 0 },
+    };
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("subagent_state", { ...base, current_activity: "Reading auth.ts" }),
+      );
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...base,
+          tool_use_count: 2,
+          current_activity: "Searching token refresh",
+        }),
+      );
+    });
+    await flushSubagents();
+
+    const group = getItems().find((item) => item.kind === "subagent_group");
+    expect(group?.kind === "subagent_group" ? group.agents[0]?.activities : []).toEqual([
+      "Reading auth.ts",
+      "Searching token refresh",
+    ]);
+  });
+
+  it("keeps late async snapshots attached to their original run group", async () => {
+    const { hook, getItems } = setup();
+    const snapshot = (agentId: string, state: "starting" | "completed") => ({
+      agent_id: agentId,
+      task_name: agentId,
+      state,
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 0,
+      token_usage: { input: 0, output: 0 },
+    });
+
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("old-agent", "starting")));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("new-agent", "starting")));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("old-agent", "completed")));
+    });
+    await flushSubagents();
+
+    const groups = getItems().filter((item) => item.kind === "subagent_group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.kind === "subagent_group" ? groups[0].agents : []).toMatchObject([
+      { toolCallId: "old-agent", status: "idle" },
+    ]);
+    expect(groups[1]?.kind === "subagent_group" ? groups[1].agents : []).toMatchObject([
+      { toolCallId: "new-agent", status: "starting" },
+    ]);
+  });
+});
+
+describe("models_change", () => {
+  it("refreshes the picker when local-model discovery lands", async () => {
+    const discovered = [
+      { id: "local/ollama/gemma4:e2b", name: "gemma4:e2b (Ollama)", provider: "local" },
+    ];
+    vi.mocked(listModels).mockResolvedValue(discovered as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    // Without this the boot scan finds the user's models and nothing ever
+    // shows them until the app restarts.
+    expect(listModels).toHaveBeenCalled();
+    expect(getModels()).toEqual(discovered);
+  });
+
+  it("refreshes the picker when a provider is connected", async () => {
+    // Connecting a provider unlocks its models; the sidecar fans models_change
+    // out to every window because ~/.gg/auth.json is shared, not per-session.
+    const unlocked = [
+      { id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" },
+      { id: "gpt-6", name: "GPT-6", provider: "openai" },
+    ];
+    vi.mocked(listModels).mockResolvedValue(unlocked as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual(unlocked);
+  });
+
+  it("keeps the existing list when the refresh itself fails", async () => {
+    const seeded = [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }];
+    vi.mocked(listModels).mockResolvedValue(seeded as never);
+    const { hook, getModels } = setup();
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+    expect(getModels()).toEqual(seeded);
+
+    // null = the IPC call failed. Wiping the picker on a transient failure
+    // would strand the user with no way to switch models.
+    vi.mocked(listModels).mockResolvedValue(null as never);
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual(seeded);
+  });
+
+  it("clears the picker when the last provider is disconnected", async () => {
+    const seeded = [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }];
+    vi.mocked(listModels).mockResolvedValue(seeded as never);
+    const { hook, getModels } = setup();
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+    expect(getModels()).toEqual(seeded);
+
+    // [] is a real answer, not a failure: every provider is now disconnected.
+    // Leaving the old list up would offer models that can no longer authenticate.
+    vi.mocked(listModels).mockResolvedValue([] as never);
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual([]);
+  });
+
+  describe("ask_user band", () => {
+    const question = {
+      id: "flag",
+      question: "Flip the flag for everyone now?",
+      kind: "confirm",
+      options: [{ label: "Yes" }, { label: "No" }],
+    };
+
+    it("renders a question the agent is parked on", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ kind: "ask", prompt: { id: "ask-1", questions: [question] } }),
+      ]);
+    });
+
+    it("closes only the host-settled question across an ordinary run end", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        for (const id of ["ask-1", "ask-2"]) {
+          hook.result.current.handleEvent(ev("ask_user", { id, questions: [question] }));
+        }
+        hook.result.current.handleEvent(ev("ask_user_settled", { id: "ask-1", action: "cancel" }));
+        hook.result.current.handleEvent(ev("run_end", {}));
+      });
+      expect(getItems()[0]).toMatchObject({ cancelled: true });
+      expect(getItems()[1]).not.toHaveProperty("cancelled", true);
+    });
+
+    it("drops a malformed frame instead of rendering an unanswerable band", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [] }));
+        hook.result.current.handleEvent(ev("ask_user", { questions: [question] }));
+      });
+      expect(getItems()).toEqual([]);
+    });
+
+    // The sidecar releases parked questions only on a real abort, so only a
+    // cancelled run may close a band.
+    it("closes an unanswered band when the run is cancelled", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", { cancelled: true }));
+      });
+      expect(getItems()).toEqual([expect.objectContaining({ kind: "ask", cancelled: true })]);
+    });
+
+    // Autopilot emits a run_end per injected round while the tool call is still
+    // parked; closing there would kill a question the user can still answer and
+    // strand the agent until its ten-minute timeout.
+    it("leaves the band live across a normal run_end", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", {}));
+        hook.result.current.handleEvent(ev("run_end", {}));
+      });
+      expect(getItems()).toEqual([expect.not.objectContaining({ cancelled: true })]);
+    });
   });
 });

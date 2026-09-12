@@ -23,6 +23,25 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
     expect(source).not.toMatch(/(?:run|execute)(?:Scanner|Specialist|Command)/);
   });
 
+  it("has one bounded fingerprint/refresh policy and no watcher, polling or alternate writer", async () => {
+    const inventory = await fs.readFile(path.join(programmaticDirectory, "inventory.ts"), "utf8");
+    const profile = await fs.readFile(profilePath, "utf8");
+    const lifecycle = await fs.readFile(path.join(programmaticDirectory, "lifecycle.ts"), "utf8");
+    expect(inventory.match(/function fingerprintConfigurationSnapshot\(/g)).toHaveLength(1);
+    expect(inventory.match(/function compareConfigurationSnapshots\(/g)).toHaveLength(1);
+    expect(profile.match(/function assessProgrammaticSetup\(/g)).toHaveLength(1);
+    expect(profile.match(/function persistProgrammaticProfile\(/g)).toHaveLength(1);
+    expect(profile.match(/operations\.rename\(/g)).toHaveLength(1);
+    expect(profile).toContain("compareConfigurationSnapshots(");
+    expect(lifecycle).toContain("assessProgrammaticSetup(");
+    expect(profile).not.toContain("CONFIG_FILE_NAMES");
+    expect(lifecycle).not.toContain("CONFIG_FILE_NAMES");
+    expect(`${inventory}\n${profile}\n${lifecycle}`).not.toMatch(/\b(?:setInterval|setTimeout|watch|watchFile)\s*\(/);
+    expect(inventory).toContain("PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT * 2");
+    expect(Buffer.byteLength(profile)).toBeLessThan(24_000);
+    expect(Buffer.byteLength(inventory)).toBeLessThan(18_000);
+  });
+
   it("accepts no arbitrary destination or executable command field", () => {
     expect(
       ProgrammaticProfileParams.safeParse({ action: "inspect", path: "elsewhere.json" }).success,
@@ -51,7 +70,8 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
           specifier?.startsWith("node:") ||
           specifier === "zod" ||
           specifier === "@kenkaiiii/gg-agent" ||
-          specifier === "@kenkaiiii/gg-core",
+          specifier === "@kenkaiiii/gg-core" ||
+          specifier === "@kenkaiiii/gg-core/programmatic-chat-contract",
       ),
     ).toBe(true);
   });

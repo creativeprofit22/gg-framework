@@ -133,7 +133,9 @@ export class AppSidecarProgrammaticChat {
           if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
           const handle = sha256(randomBytes(32).toString("hex") + canonicalJson(proposal));
           const projection: ProgrammaticChatProposal = {
-            handle,
+            handle: proposal.operation === "current" ? null : handle,
+            operation: proposal.operation,
+            configuration: proposal.configuration,
             fingerprint: proposal.configurationFingerprint.sha256,
             profileJson: canonicalJson(proposal.profile),
             routes: proposal.routes.map(({ opportunityId, resolution }) => ({
@@ -154,7 +156,7 @@ export class AppSidecarProgrammaticChat {
           body = { version: 1, action: "inspect-setup", ok: true, proposal: projection };
           if (!isProgrammaticChatResponse(body))
             return fail(422, "The proposed setup is too large to display safely. It cannot be approved here; no settings were saved.");
-          this.pending = { identity: target.identity, cwd: target.cwd, handle, proposal };
+          this.pending = proposal.operation === "current" ? null : { identity: target.identity, cwd: target.cwd, handle, proposal };
           break;
         }
         case "approve-setup": {
@@ -167,9 +169,10 @@ export class AppSidecarProgrammaticChat {
             target.cwd,
             pending.proposal.configurationFingerprint,
             pending.proposal.profile,
+            { expectedPriorProfileDigest: pending.proposal.expectedPriorProfileDigest },
           );
           if (!result.ok)
-            return fail(409, "The project settings changed. Choose Review setup to see the new settings before approving.");
+            return fail(409, result.changed ? result.detail : "The project settings changed. Choose Review setup to see the new settings before approving.", true);
           body = { version: 1, action: "approve-setup", ok: true, changed: result.changed };
           break;
         }

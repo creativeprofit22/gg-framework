@@ -5,7 +5,10 @@ import {
   type ProgrammaticChatSummary,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
-import { canRunProgrammaticSelection, type ProgrammaticChatState } from "./programmatic-chat-state";
+import {
+  canRunProgrammaticSelection, canScanProgrammatic, isProgrammaticCurrentReview,
+  programmaticConfiguration, type ProgrammaticChatState,
+} from "./programmatic-chat-state";
 
 const stateLabels: Record<ProgrammaticChatSummary["state"], string> = {
   discovered: "Found",
@@ -44,6 +47,14 @@ export function ProgrammaticChat({
   const mutationLocked = locked || planMode || state.reconcile;
   const report = state.report;
   const selected = state.detail;
+  const configuration = programmaticConfiguration(state);
+  const currentReview = isProgrammaticCurrentReview(state);
+  const reportAssessmentSuperseded = !!configuration && !!report &&
+    (configuration.status !== report.configuration?.status ||
+      configuration.currentFingerprint !== report.configuration?.currentFingerprint);
+  const setupBlockedReason = configuration && configuration.status !== "current"
+    ? "Review and approve setup before checking for opportunities or starting a task."
+    : undefined;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
       title: "Ready to review",
@@ -89,8 +100,32 @@ export function ProgrammaticChat({
           checking for opportunities, starting work or dismissing an item.
         </p>
       )}
-      {report && <p>{report.reason}</p>}
-      {report && !report.scan.available && <p>{report.scan.reason}</p>}
+      {reportAssessmentSuperseded ? <p>These results predate the latest setup review. Refresh results to update task availability.</p> : <>
+        {report && <p>{report.reason}</p>}
+        {report && !report.scan.available && <p>{report.scan.reason}</p>}
+      </>}
+      {setupBlockedReason && <p>{setupBlockedReason}</p>}
+      {report?.status === "stale" && <p>Older results remain available below. Saving setup does not update these results; run Check for opportunities afterward.</p>}
+      {configuration?.diagnostic && <p>{configuration.diagnostic}</p>}
+      {configuration?.status === "refresh-required" && (
+        <details>
+          <summary>Why setup needs a refresh</summary>
+          {configuration.baselineUnavailable && <p>Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable; review all current inputs in the setup below.</p>}
+          {configuration.drift && <>
+            <ul>{configuration.drift.files.map((file) => <li key={file.path}>
+              {file.kind}: <code>{file.path}</code>
+            </li>)}</ul>
+            {configuration.drift.policy && <p>Configuration policy: {configuration.drift.policy.before} → {configuration.drift.policy.after}</p>}
+            {configuration.drift.schema && <p>Scanner settings schema: {configuration.drift.schema.before} → {configuration.drift.schema.after}</p>}
+            {configuration.drift.exclusions && <>
+              <p>Skipped-item rules changed.</p>
+              <p>Previously: {configuration.drift.exclusions.before.join(", ") || "None"}</p>
+              <p>Now: {configuration.drift.exclusions.after.join(", ") || "None"}</p>
+            </>}
+          </>}
+          <p>Any byte change in a recognized configuration file needs review, including cosmetic manifest edits.</p>
+        </details>
+      )}
       {state.error && <p role="alert">{state.error}</p>}
       {state.reconcile && (
         <p>
@@ -101,10 +136,10 @@ export function ProgrammaticChat({
       <div className="programmatic-actions">
         <button
           className="btn btn-ghost btn-sm"
-          disabled={locked}
+          disabled={locked || configuration?.status === "unreadable"}
           onClick={() => onAction({ version: 1, action: "inspect-setup" })}
         >
-          Review setup
+          {configuration?.refreshAvailable ? "Review setup refresh" : "Review setup"}
         </button>
         <button
           className="btn btn-ghost btn-sm"
@@ -116,8 +151,8 @@ export function ProgrammaticChat({
         {report && report.status !== "setup-required" && (
           <button
             className="btn btn-ghost btn-sm"
-            disabled={mutationLocked || report.scan?.available !== true}
-            title={report.scan?.reason}
+            disabled={mutationLocked || !canScanProgrammatic(state)}
+            title={setupBlockedReason ?? report.scan?.reason}
             onClick={() => onAction({ version: 1, action: "scan" })}
           >
             Check for opportunities
@@ -126,12 +161,15 @@ export function ProgrammaticChat({
       </div>
       {state.proposal && (
         <div className="programmatic-proposal">
-          <h3>Review what to enable</h3>
-          <p>
+          <h3>{state.proposal.operation === "current" ? currentReview ? "Saved setup is current" : "Previous setup review" : "Review what to enable"}</h3>
+          {state.proposal.operation === "current" ? currentReview
+            ? <p>No regeneration or approval is needed. Source changes only need a rescan.</p>
+            : <p>This review has been superseded by a newer setup assessment. These older settings are shown for reference only.</p>
+            : <p>
             Find repeatable tasks GG can help with. Reviewing setup changes no files. Approve and
             save setup writes the check settings shown below to this project. It does not start the
             work; each task needs a separate approval.
-          </p>
+          </p>}
           <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
           <p>
             Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
@@ -164,25 +202,25 @@ export function ProgrammaticChat({
               ))}
             </ul>
           </details>
-          {!state.proposalApprovable && (
+          {!state.proposalApprovable && state.proposal.operation !== "current" && (
             <p>
               Choose Review setup again before approving. These older settings are shown for
               reference only.
             </p>
           )}
-          <button
+          {state.proposal.handle && <button
             className="btn btn-primary btn-sm"
             disabled={mutationLocked || !state.proposalApprovable}
-            onClick={() =>
-              onAction({
+            onClick={() => {
+              if (state.proposal?.handle) onAction({
                 version: 1,
                 action: "approve-setup",
-                proposalHandle: state.proposal!.handle,
-              })
-            }
+                proposalHandle: state.proposal.handle,
+              });
+            }}
           >
-            Approve and save setup
-          </button>
+            {state.proposal.operation === "refresh" ? "Approve and save refresh" : "Approve and save setup"}
+          </button>}
         </div>
       )}
       {report?.status === "setup-required" && (
@@ -299,7 +337,7 @@ export function ProgrammaticChat({
             <button
               className="btn btn-primary btn-sm"
               disabled={mutationLocked || !canRunProgrammaticSelection(state)}
-              title={selected.summary.actions?.run.reason}
+              title={setupBlockedReason ?? selected.summary.actions?.run.reason}
               onClick={onRun}
             >
               Review task approval

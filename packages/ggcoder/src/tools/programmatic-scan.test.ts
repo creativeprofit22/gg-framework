@@ -9,7 +9,7 @@ import type {
 import {
   configurationFingerprintV1Schema,
   programmaticLifecycleStateV1Schema,
-  programmaticProfileEnvelopeV1Schema,
+  programmaticProfileEnvelopeV2Schema,
 } from "../core/programmatic/contracts.js";
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../core/programmatic/lifecycle.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
@@ -46,6 +46,7 @@ async function generateProfile(root: string): Promise<void> {
   const inspected = JSON.parse((await tool.execute({ action: "inspect" }, context)) as string) as {
     configuration_fingerprint: ConfigurationFingerprintV1;
     profile: ProgrammaticProfileV1;
+    expected_prior_profile_digest: string | null;
   };
   const generated = JSON.parse(
     (await tool.execute(
@@ -53,6 +54,7 @@ async function generateProfile(root: string): Promise<void> {
         action: "generate",
         configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
+        expected_prior_profile_digest: inspected.expected_prior_profile_digest,
       },
       context,
     )) as string,
@@ -160,11 +162,11 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
   });
 
-  it("serializes profile replacement against the final lifecycle commit window", async () => {
+  it("keeps an identical current approval a byte-preserving no-op in the lifecycle commit window", async () => {
     const root = await repository();
     await generateProfile(root);
     const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
-    const stored = programmaticProfileEnvelopeV1Schema.parse(
+    const stored = programmaticProfileEnvelopeV2Schema.parse(
       JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown,
     );
     await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
@@ -177,16 +179,14 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
           root,
           proposal.configurationFingerprint,
           proposal.profile,
+          { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest },
         );
       },
     });
 
-    expect(replacementResult).toMatchObject({ ok: true, changed: true });
-    expect(result).toMatchObject({
-      ok: false,
-      error: "stale-configuration",
-      changed: false,
-    });
-    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+    expect(replacementResult).toMatchObject({ ok: true, changed: false });
+    expect(result).toMatchObject({ ok: true, changed: true });
+    expect(await fs.readFile(profilePath, "utf8")).toBe(JSON.stringify(stored, null, 2));
+    expect(programmaticLifecycleStateV1Schema.parse(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8"))).records).toHaveLength(1);
   });
 });

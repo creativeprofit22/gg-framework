@@ -81,6 +81,7 @@ async function approveProfile(root: string): Promise<void> {
     root,
     proposal.configurationFingerprint,
     proposal.profile,
+    { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest },
   );
   if (!persisted.ok) throw new Error(`Profile approval failed: ${persisted.error}`);
 }
@@ -103,6 +104,81 @@ async function persistedState(root: string): Promise<ProgrammaticLifecycleStateV
     JSON.parse(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")) as unknown,
   );
 }
+
+describe("configuration drift reconciliation", () => {
+  it.each(["completed", "dismissed"] as const)("preserves %s identity/history through refresh and failed scan retry", async (terminal) => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const state = await persistedState(root);
+    const first = state.records[0]!;
+    first.lifecycle.state = terminal;
+    const disappeared = structuredClone(first);
+    disappeared.opportunity.identity.id = "f".repeat(64);
+    disappeared.lifecycle.opportunity.id = disappeared.opportunity.identity.id;
+    state.records.push(disappeared);
+    state.records.sort((a, b) => a.opportunity.identity.id.localeCompare(b.opportunity.identity.id));
+    await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(state));
+    const before = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
+    await writeFile(path.join(root, "package.json"), '{"name":"drift"}\n');
+    const stale = await readProgrammaticChatReport(root);
+    expect(stale.scan.available).toBe(false);
+    expect((await readProgrammaticChatDetail(root, first.opportunity.identity.id)).detail?.summary.state).toBe(terminal);
+    await approveProfile(root);
+    expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
+    expect(await runProgrammaticScan(root, { operations: { rename: async () => { throw new Error("injected failure"); } } }))
+      .toMatchObject({ ok: false });
+    expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
+    expect(await readProgrammaticChatReport(root)).toMatchObject({ status: "stale", scan: { available: true } });
+    expect((await runProgrammaticScan(root)).ok).toBe(true);
+    const after = await persistedState(root);
+    expect(after.records.find((record) => record.opportunity.identity.id === first.opportunity.identity.id)?.lifecycle).toEqual(first.lifecycle);
+    expect(after.records.find((record) => record.opportunity.identity.id === disappeared.opportunity.identity.id)?.lifecycle).toEqual(disappeared.lifecycle);
+    const profileBytes = await readFile(path.join(root, ".gg/programmatic/profile.json"));
+    for (let i = 0; i < 3; i++) {
+      await writeFile(path.join(root, "source.ts"), `export const value = ${i};`);
+      expect((await runProgrammaticScan(root)).ok).toBe(true);
+      expect(await readFile(path.join(root, ".gg/programmatic/profile.json"))).toEqual(profileBytes);
+    }
+  });
+
+  it("keeps legacy reports inspectable but denies scan/execution until explicit upgrade", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const state = await persistedState(root);
+    const profilePath = path.join(root, ".gg/programmatic/profile.json");
+    const { configurationSnapshot: _snapshot, ...profile } = JSON.parse(await readFile(profilePath, "utf8"));
+    await writeFile(profilePath, JSON.stringify({ ...profile, version: 1 }));
+    const report = await readProgrammaticChatReport(root);
+    expect(report).toMatchObject({ status: "stale", scan: { available: false } });
+    expect(report.rows).toHaveLength(1);
+    expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
+    await expect(accessProgrammaticExecutionRecord(root, state.records[0]!.opportunity.identity.id, state.configurationFingerprint))
+      .rejects.toThrow(/configuration/);
+    await approveProfile(root);
+    expect((await runProgrammaticScan(root)).ok).toBe(true);
+    expect((await persistedState(root)).records).toEqual(state.records);
+  });
+
+  it("rejects configuration drift during a no-write rescan", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const before = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
+    let changed = false;
+    const result = await runProgrammaticScan(root, { operations: {
+      readFile: async (filePath) => {
+        const value = await readFile(filePath);
+        if (!changed && path.basename(filePath) === "state.json") {
+          changed = true;
+          await writeFile(path.join(root, "package.json"), '{"name":"raced"}\n');
+        }
+        return value;
+      },
+    } });
+    expect(changed).toBe(true);
+    expect(result).toMatchObject({ ok: false, error: "stale-configuration" });
+    expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
+  });
+});
 
 describe("chat report and dismissal", () => {
   it("refuses a rescan while a stored opportunity is owned without changing its snapshot", async () => {
@@ -588,8 +664,7 @@ it.each(["profile", "state", "owner"])(
     let injected = false;
     const profilePath = path.join(root, ".gg/programmatic/profile.json");
     const changedProfile = JSON.stringify({
-      version: 1,
-      configurationFingerprint: fp,
+      ...JSON.parse(await readFile(profilePath, "utf8")),
       profile: { version: 1, scanners: [] },
     });
     const settlement = settleProgrammaticExecutionRecord(root, id, runId, fp, "queued", {

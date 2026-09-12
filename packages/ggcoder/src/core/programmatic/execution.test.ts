@@ -120,7 +120,7 @@ beforeEach(async () => {
   await fs.writeFile(path.join(root, "src-tauri/Cargo.toml"), "[package]\nname='fixture'\n");
   await json(path.join(root, "src-tauri/tauri.conf.json"), {});
   const proposal = await buildProgrammaticProfileProposal(root);
-  expect((await persistProgrammaticProfile(root, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+  expect((await persistProgrammaticProfile(root, proposal.configurationFingerprint, proposal.profile, { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest })).ok).toBe(true);
   await runProgrammaticScan(root);
   const seeded = await state();
   selected = seeded.records[0]!.opportunity.identity.id;
@@ -490,7 +490,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     await fs.writeFile(path.join(root, "other-app/src-tauri/Cargo.toml"), "[package]\nname = 'other-fixture'\n");
     const fresh = await buildProgrammaticProfileProposal(root);
     expect(fresh.configurationFingerprint.sha256).not.toBe(sha256);
-    expect((await persistProgrammaticProfile(root, fresh.configurationFingerprint, fresh.profile)).ok).toBe(true);
+    expect((await persistProgrammaticProfile(root, fresh.configurationFingerprint, fresh.profile, { expectedPriorProfileDigest: fresh.expectedPriorProfileDigest })).ok).toBe(true);
     expect((await runProgrammaticScan(root)).ok).toBe(true);
     const available = (await state()).records.find((record) => record.presence === "present" && record.lifecycle.state !== "completed");
     expect(available).toBeDefined();
@@ -527,7 +527,7 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     await fs.mkdir(binaries, { recursive: true });
     await fs.writeFile(path.join(binaries, `helper-${host.rust_triple}${host.platform === "win32" ? ".exe" : ""}`), "sidecar\n");
     const proposal = await buildProgrammaticProfileProposal(root);
-    expect((await persistProgrammaticProfile(root, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+    expect((await persistProgrammaticProfile(root, proposal.configurationFingerprint, proposal.profile, { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest })).ok).toBe(true);
     await runProgrammaticScan(root);
     const seeded = await state();
     const record = seeded.records.find(({ opportunity }) => opportunity.route.status === "routable" && opportunity.route.specialistCommand === "setup-tauri-package")!;

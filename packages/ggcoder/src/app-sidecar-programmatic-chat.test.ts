@@ -54,6 +54,37 @@ async function fixture() {
   return { cwd, target, adapter, call, inspect };
 }
 describe("session-scoped programmatic adapter", () => {
+  it("exposes exact drift read-only, gates current setup and preserves dismissed history through separately approved refresh", async () => {
+    const f = await fixture();
+    const initial = await f.inspect();
+    expect(initial.operation).toBe("initial");
+    expect((await f.call("approve-setup", { proposalHandle: initial.handle })).status).toBe(200);
+    expect((await f.inspect()).handle).toBeNull();
+    expect((await f.call("approve-setup", { proposalHandle: initial.handle })).status).toBe(409);
+    await f.call("scan");
+    const report = await readProgrammaticChatReport(f.cwd);
+    const id = report.rows[0]!.id;
+    await f.call("dismiss", { id, snapshot: report.snapshot });
+    const statePath = path.join(f.cwd, PROGRAMMATIC_STATE_PATH);
+    const before = await readFile(statePath);
+    const profilePath = path.join(f.cwd, ".gg/programmatic/profile.json");
+    const oldProfile = await readFile(profilePath);
+    await writeFile(path.join(f.cwd, "package.json"), '{"name":"changed"}\n');
+    expect((await f.call("report", { offset: 0 })).body).toMatchObject({ ok: true, report: {
+      status: "stale", scan: { available: false }, configuration: { status: "refresh-required",
+        drift: { files: [{ path: "package.json", kind: "modified" }] } },
+    } });
+    expect((await f.call("detail", { id })).body).toMatchObject({ ok: true, detail: { summary: { state: "dismissed" } } });
+    expect(await readFile(profilePath)).toEqual(oldProfile);
+    const refresh = await f.inspect();
+    expect(refresh.operation).toBe("refresh");
+    expect(refresh.handle).not.toBeNull();
+    expect(await readFile(profilePath)).toEqual(oldProfile);
+    expect((await f.call("approve-setup", { proposalHandle: refresh.handle })).status).toBe(200);
+    expect(await readFile(statePath)).toEqual(before);
+    expect((await f.call("scan")).status).toBe(200);
+    expect((await readProgrammaticChatReport(f.cwd)).rows[0]).toMatchObject({ id, state: "dismissed" });
+  });
   it("projects another pane's off-page owner and restores eligibility on fresh reads", async () => {
     const f = await fixture();
     const proposal = await f.inspect();
@@ -128,6 +159,47 @@ describe("session-scoped programmatic adapter", () => {
     } } });
     expect(await readFile(primaryPath)).toEqual(committed);
     expect(scans).toBe(1);
+  });
+
+  it.each([false, true])("reconciles committed setup cleanup failure without retry or scan (thrown: %s)", async (throwAfterCommit) => {
+    const f = await fixture();
+    let writes = 0;
+    let scans = 0;
+    const adapter = new AppSidecarProgrammaticChat(
+      () => f.target, () => true, () => {},
+      {
+        inspect: buildProgrammaticProfileProposal,
+        persist: async (root, fingerprint, profile, options) => {
+          writes++;
+          const result = await persistProgrammaticProfile(root, fingerprint, profile, {
+            ...options,
+            operations: { rm: async () => { throw new Error("cleanup failed"); } },
+          });
+          if (throwAfterCommit) throw new Error("submitted write response lost");
+          return result;
+        },
+        report: readProgrammaticChatReport,
+        detail: readProgrammaticChatDetail,
+        dismiss: dismissProgrammaticOpportunity,
+        scan: async (root) => { scans++; return runProgrammaticScan(root); },
+      },
+    );
+    const inspected = await adapter.handle({ version: 1, action: "inspect-setup" });
+    if (!("ok" in inspected.body) || !inspected.body.ok || inspected.body.action !== "inspect-setup")
+      throw new Error("Missing proposal");
+    const proposalHandle = inspected.body.proposal.handle;
+    expect(await adapter.handle({ version: 1, action: "approve-setup", proposalHandle }))
+      .toMatchObject({ status: 409, body: { ok: false, reconcile: true } });
+    const profilePath = path.join(f.cwd, ".gg/programmatic/profile.json");
+    const committed = await readFile(profilePath);
+    expect(await adapter.handle({ version: 1, action: "report", offset: 0 }))
+      .toMatchObject({ status: 200, body: { ok: true, report: { configuration: { status: "current" } } } });
+    expect(await adapter.handle({ version: 1, action: "approve-setup", proposalHandle }))
+      .toMatchObject({ status: 409 });
+    expect(await readFile(profilePath)).toEqual(committed);
+    await expect(access(path.join(f.cwd, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+    expect(writes).toBe(1);
+    expect(scans).toBe(0);
   });
 
   it("separates real inspection, explicit approval, scan and dismissal", async () => {
@@ -224,7 +296,7 @@ describe("session-scoped programmatic adapter", () => {
     const proposal = await f.inspect();
     await writeFile(path.join(f.cwd, "package.json"), '{"name":"changed"}');
     const stale = await f.call("approve-setup", { proposalHandle: proposal.handle });
-    expect(stale).toMatchObject({ status: 409, body: { ok: false, reconcile: false } });
+    expect(stale).toMatchObject({ status: 409, body: { ok: false, reconcile: true } });
     expect(stale.body).not.toHaveProperty("approvableProposalHandle");
     await expect(access(path.join(f.cwd, ".gg/programmatic/profile.json"))).rejects.toThrow();
     expect((await f.call("report", { offset: 0 })).status).toBe(200);

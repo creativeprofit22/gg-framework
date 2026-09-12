@@ -1,7 +1,13 @@
-import fs from "node:fs/promises";
+import fs, { rm } from "node:fs/promises";
+import type * as FsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
 import type {
   ConfigurationFingerprintV1,
   ProgrammaticProfileV1,
@@ -10,7 +16,7 @@ import {
   persistProgrammaticProfile,
   type ProgrammaticProfileOperations,
 } from "../core/programmatic/profile.js";
-import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
+import { buildProgrammaticInventory, PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
 import { getPromptCommand, PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { canonicalJson } from "../core/tauri-package/paths.js";
 import {
@@ -26,10 +32,12 @@ type ToolInput =
       action: "generate";
       configuration_fingerprint: ConfigurationFingerprintV1;
       profile: ProgrammaticProfileV1;
+      expected_prior_profile_digest: string | null;
     };
 
 interface InspectOutput {
   action: "inspect";
+  expected_prior_profile_digest: string | null;
   changed: false;
   configuration_fingerprint: ConfigurationFingerprintV1;
   configuration_inputs: Array<{ path: string; sha256: string }>;
@@ -88,6 +96,7 @@ async function previousValidProfile(): Promise<{
     action: "generate",
     configuration_fingerprint: inspected.configuration_fingerprint,
     profile: inspected.profile,
+    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
   });
   expect(generated).toMatchObject({ ok: true, changed: true });
   const destination = path.join(root, PROGRAMMATIC_PROFILE_PATH);
@@ -97,7 +106,7 @@ async function previousValidProfile(): Promise<{
     profile: inspected.profile,
   })}\n`;
   await fs.writeFile(destination, previousBytes);
-  return { root, inspected, destination, previousBytes };
+  return { root, inspected: await inspect(root), destination, previousBytes };
 }
 
 async function expectNoTemporaryFiles(root: string): Promise<void> {
@@ -191,6 +200,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
       action: "generate",
       configuration_fingerprint: inspected.configuration_fingerprint,
       profile: inspected.profile,
+    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
     };
 
     expect(await execute(tool, input)).toMatchObject({
@@ -201,9 +211,10 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     });
     expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")).toBe(
       canonicalJson({
-        version: 1,
+        version: 2,
         configurationFingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
+        configurationSnapshot: (await buildProgrammaticInventory(root)).configurationSnapshot,
       }),
     );
     expect(await execute(tool, input)).toMatchObject({
@@ -226,6 +237,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         action: "generate",
         configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
+    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
       }),
     ).toMatchObject({ error: "stale-proposal", changed: false });
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
@@ -236,6 +248,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         action: "generate",
         configuration_fingerprint: current.configuration_fingerprint,
         profile: { version: 1, scanners: [] },
+        expected_prior_profile_digest: current.expected_prior_profile_digest,
       }),
     ).toMatchObject({ error: "proposal-mismatch", changed: false });
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
@@ -252,6 +265,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         action: "generate",
         configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
+    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
       }),
     ).toContain("programmatic_profile is restricted in plan mode");
   });
@@ -295,10 +309,45 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
       action: "generate",
       configuration_fingerprint: first.configuration_fingerprint,
       profile: first.profile,
+      expected_prior_profile_digest: first.expected_prior_profile_digest,
     };
     expect(await execute(tool, input)).toMatchObject({ ok: true, changed: true });
     expect(await execute(tool, input)).toMatchObject({ ok: true, changed: false });
   });
+  it.each(["initial", "refresh"])("serializes committed %s cleanup failure truthfully", async (operation) => {
+    const root = await repository();
+    const tool = createProgrammaticProfileTool(root);
+    if (operation === "refresh") {
+      const initial = await inspect(root);
+      expect(await execute(tool, { action: "generate",
+        configuration_fingerprint: initial.configuration_fingerprint, profile: initial.profile,
+        expected_prior_profile_digest: initial.expected_prior_profile_digest,
+      })).toMatchObject({ ok: true, changed: true });
+      await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+    }
+    const proposal = await inspect(root);
+    const profileDirectory = path.join(await fs.realpath(root), ".gg/programmatic");
+    let cleanups = 0;
+    await vi.mocked(rm).withImplementation(async (file, options) => {
+      if (typeof file === "string" && path.dirname(file) === profileDirectory &&
+          path.basename(file).startsWith(".profile-")) {
+        cleanups++;
+        throw new Error("injected cleanup failure");
+      }
+      return fs.rm(file, options);
+    }, async () => {
+      expect(await execute(tool, { action: "generate",
+        configuration_fingerprint: proposal.configuration_fingerprint, profile: proposal.profile,
+        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+      })).toMatchObject({ action: "generate", ok: false, changed: true,
+        error: "post-commit-failed", detail: expect.stringContaining("Read back setup before retrying") });
+    });
+    expect(cleanups).toBe(1);
+    expect(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")))
+      .toMatchObject({ configurationFingerprint: proposal.configuration_fingerprint, profile: proposal.profile });
+    expect(await inspect(root)).toMatchObject({ operation: "current", approval_available: false });
+  });
+
   it("preserves the previous profile when a temporary write fails", async () => {
     const { root, inspected, destination, previousBytes } = await previousValidProfile();
     const operations: Partial<ProgrammaticProfileOperations> = {
@@ -310,6 +359,7 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
     await expect(
       persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
         operations,
+        expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
       }),
     ).rejects.toThrow("injected temporary write failure");
     expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
@@ -328,6 +378,7 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
     await expect(
       persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
         operations,
+        expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
       }),
     ).rejects.toThrow();
     expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
@@ -346,6 +397,7 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
     await expect(
       persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
         operations,
+        expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
       }),
     ).resolves.toMatchObject({ error: "stale-proposal", changed: false });
     expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
@@ -363,6 +415,7 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
     await expect(
       persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
         operations,
+        expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
       }),
     ).rejects.toThrow("injected rename failure");
     expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);

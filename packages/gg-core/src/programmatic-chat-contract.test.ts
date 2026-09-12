@@ -26,8 +26,12 @@ const report = {
   total: 1,
   rows: [summary],
 };
+const configuration = { status: "missing", currentFingerprint: hash, refreshAvailable: false,
+  baselineUnavailable: false, diagnostic: null, drift: null };
 const proposal = {
   handle: hash,
+  operation: "initial",
+  configuration,
   fingerprint: hash,
   profileJson: '{\n  "scanners": [],\n  "version": 1\n}\n',
   routes: [{ id: hash, route }],
@@ -51,6 +55,30 @@ const detail = {
 const response = (action: string, fields: object) => ({ version: 1, action, ok: true, ...fields });
 
 describe("programmatic chat transport", () => {
+  it("requires current setup to have no approvable handle", () => {
+    const current = { ...proposal, handle: null, operation: "current",
+      configuration: { ...configuration, status: "current" } };
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal: current }))).toBe(true);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal: { ...current, handle: hash } }))).toBe(false);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal: { ...proposal, handle: null } }))).toBe(false);
+  });
+  it("validates exact bounded drift without unsafe paths or invented before hashes", () => {
+    const change = { path: "package.json", kind: "modified", before: hash, after: "b".repeat(64) };
+    const drift = { files: [change], policy: null, schema: null, exclusions: null };
+    const refresh = { ...proposal, operation: "refresh", configuration: { ...configuration,
+      status: "refresh-required", refreshAvailable: true, drift } };
+    const valid = (value: unknown) => isProgrammaticChatResponse(response("inspect-setup", { proposal: value }));
+    expect(valid(refresh)).toBe(true);
+    for (const files of [[{ ...change, path: "../secret" }], [change, change],
+      [{ ...change, kind: "added" }], [{ ...change, after: hash }],
+      Array.from({ length: 20_001 }, (_, index) => ({ ...change, path: `${index}.json` }))]) {
+      expect(valid({ ...refresh, configuration: { ...refresh.configuration, drift: { ...drift, files } } })).toBe(false);
+    }
+    expect(valid({ ...refresh, configuration: { ...refresh.configuration, baselineUnavailable: true } })).toBe(false);
+    expect(valid({ ...refresh, configuration: { ...refresh.configuration, baselineUnavailable: true, drift: null } })).toBe(true);
+    expect(isProgrammaticChatResponse(response("report", { report: { ...report,
+      configuration: { ...configuration, status: "unreadable", currentFingerprint: null, diagnostic: "Repair required" } } }))).toBe(true);
+  });
   it("accepts only strict setup-failure handle preservation markers", () => {
     const failure = { version: 1, action: "approve-setup", ok: false, error: "Busy", reconcile: false };
     expect(isProgrammaticChatResponse(failure)).toBe(true);

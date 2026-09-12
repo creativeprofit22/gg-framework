@@ -25,6 +25,7 @@ import {
   initialProgrammaticChatState,
   programmaticChatReducer,
   canRunProgrammaticSelection,
+  canScanProgrammatic,
 } from "./programmatic-chat-state";
 import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
@@ -1949,7 +1950,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         selection.operation !== null)
     )
       return;
-    if (request.action === "scan" && selection.report?.scan.available !== true) return;
+    if (request.action === "scan" && !canScanProgrammatic(selection)) return;
     if (
       request.action === "dismiss" &&
       (selection.detail?.summary.actions?.dismiss.available !== true ||

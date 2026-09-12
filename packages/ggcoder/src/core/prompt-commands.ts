@@ -272,7 +272,9 @@ Report that /commit now automatically groups changes into ordered commits, verif
 3. Report its inventory, exact configuration fingerprint, exact profile, every route, exclusions, drift inputs, and fixed profile path without altering them.
 4. State explicitly that setup performed no writes.
 5. Stop for separate user approval. Do not call \`generate\`, run scanners or specialists, invoke shell commands, mutate files, or perform lifecycle work.
-6. Explain that a later explicit invocation must call the \`generate\` action with the exact returned fingerprint and profile.`,
+6. When setup is current, show its saved settings without proposing regeneration or approval. Source and lifecycle changes only need an explicit rescan, not new setup.
+7. For a refresh, show the exact added, removed and modified configuration inputs and policy, schema or exclusion differences. A known legacy schema has no prior per-file baseline: explain that limitation and show all current inputs, never invent historical changes. Unreadable or unsupported data requires repair, not an overwrite.
+8. Only when approval is available, explain that a later separately approved invocation must call the \`generate\` action with the exact returned fingerprint, profile and \`expected_prior_profile_digest\` (including null for missing setup). The digest is a concurrency precondition, not user approval. Saving refreshed settings never scans: a later explicit Check for opportunities reconciles old results and lifecycle history.`,
   },
   {
     name: "programmatic",

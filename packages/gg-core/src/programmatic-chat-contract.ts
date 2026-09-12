@@ -51,11 +51,25 @@ export interface ProgrammaticChatDetail {
   evidence: ProgrammaticChatEvidence[];
   evidenceTruncated: boolean;
 }
+export interface ProgrammaticChatConfiguration {
+  status: "missing" | "current" | "refresh-required" | "unreadable";
+  currentFingerprint: string | null;
+  refreshAvailable: boolean;
+  baselineUnavailable: boolean;
+  diagnostic: string | null;
+  drift: {
+    files: { path: string; kind: "added" | "removed" | "modified"; before: string | null; after: string | null }[];
+    policy: { before: number; after: number } | null;
+    schema: { before: number; after: number } | null;
+    exclusions: { before: string[]; after: string[] } | null;
+  } | null;
+}
 export interface ProgrammaticChatReport {
   status: "setup-required" | "current" | "stale" | "recovered";
   reason: string;
   /** Current profile validation and project conflicts, independent of scan freshness. */
   scan: ProgrammaticChatAvailability;
+  configuration?: ProgrammaticChatConfiguration;
   snapshot: string | null;
   fingerprint: string | null;
   offset: number;
@@ -63,7 +77,9 @@ export interface ProgrammaticChatReport {
   rows: ProgrammaticChatSummary[];
 }
 export interface ProgrammaticChatProposal {
-  handle: string;
+  handle: string | null;
+  operation: "initial" | "current" | "refresh";
+  configuration: ProgrammaticChatConfiguration;
   fingerprint: string;
   /** Exact canonical profile JSON, not an editable command or route envelope. */
   profileJson: string;
@@ -204,6 +220,34 @@ const detail: Guard = (value) =>
     ),
     evidenceTruncated: bool,
   });
+const ordered = (values: string[]) => values.every((value, index) => index === 0 || values[index - 1]! < value);
+const revision: Guard = (value) => integer(Number.MAX_SAFE_INTEGER)(value) && value !== 0;
+const revisionChange: Guard = (value) => object(value, { before: revision, after: revision }) &&
+  (value as { before: number; after: number }).before !== (value as { before: number; after: number }).after;
+const exclusions: Guard = (value) => list(isProgrammaticChatRelativePath, 10_000)(value) && ordered(value as string[]);
+const driftFile: Guard = (value) => {
+  if (!object(value, { path: isProgrammaticChatRelativePath, kind: oneOf("added", "removed", "modified"), before: nullable(hash), after: nullable(hash) })) return false;
+  const item = value as { kind: string; before: string | null; after: string | null };
+  return item.kind === "added" ? item.before === null && item.after !== null
+    : item.kind === "removed" ? item.before !== null && item.after === null
+      : item.before !== null && item.after !== null && item.before !== item.after;
+};
+const drift: Guard = (value) => object(value, {
+  files: (files) => list(driftFile, 20_000)(files) && ordered((files as { path: string }[]).map((file) => file.path)),
+  policy: nullable(revisionChange), schema: nullable(revisionChange),
+  exclusions: nullable((change) => object(change, { before: exclusions, after: exclusions })),
+});
+const configuration: Guard = (value) => {
+  if (!object(value, {
+    status: oneOf("missing", "current", "refresh-required", "unreadable"),
+    currentFingerprint: nullable(hash), refreshAvailable: bool, baselineUnavailable: bool,
+    diagnostic: nullable(text(1_000)), drift: nullable(drift),
+  })) return false;
+  const item = value as ProgrammaticChatConfiguration;
+  return item.refreshAvailable === (item.status === "refresh-required") &&
+    (!item.baselineUnavailable || (item.status === "refresh-required" && item.drift === null)) &&
+    (item.status === "unreadable" || item.currentFingerprint !== null);
+};
 const report: Guard = (value) => {
   if (
     !object(value, {
@@ -215,7 +259,7 @@ const report: Guard = (value) => {
       offset: integer(1_000),
       total: integer(1_000),
       rows: list(summary, PROGRAMMATIC_CHAT_PAGE_LIMIT),
-    })
+    }, { configuration })
   )
     return false;
   const page = value as ProgrammaticChatReport;
@@ -260,16 +304,21 @@ const profileJson: Guard = (value) => {
 };
 const proposal: Guard = (value) =>
   object(value, {
-    handle: hash,
+    handle: nullable(hash),
+    operation: oneOf("initial", "current", "refresh"),
+    configuration,
     fingerprint: hash,
     profileJson,
     routes: list((item) => object(item, { id: hash, route }), 1_000),
-    exclusions: list(text(500), 200),
+    exclusions,
     configurationInputs: list(
       (item) => object(item, { path: isProgrammaticChatRelativePath, sha256: hash }),
       10_000,
     ),
-  });
+  }) && ((value as ProgrammaticChatProposal).operation === "current"
+    ? (value as ProgrammaticChatProposal).handle === null && (value as ProgrammaticChatProposal).configuration.status === "current"
+    : (value as ProgrammaticChatProposal).handle !== null &&
+      (value as ProgrammaticChatProposal).configuration.status === ((value as ProgrammaticChatProposal).operation === "initial" ? "missing" : "refresh-required"));
 const action = oneOf("report", "detail", "inspect-setup", "approve-setup", "scan", "dismiss");
 
 export function isProgrammaticChatRequest(value: unknown): value is ProgrammaticChatRequest {

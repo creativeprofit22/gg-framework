@@ -1,8 +1,19 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Stats } from "node:fs";
-import type { InventoryEntryV1, InventoryV1 } from "./contracts.js";
-import { inventoryV1Schema, PROGRAMMATIC_CONTRACT_VERSION } from "./contracts.js";
+import type {
+  ConfigurationSnapshot,
+  InventoryEntryV1,
+  InventoryV1,
+  ProgrammaticProfileEnvelopeV2,
+} from "./contracts.js";
+import {
+  configurationSnapshotSchema,
+  inventoryV1Schema,
+  programmaticProfileEnvelopeV2Schema,
+  PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT,
+  PROGRAMMATIC_CONTRACT_VERSION,
+} from "./contracts.js";
 import {
   canonicalRepositoryRoot,
   containedPath,
@@ -14,7 +25,8 @@ import {
 } from "../tauri-package/paths.js";
 import { loadGitignore } from "../../tools/gitignore.js";
 
-const CONFIG_FINGERPRINT_VERSION = 1;
+const CONFIG_FINGERPRINT_VERSION = 2;
+const SCANNER_PROFILE_SCHEMA_REVISION = 1;
 const DEFAULT_LIMITS = {
   maxFiles: 10_000,
   maxFileBytes: 16 * 1024 * 1024,
@@ -65,6 +77,11 @@ export const PROGRAMMATIC_INVENTORY_EXCLUSIONS = [
 const CONFIG_FILE_NAMES = new Set([
   ".gitignore",
   ".gitmodules",
+  ".nvmrc",
+  ".node-version",
+  ".python-version",
+  ".tool-versions",
+  "Tauri.toml",
   ".golangci.yml",
   ".golangci.yaml",
   ".rustfmt.toml",
@@ -127,6 +144,7 @@ export interface ProgrammaticInventoryResult {
   inventory: InventoryV1;
   summary: InventorySummaryV1;
   configurationInputs: InventoryEntryV1[];
+  configurationSnapshot: ConfigurationSnapshot;
 }
 
 export interface InventoryOperations {
@@ -173,7 +191,12 @@ function isConfigurationInput(repositoryPath: string): boolean {
   if (repositoryPath.startsWith(".github/workflows/")) return /\.ya?ml$/.test(repositoryPath);
   const name = path.posix.basename(repositoryPath);
   return (
-    CONFIG_FILE_NAMES.has(name) || CONFIG_FILE_PATTERN.test(name) || DOT_CONFIG_PATTERN.test(name)
+    CONFIG_FILE_NAMES.has(name) ||
+    CONFIG_FILE_PATTERN.test(name) ||
+    DOT_CONFIG_PATTERN.test(name) ||
+    /^(?:tauri(?:\.(?:windows|linux|macos|android|ios))?\.conf\.(?:json|json5|toml)|Tauri\.(?:windows|linux|macos|android|ios)\.toml)$/.test(
+      name,
+    )
   );
 }
 
@@ -291,16 +314,14 @@ export async function buildProgrammaticInventory(
   const configurationInputs = entries.filter(
     (entry) => entry.path !== PROGRAMMATIC_PROFILE_PATH && isConfigurationInput(entry.path),
   );
-  const configurationFingerprint = {
-    version: PROGRAMMATIC_CONTRACT_VERSION,
-    sha256: sha256(
-      stableJson({
-        version: CONFIG_FINGERPRINT_VERSION,
-        exclusions: PROGRAMMATIC_INVENTORY_EXCLUSIONS,
-        inputs: configurationInputs,
-      }),
-    ),
-  };
+  // Every byte of a recognized setup file is input, including cosmetic manifest edits.
+  const configurationSnapshot = configurationSnapshotSchema.parse({
+    policyRevision: CONFIG_FINGERPRINT_VERSION,
+    scannerProfileSchemaRevision: SCANNER_PROFILE_SCHEMA_REVISION,
+    exclusions: [...PROGRAMMATIC_INVENTORY_EXCLUSIONS].sort(),
+    inputs: configurationInputs,
+  });
+  const configurationFingerprint = fingerprintConfigurationSnapshot(configurationSnapshot);
   const inventory = inventoryV1Schema.parse({
     version: PROGRAMMATIC_CONTRACT_VERSION,
     configurationFingerprint,
@@ -316,5 +337,82 @@ export async function buildProgrammaticInventory(
       configurationFileCount: configurationInputs.length,
     },
     configurationInputs,
+    configurationSnapshot,
+  };
+}
+
+export function fingerprintConfigurationSnapshot(snapshot: ConfigurationSnapshot) {
+  return {
+    version: PROGRAMMATIC_CONTRACT_VERSION,
+    sha256: sha256(stableJson(configurationSnapshotSchema.parse(snapshot))),
+  };
+}
+
+export function validateProfileConfigurationBaseline(
+  value: unknown,
+): ProgrammaticProfileEnvelopeV2 {
+  const envelope = programmaticProfileEnvelopeV2Schema.parse(value);
+  if (
+    fingerprintConfigurationSnapshot(envelope.configurationSnapshot).sha256 !==
+    envelope.configurationFingerprint.sha256
+  ) {
+    throw new Error("Stored configuration snapshot does not match its fingerprint");
+  }
+  return envelope;
+}
+
+export interface ConfigurationDrift {
+  files: {
+    path: string;
+    kind: "added" | "removed" | "modified";
+    before: string | null;
+    after: string | null;
+  }[];
+  policy: { before: number; after: number } | null;
+  schema: { before: number; after: number } | null;
+  exclusions: { before: string[]; after: string[] } | null;
+}
+
+export function compareConfigurationSnapshots(
+  previous: ConfigurationSnapshot,
+  current: ConfigurationSnapshot,
+): ConfigurationDrift {
+  const before = configurationSnapshotSchema.parse(previous);
+  const after = configurationSnapshotSchema.parse(current);
+  const oldInputs = new Map(before.inputs.map((input) => [input.path, input.sha256]));
+  const newInputs = new Map(after.inputs.map((input) => [input.path, input.sha256]));
+  const paths = [...new Set([...oldInputs.keys(), ...newInputs.keys()])].sort();
+  if (paths.length > PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT * 2) {
+    throw new Error("Configuration diff input limit exceeded");
+  }
+  const files: ConfigurationDrift["files"] = [];
+  for (const path of paths) {
+    const oldHash = oldInputs.get(path) ?? null;
+    const newHash = newInputs.get(path) ?? null;
+    if (oldHash === newHash) continue;
+    files.push({
+      path,
+      kind: oldHash === null ? "added" : newHash === null ? "removed" : "modified",
+      before: oldHash,
+      after: newHash,
+    });
+  }
+  return {
+    files,
+    policy:
+      before.policyRevision === after.policyRevision
+        ? null
+        : { before: before.policyRevision, after: after.policyRevision },
+    schema:
+      before.scannerProfileSchemaRevision === after.scannerProfileSchemaRevision
+        ? null
+        : {
+            before: before.scannerProfileSchemaRevision,
+            after: after.scannerProfileSchemaRevision,
+          },
+    exclusions:
+      stableJson(before.exclusions) === stableJson(after.exclusions)
+        ? null
+        : { before: before.exclusions, after: after.exclusions },
   };
 }

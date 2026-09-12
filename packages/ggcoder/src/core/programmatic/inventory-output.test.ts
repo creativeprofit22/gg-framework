@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { buildProgrammaticInventory } from "./inventory.js";
+import { buildProgrammaticInventory, PROGRAMMATIC_INVENTORY_EXCLUSIONS } from "./inventory.js";
 
 let root: string;
 afterEach(async () => fs.rm(root, { recursive: true, force: true }));
@@ -21,7 +21,12 @@ it("returns only bounded summaries, hashes, and repository-relative evidence loc
   expect(output).not.toContain(root);
   expect(output).not.toContain(secret);
   expect(output).not.toContain("TOKEN=");
-  expect(output).not.toContain(".env");
-  expect(Object.keys(result)).toEqual(["inventory", "summary", "configurationInputs"]);
+  // Fixed exclusion policy names are now retained; secret files must still never become evidence.
+  const { configurationSnapshot, ...inventoryOutput } = result;
+  expect(JSON.stringify(inventoryOutput)).not.toContain(".env");
+  expect(JSON.stringify(configurationSnapshot.inputs)).not.toContain(".env");
+  expect(configurationSnapshot.exclusions).toEqual([...PROGRAMMATIC_INVENTORY_EXCLUSIONS].sort());
+  expect(Object.keys(configurationSnapshot)).toEqual(["policyRevision", "scannerProfileSchemaRevision", "exclusions", "inputs"]);
+  expect(Object.keys(result)).toEqual(["inventory", "summary", "configurationInputs", "configurationSnapshot"]);
   expect(result.inventory.entries.every((entry) => /^[a-f0-9]{64}$/.test(entry.sha256))).toBe(true);
 });

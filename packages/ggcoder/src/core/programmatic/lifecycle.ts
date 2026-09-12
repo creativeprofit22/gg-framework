@@ -14,7 +14,6 @@ import type {
   OpportunityDiscoveryResultV1,
   ProgrammaticLifecycleRecordV1,
   ProgrammaticLifecycleStateV1,
-  ProgrammaticProfileEnvelopeV1,
   ProgrammaticScanSummaryV1,
 } from "./contracts.js";
 import {
@@ -24,7 +23,6 @@ import {
   PROGRAMMATIC_CONTRACT_VERSION,
   PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT,
   programmaticLifecycleStateV1Schema,
-  programmaticProfileEnvelopeV1Schema,
   programmaticScanSummaryV1Schema,
 } from "./contracts.js";
 import {
@@ -32,6 +30,7 @@ import {
   PROGRAMMATIC_PROFILE_PATH,
   type InventoryOperations,
 } from "./inventory.js";
+import { assessProgrammaticSetup, loadApprovedProgrammaticProfile, projectProgrammaticConfiguration, type StoredProgrammaticProfile } from "./profile.js";
 import { discoverProgrammaticOpportunities } from "./opportunities.js";
 import { resolveProgrammaticRoutes } from "./routes.js";
 import {
@@ -303,21 +302,13 @@ async function loadProfile(
 ): Promise<
   | { status: "missing" }
   | { status: "invalid" }
-  | { status: "valid"; envelope: ProgrammaticProfileEnvelopeV1; bytes: Buffer }
+  | ({ status: "valid" } & StoredProgrammaticProfile)
 > {
-  const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
   try {
-    await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
-    const stat = await operations.lstat(profilePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { status: "invalid" };
-    const bytes = await operations.readFile(profilePath);
-    const envelope = programmaticProfileEnvelopeV1Schema.parse(
-      JSON.parse(bytes.toString("utf8")) as unknown,
-    );
-    await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
-    return { status: "valid", envelope, bytes };
-  } catch (error) {
-    return isMissing(error) ? { status: "missing" } : { status: "invalid" };
+    const stored = await loadApprovedProgrammaticProfile(root, operations);
+    return stored ? { status: "valid", ...stored } : { status: "missing" };
+  } catch {
+    return { status: "invalid" };
   }
 }
 
@@ -341,15 +332,11 @@ async function ensureCommitInputsUnchanged(
   expectedProfileBytes: Buffer,
   expectedFingerprint: ConfigurationFingerprintV1,
 ): Promise<void> {
-  await ensureProfileUnchanged(root, operations, expectedProfileBytes);
-
-  const inventory = await buildProgrammaticInventory(root, { operations: inventoryOperations });
-  const currentFingerprint = configurationFingerprintV1Schema.parse(
-    inventory.inventory.configurationFingerprint,
-  );
+  const assessment = await assessProgrammaticSetup(root, { operations, inventoryOperations });
   if (
-    currentFingerprint.version !== expectedFingerprint.version ||
-    currentFingerprint.sha256 !== expectedFingerprint.sha256
+    assessment.status !== "current" ||
+    !assessment.stored?.bytes.equals(expectedProfileBytes) ||
+    assessment.inventory?.inventory.configurationFingerprint.sha256 !== expectedFingerprint.sha256
   ) {
     throw new StaleConfigurationError("Programmatic configuration changed during scanning");
   }
@@ -377,6 +364,7 @@ export async function accessProgrammaticExecutionRecord(
     const profile = await loadProfile(root, operations);
     if (
       profile.status !== "valid" ||
+      profile.envelope.version !== 2 ||
       profile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256
     ) {
       throw new Error("Approved configuration is unavailable or changed.");
@@ -534,11 +522,12 @@ export async function settleProgrammaticExecutionRecord(
     });
     let configurationRefreshRequired = loaded.state.configurationRefreshRequired === true;
     try {
-      const inventory = await buildProgrammaticInventory(root, {
-        operations: options.inventoryOperations,
+      const assessment = await assessProgrammaticSetup(root, {
+        operations, inventoryOperations: options.inventoryOperations,
       });
       configurationRefreshRequired ||=
-        inventory.inventory.configurationFingerprint.sha256 !== fingerprint.sha256;
+        assessment.status !== "current" ||
+        assessment.inventory?.inventory.configurationFingerprint.sha256 !== fingerprint.sha256;
     } catch {
       // Unreadable/unsafe configuration cannot prevent cleanup, but must prevent future dispatch.
       configurationRefreshRequired = true;
@@ -633,7 +622,12 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   const root = await canonicalRepositoryRoot(repositoryRoot);
   const operations = { ...localOperations, ...options.operations };
   const state = await readChatState(root, operations);
-  const profile = await loadProfile(root, operations);
+  const assessment = await assessProgrammaticSetup(root, {
+    operations, inventoryOperations: options.inventoryOperations,
+  });
+  const profile = assessment.stored
+    ? { status: "valid" as const, ...assessment.stored }
+    : { status: assessment.status === "missing" ? "missing" as const : "invalid" as const };
   const loaded = state.loaded.status === "valid" ? state.loaded : null;
   // Inspect the full validated snapshot, not the displayed page or selected record.
   const conflictReason = loaded?.state.records.some(
@@ -647,13 +641,7 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   let scanAvailable = false;
   if (profile.status === "valid") {
     try {
-      await ensureCommitInputsUnchanged(
-        root,
-        operations,
-        options.inventoryOperations,
-        profile.bytes,
-        profile.envelope.configurationFingerprint,
-      );
+      if (assessment.status !== "current") throw new StaleConfigurationError();
       scanAvailable = true;
       if (
         !loaded ||
@@ -670,13 +658,17 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
           "Saved settings match the project, but these results are older. Choose Check for opportunities before starting a task.";
     } catch {
       status = "stale";
-      reason = "Project settings changed or cannot be read. Choose Review setup before starting a task.";
+      reason = assessment.status === "unreadable" ? assessment.diagnostic!
+        : assessment.baselineUnavailable
+          ? "Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable. Choose Review setup."
+          : "Project settings changed. Choose Review setup refresh before checking for opportunities or starting a task.";
     }
   }
   return {
     root,
     ...state,
     profile,
+    assessment,
     status,
     reason,
     conflictReason,
@@ -782,6 +774,7 @@ export async function readProgrammaticChatReport(
     status: context.status,
     reason: context.reason,
     scan: context.scan,
+    configuration: projectProgrammaticConfiguration(context.assessment),
     snapshot: context.snapshot,
     fingerprint: context.fingerprint,
     offset: start,
@@ -930,9 +923,10 @@ export async function runProgrammaticScan(
     fingerprint = configurationFingerprintV1Schema.parse(
       inventory.inventory.configurationFingerprint,
     );
+    const assessment = await assessProgrammaticSetup(root, { operations, inventory });
     if (
-      loadedProfile.envelope.configurationFingerprint.version !== fingerprint.version ||
-      loadedProfile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256
+      assessment.status !== "current" ||
+      !assessment.stored?.bytes.equals(loadedProfile.bytes)
     ) {
       return errorResult(
         "stale-configuration",
@@ -1024,7 +1018,7 @@ export async function runProgrammaticScan(
       const nextBytes = Buffer.from(canonicalJson(reconciled.state), "utf8");
       const unchanged = loaded.status === "valid" && loaded.bytes.equals(nextBytes);
       if (unchanged && !recovered) {
-        await revalidateProfile();
+        await revalidateCommit();
         return {
           ok: true,
           changed: false,

@@ -242,7 +242,10 @@ describe("prompt commands", () => {
     expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");
-    expect(setup?.prompt).toContain("exact returned fingerprint and profile");
+    expect(setup?.prompt).toContain("exact returned fingerprint, profile and `expected_prior_profile_digest`");
+    expect(setup?.prompt).toContain("without proposing regeneration or approval");
+    expect(setup?.prompt).toContain("never invent historical changes");
+    expect(setup?.prompt).toContain("Saving refreshed settings never scans");
     expect(setup?.prompt).not.toContain('action: "generate"');
     expect(getPromptCommand("generate-programmatic-profile")).toBeUndefined();
   });

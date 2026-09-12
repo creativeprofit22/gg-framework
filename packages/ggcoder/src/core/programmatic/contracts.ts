@@ -32,11 +32,7 @@ const stableIdSchema = z
   .max(LIMITS.scannerIdChars)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const boundedString = (max: number) => z.string().min(1).max(max);
-export const specialistCommandSchema = z.enum([
-  "research",
-  "setup-sweep",
-  "setup-tauri-package",
-]);
+export const specialistCommandSchema = z.enum(["research", "setup-sweep", "setup-tauri-package"]);
 const lifecycleStateSchema = z.enum(["discovered", "queued", "running", "completed", "dismissed"]);
 const nonnegativeSafeIntegerSchema = z
   .number()
@@ -102,6 +98,50 @@ export const inventoryEntryV1Schema = z.strictObject({
   path: repositoryRelativePathSchema,
   sha256: sha256Schema,
 });
+
+function isSafeConfigurationSnapshotPath(value: string): boolean {
+  return (
+    !value.includes(":") &&
+    Array.from(value).every((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    })
+  );
+}
+
+// Stored setup evolves independently of opportunity identity and lifecycle contracts.
+const PROGRAMMATIC_PROFILE_ENVELOPE_VERSION = 2 as const;
+export const PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT = LIMITS.inventoryEntries;
+export const configurationSnapshotSchema = z.strictObject({
+  policyRevision: positiveSafeIntegerSchema,
+  scannerProfileSchemaRevision: positiveSafeIntegerSchema,
+  exclusions: z
+    .array(repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath, "unsafe exclusion path"))
+    .max(LIMITS.inventoryEntries)
+    .refine(isStrictlyAscending, "exclusions must be unique and sorted ascending"),
+  inputs: z
+    .array(
+      inventoryEntryV1Schema.refine(
+        (input) => isSafeConfigurationSnapshotPath(input.path),
+        "unsafe configuration path",
+      ),
+    )
+    .max(LIMITS.inventoryEntries)
+    .refine(
+      (inputs) => isStrictlyAscending(inputs.map((input) => input.path)),
+      "configuration input paths must be unique and sorted ascending",
+    ),
+});
+
+export const programmaticProfileEnvelopeV2Schema = z.strictObject({
+  version: z.literal(PROGRAMMATIC_PROFILE_ENVELOPE_VERSION),
+  configurationFingerprint: configurationFingerprintV1Schema,
+  profile: programmaticProfileV1Schema,
+  configurationSnapshot: configurationSnapshotSchema,
+});
+
+export type ConfigurationSnapshot = z.infer<typeof configurationSnapshotSchema>;
+export type ProgrammaticProfileEnvelopeV2 = z.infer<typeof programmaticProfileEnvelopeV2Schema>;
 
 export const inventoryV1Schema = z
   .strictObject({
@@ -222,14 +262,16 @@ export const opportunityDiscoveryResultV1Schema = z
     message: "opportunity IDs must be unique and sorted ascending",
   });
 
-export const opportunityLifecycleV1Schema = z.strictObject({
-  version: versionSchema,
-  opportunity: opportunityIdentityV1Schema,
-  state: lifecycleStateSchema,
-  runId: z.string().uuid().optional(),
-}).refine((value) => value.runId === undefined || value.state === "running", {
-  message: "Only a running lifecycle may hold execution ownership",
-});
+export const opportunityLifecycleV1Schema = z
+  .strictObject({
+    version: versionSchema,
+    opportunity: opportunityIdentityV1Schema,
+    state: lifecycleStateSchema,
+    runId: z.string().uuid().optional(),
+  })
+  .refine((value) => value.runId === undefined || value.state === "running", {
+    message: "Only a running lifecycle may hold execution ownership",
+  });
 
 export const programmaticLifecycleRecordV1Schema = z
   .strictObject({

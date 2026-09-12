@@ -361,11 +361,106 @@ describe("embedded opportunity review", () => {
       snapshot: hash,
     });
   });
+  it("shows exact refresh reasons, retains old detail and requires explicit refresh approval", () => {
+    const configuration = { status: "refresh-required" as const, currentFingerprint: "b".repeat(64),
+      refreshAvailable: true, baselineUnavailable: false, diagnostic: null,
+      drift: { files: [{ path: "package.json", kind: "modified" as const, before: hash, after: "b".repeat(64) }],
+        policy: null, schema: null, exclusions: null } };
+    const { props, rerender } = fixture();
+    const report = { ...props.state.report!, status: "stale" as const,
+      scan: { available: false, reason: "Configuration changed" }, configuration };
+    rerender(<ProgrammaticChat {...props} state={{ ...props.state, report }} />);
+    expect(screen.getByText("Why setup needs a refresh")).toBeTruthy();
+    expect(screen.getByText("package.json")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Review setup refresh" }));
+    expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "inspect-setup" });
+    expect(screen.queryByRole("button", { name: "Approve and save refresh" })).toBeNull();
+    rerender(<ProgrammaticChat {...props} state={{ ...props.state, report, proposalApprovable: true,
+      proposal: { handle: hash, operation: "refresh", configuration, fingerprint: "b".repeat(64),
+        profileJson: "exact refresh", routes: [], exclusions: [], configurationInputs: [] } }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve and save refresh" }));
+    expect(props.onAction).toHaveBeenLastCalledWith({ version: 1, action: "approve-setup", proposalHandle: hash });
+  });
+  it("blocks cached scan and run after inspection finds drift, without blocking dismissal", () => {
+    const { props, rerender } = fixture();
+    const configuration = { status: "refresh-required" as const, currentFingerprint: "b".repeat(64),
+      refreshAvailable: true, baselineUnavailable: false, diagnostic: null,
+      drift: { files: [{ path: "package.json", kind: "modified" as const, before: hash, after: "b".repeat(64) }],
+        policy: null, schema: null, exclusions: null } };
+    const state = programmaticChatReducer(props.state, { type: "response", generation: "one", epoch: 0,
+      response: { version: 1, action: "inspect-setup", ok: true, proposal: {
+        handle: hash, operation: "refresh", configuration, fingerprint: "b".repeat(64),
+        profileJson: "exact refresh", routes: [], exclusions: [], configurationInputs: [],
+      } } });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    for (const name of ["Check for opportunities", "Review task approval"]) {
+      const button = screen.getByRole("button", { name }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+    }
+    expect(props.onRun).not.toHaveBeenCalled();
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(screen.getByText("package.json").parentElement?.textContent).toBe("modified: package.json");
+    expect(screen.getByLabelText("Exact settings to save").textContent).toBe("exact refresh");
+    expect(state.detail).toBe(props.state.detail);
+    expect(state.report).toBe(props.state.report);
+    expect(state.selectedId).toBe(hash);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss this item" }));
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "dismiss", id: hash, snapshot: hash });
+  });
+  it.each(["refresh-required", "unreadable", "missing"] as const)("marks a retained current review historical after a %s report", (status) => {
+    const { props, rerender } = fixture();
+    const currentConfiguration = { status: "current" as const, currentFingerprint: hash,
+      refreshAvailable: false, baselineUnavailable: false, diagnostic: null, drift: null };
+    let state = programmaticChatReducer(props.state, { type: "response", generation: "one", epoch: 0,
+      response: { version: 1, action: "inspect-setup", ok: true, proposal: { operation: "current", handle: null,
+        fingerprint: hash, profileJson: "previous exact settings", routes: [], exclusions: [], configurationInputs: [],
+        configuration: currentConfiguration } } });
+    const configuration = { ...currentConfiguration, status, currentFingerprint: "b".repeat(64),
+      refreshAvailable: status === "refresh-required", diagnostic: status === "unreadable" ? "Cannot read package.json" : null,
+      drift: status === "refresh-required" ? { files: [{ path: "package.json", kind: "modified" as const, before: hash, after: "b".repeat(64) }], policy: null, schema: null, exclusions: null } : null };
+    state = programmaticChatReducer(state, { type: "response", generation: "one", epoch: 0,
+      response: { version: 1, action: "report", ok: true, report: { ...props.state.report!, configuration,
+        status: "stale", scan: { available: false, reason: "Setup changed" } } } });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect(screen.queryByText("Saved setup is current")).toBeNull();
+    expect(screen.queryByText(/No regeneration or approval is needed/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Previous setup review" })).toBeTruthy();
+    expect(screen.getByLabelText("Exact settings to save").textContent).toBe("previous exact settings");
+    expect(screen.getByText("Selected opportunity")).toBeTruthy();
+    if (status === "refresh-required") expect(screen.getByText("package.json").parentElement?.textContent).toBe("modified: package.json");
+    for (const name of ["Check for opportunities", "Review task approval"])
+      expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Dismiss this item" }) as HTMLButtonElement).disabled).toBe(false);
+    // A reverted configuration is current, but the old report is not a new permission grant.
+    state = programmaticChatReducer(state, { type: "response", generation: "one", epoch: 0,
+      response: { version: 1, action: "inspect-setup", ok: true, proposal: { ...state.proposal!, configuration: currentConfiguration } } });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect(screen.getByRole("heading", { name: "Saved setup is current" })).toBeTruthy();
+    expect(screen.queryByText("Why setup needs a refresh")).toBeNull();
+    expect(screen.queryByText("Cannot read package.json")).toBeNull();
+    expect(screen.getByText(/Refresh results to update task availability/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("displays current saved settings without an approval button", () => {
+    fixture({ proposalApprovable: false, proposal: { operation: "current", handle: null,
+      fingerprint: hash, profileJson: "saved settings", routes: [], exclusions: [], configurationInputs: [],
+      configuration: { status: "current", currentFingerprint: hash, refreshAvailable: false,
+        baselineUnavailable: false, diagnostic: null, drift: null } } });
+    expect(screen.getByText("Saved setup is current")).toBeTruthy();
+    expect(screen.getByText("saved settings")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Approve and save/ })).toBeNull();
+  });
   it("displays exact proposal and requires its separate approval", () => {
     const { props, rerender } = fixture({
       proposalApprovable: true,
       proposal: {
         handle: hash,
+        operation: "initial" as const,
+        configuration: { status: "missing" as const, currentFingerprint: hash, refreshAvailable: false,
+          baselineUnavailable: false, diagnostic: null, drift: null },
         fingerprint: hash,
         profileJson: "exact profile",
         routes: [],
@@ -391,6 +486,9 @@ describe("embedded opportunity review", () => {
     (uncertain) => {
       const proposal = {
         handle: hash,
+        operation: "initial" as const,
+        configuration: { status: "missing" as const, currentFingerprint: hash, refreshAvailable: false,
+          baselineUnavailable: false, diagnostic: null, drift: null },
         fingerprint: hash,
         profileJson: "exact old profile",
         routes: [],
@@ -503,6 +601,9 @@ describe("embedded opportunity review", () => {
       proposalApprovable: true,
       proposal: {
         handle: hash,
+        operation: "initial" as const,
+        configuration: { status: "missing" as const, currentFingerprint: hash, refreshAvailable: false,
+          baselineUnavailable: false, diagnostic: null, drift: null },
         fingerprint: hash,
         profileJson: "exact profile",
         routes: [],

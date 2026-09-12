@@ -17,6 +17,7 @@ const GenerateParams = z.strictObject({
   action: z.literal("generate"),
   configuration_fingerprint: configurationFingerprintV1Schema,
   profile: programmaticProfileV1Schema,
+  expected_prior_profile_digest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
 });
 
 export const ProgrammaticProfileParams = z.discriminatedUnion("action", [
@@ -60,6 +61,10 @@ export function createProgrammaticProfileTool(
           return stableJson({
             action: "inspect",
             changed: false,
+            operation: proposal.operation,
+            approval_available: proposal.operation !== "current",
+            expected_prior_profile_digest: proposal.expectedPriorProfileDigest,
+            configuration: proposal.configuration,
             configuration_fingerprint: proposal.configurationFingerprint,
             configuration_inputs: proposal.configurationInputs,
             exclusions: proposal.exclusions,
@@ -80,6 +85,7 @@ export function createProgrammaticProfileTool(
           input.configuration_fingerprint,
           input.profile,
           {
+            expectedPriorProfileDigest: input.expected_prior_profile_digest,
             onPreMutation: (repositoryPath) =>
               options.onPreFileMutation?.(containedPath(cwd, repositoryPath)),
             onCommitted: (repositoryPath) =>

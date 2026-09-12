@@ -6,6 +6,8 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
   configurationFingerprintV1Schema,
+  configurationSnapshotSchema,
+  programmaticProfileEnvelopeV2Schema,
   discoveredOpportunityV1Schema,
   evidenceItemV1Schema,
   evidenceLocationV1Schema,
@@ -43,6 +45,88 @@ const programmaticProfileEnvelope = {
   profile: programmaticProfile,
 };
 const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
+
+describe("independent stored setup envelope", () => {
+  const snapshot = {
+    policyRevision: 2,
+    scannerProfileSchemaRevision: 1,
+    exclusions: ["**/node_modules/**"],
+    inputs: [inventoryEntry],
+  };
+  const envelope = {
+    version: 2,
+    configurationFingerprint,
+    profile: programmaticProfile,
+    configurationSnapshot: snapshot,
+  };
+
+  it("retains known v1 and accepts v2 without changing identity or profile wire versions", () => {
+    expect(programmaticProfileEnvelopeV1Schema.parse(programmaticProfileEnvelope).version).toBe(1);
+    expect(programmaticProfileEnvelopeV2Schema.parse(envelope).profile.version).toBe(1);
+    expect(programmaticProfileEnvelopeV2Schema.safeParse({ ...envelope, version: 3 }).success).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ["colon", ":"],
+    ["NUL", "\0"],
+    ["LF", "\n"],
+    ["U+001F", "\u001f"],
+    ["DEL", "\u007f"],
+  ])("rejects %s in both snapshot exclusions and input paths", (_label, character) => {
+    const unsafePath = `src/bad${character}name.json`;
+    const exclusion = configurationSnapshotSchema.safeParse({
+      ...snapshot,
+      exclusions: [unsafePath],
+    });
+    const input = configurationSnapshotSchema.safeParse({
+      ...snapshot,
+      inputs: [{ ...inventoryEntry, path: unsafePath }],
+    });
+    expect(exclusion.success).toBe(false);
+    expect(input.success).toBe(false);
+    expect(exclusion.error?.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "unsafe exclusion path" })]),
+    );
+    expect(input.error?.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "unsafe configuration path" })]),
+    );
+  });
+
+  it("accepts valid repository input paths and glob exclusions", () => {
+    const valid = {
+      ...snapshot,
+      exclusions: ["**/node_modules/**", "dist/**", "src/generated"],
+      inputs: [inventoryEntry, { ...inventoryEntry, path: "src/config/settings.json" }],
+    };
+    expect(configurationSnapshotSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("rejects unsafe, duplicate, unsorted, invalid and oversized configuration snapshots", () => {
+    for (const inputs of [
+      [{ ...inventoryEntry, path: "../outside" }],
+      [{ ...inventoryEntry, path: "C:/outside" }],
+      [{ ...inventoryEntry, sha256: "invalid" }],
+      [inventoryEntry, inventoryEntry],
+      [{ ...inventoryEntry, path: "z.json" }, inventoryEntry],
+      Array.from({ length: 10_001 }, (_, i) => ({
+        ...inventoryEntry,
+        path: `${String(i).padStart(5, "0")}.json`,
+      })),
+    ])
+      expect(configurationSnapshotSchema.safeParse({ ...snapshot, inputs }).success).toBe(false);
+    expect(
+      configurationSnapshotSchema.safeParse({ ...snapshot, contents: "not retained" }).success,
+    ).toBe(false);
+    expect(
+      configurationSnapshotSchema.safeParse({ ...snapshot, exclusions: ["b", "a"] }).success,
+    ).toBe(false);
+    expect(configurationSnapshotSchema.safeParse({ ...snapshot, policyRevision: 0 }).success).toBe(
+      false,
+    );
+  });
+});
 const inventory = {
   version: 1,
   configurationFingerprint,
@@ -627,8 +711,7 @@ describe("Phase 1 structural bloat audit", () => {
     if (!symbol) return false;
     let referenced = false;
     const visit = (node: ts.Node) => {
-      if (ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === symbol)
-        referenced = true;
+      if (ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === symbol) referenced = true;
       ts.forEachChild(node, visit);
     };
     for (const statement of source.statements) {
@@ -667,7 +750,8 @@ describe("Phase 1 structural bloat audit", () => {
         );
       }
       if (ts.isFunctionDeclaration(node)) {
-        return node.name && ["isStrictlyAscending"].includes(node.name.text)
+        return node.name &&
+          ["isStrictlyAscending", "isSafeConfigurationSnapshotPath"].includes(node.name.text)
           ? []
           : ["unreviewed helper"];
       }

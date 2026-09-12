@@ -1,5 +1,6 @@
 import type {
   ProgrammaticChatAction,
+  ProgrammaticChatConfiguration,
   ProgrammaticChatDetail,
   ProgrammaticChatProposal,
   ProgrammaticChatReport,
@@ -10,6 +11,8 @@ export interface ProgrammaticChatState {
   generation: string;
   epoch: number;
   report: ProgrammaticChatReport | null;
+  /** Latest accepted setup assessment, independent of lifecycle/scan snapshots. */
+  configuration: ProgrammaticChatConfiguration | null;
   selectedId: string | null;
   detail: ProgrammaticChatDetail | null;
   detailSnapshot: string | null;
@@ -25,6 +28,7 @@ export const initialProgrammaticChatState = (generation: string): ProgrammaticCh
   generation,
   epoch: 0,
   report: null,
+  configuration: null,
   selectedId: null,
   detail: null,
   detailSnapshot: null,
@@ -107,6 +111,14 @@ export function programmaticChatReducer(
       return {
         ...base,
         report: response.report,
+        configuration: response.report.configuration ?? state.configuration,
+        proposalApprovable: state.proposalApprovable &&
+          (!response.report.configuration || (
+            response.report.configuration.status !== "current" &&
+            response.report.configuration.status !== "unreadable" &&
+            response.report.configuration.status === state.proposal?.configuration.status &&
+            response.report.configuration.currentFingerprint === state.proposal?.fingerprint
+          )),
         reconcile: false,
         notice: `${response.report.total} opportunities. ${response.report.reason}`,
       };
@@ -123,8 +135,13 @@ export function programmaticChatReducer(
       return {
         ...base,
         proposal: response.proposal,
-        proposalApprovable: true,
-        notice: "Setup is ready to review. No files have been changed.",
+        configuration: response.proposal.configuration,
+        proposalApprovable: response.proposal.handle !== null && response.proposal.operation !== "current",
+        notice: response.proposal.operation === "current"
+          ? "Saved setup is current. No regeneration or approval is needed."
+          : response.proposal.operation === "refresh"
+            ? "Setup refresh is ready to review. No files have been changed."
+            : "Setup is ready to review. No files have been changed.",
       };
     case "approve-setup":
       return {
@@ -144,10 +161,35 @@ export function programmaticChatReducer(
   }
 }
 
+export function programmaticConfiguration(state: ProgrammaticChatState): ProgrammaticChatConfiguration | null {
+  return state.configuration ?? state.report?.configuration ?? state.proposal?.configuration ?? null;
+}
+
+export function isProgrammaticCurrentReview(state: ProgrammaticChatState): boolean {
+  const configuration = programmaticConfiguration(state);
+  return state.proposal?.operation === "current" &&
+    configuration?.status === "current" &&
+    configuration.currentFingerprint === state.proposal.fingerprint;
+}
+
+function setupAllowsProgrammaticExecution(state: ProgrammaticChatState): boolean {
+  const configuration = programmaticConfiguration(state);
+  // Older daemon reports omit assessments; retain their explicit server permissions.
+  return configuration === null || configuration.status === "current";
+}
+
+export function canScanProgrammatic(state: ProgrammaticChatState): boolean {
+  return !state.operation && !state.reconcile &&
+    setupAllowsProgrammaticExecution(state) && state.report?.scan.available === true;
+}
+
 export function canRunProgrammaticSelection(state: ProgrammaticChatState): boolean {
+  const configuration = programmaticConfiguration(state);
   return (
     !state.operation &&
     !state.reconcile &&
+    setupAllowsProgrammaticExecution(state) &&
+    (!configuration || configuration.currentFingerprint === state.report?.fingerprint) &&
     state.report?.status === "current" &&
     state.detailSnapshot === state.report.snapshot &&
     state.detail?.summary.id === state.selectedId &&

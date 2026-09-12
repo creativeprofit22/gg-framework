@@ -59,7 +59,10 @@ export class PersistentShell {
   private child: ChildProcess | null = null;
   private busy = false;
   private closing = false;
-  private readonly owned = new Map<ChildProcess, { closed: Promise<void>; cleanup?: Promise<void> }>();
+  private readonly owned = new Map<
+    ChildProcess,
+    { closed: Promise<void>; cleanup?: Promise<void> }
+  >();
 
   constructor(
     private readonly cwd: string,
@@ -77,10 +80,14 @@ export class PersistentShell {
     // Timeout, kill and shutdown share one confirmed cleanup per child. Keep
     // failures owned even after close so shutdown cannot silently pass them.
     owned.cleanup = Promise.resolve().then(async () => {
-      if (child.pid !== undefined) await this.lifecycle.cleanupProcessTree({
-        pid: child.pid,
-        isExited: () => child.exitCode !== null || child.signalCode !== null,
-      }, { requireSettlement: true });
+      if (child.pid !== undefined)
+        await this.lifecycle.cleanupProcessTree(
+          {
+            pid: child.pid,
+            isExited: () => child.exitCode !== null || child.signalCode !== null,
+          },
+          { requireSettlement: true },
+        );
       await owned.closed;
       this.owned.delete(child);
     });
@@ -115,10 +122,14 @@ export class PersistentShell {
       env: this.env,
       detached: process.platform !== "win32",
     });
-    this.owned.set(child, { closed: new Promise((resolve) => child.once("close", () => {
-      if (!this.owned.get(child)?.cleanup) this.owned.delete(child);
-      resolve();
-    })) });
+    this.owned.set(child, {
+      closed: new Promise((resolve) =>
+        child.once("close", () => {
+          if (!this.owned.get(child)?.cleanup) this.owned.delete(child);
+          resolve();
+        }),
+      ),
+    });
     // Don't let a lingering session shell keep the parent process alive.
     child.unref();
     this.child = child;
@@ -403,7 +414,8 @@ export class PersistentShell {
         finish("spawnError", null, child.signalCode, error);
       };
 
-      const timer = setTimeout(() => interrupt("timedOut"), timeoutMs);
+      // Zero is the internal no-deadline sentinel, shared with fresh-shell bash.
+      const timer = timeoutMs > 0 ? setTimeout(() => interrupt("timedOut"), timeoutMs) : undefined;
 
       child.on("exit", onExit);
       child.on("error", onError);

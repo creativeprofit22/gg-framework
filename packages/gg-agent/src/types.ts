@@ -44,10 +44,10 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    */
   executionMode?: ToolExecutionMode;
   /**
-   * Overrides the loop's default per-tool timeout. A tool that owns a longer
-   * internal budget than the default must declare it here, or the loop cancels
-   * it first and the tool's own timeout — with its specific, actionable error
-   * message — becomes unreachable.
+   * Overrides the loop's default 300000ms per-tool deadline. A positive value
+   * sets a deadline; 0 explicitly disables the loop deadline for tools that
+   * own their execution lifetime. Caller/session cancellation always applies.
+   * Omission retains the finite default for ordinary tools.
    */
   timeoutMs?: number;
   execute: (

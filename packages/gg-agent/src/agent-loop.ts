@@ -33,7 +33,7 @@ import {
 } from "./output-ceiling.js";
 
 const DEFAULT_MAX_TURNS = 300;
-/** Per-tool cancellation ceiling; a tool may raise it via `timeoutMs`. */
+/** Default cancellation ceiling; tools may override it or opt out with `timeoutMs: 0`. */
 const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
 
 /**
@@ -1893,17 +1893,18 @@ async function executeSingleToolCall(
           throw originalError;
         }
       }
-      // Per-tool timeout: combine the caller's signal with a 5-minute default
-      // so no single tool can block the agent loop indefinitely.
-      // When the caller has no signal, AbortSignal.timeout is used alone.
-      // AbortSignal.any() merges them — either firing aborts the tool.
-      // A tool with a longer internal budget declares `timeoutMs`; without
-      // that, this default preempts the tool's own timeout and replaces its
-      // specific error with a generic cancellation.
+      // Zero explicitly delegates deadline ownership to the tool (e.g. bash).
+      // Never pass that sentinel to AbortSignal.timeout: zero aborts immediately.
+      // Caller cancellation remains active even when there is no deadline.
       const callerSignal = options.signal;
-      const toolTimeout = AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS);
+      const timeoutMs = tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+      const toolTimeout = timeoutMs === 0 ? undefined : AbortSignal.timeout(timeoutMs);
       const ctx: ToolContext = {
-        signal: callerSignal ? AbortSignal.any([callerSignal, toolTimeout]) : toolTimeout,
+        signal: toolTimeout
+          ? callerSignal
+            ? AbortSignal.any([callerSignal, toolTimeout])
+            : toolTimeout
+          : (callerSignal ?? new AbortController().signal),
         toolCallId: toolCall.id,
         onUpdate: (update: unknown) => {
           pushEvent({
@@ -1988,7 +1989,12 @@ async function executeSingleToolCall(
     ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }),
   });
 
-  return { toolCallId: toolCall.id, content: resultContent, isError, ...(imageResult ? { imageResult } : {}) };
+  return {
+    toolCallId: toolCall.id,
+    content: resultContent,
+    isError,
+    ...(imageResult ? { imageResult } : {}),
+  };
 }
 
 /**

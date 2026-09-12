@@ -42,7 +42,8 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
   return sandboxed ? { ...env, ...SANDBOX_ENV_PATCH } : env;
 }
 
-const DEFAULT_TIMEOUT = 120_000; // 120 seconds
+/** Internal deadline sentinel: omitted bash timeout means no deadline. */
+const NO_DEADLINE = 0;
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 /** A sleep this long guesses completion instead of waiting for a process event. */
@@ -112,7 +113,7 @@ function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome, tail: 
     `Command: ${metadata.command}\n` +
     `CWD: ${metadata.cwd}\n` +
     `Started: ${new Date(metadata.startedAt).toISOString()}\n` +
-    `Timeout: ${metadata.timeoutMs}ms\n` +
+    `Timeout: ${metadata.timeoutMs === 0 ? "none" : `${metadata.timeoutMs}ms`}\n` +
     `Reason: ${outcome.reason}\n` +
     `Exit code: ${outcome.exitCode ?? "none"}\n` +
     `Signal: ${outcome.signal ?? "none"}\n` +
@@ -432,7 +433,7 @@ export async function executeForegroundCommand({
       child.on("close", onChildClose);
       child.on("error", onChildError);
 
-      deadlineTimer = setTimeout(() => interrupt("timedOut"), timeoutMs);
+      if (timeoutMs > 0) deadlineTimer = setTimeout(() => interrupt("timedOut"), timeoutMs);
 
       signal.addEventListener("abort", onAbort, { once: true });
       abortListenerRegistered = true;
@@ -564,7 +565,7 @@ const BashParams = z.object({
     .min(1000)
     .optional()
     .describe(
-      "Foreground timeout in milliseconds (default: 120000). Finite build, test, lint, " +
+      "Optional foreground timeout in milliseconds; omit for no deadline (also with persist:true). Finite build, test, lint, " +
         "format, migration, and one-shot commands wait for completion in foreground.",
     ),
   run_in_background: z
@@ -645,7 +646,7 @@ export function createBashTool(
       "Use cmd.exe syntax (dir, findstr, type, del); POSIX commands and bash syntax " +
       "(ls, grep, cat, &&-chains relying on bash semantics, $(...), single-quoting) will fail. " +
       "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
-      "for final status under the default 120000ms timeout. Long output is truncated (tail kept). " +
+      "for final status without a deadline unless timeout is explicitly set. Let builds finish; do not invent a time limit. Long output is truncated (tail kept). " +
       "Set run_in_background=true for long-lived or interactive commands " +
       "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
       "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
@@ -659,7 +660,7 @@ export function createBashTool(
       "code, so piping tests through tail/head cannot mask a failure. " +
       "Commands run in a non-interactive bash shell with TERM=dumb. " +
       "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
-      "for final status under the default 120000ms timeout. Long output is truncated (tail kept). " +
+      "for final status without a deadline unless timeout is explicitly set. Let builds finish; do not invent a time limit. Long output is truncated (tail kept). " +
       "Set run_in_background=true for long-lived or interactive commands " +
       "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
       "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
@@ -682,6 +683,8 @@ export function createBashTool(
       "Do not use silence as readiness; healthy servers normally go quiet.",
     parameters: BashParams,
     executionMode: "sequential",
+    // Bash owns optional per-command deadlines; the loop must not preempt them.
+    timeoutMs: 0,
     async execute({ command, timeout: timeoutMs, run_in_background, persist, wake }, context) {
       const commandMode = run_in_background === true ? "background" : "foreground";
       if (wake && !run_in_background) {
@@ -769,14 +772,17 @@ export function createBashTool(
               launch,
             );
             sessionShell = shell;
-            processManager.registerShutdown(() => shell.killNow(), () => shell.shutdownAndWait());
+            processManager.registerShutdown(
+              () => shell.killNow(),
+              () => shell.shutdownAndWait(),
+            );
             sessionSandboxKey = sandboxKey;
             sessionSandboxed = launch.sandboxed;
           } catch (error) {
             return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
           }
         }
-        const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+        const effectiveTimeout = timeoutMs ?? NO_DEADLINE;
         const execution = await executePersistentCommand({
           command,
           cwd,
@@ -825,7 +831,7 @@ export function createBashTool(
         );
       }
 
-      const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+      const effectiveTimeout = timeoutMs ?? NO_DEADLINE;
       const shell = resolveShell(command, shellOpts);
       let launch: SandboxLaunch;
       try {

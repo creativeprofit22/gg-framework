@@ -126,14 +126,14 @@ const backgroundCommands = [
 ] as const;
 
 const foregroundCommands = [
-  { commandClass: "vitest run", command: "pnpm exec vitest run", timeoutMs: 120_000 },
-  { commandClass: "build", command: "pnpm build", timeoutMs: 120_000 },
-  { commandClass: "lint", command: "pnpm lint", timeoutMs: 120_000 },
-  { commandClass: "format", command: "pnpm format:check", timeoutMs: 120_000 },
+  { commandClass: "vitest run", command: "pnpm exec vitest run", timeoutMs: 0 },
+  { commandClass: "build", command: "pnpm build", timeoutMs: 0 },
+  { commandClass: "lint", command: "pnpm lint", timeoutMs: 0 },
+  { commandClass: "format", command: "pnpm format:check", timeoutMs: 0 },
   {
     commandClass: "migration",
     command: "pnpm prisma migrate deploy",
-    timeoutMs: 120_000,
+    timeoutMs: 0,
   },
   {
     commandClass: "one-shot script with timeout override",
@@ -148,7 +148,7 @@ describe("bash explicit command modes", () => {
       const harness = await createHarness();
       try {
         const tool = createBashTool(process.cwd(), harness.manager, harness.ops);
-        const args = timeoutMs === 120_000 ? { command } : { command, timeout: timeoutMs };
+        const args = timeoutMs === 0 ? { command } : { command, timeout: timeoutMs };
         let settled = false;
         const execution = Promise.resolve(tool.execute(args, toolContext())).then((result) => {
           settled = true;
@@ -189,13 +189,18 @@ describe("bash explicit command modes", () => {
     const harness = await createHarness();
     try {
       const tool = createBashTool(process.cwd(), harness.manager, harness.ops);
-      const execution = Promise.resolve(tool.execute({ command: "printf managed", persist: true }, toolContext()));
+      const execution = Promise.resolve(
+        tool.execute({ command: "printf managed", persist: true }, toolContext()),
+      );
       await vi.waitFor(() => expect(harness.spawn).toHaveBeenCalledOnce());
       let settled = false;
-      const cleanup = harness.manager.shutdownAllAndWait().then(() => { settled = true; });
+      const cleanup = harness.manager.shutdownAllAndWait().then(() => {
+        settled = true;
+      });
       await vi.waitFor(() => expect(harness.cleanupProcessTree).toHaveBeenCalledOnce());
       expect(harness.cleanupProcessTree).toHaveBeenCalledWith(
-        expect.objectContaining({ pid: 42_424, isExited: expect.any(Function) }), { requireSettlement: true },
+        expect.objectContaining({ pid: 42_424, isExited: expect.any(Function) }),
+        { requireSettlement: true },
       );
       expect(harness.killProcessTree).not.toHaveBeenCalled();
       harness.child.emit("exit", 0, null);
@@ -205,7 +210,8 @@ describe("bash explicit command modes", () => {
       await cleanup;
       expect(settled).toBe(true);
     } finally {
-      if (harness.child.exitCode === null && harness.child.signalCode === null) completeChild(harness.child, "");
+      if (harness.child.exitCode === null && harness.child.signalCode === null)
+        completeChild(harness.child, "");
       await harness.cleanup();
     }
   });

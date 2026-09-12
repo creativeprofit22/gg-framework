@@ -741,6 +741,23 @@ if (selectedProbe !== undefined) {
   }, 60_000);
 } else {
   describe("foreground execution outcomes", () => {
+    it("omitted bash timeout waits beyond both old deadlines for actual completion", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const fake = createFakeChild();
+      let settled = false;
+      const result = executeRendered(fake).then((value) => {
+        settled = true;
+        return value;
+      });
+      await fake.ready();
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      const settledBeforeClose = settled;
+      fake.emitClose(0);
+      expect(await result).toContain("Exit code: 0");
+      expect(settledBeforeClose).toBe(false);
+      const tool = createBashTool(process.cwd(), testProcessManager(), operationsFor(fake.child));
+      expect(tool.timeoutMs).toBe(0);
+    });
     it("creates the log before spawn and exposes source-labelled partial output live", async () => {
       const fake = createFakeChild(2_000_000_021);
       const manager = testProcessManager();
@@ -1877,10 +1894,10 @@ if (selectedProbe !== undefined) {
       expectRenderedDiagnostics(result, "timedOut");
     });
 
-    it("keeps the omitted timeout deadline at exactly 120000ms", async () => {
+    it("keeps an explicit timeout deadline at exactly 120000ms", async () => {
       vi.useFakeTimers();
       const fake = createFakeChild(2_000_000_012);
-      const resultPromise = executeRendered(fake);
+      const resultPromise = executeRendered(fake, { timeoutMs: 120_000 });
       await fake.ready();
       let fulfilled = false;
       void resultPromise.then(() => {
@@ -2223,6 +2240,52 @@ if (selectedProbe !== undefined) {
     }
   });
 
+  it.each(["completion", "abort"])(
+    "omitted persistent bash timeout waits for %s",
+    async (ending) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const fake = createPersistentFakeChild();
+      const cleanup = vi.fn(async () => {});
+      const manager = testProcessManager();
+      const tool = createBashTool(process.cwd(), manager, {
+        ...localOperations,
+        process: {
+          ...localOperations.process,
+          spawn: () => fake.child,
+          cleanupProcessTree: cleanup,
+        },
+      });
+      const controller = new AbortController();
+      const written = once(fake.child.stdin!, "data");
+      let settled = false;
+      const execution = Promise.resolve(
+        tool.execute(
+          { command: "fixture command", persist: true },
+          { signal: controller.signal, toolCallId: "no-deadline-persist" },
+        ),
+      ).then((result) => {
+        settled = true;
+        return result;
+      });
+      const [data] = await written;
+      const sentinel = /echo "(__GG_PSH_[^"]+__)\$\?"/.exec(data.toString())?.[1];
+      expect(sentinel).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      expect(settled).toBe(false);
+      expect(cleanup).not.toHaveBeenCalled();
+      if (ending === "abort") controller.abort();
+      else (fake.child.stdout as PassThrough).write(`${sentinel}0\n`);
+      const result = structuredBashResult(await execution);
+      expect(result.details.bashDiagnostics).toMatchObject({
+        timeoutMs: 0,
+        reason: ending === "abort" ? "aborted" : "completed",
+      });
+      if (ending === "abort") expect(cleanup).toHaveBeenCalledOnce();
+      fake.markExited();
+      manager.shutdownAll();
+    },
+  );
+
   it("excludes the private sentinel from persistent progress byte counts", async () => {
     const fake = createPersistentFakeChild();
     const stdin = fake.child.stdin as PassThrough;
@@ -2260,7 +2323,9 @@ if (selectedProbe !== undefined) {
   it("settles pre-aborted persistent runs as ABORTED without retaining listeners", async () => {
     const controller = new AbortController();
     controller.abort();
-    const cleanup = vi.fn(async (target: ProcessTarget) => localOperations.process.killProcessTree(target));
+    const cleanup = vi.fn(async (target: ProcessTarget) =>
+      localOperations.process.killProcessTree(target),
+    );
     const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, {
       ...localOperations.process,
       cleanupProcessTree: cleanup,

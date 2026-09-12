@@ -131,6 +131,63 @@ async function collectLoop(
   return { events, result: result! };
 }
 
+describe("tool deadline contract", () => {
+  it.each([undefined, 0, 1_800_000])(
+    "honors timeoutMs=%s and caller cancellation",
+    async (timeoutMs) => {
+      vi.useFakeTimers();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), ms);
+        return controller.signal;
+      });
+      const caller = new AbortController();
+      try {
+        mockStream.mockReset();
+        mockStream.mockReturnValueOnce(
+          mockToolCallResult("fixture", {
+            inputTokens: 1,
+            outputTokens: 1,
+          }) as unknown as ReturnType<typeof stream>,
+        );
+        mockStream.mockReturnValueOnce(
+          mockOkResult("done") as unknown as ReturnType<typeof stream>,
+        );
+        const execute = vi.fn(async (_args, context) => {
+          await vi.advanceTimersByTimeAsync(300_001);
+          expect(context.signal.aborted).toBe(timeoutMs === undefined);
+          caller.abort();
+          expect(context.signal.aborted).toBe(true);
+          return "done";
+        });
+        const { events } = await collectLoop([], {
+          provider: "anthropic",
+          model: "test",
+          signal: caller.signal,
+          tools: [
+            {
+              name: "fixture",
+              description: "fixture",
+              parameters: emptyParams,
+              timeoutMs,
+              execute,
+            },
+          ],
+        });
+        expect(execute).toHaveBeenCalledOnce();
+        expect(events.filter((event) => event.type === "tool_call_end")).not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ isError: true })]),
+        );
+        if (timeoutMs === 0) expect(timeout).not.toHaveBeenCalled();
+        else expect(timeout).toHaveBeenCalledWith(timeoutMs ?? 300_000);
+      } finally {
+        timeout.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 // ── Tests ──────────────────────────────────────────────────
 
 describe("isThinkingBlockError", () => {

@@ -42,6 +42,12 @@ GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runt
 - Release preflight requires updater signing credentials on every platform and Apple signing/notarization credentials for macOS. macOS nested Node/native-addon binaries must be signed before Tauri assembles and notarizes the app.
 <!-- gg:init:end -->
 
+## Verification status handoff
+
+- Before discussing Local Fork `/ship`, release blockers, Roadmap regression or historical daemon verification, read `.gg/verification/current-status.md` and the relevant linked evidence. This applies to status questions as well as execution work; ordinary unrelated coding does not require it.
+- Dated reports and their “other gates remain open” wording are historical snapshots, not a current task inventory. Check later results and completion records before carrying a blocker forward. Distinguish completed fixes, verification not yet exercised, historical unknowns and confirmed current defects. Same HEAD does not establish the same dirty-tree source.
+- Maintain that handoff when new evidence changes a listed status: update the relevant entry with scope, provenance and evidence, preserving original logs/verdicts and recorded failures/skips. Do not reopen completed work or claim overall release approval from a scoped pass. Missing handoff/evidence means status is unverified, not permission to guess or rerun work.
+
 ## Local Fork release-note upkeep
 
 - Perform release-note upkeep only when explicitly rebuilding the distributable Local Fork app or syncing with upstream. Ordinary feature/fix work, dev-server runs, and verification builds do not trigger upkeep. At that checkpoint, apply all requirements below to accumulated user-facing changes without a separate reminder. Skip internal-only refactors, tests, tooling, and documentation changes unless they change something users experience.

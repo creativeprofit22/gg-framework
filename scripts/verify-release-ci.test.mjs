@@ -100,6 +100,63 @@ test("roadmap reliability native smoke remains an isolated Windows app gate", ()
   assert.match(workflow, /uses: actions\/upload-artifact@v7/);
 });
 
+test("programmatic execution is a bounded blocking Windows app gate with failure evidence", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const appJob = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
+  const smoke = appJob.match(/      - name: Programmatic execution native smoke\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  assert.ok(smoke);
+  assert.match(smoke, /id: programmatic_execution_smoke/);
+  assert.match(smoke, /if: runner\.os == 'Windows'\r?\n/);
+  assert.match(smoke, /shell: bash/);
+  assert.match(smoke, /timeout-minutes: 15/);
+  assert.match(smoke, /set -euo pipefail/);
+  assert.match(smoke, /mkdir -p "\$TEMP"/);
+  assert.match(smoke, /node gg-app\/scripts\/programmatic-execution-dev-smoke\.mjs --identity com\.ggcoder\.local-fork 2>&1 \| tee "\$TEMP\/console\.log"/);
+  assert.doesNotMatch(appJob, /continue-on-error/);
+  assert.doesNotMatch(smoke, /\|\| true|--visual|--preflight/);
+  for (const variable of ["TEMP", "TMP"]) {
+    assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/programmatic-execution-dev-smoke`));
+  }
+  const ordered = [
+    "uses: Swatinem/rust-cache@v2",
+    "- name: Build framework packages",
+    "pnpm --filter @kenkaiiii/gg-ai build",
+    "pnpm --filter @kenkaiiii/gg-agent build",
+    "pnpm --filter @kenkaiiii/gg-core build",
+    "pnpm --filter @kenkaiiii/ggcoder build",
+    "- name: Stage node runtime + bundle sidecar",
+    "- name: Install Playwright browser",
+    "- name: Roadmap reliability native smoke",
+    "- name: Rust unit tests",
+    "- name: Cross-pane project isolation native smoke",
+    "- name: Programmatic execution native smoke",
+    "- name: Upload failed programmatic execution evidence",
+    "- name: Packaged app smoke",
+  ].map((needle) => appJob.indexOf(needle));
+  assert.ok(ordered.every((position, index) => position >= 0 && (index === 0 || position > ordered[index - 1])));
+  assert.match(appJob, /timeout-minutes: 60/);
+  assert.match(appJob, /workspaces: gg-app\/src-tauri/);
+  const upload = appJob.match(/      - name: Upload failed programmatic execution evidence\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  assert.ok(upload);
+  assert.match(upload, /if: failure\(\) && runner\.os == 'Windows' && steps\.programmatic_execution_smoke\.outcome == 'failure'/);
+  assert.match(upload, /uses: actions\/upload-artifact@v7/);
+  assert.match(upload, /if-no-files-found: error/);
+  assert.match(upload, /retention-days: 7/);
+  const evidencePaths = upload.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("${{ runner.temp }}"));
+  const root = "${{ runner.temp }}/programmatic-execution-dev-smoke";
+  assert.deepEqual(evidencePaths, [
+    `${root}/console.log`,
+    ...["result.json", "failure.json", "cleanup.json", "developer.log"].map((name) => `${root}/gg-programmatic-execution-*/audit/${name}`),
+  ]);
+  const fixture = readFileSync(new URL("../gg-app/scripts/programmatic-execution-dev-smoke.mjs", import.meta.url), "utf8");
+  assert.match(fixture, /mkdtempSync\(join\(tmpdir\(\), "gg-programmatic-execution-"\)\)/);
+  assert.match(fixture, /json\(join\(paths.audit, "failure.json"\), \{ error: error.message \}\);\s*if \(client\)/);
+  assert.match(fixture, /GG_APP_DEV_SMOKE_WINDOW: "minimized"/);
+  assert.equal(fixture.split("const native = spawn(").length - 1, 1);
+  const vite = readFileSync(new URL("../gg-app/vite.config.ts", import.meta.url), "utf8");
+  assert.match(vite, /port: 1420,\s*strictPort: true/);
+});
+
 test("desktop CI installs full Chromium on every OS for workspace extension tests", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const installStep = workflow.match(

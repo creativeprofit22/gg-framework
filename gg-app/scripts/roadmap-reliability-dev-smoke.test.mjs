@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const { test } = process.env.VITEST ? await import("vitest") : await import("node:test");
@@ -11,12 +11,140 @@ import {
   executeFixtureStatus,
   fixtureDiagnostics,
   fixtureDoneRequest,
+  fixturePendingReviews,
+  finalizeRoadmapReliabilitySmoke,
+  finishRoadmapReviewPreview,
   mutateFixturePhaseLease,
   parseRoadmapReliabilitySmokeArguments,
   readFixtureRepository,
   seedRoadmapReliabilityFixture,
   validateRoadmapReliabilityAudit,
 } from "./roadmap-reliability-dev-smoke.mjs";
+
+test("review fixture is long, session-scoped, repeatable, and does not mutate Notes", () => {
+  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "review-project") });
+  const before = JSON.stringify(state.document);
+  const a = fixturePendingReviews(state, "a");
+  assert.deepEqual(fixturePendingReviews(state, "a"), a);
+  assert.notEqual(fixturePendingReviews(state, "b").draft.id, a.draft.id);
+  assert.equal(a.draft.phases.length, 20);
+  assert.equal(a.draft.references.length, 20);
+  assert.equal(a.draft.phases[0].referenceIds.length, 20);
+  assert.equal(a.draft.phases[0].sourcePrompt.length, 16_384);
+  assert.equal(a.draft.phases[0].doneWhen.length, 20);
+  assert.equal(a.draft.phases[0].doneWhen[0].length, 1_024);
+  assert.ok(a.plan.content.length > 5000);
+  assert.equal(a.draft.projectKey, state.projectKey);
+  assert.equal(JSON.stringify(state.document), before);
+});
+
+test("interactive review uses readable isolated sample phases without a plan gate", () => {
+  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "preview-project") });
+  const before = JSON.stringify(state.document);
+  const preview = fixturePendingReviews(state, "preview-session", true);
+  assert.equal(preview.plan, null);
+  assert.equal(preview.draft.phases.length, 3);
+  assert.match(preview.draft.summary, /isolated developer preview/);
+  assert.equal(JSON.stringify(state.document), before);
+  assert.equal(parseRoadmapReliabilitySmokeArguments(["--review", "--identity", "com.ggcoder.local-fork"]).interactive, true);
+});
+
+test("plan preview retains both reviews and a labelled non-executing sample plan", () => {
+  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "plan-preview") });
+  const before = JSON.stringify(state.document);
+  const preview = fixturePendingReviews(state, "preview-session", "plan");
+  assert.equal(preview.plan.state, "pending-review");
+  assert.match(preview.plan.content, /sample implementation plan/);
+  assert.match(preview.plan.content, /not connected to a live model/);
+  assert.equal(preview.draft.phases.length, 3);
+  assert.equal(JSON.stringify(state.document), before);
+  assert.equal(parseRoadmapReliabilitySmokeArguments(["--identity", "com.ggcoder.local-fork", "--review-plan"]).review, "plan");
+});
+
+for (const [flag, review] of [["--review", "roadmap"], ["--review-plan", "plan"]]) {
+  for (const cleanupFails of [false, true]) {
+    test(`${flag} saves screenshot before close and finalizes ${cleanupFails ? "cleanup failure" : "successful close"}`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "gg-review-finalization-"));
+      const options = parseRoadmapReliabilitySmokeArguments([
+        flag, "--identity", "com.ggcoder.local-fork",
+        "--screenshot", join(root, "preview.png"), "--outcome", join(root, "outcome.json"),
+      ]);
+      const events = [];
+      const cleanupError = new Error("injected cleanup failure");
+      const client = {
+        evaluate: async (expression) => {
+          assert.match(expression, new RegExp(`data-review-trigger=${review}`));
+          assert.match(expression, /aria-expanded/);
+          events.push("visible");
+          return true;
+        },
+        send: async (method) => {
+          assert.equal(method, "Page.captureScreenshot");
+          events.push("screenshot");
+          return { data: Buffer.from("preview-image").toString("base64") };
+        },
+      };
+      try {
+        const running = finalizeRoadmapReliabilitySmoke(options, {
+          run: () => finishRoadmapReviewPreview(client, options, async () => {
+            assert.equal(readFileSync(options.screenshot, "utf8"), "preview-image");
+            assert.equal(existsSync(options.outcome), false);
+            events.push("closed");
+          }),
+          cleanup: async () => {
+            events.push("cleanup");
+            assert.equal(existsSync(options.outcome), false);
+            if (cleanupFails) throw cleanupError;
+          },
+        });
+        if (cleanupFails) await assert.rejects(running, error => error === cleanupError);
+        else assert.equal((await running).status, "preview-closed");
+        const outcome = JSON.parse(readFileSync(options.outcome, "utf8"));
+        assert.deepEqual(events, ["visible", "screenshot", "closed", "cleanup"]);
+        assert.equal(outcome.status, cleanupFails ? "failed" : "preview-closed");
+        assert.equal(outcome.mode, "preview");
+        assert.equal(outcome.review, review);
+        assert.equal(outcome.screenshot, options.screenshot);
+        assert.equal(outcome.automatedVerification, "not-run");
+        if (cleanupFails) assert.equal(outcome.error, cleanupError.message);
+        else {
+          assert.equal(outcome.packagedRuntimeVerified, false);
+          assert.equal(outcome.installerVerified, false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test("shared finalization preserves automated evidence and persists failures before rejecting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gg-smoke-finalization-"));
+  const options = { identity: "com.ggcoder.local-fork", outcome: join(root, "outcome.json") };
+  const result = { status: "passed", identity: options.identity, statusUpdates: 1, fixtureAudit: [] };
+  try {
+    assert.deepEqual(await finalizeRoadmapReliabilitySmoke(options, {
+      run: async () => result, cleanup: async () => {},
+    }), result);
+    assert.deepEqual(JSON.parse(readFileSync(options.outcome, "utf8")), result);
+    for (const stage of ["run", "cleanup"]) {
+      const error = new Error(`${stage} failed`);
+      let cleaned = false;
+      await assert.rejects(finalizeRoadmapReliabilitySmoke(options, {
+        run: async () => { if (stage === "run") throw error; return result; },
+        cleanup: async () => { cleaned = true; if (stage === "cleanup") throw error; },
+        failureEvidence: () => ({ fixtureAudit: [], developerLogTail: "diagnostics" }),
+      }), caught => caught === error);
+      assert.equal(cleaned, true);
+      assert.deepEqual(JSON.parse(readFileSync(options.outcome, "utf8")), {
+        status: "failed", identity: options.identity, error: error.message,
+        fixtureAudit: [], developerLogTail: "diagnostics",
+      });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "gg-roadmap-reliability-test-"));
@@ -204,6 +332,89 @@ test("transport emits actual notes_change, rejects stale status honestly, and re
     assert.match(readFileSync(auditFile, "utf8"), /"action":"notes-change"/);
   } finally {
     await reader?.cancel();
+    controller.abort();
+    fixtureServer.server.closeAllConnections();
+    await new Promise((resolveClose) => fixtureServer.server.close(resolveClose));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("context numbers survive state hydration, ready replay, and every review refresh", async () => {
+  const { root, state } = await fixture();
+  const fixtureServer = createRoadmapReliabilityFixtureServer({
+    state, auditFile: join(root, "audit.jsonl"),
+    fixtureToken: "fixture-token", launchToken: "launch-token",
+  });
+  const readers = [];
+  const controller = new AbortController();
+  const assertNumbers = (snapshot) => {
+    // Required numeric DesktopContextSnapshot fields; git counts are optional in AgentState.
+    for (const key of ["contextTokens", "contextWindow", "gitDirtyFileCount"]) {
+      assert.ok(Number.isFinite(snapshot[key]), `${key} must be finite`);
+      assert.ok(snapshot[key] >= 0, `${key} must be nonnegative`);
+    }
+    assert.equal(snapshot.contextTokens, 0);
+    assert.equal(snapshot.contextWindow, 200_000);
+  };
+  try {
+    await new Promise((resolveListen) => fixtureServer.server.listen(0, "127.0.0.1", resolveListen));
+    const origin = `http://127.0.0.1:${fixtureServer.server.address().port}`;
+    const headers = { "x-gg-token": "launch-token", "x-gg-session": "session-a" };
+    await fetch(`${origin}/session`, {
+      method: "POST", headers,
+      body: JSON.stringify({ sessionPath: join(root, "sessions", "session-a.jsonl") }),
+    });
+    const hydrate = async () => {
+      const response = await fetch(`${origin}/state`, { headers });
+      assert.equal(response.status, 200);
+      const snapshot = await response.json();
+      assertNumbers(snapshot);
+      return snapshot;
+    };
+    const connect = async () => {
+      const response = await fetch(`${origin}/events`, {
+        headers, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
+      });
+      assert.equal(response.status, 200);
+      const reader = response.body.getReader();
+      readers.push(reader);
+      let buffer = "";
+      const decoder = new TextDecoder();
+      return async () => {
+        while (!buffer.includes("\n\n")) {
+          const chunk = await reader.read();
+          assert.equal(chunk.done, false, "SSE ended before ready");
+          buffer += decoder.decode(chunk.value, { stream: true });
+        }
+        const boundary = buffer.indexOf("\n\n");
+        const event = JSON.parse(buffer.slice(0, boundary).replace(/^data: /, ""));
+        buffer = buffer.slice(boundary + 2);
+        assert.equal(event.type, "ready");
+        assert.equal(event.sessionId, "session-a");
+        assertNumbers(event.data);
+        return event.data;
+      };
+    };
+    const before = JSON.stringify(state.document);
+    assert.deepEqual(await (await connect())(), await hydrate());
+    for (const preview of [{}, { interactive: true }, { interactive: true, review: "plan" }]) {
+      const nextReady = await connect();
+      assert.deepEqual(await nextReady(), await hydrate());
+      const response = await fetch(`${origin}/fixture/reviews`, {
+        method: "POST", headers: { "x-fixture-token": "fixture-token" },
+        body: JSON.stringify({ sessionId: "session-a", ...preview }),
+      });
+      assert.equal(response.status, 200);
+      const refreshed = await nextReady();
+      assert.deepEqual(refreshed, await hydrate());
+      assert.equal(refreshed.pendingPlanReview?.state ?? null,
+        preview.interactive && !preview.review ? null : "pending-review");
+      assert.ok(state.sessions.get("session-a").reviews.draft);
+      assert.deepEqual(await (await connect())(), refreshed);
+    }
+    assert.equal(JSON.stringify(state.document), before);
+  } finally {
+    await Promise.all(readers.map((reader) => reader.cancel()));
     controller.abort();
     fixtureServer.server.closeAllConnections();
     await new Promise((resolveClose) => fixtureServer.server.close(resolveClose));

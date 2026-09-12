@@ -10284,9 +10284,60 @@ pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
 }
 
+/// A debug override replaces, rather than extends, the plugin's shared file targets.
+/// Release builds ignore the variable entirely, including invalid values.
+fn native_log_override_targets(
+    debug_enabled: bool,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<Option<[tauri_plugin_log::TargetKind; 2]>, String> {
+    if !debug_enabled {
+        return Ok(None);
+    }
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || value.as_encoded_bytes().contains(&0) {
+        return Err("GG_APP_DEV_LOG_DIR must be an absolute directory path without NUL bytes".into());
+    }
+    Ok(Some([
+        tauri_plugin_log::TargetKind::Stdout,
+        tauri_plugin_log::TargetKind::Folder {
+            path,
+            file_name: Some("gg-app".into()),
+        },
+    ]))
+}
+
+fn native_log_builder(
+    debug_enabled: bool,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<tauri_plugin_log::Builder, String> {
+    let builder = tauri_plugin_log::Builder::new().level(log::LevelFilter::Info);
+    match native_log_override_targets(debug_enabled, value)? {
+        Some(targets) => Ok(builder
+            .clear_targets()
+            .targets(targets.map(tauri_plugin_log::Target::new))),
+        None => Ok(builder
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Stdout,
+            ))
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("gg-app".into()),
+                },
+            ))),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_diagnostics();
+    let logging = native_log_builder(
+        cfg!(debug_assertions),
+        std::env::var_os("GG_APP_DEV_LOG_DIR").as_deref(),
+    )
+    .expect("invalid native logging configuration");
     let daemon_token =
         generate_daemon_auth_token().expect("failed to generate per-launch daemon bearer token");
     let mut default_headers = reqwest::header::HeaderMap::new();
@@ -10313,19 +10364,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Info)
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("gg-app".into()),
-                    },
-                ))
-                .build(),
-        )
+        .plugin(logging.build())
         .manage(Daemon {
             token: daemon_token,
             ..Default::default()
@@ -10789,6 +10828,66 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_log_override_selects_only_stdout_and_requested_folder() {
+        let path = std::env::current_dir().unwrap().join("isolated-native-logs");
+        let targets = native_log_override_targets(true, Some(path.as_os_str()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(&targets[0], tauri_plugin_log::TargetKind::Stdout));
+        assert!(matches!(&targets[1], tauri_plugin_log::TargetKind::Folder {
+            path: selected, file_name: Some(name),
+        } if selected == &path && name == "gg-app"));
+        assert!(!targets
+            .iter()
+            .any(|target| matches!(target, tauri_plugin_log::TargetKind::LogDir { .. })));
+        assert!(native_log_builder(true, Some(path.as_os_str())).is_ok());
+    }
+
+    #[test]
+    fn native_log_override_unset_preserves_normal_logging() {
+        assert!(native_log_override_targets(true, None).unwrap().is_none());
+        assert!(native_log_builder(true, None).is_ok());
+    }
+
+    #[test]
+    fn native_log_override_rejects_empty_relative_and_nul_paths() {
+        let absolute = std::env::current_dir().unwrap().join("invalid\0logs");
+        for value in [
+            std::ffi::OsStr::new(""),
+            std::ffi::OsStr::new("relative/logs"),
+            std::ffi::OsStr::new("../logs"),
+            absolute.as_os_str(),
+        ] {
+            assert!(native_log_override_targets(true, Some(value)).is_err());
+            // Invalid overrides must propagate errors instead of returning the normal builder.
+            assert!(native_log_builder(true, Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn native_log_override_release_ignores_even_invalid_values() {
+        let absolute = std::env::current_dir().unwrap().join("isolated-native-logs");
+        for value in [
+            None,
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("relative")),
+            Some(absolute.as_os_str()),
+        ] {
+            assert!(native_log_override_targets(false, value).unwrap().is_none());
+            assert!(native_log_builder(false, value).is_ok());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_log_override_rejects_drive_relative_and_root_relative_paths() {
+        for value in [r"C:logs", r"\logs"] {
+            assert!(native_log_builder(true, Some(std::ffi::OsStr::new(value))).is_err());
+        }
+    }
 
     /// Guards the startup crash from the reqwest 0.13 bump: the shared client is
     /// built before anything else in `run()`, and without a rustls provider that

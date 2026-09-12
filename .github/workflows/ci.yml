@@ -113,9 +113,9 @@ jobs:
   app:
     name: app · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # 45 not 30: Windows also builds and installs the isolated NSIS smoke flavor
-    # after the MSI smoke; cold Rust caches remain substantially slower.
-    timeout-minutes: 45
+    # Windows also runs the bounded opportunity developer smoke before the
+    # installer smokes. Keep cold-cache headroom and time for failure uploads.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -229,6 +229,39 @@ jobs:
         shell: bash
         timeout-minutes: 15
         run: pnpm --filter gg-app smoke:cross-pane-project-isolation-dev
+
+      # Serial with the other native smokes: Vite owns fixed port 1420 and
+      # strictPort rejects an existing listener. Reuse the Rust cache above;
+      # the fixture builds the current developer target, never a packaged app.
+      # Detector route and local provider transport are explicitly mocked;
+      # setup/approval/scan/isolated execution/persistence/rescan remain real.
+      - name: Programmatic execution native smoke
+        id: programmatic_execution_smoke
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          TEMP: ${{ runner.temp }}/programmatic-execution-dev-smoke
+          TMP: ${{ runner.temp }}/programmatic-execution-dev-smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEMP"
+          node gg-app/scripts/programmatic-execution-dev-smoke.mjs --identity com.ggcoder.local-fork 2>&1 | tee "$TEMP/console.log"
+
+      - name: Upload failed programmatic execution evidence
+        if: failure() && runner.os == 'Windows' && steps.programmatic_execution_smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: programmatic-execution-dev-smoke-${{ github.sha }}
+          # Only diagnostics, never the isolated home, auth, or staged source.
+          path: |
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/console.log
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/result.json
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/failure.json
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/cleanup.json
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/developer.log
+          if-no-files-found: error
+          retention-days: 7
 
       # Windows-only, and the ONLY job that exercises real installer output.
       # `smoke-sidecar` above proves the bundled runtime loads, but it launches

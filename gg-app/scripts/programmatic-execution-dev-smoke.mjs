@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync, readdirSync, realpathSync } from "node:fs";
 import http from "node:http";
+import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -41,37 +42,20 @@ function snapshot(directory, prefix = "") {
   return result;
 }
 
-async function seed(paths, agentDir) {
-  const previous = { ...process.env };
-  try {
-    process.env.HOME = paths.home;
-    process.env.USERPROFILE = paths.home;
-    process.env.GG_AGENT_DIR = agentDir;
-    const { buildProgrammaticProfileProposal, persistProgrammaticProfile } = await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/profile.js")));
-    const { runProgrammaticScan } = await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/lifecycle.js")));
-    mkdirSync(join(paths.project, "src-tauri"), { recursive: true });
-    writeFileSync(join(paths.project, ".gitignore"), ".gg/\n");
-    writeFileSync(join(paths.project, "AGENTS.md"), "NECESSARY FIXTURE PROJECT INSTRUCTIONS\n");
-    json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture" });
-    writeFileSync(join(paths.project, "src-tauri/Cargo.toml"), "[package]\nname='fixture'\n");
-    json(join(paths.project, "src-tauri/tauri.conf.json"), {});
-    const proposal = await buildProgrammaticProfileProposal(paths.project);
-    assert.equal((await persistProgrammaticProfile(paths.project, proposal.configurationFingerprint, proposal.profile)).ok, true);
-    assert.equal((await runProgrammaticScan(paths.project)).ok, true);
-    const statePath = join(paths.project, ".gg/programmatic/state.json");
-    const state = JSON.parse(readFileSync(statePath, "utf8"));
-    assert.equal(state.records.length, 1);
-    state.records[0].opportunity.route = { status: "routable", specialistCommand: "research" };
-    json(statePath, state);
-    const profilePath = join(paths.project, ".gg/programmatic/profile.json");
-    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
-    profile.profile.scanners[0].specialistCommand = "research";
-    json(profilePath, profile);
-    return { id: state.records[0].opportunity.identity.id, fingerprint: state.configurationFingerprint.sha256, condition: state.records[0].opportunity.verification, statePath };
-  } finally {
-    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
-    Object.assign(process.env, previous);
-  }
+function seed(paths) {
+  mkdirSync(join(paths.project, "src-tauri"), { recursive: true });
+  writeFileSync(join(paths.project, ".gitignore"), ".gg/\n");
+  writeFileSync(join(paths.project, "AGENTS.md"), "NECESSARY FIXTURE PROJECT INSTRUCTIONS\n");
+  json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture" });
+  writeFileSync(join(paths.project, "src-tauri/Cargo.toml"), "[package]\nname='fixture'\n");
+  json(join(paths.project, "src-tauri/tauri.conf.json"), {});
+  // Only this staged detector is mocked. Production profile validation, scanning and storage remain real.
+  const detector = readFileSync(join(workspace, "packages/ggcoder/dist/core/programmatic/opportunities.js"), "utf8");
+  const needle = 'specialistCommand: "setup-tauri-package"';
+  assert.equal(detector.split(needle).length - 1, 1, "Exactly one detector route boundary");
+  const stagedDetector = join(paths.audit, "fixture-opportunities.js");
+  writeFileSync(stagedDetector, detector.replace(needle, 'specialistCommand: "research"'));
+  return { stagedDetector, statePath: join(paths.project, ".gg/programmatic/state.json") };
 }
 
 async function run() {
@@ -80,13 +64,14 @@ async function run() {
   // Compile the current developer target; a debug-directory executable can be a stale smoke build.
   const nativeCommand = "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json";
   assert.ok(existsSync(join(workspace, "packages/ggcoder/dist/core/programmatic/execution.js")), "Compile the development dispatcher first.");
-  const paths = createIsolatedProfile(mkdtempSync(join(tmpdir(), "gg-programmatic-execution-")));
+  const paths = createIsolatedProfile(realpathSync.native(mkdtempSync(join(tmpdir(), "gg-programmatic-execution-"))));
   const agentDir = join(paths.home, ".gg/identities", identity);
   mkdirSync(join(agentDir, "commands"), { recursive: true });
   writeFileSync(join(agentDir, "commands/research.md"), `---\nname: research\ndescription: Harmless fixture\n---\n${fixtureBody}\n`);
   json(join(agentDir, "auth.json"), {});
   json(join(agentDir, "settings.json"), { defaultProvider: "azure", defaultModel: "azure:fixture", autoCompact: false, idealReviewEnabled: false });
-  const fixture = await seed(paths, agentDir);
+  const fixture = seed(paths);
+  assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false);
   const baseline = snapshot(paths.project);
   const requests = [];
   let providerFailure;
@@ -124,6 +109,7 @@ async function run() {
   for (const key of Object.keys(env)) if (/(?:API_KEY|ACCESS_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIALS|^AZURE_|^HOMEDRIVE$|^HOMEPATH$)/i.test(key)) delete env[key];
   Object.assign(env, { GG_SIDECAR_PATH: fileURLToPath(import.meta.url), GG_PROGRAMMATIC_EXECUTION_FIXTURE_MODE: "sidecar",
     GG_PROGRAMMATIC_EXECUTION_FIXTURE_PROVIDER: providerUrl,
+    GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector,
     GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: "minimized",
     COREPACK_HOME: process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node/corepack"), COREPACK_DEFAULT_TO_LATEST: "0",
     CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
@@ -142,14 +128,40 @@ async function run() {
     }, 300_000), (target) => String(target.url).startsWith("http://localhost:1420"));
     await client.send("Runtime.enable");
     await waitFor("developer document", () => client.evaluate(`location.origin === "http://localhost:1420" && document.readyState === "complete"`));
+    await waitFor("initial workspace persistence", () => client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`));
+    await client.evaluate(`(() => {
+      localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({ version: 9, root: { type: "leaf", paneId: "primary" }, focusedPaneId: "primary", panes: { primary: { kind: "agent", mode: "code", cwd: ${JSON.stringify(paths.project)}, sessionPath: null } } }));
+      location.reload(); return true;
+    })()`);
+    await waitFor("rendered project pane", () => client.evaluate(`!!document.querySelector('.agent-pane textarea')`));
     await waitFor("native session", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s => s.ready && s.provider === "azure" && s)`));
     const parentState = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     await client.evaluate(`import("/src/agent.ts").then(m => { window.fixtureEvents=[]; window.fixtureUnsubscribe=m.subscribe(e=>{ if (["ask_user","text_delta","done"].includes(e.type) && window.fixtureEvents.length < 100) window.fixtureEvents.push(e); }); return true; })`);
-    await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_prompt", { paneId:"primary", text:${JSON.stringify(`/programmatic-run ${fixture.id} ${fixture.fingerprint}`)}, attachments:[], meta:null })`);
+    const click = async (label) => {
+      await waitFor(`rendered ${label}`, () => client.evaluate(`Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`));
+      await client.evaluate(`Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled).click()`);
+    };
+    await click("Opportunities");
+    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Setup required")`));
+    await click("Inspect setup");
+    await waitFor("exact proposal", () => client.evaluate(`document.querySelector('[aria-label="Exact proposed profile"]')?.textContent.includes('"research"')`));
+    assert.equal(requests.length, 0, "No provider dispatch during setup inspection");
+    assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false, "Inspection must not write approval");
+    await click("Approve setup");
+    await waitFor("approved profile", () => existsSync(join(paths.project, ".gg/programmatic/profile.json")));
+    await click("Rescan");
+    await waitFor("persisted scan", () => existsSync(fixture.statePath));
+    const scanned = JSON.parse(readFileSync(fixture.statePath, "utf8"));
+    assert.equal(scanned.records.length, 1);
+    Object.assign(fixture, { id: scanned.records[0].opportunity.identity.id, fingerprint: scanned.configurationFingerprint.sha256, condition: scanned.records[0].opportunity.verification });
+    await waitFor("selectable opportunity", () => client.evaluate(`!!document.querySelector('.programmatic-row:not(:disabled)')`));
+    await client.evaluate(`document.querySelector('.programmatic-row:not(:disabled)').click()`);
+    await click("Run selected opportunity");
     const question = await waitFor("native approval question", () => client.evaluate(`window.fixtureEvents.find(e=>e.type==="ask_user")?.data`));
     assert.equal(requests.length, 0, "No provider dispatch before approval");
     assert.match(question.questions[0].question, /research/);
-    await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_ask_user", {paneId:"primary", id:${JSON.stringify(question.id)}, action:"answer", answers:${JSON.stringify({ [question.questions[0].id]: question.questions[0].options[0].value })}})`);
+    await waitFor("rendered specialist approval", () => client.evaluate(`Array.from(document.querySelectorAll('[data-ask-option]')).some(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)}))`));
+    await client.evaluate(`Array.from(document.querySelectorAll('[data-ask-option]')).find(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)})).click()`);
     await waitFor("isolated result through native events", () => client.evaluate(`window.fixtureEvents.some(e=>e.type==="text_delta" && e.data.text.includes(${JSON.stringify(completion)}))`));
     await waitFor("parent settled", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s=>!s.running)`));
     if (providerFailure) throw providerFailure;
@@ -161,9 +173,14 @@ async function run() {
     const allowed = new Set(["read", "find", "grep", "ls", "code_search", "code_nav", "web_search", "web_fetch", "ask_user", "research_corpus", "programmatic_result"]);
     assert.ok(requests[0].tools.every((tool) => allowed.has(tool.name)));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].lifecycle.state, "completed");
+    await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('completed')`));
+    await click("Rescan");
+    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('completed') && document.querySelector('.programmatic-detail')?.textContent.includes('completed') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
+    assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].opportunity.identity.id, fixture.id);
+    assert.equal(requests.length, 3, "Rescan must not dispatch another specialist");
     const after = snapshot(paths.project);
     const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]);
-    assert.deepEqual(changes.sort(), [".gg/programmatic/state.json", ".gg/programmatic/state.previous.json"]);
+    assert.deepEqual(changes.sort(), [".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json"]);
     const finalParent = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     assert.equal(finalParent.sessionId, parentState.sessionId);
     assert.equal(finalParent.messageCount, parentState.messageCount);
@@ -171,8 +188,15 @@ async function run() {
     assert.equal(transcriptFiles.length, 1, "Only the host transcript exists");
     const events = await client.evaluate(`window.fixtureEvents`);
     assert.ok(events.some((event) => event.type === "text_delta" && event.data.text.includes("[research] read")));
-    json(join(paths.audit, "result.json"), { passed: true, minimized: true, real: ["developer app", "native prompt/question/event proxy", "Node dispatcher", "AgentSession", "read tool", "lifecycle storage"], mocked: ["local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false });
-  } catch (error) { failure = error; }
+    json(join(paths.audit, "result.json"), { passed: true, minimized: true, real: ["rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", "Node dispatcher", "AgentSession", "read tool", "lifecycle storage"], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false });
+  } catch (error) {
+    failure = error;
+    // Native startup can fail before CDP exists; retain that failure too.
+    json(join(paths.audit, "failure.json"), { error: error.message });
+    if (client) {
+      try { json(join(paths.audit, "failure.json"), { error: error.message, text: await client.evaluate('document.body.innerText'), buttons: await client.evaluate('Array.from(document.querySelectorAll("button")).map(b=>({text:b.textContent,disabled:b.disabled}))') }); } catch { /* Original failure remains authoritative. */ }
+    }
+  }
   finally {
     client?.close();
     const cleanupErrors = [];
@@ -187,6 +211,7 @@ async function run() {
     server.closeAllConnections();
     await new Promise((done) => server.close(done));
     closeSync(logFd);
+    json(join(paths.audit, "cleanup.json"), { ownedProcessTreesStopped: cleanupErrors.length === 0, providerServerClosed: true, errors: cleanupErrors.map((error) => error.message) });
     if (cleanupErrors.length) throw new AggregateError([...(failure ? [failure] : []), ...cleanupErrors], "Fixture cleanup failed");
   }
   console.log(`Fixture evidence: ${paths.audit}`);
@@ -208,6 +233,15 @@ if (mode === "sidecar") {
     // Mock only the provider transport; preserve the real Azure configuration validator.
     return realFetch(url, init);
   };
+  const detectorUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/opportunities.js")).href;
+  const original = readFileSync(fileURLToPath(detectorUrl), "utf8");
+  const staged = readFileSync(process.env.GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR, "utf8");
+  const needle = 'specialistCommand: "setup-tauri-package"';
+  assert.equal(original.split(needle).length - 1, 1);
+  assert.equal(staged, original.replace(needle, 'specialistCommand: "research"'));
+  registerHooks({ load(target, context, nextLoad) {
+    return target === detectorUrl ? { format: "module", source: staged, shortCircuit: true } : nextLoad(target, context);
+  } });
   await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/app-sidecar.js")));
 } else if (process.argv[2] === "--preflight") {
   const { resolveAzureOpenAIConfig } = await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/core/auth-storage.js")));

@@ -216,31 +216,16 @@ describe("buildSystemPrompt", () => {
   });
 
   it.each([
-    [[], "6b584e17161089263de4d0b59bc347b5b2787c88e4211dce643da1000dcd3b9e"],
-    [["ask_user"], "207ab1fb6d7da730cd7754bb46e3fd22a2225671e6f26246b896a509025890aa"],
+    [[], "ff0f5fa41941e2cb3c9d091c2e1db6426b9e9e8117e7fbaa3642095dc766bb33"],
+    [["ask_user"], "6c7430d7e676c9d379fd96c1ff239fde74c51144986edde8841387070e73d2e6"],
   ] as const)(
-    "preserves the explicit-status response policy with tools %j",
+    "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
       const cwd = await makeProject();
       const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, toolNames);
       const talk = prompt
         .slice(sectionIndex(prompt, "## How to Talk"), sectionIndex(prompt, "## How to Work"))
         .trimEnd();
-      for (const rule of [
-        "Final reply starts with a bold status:",
-        "DONE (requested scope completed)",
-        "NOT FIXED (problem remains)",
-        "UNVERIFIED (changed, not verified)",
-        "BLOCKED (cannot proceed)",
-        "NEEDS APPROVAL (awaiting your decision)",
-        'required user action or "No action needed,"',
-        "investigation is not implementation; implementation is not verification or deployment",
-        "Surface remaining limitations and pending deployment beside the outcome",
-        'Never say "all clear" with unresolved work',
-        "Approval questions still use the ask channel below",
-      ]) {
-        expect(talk).toContain(rule);
-      }
       expect(createHash("sha256").update(talk).digest("hex")).toBe(hash);
     },
   );
@@ -291,21 +276,18 @@ describe("buildSystemPrompt", () => {
     expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
 
-    // The budget is the whole reply or it is nothing. Every earlier version
-    // carved out the parts that actually carried the bloat (step lists, the
-    // ask, batched question lists), so a 900-word reply satisfied every rule.
-    // These assertions keep the cap total and the escape hatches deleted.
-    expect(talk).toContain("Prose, lists, headers, the ask — everything counts, nothing is exempt");
-    expect(talk).toContain("each with your pick, inside the budget");
-    expect(talk).not.toContain("prose only; a step list or the ask doesn't count");
-    expect(talk).not.toContain("exempt from the reply and list caps");
-    expect(talk).not.toContain("Question lists are payload");
-    // "exempt" survives in exactly one place: the line that denies exemptions.
-    expect(talk.match(/exempt/g) ?? []).toHaveLength(1);
+    // Flexible detail must not compete with leftover hard reply caps.
+    expect(talk).toContain("treat length as flexible, not a hard limit");
+    expect(talk).toContain("Simple updates stay brief");
+    expect(talk).toContain("Avoid repetition and unnecessary background");
+    expect(talk).toContain("each with your pick");
+    expect(talk).not.toContain("inside the budget");
+    expect(talk).not.toContain("max 5 items");
+    expect(talk).not.toContain("Needs a second line?");
+    expect(talk).not.toContain("earn a clause only");
+    expect(talk.match(/exempt/g) ?? []).toHaveLength(0);
 
-    // Cutting How to Talk was the point: it competes with the task for the
-    // model's attention, so the meta-instructions stay smaller than the reply
-    // budget they enforce is generous.
+    // Keep the style instructions compact even though reply length is flexible.
     expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(360);
 
     // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
@@ -370,14 +352,18 @@ describe("buildSystemPrompt", () => {
     for (const required of [
       "works directly in the user's codebase",
       "completing tasks end-to-end",
-      "**Budget: ~120 words, whole reply.**",
-      "everything counts, nothing is exempt",
-      "**One line per item, ≤15 words, max 5 items.**",
+      "**Clarity over brevity.**",
+      "treat length as flexible, not a hard limit",
+      "explanations, tradeoffs, plans, and unfamiliar concepts get more detail",
+      "**Short paragraphs by default.**",
+      "usually one to three sentences per paragraph",
+      "Use bullets for actual lists or steps, not every answer",
       "Take every safe, reversible step the goal implies",
       "never ask permission, merely suggest it, or leave it for the user",
       "ONE action that unblocks you",
       "what already works so finished work is never buried",
-      "conclusion, not investigation",
+      "Explain what changed and why it matters together",
+      "Include enough reasoning to connect ideas",
       // Jargon is opt-in, not default: an identifier only earns a mention when
       // the user has to act on it, and then it carries its stake in the same
       // breath. Everything else is described by behavior, not by name.
@@ -433,6 +419,10 @@ describe("buildSystemPrompt", () => {
       expect(prompt).toContain(required);
     }
 
+    expect(prompt).not.toContain("Budget: ~120 words");
+    expect(prompt).not.toContain("≤15 words");
+    expect(prompt).not.toContain("≤8 words");
+    expect(prompt).not.toContain("inside the budget");
     expect(prompt).not.toContain("doable in under 2 minutes");
     expect(prompt).not.toContain("Estimate time only when");
     expect(prompt).not.toContain("plan multi-file work first");

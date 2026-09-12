@@ -9,10 +9,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { SessionManager } from "../core/session-manager.js";
 import { restoreToolImages } from "../app-sidecar-image-history.js";
 import { resolveToolSchema, stream, StreamResult, type Message } from "@kenkaiiii/gg-ai";
+import type * as GgAi from "@kenkaiiii/gg-ai";
 import { agentLoop } from "@kenkaiiii/gg-agent";
 
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@kenkaiiii/gg-ai")>(),
+  ...await importOriginal<typeof GgAi>(),
   stream: vi.fn(),
 }));
 

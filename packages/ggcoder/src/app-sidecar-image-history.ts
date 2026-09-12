@@ -6,7 +6,7 @@ import { downscaleForPreview } from "./utils/image.js";
 type HistoryImage = { src: string; path?: string };
 
 async function existingOriginal(value: unknown): Promise<string | undefined> {
-  if (typeof value !== "string" || value.length > 32768 || /[\x00-\x1f\x7f]/.test(value) || !path.isAbsolute(value)) return;
+  if (typeof value !== "string" || value.length > 32768 || Array.from(value).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) || !path.isAbsolute(value)) return;
   try {
     return (await fs.stat(value)).isFile() ? value : undefined;
   } catch {
@@ -22,7 +22,7 @@ function imageResult(value: unknown): ToolResult["imageResult"] {
   for (const value of result.images) {
     if (!value || typeof value !== "object") return;
     const image = value as Record<string, unknown>;
-    if (image.type !== "image" || typeof image.path !== "string" || image.path.length > 32768 || /[\x00-\x1f\x7f]/.test(image.path)) return;
+    if (image.type !== "image" || typeof image.path !== "string" || image.path.length > 32768 || Array.from(image.path).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) return;
     if (!path.isAbsolute(image.path) || !["image/png", "image/jpeg", "image/webp"].includes(String(image.mediaType))) return;
     if (typeof image.data !== "string" || image.data.length === 0 || image.data.length > 2_000_000 || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) return;
   }

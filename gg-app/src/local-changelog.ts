@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-09-upstream-0630-images-and-prompts",
+    id: "local-2026-09-12-upstream-0634-reviews-and-replies",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-09-upstream-0630-images-and-prompts",
+    label: "Upstream 0.63.0, with clearer prompts and image results",
+    date: "2026-09-09",
+    items: [
+      "Sharpen your request without changing the mission. `Enhance?` respects your selected model and keeps questions, details, and exclusions in view. Empty or cut-short rewrites are rejected rather than replacing your draft.",
+      "Image requests use `GPT Image 2.5 Flare` for creation and `Sunburst` for edits through your connected OpenAI account, even when your chat uses another provider. Saved originals are not resized to match your request. Size mismatches get a warning; exact sizing is not guaranteed, and transparent backgrounds are not supported.",
+      "Pick up your images where you left off. Reopened chats keep multiple previews paired with their saved originals and retain image warnings. If generation or preview creation stops partway through, the result lists what was saved without retrying it. Deleted originals lose their open action, not their retained preview.",
+      "A sent prompt should stay sent. Accepted prompts are saved before work begins, and pane-local drafts stay with their workspace instead of spilling into another pane. Regular sent prompts also get a distinct blue treatment without changing queued messages or question answers.",
+      "Question cards wait for an accepted answer before looking settled. Busy controls and `Autopilot` keep their session boundaries, so a stale response cannot silently approve a newer request or start unrelated work.",
+      "Repository references are easier to follow. Linked repository names take you to the source without losing the context of the result.",
+      "Preview ready? Keep going without shutting it down. `Dev-server readiness` lets the agent check your page while the server stays running, without calling that ongoing command complete.",
+      "Keep moving while `edit checks` run in the background. Delayed diagnostics still reach the agent without bringing back the Local Fork's removed automatic check reminders.",
+    ],
   },
   {
     id: "local-2026-09-07-upstream-0621-and-roadmap-recovery",

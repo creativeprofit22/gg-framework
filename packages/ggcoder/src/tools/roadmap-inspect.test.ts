@@ -36,6 +36,10 @@ describe("createRoadmapInspectTool", () => {
       additionalProperties: false,
     });
     expect(tool.description).toContain("before drafting");
+    expect(tool.description).toContain("assessing existing-phase status");
+    expect(tool.description).toContain("historical reports");
+    expect(tool.description).toContain("not proof of current criteria");
+    expect(tool.description).toContain("legacy summaries may lack evidence and provenance");
     expect(tool.description).toContain("bounded Project Notes v3 Roadmap projection");
   });
 });

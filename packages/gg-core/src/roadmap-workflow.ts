@@ -3,6 +3,8 @@ import {
   isNotesReviewDecision,
   isNotesRoadmapReviewer,
   isNotesVerificationStatus,
+  isValidNotesRoadmapEvidence,
+  NOTES_ROADMAP_REASON_MAX_LENGTH,
   NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
   canonicalReferenceIdentity,
   normalizeCanonicalUrl,
@@ -40,6 +42,13 @@ export type RoadmapWorkflowValidationResult<T> =
 export interface RoadmapInspectionVerificationSummary {
   status: NotesVerificationStatus;
   reason: string | null;
+  /** Historical report fields: emitted together; absent only in legacy projections.
+   * Neither a legacy label nor a historical report proves current completion criteria.
+   */
+  evidence?: string[];
+  updateId?: string;
+  timestamp?: string;
+  progress?: string;
 }
 
 export interface RoadmapInspectionReviewSummary {
@@ -698,11 +707,23 @@ function isRoadmapInspectionPhase(value: unknown): value is RoadmapInspectionPha
 }
 
 function isInspectionVerification(value: unknown): boolean {
+  if (value === null) return true;
+  // Accept the exact legacy shape, never partially populated provenance or unknown fields.
+  if (!isRecord(value)) return false;
+  const legacy = Object.keys(value).length === 2;
+  const keys = legacy
+    ? ["status", "reason"]
+    : ["status", "reason", "evidence", "updateId", "timestamp", "progress"];
+  if (!isRecordWithExactKeys(value, keys)) return false;
+  if (!isNotesVerificationStatus(value.status) || !isNullableString(value.reason)) return false;
+  if (legacy) return true;
   return (
-    value === null ||
-    (isRecordWithExactKeys(value, ["status", "reason"]) &&
-      isNotesVerificationStatus(value.status) &&
-      isNullableString(value.reason))
+    (value.reason === null || value.reason.length <= NOTES_ROADMAP_REASON_MAX_LENGTH) &&
+    isValidNotesRoadmapEvidence(value.evidence) &&
+    isNonEmptyString(value.updateId) &&
+    isIsoTimestamp(value.timestamp) &&
+    isNonEmptyString(value.progress) &&
+    value.progress.length <= 4_096
   );
 }
 

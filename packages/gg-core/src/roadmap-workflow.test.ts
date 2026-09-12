@@ -7,6 +7,7 @@ import {
   ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
   ROADMAP_PHASE_TITLE_MAX_LENGTH,
   ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
+  isRoadmapInspectionOutcome,
   isRoadmapPhaseDraft,
   isRoadmapPhaseDraftApprovalResult,
   isRoadmapPhaseDraftRejectionResult,
@@ -29,6 +30,126 @@ function request(): RoadmapPhaseDraftRequest {
     ],
   };
 }
+
+function inspectionWithVerification(latestVerification: unknown) {
+  return {
+    status: "ok",
+    inspection: {
+      projectKey: "/work/app",
+      revision: 3,
+      phases: [
+        {
+          id: "phase-1",
+          title: "Phase",
+          goal: "Goal",
+          doneWhen: ["Checks pass"],
+          order: 0,
+          status: "review",
+          archivedAt: null,
+          hasBoundSession: true,
+          latestProgress: "Later progress",
+          latestBlocker: null,
+          latestVerification,
+          latestReview: null,
+          hasUserStatusOverride: false,
+        },
+      ],
+    },
+  };
+}
+
+const verificationReport = {
+  status: "passed",
+  reason: null,
+  evidence: ["reports/checks.md: focused checks passed"],
+  updateId: "update-1",
+  timestamp: "2026-08-05T12:00:00.000Z",
+  progress: "Verification completed",
+};
+
+describe("Roadmap inspection verification", () => {
+  it.each(["passed", "failed", "exception-requested"])(
+    "accepts historical %s reports",
+    (status) => {
+      expect(
+        isRoadmapInspectionOutcome(
+          inspectionWithVerification({
+            ...verificationReport,
+            status,
+            reason: status === "passed" ? null : "Reason",
+          }),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("accepts null and exact legacy summaries without inventing evidence", () => {
+    for (const report of [null, { status: "passed", reason: null }]) {
+      expect(isRoadmapInspectionOutcome(inspectionWithVerification(report))).toBe(true);
+    }
+    // Historical records may legitimately have no evidence; inspection is not a Done gate.
+    expect(
+      isRoadmapInspectionOutcome(
+        inspectionWithVerification({ ...verificationReport, evidence: [] }),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts the persisted evidence, progress, and reason bounds", () => {
+    expect(
+      isRoadmapInspectionOutcome(
+        inspectionWithVerification({
+          ...verificationReport,
+          evidence: Array.from({ length: 20 }, () => "x".repeat(4_096)),
+          progress: "x".repeat(4_096),
+          reason: "x".repeat(1_024),
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    { evidence: Array.from({ length: 21 }, () => "report") },
+    { evidence: ["x".repeat(4_097)] },
+    { evidence: [""] },
+    { evidence: [" "] },
+    { evidence: [42] },
+    { evidence: null },
+    { progress: "x".repeat(4_097) },
+    { progress: " " },
+    { progress: null },
+    { reason: "x".repeat(1_025) },
+    { reason: 42 },
+    { timestamp: "not-a-date" },
+    { timestamp: null },
+    { updateId: " " },
+    { updateId: 42 },
+    { status: "unknown" },
+    { sourcePrompt: "hidden" },
+    { sessionPath: "/hidden" },
+  ])("rejects malformed or oversized report fields: %j", (invalid) => {
+    expect(
+      isRoadmapInspectionOutcome(inspectionWithVerification({ ...verificationReport, ...invalid })),
+    ).toBe(false);
+  });
+
+  it("rejects missing fields and partial legacy upgrades", () => {
+    for (const key of Object.keys(verificationReport)) {
+      const partial: Record<string, unknown> = { ...verificationReport };
+      delete partial[key];
+      expect(isRoadmapInspectionOutcome(inspectionWithVerification(partial))).toBe(false);
+    }
+    expect(
+      isRoadmapInspectionOutcome(
+        inspectionWithVerification({
+          status: "passed",
+          reason: null,
+          evidence: ["report"],
+        }),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("Roadmap workflow protocol", () => {
   it("accepts and normalizes a canonical flat request", () => {

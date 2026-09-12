@@ -21,8 +21,10 @@ export function createRoadmapInspectTool(
   return {
     name: "roadmap_inspect",
     description:
-      "Inspect the current bounded Project Notes v3 Roadmap projection before drafting phases. " +
+      "Inspect the current bounded Project Notes v3 Roadmap projection before drafting phases or assessing existing-phase status. " +
       "Always inspect immediately before roadmap_phase_draft so the revision and existing phases are current. " +
+      "Verification evidence and provenance describe historical reports, not proof of current criteria or authorization for automatic Done. " +
+      "Assess the matching verification progress separately from latestProgress; legacy summaries may lack evidence and provenance. " +
       "This read-only tool returns only the bounded Roadmap projection, never the full Notes document.",
     parameters: RoadmapInspectParams,
     rawInputSchema: roadmapInspectInputSchema,

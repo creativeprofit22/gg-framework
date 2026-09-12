@@ -27,7 +27,6 @@ function owningSession(): AppSidecarRoadmapToolSession {
       references: [],
       executionStage: "implementing",
     }),
-    getMessages: () => [],
     getState: () => sessionLink,
   };
 }
@@ -49,10 +48,8 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn() },
-      durableExecution: false,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => null,
       broadcastNotesSnapshot: vi.fn(),
     });
 
@@ -87,10 +84,8 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn(), checkpointPhaseExecutionStep },
-      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => null,
       captureWorkspaceSnapshot: async () => {
         order.push("capture");
         return workspace;
@@ -138,10 +133,8 @@ describe("AppSidecarRoadmapToolHost", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: { recordRoadmapStatusUpdate: vi.fn(), checkpointPhaseExecutionStep },
-      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => null,
       captureWorkspaceSnapshot,
       mutateWithLeaseFence: async () => ({ status: "phase-lease-lost" as const }),
       broadcastNotesSnapshot: vi.fn(),
@@ -172,13 +165,9 @@ describe("AppSidecarRoadmapToolHost", () => {
     }));
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
-      durableExecution: true,
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => {
-        throw new Error("Progress is not completion authority");
-      },
       broadcastNotesSnapshot: vi.fn(),
       mutateStatusWithLeaseFence: async (_phaseId, operation) => ({
         status: "executed",
@@ -187,7 +176,6 @@ describe("AppSidecarRoadmapToolHost", () => {
     });
     const fresh = {
       getActivePhaseContext: () => undefined,
-      getMessages: () => [],
       getState: () => sessionLink,
     };
     const output = await host
@@ -218,11 +206,9 @@ describe("AppSidecarRoadmapToolHost", () => {
     const mutateStatusWithLeaseFence = vi.fn(async () => ({ status }));
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
-      durableExecution: true,
       repository: { recordRoadmapStatusUpdate },
       reconciliations,
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => null,
       broadcastNotesSnapshot,
       mutateStatusWithLeaseFence,
     });

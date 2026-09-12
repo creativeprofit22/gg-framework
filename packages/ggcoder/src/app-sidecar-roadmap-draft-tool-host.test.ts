@@ -1,4 +1,9 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { isRoadmapInspectionOutcome } from "@kenkaiiii/gg-core/roadmap-workflow";
+import { ProjectNotesRepository } from "./project-notes-repository.js";
 import type {
   NotesDocumentV3,
   NotesPhase,
@@ -126,6 +131,119 @@ function host(
 }
 
 describe("projectRoadmapInspection", () => {
+  it.each(["passed", "failed", "exception-requested"] as const)(
+    "retains persisted %s evidence and provenance across a later progress-only update",
+    async (verification) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-inspection-"));
+      try {
+        const repository = new ProjectNotesRepository(root);
+        const initial = loaded(1, [phase({ order: 0, roadmapEvents: [] })]);
+        if (initial.status !== "ok") throw new Error("Expected fixture snapshot");
+        const migrated = await repository.migrate("/work/app", initial.snapshot.document);
+        expect(migrated.status, JSON.stringify(migrated)).toBe("ok");
+        const report = {
+          updateId: "verified-update",
+          phaseId: "phase-1",
+          actor: "gg-coder" as const,
+          transition: "in-progress" as const,
+          progress: "Focused verification report",
+          blocker: null,
+          requiredExternalAction: null,
+          evidence: ["reports/focused-checks.md: bounded criteria results"],
+          verification,
+          verificationReason: verification === "passed" ? null : "Check unavailable or failed",
+          proposedReferences: [],
+          timestamp,
+          expectedSession: { sessionId: "bound-session", sessionPath: null },
+          requireBoundPhase: true,
+          autopilotEnabled: false,
+        };
+        expect((await repository.recordRoadmapStatusUpdate("/work/app", report)).status).toBe(
+          "committed",
+        );
+        expect(
+          (
+            await repository.recordRoadmapStatusUpdate("/work/app", {
+              ...report,
+              updateId: "later-progress",
+              progress: "Later unrelated progress",
+              evidence: ["Not verification evidence"],
+              verification: null,
+              verificationReason: null,
+              timestamp: "2026-08-05T13:00:00.000Z",
+            })
+          ).status,
+        ).toBe("committed");
+
+        // A fresh repository and tool host must use persisted evidence, not session memory.
+        const beforeInspection = await repository.load("/work/app");
+        const fresh = host((cwd) => new ProjectNotesRepository(root).load(cwd)).value;
+        const tool = fresh
+          .createSessionTools()
+          .find((candidate) => candidate.name === "roadmap_inspect")!;
+        const outcome = JSON.parse((await tool.execute({}, {} as never)) as string);
+        expect(isRoadmapInspectionOutcome(outcome)).toBe(true);
+        expect(outcome.inspection.revision).toBe(3);
+        expect(outcome.inspection.phases[0]).toMatchObject({
+          status: "review",
+          hasUserStatusOverride: true,
+          latestProgress: "Later unrelated progress",
+          latestVerification: {
+            status: verification,
+            reason: report.verificationReason,
+            evidence: report.evidence,
+            updateId: report.updateId,
+            timestamp,
+            progress: report.progress,
+          },
+        });
+        const serialized = JSON.stringify(outcome);
+        for (const hidden of [
+          "sessionPath",
+          "roadmapEvents",
+          "sourcePrompt",
+          "verificationSession",
+          "currentFocus",
+        ]) {
+          expect(serialized).not.toContain(hidden);
+        }
+        expect(await repository.load("/work/app")).toEqual(beforeInspection);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("returns no verification when there are no verification reports", () => {
+    const outcome = projectRoadmapInspection(
+      "/work/app",
+      loaded(1, [phase({ roadmapEvents: [] })]),
+    );
+    expect(outcome).toMatchObject({
+      status: "ok",
+      inspection: { phases: [{ latestVerification: null }] },
+    });
+  });
+  it("preserves maximum bounded evidence without aliasing stored events", () => {
+    const source = phase();
+    const report = source.roadmapEvents[0]!;
+    if (report.type !== "status-update") throw new Error("Expected status fixture");
+    report.evidence = Array.from({ length: 20 }, () => "x".repeat(4_096));
+    report.progress = "p".repeat(4_096);
+    const outcome = projectRoadmapInspection("/work/app", loaded(4, [source]));
+    expect(isRoadmapInspectionOutcome(outcome)).toBe(true);
+    if (outcome.status !== "ok") throw new Error("Expected inspection");
+    expect(outcome.inspection.phases[0]!.latestVerification).toEqual({
+      status: "passed",
+      reason: null,
+      evidence: report.evidence,
+      updateId: report.id,
+      timestamp,
+      progress: report.progress,
+    });
+    expect(outcome.inspection.phases[0]!.latestVerification!.evidence).not.toBe(report.evidence);
+  });
+
   it("returns a sorted bounded projection with latest summaries", () => {
     const outcome = projectRoadmapInspection(
       "/work/app",
@@ -142,7 +260,14 @@ describe("projectRoadmapInspection", () => {
             id: "earlier",
             hasBoundSession: true,
             latestProgress: "Implementation complete",
-            latestVerification: { status: "passed", reason: null },
+            latestVerification: {
+              status: "passed",
+              reason: null,
+              evidence: ["pnpm test passed"],
+              updateId: "update-1",
+              timestamp,
+              progress: "Implementation complete",
+            },
             latestReview: { reviewer: "ken", decision: "accepted", reason: null },
             hasUserStatusOverride: true,
           },

@@ -237,19 +237,14 @@ describe("transparent status leases", () => {
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
-      durableExecution: true,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
-      resolvePlanProgress: () => {
-        throw new Error("Must not require old plan progress");
-      },
       broadcastNotesSnapshot: () => {},
       mutateStatusWithLeaseFence: (phaseId, operation) =>
         service.withStatusLease(fresh, phaseId, operation),
     });
     const [tool] = host.createSessionTools("coding", () => ({
       getActivePhaseContext: () => undefined,
-      getMessages: () => [],
       getState: () => fresh.getState(),
     }));
     const input = RoadmapStatusParams.parse({

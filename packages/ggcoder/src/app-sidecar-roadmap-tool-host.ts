@@ -1,8 +1,6 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type { Message } from "@kenkaiiii/gg-ai";
-import type { NotesWorkspaceSnapshotV1, NotesSessionLink } from "@kenkaiiii/gg-core/project-notes";
+import type { NotesWorkspaceSnapshotV1 } from "@kenkaiiii/gg-core/project-notes";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
-import type { PhaseImplementationPlanProgress } from "./app-sidecar-phase-completion.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { PhaseStatusLeaseFailure } from "./app-sidecar-phase-binding.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
@@ -37,26 +35,15 @@ export const APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES = [
 
 export interface AppSidecarRoadmapToolSession {
   getActivePhaseContext(): ActivePhaseContextV1 | undefined;
-  getMessages(): Message[];
   getState(): { sessionId: string; sessionPath: string | null };
 }
 
 export interface AppSidecarRoadmapToolHostDependencies {
   cwd: string;
-  durableExecution: boolean;
   repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate"> &
-    Partial<
-      Pick<
-        ProjectNotesRepository,
-        "load" | "checkpointPhaseExecutionStep" | "recordPhaseExecutionEvidence"
-      >
-    >;
+    Partial<Pick<ProjectNotesRepository, "checkpointPhaseExecutionStep">>;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
-  resolvePlanProgress(input: {
-    phaseId: string;
-    session: NotesSessionLink;
-  }): PhaseImplementationPlanProgress | null;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
   captureWorkspaceSnapshot?: () => Promise<NotesWorkspaceSnapshotV1>;

@@ -7,10 +7,15 @@ import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT } from "./app-sidecar-roadmap-draft-tool-host.js";
 import { AgentSession } from "./core/agent-session.js";
+import { createAppSidecarCodingRoadmapSessionOptions } from "./app-sidecar-roadmap-session-options.js";
+import { AppSidecarRoadmapToolHost } from "./app-sidecar-roadmap-tool-host.js";
+import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { createAppSidecarPhaseBindingService } from "./app-sidecar-phase-binding.js";
+import { RoadmapPhaseLeaseRepository } from "./roadmap-phase-lease-repository.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 
 interface ToolStep {
-  name: "roadmap_inspect" | "roadmap_phase_draft";
+  name: "roadmap_inspect" | "roadmap_phase_draft" | "roadmap_status" | "read" | "edit";
   args: Record<string, unknown>;
 }
 
@@ -418,6 +423,254 @@ async function runAppIntentEval(evaluation: IntentContractEval): Promise<{
   return { requestBodies, calledTools, pendingDraft: drafts.pending(project) };
 }
 
+// Scripted transport/tool/storage tests, NOT evidence of live-model intent selection.
+// Each case starts a fresh coding session; only synthetic files and Notes are used.
+describe("app Roadmap scripted real-host completion wiring", () => {
+  it.each([
+    "inline report",
+    "evidence path",
+    "explicit file",
+    "unmet criterion",
+    "missing evidence",
+  ])(
+    "%s",
+    async (scenario) => {
+      const { root, project, repository } = await createProject();
+      const roadmapPath = path.join(project, "ROADMAP.md");
+      const originalFile = "# File roadmap\nCore delivery: pending\n";
+      const completedFile = "# File roadmap\nCore delivery: done\n";
+      const report =
+        scenario === "unmet criterion"
+          ? "Synthetic check report: Core acceptance checks FAILED; exit 1."
+          : scenario === "missing evidence"
+            ? "No check has run; no supporting evidence is available."
+            : "Synthetic check report: Core acceptance checks pass; exit 0.";
+      await fs.writeFile(roadmapPath, originalFile);
+      await fs.writeFile(path.join(project, "check-report.md"), report);
+      const request =
+        scenario === "explicit file"
+          ? "Edit ROADMAP.md to mark Core delivery done. Do not update Project Notes."
+          : scenario === "evidence path"
+            ? "Mark the verified Core delivery phase Done using check-report.md as supporting Notes evidence, not as a file to edit."
+            : scenario === "unmet criterion"
+              ? `Check Core delivery against this report; do not mark Done if its criterion is unmet. ${report}`
+              : scenario === "missing evidence"
+                ? "Mark Core delivery Done, but no passing check report or supporting evidence is available."
+                : `Mark the verified Core delivery phase Done using this passing check report: ${report}`;
+      const before = await repository.load(project);
+      if (before.status !== "ok") throw new Error("Expected isolated Notes");
+      const drafts = new AppSidecarRoadmapDraftCoordinator();
+      const draftHost = new AppSidecarRoadmapDraftToolHost({
+        cwd: project,
+        repository,
+        drafts,
+        getOwningSession: () => session,
+      });
+      const binding = createAppSidecarPhaseBindingService({
+        repository,
+        leaseRepository: new RoadmapPhaseLeaseRepository(path.join(root, "agent")),
+        daemonInstanceId: "synthetic-intent-daemon",
+        processId: process.pid,
+        processStartToken: "synthetic-intent-start",
+      });
+      const broadcast = vi.fn();
+      const timestamp = "2026-09-12T00:00:00.000Z";
+      const statusHost = new AppSidecarRoadmapToolHost({
+        cwd: project,
+        repository,
+        reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+        projectAutopilot: { isEnabled: () => false },
+        broadcastNotesSnapshot: broadcast,
+        now: () => timestamp,
+        mutateStatusWithLeaseFence: (phaseId, operation) =>
+          binding.withStatusLease(session, phaseId, operation),
+      });
+      const requestBodies: Record<string, unknown>[] = [];
+      const scriptedCalls: ToolStep[] = [];
+      let inspectedRevision: number | undefined;
+      const outputFor = (body: Record<string, unknown>, name: string): string => {
+        const input = Array.isArray(body.input) ? body.input.filter(isRecord) : [];
+        const call = input.find((item) => item.type === "function_call" && item.name === name);
+        const output = input.find(
+          (item) => item.type === "function_call_output" && item.call_id === call?.call_id,
+        );
+        if (typeof output?.output !== "string") throw new Error(`Missing ${name} output`);
+        return output.output;
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          requestBodies.push(body);
+          const context = extractIntentPromptContext(body);
+          expect(context.request).toBe(request);
+          expect(context.instructions).toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
+          expect(context.declaredTools).toEqual(
+            expect.arrayContaining([
+              "roadmap_inspect",
+              "roadmap_status",
+              "roadmap_phase_draft",
+              "read",
+              "edit",
+            ]),
+          );
+          expect(context.consumedTools).toEqual(scriptedCalls.map((step) => step.name));
+          let step: ToolStep | undefined;
+          if (scenario === "explicit file") {
+            if (scriptedCalls.length === 0)
+              step = { name: "read", args: { file_path: roadmapPath } };
+            else if (scriptedCalls.length === 1) {
+              expect(outputFor(body, "read")).toContain("Core delivery: pending");
+              step = {
+                name: "edit",
+                args: {
+                  file_path: roadmapPath,
+                  edits: [{ old_text: "Core delivery: pending", new_text: "Core delivery: done" }],
+                },
+              };
+            }
+          } else if (scriptedCalls.length === 0) {
+            step = { name: "roadmap_inspect", args: {} };
+          } else {
+            const inspected = JSON.parse(outputFor(body, "roadmap_inspect"));
+            expect(inspected).toMatchObject({
+              status: "ok",
+              inspection: {
+                revision: before.snapshot.revision,
+                phases: [
+                  expect.objectContaining({
+                    id: "phase-core-delivery",
+                    doneWhen: ["Core acceptance checks pass"],
+                  }),
+                ],
+              },
+            });
+            inspectedRevision = inspected.inspection.revision as number;
+            if (scenario === "evidence path" && scriptedCalls.length === 1) {
+              step = { name: "read", args: { file_path: path.join(project, "check-report.md") } };
+            } else if (!context.consumedTools.includes("roadmap_status")) {
+              if (scenario === "evidence path") expect(outputFor(body, "read")).toContain(report);
+              // The failed/missing-evidence control scripts an honest non-completion report.
+              // Semantic assessment of criteria is a model responsibility, not a backend guarantee.
+              const incomplete = scenario === "unmet criterion" || scenario === "missing evidence";
+              step = {
+                name: "roadmap_status",
+                args: {
+                  update_id: `synthetic-${scenario.replaceAll(" ", "-")}`,
+                  phase_id: "phase-core-delivery",
+                  expected_revision: inspectedRevision,
+                  transition: incomplete ? "in-progress" : "done",
+                  progress: incomplete
+                    ? "Core acceptance verification remains unmet."
+                    : "Core acceptance checks passed.",
+                  verification: incomplete
+                    ? { result: "failed", reason: "Core acceptance is not verified." }
+                    : { result: "passed" },
+                  evidence:
+                    scenario === "missing evidence"
+                      ? []
+                      : [scenario === "evidence path" ? `check-report.md: ${report}` : report],
+                },
+              };
+            } else {
+              expect(JSON.parse(outputFor(body, "roadmap_status"))).toMatchObject({
+                result: "committed",
+                revision: inspectedRevision + 1,
+                statusOutcome: "applied",
+              });
+            }
+          }
+          if (!step) return responseWithText("Scripted wiring scenario complete.");
+          scriptedCalls.push(step);
+          return responseWithTool(step, scriptedCalls.length);
+        }),
+      );
+      const session: AgentSession = new AgentSession({
+        provider: "azure",
+        model: "azure:intent-eval",
+        baseUrl: "https://intent.eval/openai/v1/responses",
+        cwd: project,
+        systemPrompt: "You are a coding assistant in a disposable synthetic project.",
+        sessionRootDir: path.join(root, "sessions"),
+        maxTurns: 6,
+        projectCustomization: false,
+        loadExtensions: false,
+        selfCorrectionHooks: false,
+        orchestrationPrompt: false,
+        mcpEnabled: false,
+        coderSlashCommands: false,
+        allowedTools: ["read", "edit", "roadmap_inspect", "roadmap_status", "roadmap_phase_draft"],
+        ...createAppSidecarCodingRoadmapSessionOptions(
+          statusHost.createSessionTools("coding", () => session),
+          draftHost.createSessionTools(),
+        ),
+      });
+      const calledTools: string[] = [];
+      session.eventBus.on("tool_call_start", ({ name }) => calledTools.push(name));
+      try {
+        await session.initialize();
+        expect(session.getActivePhaseContext()).toBeUndefined();
+        await session.prompt(request);
+      } finally {
+        await session.dispose();
+      }
+      expect(requestBodies.length).toBe(scriptedCalls.length + 1);
+      expect(calledTools).toEqual(
+        scenario === "explicit file"
+          ? ["read", "edit"]
+          : scenario === "evidence path"
+            ? ["roadmap_inspect", "read", "roadmap_status"]
+            : ["roadmap_inspect", "roadmap_status"],
+      );
+      expect(drafts.pending(project)).toBeNull();
+      expect(await fs.readFile(roadmapPath, "utf8")).toBe(
+        scenario === "explicit file" ? completedFile : originalFile,
+      );
+      expect(await fs.readFile(path.join(project, "check-report.md"), "utf8")).toBe(report);
+      // Reload with a new repository instance to prove persistence, not a host return value.
+      const after = await new ProjectNotesRepository(path.join(root, "agent")).load(project);
+      if (after.status !== "ok") throw new Error("Expected persisted Notes");
+      if (scenario === "explicit file") {
+        expect(after.snapshot).toEqual(before.snapshot);
+        expect(broadcast).not.toHaveBeenCalled();
+      } else {
+        const done = scenario === "inline report" || scenario === "evidence path";
+        expect(after.snapshot.revision).toBe(inspectedRevision! + 1);
+        const phase = after.snapshot.document.phases[0]!;
+        expect(phase.status).toBe(done ? "done" : "in-progress");
+        expect(phase.completedAt).toBe(done ? timestamp : null);
+        expect(phase.lifecycleEvents).toEqual([
+          expect.objectContaining({
+            fromStatus: "not-started",
+            toStatus: done ? "done" : "in-progress",
+            timestamp,
+          }),
+        ]);
+        const payload = scriptedCalls.find((step) => step.name === "roadmap_status")!.args;
+        expect(payload.expected_revision).toBe(before.snapshot.revision);
+        expect(phase.roadmapEvents).toEqual([
+          expect.objectContaining({
+            type: "status-update",
+            verification: done ? "passed" : "failed",
+            evidence: payload.evidence,
+            progress: payload.progress,
+            timestamp,
+          }),
+        ]);
+        if (done) {
+          expect(payload).toMatchObject({ transition: "done", verification: { result: "passed" } });
+          expect(payload.evidence).toEqual([
+            expect.stringContaining("Core acceptance checks pass"),
+          ]);
+        }
+        expect(broadcast).toHaveBeenCalledTimes(1);
+        expect(after.snapshot.document.phases).toHaveLength(1);
+      }
+    },
+    20_000,
+  );
+});
+
 describe("app Roadmap behavioral intent-contract evals", () => {
   for (const evaluation of appIntentEvals) {
     it(`${evaluation.name}: consumes ${JSON.stringify(evaluation.request)}`, async () => {
@@ -425,7 +678,9 @@ describe("app Roadmap behavioral intent-contract evals", () => {
       expect(extractIntentPromptContext(result.requestBodies[0] ?? {}).request).toBe(
         evaluation.request,
       );
-      expect(result.requestBodies[0]?.instructions).toContain("## App Roadmap intent");
+      expect(result.requestBodies[0]?.instructions).toContain(
+        APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+      );
       expect(result.calledTools).toEqual(evaluation.expectedTools);
       expect(result.pendingDraft !== null).toBe(evaluation.expectsDraft);
     }, 15_000);

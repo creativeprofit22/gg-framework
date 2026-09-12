@@ -3018,6 +3018,7 @@ async function createSession(
     target.eventBus.on("error", (data) => broadcastError("error", "agent error", data.error));
     target.eventBus.on("model_change", (data) => broadcast("model_change", data));
     target.eventBus.on("hook", (data) => broadcast("hook", data));
+    target.eventBus.on("diagnostics", (data) => broadcast("diagnostics", data));
     target.eventBus.on("hook_armed", (data) => broadcast("hook_armed", data));
     target.eventBus.on("subagent_state", (data) => broadcast("subagent_state", data));
     target.eventBus.on("mcp_server_state", (data) => broadcast("mcp_server_state", data));

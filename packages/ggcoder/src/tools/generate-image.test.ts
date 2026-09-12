@@ -144,7 +144,8 @@ describe("generate_image param schema", () => {
     const tool = createGenerateImageTool(tmpDir, fakeAuth());
     expect(tool.description).toBe(
       "Generate or edit images using OpenAI's GPT Image 2.5 models: Flare (default, fast) " +
-      "or Sunburst (precise editing). Works even when a different " +
+      "or Sunburst (precise editing). Transparent backgrounds are currently unsupported " +
+      "through this tool. Works even when a different " +
       "chat provider is active — only requires OpenAI to be connected. Only use this tool when " +
       "the user explicitly asks to create, generate, or edit an image. Pass `image` with a " +
       "file path to edit an existing image (e.g. a previously generated one or a user attachment). " +
@@ -157,7 +158,9 @@ describe("generate_image param schema", () => {
         background: {
           type: "string",
           enum: ["opaque", "auto"],
-          description: "Background type (default auto). Transparent backgrounds are not supported by this tool.",
+          description: "Background type (default auto). Use auto or opaque. Transparent is currently " +
+            "unsupported by the connected ChatGPT/Codex backend for both models and will " +
+            "be rejected locally. Do not retry transparent requests or switch models to bypass this.",
         },
         size: {
           type: "string",
@@ -189,6 +192,9 @@ describe("generate_image param schema", () => {
         out_path: "out.png",
       }).success,
     ).toBe(true);
+    expect(tool.description).toContain("Transparent backgrounds are currently unsupported");
+    expect(schema.shape.background.description).toContain("Do not retry transparent requests");
+    // Public calls reject transparency; stale direct calls still get actionable errors.
     for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
       for (const background of ["opaque", "auto"]) {
         expect(schema.safeParse({ prompt: "x", model, background }).success).toBe(true);
@@ -520,10 +526,19 @@ describe("generate_image — error handling", () => {
       const credentials = vi.spyOn(auth, "resolveCredentials");
       const tool = createGenerateImageTool(tmpDir, auth);
       for (const output_format of [undefined, "png", "webp", "jpeg"]) {
-        // Serialized stale input deliberately bypasses the current public schema.
-        const args = JSON.parse(JSON.stringify({ prompt: "a logo", model, background: "transparent", output_format }));
-        const result = await tool.execute(args, ctx());
-        expect(await failureText(result)).toBe("Transparent backgrounds are not supported by this tool. Use opaque or auto.");
+        for (const image of [undefined, "nonexistent-reference.png"]) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            // Serialized stale input deliberately bypasses the current public schema.
+            const args = JSON.parse(JSON.stringify({ prompt: "a logo", model, background: "transparent", output_format, image }));
+            const result = await tool.execute(args, ctx());
+            expect(await failureText(result)).toBe(
+              "Transparent backgrounds are currently unsupported by the connected ChatGPT/Codex " +
+              "image backend for both Flare and Sunburst, including PNG and WebP output. " +
+              "No request was sent. Do not retry with another model or format. " +
+              "Explain this limitation to the user; do not silently substitute an opaque background.",
+            );
+          }
+        }
       }
       expect(credentials).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();

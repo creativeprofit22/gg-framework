@@ -3307,10 +3307,28 @@ select {
 }
 /* Bound wrapped chrome too, so short panes retain chat, reviews and input. */
 @container review-pane (max-height: 700px) {
-  .chat-head { max-height: 12cqh; min-height: 0; overflow: auto; flex-shrink: 0; }
-  .liveregion { max-height: 10cqh; min-height: 0; overflow: auto; flex-shrink: 0; }
-  .inputwrap { max-height: 22cqh; min-height: 0; overflow: auto; }
-  .footer { max-height: 8cqh; min-height: 0; overflow: auto; }
+  .chat-head {
+    max-height: 12cqh;
+    min-height: 0;
+    overflow: auto;
+    flex-shrink: 0;
+  }
+  .liveregion {
+    max-height: 10cqh;
+    min-height: 0;
+    overflow: auto;
+    flex-shrink: 0;
+  }
+  .inputwrap {
+    max-height: 22cqh;
+    min-height: 0;
+    overflow: auto;
+  }
+  .footer {
+    max-height: 8cqh;
+    min-height: 0;
+    overflow: auto;
+  }
 }
 .conversation-stack {
   display: flex;
@@ -3321,7 +3339,9 @@ select {
   overflow: hidden;
   container-type: size;
 }
-.conversation-stack.has-reviews { min-height: 180px; }
+.conversation-stack.has-reviews {
+  min-height: 180px;
+}
 .review-dock {
   --review-reading-width: 768px;
   display: flex;
@@ -3338,14 +3358,18 @@ select {
   min-height: 0;
   overflow: hidden;
 }
-.conversation-stack:has(.review-dock.is-expanded) > .transcript-frame { min-height: 24px; }
+.conversation-stack:has(.review-dock.is-expanded) > .transcript-frame {
+  min-height: 24px;
+}
 .conversation-stack:has(.review-dock.is-maximized) > .transcript-frame {
   flex: 0 0 0;
   min-height: 0;
   height: 0;
   visibility: hidden;
 }
-.review-dock.is-maximized { flex: 1 1 0; }
+.review-dock.is-maximized {
+  flex: 1 1 0;
+}
 .review-reading-rail,
 .review-dock-header {
   box-sizing: border-box;
@@ -3382,11 +3406,24 @@ select {
   height: 36px;
   padding: 0;
 }
-.review-dock-tabs:has(> button:nth-child(2)) .review-dock-toggle { display: none; }
-.review-dock-trigger strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.review-dock .plan-review-message { padding-block: 8px; }
-.review-dock .plan-review-message strong { font-size: 16px; }
-.review-dock .plan-review-message p { display: none; }
+.review-dock-tabs:has(> button:nth-child(2)) .review-dock-toggle {
+  display: none;
+}
+.review-dock-trigger strong {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.review-dock .plan-review-message {
+  padding-block: 8px;
+}
+.review-dock .plan-review-message strong {
+  font-size: 16px;
+}
+.review-dock .plan-review-message p {
+  display: none;
+}
 .review-dock .review-dock-trigger {
   width: 100%;
   min-height: 48px;
@@ -3397,8 +3434,13 @@ select {
   gap: 12px;
   color: var(--text);
 }
-.review-dock-trigger > span:first-of-type { min-width: 0; flex: 1; }
-.review-dock-trigger svg { flex-shrink: 0; }
+.review-dock-trigger > span:first-of-type {
+  min-width: 0;
+  flex: 1;
+}
+.review-dock-trigger svg {
+  flex-shrink: 0;
+}
 .review-dock-summary {
   display: block;
   overflow: hidden;
@@ -3407,7 +3449,11 @@ select {
   color: var(--text-secondary);
   font-size: 12px;
 }
-.review-dock-toggle { font-size: 12px; flex-shrink: 0; color: var(--text-secondary); }
+.review-dock-toggle {
+  font-size: 12px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
 .review-dock-panel {
   display: flex;
   flex-direction: column;
@@ -3426,16 +3472,38 @@ select {
   height: 100%;
   min-height: 180px;
 }
-.review-dock-panel > .roadmap-draft-review { min-height: 144px; }
-.review-dock-panel:has(.plan-feedback) > section { min-height: 360px; }
-.review-dock-panel .review-content-scroller ~ * { flex-shrink: 0; }
-.review-dock-panel[hidden] { display: none; }
-.review-dock :focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
-.review-dock .btn, .review-dock .modal-btn { white-space: normal; max-width: 100%; }
-.review-dock .plan-feedback-row, .review-dock .plan-feedback-buttons { flex-wrap: wrap; }
+.review-dock-panel > .roadmap-draft-review {
+  min-height: 144px;
+}
+.review-dock-panel:has(.plan-feedback) > section {
+  min-height: 360px;
+}
+.review-dock-panel .review-content-scroller ~ * {
+  flex-shrink: 0;
+}
+.review-dock-panel[hidden] {
+  display: none;
+}
+.review-dock :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.review-dock .btn,
+.review-dock .modal-btn {
+  white-space: normal;
+  max-width: 100%;
+}
+.review-dock .plan-feedback-row,
+.review-dock .plan-feedback-buttons {
+  flex-wrap: wrap;
+}
 @media (forced-colors: active) {
-  .review-dock :focus-visible { outline-color: Highlight; }
-  .review-dock button { border: 1px solid ButtonText; }
+  .review-dock :focus-visible {
+    outline-color: Highlight;
+  }
+  .review-dock button {
+    border: 1px solid ButtonText;
+  }
 }
 
 .transcript-frame {

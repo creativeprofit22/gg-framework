@@ -94,8 +94,8 @@ export function ProgrammaticChat({
       {state.error && <p role="alert">{state.error}</p>}
       {state.reconcile && (
         <p>
-          Reload the results to check what was saved before trying again. This action
-          will not retry automatically.
+          Reload the results to check what was saved before trying again. This action will not retry
+          automatically.
         </p>
       )}
       <div className="programmatic-actions">
@@ -128,9 +128,9 @@ export function ProgrammaticChat({
         <div className="programmatic-proposal">
           <h3>Review what to enable</h3>
           <p>
-            Find repeatable tasks GG can help with. Reviewing setup changes no files.
-            Approve and save setup writes the check settings shown below to this project.
-            It does not start the work; each task needs a separate approval.
+            Find repeatable tasks GG can help with. Reviewing setup changes no files. Approve and
+            save setup writes the check settings shown below to this project. It does not start the
+            work; each task needs a separate approval.
           </p>
           <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
           <p>
@@ -141,8 +141,7 @@ export function ProgrammaticChat({
             {state.proposal.routes.map(({ id, route }) => (
               <li key={id}>
                 {route.command ?? "Unavailable"}: {route.reason}
-                {route.machineLocal &&
-                  " This task tool must be installed on the computer you use."}
+                {route.machineLocal && " This task tool must be installed on the computer you use."}
               </li>
             ))}
           </ul>
@@ -166,7 +165,10 @@ export function ProgrammaticChat({
             </ul>
           </details>
           {!state.proposalApprovable && (
-            <p>Choose Review setup again before approving. These older settings are shown for reference only.</p>
+            <p>
+              Choose Review setup again before approving. These older settings are shown for
+              reference only.
+            </p>
           )}
           <button
             className="btn btn-primary btn-sm"
@@ -184,10 +186,16 @@ export function ProgrammaticChat({
         </div>
       )}
       {report?.status === "setup-required" && (
-        <p>Start with Review setup to see which repeatable tasks GG can help with. Nothing is saved until you approve.</p>
+        <p>
+          Start with Review setup to see which repeatable tasks GG can help with. Nothing is saved
+          until you approve.
+        </p>
       )}
       {report && report.status !== "setup-required" && report.total === 0 && (
-        <p>No opportunities to show. Choose Check for opportunities to run the saved checks and save their results. This does not start any task.</p>
+        <p>
+          No opportunities to show. Choose Check for opportunities to run the saved checks and save
+          their results. This does not start any task.
+        </p>
       )}
       {groups.map(({ title, matches }) => {
         const rows = report?.rows.filter(matches) ?? [];
@@ -222,7 +230,11 @@ export function ProgrammaticChat({
             className="btn btn-ghost btn-sm"
             disabled={locked || report.offset === 0}
             onClick={() =>
-              onAction({ version: 1, action: "report", offset: Math.max(0, report.offset - PROGRAMMATIC_CHAT_PAGE_LIMIT) })
+              onAction({
+                version: 1,
+                action: "report",
+                offset: Math.max(0, report.offset - PROGRAMMATIC_CHAT_PAGE_LIMIT),
+              })
             }
           >
             Previous opportunities
@@ -235,7 +247,13 @@ export function ProgrammaticChat({
           <button
             className="btn btn-ghost btn-sm"
             disabled={locked || report.offset + report.rows.length >= report.total}
-            onClick={() => onAction({ version: 1, action: "report", offset: report.offset + PROGRAMMATIC_CHAT_PAGE_LIMIT })}
+            onClick={() =>
+              onAction({
+                version: 1,
+                action: "report",
+                offset: report.offset + PROGRAMMATIC_CHAT_PAGE_LIMIT,
+              })
+            }
           >
             Next opportunities
           </button>
@@ -243,8 +261,8 @@ export function ProgrammaticChat({
       )}
       {state.missingSelection && (
         <p>
-          Your selected opportunity is not in the restored results. Choose another item to
-          review; none was selected for you.
+          Your selected opportunity is not in the restored results. Choose another item to review;
+          none was selected for you.
         </p>
       )}
       {selected && (
@@ -256,9 +274,14 @@ export function ProgrammaticChat({
             {selected.summary.presence === "disappeared" && "No longer found; cannot start."}
           </p>
           <p>{selected.summary.route.reason}</p>
-          {selected.summary.actions?.run.available === false && <p>{selected.summary.actions.run.reason}</p>}
+          {selected.summary.actions?.run.available === false && (
+            <p>{selected.summary.actions.run.reason}</p>
+          )}
           {selected.summary.route.machineLocal && (
-            <p>This task tool is installed on this computer. It may not be available on another computer.</p>
+            <p>
+              This task tool is installed on this computer. It may not be available on another
+              computer.
+            </p>
           )}
           <h4>Files this task may change</h4>
           {selected.summary.mutationPaths.length ? (
@@ -318,7 +341,14 @@ export function ProgrammaticChat({
             <ul>
               {selected.evidence.map((item, index) => (
                 <li key={index}>
-                  <Badge>{item.basis === "observed" ? "Checked directly" : item.basis === "inferred" ? "Inferred, not confirmed" : "Assumed, not checked"}</Badge> {item.message}
+                  <Badge>
+                    {item.basis === "observed"
+                      ? "Checked directly"
+                      : item.basis === "inferred"
+                        ? "Inferred, not confirmed"
+                        : "Assumed, not checked"}
+                  </Badge>{" "}
+                  {item.message}
                   {item.location && (
                     <>
                       {" "}

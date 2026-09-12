@@ -26,7 +26,14 @@ export function useRoadmapDraft(client: PaneAgentClient, scope: string, hydrated
   } | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   useLayoutEffect(() => {
-    const generation = { client, scope, active: true, pending: false, again: false, deciding: false };
+    const generation = {
+      client,
+      scope,
+      active: true,
+      pending: false,
+      again: false,
+      deciding: false,
+    };
     generationRef.current = generation;
     dispatch({ type: "reset" });
     setRefreshError(null);

@@ -1386,6 +1386,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           schedulePromotionEnd();
           break;
         }
+        case "diagnostics": {
+          // Raw post-edit feedback belongs to the agent, not the conversation.
+          // The session delivers observations to the model without a completion gate;
+          // don't add chat rows, split streamed answers, or release held drafts.
+          break;
+        }
         case "hook_armed": {
           // Pre-final hooks hold text back; other hooks are mid-loop.
           const armedKind = String(d.kind ?? "ideal");

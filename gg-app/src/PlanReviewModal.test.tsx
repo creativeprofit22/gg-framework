@@ -62,9 +62,9 @@ describe("PlanReviewModal durable human gate", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Feedback" })).toBeNull();
     expect(
-      screen.getByRole("region", { name: "Plan content" }).contains(
-        screen.getByRole("button", { name: "Retry revision" }),
-      ),
+      screen
+        .getByRole("region", { name: "Plan content" })
+        .contains(screen.getByRole("button", { name: "Retry revision" })),
     ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));
     expect(onRetryRevision).toHaveBeenCalledTimes(1);

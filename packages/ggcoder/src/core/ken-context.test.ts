@@ -76,6 +76,66 @@ describe("buildKenDigest", () => {
     platform: "darwin",
   };
 
+  it("uses host results instead of re-rejecting a completed background launch", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "bg",
+            name: "bash",
+            args: { command: "pnpm test", run_in_background: true },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "bg", content: "ID: task-1", isError: false }],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: {
+        currentEvidence: [
+          { command: "pnpm test", status: "passed", reason: "Host exit code 0", cwd: base.cwd, executionId: "bg-exit" },
+        ],
+        staleEvidence: [],
+      },
+    });
+    expect(digest).toContain("PASSED: `pnpm test`");
+    expect(digest).toContain("OBSERVED PASSED: `pnpm test`");
+    expect(digest).toContain("not certification of requirements");
+    expect(digest).not.toContain("Current host gate:");
+    expect(digest).not.toContain("HISTORICAL UNCLASSIFIED: `pnpm test`");
+    expect(digest).not.toContain("background or persistent commands are not bounded evidence");
+  });
+
+  it("labels old transcript failures historical when the current host ledger is empty", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "old", name: "bash", args: { command: "pnpm test" } }],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "old", content: "Exit code: 1", isError: true },
+        ],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: { currentEvidence: [], staleEvidence: [] },
+    });
+    expect(digest).toContain("HISTORICAL FAILED: `pnpm test`");
+    expect(digest).toContain("Historical reports were not rerun");
+    expect(digest).not.toContain("OBSERVED FAILED:");
+    expect(digest).not.toContain("Current host gate:");
+  });
+
   it("includes the env and the question", () => {
     const digest = buildKenDigest({ ...base, messages: [] });
     expect(digest).toContain("/tmp/proj");

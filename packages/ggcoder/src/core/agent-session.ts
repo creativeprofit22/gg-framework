@@ -126,6 +126,12 @@ import {
   type ImportForeignTranscriptResult,
 } from "./foreign-session-import.js";
 import { createToolSearchTool } from "../tools/tool-search.js";
+import { createSessionStatsTool } from "../tools/session-stats.js";
+import {
+  createDiagnoseCommand,
+  isInternalDiagnosticsEnabled,
+  SessionDiagnosticsRecorder,
+} from "./internal-diagnostics.js";
 import { log } from "./logger.js";
 import { setEstimatorModel, calibrateEstimatorFromUsage } from "./compaction/token-estimator.js";
 import { calculateActiveContextTokens } from "./compaction/active-context.js";
@@ -496,6 +502,9 @@ export class AgentSession {
   // transcript rows the live run showed.
   private appMarkers: AppMarkerPayload[] = [];
   private turnMetrics: TurnMetricPayload[] = [];
+  /** Internal-only (GG_INTERNAL): live per-session cost/reliability recorder.
+   * Absent entirely in public builds — see core/internal-diagnostics.ts. */
+  private diagnosticsRecorder?: SessionDiagnosticsRecorder;
   private tools: AgentTool[] = [];
   /** Canonical guarded tool registry; `tools` is the policy-filtered live view used by the loop. */
   private registeredTools = new Map<string, AgentTool>();
@@ -577,9 +586,6 @@ export class AgentSession {
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
-  /** Verification gate: code edited this run, nothing proved it since. */
-  /** Mirror of the last verification `hook_armed` value, so the event fires
-   *  only on a real edge. */
   private compactionOccurred = false;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
@@ -863,7 +869,11 @@ export class AgentSession {
           }
         : {}),
     });
-    const additionalTools = this.opts.additionalTools ?? [];
+    const additionalTools = [...(this.opts.additionalTools ?? [])];
+    // Keep the internal tool eager, but subject to the same live capability guards.
+    if (isInternalDiagnosticsEnabled()) {
+      additionalTools.push(createSessionStatsTool(() => this.diagnosticsRecorder));
+    }
     const tools = [...builtInTools, ...additionalTools];
     // Static allow-lists (Ken) and live capability policies (chat Research) share
     // one guarded registry, so initial, additional, promoted, and late tools obey
@@ -969,6 +979,21 @@ export class AgentSession {
     if (this.opts.coderSlashCommands !== false) {
       const builtins = createBuiltinCommands();
       for (const cmd of builtins) this.slashCommands.register(cmd);
+
+      // Internal-only diagnostics: recorder + /diagnose exist exclusively when
+      // the internal flag is on. Public sessions never see either, so the
+      // command list and prompt stay identical to a build without this code.
+      if (isInternalDiagnosticsEnabled()) {
+        this.diagnosticsRecorder = new SessionDiagnosticsRecorder({
+          // Lazy: the session id is assigned at first prompt, not init.
+          sessionId: () => this.sessionId,
+          cwd: this.cwd,
+          provider: this.provider,
+          model: this.model,
+        });
+        this.diagnosticsRecorder.attach(this.eventBus);
+        this.slashCommands.register(createDiagnoseCommand());
+      }
 
       // Wire up /help to show all registered + prompt + custom commands.
       const helpCmd = this.slashCommands.get("help");
@@ -1915,12 +1940,12 @@ export class AgentSession {
    * post-compaction re-grounding. At most one loop-break/re-grounding per run.
    * Mirrors the TUI's getSteeringMessages ordering.
    */
-  private drainQueuedDiagnostics(): string | undefined {
+  private drainQueuedDiagnostics(deferUnverified = false): string | undefined {
     const evidence = this.verificationEvidenceLedger.snapshot().currentEvidence;
     // Suppress silence notices only after current, successful command evidence.
     // Real diagnostics remain visible; failed/stale/skipped checks never qualify.
     const verified = evidence.length > 0 && evidence.every((entry) => entry.status === "passed");
-    return this.lspManager?.drainDiagnostics(!verified);
+    return this.lspManager?.drainDiagnostics(!verified, { deferUnverified });
   }
 
   private getHookSteeringMessages(): Message[] | null {
@@ -1952,8 +1977,8 @@ export class AgentSession {
     // it in the very next turn instead of discovering it at the pre-stop
     // completion gate — but it never displaces user steering, which rides out
     // in the same batch when both are pending.
-    const diagnosticText = this.drainQueuedDiagnostics();
-    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
+    const diagnosticText = this.drainQueuedDiagnostics(true);
+    if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
     const notified = this.notifications.drain();
     const notificationMessage: Message | null =
       notified.length > 0 || diagnosticText
@@ -2356,23 +2381,26 @@ export class AgentSession {
    * blocked until harness-owned post-injection reads cover every changed file.
    */
   private async getHookFollowUpMessages(): Promise<Message[] | null> {
+    // Exit notifications and task_output refer to the same host process record.
+    // Do not force an extra polling tool/turn merely to acknowledge a known exit.
+
     // Edits return immediately; only the completion boundary waits for remaining
     // checks. Queued timeouts stay explicitly unverified, never a false all-clear.
     await this.lspManager?.flushDiagnostics(this.opts.signal);
     if (this.opts.signal?.aborted) return null;
     const diagnosticText = this.drainQueuedDiagnostics();
-    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
-    if (diagnosticText) {
-      return [
-        {
-          role: "user",
-          content: buildNotificationSteeringText([diagnosticText]),
-          provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
-        },
-      ];
-    }
+    if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
+    const diagnosticMessages: Message[] = diagnosticText
+      ? [
+          {
+            role: "user",
+            content: buildNotificationSteeringText([diagnosticText]),
+            provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+          },
+        ]
+      : [];
     const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager);
-    if (childCompletionFollowUp) return childCompletionFollowUp;
+    if (childCompletionFollowUp) return [...diagnosticMessages, ...childCompletionFollowUp];
 
     // Background processes started this run and never read block completion:
     // their progress/exit checkpoints only land on the steering path, which an
@@ -2387,12 +2415,12 @@ export class AgentSession {
       log("INFO", "process-gate", "Injecting background-process completion gate", {
         injected: String(this.processGateInjected),
       });
-      return processFollowUp;
+      return [...diagnosticMessages, ...processFollowUp];
     }
 
-    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) {
-      return null;
-    }
+    if (diagnosticMessages.length > 0) return diagnosticMessages;
+
+    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return null;
 
     if (this.idealReviewPhase === "reviewing") {
       const coverage = this.reviewCoverage.evidence();
@@ -2449,8 +2477,6 @@ export class AgentSession {
     // Independent reviewer first (async, bounded): its findings ride in the
     // SAME follow-up batch as the in-thread review + coverage requirements, so
     // addressing everything still costs one extra turn.
-    const independentMessages = await this.runIndependentReview(decision);
-
     this.reviewCoverage.start(this.hookFileEditCounts.keys());
     this.idealReviewPhase = "reviewing";
     const coverage = this.reviewCoverage.evidence();
@@ -2467,6 +2493,8 @@ export class AgentSession {
     // coverage is outstanding injects again. Disarm lands later, on the read
     // that closes the last gap (or when the retry budget escalates).
     this.refreshIdealReviewArmed();
+    // Announce the phase before the reviewer starts, not after its bounded wait.
+    const independentMessages = await this.runIndependentReview(decision);
     log("INFO", "ideal", "Injecting ideal review before final response", {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
@@ -3216,6 +3244,8 @@ export class AgentSession {
       baseUrl?: string;
     },
     mode: "manual" | "automatic" | "forced" = "manual",
+    /** User-stated focus (`/compact <focus>`): what must survive verbatim. */
+    focus?: string,
   ): Promise<void> {
     this.contextProfileLocked = !this.getOpenAICodexContextProfileEligibility().canChange;
     this.lastCompactionCompacted = false;
@@ -3254,6 +3284,7 @@ export class AgentSession {
         targetTokens: policy.targetTokens,
         signal: this.opts.signal,
         approvedPlanPath: this.approvedPlanPath,
+        focus,
       });
       contextSelection = output.result.contextSelection;
       return output;
@@ -4536,6 +4567,9 @@ export class AgentSession {
       },
     };
     this.turnMetrics.push(payload);
+    // Internal diagnostics piggyback on the authoritative per-turn metric —
+    // one source of truth, and the record flushes to disk every turn.
+    this.diagnosticsRecorder?.recordTurnMetric(payload);
     if (this.sessionPath) await this.sessionManager.appendTurnMetric(this.sessionPath, payload);
   }
 
@@ -4992,6 +5026,7 @@ export class AgentSession {
   async dispose(beforeSessionReset?: () => Promise<void>, awaitProcesses = false): Promise<void> {
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
+    this.diagnosticsRecorder?.finalize();
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
     if (awaitProcesses) this.eventBus.removeAllListeners();
     const processes = awaitProcesses
@@ -5285,7 +5320,7 @@ export class AgentSession {
   private createSlashCommandContext(): SlashCommandContext {
     return {
       switchModel: (provider, model) => this.switchModel(provider, model),
-      compact: () => this.compact(undefined, "manual"),
+      compact: (focus?: string) => this.compact(undefined, "manual", focus),
       newSession: () => this.newSession(),
       listSessions: async () => {
         const sessions = await this.sessionManager.list(this.cwd);

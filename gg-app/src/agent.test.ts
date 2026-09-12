@@ -26,13 +26,26 @@ import {
 } from "./agent";
 
 it("classifies only bounded typed prompt rejections, not English messages or arbitrary internals", () => {
-  const rejected = { category: "rejected", code: "programmatic_execution_busy", message: "Wait for the current run." };
-  expect(new PromptSubmissionError(rejected)).toMatchObject({ category: "rejected", message: rejected.message });
+  const rejected = {
+    category: "rejected",
+    code: "programmatic_execution_busy",
+    message: "Wait for the current run.",
+  };
+  expect(new PromptSubmissionError(rejected)).toMatchObject({
+    category: "rejected",
+    message: rejected.message,
+  });
   expect(String(new PromptSubmissionError(rejected))).toContain(rejected.message);
-  for (const failure of ["programmatic_execution_busy", new Error(rejected.message),
-    { ...rejected, code: "internal_error" }, { ...rejected, code: [rejected.code] },
+  for (const failure of [
+    "programmatic_execution_busy",
+    new Error(rejected.message),
+    { ...rejected, code: "internal_error" },
+    { ...rejected, code: [rejected.code] },
     { ...rejected, message: "x".repeat(257) },
-    { ...rejected, message: "private\nhistory" }, { ...rejected, category: "unknown" }, null]) {
+    { ...rejected, message: "private\nhistory" },
+    { ...rejected, category: "unknown" },
+    null,
+  ]) {
     expect(new PromptSubmissionError(failure).category).toBe("unknown");
   }
 });

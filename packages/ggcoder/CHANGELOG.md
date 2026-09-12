@@ -1,5 +1,41 @@
 # @kenkaiiii/ggcoder
 
+## 5.59.4
+
+### Patch Changes
+
+- Compaction summaries now carry failing test names forward deterministically: test failures parsed from tool results are appended to the summary in a tracked block, survive re-compaction, and are reversed when a later run passes.
+  - @kenkaiiii/gg-ai@5.59.4
+  - @kenkaiiii/gg-agent@5.59.4
+  - @kenkaiiii/gg-core@5.59.4
+
+## 5.59.3
+
+### Patch Changes
+
+- Fix replace_all re-editing replaced text (duplicate properties, skipped occurrences), reject unsafe global elision matches, and stop empty/invisible search strings from hanging or mismatching blank lines.
+  - @kenkaiiii/gg-ai@5.59.3
+  - @kenkaiiii/gg-agent@5.59.3
+  - @kenkaiiii/gg-core@5.59.3
+
+## 5.59.2
+
+### Patch Changes
+
+- Clarify agent completion status and required next actions, reject unsupported transparent image requests without repeated backend failures, and preserve prior verification after successful mixed check commands that leave source unchanged.
+  - @kenkaiiii/gg-ai@5.59.2
+  - @kenkaiiii/gg-agent@5.59.2
+  - @kenkaiiii/gg-core@5.59.2
+
+## 5.59.1
+
+### Patch Changes
+
+- Reduce repeated verification hooks by separating edit diagnostics from completion checks, sharing background-check results with Autopilot, and preserving verification after builds that leave source unchanged.
+  - @kenkaiiii/gg-ai@5.59.1
+  - @kenkaiiii/gg-agent@5.59.1
+  - @kenkaiiii/gg-core@5.59.1
+
 ## 5.59.0
 
 ### Minor Changes

@@ -1136,8 +1136,15 @@ export class PromptSubmissionError extends Error {
 
   constructor(failure: unknown) {
     const rejected = isPromptSubmissionRejection(failure);
-    super(rejected ? failure.message : failure instanceof Error ? failure.message :
-      typeof failure === "string" ? failure : "Prompt acknowledgement is uncertain.");
+    super(
+      rejected
+        ? failure.message
+        : failure instanceof Error
+          ? failure.message
+          : typeof failure === "string"
+            ? failure
+            : "Prompt acknowledgement is uncertain.",
+    );
     this.name = "PromptSubmissionError";
     this.category = rejected ? "rejected" : "unknown";
     this.code = rejected ? failure.code : undefined;

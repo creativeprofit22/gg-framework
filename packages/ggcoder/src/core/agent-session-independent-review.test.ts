@@ -173,6 +173,26 @@ describe("AgentSession independent Ideal reviewer", () => {
       }
     },
   );
+  it("announces review before starting and waiting for the independent reviewer", async () => {
+    const manager = fakeManager("CLEAR");
+    const internal = makeSession(highStakesStats, manager);
+    const order: string[] = [];
+    internal.eventBus.on("hook", (event) => order.push((event as { kind: string }).kind));
+    manager.spawn.mockImplementation(async () => {
+      order.push("reviewer started");
+      return { agent_id: "reviewer-1", state: "completed", output: "CLEAR" };
+    });
+    manager.wait.mockImplementation(async () => {
+      order.push("reviewer finished");
+      return {
+        timed_out: false,
+        agents: [{ agent_id: "reviewer-1", state: "completed", output: "CLEAR" }],
+      };
+    });
+    await internal.getHookFollowUpMessages();
+    expect(order).toEqual(["ideal", "reviewer started", "reviewer finished"]);
+  });
+
   it("spawns on the ACTIVE model with read-only tools and prepends findings", async () => {
     const manager = fakeManager(
       "VERDICT: ISSUES\nFINDINGS:\n- src/a.ts: value should be validated before export",

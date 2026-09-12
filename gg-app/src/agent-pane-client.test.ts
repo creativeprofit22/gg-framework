@@ -629,28 +629,42 @@ describe("pane agent client", () => {
     }
   });
 
-  it.each(["primary", "right"])("preserves definite rejection and never retries %s prompts", async (paneId) => {
-    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
-    for (const code of ["programmatic_execution_busy", "invalid_programmatic_selection"]) {
-      invoke.mockClear();
-      invoke.mockRejectedValueOnce({ category: "rejected", code, message: "Select one opportunity after the current run finishes." });
-      await expect(submit("/programmatic-run a b")).rejects.toMatchObject({
-        category: "rejected", code, message: "Select one opportunity after the current run finishes.",
-      });
-      expect(invoke).toHaveBeenCalledTimes(1);
-    }
-  });
+  it.each(["primary", "right"])(
+    "preserves definite rejection and never retries %s prompts",
+    async (paneId) => {
+      const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+      for (const code of ["programmatic_execution_busy", "invalid_programmatic_selection"]) {
+        invoke.mockClear();
+        invoke.mockRejectedValueOnce({
+          category: "rejected",
+          code,
+          message: "Select one opportunity after the current run finishes.",
+        });
+        await expect(submit("/programmatic-run a b")).rejects.toMatchObject({
+          category: "rejected",
+          code,
+          message: "Select one opportunity after the current run finishes.",
+        });
+        expect(invoke).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
 
-  it.each(["primary", "right"])("keeps network and malformed acknowledgements unknown for %s without retry", async (paneId) => {
-    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
-    for (const lost of [true, false]) {
-      invoke.mockClear();
-      if (lost) invoke.mockRejectedValueOnce(new Error("Network response lost"));
-      else invoke.mockResolvedValueOnce({ queued: false, count: 1 });
-      await expect(submit("/programmatic-run a b")).rejects.toMatchObject({ category: "unknown" });
-      expect(invoke).toHaveBeenCalledTimes(1);
-    }
-  });
+  it.each(["primary", "right"])(
+    "keeps network and malformed acknowledgements unknown for %s without retry",
+    async (paneId) => {
+      const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+      for (const lost of [true, false]) {
+        invoke.mockClear();
+        if (lost) invoke.mockRejectedValueOnce(new Error("Network response lost"));
+        else invoke.mockResolvedValueOnce({ queued: false, count: 1 });
+        await expect(submit("/programmatic-run a b")).rejects.toMatchObject({
+          category: "unknown",
+        });
+        expect(invoke).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
 
   it.each(["primary", "right"])(
     "preserves queue correlation through %s prompt IPC",

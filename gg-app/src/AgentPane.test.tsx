@@ -22,7 +22,9 @@ HTMLElement.prototype.scrollTo = vi.fn();
 Element.prototype.scrollIntoView = vi.fn();
 
 const nativeMocks = vi.hoisted(() => ({
-  invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => undefined),
+  invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(
+    async () => undefined,
+  ),
   onDragDropEvent: vi.fn(async () => vi.fn()),
   openDialog: vi.fn(),
   saveDialog: vi.fn(),
@@ -67,10 +69,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
     label: "main",
-    listen: vi.fn(async (name: string, receive: (event: { payload: PaneEventEnvelope }) => void) => {
-      if (name === "agent-event") nativeMocks.agentEvent = receive;
-      return vi.fn();
-    }),
+    listen: vi.fn(
+      async (name: string, receive: (event: { payload: PaneEventEnvelope }) => void) => {
+        if (name === "agent-event") nativeMocks.agentEvent = receive;
+        return vi.fn();
+      },
+    ),
     setTitle: vi.fn(),
   }),
 }));
@@ -346,7 +350,9 @@ const paneListenerObservers = new WeakMap<
   PaneAgentClient,
   (action: "attach" | "detach", count: number) => void
 >();
-let hydrationCleanupObserver: ((phase: "cleanup-start" | "cleanup-end" | "release") => void) | undefined;
+let hydrationCleanupObserver:
+  | ((phase: "cleanup-start" | "cleanup-end" | "release") => void)
+  | undefined;
 
 // Mirror native fan-out to active subscribers, not whichever hook subscribed last.
 function paneEvents(pane: PaneAgentClient): (event: SidecarEvent) => void {
@@ -596,222 +602,281 @@ describe("pane-local opening (mocked native transport)", () => {
   it.each([
     { clock: "", pausedTimers: false },
     { clock: " with paused application timers", pausedTimers: true },
-  ])("discards stale hydration and its events without opening a newer generation's gate$clock", async ({ pausedTimers }) => {
-    // Hydration uses promises; readiness must not depend on polling application timers.
-    if (pausedTimers) {
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-    }
-    // [DBG-hydration-7c91] Scalar-only, bounded, synchronous observations: no scheduling.
-    const started = performance.now();
-    const ledger: Array<Record<string, unknown>> = [];
-    let overflow = 0;
-    let sequence = 0;
-    let active = true;
-    let stage = "test-entry";
-    let completed = "none";
-    let bodyComplete = false;
-    let cleanupEnd = false;
-    const cleanupSnapshots: Partial<Record<"cleanup-start" | "cleanup-end", Record<string, unknown>>> = {};
-    let requestedGeneration = 1;
-    let oldResolution = "not-resolved";
-    let newResolution = "not-resolved";
-    let mainContainer: HTMLElement | undefined;
-    let otherContainer: HTMLElement | undefined;
-    const listenerCounts = { main: 0, other: 0 };
-    const generations: { main: number | null; other: number | null } = { main: null, other: null };
-    onTestFailed(() => {
-      try {
-        console.error("[DBG-hydration-7c91]", JSON.stringify({
-          ledger, overflow, stage, completed, bodyComplete, cleanupEnd, cleanupSnapshots,
-          cleanupEndMissing: !cleanupEnd,
-        }));
-      } finally {
-        active = false;
-        ledger.length = 0;
+  ])(
+    "discards stale hydration and its events without opening a newer generation's gate$clock",
+    async ({ pausedTimers }) => {
+      // Hydration uses promises; readiness must not depend on polling application timers.
+      if (pausedTimers) {
+        vi.useFakeTimers({
+          toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+        });
       }
-    });
-    nativeMocks.realMentor = true;
-    const pane = client("pane-stale-history", 1);
-    const other = client("pane-independent-history", 1);
-    const calls = (value: PaneAgentClient) => ({
-      restore: vi.mocked(value.restore).mock.calls.length,
-      waitForReady: vi.mocked(value.waitForReady).mock.calls.length,
-      getState: vi.mocked(value.getState).mock.calls.length,
-      listModels: vi.mocked(value.listModels).mock.calls.length,
-      listCommands: vi.mocked(value.listCommands).mock.calls.length,
-      listTasks: vi.mocked(value.listTasks).mock.calls.length,
-      listHistory: vi.mocked(value.listHistory).mock.calls.length,
-      sendPrompt: vi.mocked(value.sendPrompt).mock.calls.length,
-    });
-    const dom = (container: HTMLElement | undefined) => {
-      const text = container?.textContent ?? "";
-      return {
-        connected: container?.isConnected ?? false,
-        modelButton: !!container?.querySelector(".footer .model-button"),
-        sendDisabled: container?.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')?.disabled ?? null,
-        connecting: text.includes("connecting to agent"),
-        currentStored: text.includes("Current stored prompt"),
-        currentLive: text.includes("Current live answer"),
-        staleStored: text.includes("Stale stored prompt"),
-        staleLive: text.includes("Stale live answer"),
+      // [DBG-hydration-7c91] Scalar-only, bounded, synchronous observations: no scheduling.
+      const started = performance.now();
+      const ledger: Array<Record<string, unknown>> = [];
+      let overflow = 0;
+      let sequence = 0;
+      let active = true;
+      let stage = "test-entry";
+      let completed = "none";
+      let bodyComplete = false;
+      let cleanupEnd = false;
+      const cleanupSnapshots: Partial<
+        Record<"cleanup-start" | "cleanup-end", Record<string, unknown>>
+      > = {};
+      let requestedGeneration = 1;
+      let oldResolution = "not-resolved";
+      let newResolution = "not-resolved";
+      let mainContainer: HTMLElement | undefined;
+      let otherContainer: HTMLElement | undefined;
+      const listenerCounts = { main: 0, other: 0 };
+      const generations: { main: number | null; other: number | null } = {
+        main: null,
+        other: null,
       };
-    };
-    const record = (label: string, coarse = false) => {
-      if (!active) return;
-      const seq = ++sequence;
-      if (ledger.length === 64) { overflow++; return; }
-      ledger.push({
-        seq, elapsedMs: performance.now() - started, label, stage, completed,
-        bodyComplete, requestedGeneration, oldResolution, newResolution,
-        generations: { ...generations }, listeners: { ...listenerCounts },
-        mainCalls: calls(pane), otherCalls: calls(other),
-        ...(coarse ? { mainDom: dom(mainContainer), otherDom: dom(otherContainer) } : {}),
+      onTestFailed(() => {
+        try {
+          console.error(
+            "[DBG-hydration-7c91]",
+            JSON.stringify({
+              ledger,
+              overflow,
+              stage,
+              completed,
+              bodyComplete,
+              cleanupEnd,
+              cleanupSnapshots,
+              cleanupEndMissing: !cleanupEnd,
+            }),
+          );
+        } finally {
+          active = false;
+          ledger.length = 0;
+        }
       });
-    };
-    const begin = (label: string) => {
-      if (!active) return;
-      stage = label;
-      record(`${label}:start`, true);
-    };
-    const end = (label: string) => {
-      if (!active) return;
-      completed = label;
-      record(`${label}:complete`, true);
-    };
-    const mainGeneration = (generation: number) => {
-      if (!active) return;
-      generations.main = generation;
-      record("main-generation");
-    };
-    const otherGeneration = (generation: number) => {
-      if (!active) return;
-      generations.other = generation;
-      record("other-generation");
-    };
-    paneListenerObservers.set(pane, (action, count) => {
-      listenerCounts.main = count;
-      record(`main-listener-${action}`);
-    });
-    paneListenerObservers.set(other, (action, count) => {
-      listenerCounts.other = count;
-      record(`other-listener-${action}`);
-    });
-    hydrationCleanupObserver = (phase) => {
-      if (phase === "release") {
-        active = false;
-        paneListenerObservers.delete(pane);
-        paneListenerObservers.delete(other);
-        mainContainer = undefined;
-        otherContainer = undefined;
-        return;
-      }
-      if (phase === "cleanup-end") cleanupEnd = true;
-      cleanupSnapshots[phase] = {
-        stage, completed, bodyComplete, requestedGeneration, oldResolution, newResolution,
-        generations: { ...generations }, listeners: { ...listenerCounts },
-        mainCalls: calls(pane), otherCalls: calls(other),
-        mainDom: dom(mainContainer), otherDom: dom(otherContainer),
+      nativeMocks.realMentor = true;
+      const pane = client("pane-stale-history", 1);
+      const other = client("pane-independent-history", 1);
+      const calls = (value: PaneAgentClient) => ({
+        restore: vi.mocked(value.restore).mock.calls.length,
+        waitForReady: vi.mocked(value.waitForReady).mock.calls.length,
+        getState: vi.mocked(value.getState).mock.calls.length,
+        listModels: vi.mocked(value.listModels).mock.calls.length,
+        listCommands: vi.mocked(value.listCommands).mock.calls.length,
+        listTasks: vi.mocked(value.listTasks).mock.calls.length,
+        listHistory: vi.mocked(value.listHistory).mock.calls.length,
+        sendPrompt: vi.mocked(value.sendPrompt).mock.calls.length,
+      });
+      const dom = (container: HTMLElement | undefined) => {
+        const text = container?.textContent ?? "";
+        return {
+          connected: container?.isConnected ?? false,
+          modelButton: !!container?.querySelector(".footer .model-button"),
+          sendDisabled:
+            container?.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')
+              ?.disabled ?? null,
+          connecting: text.includes("connecting to agent"),
+          currentStored: text.includes("Current stored prompt"),
+          currentLive: text.includes("Current live answer"),
+          staleStored: text.includes("Stale stored prompt"),
+          staleLive: text.includes("Stale live answer"),
+        };
       };
-      record(phase, true);
-    };
-    record("test-entry");
-    const emit = liveEvents(pane);
-    const oldHistory = deferred<AgentModule.HistoryEntry[]>();
-    const newHistory = deferred<AgentModule.HistoryEntry[]>();
-    vi.mocked(pane.listHistory)
-      .mockReturnValueOnce(oldHistory.promise)
-      .mockReturnValueOnce(newHistory.promise);
-    begin("render");
-    const view = await act(async () => render(
-      <AgentPane client={pane} target={target} generation={1} onGenerationChange={mainGeneration} workspaceOwnsSessionLifecycle />,
-    ));
-    mainContainer = view.container;
-    end("render");
-    begin("first-history");
-    expect(pane.listHistory).toHaveBeenCalledTimes(1);
-    end("first-history");
-    begin("stale-event");
-    act(() => emit("text_delta", { text: "Stale live answer" }));
-    end("stale-event");
-    vi.mocked(pane.restore).mockResolvedValue(2);
-    vi.mocked(pane.waitForReady).mockResolvedValue({
-      ready: true,
-      error: null,
-      generation: 2,
-      sessionId: pane.paneId,
-    });
-    requestedGeneration = 2;
-    begin("rerender");
-    await act(async () => view.rerender(
-      <AgentPane
-        client={pane}
-        target={{ ...target, sessionPath: "/new.jsonl" }}
-        generation={2}
-        onGenerationChange={mainGeneration}
-        workspaceOwnsSessionLifecycle
-      />,
-    ));
-    end("rerender");
-    begin("second-history");
-    expect(pane.listHistory).toHaveBeenCalledTimes(2);
-    end("second-history");
-    begin("independent-render");
-    const otherView = await act(async () => render(
-      <AgentPane client={other} target={target} onGenerationChange={otherGeneration} workspaceOwnsSessionLifecycle />,
-    ));
-    otherContainer = otherView.container;
-    end("independent-render");
-    begin("independent-ready");
-    expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull();
-    end("independent-ready");
-    begin("independent-input");
-    const otherInput = within(otherView.container).getByRole("textbox");
-    await act(async () => {
-      fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
-      fireEvent.keyDown(otherInput, { key: "Enter" });
-    });
-    end("independent-input");
-    begin("independent-submit");
-    expect(other.sendPrompt).toHaveBeenCalledTimes(1);
-    end("independent-submit");
-    begin("old-history-act");
-    oldResolution = "resolve-invoked";
-    record("old-history-resolve-invoked");
-    await act(async () => oldHistory.resolve([{ role: "user", text: "Stale stored prompt" }]));
-    end("old-history-act");
-    begin("gate-assertions");
-    const input = within(view.container).getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.change(input, { target: { value: "New generation draft" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect(input.value).toBe("New generation draft");
-    expect(within(view.container).getByText(/connecting to agent/)).toBeTruthy();
-    end("gate-assertions");
-    begin("current-event");
-    act(() => emit("text_delta", { text: "Current live answer" }));
-    end("current-event");
-    begin("new-history-act");
-    newResolution = "resolve-invoked";
-    record("new-history-resolve-invoked");
-    await act(async () => newHistory.resolve([{ role: "user", text: "Current stored prompt" }]));
-    end("new-history-act");
-    begin("current-transcript");
-    expect(within(view.container).getByText("Current stored prompt")).toBeTruthy();
-    end("current-transcript");
-    begin("transcript-assertions");
-    expect(within(view.container).getAllByText("Current live answer")).toHaveLength(1);
-    expect(screen.queryByText("Stale stored prompt")).toBeNull();
-    expect(screen.queryByText("Stale live answer")).toBeNull();
-    end("transcript-assertions");
-    begin("current-input");
-    await act(async () => fireEvent.keyDown(input, { key: "Enter" }));
-    end("current-input");
-    begin("current-submit");
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-    end("current-submit");
-    if (active) bodyComplete = true;
-    end("test-body");
-  }, 0); // No deadline: both clock variants must finish their full assertion sequence.
+      const record = (label: string, coarse = false) => {
+        if (!active) return;
+        const seq = ++sequence;
+        if (ledger.length === 64) {
+          overflow++;
+          return;
+        }
+        ledger.push({
+          seq,
+          elapsedMs: performance.now() - started,
+          label,
+          stage,
+          completed,
+          bodyComplete,
+          requestedGeneration,
+          oldResolution,
+          newResolution,
+          generations: { ...generations },
+          listeners: { ...listenerCounts },
+          mainCalls: calls(pane),
+          otherCalls: calls(other),
+          ...(coarse ? { mainDom: dom(mainContainer), otherDom: dom(otherContainer) } : {}),
+        });
+      };
+      const begin = (label: string) => {
+        if (!active) return;
+        stage = label;
+        record(`${label}:start`, true);
+      };
+      const end = (label: string) => {
+        if (!active) return;
+        completed = label;
+        record(`${label}:complete`, true);
+      };
+      const mainGeneration = (generation: number) => {
+        if (!active) return;
+        generations.main = generation;
+        record("main-generation");
+      };
+      const otherGeneration = (generation: number) => {
+        if (!active) return;
+        generations.other = generation;
+        record("other-generation");
+      };
+      paneListenerObservers.set(pane, (action, count) => {
+        listenerCounts.main = count;
+        record(`main-listener-${action}`);
+      });
+      paneListenerObservers.set(other, (action, count) => {
+        listenerCounts.other = count;
+        record(`other-listener-${action}`);
+      });
+      hydrationCleanupObserver = (phase) => {
+        if (phase === "release") {
+          active = false;
+          paneListenerObservers.delete(pane);
+          paneListenerObservers.delete(other);
+          mainContainer = undefined;
+          otherContainer = undefined;
+          return;
+        }
+        if (phase === "cleanup-end") cleanupEnd = true;
+        cleanupSnapshots[phase] = {
+          stage,
+          completed,
+          bodyComplete,
+          requestedGeneration,
+          oldResolution,
+          newResolution,
+          generations: { ...generations },
+          listeners: { ...listenerCounts },
+          mainCalls: calls(pane),
+          otherCalls: calls(other),
+          mainDom: dom(mainContainer),
+          otherDom: dom(otherContainer),
+        };
+        record(phase, true);
+      };
+      record("test-entry");
+      const emit = liveEvents(pane);
+      const oldHistory = deferred<AgentModule.HistoryEntry[]>();
+      const newHistory = deferred<AgentModule.HistoryEntry[]>();
+      vi.mocked(pane.listHistory)
+        .mockReturnValueOnce(oldHistory.promise)
+        .mockReturnValueOnce(newHistory.promise);
+      begin("render");
+      const view = await act(async () =>
+        render(
+          <AgentPane
+            client={pane}
+            target={target}
+            generation={1}
+            onGenerationChange={mainGeneration}
+            workspaceOwnsSessionLifecycle
+          />,
+        ),
+      );
+      mainContainer = view.container;
+      end("render");
+      begin("first-history");
+      expect(pane.listHistory).toHaveBeenCalledTimes(1);
+      end("first-history");
+      begin("stale-event");
+      act(() => emit("text_delta", { text: "Stale live answer" }));
+      end("stale-event");
+      vi.mocked(pane.restore).mockResolvedValue(2);
+      vi.mocked(pane.waitForReady).mockResolvedValue({
+        ready: true,
+        error: null,
+        generation: 2,
+        sessionId: pane.paneId,
+      });
+      requestedGeneration = 2;
+      begin("rerender");
+      await act(async () =>
+        view.rerender(
+          <AgentPane
+            client={pane}
+            target={{ ...target, sessionPath: "/new.jsonl" }}
+            generation={2}
+            onGenerationChange={mainGeneration}
+            workspaceOwnsSessionLifecycle
+          />,
+        ),
+      );
+      end("rerender");
+      begin("second-history");
+      expect(pane.listHistory).toHaveBeenCalledTimes(2);
+      end("second-history");
+      begin("independent-render");
+      const otherView = await act(async () =>
+        render(
+          <AgentPane
+            client={other}
+            target={target}
+            onGenerationChange={otherGeneration}
+            workspaceOwnsSessionLifecycle
+          />,
+        ),
+      );
+      otherContainer = otherView.container;
+      end("independent-render");
+      begin("independent-ready");
+      expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull();
+      end("independent-ready");
+      begin("independent-input");
+      const otherInput = within(otherView.container).getByRole("textbox");
+      await act(async () => {
+        fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
+        fireEvent.keyDown(otherInput, { key: "Enter" });
+      });
+      end("independent-input");
+      begin("independent-submit");
+      expect(other.sendPrompt).toHaveBeenCalledTimes(1);
+      end("independent-submit");
+      begin("old-history-act");
+      oldResolution = "resolve-invoked";
+      record("old-history-resolve-invoked");
+      await act(async () => oldHistory.resolve([{ role: "user", text: "Stale stored prompt" }]));
+      end("old-history-act");
+      begin("gate-assertions");
+      const input = within(view.container).getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(input, { target: { value: "New generation draft" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe("New generation draft");
+      expect(within(view.container).getByText(/connecting to agent/)).toBeTruthy();
+      end("gate-assertions");
+      begin("current-event");
+      act(() => emit("text_delta", { text: "Current live answer" }));
+      end("current-event");
+      begin("new-history-act");
+      newResolution = "resolve-invoked";
+      record("new-history-resolve-invoked");
+      await act(async () => newHistory.resolve([{ role: "user", text: "Current stored prompt" }]));
+      end("new-history-act");
+      begin("current-transcript");
+      expect(within(view.container).getByText("Current stored prompt")).toBeTruthy();
+      end("current-transcript");
+      begin("transcript-assertions");
+      expect(within(view.container).getAllByText("Current live answer")).toHaveLength(1);
+      expect(screen.queryByText("Stale stored prompt")).toBeNull();
+      expect(screen.queryByText("Stale live answer")).toBeNull();
+      end("transcript-assertions");
+      begin("current-input");
+      await act(async () => fireEvent.keyDown(input, { key: "Enter" }));
+      end("current-input");
+      begin("current-submit");
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+      end("current-submit");
+      if (active) bodyComplete = true;
+      end("test-body");
+    },
+    0,
+  ); // No deadline: both clock variants must finish their full assertion sequence.
 
   it.each(["1536x1024", "1254x1254", "1024x1024"])(
     "restores %s sizing evidence once alongside its image after live rendering",
@@ -1071,7 +1136,9 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     });
     // Keep project selection and real history hydration, without making composer
     // tests depend on the unrelated lazy Ken Markdown/action renderer.
-    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Existing search request" }]);
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "Existing search request" },
+    ]);
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
@@ -1139,9 +1206,11 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     },
   );
 
-  it.each([false, true].flatMap((reduced) =>
-    ["x".repeat(12_000), "😀".repeat(6_000)].map((text) => ({ reduced, text })),
-  ))("enforces UTF-16 enhancement limits (case %#)", async ({ reduced, text }) => {
+  it.each(
+    [false, true].flatMap((reduced) =>
+      ["x".repeat(12_000), "😀".repeat(6_000)].map((text) => ({ reduced, text })),
+    ),
+  )("enforces UTF-16 enhancement limits (case %#)", async ({ reduced, text }) => {
     vi.stubGlobal("matchMedia", () => ({
       matches: reduced,
       addEventListener: vi.fn(),
@@ -3116,24 +3185,54 @@ describe("AgentPane lifecycle", () => {
     let completed = false;
     vi.mocked(pane.programmatic).mockImplementation(async (request) => {
       const summary = {
-        id, expectedOutput: "Review packaging", state: completed ? "completed" as const : "discovered" as const,
-        presence: "present" as const, mutationPaths: [],
-        actions: { run: { available: !completed, reason: completed ? "Completed" : "Can run" },
-          dismiss: { available: !completed, reason: completed ? "Completed" : "Can dismiss" } },
-        route: { available: !completed, command: "research" as const,
-          reason: completed ? "Execution completed" : "Available", machineLocal: true },
+        id,
+        expectedOutput: "Review packaging",
+        state: completed ? ("completed" as const) : ("discovered" as const),
+        presence: "present" as const,
+        mutationPaths: [],
+        actions: {
+          run: { available: !completed, reason: completed ? "Completed" : "Can run" },
+          dismiss: { available: !completed, reason: completed ? "Completed" : "Can dismiss" },
+        },
+        route: {
+          available: !completed,
+          command: "research" as const,
+          reason: completed ? "Execution completed" : "Available",
+          machineLocal: true,
+        },
       };
       const snapshot = (completed ? "b" : "a").repeat(64);
-      if (request.action === "report") return {
-        version: 1, action: "report", ok: true,
-        report: { status: "current", reason: "Current", scan: { available: true, reason: "Approved" },
-          snapshot, fingerprint: id, offset: 0, total: 1, rows: [summary] },
-      };
-      if (request.action === "detail") return {
-        version: 1, action: "detail", ok: true, snapshot,
-        detail: { summary, trigger: "Manifest change", verification: completed ? "Verified completion" : "Not yet run",
-          risks: [], evidence: [], evidenceTruncated: false },
-      };
+      if (request.action === "report")
+        return {
+          version: 1,
+          action: "report",
+          ok: true,
+          report: {
+            status: "current",
+            reason: "Current",
+            scan: { available: true, reason: "Approved" },
+            snapshot,
+            fingerprint: id,
+            offset: 0,
+            total: 1,
+            rows: [summary],
+          },
+        };
+      if (request.action === "detail")
+        return {
+          version: 1,
+          action: "detail",
+          ok: true,
+          snapshot,
+          detail: {
+            summary,
+            trigger: "Manifest change",
+            verification: completed ? "Verified completion" : "Not yet run",
+            risks: [],
+            evidence: [],
+            evidenceTruncated: false,
+          },
+        };
       throw new Error(`Unexpected mutation: ${request.action}`);
     });
     const view = render(<AgentPane client={pane} target={target} />);
@@ -3170,113 +3269,182 @@ describe("AgentPane lifecycle", () => {
     });
     const question = {
       id: "ask-1",
-      questions: [{
-        id: "specialist-approval", kind: "choice", question: "Allow /research to work on this task?",
-        allowOther: false,
-        options: [
-          { label: "Approve and start task", value: "approved-snapshot" },
-          { label: "Cancel", value: "cancel", recommended: true },
-        ],
-      }],
+      questions: [
+        {
+          id: "specialist-approval",
+          kind: "choice",
+          question: "Allow /research to work on this task?",
+          allowOther: false,
+          options: [
+            { label: "Approve and start task", value: "approved-snapshot" },
+            { label: "Cancel", value: "cancel", recommended: true },
+          ],
+        },
+      ],
     };
     expect(nativeMocks.agentEvent).not.toBeNull();
-    act(() => nativeMocks.agentEvent!({ payload: {
-      paneId: pane.paneId, sessionId: "opportunity-session", type: "ask_user", data: question,
-    } }));
+    act(() =>
+      nativeMocks.agentEvent!({
+        payload: {
+          paneId: pane.paneId,
+          sessionId: "opportunity-session",
+          type: "ask_user",
+          data: question,
+        },
+      }),
+    );
     // The real transport buffers the frame until native identity resolves.
     expect(screen.queryByText(question.questions[0].question)).toBeNull();
     await act(async () => receipt.resolve({ queued: false, count: 0 }));
-    await act(async () => identity.resolve({
-      ready: true, error: null, generation: 8, sessionId: "opportunity-session",
-    }));
+    await act(async () =>
+      identity.resolve({
+        ready: true,
+        error: null,
+        generation: 8,
+        sessionId: "opportunity-session",
+      }),
+    );
     expect(await screen.findByText(question.questions[0].question)).toBeTruthy();
     expect(pane.answerAskUser).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "1Approve and start task" }));
-    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith(
-      "ask-1", "answer", { "specialist-approval": "approved-snapshot" },
-    ));
+    await waitFor(() =>
+      expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-1", "answer", {
+        "specialist-approval": "approved-snapshot",
+      }),
+    );
   });
 
-  it.each(["programmatic_execution_busy", "invalid_programmatic_selection"])("shows definite %s rejection without uncertain reconciliation or retry", async (code) => {
-    const { pane, receipt } = await deferredOpportunityRun(false);
-    await act(async () => receipt.reject(new PromptSubmissionError({
-      category: "rejected", code, message: "Wait for the current run to finish.",
-    })));
-    expect(await screen.findByText("Run rejected: Wait for the current run to finish.")).toBeTruthy();
-    expect(screen.queryByText(/We could not confirm whether the task started/)).toBeNull();
-    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(pane.programmatic).toHaveBeenCalledTimes(2);
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-  });
+  it.each(["programmatic_execution_busy", "invalid_programmatic_selection"])(
+    "shows definite %s rejection without uncertain reconciliation or retry",
+    async (code) => {
+      const { pane, receipt } = await deferredOpportunityRun(false);
+      await act(async () =>
+        receipt.reject(
+          new PromptSubmissionError({
+            category: "rejected",
+            code,
+            message: "Wait for the current run to finish.",
+          }),
+        ),
+      );
+      expect(
+        await screen.findByText("Run rejected: Wait for the current run to finish."),
+      ).toBeTruthy();
+      expect(screen.queryByText(/We could not confirm whether the task started/)).toBeNull();
+      expect(
+        (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      expect(pane.programmatic).toHaveBeenCalledTimes(2);
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    },
+  );
 
-  it.each(["Network response lost", "invalid prompt submission response"])("keeps %s uncertain without retrying execution", async (message) => {
-    const { pane, receipt } = await deferredOpportunityRun(false);
-    await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
-    expect(await screen.findByText(/We could not confirm whether the task started/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-  });
+  it.each(["Network response lost", "invalid prompt submission response"])(
+    "keeps %s uncertain without retrying execution",
+    async (message) => {
+      const { pane, receipt } = await deferredOpportunityRun(false);
+      await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
+      expect(await screen.findByText(/We could not confirm whether the task started/)).toBeTruthy();
+      expect(
+        (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("coalesces terminal invalidations before a deferred opportunity receipt into report and detail refresh", async () => {
     const { pane, receipt, id } = await deferredOpportunityRun();
     await act(async () => receipt.resolve({ queued: false, count: 0 }));
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(4));
     expect(await screen.findByText("Verified completion")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Review packaging.*Completed/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(
+      screen
+        .getByRole("button", { name: /Review packaging.*Completed/ })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
-      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
-      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 },
+      { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 },
+      { version: 1, action: "detail", id },
     ]);
     expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["rejected", "uncertain"] as const)("refreshes authoritative completion after a %s opportunity receipt without retrying the run", async (outcome) => {
-    const { pane, receipt, id } = await deferredOpportunityRun();
-    await act(async () => {
-      if (outcome === "rejected") receipt.reject(new Error("Opportunity run rejected"));
-      else receipt.reject(new Error("Native acknowledgement lost"));
-    });
-    expect(await screen.findByText("Verified completion")).toBeTruthy();
-    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
-      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
-      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
-    ]);
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-  });
+  it.each(["rejected", "uncertain"] as const)(
+    "refreshes authoritative completion after a %s opportunity receipt without retrying the run",
+    async (outcome) => {
+      const { pane, receipt, id } = await deferredOpportunityRun();
+      await act(async () => {
+        if (outcome === "rejected") receipt.reject(new Error("Opportunity run rejected"));
+        else receipt.reject(new Error("Native acknowledgement lost"));
+      });
+      expect(await screen.findByText("Verified completion")).toBeTruthy();
+      expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+        { version: 1, action: "report", offset: 0 },
+        { version: 1, action: "detail", id },
+        { version: 1, action: "report", offset: 0 },
+        { version: 1, action: "detail", id },
+      ]);
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    },
+  );
 
-  it.each(["resolve", "reject"] as const)("discards queued opportunity refresh on unmount before receipt %s", async (outcome) => {
-    const { pane, receipt, view } = await deferredOpportunityRun();
-    view.unmount();
-    await act(async () => {
-      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
-      else receipt.reject(new Error("Late acknowledgement failure"));
-    });
-    expect(pane.programmatic).toHaveBeenCalledTimes(2);
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-  });
+  it.each(["resolve", "reject"] as const)(
+    "discards queued opportunity refresh on unmount before receipt %s",
+    async (outcome) => {
+      const { pane, receipt, view } = await deferredOpportunityRun();
+      view.unmount();
+      await act(async () => {
+        if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+        else receipt.reject(new Error("Late acknowledgement failure"));
+      });
+      expect(pane.programmatic).toHaveBeenCalledTimes(2);
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    },
+  );
 
-  it.each(["resolve", "reject"] as const)("does not drain a reset session's queued opportunity refresh on receipt %s", async (outcome) => {
-    const { pane, receipt, emit } = await deferredOpportunityRun();
-    act(() => emit("session_reset", {}));
-    expect(screen.queryByRole("heading", { name: "Opportunities" })).toBeNull();
-    // A new report owner must survive the old receipt's finally block.
-    const report = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
-    vi.mocked(pane.programmatic).mockReturnValueOnce(report.promise);
-    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    expect(pane.programmatic).toHaveBeenCalledTimes(3);
-    await act(async () => {
-      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
-      else receipt.reject(new Error("Late acknowledgement failure"));
-    });
-    expect(pane.programmatic).toHaveBeenCalledTimes(3);
-    await act(async () => report.resolve({ version: 1, action: "report", ok: true,
-      report: { status: "current", reason: "Fresh session report", scan: { available: true, reason: "Approved" },
-        snapshot: "c".repeat(64), fingerprint: "c".repeat(64), offset: 0, total: 0, rows: [] } }));
-    expect(await screen.findByText("Fresh session report")).toBeTruthy();
-    expect(screen.queryByText("Verified completion")).toBeNull();
-    expect(pane.programmatic).toHaveBeenCalledTimes(3);
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
-  });
+  it.each(["resolve", "reject"] as const)(
+    "does not drain a reset session's queued opportunity refresh on receipt %s",
+    async (outcome) => {
+      const { pane, receipt, emit } = await deferredOpportunityRun();
+      act(() => emit("session_reset", {}));
+      expect(screen.queryByRole("heading", { name: "Opportunities" })).toBeNull();
+      // A new report owner must survive the old receipt's finally block.
+      const report = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+      vi.mocked(pane.programmatic).mockReturnValueOnce(report.promise);
+      fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      expect(pane.programmatic).toHaveBeenCalledTimes(3);
+      await act(async () => {
+        if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+        else receipt.reject(new Error("Late acknowledgement failure"));
+      });
+      expect(pane.programmatic).toHaveBeenCalledTimes(3);
+      await act(async () =>
+        report.resolve({
+          version: 1,
+          action: "report",
+          ok: true,
+          report: {
+            status: "current",
+            reason: "Fresh session report",
+            scan: { available: true, reason: "Approved" },
+            snapshot: "c".repeat(64),
+            fingerprint: "c".repeat(64),
+            offset: 0,
+            total: 0,
+            rows: [],
+          },
+        }),
+      );
+      expect(await screen.findByText("Fresh session report")).toBeTruthy();
+      expect(screen.queryByText("Verified completion")).toBeNull();
+      expect(pane.programmatic).toHaveBeenCalledTimes(3);
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("does not expose opportunities in chat mode", async () => {
     const pane = client("pane-chat-opportunities", 8);

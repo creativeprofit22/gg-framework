@@ -1830,11 +1830,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   );
 
   const {
-    state: roadmapDraftState, dispatch: dispatchRoadmapDraft,
-    refresh: refreshRoadmapDraft, refreshError: roadmapDraftRefreshError,
+    state: roadmapDraftState,
+    dispatch: dispatchRoadmapDraft,
+    refresh: refreshRoadmapDraft,
+    refreshError: roadmapDraftRefreshError,
     onChange: onRoadmapPhaseDraftChange,
-    approve: approveRoadmapDraft, reject: rejectRoadmapDraft,
-  } = useRoadmapDraft(client, JSON.stringify([state?.sessionId, state?.cwd, hydrateNonce]), hydrated);
+    approve: approveRoadmapDraft,
+    reject: rejectRoadmapDraft,
+  } = useRoadmapDraft(
+    client,
+    JSON.stringify([state?.sessionId, state?.cwd, hydrateNonce]),
+    hydrated,
+  );
   const onAstraStateChange = useCallback(() => {
     astraAuthoritativeRevisionRef.current += 1;
   }, []);
@@ -1934,18 +1941,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   };
   const performProgrammatic = async (request: ProgrammaticChatRequest): Promise<void> => {
     const selection = programmaticRef.current;
-    if (request.action === "approve-setup" && (
-      !selection.proposalApprovable ||
-      selection.proposal?.handle !== request.proposalHandle ||
-      selection.reconcile || selection.operation !== null
-    )) return;
+    if (
+      request.action === "approve-setup" &&
+      (!selection.proposalApprovable ||
+        selection.proposal?.handle !== request.proposalHandle ||
+        selection.reconcile ||
+        selection.operation !== null)
+    )
+      return;
     if (request.action === "scan" && selection.report?.scan.available !== true) return;
-    if (request.action === "dismiss" && (
-      selection.detail?.summary.actions?.dismiss.available !== true ||
-      selection.detail.summary.id !== request.id ||
-      selection.detailSnapshot !== request.snapshot ||
-      selection.report?.snapshot !== request.snapshot
-    )) return;
+    if (
+      request.action === "dismiss" &&
+      (selection.detail?.summary.actions?.dismiss.available !== true ||
+        selection.detail.summary.id !== request.id ||
+        selection.detailSnapshot !== request.snapshot ||
+        selection.report?.snapshot !== request.snapshot)
+    )
+      return;
     if (
       workspaceMode !== "code" ||
       !hydrated ||
@@ -2051,8 +2063,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           type: "error",
           generation,
           epoch,
-          error: rejected ? `Run rejected: ${error.message}` :
-            "We could not confirm whether the task started. Reload results before trying again.",
+          error: rejected
+            ? `Run rejected: ${error.message}`
+            : "We could not confirm whether the task started. Reload results before trying again.",
           reconcile: !rejected,
         });
     } finally {
@@ -3942,10 +3955,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function recoverPlanMutation(error: unknown, fallback: string): void {
     if (error instanceof PlanMutationError && error.pendingPlanReview !== undefined) {
       const recovered = error.pendingPlanReview;
-      replacePlanReview(current =>
-        current && planReview && current.checkpointId === planReview.checkpointId &&
-        current.generation === planReview.generation && stateRef.current?.sessionId === state?.sessionId
-          ? recovered : current,
+      replacePlanReview((current) =>
+        current &&
+        planReview &&
+        current.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation &&
+        stateRef.current?.sessionId === state?.sessionId
+          ? recovered
+          : current,
       );
     }
     toast(error instanceof PlanMutationError ? error.message : fallback, "error", 7_000);
@@ -3970,10 +3987,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (!planReview) return;
       await acceptPlanIPC(planReview.checkpointId, planReview.generation);
       planResumePromptRef.current = null;
-      replacePlanReview(current =>
+      replacePlanReview((current) =>
         stateRef.current?.sessionId === state?.sessionId &&
-        current?.checkpointId === planReview.checkpointId && current.generation === planReview.generation
-          ? null : current,
+        current?.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation
+          ? null
+          : current,
       );
       pushItem({ kind: "info", id: nextId(), text: "\u2713 Plan accepted. Resuming." });
     } catch (error) {
@@ -4315,32 +4334,66 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     );
   }
 
-  const planIdentity = planReview ? `${state?.sessionId}:${planReview.checkpointId}:${planReview.generation}` : null;
-  const expandedReview = roadmapDraftState.open ? "roadmap" : planIdentity && expandedPlanIdentity === planIdentity ? "plan" : null;
+  const planIdentity = planReview
+    ? `${state?.sessionId}:${planReview.checkpointId}:${planReview.generation}`
+    : null;
+  const expandedReview = roadmapDraftState.open
+    ? "roadmap"
+    : planIdentity && expandedPlanIdentity === planIdentity
+      ? "plan"
+      : null;
   const setExpandedReview = (id: ReviewDockItem["id"] | null) => {
     setExpandedPlanIdentity(id === "plan" ? planIdentity : null);
     dispatchRoadmapDraft({ type: id === "roadmap" ? "open" : "dismiss" });
   };
   const reviewItems: ReviewDockItem[] = [];
-  if (workspaceMode === "code" && planReview) reviewItems.push({
-    id: "plan", identity: planIdentity!, label: "Plan approval required",
-    summary: planReview.state === "revision-requested" ? "Revision requested" : "Review the saved plan before approving",
-    content: <PlanReviewModal content={planReview.content} kenReviewing={autopilotReviewing}
-      kenReady={planReview.reviewStatus === "ready"}
-      readinessReason={planReview.state === "pending-review" && planReview.reviewStatus === "ready" ? planReview.feedback : null}
-      revisionPending={planReview.state === "revision-requested"} revisionRunning={running} busy={planGateBusy}
-      onAccept={() => void acceptPlan()} onFeedback={feedback => void sendPlanFeedback(feedback)}
-      onRetryRevision={() => void retryPlanRevision()} />,
-  });
+  if (workspaceMode === "code" && planReview)
+    reviewItems.push({
+      id: "plan",
+      identity: planIdentity!,
+      label: "Plan approval required",
+      summary:
+        planReview.state === "revision-requested"
+          ? "Revision requested"
+          : "Review the saved plan before approving",
+      content: (
+        <PlanReviewModal
+          content={planReview.content}
+          kenReviewing={autopilotReviewing}
+          kenReady={planReview.reviewStatus === "ready"}
+          readinessReason={
+            planReview.state === "pending-review" && planReview.reviewStatus === "ready"
+              ? planReview.feedback
+              : null
+          }
+          revisionPending={planReview.state === "revision-requested"}
+          revisionRunning={running}
+          busy={planGateBusy}
+          onAccept={() => void acceptPlan()}
+          onFeedback={(feedback) => void sendPlanFeedback(feedback)}
+          onRetryRevision={() => void retryPlanRevision()}
+        />
+      ),
+    });
 
-  if (roadmapDraftState.draft) reviewItems.push({
-    id: "roadmap", identity: `${state?.sessionId}:${roadmapDraftState.draft.id}`,
-    label: "Roadmap draft", summary: `${roadmapDraftState.draft.phases.length} proposed phases · ${roadmapDraftState.draft.status === "stale" ? "Out of date" : "Approval required"}`,
-    content: <RoadmapPhaseDraftReviewModal
-      draft={roadmapDraftState.draft} open decision={roadmapDraftState.decision}
-      error={roadmapDraftState.error} announcement=""
-      onApprove={approveRoadmapDraft} onReject={rejectRoadmapDraft} />,
-  });
+  if (roadmapDraftState.draft)
+    reviewItems.push({
+      id: "roadmap",
+      identity: `${state?.sessionId}:${roadmapDraftState.draft.id}`,
+      label: "Roadmap draft",
+      summary: `${roadmapDraftState.draft.phases.length} proposed phases · ${roadmapDraftState.draft.status === "stale" ? "Out of date" : "Approval required"}`,
+      content: (
+        <RoadmapPhaseDraftReviewModal
+          draft={roadmapDraftState.draft}
+          open
+          decision={roadmapDraftState.decision}
+          error={roadmapDraftState.error}
+          announcement=""
+          onApprove={approveRoadmapDraft}
+          onReject={rejectRoadmapDraft}
+        />
+      ),
+    });
 
   const roadmapDraftTrigger = roadmapDraftState.draft ? (
     <button
@@ -4552,68 +4605,72 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
       <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
-      <div
-        className="transcript-frame"
-        onMouseEnter={() => setChatHovered(true)}
-        onMouseLeave={() => setChatHovered(false)}
-      >
-        {workspaceMode === "code" && kenPowerBanner && (
-          <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
-        )}
-        <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
-          {!hydrated && items.length === 0 ? (
-            <TranscriptSkeleton />
-          ) : (
-            <>
-              {items.length === 0 &&
-                (status === "ready" ? (
-                  <WakeScreen chat={workspaceMode === "chat"} />
-                ) : (
-                  <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                    {`\u273b ${status}`}
-                  </div>
-                ))}
-              <KenPromptActionProvider value={kenPromptDispatcher}>
-                {items.map((it) =>
-                  createElement(TranscriptRow, {
-                    key: it.id,
-                    item: it,
-                    onImageLoad: maybeScrollToBottom,
-                    onAskAnswer: handleAskAnswer,
-                    onAskType: handleAskType,
-                  }),
-                )}
-              </KenPromptActionProvider>
-              {workspaceMode === "code" &&
-                programmaticOpen &&
-                programmatic.generation === programmaticGeneration && (
-                  <ProgrammaticChat
-                    state={programmatic}
-                    busy={programmaticBusy}
-                    planMode={state?.planMode ?? false}
-                    onAction={(request) => void performProgrammatic(request)}
-                    onSelect={(id) => {
-                      dispatchProgrammatic({ type: "select", id });
-                      void performProgrammatic({ version: 1, action: "detail", id });
-                    }}
-                    onRun={() => void runSelectedProgrammatic()}
-                  />
-                )}
-            </>
+        <div
+          className="transcript-frame"
+          onMouseEnter={() => setChatHovered(true)}
+          onMouseLeave={() => setChatHovered(false)}
+        >
+          {workspaceMode === "code" && kenPowerBanner && (
+            <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
+          )}
+          <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
+            {!hydrated && items.length === 0 ? (
+              <TranscriptSkeleton />
+            ) : (
+              <>
+                {items.length === 0 &&
+                  (status === "ready" ? (
+                    <WakeScreen chat={workspaceMode === "chat"} />
+                  ) : (
+                    <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                      {`\u273b ${status}`}
+                    </div>
+                  ))}
+                <KenPromptActionProvider value={kenPromptDispatcher}>
+                  {items.map((it) =>
+                    createElement(TranscriptRow, {
+                      key: it.id,
+                      item: it,
+                      onImageLoad: maybeScrollToBottom,
+                      onAskAnswer: handleAskAnswer,
+                      onAskType: handleAskType,
+                    }),
+                  )}
+                </KenPromptActionProvider>
+                {workspaceMode === "code" &&
+                  programmaticOpen &&
+                  programmatic.generation === programmaticGeneration && (
+                    <ProgrammaticChat
+                      state={programmatic}
+                      busy={programmaticBusy}
+                      planMode={state?.planMode ?? false}
+                      onAction={(request) => void performProgrammatic(request)}
+                      onSelect={(id) => {
+                        dispatchProgrammatic({ type: "select", id });
+                        void performProgrammatic({ version: 1, action: "detail", id });
+                      }}
+                      onRun={() => void runSelectedProgrammatic()}
+                    />
+                  )}
+              </>
+            )}
+          </div>
+          {items.length > 0 && (
+            <ExportChatButton
+              visible={chatHovered || exporting}
+              busy={exporting}
+              onExport={() => void exportTranscript()}
+            />
           )}
         </div>
-        {items.length > 0 && (
-          <ExportChatButton
-            visible={chatHovered || exporting}
-            busy={exporting}
-            onExport={() => void exportTranscript()}
-          />
-        )}
-      </div>
 
-      <ReviewDock items={reviewItems} expanded={expandedReview}
-        onExpandedChange={setExpandedReview} onLayoutChange={maybeScrollToBottom}
-        fallbackFocus={() => inputRef.current?.focus()} />
+        <ReviewDock
+          items={reviewItems}
+          expanded={expandedReview}
+          onExpandedChange={setExpandedReview}
+          onLayoutChange={maybeScrollToBottom}
+          fallbackFocus={() => inputRef.current?.focus()}
+        />
       </div>
 
       <div className="liveregion">
@@ -4894,8 +4951,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           // when there's text and out when there isn't.
           <button
             className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
-            title={enhanceOverLimit ? enhanceLimitReason : "Enhance prompt — clearer wording + correct terms"}
-            aria-describedby={enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined}
+            title={
+              enhanceOverLimit
+                ? enhanceLimitReason
+                : "Enhance prompt — clearer wording + correct terms"
+            }
+            aria-describedby={
+              enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+            }
             disabled={planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit}
             aria-hidden={!enhanceHintVisible}
             onClick={() => void runEnhance()}
@@ -5273,7 +5336,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {roadmapDraftRefreshError && (
         <div role="status" className="roadmap-draft-refresh-error">
           {roadmapDraftRefreshError}
-          <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>Retry Roadmap review</button>
+          <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>
+            Retry Roadmap review
+          </button>
         </div>
       )}
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">

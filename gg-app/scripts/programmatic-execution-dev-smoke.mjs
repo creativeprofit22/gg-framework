@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connectToDevWebview, createIsolatedProfile, reserveHeldTcpPort, sanitizedSmokeEnvironment } from "./phase-25-windows-smoke-helpers.mjs";
 import { terminateProcessTree, readProcessTable, processTreeSnapshot, survivingProcessIds } from "./workspace-shell-evidence.mjs";
+import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspace = resolve(app, "..");
@@ -60,11 +61,30 @@ function seed(paths) {
 
 async function run() {
   assert.equal(process.platform, "win32");
-  assert.deepEqual(process.argv.slice(2), ["--identity", identity]);
+  const visual = process.argv.includes("--visual");
+  const driftOnly = process.argv.includes("--drift-only");
+  assert.ok(!driftOnly || !visual, "Drift-only smoke stays minimized and does not repeat visual/input checks");
+  const reuseBuiltDev = process.argv.includes("--reuse-built-dev");
+  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(visual ? ["--visual"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
+  const builtDev = join(app, "src-tauri/target/debug/gg-app.exe");
+  if (reuseBuiltDev) {
+    assert.match(process.env.GG_PROGRAMMATIC_BUILT_DEV_SHA256 ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(createHash("sha256").update(readFileSync(builtDev)).digest("hex"), process.env.GG_PROGRAMMATIC_BUILT_DEV_SHA256, "Previously verified developer binary must match recorded hash");
+  }
   // Compile the current developer target; a debug-directory executable can be a stale smoke build.
-  const nativeCommand = "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json";
+  const frontendPort = await reserveHeldTcpPort();
+  const frontendOrigin = reuseBuiltDev ? process.env.GG_PROGRAMMATIC_BUILT_DEV_ORIGIN : `http://127.0.0.1:${frontendPort.port}`;
+  assert.match(frontendOrigin ?? "", /^http:\/\/127\.0\.0\.1:\d{4,5}$/);
+  await frontendPort.release();
   assert.ok(existsSync(join(workspace, "packages/ggcoder/dist/core/programmatic/execution.js")), "Compile the development dispatcher first.");
   const paths = createIsolatedProfile(realpathSync.native(mkdtempSync(join(tmpdir(), "gg-programmatic-execution-"))));
+  // Keep cmd.exe arguments space-free; quoted Windows paths are re-escaped by spawn.
+  const launchDir = mkdtempSync(join(workspace, ".gg/evidence/programmatic-native-launch-"));
+  const nativeConfig = join(launchDir, "tauri.dev-smoke.json");
+  json(nativeConfig, { ...JSON.parse(readFileSync(join(app, "src-tauri/tauri.local.conf.json"), "utf8")), build: { beforeDevCommand: `pnpm exec vite --host 127.0.0.1 --port ${frontendPort.port}`, devUrl: frontendOrigin } });
+  const configArgument = `../.gg/evidence/${launchDir.split(/[\\/]/).at(-1)}/tauri.dev-smoke.json`;
+  assert.match(configArgument, /^\.\.\/\.gg\/evidence\/programmatic-native-launch-[A-Za-z0-9]+\/tauri\.dev-smoke\.json$/);
+  const nativeCommand = `pnpm exec tauri dev --config ${configArgument}`;
   const agentDir = join(paths.home, ".gg/identities", identity);
   mkdirSync(join(agentDir, "commands"), { recursive: true });
   writeFileSync(join(agentDir, "commands/research.md"), `---\nname: research\ndescription: Harmless fixture\n---\n${fixtureBody}\n`);
@@ -110,24 +130,33 @@ async function run() {
   Object.assign(env, { GG_SIDECAR_PATH: fileURLToPath(import.meta.url), GG_PROGRAMMATIC_EXECUTION_FIXTURE_MODE: "sidecar",
     GG_PROGRAMMATIC_EXECUTION_FIXTURE_PROVIDER: providerUrl,
     GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector,
-    GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: "minimized",
+    GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
     COREPACK_HOME: process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node/corepack"), COREPACK_DEFAULT_TO_LATEST: "0",
     CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
     RUSTUP_HOME: process.env.RUSTUP_HOME ?? join(process.env.USERPROFILE ?? "", ".rustup") });
+  console.log(`Fixture evidence: ${paths.audit}`);
   const logFd = openSync(join(paths.audit, "developer.log"), "a");
   const owned = [];
   let client;
   let failure;
   try {
-    const native = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", nativeCommand], { cwd: app, env, windowsHide: true, stdio: ["ignore", logFd, logFd] });
+    if (reuseBuiltDev) {
+      const frontend = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm exec vite --host 127.0.0.1 --port ${new URL(frontendOrigin).port}`], { cwd: app, env, windowsHide: true, stdio: ["ignore", logFd, logFd] });
+      owned.push(frontend);
+      await waitFor("reused build frontend HTTP readiness", async () => (await fetch(frontendOrigin)).ok);
+      json(join(paths.audit, "reused-build.json"), { binary: builtDev, sha256: createHash("sha256").update(readFileSync(builtDev)).digest("hex"), origin: frontendOrigin });
+    }
+    const native = reuseBuiltDev
+      ? spawn(builtDev, [], { cwd: app, env, windowsHide: true, stdio: ["ignore", logFd, logFd] })
+      : spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", nativeCommand], { cwd: app, env, windowsHide: true, stdio: ["ignore", logFd, logFd] });
     owned.push(native);
     await new Promise((done, reject) => { native.once("spawn", done); native.once("error", reject); });
     client = await connectToDevWebview(cdpPort, (label, check) => waitFor(label, () => {
       if (native.exitCode !== null) throw new Error("Developer app exited; inspect developer.log");
       return check();
-    }, 300_000), (target) => String(target.url).startsWith("http://localhost:1420"));
+    }, 300_000), (target) => String(target.url).startsWith(frontendOrigin));
     await client.send("Runtime.enable");
-    await waitFor("developer document", () => client.evaluate(`location.origin === "http://localhost:1420" && document.readyState === "complete"`));
+    await waitFor("developer document", () => client.evaluate(`location.origin === ${JSON.stringify(frontendOrigin)} && document.readyState === "complete"`));
     await waitFor("initial workspace persistence", () => client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`));
     await client.evaluate(`(() => {
       localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({ version: 9, root: { type: "leaf", paneId: "primary" }, focusedPaneId: "primary", panes: { primary: { kind: "agent", mode: "code", cwd: ${JSON.stringify(paths.project)}, sessionPath: null } } }));
@@ -137,31 +166,83 @@ async function run() {
     await waitFor("native session", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s => s.ready && s.provider === "azure" && s)`));
     const parentState = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     await client.evaluate(`import("/src/agent.ts").then(m => { window.fixtureEvents=[]; window.fixtureUnsubscribe=m.subscribe(e=>{ if (["ask_user","text_delta","done"].includes(e.type) && window.fixtureEvents.length < 100) window.fixtureEvents.push(e); }); return true; })`);
+    const input = visual ? await createNativeInputSmoke(client, native.pid, paths.audit, waitFor) : null;
     const click = async (label) => {
+      if (input) return input.activate(input.button(label), label, label === "Approve and save setup");
       await waitFor(`rendered ${label}`, () => client.evaluate(`Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`));
       await client.evaluate(`Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled).click()`);
     };
     await click("Opportunities");
-    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Setup required")`));
-    await click("Inspect setup");
-    await waitFor("exact proposal", () => client.evaluate(`document.querySelector('[aria-label="Exact proposed profile"]')?.textContent.includes('"research"')`));
+    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Start with Review setup")`));
+    await click("Review setup");
+    await waitFor("exact proposal", () => client.evaluate(`document.querySelector('[aria-label="Exact settings to save"]')?.textContent.includes('"research"')`));
     assert.equal(requests.length, 0, "No provider dispatch during setup inspection");
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false, "Inspection must not write approval");
-    await click("Approve setup");
+    await click("Approve and save setup");
     await waitFor("approved profile", () => existsSync(join(paths.project, ".gg/programmatic/profile.json")));
-    await click("Rescan");
+    await click("Check for opportunities");
     await waitFor("persisted scan", () => existsSync(fixture.statePath));
     const scanned = JSON.parse(readFileSync(fixture.statePath, "utf8"));
     assert.equal(scanned.records.length, 1);
     Object.assign(fixture, { id: scanned.records[0].opportunity.identity.id, fingerprint: scanned.configurationFingerprint.sha256, condition: scanned.records[0].opportunity.verification });
     await waitFor("selectable opportunity", () => client.evaluate(`!!document.querySelector('.programmatic-row:not(:disabled)')`));
-    await client.evaluate(`document.querySelector('.programmatic-row:not(:disabled)').click()`);
-    await click("Run selected opportunity");
+    if (input) await input.activate("document.querySelector('.programmatic-row:not(:disabled)')", "Select opportunity", true);
+    else await client.evaluate(`document.querySelector('.programmatic-row:not(:disabled)').click()`);
+    if (driftOnly) {
+      await click("Dismiss this item");
+      await waitFor("dismissed fixture detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Dismissed')`));
+      const profilePath = join(paths.project, ".gg/programmatic/profile.json");
+      const previousProfile = readFileSync(profilePath);
+      const previousState = readFileSync(fixture.statePath);
+      const dismissed = JSON.parse(previousState.toString("utf8")).records[0];
+      assert.equal(dismissed.lifecycle.state, "dismissed");
+      json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture", description: "one exact configuration drift" });
+      await click("Refresh results");
+      await waitFor("exact rendered drift", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('modified: package.json')`));
+      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).find(b=>b.textContent.trim()==='Check for opportunities').disabled`), true);
+      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Review task approval' && !b.disabled)`), false);
+      assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Dismissed')`), true);
+      assert.deepEqual(readFileSync(profilePath), previousProfile);
+      assert.deepEqual(readFileSync(fixture.statePath), previousState);
+      await click("Review setup refresh");
+      await waitFor("refresh proposal", () => client.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Approve and save refresh' && !b.disabled)`));
+      assert.deepEqual(readFileSync(profilePath), previousProfile, "Review cannot write setup");
+      await click("Approve and save refresh");
+      await waitFor("new approved fingerprint", () => JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
+      assert.deepEqual(readFileSync(fixture.statePath), previousState, "Approval must not scan or reset lifecycle");
+      await click("Check for opportunities");
+      await waitFor("reconciled fingerprint", () => JSON.parse(readFileSync(fixture.statePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
+      await waitFor("retained dismissed selection", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Dismissed') && document.querySelector('.programmatic-detail')?.textContent.includes('Dismissed')`));
+      const refreshed = JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0];
+      assert.deepEqual(refreshed.opportunity.identity, dismissed.opportunity.identity);
+      assert.deepEqual(refreshed.lifecycle, dismissed.lifecycle);
+      assert.equal(requests.length, 0, "Drift workflow never dispatches a provider or specialist");
+      assert.equal(providerFailure, undefined);
+      json(join(paths.audit, "drift.json"), { changedInput: "package.json", identity: fixture.id,
+        previousFingerprint: fixture.fingerprint, fingerprint: JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256,
+        lifecycleBefore: dismissed.lifecycle, lifecycleAfter: refreshed.lifecycle,
+        profileBefore: createHash("sha256").update(previousProfile).digest("hex"),
+        stateBefore: createHash("sha256").update(previousState).digest("hex"), requests: requests.length });
+    } else {
+    if (input) {
+      await input.activate("document.querySelector('.programmatic-detail summary')", "Inspect evidence", true);
+      assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail details').open`), true);
+      await input.layout("desktop-selected");
+      await input.zoom(2);
+      await input.layout("desktop-200-percent");
+      await input.zoom(1);
+      await input.resize(600, 640);
+      await input.layout("native-600x640");
+      await input.resize(1280, 900);
+    }
+    await click("Review task approval");
     const question = await waitFor("native approval question", () => client.evaluate(`window.fixtureEvents.find(e=>e.type==="ask_user")?.data`));
     assert.equal(requests.length, 0, "No provider dispatch before approval");
     assert.match(question.questions[0].question, /research/);
     await waitFor("rendered specialist approval", () => client.evaluate(`Array.from(document.querySelectorAll('[data-ask-option]')).some(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)}))`));
-    await client.evaluate(`Array.from(document.querySelectorAll('[data-ask-option]')).find(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)})).click()`);
+    const approval = `Array.from(document.querySelectorAll('[data-ask-option]')).find(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)}))`;
+    if (input) await input.activate(approval, "Approve isolated read-only task");
+    else await client.evaluate(`(${approval}).click()`);
     await waitFor("isolated result through native events", () => client.evaluate(`window.fixtureEvents.some(e=>e.type==="text_delta" && e.data.text.includes(${JSON.stringify(completion)}))`));
     await waitFor("parent settled", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s=>!s.running)`));
     if (providerFailure) throw providerFailure;
@@ -173,22 +254,30 @@ async function run() {
     const allowed = new Set(["read", "find", "grep", "ls", "code_search", "code_nav", "web_search", "web_fetch", "ask_user", "research_corpus", "programmatic_result"]);
     assert.ok(requests[0].tools.every((tool) => allowed.has(tool.name)));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].lifecycle.state, "completed");
-    await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('completed')`));
-    await click("Rescan");
-    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('completed') && document.querySelector('.programmatic-detail')?.textContent.includes('completed') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
+    await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`));
+    await click("Check for opportunities");
+    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Completed') && document.querySelector('.programmatic-detail')?.textContent.includes('Completed') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].opportunity.identity.id, fixture.id);
     assert.equal(requests.length, 3, "Rescan must not dispatch another specialist");
+    if (input) {
+      await input.pointer();
+      await input.layout("completed-after-rescan");
+      input.evidence.passed = true;
+      input.save();
+    }
+    }
     const after = snapshot(paths.project);
     const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]);
-    assert.deepEqual(changes.sort(), [".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json"]);
+    assert.deepEqual(changes.sort(), [".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...(driftOnly ? ["package.json"] : [])]);
     const finalParent = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     assert.equal(finalParent.sessionId, parentState.sessionId);
     assert.equal(finalParent.messageCount, parentState.messageCount);
     const transcriptFiles = Object.keys(snapshot(join(agentDir, "sessions"))).filter((name) => name.endsWith(".jsonl"));
     assert.equal(transcriptFiles.length, 1, "Only the host transcript exists");
     const events = await client.evaluate(`window.fixtureEvents`);
-    assert.ok(events.some((event) => event.type === "text_delta" && event.data.text.includes("[research] read")));
-    json(join(paths.audit, "result.json"), { passed: true, minimized: true, real: ["rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", "Node dispatcher", "AgentSession", "read tool", "lifecycle storage"], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false });
+    if (driftOnly) assert.deepEqual(events, [], "No task approval, execution output or completion events");
+    else assert.ok(events.some((event) => event.type === "text_delta" && event.data.text.includes("[research] read")));
+    json(join(paths.audit, "result.json"), { passed: true, driftOnly, minimized: !visual, nativeInputSmoke: visual, real: [driftOnly ? "rendered initial approval, scan, dismissal, exact drift inspection, separate refresh approval and rescan" : "rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", ...(driftOnly ? [] : ["Node dispatcher", "AgentSession", "read tool"]), "lifecycle storage"], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false });
   } catch (error) {
     failure = error;
     // Native startup can fail before CDP exists; retain that failure too.
@@ -216,7 +305,7 @@ async function run() {
   }
   console.log(`Fixture evidence: ${paths.audit}`);
   if (failure) throw failure;
-  console.log("PROGRAMMATIC EXECUTION DEV SMOKE PASS (one minimized developer launch; no packaging)");
+  console.log(`PROGRAMMATIC ${driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : "minimized"} developer launch; no packaging)`);
 }
 
 if (mode === "sidecar") {

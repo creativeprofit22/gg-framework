@@ -18,8 +18,16 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { autosizeComposer } from "./composer-autosize";
+import { ProgrammaticChat } from "./ProgrammaticChat";
+import {
+  initialProgrammaticChatState,
+  programmaticChatReducer,
+  canRunProgrammaticSelection,
+} from "./programmatic-chat-state";
+import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   requireContinuationAcceptedEvent,
+  PromptSubmissionError,
   type ContinuationCommitRequest,
   type ContinuationDestination,
   type ContinuationHandoffResponse,
@@ -105,6 +113,7 @@ import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
 import { ExportChatButton } from "./ExportChatButton";
 import { PlanReviewModal } from "./PlanReviewModal";
+import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
 import { McpElicitModal } from "./McpElicitModal";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 // Experimental gaze focus — disabled for now (see main.tsx).
@@ -152,11 +161,7 @@ import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
-import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
-import {
-  initialRoadmapPhaseDraftState,
-  reduceRoadmapPhaseDraftState,
-} from "./roadmap-phase-draft-state";
+import { useRoadmapDraft } from "./useRoadmapDraft";
 import { basename } from "./tool-format";
 import {
   deriveKenPromptTitle,
@@ -797,12 +802,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // alongside the count because the sidecar is the source of truth for both.
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [state, setState] = useState<AgentState | null>(null);
-  const [roadmapDraftState, dispatchRoadmapDraft] = useReducer(
-    reduceRoadmapPhaseDraftState,
-    initialRoadmapPhaseDraftState,
-  );
-  const roadmapDraftEventVersionRef = useRef(roadmapDraftState.eventVersion);
-  roadmapDraftEventVersionRef.current = roadmapDraftState.eventVersion;
   // Transient "KEN IS ON"/"KEN IS OFF" takeover banner shown when Autopilot
   // is toggled. Null = not showing; the banner clears itself via `onDone`
   // once its slide-out animation finishes.
@@ -841,9 +840,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [liveToolFeed, setLiveToolFeed] = useState<LiveToolEntry[]>([]);
   const [tokens, setTokens] = useState(0);
   const [doneStatus, setDoneStatus] = useState<string | null>(null);
-  // Pending plan awaiting an explicit workflow-gate decision. The gate remains
-  // inline with the transcript until approval, feedback, or dismissal resolves it.
+  // Pending plan awaiting an explicit workflow-gate decision in the review dock.
+  // Collapsing details never resolves the persisted approval gate.
   const [planReview, setPlanReview] = useState<PendingPlanReview | null>(null);
+  const [expandedPlanIdentity, setExpandedPlanIdentity] = useState<string | null>(null);
   const [planGateBusy, setPlanGateBusy] = useState(false);
   // Exact operation that entered Plan Mode. Kept in webview memory only: approval
   // replays this prompt after the sidecar has accepted the plan.
@@ -1827,9 +1827,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [],
   );
 
-  const onRoadmapPhaseDraftChange = useCallback((draft: RoadmapPhaseDraft | null) => {
-    dispatchRoadmapDraft({ type: "event", draft });
-  }, []);
+  const {
+    state: roadmapDraftState, dispatch: dispatchRoadmapDraft,
+    refresh: refreshRoadmapDraft, refreshError: roadmapDraftRefreshError,
+    onChange: onRoadmapPhaseDraftChange,
+    approve: approveRoadmapDraft, reject: rejectRoadmapDraft,
+  } = useRoadmapDraft(client, JSON.stringify([state?.sessionId, state?.cwd, hydrateNonce]), hydrated);
   const onAstraStateChange = useCallback(() => {
     astraAuthoritativeRevisionRef.current += 1;
   }, []);
@@ -1840,6 +1843,40 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
+  const programmaticGeneration = `${paneId}:${generationRef.current}:${promptSessionResetEpochRef.current}:${state?.cwd}:${state?.conversationId}:${state?.sessionId}:${workspaceMode}`;
+  const [programmaticOpen, setProgrammaticOpen] = useState(false);
+  const [programmatic, dispatchProgrammatic] = useReducer(
+    programmaticChatReducer,
+    programmaticGeneration,
+    initialProgrammaticChatState,
+  );
+  const programmaticRef = useRef(programmatic);
+  programmaticRef.current = programmatic;
+  const programmaticTargetRef = useRef(programmaticGeneration);
+  programmaticTargetRef.current = programmaticGeneration;
+  const programmaticEpoch = useRef(0);
+  const programmaticOwner = useRef<number | null>(null);
+  const programmaticRefreshPending = useRef(false);
+  const [programmaticInvalidation, invalidateProgrammatic] = useReducer(
+    (value: number) => value + 1,
+    0,
+  );
+  const onProgrammaticActivity = useCallback(
+    (open: boolean) => {
+      if (workspaceMode !== "code") return;
+      if (open) setProgrammaticOpen(true);
+      invalidateProgrammatic();
+    },
+    [workspaceMode],
+  );
+  useEffect(() => {
+    programmaticEpoch.current++;
+    programmaticOwner.current = null;
+    programmaticRefreshPending.current = false;
+    dispatchProgrammatic({ type: "reset", generation: programmaticGeneration });
+    setProgrammaticOpen(false);
+  }, [programmaticGeneration]);
+
   const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } =
     useAgentEvents({
       client,
@@ -1872,6 +1909,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setModels,
       onAstraStateChange,
       onRoadmapPhaseDraftChange,
+      onRoadmapPhaseDraftRefresh: refreshRoadmapDraft,
+      onProgrammaticActivity,
       stateRef,
       planDoneRef,
       planTotalRef,
@@ -1882,6 +1921,142 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       shouldApplySessionReset,
       onContinuationAccepted,
     });
+
+  const programmaticBusy = running || planGateBusy || autopilotReviewing || kenRunning;
+  const releaseProgrammaticOwner = (owner: number, current: boolean): void => {
+    if (programmaticOwner.current !== owner) return;
+    programmaticOwner.current = null;
+    const pending = programmaticRefreshPending.current;
+    programmaticRefreshPending.current = false;
+    if (current && pending) invalidateProgrammatic();
+  };
+  const performProgrammatic = async (request: ProgrammaticChatRequest): Promise<void> => {
+    const selection = programmaticRef.current;
+    if (request.action === "approve-setup" && (
+      !selection.proposalApprovable ||
+      selection.proposal?.handle !== request.proposalHandle ||
+      selection.reconcile || selection.operation !== null
+    )) return;
+    if (request.action === "scan" && selection.report?.scan.available !== true) return;
+    if (request.action === "dismiss" && (
+      selection.detail?.summary.actions?.dismiss.available !== true ||
+      selection.detail.summary.id !== request.id ||
+      selection.detailSnapshot !== request.snapshot ||
+      selection.report?.snapshot !== request.snapshot
+    )) return;
+    if (
+      workspaceMode !== "code" ||
+      !hydrated ||
+      programmaticBusy ||
+      programmaticOwner.current !== null
+    )
+      return;
+    const generation = programmaticTargetRef.current;
+    const owner = ++programmaticEpoch.current;
+    const lifecycle = lifecycleEpochRef.current;
+    programmaticOwner.current = owner;
+    const current = () =>
+      mountedRef.current &&
+      lifecycleEpochRef.current === lifecycle &&
+      programmaticTargetRef.current === generation &&
+      programmaticOwner.current === owner;
+    let pending: ProgrammaticChatRequest | null = request;
+    try {
+      while (pending && current()) {
+        const active: ProgrammaticChatRequest = pending;
+        const epoch = ++programmaticEpoch.current;
+        dispatchProgrammatic({ type: "start", generation, epoch, operation: active.action });
+        const response = await client.programmatic(active);
+        if (!current()) return;
+        dispatchProgrammatic({ type: "response", generation, epoch, response });
+        if (!response.ok) return;
+        pending = null;
+        if (["approve-setup", "scan", "dismiss"].includes(active.action))
+          pending = {
+            version: 1,
+            action: "report",
+            offset: programmaticRef.current.report?.offset ?? 0,
+          };
+        else if (active.action === "report" && programmaticRef.current.selectedId)
+          pending = { version: 1, action: "detail", id: programmaticRef.current.selectedId };
+      }
+    } catch {
+      if (current())
+        dispatchProgrammatic({
+          type: "error",
+          generation,
+          epoch: programmaticEpoch.current,
+          error: "Opportunity request failed. Read the current report before retrying.",
+          reconcile: ["approve-setup", "scan", "dismiss"].includes(request.action),
+        });
+    } finally {
+      releaseProgrammaticOwner(owner, current());
+    }
+  };
+  const programmaticRefreshRef = useRef(performProgrammatic);
+  programmaticRefreshRef.current = performProgrammatic;
+  useEffect(() => {
+    if (programmaticOpen && workspaceMode === "code" && hydrated && !programmaticBusy) {
+      if (programmaticOwner.current !== null) {
+        programmaticRefreshPending.current = true;
+        return;
+      }
+      void programmaticRefreshRef.current({
+        version: 1,
+        action: "report",
+        offset: programmaticRef.current.report?.offset ?? 0,
+      });
+    }
+  }, [
+    programmaticOpen,
+    programmaticInvalidation,
+    workspaceMode,
+    hydrated,
+    hydrateNonce,
+    programmaticBusy,
+  ]);
+  const runSelectedProgrammatic = async (): Promise<void> => {
+    if (
+      workspaceMode !== "code" ||
+      state?.planMode ||
+      programmaticBusy ||
+      programmaticOwner.current !== null ||
+      !canRunProgrammaticSelection(programmaticRef.current)
+    )
+      return;
+    const selected = programmaticRef.current;
+    const text = `/programmatic-run ${selected.selectedId} ${selected.report!.fingerprint}`;
+    const generation = programmaticTargetRef.current;
+    const epoch = ++programmaticEpoch.current;
+    const lifecycle = lifecycleEpochRef.current;
+    programmaticOwner.current = epoch;
+    dispatchProgrammatic({ type: "start", generation, epoch, operation: "run" });
+    const current = () =>
+      mountedRef.current &&
+      lifecycleEpochRef.current === lifecycle &&
+      programmaticTargetRef.current === generation &&
+      programmaticOwner.current === epoch;
+    try {
+      const submission = await client.sendPrompt(text);
+      if (!current()) return;
+      if (submission.queued) throw new Error("Opportunity run unexpectedly queued");
+      acceptSubmission({ kind: "user", id: nextId(), text, command: true }, submission);
+      dispatchProgrammatic({ type: "run-accepted", generation, epoch });
+    } catch (error) {
+      const rejected = error instanceof PromptSubmissionError && error.category === "rejected";
+      if (current())
+        dispatchProgrammatic({
+          type: "error",
+          generation,
+          epoch,
+          error: rejected ? `Run rejected: ${error.message}` :
+            "Run acknowledgement is uncertain. Read the current report before retrying.",
+          reconcile: !rejected,
+        });
+    } finally {
+      releaseProgrammaticOwner(epoch, current());
+    }
+  };
 
   const handleEventRef = useRef(handleEvent);
   handleEventRef.current = handleEvent;
@@ -2122,6 +2297,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   ]);
 
   useEffect(() => {
+    // Keep the pane subscription (and its identity-lookup event buffer) alive
+    // across renders; only the handler changes when UI state changes.
     const unsub = subscribe((event) => {
       const pending = hydrationEventsRef.current;
       if (pending) {
@@ -2133,10 +2310,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         return;
       }
-      handleEvent(event);
+      handleEventRef.current(event);
     });
     return () => unsub();
-  }, [handleEvent, subscribe]);
+  }, [subscribe]);
 
   // Boot-time/reload workspace recovery: Rust keeps THIS window's active target
   // for its lifetime. A restored app launch and a WebKit content-process reload
@@ -2188,60 +2365,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       void unlisten?.();
     };
   }, [client, waitForReady]);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    let cancelled = false;
-    const startedAtEventVersion = roadmapDraftEventVersionRef.current;
-    void client
-      .getRoadmapPhaseDraft()
-      .then((draft) => {
-        if (!cancelled) {
-          dispatchRoadmapDraft({ type: "hydrated", draft, startedAtEventVersion });
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          dispatchRoadmapDraft({
-            type: "failed",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, hydrated, hydrateNonce]);
-
-  const approveRoadmapDraft = useCallback(() => {
-    const draftId = roadmapDraftState.draft?.id;
-    if (!draftId || roadmapDraftState.decision !== "idle") return;
-    dispatchRoadmapDraft({ type: "decision-started", decision: "approving" });
-    void client
-      .approveRoadmapPhaseDraft(draftId)
-      .then((result) => dispatchRoadmapDraft({ type: "approval-result", result }))
-      .catch((error) =>
-        dispatchRoadmapDraft({
-          type: "failed",
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-  }, [client, roadmapDraftState.decision, roadmapDraftState.draft?.id]);
-
-  const rejectRoadmapDraft = useCallback(() => {
-    const draftId = roadmapDraftState.draft?.id;
-    if (!draftId || roadmapDraftState.decision !== "idle") return;
-    dispatchRoadmapDraft({ type: "decision-started", decision: "rejecting" });
-    void client
-      .rejectRoadmapPhaseDraft(draftId)
-      .then((result) => dispatchRoadmapDraft({ type: "rejection-result", result }))
-      .catch((error) =>
-        dispatchRoadmapDraft({
-          type: "failed",
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-  }, [client, roadmapDraftState.decision, roadmapDraftState.draft?.id]);
 
   useEffect(() => {
     // Only the main window auto-connects to its default project. Secondary
@@ -3566,6 +3689,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (promptSubmissionPendingRef.current?.()) return;
     if (!readyRef.current) return;
     const trimmed = input.trim();
+    if (
+      workspaceMode === "code" &&
+      /^\/(?:setup-programmatic|programmatic|programmatic-run)(?:\s|$)/.test(trimmed)
+    )
+      onProgrammaticActivity(true);
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
       typingAskRef.current = null;
@@ -3807,13 +3935,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   function recoverPlanMutation(error: unknown, fallback: string): void {
     if (error instanceof PlanMutationError && error.pendingPlanReview !== undefined) {
-      replacePlanReview(error.pendingPlanReview);
+      const recovered = error.pendingPlanReview;
+      replacePlanReview(current =>
+        current && planReview && current.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation && stateRef.current?.sessionId === state?.sessionId
+          ? recovered : current,
+      );
     }
     toast(error instanceof PlanMutationError ? error.message : fallback, "error", 7_000);
   }
 
   async function acceptPlan(): Promise<void> {
-    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
     // Capture the approved plan's step count BEFORE the IPC — accepting starts a
     // fresh session on the sidecar, whose session_reset broadcast nulls
     // planReview (and clears the transcript + counters) here.
@@ -3831,7 +3964,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (!planReview) return;
       await acceptPlanIPC(planReview.checkpointId, planReview.generation);
       planResumePromptRef.current = null;
-      replacePlanReview(null);
+      replacePlanReview(current =>
+        stateRef.current?.sessionId === state?.sessionId &&
+        current?.checkpointId === planReview.checkpointId && current.generation === planReview.generation
+          ? null : current,
+      );
       pushItem({ kind: "info", id: nextId(), text: "\u2713 Plan accepted. Resuming." });
     } catch (error) {
       pendingPlanTotalRef.current = null;
@@ -3842,13 +3979,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function sendPlanFeedback(feedback: string): Promise<void> {
-    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
     if (!planReview) return;
     setPlanGateBusy(true);
     try {
       await revisePlanIPC(planReview.checkpointId, planReview.generation, feedback);
       replacePlanReview((current) =>
         current &&
+        stateRef.current?.sessionId === state?.sessionId &&
         current.checkpointId === planReview.checkpointId &&
         current.generation === planReview.generation
           ? { ...current, state: "revision-requested", feedback }
@@ -3863,7 +4001,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   async function retryPlanRevision(): Promise<void> {
-    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
     if (!planReview || planReview.state !== "revision-requested" || !planReview.feedback) return;
     setPlanGateBusy(true);
     try {
@@ -4171,14 +4309,41 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     );
   }
 
+  const planIdentity = planReview ? `${state?.sessionId}:${planReview.checkpointId}:${planReview.generation}` : null;
+  const expandedReview = roadmapDraftState.open ? "roadmap" : planIdentity && expandedPlanIdentity === planIdentity ? "plan" : null;
+  const setExpandedReview = (id: ReviewDockItem["id"] | null) => {
+    setExpandedPlanIdentity(id === "plan" ? planIdentity : null);
+    dispatchRoadmapDraft({ type: id === "roadmap" ? "open" : "dismiss" });
+  };
+  const reviewItems: ReviewDockItem[] = [];
+  if (workspaceMode === "code" && planReview) reviewItems.push({
+    id: "plan", identity: planIdentity!, label: "Plan approval required",
+    summary: planReview.state === "revision-requested" ? "Revision requested" : "Review the saved plan before approving",
+    content: <PlanReviewModal content={planReview.content} kenReviewing={autopilotReviewing}
+      kenReady={planReview.reviewStatus === "ready"}
+      readinessReason={planReview.state === "pending-review" && planReview.reviewStatus === "ready" ? planReview.feedback : null}
+      revisionPending={planReview.state === "revision-requested"} revisionRunning={running} busy={planGateBusy}
+      onAccept={() => void acceptPlan()} onFeedback={feedback => void sendPlanFeedback(feedback)}
+      onRetryRevision={() => void retryPlanRevision()} />,
+  });
+
+  if (roadmapDraftState.draft) reviewItems.push({
+    id: "roadmap", identity: `${state?.sessionId}:${roadmapDraftState.draft.id}`,
+    label: "Roadmap draft", summary: `${roadmapDraftState.draft.phases.length} proposed phases · ${roadmapDraftState.draft.status === "stale" ? "Out of date" : "Approval required"}`,
+    content: <RoadmapPhaseDraftReviewModal
+      draft={roadmapDraftState.draft} open decision={roadmapDraftState.decision}
+      error={roadmapDraftState.error} announcement=""
+      onApprove={approveRoadmapDraft} onReject={rejectRoadmapDraft} />,
+  });
+
   const roadmapDraftTrigger = roadmapDraftState.draft ? (
     <button
       type="button"
       className="btn btn-sm btn-ghost roadmap-draft-trigger"
-      onClick={() => dispatchRoadmapDraft({ type: "open" })}
+      onClick={() => setExpandedReview("roadmap")}
       title="Review pending Roadmap draft"
       aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
-      aria-haspopup="dialog"
+      aria-expanded={expandedReview === "roadmap"}
     >
       <GitBranch size={13} aria-hidden="true" />
       <span>Review draft</span>
@@ -4380,6 +4545,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           existing session scrolled down it rendered far above what's on
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
+      <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
       <div
         className="transcript-frame"
         onMouseEnter={() => setChatHovered(true)}
@@ -4412,24 +4578,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   }),
                 )}
               </KenPromptActionProvider>
-              {workspaceMode === "code" && planReview !== null && (
-                <PlanReviewModal
-                  content={planReview.content}
-                  kenReviewing={autopilotReviewing}
-                  kenReady={planReview.reviewStatus === "ready"}
-                  readinessReason={
-                    planReview.state === "pending-review" && planReview.reviewStatus === "ready"
-                      ? planReview.feedback
-                      : null
-                  }
-                  revisionPending={planReview.state === "revision-requested"}
-                  revisionRunning={running}
-                  busy={planGateBusy}
-                  onAccept={() => void acceptPlan()}
-                  onFeedback={(feedback) => void sendPlanFeedback(feedback)}
-                  onRetryRevision={() => void retryPlanRevision()}
-                />
-              )}
+              {workspaceMode === "code" &&
+                programmaticOpen &&
+                programmatic.generation === programmaticGeneration && (
+                  <ProgrammaticChat
+                    state={programmatic}
+                    busy={programmaticBusy}
+                    planMode={state?.planMode ?? false}
+                    onAction={(request) => void performProgrammatic(request)}
+                    onSelect={(id) => {
+                      dispatchProgrammatic({ type: "select", id });
+                      void performProgrammatic({ version: 1, action: "detail", id });
+                    }}
+                    onRun={() => void runSelectedProgrammatic()}
+                  />
+                )}
             </>
           )}
         </div>
@@ -4440,6 +4603,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             onExport={() => void exportTranscript()}
           />
         )}
+      </div>
+
+      <ReviewDock items={reviewItems} expanded={expandedReview}
+        onExpandedChange={setExpandedReview} onLayoutChange={maybeScrollToBottom}
+        fallbackFocus={() => inputRef.current?.focus()} />
       </div>
 
       <div className="liveregion">
@@ -4664,6 +4832,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               autoFocus
             />
           </div>
+          {workspaceMode === "code" && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              aria-expanded={programmaticOpen}
+              disabled={!hydrated || programmatic.generation !== programmaticGeneration}
+              onClick={() => setProgrammaticOpen((value) => !value)}
+            >
+              Opportunities
+            </button>
+          )}
           {workspaceMode === "code" && (
             <button
               type="button"
@@ -5078,18 +5257,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       )}
 
-      <RoadmapPhaseDraftReviewModal
-        draft={roadmapDraftState.draft}
-        open={roadmapDraftState.open}
-        decision={roadmapDraftState.decision}
-        error={roadmapDraftState.error}
-        announcement={roadmapDraftState.announcement}
-        onClose={() => dispatchRoadmapDraft({ type: "dismiss" })}
-        onApprove={approveRoadmapDraft}
-        onReject={rejectRoadmapDraft}
-      />
+      {roadmapDraftRefreshError && (
+        <div role="status" className="roadmap-draft-refresh-error">
+          {roadmapDraftRefreshError}
+          <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>Retry Roadmap review</button>
+        </div>
+      )}
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
-        {!roadmapDraftState.open ? roadmapDraftState.announcement : ""}
+        {roadmapDraftState.announcement}
+      </div>
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {planReview ? "A plan is awaiting your review. Approval is required before execution." : ""}
       </div>
 
       {/* Always mounted: an MCP server can ask for input at any moment, in any

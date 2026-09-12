@@ -21,10 +21,19 @@ describe("PlanReviewModal durable human gate", () => {
     expect(screen.getByText(/Your approval is still required/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
     expect(screen.getByRole("status").textContent).toBe("Corpus unavailable.");
+    const scroller = screen.getByRole("region", { name: "Plan content" });
+    expect(scroller.tabIndex).toBe(0);
+    expect(scroller.querySelector(".plan-review-body")).not.toBeNull();
+    expect(scroller.contains(screen.getByText("Plan approval required"))).toBe(false);
+    expect(scroller.contains(screen.getByRole("status"))).toBe(false);
+    expect(scroller.contains(screen.getByRole("button", { name: "Approve" }))).toBe(false);
+    expect(scroller.contains(screen.getByRole("button", { name: "Feedback" }))).toBe(false);
     expect(onAccept).not.toHaveBeenCalled();
     expect(onFeedback).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    expect(scroller.contains(screen.getByRole("textbox"))).toBe(false);
+    expect(scroller.contains(screen.getByRole("button", { name: "Send feedback" }))).toBe(false);
     expect(
       (screen.getByRole("button", { name: "Send feedback" }) as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -52,6 +61,11 @@ describe("PlanReviewModal durable human gate", () => {
     expect(onRetryRevision).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Feedback" })).toBeNull();
+    expect(
+      screen.getByRole("region", { name: "Plan content" }).contains(
+        screen.getByRole("button", { name: "Retry revision" }),
+      ),
+    ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));
     expect(onRetryRevision).toHaveBeenCalledTimes(1);
   });

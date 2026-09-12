@@ -191,6 +191,8 @@ export interface AgentEventsDeps {
   setModels: Dispatch<SetStateAction<ModelOption[]>>;
   onAstraStateChange?: () => void;
   onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
+  onRoadmapPhaseDraftRefresh?: () => void;
+  onProgrammaticActivity?: (open: boolean) => void;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -251,6 +253,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setModels,
     onAstraStateChange,
     onRoadmapPhaseDraftChange,
+    onRoadmapPhaseDraftRefresh,
+    onProgrammaticActivity,
     planDoneRef,
     planTotalRef,
     planReviewPathRef,
@@ -657,6 +661,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         return;
       }
       const d = e.data as Record<string, unknown>;
+      if (
+        (e.type === "tool_call_start" || e.type === "tool_call_end") &&
+        (d.name === "programmatic_profile" || d.name === "programmatic_scan")
+      )
+        onProgrammaticActivity?.(true);
+      if (e.type === "run_end" || e.type === "agent_done" || e.type === "ready")
+        onProgrammaticActivity?.(false);
       switch (e.type) {
         case "autopilot": {
           if (typeof d.autopilot === "boolean") {
@@ -666,6 +677,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "ready": {
+          onRoadmapPhaseDraftRefresh?.();
           const readyState = {
             ...d,
             openAICodexContextProfileEligibility: parseContextProfileEligibility(
@@ -916,6 +928,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           const liveEntry = liveToolByIdRef.current.get(id);
           liveToolByIdRef.current.delete(id);
+          if (liveEntry?.name === "roadmap_phase_draft") onRoadmapPhaseDraftRefresh?.();
           const isMcpFailure =
             isError &&
             liveEntry !== undefined &&
@@ -1553,6 +1566,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       hydrateKen,
       handleAutopilotEvent,
       onRoadmapPhaseDraftChange,
+      onRoadmapPhaseDraftRefresh,
+      onProgrammaticActivity,
       onAstraStateChange,
       appendAssistant,
       pushItem,

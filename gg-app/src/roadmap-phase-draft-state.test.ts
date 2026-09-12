@@ -27,6 +27,44 @@ const draft = {
 };
 
 describe("Roadmap phase draft state", () => {
+  it("keeps a collapsed in-flight review and its context on same-draft replay", () => {
+    let state = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
+      type: "event",
+      draft,
+    });
+    state = reduceRoadmapPhaseDraftState(state, { type: "dismiss" });
+    state = reduceRoadmapPhaseDraftState(state, {
+      type: "decision-started",
+      decision: "approving",
+    });
+    const replay = reduceRoadmapPhaseDraftState(state, {
+      type: "event",
+      draft: structuredClone(draft),
+    });
+    expect(replay).toMatchObject({
+      open: false,
+      decision: "approving",
+      announcement: state.announcement,
+    });
+  });
+
+  it("does not resurrect a decided draft from delayed hydration", () => {
+    const pending = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
+      type: "event",
+      draft,
+    });
+    const decided = reduceRoadmapPhaseDraftState(pending, {
+      type: "rejection-result",
+      result: { status: "rejected" },
+    });
+    expect(
+      reduceRoadmapPhaseDraftState(decided, {
+        type: "hydrated",
+        draft,
+        startedAtEventVersion: pending.eventVersion,
+      }),
+    ).toBe(decided);
+  });
   it("normalizes legacy drafts and rejects malformed current links", () => {
     const legacy = structuredClone(draft) as Record<string, unknown>;
     delete legacy.references;
@@ -57,12 +95,12 @@ describe("Roadmap phase draft state", () => {
     ).toBe(eventState);
   });
 
-  it("opens new drafts and preserves non-decision dismissal for review later", () => {
+  it("announces compact new drafts and preserves non-decision dismissal for review later", () => {
     const received = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
       type: "event",
       draft,
     });
-    expect(received).toMatchObject({ draft, open: true });
+    expect(received).toMatchObject({ draft, open: false });
     const dismissed = reduceRoadmapPhaseDraftState(received, { type: "dismiss" });
     expect(dismissed).toMatchObject({ draft, open: false });
     expect(reduceRoadmapPhaseDraftState(dismissed, { type: "open" }).open).toBe(true);
@@ -78,7 +116,7 @@ describe("Roadmap phase draft state", () => {
       result: { status: "stale-revision", expectedRevision: 3, currentRevision: 4 },
     });
     expect(stale).toMatchObject({
-      open: true,
+      open: false,
       decision: "idle",
       draft: { id: "draft-1", status: "stale" },
     });

@@ -9,7 +9,14 @@ import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { toast } from "./toast";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
+  isProgrammaticChatRequest,
+  isProgrammaticChatResponse,
+  type ProgrammaticChatRequest,
+  type ProgrammaticChatResponse,
+} from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import {
   continuationInstructionError,
+  isPromptSubmissionRejection,
   requireAskUserAcknowledgement,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type {
@@ -1123,6 +1130,20 @@ export function requireContinuationCommitResponse(
   return value as unknown as ContinuationCommitResponse;
 }
 
+export class PromptSubmissionError extends Error {
+  readonly category: "rejected" | "unknown";
+  readonly code?: string;
+
+  constructor(failure: unknown) {
+    const rejected = isPromptSubmissionRejection(failure);
+    super(rejected ? failure.message : failure instanceof Error ? failure.message :
+      typeof failure === "string" ? failure : "Prompt acknowledgement is uncertain.");
+    this.name = "PromptSubmissionError";
+    this.category = rejected ? "rejected" : "unknown";
+    this.code = rejected ? failure.code : undefined;
+  }
+}
+
 /** Authoritative outcome of submitting one prompt to the sidecar. */
 export type PromptSubmissionResult =
   | { queued: true; count: number; queueId: string }
@@ -1168,8 +1189,9 @@ export async function sendPrompt(
     });
     return requirePromptSubmissionResult(result);
   } catch (e) {
-    await logError(`agent_prompt failed: ${String(e)}`);
-    throw e;
+    const failure = new PromptSubmissionError(e);
+    await logError(`agent_prompt failed: ${failure.message}`);
+    throw failure;
   }
 }
 
@@ -3077,6 +3099,7 @@ export function disposePaneSession(paneId: string, generation?: number): Promise
 
 export interface PaneAgentClient extends NotesClient {
   readonly paneId: string;
+  programmatic(request: ProgrammaticChatRequest): Promise<ProgrammaticChatResponse>;
   status(): Promise<PaneStartupStatus>;
   waitForReady(): Promise<PaneStartupStatus>;
   create(target: PaneSessionTarget): Promise<number>;
@@ -3213,6 +3236,20 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
 
   return {
     paneId,
+    async programmatic(request) {
+      if (!isProgrammaticChatRequest(request)) throw new Error("Invalid opportunity action.");
+      const before = await call<PaneStartupStatus>("agent_pane_status");
+      const response = await call<unknown>("agent_programmatic", {
+        request,
+        expectedGeneration: before.generation,
+      });
+      const after = await call<PaneStartupStatus>("agent_pane_status");
+      if (before.generation !== after.generation)
+        throw new Error("Project pane changed. Reopen opportunities.");
+      if (!isProgrammaticChatResponse(response) || response.action !== request.action)
+        throw new Error("Invalid opportunity response. Read the report before retrying.");
+      return response;
+    },
     status: () => call("agent_pane_status"),
     waitForReady: ready,
     async create(target) {
@@ -3454,10 +3491,15 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       await ready();
       return requireEnhanceResult(await call<unknown>("agent_enhance_prompt", { text }));
     },
-    sendPrompt: async (text, attachments = [], meta) =>
-      requirePromptSubmissionResult(
-        await call<unknown>("agent_prompt", { text, attachments, meta: meta ?? null }),
-      ),
+    sendPrompt: async (text, attachments = [], meta) => {
+      try {
+        return requirePromptSubmissionResult(
+          await call<unknown>("agent_prompt", { text, attachments, meta: meta ?? null }),
+        );
+      } catch (error) {
+        throw new PromptSubmissionError(error);
+      }
+    },
     commitContinuation: async (request) => {
       const body: ContinuationCommitRequest = {
         preparedId: request.preparedId,

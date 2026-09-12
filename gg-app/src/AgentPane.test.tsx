@@ -5,8 +5,9 @@ import { imageOriginals } from "../../packages/ggcoder/src/test-support/image-or
 import path from "node:path";
 import { useCallback, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, onTestFailed, vi } from "vitest";
 import type * as AgentModule from "./agent";
+import type { PaneEventEnvelope } from "./pane-routing";
 import type * as MentorModule from "./useKenMentor";
 import type * as EventsModule from "./useAgentEvents";
 import type * as ToastModule from "./toast";
@@ -21,7 +22,7 @@ HTMLElement.prototype.scrollTo = vi.fn();
 Element.prototype.scrollIntoView = vi.fn();
 
 const nativeMocks = vi.hoisted(() => ({
-  invoke: vi.fn(async () => undefined),
+  invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => undefined),
   onDragDropEvent: vi.fn(async () => vi.fn()),
   openDialog: vi.fn(),
   saveDialog: vi.fn(),
@@ -29,6 +30,7 @@ const nativeMocks = vi.hoisted(() => ({
   getDroppedPathInfo: vi.fn(async (paths: string[]) =>
     paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
   ),
+  agentEvent: null as null | ((event: { payload: PaneEventEnvelope }) => void),
   modelsChanged: null as null | (() => void),
   modelsUnlisten: vi.fn(),
   onSessionReset: null as null | ((operationId?: string) => void),
@@ -65,7 +67,10 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
     label: "main",
-    listen: vi.fn(async () => vi.fn()),
+    listen: vi.fn(async (name: string, receive: (event: { payload: PaneEventEnvelope }) => void) => {
+      if (name === "agent-event") nativeMocks.agentEvent = receive;
+      return vi.fn();
+    }),
     setTitle: vi.fn(),
   }),
 }));
@@ -240,7 +245,7 @@ import {
   resolveRoadmapPhaseResume,
   resolveRoadmapPhaseResumeFromNotes,
 } from "./AgentPane";
-import { PlanMutationError } from "./agent";
+import { PlanMutationError, PromptSubmissionError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type {
   AgentState,
@@ -335,22 +340,57 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-function liveEvents(pane: PaneAgentClient) {
-  const listeners = new Set<(event: AgentModule.SidecarEvent) => void>();
+const paneEmitters = new WeakMap<PaneAgentClient, (event: SidecarEvent) => void>();
+// [DBG-hydration-7c91] Registered only by the stale-hydration diagnostic test.
+const paneListenerObservers = new WeakMap<
+  PaneAgentClient,
+  (action: "attach" | "detach", count: number) => void
+>();
+let hydrationCleanupObserver: ((phase: "cleanup-start" | "cleanup-end" | "release") => void) | undefined;
+
+// Mirror native fan-out to active subscribers, not whichever hook subscribed last.
+function paneEvents(pane: PaneAgentClient): (event: SidecarEvent) => void {
+  const existing = paneEmitters.get(pane);
+  if (existing) return existing;
+  const listeners = new Set<(event: SidecarEvent) => void>();
   vi.mocked(pane.subscribe).mockImplementation((receive) => {
     listeners.add(receive);
+    paneListenerObservers.get(pane)?.("attach", listeners.size);
     return () => {
       listeners.delete(receive);
+      paneListenerObservers.get(pane)?.("detach", listeners.size);
     };
   });
-  return (type: string, data: object) => {
-    for (const receive of listeners) receive({ type, data } as AgentModule.SidecarEvent);
+  const emit = (event: SidecarEvent) => {
+    for (const receive of listeners) receive(event);
   };
+  paneEmitters.set(pane, emit);
+  return emit;
+}
+
+function liveEvents(pane: PaneAgentClient) {
+  const emit = paneEvents(pane);
+  return (type: string, data: object) => emit({ type, data });
 }
 
 function client(paneId: string, generation: number): PaneAgentClient {
-  return {
+  const pane = {
     paneId,
+    programmatic: vi.fn(async () => ({
+      version: 1,
+      action: "report",
+      ok: true,
+      report: {
+        status: "setup-required",
+        reason: "Inspect setup",
+        scan: { available: false, reason: "Approve current setup." },
+        snapshot: null,
+        fingerprint: null,
+        offset: 0,
+        total: 0,
+        rows: [],
+      },
+    })),
     create: vi.fn(async () => generation),
     restore: vi.fn(async () => generation),
     dispose: vi.fn(async () => {}),
@@ -456,6 +496,8 @@ function client(paneId: string, generation: number): PaneAgentClient {
     loginMcpServer: vi.fn(),
     removeMcpServer: vi.fn(),
   } as unknown as PaneAgentClient;
+  paneEvents(pane);
+  return pane;
 }
 
 async function renderKenPromptPane(
@@ -485,8 +527,17 @@ async function renderKenPromptPane(
 }
 
 afterEach(() => {
-  cleanup();
+  const observe = hydrationCleanupObserver;
+  try {
+    observe?.("cleanup-start");
+    cleanup();
+    observe?.("cleanup-end");
+  } finally {
+    hydrationCleanupObserver = undefined;
+    observe?.("release");
+  }
   vi.clearAllMocks();
+  nativeMocks.invoke.mockResolvedValue(undefined);
   nativeMocks.modelsChanged = null;
   nativeMocks.modelsUnlisten.mockReset();
   nativeMocks.onSessionReset = null;
@@ -500,6 +551,12 @@ afterEach(() => {
 });
 
 describe("pane-local opening (mocked native transport)", () => {
+  beforeAll(async () => {
+    // Exercise hydration against the real renderer, without cold Markdown imports
+    // consuming the first render's act flush. Keep module I/O in fixture setup.
+    await import("./Markdown");
+  }, 0);
+
   it("gates submissions with drafts intact until history and buffered live events are applied", async () => {
     nativeMocks.realMentor = true;
     const pane = client("pane-hydrating", 1);
@@ -536,21 +593,146 @@ describe("pane-local opening (mocked native transport)", () => {
     expect(input.value).toBe("Existing prompt");
   });
 
-  it("discards stale hydration and its events without opening a newer generation's gate", async () => {
+  it.each([
+    { clock: "", pausedTimers: false },
+    { clock: " with paused application timers", pausedTimers: true },
+  ])("discards stale hydration and its events without opening a newer generation's gate$clock", async ({ pausedTimers }) => {
+    // Hydration uses promises; readiness must not depend on polling application timers.
+    if (pausedTimers) {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    }
+    // [DBG-hydration-7c91] Scalar-only, bounded, synchronous observations: no scheduling.
+    const started = performance.now();
+    const ledger: Array<Record<string, unknown>> = [];
+    let overflow = 0;
+    let sequence = 0;
+    let active = true;
+    let stage = "test-entry";
+    let completed = "none";
+    let bodyComplete = false;
+    let cleanupEnd = false;
+    const cleanupSnapshots: Partial<Record<"cleanup-start" | "cleanup-end", Record<string, unknown>>> = {};
+    let requestedGeneration = 1;
+    let oldResolution = "not-resolved";
+    let newResolution = "not-resolved";
+    let mainContainer: HTMLElement | undefined;
+    let otherContainer: HTMLElement | undefined;
+    const listenerCounts = { main: 0, other: 0 };
+    const generations: { main: number | null; other: number | null } = { main: null, other: null };
+    onTestFailed(() => {
+      try {
+        console.error("[DBG-hydration-7c91]", JSON.stringify({
+          ledger, overflow, stage, completed, bodyComplete, cleanupEnd, cleanupSnapshots,
+          cleanupEndMissing: !cleanupEnd,
+        }));
+      } finally {
+        active = false;
+        ledger.length = 0;
+      }
+    });
     nativeMocks.realMentor = true;
     const pane = client("pane-stale-history", 1);
     const other = client("pane-independent-history", 1);
+    const calls = (value: PaneAgentClient) => ({
+      restore: vi.mocked(value.restore).mock.calls.length,
+      waitForReady: vi.mocked(value.waitForReady).mock.calls.length,
+      getState: vi.mocked(value.getState).mock.calls.length,
+      listModels: vi.mocked(value.listModels).mock.calls.length,
+      listCommands: vi.mocked(value.listCommands).mock.calls.length,
+      listTasks: vi.mocked(value.listTasks).mock.calls.length,
+      listHistory: vi.mocked(value.listHistory).mock.calls.length,
+      sendPrompt: vi.mocked(value.sendPrompt).mock.calls.length,
+    });
+    const dom = (container: HTMLElement | undefined) => {
+      const text = container?.textContent ?? "";
+      return {
+        connected: container?.isConnected ?? false,
+        modelButton: !!container?.querySelector(".footer .model-button"),
+        sendDisabled: container?.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')?.disabled ?? null,
+        connecting: text.includes("connecting to agent"),
+        currentStored: text.includes("Current stored prompt"),
+        currentLive: text.includes("Current live answer"),
+        staleStored: text.includes("Stale stored prompt"),
+        staleLive: text.includes("Stale live answer"),
+      };
+    };
+    const record = (label: string, coarse = false) => {
+      if (!active) return;
+      const seq = ++sequence;
+      if (ledger.length === 64) { overflow++; return; }
+      ledger.push({
+        seq, elapsedMs: performance.now() - started, label, stage, completed,
+        bodyComplete, requestedGeneration, oldResolution, newResolution,
+        generations: { ...generations }, listeners: { ...listenerCounts },
+        mainCalls: calls(pane), otherCalls: calls(other),
+        ...(coarse ? { mainDom: dom(mainContainer), otherDom: dom(otherContainer) } : {}),
+      });
+    };
+    const begin = (label: string) => {
+      if (!active) return;
+      stage = label;
+      record(`${label}:start`, true);
+    };
+    const end = (label: string) => {
+      if (!active) return;
+      completed = label;
+      record(`${label}:complete`, true);
+    };
+    const mainGeneration = (generation: number) => {
+      if (!active) return;
+      generations.main = generation;
+      record("main-generation");
+    };
+    const otherGeneration = (generation: number) => {
+      if (!active) return;
+      generations.other = generation;
+      record("other-generation");
+    };
+    paneListenerObservers.set(pane, (action, count) => {
+      listenerCounts.main = count;
+      record(`main-listener-${action}`);
+    });
+    paneListenerObservers.set(other, (action, count) => {
+      listenerCounts.other = count;
+      record(`other-listener-${action}`);
+    });
+    hydrationCleanupObserver = (phase) => {
+      if (phase === "release") {
+        active = false;
+        paneListenerObservers.delete(pane);
+        paneListenerObservers.delete(other);
+        mainContainer = undefined;
+        otherContainer = undefined;
+        return;
+      }
+      if (phase === "cleanup-end") cleanupEnd = true;
+      cleanupSnapshots[phase] = {
+        stage, completed, bodyComplete, requestedGeneration, oldResolution, newResolution,
+        generations: { ...generations }, listeners: { ...listenerCounts },
+        mainCalls: calls(pane), otherCalls: calls(other),
+        mainDom: dom(mainContainer), otherDom: dom(otherContainer),
+      };
+      record(phase, true);
+    };
+    record("test-entry");
     const emit = liveEvents(pane);
     const oldHistory = deferred<AgentModule.HistoryEntry[]>();
     const newHistory = deferred<AgentModule.HistoryEntry[]>();
     vi.mocked(pane.listHistory)
       .mockReturnValueOnce(oldHistory.promise)
       .mockReturnValueOnce(newHistory.promise);
-    const view = render(
-      <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
-    );
-    await waitFor(() => expect(pane.listHistory).toHaveBeenCalledTimes(1));
+    begin("render");
+    const view = await act(async () => render(
+      <AgentPane client={pane} target={target} generation={1} onGenerationChange={mainGeneration} workspaceOwnsSessionLifecycle />,
+    ));
+    mainContainer = view.container;
+    end("render");
+    begin("first-history");
+    expect(pane.listHistory).toHaveBeenCalledTimes(1);
+    end("first-history");
+    begin("stale-event");
     act(() => emit("text_delta", { text: "Stale live answer" }));
+    end("stale-event");
     vi.mocked(pane.restore).mockResolvedValue(2);
     vi.mocked(pane.waitForReady).mockResolvedValue({
       ready: true,
@@ -558,41 +740,78 @@ describe("pane-local opening (mocked native transport)", () => {
       generation: 2,
       sessionId: pane.paneId,
     });
-    view.rerender(
+    requestedGeneration = 2;
+    begin("rerender");
+    await act(async () => view.rerender(
       <AgentPane
         client={pane}
         target={{ ...target, sessionPath: "/new.jsonl" }}
         generation={2}
+        onGenerationChange={mainGeneration}
         workspaceOwnsSessionLifecycle
       />,
-    );
-    await waitFor(() => expect(pane.listHistory).toHaveBeenCalledTimes(2));
-    const otherView = render(
-      <AgentPane client={other} target={target} workspaceOwnsSessionLifecycle />,
-    );
-    await waitFor(() =>
-      expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull(),
-    );
+    ));
+    end("rerender");
+    begin("second-history");
+    expect(pane.listHistory).toHaveBeenCalledTimes(2);
+    end("second-history");
+    begin("independent-render");
+    const otherView = await act(async () => render(
+      <AgentPane client={other} target={target} onGenerationChange={otherGeneration} workspaceOwnsSessionLifecycle />,
+    ));
+    otherContainer = otherView.container;
+    end("independent-render");
+    begin("independent-ready");
+    expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull();
+    end("independent-ready");
+    begin("independent-input");
     const otherInput = within(otherView.container).getByRole("textbox");
-    fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
-    fireEvent.keyDown(otherInput, { key: "Enter" });
-    await waitFor(() => expect(other.sendPrompt).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      fireEvent.change(otherInput, { target: { value: "Independent prompt" } });
+      fireEvent.keyDown(otherInput, { key: "Enter" });
+    });
+    end("independent-input");
+    begin("independent-submit");
+    expect(other.sendPrompt).toHaveBeenCalledTimes(1);
+    end("independent-submit");
+    begin("old-history-act");
+    oldResolution = "resolve-invoked";
+    record("old-history-resolve-invoked");
     await act(async () => oldHistory.resolve([{ role: "user", text: "Stale stored prompt" }]));
+    end("old-history-act");
+    begin("gate-assertions");
     const input = within(view.container).getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "New generation draft" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(input.value).toBe("New generation draft");
     expect(within(view.container).getByText(/connecting to agent/)).toBeTruthy();
+    end("gate-assertions");
+    begin("current-event");
     act(() => emit("text_delta", { text: "Current live answer" }));
+    end("current-event");
+    begin("new-history-act");
+    newResolution = "resolve-invoked";
+    record("new-history-resolve-invoked");
     await act(async () => newHistory.resolve([{ role: "user", text: "Current stored prompt" }]));
-    expect(await within(view.container).findByText("Current stored prompt")).toBeTruthy();
+    end("new-history-act");
+    begin("current-transcript");
+    expect(within(view.container).getByText("Current stored prompt")).toBeTruthy();
+    end("current-transcript");
+    begin("transcript-assertions");
     expect(within(view.container).getAllByText("Current live answer")).toHaveLength(1);
     expect(screen.queryByText("Stale stored prompt")).toBeNull();
     expect(screen.queryByText("Stale live answer")).toBeNull();
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
-  });
+    end("transcript-assertions");
+    begin("current-input");
+    await act(async () => fireEvent.keyDown(input, { key: "Enter" }));
+    end("current-input");
+    begin("current-submit");
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    end("current-submit");
+    if (active) bodyComplete = true;
+    end("test-body");
+  }, 0); // No deadline: both clock variants must finish their full assertion sequence.
 
   it.each(["1536x1024", "1254x1254", "1024x1024"])(
     "restores %s sizing evidence once alongside its image after live rendering",
@@ -762,7 +981,9 @@ describe("pane-local opening (mocked native transport)", () => {
         }),
       ),
     );
-    for (const summary of screen.getAllByText("Review plan")) fireEvent.click(summary);
+    for (const reviews of screen.getAllByRole("region", { name: "Pending reviews" })) {
+      fireEvent.click(within(reviews).getByRole("button", { name: /^Plan approval required/ }));
+    }
     await screen.findAllByRole("link", { name: "Plan file" });
     const slots = view.container.querySelectorAll<HTMLElement>(".agent-pane");
     // Click the unfocused pane first; focus must never choose the destination.
@@ -1440,11 +1661,7 @@ describe("AgentPane Autopilot confirmation", () => {
   it("honors returned false and reflects valid server events", async () => {
     nativeMocks.realMentor = true;
     const pane = client("autopilot-false", 1);
-    let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => {
-      emit = handler;
-      return vi.fn();
-    });
+    const emit = paneEvents(pane);
     vi.mocked(pane.setAutopilot).mockResolvedValue(false);
     const { container } = render(
       <>
@@ -1513,11 +1730,7 @@ describe("AgentPane task request failures", () => {
       const pane = client("accepted-task-failure", 1);
       vi.mocked(pane.runTask).mockResolvedValue(undefined);
       vi.mocked(pane.runAllTasks).mockResolvedValue(undefined);
-      let emit: ((event: SidecarEvent) => void) | undefined;
-      vi.mocked(pane.subscribe).mockImplementation((handler) => {
-        emit = handler;
-        return vi.fn();
-      });
+      const emit = paneEvents(pane);
       vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
       await openTasksModal(pane);
       fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
@@ -1552,11 +1765,7 @@ describe("AgentPane task request failures", () => {
   );
   it("disables task launches while Autopilot reviews, then enables them after settlement", async () => {
     const pane = client("task-autopilot-review", 1);
-    let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => {
-      emit = handler;
-      return vi.fn();
-    });
+    const emit = paneEvents(pane);
     vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
     await openTasksModal(pane);
     act(() => emit?.({ type: "autopilot_review_start", data: {} }));
@@ -1849,11 +2058,7 @@ describe("AgentPane lifecycle", () => {
 
   it("disables Astra controls while Autopilot owns the session", async () => {
     const pane = client("astra-autopilot", 1);
-    let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => {
-      emit = handler;
-      return vi.fn();
-    });
+    const emit = paneEvents(pane);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
       provider: "openai",
@@ -1953,11 +2158,7 @@ describe("AgentPane lifecycle", () => {
 
   it("preserves newer authoritative state when a profile mutation fails", async () => {
     const pane = client("astra-stale", 1);
-    let emit: ((event: SidecarEvent) => void) | undefined;
-    vi.mocked(pane.subscribe).mockImplementation((handler) => {
-      emit = handler;
-      return vi.fn();
-    });
+    const emit = paneEvents(pane);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
       provider: "openai",
@@ -2226,8 +2427,7 @@ describe("AgentPane lifecycle", () => {
         expect.objectContaining({ paneId: "pane-1", activeWork: false }),
       );
     });
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     expect(handleEvent).toBeDefined();
 
     act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
@@ -2251,18 +2451,21 @@ describe("AgentPane lifecycle", () => {
 
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
 
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
     const trigger = screen.getByRole("button", {
       name: "Review Roadmap draft with 1 proposed phase",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Roadmap draft.*Collapse/ }));
+    expect(screen.queryByRole("region", { name: "Review Roadmap draft" })).toBeNull();
     expect(trigger).toBeTruthy();
 
     fireEvent.click(trigger);
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(pane.approveRoadmapPhaseDraft).not.toHaveBeenCalled();
     expect(pane.rejectRoadmapPhaseDraft).not.toHaveBeenCalled();
   });
@@ -2271,8 +2474,7 @@ describe("AgentPane lifecycle", () => {
     const pane = client("pane-chat-live-draft", 7);
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
     await waitFor(() => expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce());
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
 
     act(() =>
       handleEvent?.({
@@ -2281,7 +2483,9 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
     ).toBeTruthy();
@@ -2313,8 +2517,7 @@ describe("AgentPane lifecycle", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(command, [], undefined));
 
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     act(() =>
       handleEvent?.({
         type: "roadmap_phase_draft_change",
@@ -2322,7 +2525,9 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
     ).toBeTruthy();
@@ -2350,6 +2555,8 @@ describe("AgentPane lifecycle", () => {
     });
 
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
 
     await waitFor(() =>
@@ -2373,6 +2580,7 @@ describe("AgentPane lifecycle", () => {
     vi.mocked(pane.rejectRoadmapPhaseDraft).mockResolvedValue({ status: "rejected" });
 
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Reject draft" }));
 
     await waitFor(() =>
@@ -2399,6 +2607,7 @@ describe("AgentPane lifecycle", () => {
 
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
 
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
     expect((await screen.findByRole("alert")).textContent).toContain("This draft is out of date.");
     expect(
       (
@@ -2420,10 +2629,11 @@ describe("AgentPane lifecycle", () => {
     );
 
     render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
 
     expect((await screen.findByRole("alert")).textContent).toContain("approval transport failed");
-    expect(screen.getByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
     ).toBeTruthy();
@@ -2437,7 +2647,9 @@ describe("AgentPane lifecycle", () => {
 
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
 
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
     expect(
       screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
@@ -2459,8 +2671,7 @@ describe("AgentPane lifecycle", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(request, [], undefined));
 
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     act(() =>
       handleEvent?.({
         type: "roadmap_phase_draft_change",
@@ -2485,7 +2696,9 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
-    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review Roadmap draft with/ }));
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
     expect(screen.getByText("Proposed from Project Notes revision 8")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Release hardening" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
@@ -2809,6 +3022,208 @@ describe("AgentPane lifecycle", () => {
     },
   );
 
+  it("opens one code-only opportunity section without changing the composer draft", async () => {
+    const pane = client("pane-opportunities", 8);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await waitFor(() =>
+      expect(pane.programmatic).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 }),
+    );
+    expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh report" }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
+  });
+
+  async function deferredOpportunityRun(
+    completeBeforeReceipt = true,
+    configurePane?: (pane: PaneAgentClient) => void,
+  ) {
+    nativeMocks.realMentor = true;
+    const pane = client("pane-opportunity-race", 8);
+    const emit = liveEvents(pane);
+    configurePane?.(pane);
+    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["sendPrompt"]>>>();
+    vi.mocked(pane.sendPrompt).mockReturnValue(receipt.promise);
+    const id = "a".repeat(64);
+    let completed = false;
+    vi.mocked(pane.programmatic).mockImplementation(async (request) => {
+      const summary = {
+        id, expectedOutput: "Review packaging", state: completed ? "completed" as const : "discovered" as const,
+        presence: "present" as const, mutationPaths: [],
+        actions: { run: { available: !completed, reason: completed ? "Completed" : "Can run" },
+          dismiss: { available: !completed, reason: completed ? "Completed" : "Can dismiss" } },
+        route: { available: !completed, command: "research" as const,
+          reason: completed ? "Execution completed" : "Available", machineLocal: true },
+      };
+      const snapshot = (completed ? "b" : "a").repeat(64);
+      if (request.action === "report") return {
+        version: 1, action: "report", ok: true,
+        report: { status: "current", reason: "Current", scan: { available: true, reason: "Approved" },
+          snapshot, fingerprint: id, offset: 0, total: 1, rows: [summary] },
+      };
+      if (request.action === "detail") return {
+        version: 1, action: "detail", ok: true, snapshot,
+        detail: { summary, trigger: "Manifest change", verification: completed ? "Verified completion" : "Not yet run",
+          risks: [], evidence: [], evidenceTruncated: false },
+      };
+      throw new Error(`Unexpected mutation: ${request.action}`);
+    });
+    const view = render(<AgentPane client={pane} target={target} />);
+    await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Review packaging/ }));
+    const run = await screen.findByRole("button", { name: "Run selected opportunity" });
+    await waitFor(() => expect((run as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(run);
+    expect(pane.sendPrompt).toHaveBeenCalledExactlyOnceWith(`/programmatic-run ${id} ${id}`);
+    if (!completeBeforeReceipt) return { pane, emit, receipt, view, id };
+    act(() => emit("run_start", {}));
+    completed = true;
+    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+    act(() => emit("agent_done", {}));
+    act(() => emit("ready", { running: false, runState: "idle" }));
+    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    return { pane, emit, receipt, view, id };
+  }
+
+  it("renders specialist approval buffered during pane identity lookup across a run receipt", async () => {
+    const realAgent = await vi.importActual<typeof AgentModule>("./agent");
+    const identity = deferred<AgentModule.PaneStartupStatus>();
+    nativeMocks.invoke.mockImplementation(async (command) => {
+      if (command === "agent_pane_status") return identity.promise;
+      return undefined;
+    });
+    const { pane, receipt } = await deferredOpportunityRun(false, (pane) => {
+      pane.subscribe = realAgent.createPaneAgentClient(pane.paneId).subscribe;
+    });
+    const question = {
+      id: "ask-1",
+      questions: [{
+        id: "specialist-approval", kind: "choice", question: "Run /research for this opportunity?",
+        allowOther: false,
+        options: [
+          { label: "Run this opportunity", value: "approved-snapshot" },
+          { label: "Cancel", value: "cancel", recommended: true },
+        ],
+      }],
+    };
+    expect(nativeMocks.agentEvent).not.toBeNull();
+    act(() => nativeMocks.agentEvent!({ payload: {
+      paneId: pane.paneId, sessionId: "opportunity-session", type: "ask_user", data: question,
+    } }));
+    // The real transport buffers the frame until native identity resolves.
+    expect(screen.queryByText(question.questions[0].question)).toBeNull();
+    await act(async () => receipt.resolve({ queued: false, count: 0 }));
+    await act(async () => identity.resolve({
+      ready: true, error: null, generation: 8, sessionId: "opportunity-session",
+    }));
+    expect(await screen.findByText(question.questions[0].question)).toBeTruthy();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "1Run this opportunity" }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith(
+      "ask-1", "answer", { "specialist-approval": "approved-snapshot" },
+    ));
+  });
+
+  it.each(["programmatic_execution_busy", "invalid_programmatic_selection"])("shows definite %s rejection without uncertain reconciliation or retry", async (code) => {
+    const { pane, receipt } = await deferredOpportunityRun(false);
+    await act(async () => receipt.reject(new PromptSubmissionError({
+      category: "rejected", code, message: "Wait for the current run to finish.",
+    })));
+    expect(await screen.findByText("Run rejected: Wait for the current run to finish.")).toBeTruthy();
+    expect(screen.queryByText(/Run acknowledgement is uncertain/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Run selected opportunity" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Network response lost", "invalid prompt submission response"])("keeps %s uncertain without retrying execution", async (message) => {
+    const { pane, receipt } = await deferredOpportunityRun(false);
+    await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
+    expect(await screen.findByText(/Run acknowledgement is uncertain/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Run selected opportunity" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces terminal invalidations before a deferred opportunity receipt into report and detail refresh", async () => {
+    const { pane, receipt, id } = await deferredOpportunityRun();
+    await act(async () => receipt.resolve({ queued: false, count: 0 }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(4));
+    expect(await screen.findByText("Verified completion")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Review packaging.*completed/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+    ]);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["rejected", "uncertain"] as const)("refreshes authoritative completion after a %s opportunity receipt without retrying the run", async (outcome) => {
+    const { pane, receipt, id } = await deferredOpportunityRun();
+    await act(async () => {
+      if (outcome === "rejected") receipt.reject(new Error("Opportunity run rejected"));
+      else receipt.reject(new Error("Native acknowledgement lost"));
+    });
+    expect(await screen.findByText("Verified completion")).toBeTruthy();
+    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+      { version: 1, action: "report", offset: 0 }, { version: 1, action: "detail", id },
+    ]);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["resolve", "reject"] as const)("discards queued opportunity refresh on unmount before receipt %s", async (outcome) => {
+    const { pane, receipt, view } = await deferredOpportunityRun();
+    view.unmount();
+    await act(async () => {
+      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+      else receipt.reject(new Error("Late acknowledgement failure"));
+    });
+    expect(pane.programmatic).toHaveBeenCalledTimes(2);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["resolve", "reject"] as const)("does not drain a reset session's queued opportunity refresh on receipt %s", async (outcome) => {
+    const { pane, receipt, emit } = await deferredOpportunityRun();
+    act(() => emit("session_reset", {}));
+    expect(screen.queryByRole("heading", { name: "Opportunities" })).toBeNull();
+    // A new report owner must survive the old receipt's finally block.
+    const report = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+    vi.mocked(pane.programmatic).mockReturnValueOnce(report.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      if (outcome === "resolve") receipt.resolve({ queued: false, count: 0 });
+      else receipt.reject(new Error("Late acknowledgement failure"));
+    });
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    await act(async () => report.resolve({ version: 1, action: "report", ok: true,
+      report: { status: "current", reason: "Fresh session report", scan: { available: true, reason: "Approved" },
+        snapshot: "c".repeat(64), fingerprint: "c".repeat(64), offset: 0, total: 0, rows: [] } }));
+    expect(await screen.findByText("Fresh session report")).toBeTruthy();
+    expect(screen.queryByText("Verified completion")).toBeNull();
+    expect(pane.programmatic).toHaveBeenCalledTimes(3);
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not expose opportunities in chat mode", async () => {
+    const pane = client("pane-chat-opportunities", 8);
+    render(<AgentPane client={pane} target={{ ...target, mode: "chat" }} />);
+    await screen.findByRole("textbox");
+    expect(screen.queryByRole("button", { name: "Opportunities" })).toBeNull();
+    expect(pane.programmatic).not.toHaveBeenCalled();
+  });
+
   it("inserts fixed-input commands exactly and disables composer additions", async () => {
     const pane = client("pane-no-input-select", 8);
     vi.mocked(pane.listCommands).mockResolvedValue([
@@ -2926,6 +3341,11 @@ describe("AgentPane lifecycle", () => {
     });
     render(<AgentPane client={pane} target={target} />);
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     expect(await screen.findByText(/Your approval is still required/i)).toBeTruthy();
     expect(
       screen.getByText("Corpus unavailable. Review this limitation before approval."),
@@ -2969,9 +3389,20 @@ describe("AgentPane lifecycle", () => {
     );
     render(<AgentPane client={pane} target={target} />);
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    expect(await screen.findByText("Latest backend plan")).toBeTruthy();
+    await screen.findByText("Latest backend plan");
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(screen.getByText("Latest backend plan")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
     expect(nativeMocks.toast).toHaveBeenCalledWith(
       expect.stringContaining("Review the latest checkpoint"),
@@ -3013,13 +3444,24 @@ describe("AgentPane lifecycle", () => {
     );
     render(<AgentPane client={pane} target={target} />);
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
     fireEvent.change(screen.getByPlaceholderText("What should change about this plan?"), {
       target: { value: "Revise this plan" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
 
-    expect(await screen.findByText("Latest revision target")).toBeTruthy();
+    await screen.findByText("Latest revision target");
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
+    expect(screen.getByText("Latest revision target")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry revision" })).toBeTruthy();
     expect(nativeMocks.toast).toHaveBeenCalledWith(
       expect.stringContaining("Review the latest checkpoint"),
@@ -3059,6 +3501,11 @@ describe("AgentPane lifecycle", () => {
     );
     render(<AgentPane client={pane} target={target} />);
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
     await waitFor(() =>
@@ -3089,6 +3536,11 @@ describe("AgentPane lifecycle", () => {
     });
     render(<AgentPane client={pane} target={target} />);
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     expect(await screen.findByRole("button", { name: "Retry revision" })).toBeTruthy();
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));
@@ -3113,8 +3565,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() =>
       expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
     );
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
 
     act(() =>
       handleEvent?.({
@@ -3125,6 +3576,11 @@ describe("AgentPane lifecycle", () => {
           planPath: "/plans/ordinary.md",
           content: "## Steps\n1. Build\n2. Verify",
         },
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
       }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
@@ -3142,8 +3598,7 @@ describe("AgentPane lifecycle", () => {
     });
 
     const continueButton = await renderKenPromptPane(pane, false, "/commit");
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     fireEvent.click(continueButton);
     await waitFor(() =>
       expect(pane.sendPrompt).toHaveBeenCalledWith("/commit", [], { kenSent: true }),
@@ -3162,6 +3617,11 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
@@ -3206,8 +3666,7 @@ describe("AgentPane lifecycle", () => {
     );
     vi.mocked(pane.sendPrompt).mockClear();
 
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     act(() =>
       handleEvent?.({
         type: "plan_exit",
@@ -3217,6 +3676,11 @@ describe("AgentPane lifecycle", () => {
           planPath: "/plans/active-commit.md",
           content: "## Steps\n1. Commit",
         },
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
       }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
@@ -3543,8 +4007,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() =>
       expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
     );
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
 
     act(() =>
       handleEvent?.({
@@ -3553,6 +4016,11 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Pending reviews" })).getByRole("button", {
+        name: /^Plan approval required/,
+      }),
+    );
     expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
     const quickAction = screen.getByRole("button", { name: "Ken, next?" });
     expect((quickAction as HTMLButtonElement).disabled).toBe(true);
@@ -4013,8 +4481,7 @@ describe("AgentPane lifecycle", () => {
     request: AgentModule.ContinuationCommitRequest,
     emitAccepted = true,
   ) {
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const emit = subscriptions[subscriptions.length - 1][0];
+    const emit = paneEvents(pane);
     const actual = { ...destination, profile: request.profile ?? ("stable" as const) };
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
@@ -4096,9 +4563,8 @@ describe("AgentPane lifecycle", () => {
       `First instruction\n\`\`\`\n\n\`\`\`prompt\n${selected}`,
     );
     fireEvent.click(screen.getAllByRole("button", { name: "New session" })[1]);
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
     act(() =>
-      subscriptions[subscriptions.length - 1][0]({
+      paneEvents(pane)({
         type: "ken_text",
         data: { text: "```prompt\nLater instruction\n```" },
       }),
@@ -4229,8 +4695,7 @@ describe("AgentPane lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
     const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const emit = subscriptions[subscriptions.length - 1][0];
+    const emit = paneEvents(pane);
     act(() =>
       emit({ type: "session_reset", data: { ...destination, operationId: "wrong-operation" } }),
     );
@@ -4523,7 +4988,7 @@ describe("AgentPane lifecycle", () => {
         await vi.advanceTimersByTimeAsync(1);
       });
       expect(pane.sendPrompt).toHaveBeenCalledOnce();
-      const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+      const emit = paneEvents(pane);
       act(() => emit({ type: "session_reset", data: snapshot.lastNewSessionReset! }));
       expect(screen.getByText("Keep this new message")).toBeTruthy();
     },
@@ -4610,7 +5075,7 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
     expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
-    const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+    const emit = paneEvents(pane);
     act(() =>
       emit({
         type: "session_reset",
@@ -4678,7 +5143,7 @@ describe("AgentPane lifecycle", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
     let input = await within(first.container).findByRole("textbox");
-    const emit = vi.mocked(pane.subscribe).mock.calls.at(-1)![0];
+    const emit = paneEvents(pane);
     act(() =>
       emit({
         type: "session_reset",
@@ -4794,8 +5259,7 @@ describe("AgentPane lifecycle", () => {
   it("blocks fresh resets during Autopilot review and shares correlation with the toolbar modal", async () => {
     const pane = client("pane-ken-autopilot", 1);
     await renderKenPromptPane(pane);
-    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
-    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    const handleEvent = paneEvents(pane);
     const fresh = screen.getByRole("button", { name: "New session" });
     const toolbar = screen.getByTitle("Start a new session for this project");
 

@@ -80,6 +80,38 @@ describe("pane agent client", () => {
     });
   });
 
+  it("scopes programmatic actions, validates receipts and rejects stale generations", async () => {
+    const client = createPaneAgentClient("right");
+    const request = { version: 1 as const, action: "scan" as const };
+    let generation = 1;
+    let receipt: unknown = {
+      version: 1,
+      action: "scan",
+      ok: false,
+      error: "Read report",
+      reconcile: true,
+    };
+    invoke.mockImplementation(async (command: string) =>
+      command === "agent_pane_status" ? { generation } : receipt,
+    );
+    expect(await client.programmatic(request)).toEqual(receipt);
+    expect(invoke).toHaveBeenCalledWith("agent_programmatic", {
+      paneId: "right",
+      request,
+      expectedGeneration: 1,
+    });
+    receipt = { version: 1, action: "scan", ok: true, changed: false, credentials: "forbidden" };
+    await expect(client.programmatic(request)).rejects.toThrow("Invalid opportunity response");
+    receipt = { version: 1, action: "dismiss", ok: true, changed: true };
+    await expect(client.programmatic(request)).rejects.toThrow("Invalid opportunity response");
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_pane_status") return { generation };
+      generation++;
+      return { version: 1, action: "scan", ok: true, changed: true };
+    });
+    await expect(client.programmatic(request)).rejects.toThrow("Project pane changed");
+  });
+
   it.each(["primary", "right"])(
     "validates Autopilot confirmations and propagates failures for %s",
     async (paneId) => {
@@ -594,6 +626,29 @@ describe("pane agent client", () => {
       await expect(client.prepareContinuationHandoff("next")).rejects.toThrow(
         "invalid continuation-handoff response",
       );
+    }
+  });
+
+  it.each(["primary", "right"])("preserves definite rejection and never retries %s prompts", async (paneId) => {
+    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+    for (const code of ["programmatic_execution_busy", "invalid_programmatic_selection"]) {
+      invoke.mockClear();
+      invoke.mockRejectedValueOnce({ category: "rejected", code, message: "Select one opportunity after the current run finishes." });
+      await expect(submit("/programmatic-run a b")).rejects.toMatchObject({
+        category: "rejected", code, message: "Select one opportunity after the current run finishes.",
+      });
+      expect(invoke).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each(["primary", "right"])("keeps network and malformed acknowledgements unknown for %s without retry", async (paneId) => {
+    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+    for (const lost of [true, false]) {
+      invoke.mockClear();
+      if (lost) invoke.mockRejectedValueOnce(new Error("Network response lost"));
+      else invoke.mockResolvedValueOnce({ queued: false, count: 1 });
+      await expect(submit("/programmatic-run a b")).rejects.toMatchObject({ category: "unknown" });
+      expect(invoke).toHaveBeenCalledTimes(1);
     }
   });
 

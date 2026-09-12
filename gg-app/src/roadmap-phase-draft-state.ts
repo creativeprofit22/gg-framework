@@ -41,7 +41,9 @@ export type RoadmapPhaseDraftAction =
   | { type: "decision-started"; decision: "approving" | "rejecting" }
   | { type: "approval-result"; result: RoadmapPhaseDraftApprovalResult }
   | { type: "rejection-result"; result: RoadmapPhaseDraftRejectionResult }
-  | { type: "failed"; message: string };
+  | { type: "failed"; message: string }
+  | { type: "refresh-failed"; message: string; startedAtEventVersion: number }
+  | { type: "reset" };
 
 export const initialRoadmapPhaseDraftState: RoadmapPhaseDraftState = {
   draft: null,
@@ -59,40 +61,76 @@ export function reduceRoadmapPhaseDraftState(
   switch (action.type) {
     case "hydrated":
       if (action.startedAtEventVersion !== state.eventVersion) return state;
-      return {
-        ...state,
-        draft: action.draft,
-        open: action.draft !== null,
-        error: null,
-      };
+      return receiveDraft(state, action.draft, false);
     case "event":
+      return receiveDraft(state, action.draft, true);
+    case "reset":
+      return { ...initialRoadmapPhaseDraftState, eventVersion: state.eventVersion + 1 };
+    case "refresh-failed":
+      return action.startedAtEventVersion === state.eventVersion
+        ? { ...state, error: action.message }
+        : state;
+    /* New drafts arrive compact; replay never changes inspection/decision state. */
+    case "open":
+      return state.draft ? { ...state, open: true } : state;
+    case "dismiss":
+      return { ...state, open: false };
+    case "decision-started":
       return {
         ...state,
-        draft: action.draft,
-        open: action.draft !== null,
-        decision: "idle",
+        decision: action.decision,
         error: null,
-        announcement:
-          action.draft === null
-            ? "Roadmap draft decision recorded."
-            : action.draft.status === "stale"
-              ? "Roadmap draft is stale and cannot be created."
-              : "A Roadmap draft is ready for review.",
+        announcement: "",
         eventVersion: state.eventVersion + 1,
       };
-    case "open":
-      return state.draft ? { ...state, open: true, error: null } : state;
-    case "dismiss":
-      return { ...state, open: false, error: null };
-    case "decision-started":
-      return { ...state, decision: action.decision, error: null, announcement: "" };
     case "approval-result":
-      return applyApprovalResult(state, action.result);
+      return applyApprovalResult({ ...state, eventVersion: state.eventVersion + 1 }, action.result);
     case "rejection-result":
-      return applyRejectionResult(state, action.result);
+      return applyRejectionResult(
+        { ...state, eventVersion: state.eventVersion + 1 },
+        action.result,
+      );
     case "failed":
-      return { ...state, decision: "idle", error: action.message, announcement: "" };
+      return {
+        ...state,
+        decision: "idle",
+        error: action.message,
+        announcement: "",
+        eventVersion: state.eventVersion + 1,
+      };
   }
+}
+
+function receiveDraft(
+  state: RoadmapPhaseDraftState,
+  draft: RoadmapPhaseDraft | null,
+  event: boolean,
+): RoadmapPhaseDraftState {
+  const same = state.draft?.id === draft?.id && state.draft?.projectKey === draft?.projectKey;
+  if (same)
+    return {
+      ...state,
+      draft,
+      announcement:
+        draft?.status === "stale" && state.draft?.status !== "stale"
+          ? "Roadmap draft is stale and cannot be created."
+          : state.announcement,
+      eventVersion: state.eventVersion + (event ? 1 : 0),
+    };
+  return {
+    ...state,
+    draft,
+    open: false,
+    decision: "idle",
+    error: null,
+    announcement:
+      draft === null
+        ? "Roadmap draft decision recorded."
+        : draft.status === "stale"
+          ? "Roadmap draft is stale and cannot be created."
+          : "A Roadmap draft is ready for review.",
+    eventVersion: state.eventVersion + (event ? 1 : 0),
+  };
 }
 
 function applyApprovalResult(

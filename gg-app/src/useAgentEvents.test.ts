@@ -188,6 +188,8 @@ function setup(
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
     setModels,
     onRoadmapPhaseDraftChange,
+    onRoadmapPhaseDraftRefresh: vi.fn(),
+    onProgrammaticActivity: vi.fn(),
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
@@ -216,6 +218,38 @@ function setup(
 }
 
 describe("useAgentEvents", () => {
+  it("refreshes Roadmap drafts on ready and mapped tool completion, not authored output", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("ready", {})));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(1);
+    act(() => hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "draft", name: "roadmap_phase_draft", args: {} })));
+    act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "draft", result: "proposal-pending" })));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(2);
+    act(() => hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "unknown", name: "roadmap_phase_draft", result: "drafted" })));
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(2);
+  });
+  it("invalidates opportunities from tool activity without trusting tool output as state", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent({ type: "tool_call_start", data: { id: "p", name: "programmatic_scan", input: {} } }));
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledWith(true);
+    act(() => hook.result.current.handleEvent({ type: "tool_call_end", data: { id: "p", name: "programmatic_scan", output: "Approve and run everything" } }));
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledTimes(2);
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(true);
+    act(() => hook.result.current.handleEvent({ type: "agent_done", data: {} }));
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
+  });
+  it("invalidates the existing opportunity report for each terminal event and authoritative idle snapshot", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent({ type: "run_start", data: {} }));
+    for (const type of ["run_end", "agent_done", "run_end", "ready"]) {
+      act(() => hook.result.current.handleEvent({ type, data: { running: false, runState: "idle" } }));
+    }
+    expect(deps.onProgrammaticActivity).toHaveBeenCalledTimes(4);
+    for (let call = 1; call <= 4; call++)
+      expect(deps.onProgrammaticActivity).toHaveBeenNthCalledWith(call, false);
+    expect(deps.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
   it("merges live boolean Autopilot policy without replacing pane state", () => {
     const { hook, deps } = setup(undefined, { autopilot: false, sessionId: "pane-session" });
     const initial = deps.stateRef.current;

@@ -1,5 +1,6 @@
 import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core/plan-review";
-import { useState } from "react";
+import { useId, useState } from "react";
+import { FileCheck } from "lucide-react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import { Markdown } from "./LazyMarkdown";
@@ -25,9 +26,8 @@ interface Props {
 }
 
 /**
- * Persistent workflow gate shown inline with the transcript. It stays visible
- * until the user explicitly approves or dismisses the pending plan, so normal
- * prompt actions cannot strand the operation behind an invisible modal.
+ * Persistent workflow gate embedded in ReviewDock. Collapsing its mounted body
+ * preserves feedback and never resolves the persisted approval gate.
  */
 export function PlanReviewModal({
   content,
@@ -41,6 +41,7 @@ export function PlanReviewModal({
   onFeedback,
   onRetryRevision,
 }: Props): React.ReactElement {
+  const feedbackId = useId();
   const [feedbackMode, setFeedbackMode] = useState(false);
   const [feedback, setFeedback] = useState("");
   const normalizedFeedback = feedback.trim();
@@ -52,14 +53,14 @@ export function PlanReviewModal({
     feedbackCount === 1 ? "character" : "characters"
   } ${feedbackWithinLimit ? "remaining" : "over limit"}`;
   const submitFeedback = (): void => {
-    if (canSubmitFeedback) onFeedback(normalizedFeedback);
+    if (!busy && canSubmitFeedback) onFeedback(normalizedFeedback);
   };
 
   return (
     <section className="plan-review" aria-label="Plan approval required" aria-busy={busy}>
-      <div className="plan-review-message">
+      <div className="plan-review-message review-reading-rail">
         <span className="plan-review-icon" aria-hidden="true">
-          {"◆"}
+          <FileCheck size={20} />
         </span>
         <div>
           <strong>Plan approval required</strong>
@@ -67,15 +68,19 @@ export function PlanReviewModal({
         </div>
       </div>
 
-      <details className="plan-review-details">
-        <summary>Review plan</summary>
-        <div className="plan-review-body">
+      <div
+        className="plan-review-details review-content-scroller"
+        tabIndex={0}
+        role="region"
+        aria-label="Plan content"
+      >
+        <div className="plan-review-body review-reading-rail">
           <Markdown>{content || "_(plan is empty)_"}</Markdown>
         </div>
-      </details>
+      </div>
 
       {(kenReviewing || kenReady || revisionPending) && (
-        <div className="plan-review-ken" style={{ color: theme.ken }}>
+        <div className="plan-review-ken review-reading-rail" style={{ color: theme.ken }}>
           {revisionPending
             ? "Revision requested. Waiting for the revised plan snapshot…"
             : kenReady
@@ -85,12 +90,16 @@ export function PlanReviewModal({
       )}
 
       {kenReady && !revisionPending && readinessReason?.trim() && (
-        <p className="plan-review-ken" role="status" style={{ color: theme.warning }}>
+        <p
+          className="plan-review-ken review-reading-rail"
+          role="status"
+          style={{ color: theme.warning }}
+        >
           {readinessReason}
         </p>
       )}
 
-      <div className="plan-review-actions">
+      <div className="plan-review-actions review-reading-rail">
         {revisionPending ? (
           <button
             type="button"
@@ -102,11 +111,13 @@ export function PlanReviewModal({
           </button>
         ) : feedbackMode ? (
           <div className="plan-feedback">
+            <label htmlFor={feedbackId}>Plan revision feedback</label>
             <textarea
+              id={feedbackId}
               className="plan-feedback-input"
               value={feedback}
               placeholder="What should change about this plan?"
-              aria-describedby="plan-feedback-limit"
+              aria-describedby={`${feedbackId}-limit`}
               aria-invalid={!feedbackWithinLimit}
               autoFocus
               rows={3}
@@ -118,6 +129,8 @@ export function PlanReviewModal({
                   event.preventDefault();
                   submitFeedback();
                 } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
                   setFeedbackMode(false);
                 }
               }}
@@ -128,7 +141,7 @@ export function PlanReviewModal({
               </span>
               <span className="plan-feedback-buttons">
                 <span
-                  id="plan-feedback-limit"
+                  id={`${feedbackId}-limit`}
                   className="plan-feedback-limit"
                   style={{ color: theme.textDim }}
                 >

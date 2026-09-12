@@ -106,6 +106,104 @@
   --radius-input: 22px;
 }
 
+/* In-thread opportunity review shares the transcript rail and button system. */
+.programmatic-chat {
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  margin-block: 16px;
+}
+.programmatic-chat h2,
+.programmatic-chat h3,
+.programmatic-chat h4 {
+  color: var(--text);
+  margin-block: 12px 8px;
+  font-size: inherit;
+}
+.programmatic-chat h2 {
+  font-size: 1.125em;
+}
+.programmatic-chat p {
+  margin-block: 8px;
+}
+.programmatic-chat ul {
+  padding-inline-start: 20px;
+}
+.programmatic-chat pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  background: var(--surface-1);
+  padding: 12px;
+}
+.programmatic-chat code {
+  font-size: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.programmatic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-block: 12px;
+}
+.programmatic-chat .btn {
+  white-space: normal;
+  min-height: 32px;
+  max-width: 100%;
+}
+.programmatic-list {
+  list-style: none;
+  padding: 0 !important;
+}
+.programmatic-list > li {
+  margin-block: 12px;
+}
+.programmatic-chat .programmatic-row {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: start;
+  flex-wrap: wrap;
+}
+.programmatic-row[aria-pressed="true"] {
+  border-color: var(--primary);
+}
+.programmatic-proposal,
+.programmatic-detail {
+  border-block-start: 1px solid var(--border-strong);
+  margin-block-start: 16px;
+}
+.programmatic-chat summary {
+  cursor: pointer;
+  min-height: 32px;
+  padding-block: 6px;
+}
+.programmatic-chat :focus:not(:focus-visible) {
+  outline: none;
+}
+.programmatic-chat :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .programmatic-chat * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .programmatic-chat :focus-visible {
+    outline-color: Highlight;
+  }
+  .programmatic-chat .programmatic-row[aria-pressed="true"] {
+    border: 2px solid Highlight;
+  }
+  .programmatic-chat .btn {
+    border: 1px solid ButtonText;
+  }
+}
+
 /* ── Button system (shared) ───────────────────────────────────────────────
    .btn is the base; pair with .btn-primary (glossy violet pill), .btn-ghost
    (glossy neutral pill), or .btn-success (glossy green pill). Pill-shaped, with
@@ -1558,21 +1656,14 @@ select {
   background: var(--surface-1);
 }
 /* ── Roadmap phase-draft review ── */
-.roadmap-draft-modal {
-  width: min(760px, calc(100vw - 32px));
-  max-height: min(880px, calc(100vh - 32px));
-  overflow: hidden;
-}
 .roadmap-draft-review {
-  max-height: calc(100vh - 128px);
-  overflow-y: auto;
-  padding-right: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.6;
 }
 .roadmap-draft-intro {
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface-1);
+  padding-block: 20px;
 }
 .roadmap-draft-kicker,
 .roadmap-draft-count,
@@ -1582,13 +1673,14 @@ select {
   gap: 7px;
   color: var(--text-muted);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 .roadmap-draft-intro > p {
   margin: 10px 0 12px;
   color: var(--text);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 16px;
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
 .roadmap-draft-stale,
@@ -1610,8 +1702,8 @@ select {
 }
 .roadmap-draft-phase-list {
   display: grid;
-  gap: 10px;
-  margin: 14px 0 0;
+  gap: 0;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -1619,30 +1711,27 @@ select {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface-1);
+  padding-block: 24px;
+  border-top: 1px solid var(--border-strong);
 }
 .roadmap-draft-phase-index {
-  padding-top: 2px;
-  color: var(--primary);
+  color: var(--text);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 20px;
   font-weight: 600;
 }
 .roadmap-draft-phase-content h3 {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: 20px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .roadmap-draft-goal {
   margin: 7px 0 14px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
 .roadmap-draft-criteria-heading {
@@ -1654,9 +1743,9 @@ select {
   gap: 6px;
   margin: 8px 0 0;
   padding-left: 20px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.6;
 }
 .roadmap-draft-criteria li::marker {
   color: var(--success);
@@ -1676,12 +1765,10 @@ select {
 .roadmap-draft-references > ul > li {
   display: grid;
   gap: 5px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-button);
-  background: var(--surface-2);
+  padding-block: 12px;
+  border-top: 1px solid var(--border);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 16px;
   overflow-wrap: anywhere;
 }
 .roadmap-draft-reference-heading {
@@ -1696,7 +1783,7 @@ select {
 .roadmap-draft-references code {
   color: var(--text-muted);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 .roadmap-draft-references p {
   margin: 0;
@@ -1724,8 +1811,8 @@ select {
 }
 .roadmap-draft-source {
   margin-top: 14px;
-  color: var(--text-muted);
-  font-size: 11px;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 .roadmap-draft-source summary {
   display: inline-flex;
@@ -1746,15 +1833,13 @@ select {
   overflow-wrap: anywhere;
 }
 .roadmap-draft-actions {
-  position: sticky;
-  bottom: 0;
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-2);
+  flex-wrap: wrap;
+  padding-block: 12px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-1);
 }
 .roadmap-draft-trigger {
   gap: 6px;
@@ -1770,25 +1855,20 @@ select {
   font-family: var(--mono);
   font-size: 10px;
 }
-@media (max-width: 560px) {
-  .roadmap-draft-modal {
-    width: calc(100vw - 16px);
-    max-height: calc(100vh - 16px);
-    padding: 18px;
-  }
-  .roadmap-draft-review {
-    max-height: calc(100vh - 104px);
-  }
+@container review-pane (max-width: 560px) {
   .roadmap-draft-phase {
     grid-template-columns: 28px minmax(0, 1fr);
-    padding: 14px 12px;
+    padding-block: 20px;
   }
   .roadmap-draft-actions {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
   }
   .roadmap-draft-actions .modal-btn {
     min-height: 44px;
+    min-width: 0;
+    padding-inline: 8px;
   }
 }
 @media (forced-colors: active) {
@@ -3222,6 +3302,142 @@ select {
    scrollable content, not what's currently on screen — a full-height overlay
    on a scrolled-down existing session would render far above the visible
    messages). `.transcript` itself just fills this frame and scrolls. */
+.agent-pane:has(.has-reviews) {
+  container: review-pane / size;
+}
+/* Bound wrapped chrome too, so short panes retain chat, reviews and input. */
+@container review-pane (max-height: 700px) {
+  .chat-head { max-height: 12cqh; min-height: 0; overflow: auto; flex-shrink: 0; }
+  .liveregion { max-height: 10cqh; min-height: 0; overflow: auto; flex-shrink: 0; }
+  .inputwrap { max-height: 22cqh; min-height: 0; overflow: auto; }
+  .footer { max-height: 8cqh; min-height: 0; overflow: auto; }
+}
+.conversation-stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 120px;
+  min-width: 0;
+  overflow: hidden;
+  container-type: size;
+}
+.conversation-stack.has-reviews { min-height: 180px; }
+.review-dock {
+  --review-reading-width: 768px;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-height: 48px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  min-width: 0;
+}
+.review-dock.is-expanded {
+  /* Bound the shell, not its header. Only the inner reading region scrolls. */
+  flex: 0 0 min(max(67cqh, 200px), max(0px, calc(100cqh - 24px)));
+  min-height: 0;
+  overflow: hidden;
+}
+.conversation-stack:has(.review-dock.is-expanded) > .transcript-frame { min-height: 24px; }
+.conversation-stack:has(.review-dock.is-maximized) > .transcript-frame {
+  flex: 0 0 0;
+  min-height: 0;
+  height: 0;
+  visibility: hidden;
+}
+.review-dock.is-maximized { flex: 1 1 0; }
+.review-reading-rail,
+.review-dock-header {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--review-reading-width, 768px);
+  margin-inline: auto;
+  padding-inline: 20px;
+}
+.review-content-scroller {
+  flex: 1 1 auto;
+  min-height: 64px;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.review-dock-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding-block: 0;
+}
+.review-dock-tabs {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.review-dock .review-dock-size {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+}
+.review-dock-tabs:has(> button:nth-child(2)) .review-dock-toggle { display: none; }
+.review-dock-trigger strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.review-dock .plan-review-message { padding-block: 8px; }
+.review-dock .plan-review-message strong { font-size: 16px; }
+.review-dock .plan-review-message p { display: none; }
+.review-dock .review-dock-trigger {
+  width: 100%;
+  min-height: 48px;
+  padding: 6px 0;
+  justify-content: flex-start;
+  text-align: start;
+  white-space: normal;
+  gap: 12px;
+  color: var(--text);
+}
+.review-dock-trigger > span:first-of-type { min-width: 0; flex: 1; }
+.review-dock-trigger svg { flex-shrink: 0; }
+.review-dock-summary {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.review-dock-toggle { font-size: 12px; flex-shrink: 0; color: var(--text-secondary); }
+.review-dock-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--border);
+}
+.review-dock-panel > section {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  height: 100%;
+  min-height: 180px;
+}
+.review-dock-panel > .roadmap-draft-review { min-height: 144px; }
+.review-dock-panel:has(.plan-feedback) > section { min-height: 360px; }
+.review-dock-panel .review-content-scroller ~ * { flex-shrink: 0; }
+.review-dock-panel[hidden] { display: none; }
+.review-dock :focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.review-dock .btn, .review-dock .modal-btn { white-space: normal; max-width: 100%; }
+.review-dock .plan-feedback-row, .review-dock .plan-feedback-buttons { flex-wrap: wrap; }
+@media (forced-colors: active) {
+  .review-dock :focus-visible { outline-color: Highlight; }
+  .review-dock button { border: 1px solid ButtonText; }
+}
+
 .transcript-frame {
   position: relative;
   flex: 1 1 auto;
@@ -3363,33 +3579,27 @@ select {
 
 /* ── Pending Plan Mode workflow gate ─────────────────────────────────────── */
 .plan-review {
-  position: sticky;
-  bottom: 8px;
-  z-index: 4;
-  margin: 12px 0 4px;
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
-  border-radius: var(--radius-card);
-  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
-  box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 58%, transparent);
-  overflow: hidden;
-  backdrop-filter: blur(12px);
+  min-width: 0;
+  background: var(--surface-1);
+  overflow-wrap: anywhere;
 }
 .plan-review-message {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 13px 14px 11px;
+  flex-shrink: 0;
+  padding-block: 16px 12px;
 }
 .plan-review-message strong {
   display: block;
   color: var(--text);
-  font-size: 14px;
+  font-size: 20px;
 }
 .plan-review-message p {
   margin: 3px 0 0;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.4;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
 }
 .plan-review-icon {
   color: var(--warning);
@@ -3411,23 +3621,29 @@ select {
   color: var(--text);
 }
 .plan-review-body {
-  max-height: min(42vh, 420px);
-  overflow-y: auto;
-  padding: 4px 14px 12px;
-  font-size: 14px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  padding-block: 16px;
+  font-size: 16px;
+  line-height: 1.6;
+}
+.plan-review-body .markdown :is(h1, h2, h3) {
+  font-size: 20px;
+  line-height: 1.35;
 }
 .plan-review-ken {
-  padding: 8px 14px;
-  font-size: 12px;
+  padding-block: 8px;
+  font-size: 14px;
   border-top: 1px solid var(--border);
 }
 .plan-review-actions {
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  padding-block: 12px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-1);
 }
 .plan-reject {
   margin-left: auto;
@@ -3446,6 +3662,7 @@ select {
 .plan-feedback-input {
   width: 100%;
   resize: vertical;
+  max-height: 120px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -3478,15 +3695,11 @@ select {
 }
 
 @media (max-width: 560px) {
-  .plan-review {
-    bottom: 4px;
-    margin-top: 8px;
-  }
   .plan-review-message {
-    padding: 11px 12px 9px;
+    padding-block: 12px;
   }
   .plan-review-actions {
-    padding: 9px 12px;
+    padding-block: 12px;
   }
   .plan-review-actions > .btn {
     flex: 1 1 0;

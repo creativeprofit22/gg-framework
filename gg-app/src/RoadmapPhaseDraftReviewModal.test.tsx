@@ -45,7 +45,6 @@ function renderModal(overrides: Partial<Parameters<typeof RoadmapPhaseDraftRevie
     decision: "idle" as const,
     error: null,
     announcement: "A Roadmap draft is ready for review.",
-    onClose: vi.fn(),
     onApprove: vi.fn(),
     onReject: vi.fn(),
     ...overrides,
@@ -58,7 +57,9 @@ describe("RoadmapPhaseDraftReviewModal", () => {
   it("shows revision, titles, goals, and completion criteria before any decision", () => {
     renderModal();
 
-    expect(screen.getByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.querySelector(".modal-backdrop, [aria-modal]")).toBeNull();
     expect(screen.getByText("Proposed from Project Notes revision 12")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Atomic backend creation" })).toBeTruthy();
     expect(
@@ -69,6 +70,13 @@ describe("RoadmapPhaseDraftReviewModal", () => {
     expect(screen.getByText("Reject leaves Notes unchanged")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create phases" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reject draft" })).toBeTruthy();
+    const scroller = screen.getByRole("region", { name: "Roadmap draft content" });
+    expect(scroller.tabIndex).toBe(0);
+    expect(
+      scroller.contains(screen.getByRole("heading", { name: "Atomic backend creation" })),
+    ).toBe(true);
+    expect(scroller.contains(screen.getByRole("button", { name: "Create phases" }))).toBe(false);
+    expect(scroller.contains(screen.getByRole("button", { name: "Reject draft" }))).toBe(false);
   });
 
   it("shows linked reference details and opens the reviewed canonical source", () => {
@@ -122,16 +130,15 @@ describe("RoadmapPhaseDraftReviewModal", () => {
     ).toBe(true);
   });
 
-  it("offers exactly explicit create/reject handlers while close remains a non-decision", () => {
+  it("offers explicit create/reject handlers and leaves collapse to the dock", () => {
     const props = renderModal();
 
     fireEvent.click(screen.getByRole("button", { name: "Create phases" }));
     fireEvent.click(screen.getByRole("button", { name: "Reject draft" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
 
     expect(props.onApprove).toHaveBeenCalledOnce();
     expect(props.onReject).toHaveBeenCalledOnce();
-    expect(props.onClose).toHaveBeenCalledOnce();
   });
 
   it("disables creation for stale proposals but keeps their content reviewable", () => {

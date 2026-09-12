@@ -4,6 +4,23 @@ export function extractImageWarnings(text: string): string {
   return text.split("\n").filter((line) => line.startsWith("WARNING: Image saved,")).join("\n");
 }
 
+/** Definite pre-execution rejection; all other prompt failures remain unknown. */
+export interface PromptSubmissionRejection {
+  category: "rejected";
+  code: "invalid_programmatic_selection" | "programmatic_execution_busy" | "programmatic_execution_plan_mode";
+  message: string;
+}
+
+export function isPromptSubmissionRejection(value: unknown): value is PromptSubmissionRejection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const failure = value as Record<string, unknown>;
+  return failure.category === "rejected" && typeof failure.code === "string" &&
+    ["invalid_programmatic_selection", "programmatic_execution_busy", "programmatic_execution_plan_mode"].includes(failure.code) &&
+    typeof failure.message === "string" && failure.message.trim().length > 0 &&
+    failure.message.length <= 256 &&
+    Array.from(failure.message).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
+}
+
 /** Display-only prompt hints. Never put these fields in model messages. */
 export type PromptSegment =
   | { kind: "text"; text: string }

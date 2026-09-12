@@ -35,6 +35,7 @@ export async function handleAppSidecarProgrammaticExecution(options: {
   busy: boolean;
   automated: boolean;
   codeMode: boolean;
+  planMode: boolean;
   claimStart(): boolean;
   respond(status: number, body: Record<string, unknown>): void;
   runAgent(label: string, run: () => Promise<ProgrammaticExecutionOutcome>): Promise<void>;
@@ -44,6 +45,10 @@ export async function handleAppSidecarProgrammaticExecution(options: {
   if (selection === null) return false;
   if (selection === "invalid" || options.attachmentCount || options.automated || !options.codeMode) {
     options.respond(400, { error: "invalid_programmatic_selection", message: "Select exactly one opportunity and its configuration fingerprint in Code mode, without attachments or automation." });
+    return true;
+  }
+  if (options.planMode) {
+    options.respond(403, { error: "programmatic_execution_plan_mode", message: "Plan mode permits inspection only." });
     return true;
   }
   if (options.busy || !options.claimStart()) {

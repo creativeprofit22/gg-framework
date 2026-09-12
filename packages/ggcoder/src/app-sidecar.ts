@@ -54,7 +54,12 @@ import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-rou
 import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
-import { createRunEndPayload, extractImageWarnings, normalizePromptMeta, type PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  createRunEndPayload,
+  extractImageWarnings,
+  normalizePromptMeta,
+  type PromptMeta,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
@@ -191,6 +196,7 @@ import {
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
+import { AppSidecarProgrammaticChat } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   handleAppSidecarProgrammaticExecution,
@@ -688,7 +694,9 @@ async function prepareAttachments(
     } catch {
       // Only validated images retain usable inline bytes. Videos use the read tool.
       if (prepared.kind !== "image") {
-        throw new Error(`Could not save attachment "${safe}" for reading. Nothing was sent; retry after checking the project upload folder.`);
+        throw new Error(
+          `Could not save attachment "${safe}" for reading. Nothing was sent; retry after checking the project upload folder.`,
+        );
       }
       out.push({ ...prepared });
     }
@@ -3154,13 +3162,14 @@ async function createSession(
   // of starting a run that would collide with an injected one on the same
   // session (AgentSession.prompt has no concurrency guard).
   let autopilotActive = false;
-  const unsubscribeAutopilot = mode === "code"
-    ? projectAutopilot.subscribe(cwd, (enabled) => {
-        // Finish the active cycle before restoring Ideal, even after a remote toggle-off.
-        session.setIdealReviewSuppressed(enabled || autopilotActive);
-        broadcast("autopilot", { autopilot: enabled });
-      })
-    : () => {};
+  const unsubscribeAutopilot =
+    mode === "code"
+      ? projectAutopilot.subscribe(cwd, (enabled) => {
+          // Finish the active cycle before restoring Ideal, even after a remote toggle-off.
+          session.setIdealReviewSuppressed(enabled || autopilotActive);
+          broadcast("autopilot", { autopilot: enabled });
+        })
+      : () => {};
   // Subscribe and read synchronously after loading: no mutation can be lost between them.
   session.setIdealReviewSuppressed(isAutopilotEnabled());
   const sessionBusyState = () => ({
@@ -4214,7 +4223,9 @@ async function createSession(
         const messagesBefore = session.getMessages().length;
         await runAgent(next.text, async () => {
           if (next.attachments.length > 0) {
-            await promptActiveSessionWithAttachments(next.text, next.attachments, { meta: next.meta });
+            await promptActiveSessionWithAttachments(next.text, next.attachments, {
+              meta: next.meta,
+            });
           } else {
             await promptActiveSession(next.text, undefined, { meta: next.meta });
           }
@@ -4260,10 +4271,15 @@ async function createSession(
   async function runTaskById(taskId: string): Promise<boolean> {
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
     if (
-      !task || !isManuallyRunnableTaskStatus(task.status) ||
-      running || autopilotActive || session.getQueuedCount() > 0 ||
-      session.getPlanMode() || planGateConflict() !== null
-    ) return false;
+      !task ||
+      !isManuallyRunnableTaskStatus(task.status) ||
+      running ||
+      autopilotActive ||
+      session.getQueuedCount() > 0 ||
+      session.getPlanMode() ||
+      planGateConflict() !== null
+    )
+      return false;
     // Fresh session per task so one task's context never bleeds into the next.
     await session.newSession();
     if (autopilotCancelled) return false;
@@ -4483,6 +4499,7 @@ async function createSession(
   let lastNewSessionReset: DesktopSessionUXState["lastNewSessionReset"];
   // Shared reset bookkeeping: ordinary reset and continuation use the same owner/event path.
   async function resetBuildSession(mutation: SessionMutationOwner): Promise<void> {
+    programmaticChat.reset();
     await session.newSession(false);
     if (mode === "chat") await session.persistAppMarker("agent_handoff", { chatAgent });
     deactivateApprovedPlan();
@@ -4544,6 +4561,17 @@ async function createSession(
       broadcast("extras", footerExtras());
     },
   });
+  const programmaticChat = new AppSidecarProgrammaticChat(
+    () => ({
+      identity: JSON.stringify(session.getConversationIdentity()),
+      cwd,
+      codeMode: mode === "code",
+      planMode: session.getPlanMode(),
+      busy: isAppSidecarSessionBusy(sessionBusyState()) || planGateConflict() !== null,
+    }),
+    () => runClaim.claim(),
+    () => runClaim.release(),
+  );
   const decisionSummaryService = new AppSidecarDecisionSummaryService(
     (options: DecisionSummarySessionOptions) => new AgentSession(options),
   );
@@ -5274,10 +5302,13 @@ async function createSession(
               // generated images) and emit a toolImages entry.
               for (const tr of msg.content) {
                 const toolImages = await restoreToolImages(tr);
-                const textContent = typeof tr.content === "string" ? tr.content : tr.content
-                  .filter((c) => c.type === "text")
-                  .map((c) => c.text)
-                  .join("\n");
+                const textContent =
+                  typeof tr.content === "string"
+                    ? tr.content
+                    : tr.content
+                        .filter((c) => c.type === "text")
+                        .map((c) => c.text)
+                        .join("\n");
                 const imageWarnings = extractImageWarnings(textContent);
                 if (toolImages.length > 0 || imageWarnings) {
                   history.push({
@@ -5435,6 +5466,28 @@ async function createSession(
       return;
     }
 
+    if (method === "POST" && url === "/programmatic") {
+      const targetIdentity = JSON.stringify(session.getConversationIdentity());
+      void readCappedBody(req, res, 2_048)
+        .then(async (raw) => {
+          if (raw === null) return;
+          if (targetIdentity !== JSON.stringify(session.getConversationIdentity())) {
+            json(res, 409, { error: "Project session changed." });
+            return;
+          }
+          let input: unknown;
+          try {
+            input = JSON.parse(raw);
+          } catch {
+            input = null;
+          }
+          const response = await programmaticChat.handle(input);
+          json(res, response.status, response.body);
+        })
+        .catch(() => json(res, 500, { error: "Programmatic action unavailable." }));
+      return;
+    }
+
     if (method === "POST" && url === "/decision-summary") {
       void readCappedBody(req, res, DECISION_SUMMARY_CONTEXT_MAX_BYTES)
         .then(async (raw) => {
@@ -5540,10 +5593,14 @@ async function createSession(
       // prompt that queued) clear a claim another request is still holding.
       let claimedStart = false;
       const rejectUnaccepted = (error?: unknown) => {
-        if (!res.writableEnded) json(res, 500, {
-          error: "prompt_not_accepted",
-          message: error instanceof Error ? error.message : "Prompt was not accepted. Your draft can be retried.",
-        });
+        if (!res.writableEnded)
+          json(res, 500, {
+            error: "prompt_not_accepted",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Prompt was not accepted. Your draft can be retried.",
+          });
       };
       void readBody(req, res)
         .then(async (raw) => {
@@ -5598,6 +5655,7 @@ async function createSession(
                 busy: isAppSidecarSessionBusy(sessionBusyState()),
                 automated: meta?.kenSent === true,
                 codeMode: mode !== "chat",
+                planMode: session.getPlanMode(),
                 claimStart: () => {
                   if (runClaim.active) return false;
                   claimedStart = runClaim.claim();
@@ -5716,7 +5774,8 @@ async function createSession(
               // yield, and `running` does not flip until runAgent begins.
               claimedStart = runClaim.claim();
               // Fail preparation before runAgent can swallow errors or record user hints.
-              const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+              const prepared =
+                attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
               const acceptFreshPrompt = () => {
                 supersedeCapturedAsks();
                 onAccepted();
@@ -5724,7 +5783,8 @@ async function createSession(
               };
               // Commands return without the persistence callback; only a successful
               // non-generating command may use completion as its acceptance boundary.
-              const startsAgentRun = attachments.length > 0 || await session.willStartAgentRun(text);
+              const startsAgentRun =
+                attachments.length > 0 || (await session.willStartAgentRun(text));
               // Gate inputs captured around the run: whether this turn is a workflow
               // slash command (attachment prompts skip slash expansion entirely), and
               // how many assistant messages the run actually adds. Computed even when
@@ -5780,7 +5840,9 @@ async function createSession(
                   if (attachments.length > 0) {
                     // Persist each attachment under .gg/uploads so files are inspectable
                     // by the agent's tools, then prompt with the media as native blocks.
-                    await promptActiveSessionWithAttachments(text, prepared, { onAccepted: acceptFreshPrompt });
+                    await promptActiveSessionWithAttachments(text, prepared, {
+                      onAccepted: acceptFreshPrompt,
+                    });
                   } else {
                     // Pass the raw text straight through. AgentSession.prompt() is the
                     // single source of truth for slash-command expansion (built-in +
@@ -6035,7 +6097,8 @@ async function createSession(
             broadcastError("error", "accepted task continuation failed", error, {
               headline: all ? "Run All stopped" : "Task run stopped",
               message: "Task setup or execution could not finish.",
-              guidance: "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+              guidance:
+                "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
             });
           })
           .finally(() => {
@@ -7468,6 +7531,7 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    programmaticChat.dispose();
     unsubscribeAutopilot();
     reminderCoordinator.unwatchSession(opts.id);
     await phaseCandidates.dispose();

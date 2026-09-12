@@ -35,6 +35,11 @@
       "import": "./dist/project-notes.js",
       "require": "./dist/project-notes.cjs"
     },
+    "./programmatic-chat-contract": {
+      "types": "./dist/programmatic-chat-contract.d.ts",
+      "import": "./dist/programmatic-chat-contract.js",
+      "require": "./dist/programmatic-chat-contract.cjs"
+    },
     "./project-task-contract": {
       "types": "./dist/project-task-contract.d.ts",
       "import": "./dist/project-task-contract.js",

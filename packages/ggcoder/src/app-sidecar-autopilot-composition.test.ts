@@ -50,6 +50,7 @@ async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode =
   };
   const events = vi.fn();
   const review = vi.fn(async () => "all-clear" as const);
+  const programmaticChat = { dispose: vi.fn((): void => {}) };
   const context = vm.createContext({
     mode, cwd, projectAutopilot: shared, loadAutopilot: load, session, broadcast: events,
     autopilotCancelled: false, runAgent: async (_text: string, run: () => Promise<void>) => run(),
@@ -64,7 +65,7 @@ async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode =
     tasksPollStopped: false, tasksPoll: null, gitPollStopped: false, gitPoll: null,
     gitHubPollStopped: false, gitHubPoll: null, phaseLeaseHeartbeat: null, ciPoll: { stop: () => {} },
     serveController: null, clients: [], kenLifecycle: { abort: () => {} }, kenAutoAbort: { abort: () => {} },
-    kenSession: null, kenAutoSession: null,
+    kenSession: null, kenAutoSession: null, programmaticChat,
     taskTurnActive: false, runUserTurn, promptActiveSession: prompt, AUTOMATION_PROVENANCE: {},
     loadTasksSync: () => [{ id: "task", title: "Implement change", prompt: "Implement change", status: "pending" }],
     isManuallyRunnableTaskStatus: (status: string) => status === "pending",
@@ -90,7 +91,7 @@ async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode =
     request: (req: { body: string }, res: { resolve: (body: unknown) => void }) => void;
     queuedEnabled: () => boolean; setActive: (active: boolean) => void; replace: (replacement: typeof session) => void;
   };
-  return { ...api, events, session, review,
+  return { ...api, events, session, review, programmaticChat,
     toggle: (enabled: boolean) => new Promise((resolve) => api.request({ body: JSON.stringify({ enabled }) }, { resolve })),
     turn: () => runUserTurn(api.userTurnDeps, "Implement change", prompt, false),
   };
@@ -130,7 +131,9 @@ describe("live project Autopilot session composition", () => {
     await a.toggle(false);
     expect(b.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(true);
     expect(b.stateSnapshot().autopilot).toBe(false);
+    expect(b.programmaticChat.dispose).not.toHaveBeenCalled();
     await b.dispose();
+    expect(b.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
     const count = b.events.mock.calls.length;
     await a.toggle(true);
     expect(b.events).toHaveBeenCalledTimes(count);
@@ -142,6 +145,9 @@ describe("live project Autopilot session composition", () => {
     await late.toggle(false);
     expect(replacement.setIdealReviewSuppressed).toHaveBeenLastCalledWith(false);
     await Promise.all([a.dispose(), other.dispose(), chat.dispose(), late.dispose()]);
+    for (const current of [a, b, other, chat, late]) {
+      expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
+    }
   });
 
   it("starts with the latest policy when mutation races persisted initialization", async () => {
@@ -155,6 +161,8 @@ describe("live project Autopilot session composition", () => {
     expect(current.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(true);
     await current.toggle(false);
     expect(current.stateSnapshot().autopilot).toBe(false);
+    expect(current.programmaticChat.dispose).not.toHaveBeenCalled();
     await current.dispose();
+    expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
   });
 });

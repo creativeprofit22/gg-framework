@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { handleAppSidecarProgrammaticExecution, settleProgrammaticRun } from "../../app-sidecar-programmatic-execution.js";
 import { RunLifecycle } from "../run-lifecycle.js";
+import { AppSidecarPlanGate } from "../../app-sidecar-plan-gate.js";
 import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { ProgrammaticExecutionOutcome } from "./execution.js";
 import { ProcessManager } from "../process-manager.js";
@@ -54,7 +55,7 @@ async function executeThroughApp(input: ProgrammaticExecutionOptions, expectedSt
   let result: ProgrammaticExecutionOutcome | undefined;
   await handleAppSidecarProgrammaticExecution({
     text: `/programmatic-run ${input.opportunityId} ${input.configurationSha256}`,
-    attachmentCount: 0, busy: false, automated: false, codeMode: true,
+    attachmentCount: 0, busy: false, automated: false, codeMode: true, planMode: false,
     claimStart: () => true, respond: vi.fn(),
     execute: (selection) => executeProgrammaticOpportunity({ ...input, ...selection }),
     runAgent: async (_label, run) => {
@@ -149,6 +150,58 @@ afterEach(async () => {
 });
 
 describe("real transient specialist execution (mocked provider HTTP only)", () => {
+  it("rejects an idle planning parent without a checkpoint before any execution side effects", async () => {
+    const parent = new AgentSession({ provider: "azure", model: "azure:fixture", baseUrl: providerUrl, cwd: root, transient: true, allowedTools: [], mcpEnabled: false, loadExtensions: false, projectCustomization: false });
+    await parent.initialize();
+    await parent.setPlanMode(true);
+    const persistCheckpoint = vi.fn();
+    const planGate = new AppSidecarPlanGate(parent.getAppMarkers(), persistCheckpoint);
+    const broadcast = vi.fn(() => { bridge.cancelAll(); });
+    const bridge = createAskUserBridge({ broadcast });
+    const ask = vi.fn(bridge.park);
+    const journal = { started: vi.fn(), finished: vi.fn() };
+    const lifecycle = new RunLifecycle(undefined, journal);
+    const before = await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8");
+    const write = vi.spyOn(fs, "writeFile");
+    const rename = vi.spyOn(fs, "rename");
+    const execute = vi.fn((selection: { opportunityId: string; configurationSha256: string }) => executeProgrammaticOpportunity(options({ ...selection, ask, cancelQuestions: () => bridge.cancelAll() })));
+    const claimStart = vi.fn(() => true);
+    const respond = vi.fn();
+    const runAgent = vi.fn(async (_label: string, run: () => Promise<ProgrammaticExecutionOutcome>) => {
+      const { generation } = lifecycle.begin(() => {});
+      const result = await run();
+      lifecycle.settle(generation, settleProgrammaticRun(result)!.journalOutcome);
+    });
+    try {
+      expect(parent.getPlanMode()).toBe(true);
+      expect(planGate.current()).toBeNull();
+      expect(lifecycle.state).toBe("idle");
+      const input = {
+        text: `/programmatic-run ${selected} ${sha256}`,
+        attachmentCount: 0, busy: lifecycle.running, automated: false, codeMode: true,
+        planMode: parent.getPlanMode(), claimStart, respond, runAgent, execute,
+      };
+      expect(await handleAppSidecarProgrammaticExecution(input)).toBe(true);
+      expect(respond).toHaveBeenCalledExactlyOnceWith(403, { error: "programmatic_execution_plan_mode", message: "Plan mode permits inspection only." });
+      expect(claimStart).not.toHaveBeenCalled();
+      expect(runAgent).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(ask).not.toHaveBeenCalled();
+      expect(broadcast).not.toHaveBeenCalled();
+      expect(bridge.pendingCount).toBe(0);
+      expect(journal.started).not.toHaveBeenCalled();
+      expect(journal.finished).not.toHaveBeenCalled();
+      expect(persistCheckpoint).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(rename).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")).toBe(before);
+      expect(requests).toHaveLength(0);
+    } finally {
+      bridge.cancelAll();
+      await parent.dispose();
+    }
+  });
+
   it("isolates context, executes the pinned global body, records evidence and persists no child transcript", async () => {
     const parent = new AgentSession({ provider: "azure", model: "azure:fixture", baseUrl: providerUrl, cwd: root, transient: true, systemPrompt: "PARENT HISTORY SENTINEL", allowedTools: [], mcpEnabled: false, loadExtensions: false, projectCustomization: false });
     await parent.initialize();

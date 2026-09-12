@@ -23,7 +23,7 @@ function outcome(status: ProgrammaticExecutionOutcome["status"]): ProgrammaticEx
 }
 function host() {
   return {
-    text, attachmentCount: 0, busy: false, automated: false, codeMode: true,
+    text, attachmentCount: 0, busy: false, automated: false, codeMode: true, planMode: false,
     claimStart: vi.fn(() => true), respond: vi.fn(),
     runAgent: vi.fn(async (_label: string, run: () => Promise<ProgrammaticExecutionOutcome>) => { await run(); }),
     execute: vi.fn(async () => outcome("succeeded")),
@@ -47,6 +47,8 @@ describe("explicit single-opportunity app command", () => {
     expect(sidecar).toContain("runLifecycle.recordOutcome(generation, outcome)");
     expect(sidecar).toContain("...createRunEndPayload(outcome, runLifecycle.state)");
     const execute = sidecar.slice(sidecar.indexOf("execute: async (selection)"), sidecar.indexOf("if (handledProgrammatic) return"));
+    const entry = sidecar.slice(sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"), sidecar.indexOf("if (handledProgrammatic) return"));
+    expect(entry).toContain("planMode: session.getPlanMode(),");
     expect(execute).toContain("return result;");
     expect(execute).toContain("cancelQuestions: () => asks.cancelAll()");
   });
@@ -98,11 +100,33 @@ describe("explicit single-opportunity app command", () => {
   it.each([`${text} extra`, `${text}\n${text}`, "/PROGRAMMATIC-RUN a b", "/programmatic-run research", "/programmatic-run"]) ("rejects invalid selection %s", (value) => {
     expect(parseProgrammaticRunSelection(value)).toBe("invalid");
   });
-  it.each([{ busy: true }, { attachmentCount: 1 }, { automated: true }, { codeMode: false }])("rejects without dispatch: %o", async (override) => {
+  it.each([{ busy: true }, { attachmentCount: 1 }, { automated: true }, { codeMode: false }, { planMode: true }])("rejects without dispatch: %o", async (override) => {
     const options = { ...host(), ...override };
     await handleAppSidecarProgrammaticExecution(options);
     expect(options.execute).not.toHaveBeenCalled();
     expect(options.claimStart).not.toHaveBeenCalled();
+  });
+  it.each([
+    { invalid: true, status: 400, code: "invalid_programmatic_selection" },
+    { invalid: false, status: 409, code: "programmatic_execution_busy" },
+  ])("returns a definite $code before acceptance or execution", async ({ invalid, status, code }) => {
+    const options = host();
+    if (invalid) options.text = "/programmatic-run invalid";
+    else options.claimStart.mockReturnValue(false); // another pane won the claim
+    await handleAppSidecarProgrammaticExecution(options);
+    expect(options.respond).toHaveBeenCalledExactlyOnceWith(status, {
+      error: code, message: expect.any(String),
+    });
+    expect(options.runAgent).not.toHaveBeenCalled();
+    expect(options.execute).not.toHaveBeenCalled();
+  });
+  it("leaves ordinary planning prompts on the existing parent path", async () => {
+    const options = { ...host(), text: "Continue inspecting the plan", planMode: true };
+    expect(await handleAppSidecarProgrammaticExecution(options)).toBe(false);
+    expect(options.respond).not.toHaveBeenCalled();
+    expect(options.claimStart).not.toHaveBeenCalled();
+    expect(options.runAgent).not.toHaveBeenCalled();
+    expect(options.execute).not.toHaveBeenCalled();
   });
   it("does not reinterpret ordinary text or a second owner's claim", async () => {
     const options = host();

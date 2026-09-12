@@ -3529,12 +3529,46 @@ struct PromptSubmissionResult {
     queue_id: Option<String>,
 }
 
+// Only allowlisted pre-execution failures carry a definite rejection receipt.
+// Legacy failures remain strings for ordinary prompt callers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+enum PromptSubmissionFailure {
+    Rejected { category: &'static str, code: String, message: String },
+    Unknown(String),
+}
+
+impl From<String> for PromptSubmissionFailure {
+    fn from(message: String) -> Self { Self::Unknown(message) }
+}
+
+impl From<&str> for PromptSubmissionFailure {
+    fn from(message: &str) -> Self { Self::Unknown(message.to_string()) }
+}
+
 fn parse_prompt_submission_response(
     status: reqwest::StatusCode,
     body: &str,
-) -> Result<PromptSubmissionResult, String> {
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
     if !status.is_success() {
-        return Err(sidecar_error_text(status, body));
+        if body.len() <= 4096 {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+                let code = value.get("error").and_then(|v| v.as_str()).unwrap_or_default();
+                let known = matches!((status.as_u16(), code),
+                    (400, "invalid_programmatic_selection") |
+                    (409, "programmatic_execution_busy") |
+                    (403, "programmatic_execution_plan_mode"));
+                if known {
+                    let message = value.get("message").and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                        .unwrap_or("Opportunity run rejected before execution. Refresh the report before retrying.");
+                    return Err(PromptSubmissionFailure::Rejected {
+                        category: "rejected", code: code.to_string(), message: message.to_string(),
+                    });
+                }
+            }
+        }
+        return Err(sidecar_error_text(status, body).into());
     }
     let result: PromptSubmissionResult =
         serde_json::from_str(body).map_err(|_| "invalid prompt submission response".to_string())?;
@@ -3561,7 +3595,7 @@ async fn post_sidecar_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
-) -> Result<PromptSubmissionResult, String> {
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
     let response = client
         .post(endpoint)
         .header("x-gg-session", gg_sid)
@@ -3588,7 +3622,7 @@ async fn agent_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
-) -> Result<PromptSubmissionResult, String> {
+) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     post_sidecar_prompt(
@@ -3772,6 +3806,44 @@ fn parse_continuation_handoff_response(
         return Err("invalid continuation-handoff response".to_string());
     }
     Ok(response)
+}
+
+/// Narrow authenticated programmatic actions; credentials never enter the webview.
+#[tauri::command]
+async fn agent_programmatic(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    request: serde_json::Value,
+    expected_generation: u64,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = {
+        let windows: State<Windows> = webview.state();
+        let registry = windows.map.lock().unwrap();
+        let pane = resolve_owned_pane(&registry, webview.label(), &pane_id).ok_or("session not ready")?;
+        if pane.generation != expected_generation { return Err("project pane changed".to_string()); }
+        pane.session_id.clone().ok_or("session not ready")?
+    };
+    if request.to_string().len() > 2048 {
+        return Err("programmatic request exceeds bounds".to_string());
+    }
+    let response = client.post(format!("{}/programmatic", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&request).send().await
+        .map_err(|_| "programmatic acknowledgement unknown; read the report before retrying".to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|_| "programmatic response unavailable".to_string())?;
+    if pane_session_for(&webview, &pane_id).as_deref() != Some(gg_sid.as_str()) {
+        return Err("project pane changed; discard this response".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| "invalid programmatic response".to_string())?;
+    // Keep typed rejection/reconciliation receipts, including non-success HTTP responses.
+    if !status.is_success() && value.get("ok").and_then(|v| v.as_bool()) != Some(false) {
+        return Err(sidecar_error_text(status, &body));
+    }
+    Ok(value)
 }
 
 /// Proxy: synthesize a bounded continuation prompt for the authenticated pane.
@@ -10311,6 +10383,7 @@ pub fn run() {
             agent_usage,
             agent_prompt,
             agent_continuation_handoff,
+            agent_programmatic,
             agent_commit_continuation,
             agent_cancel,
             agent_cancel_roadmap_status_retry,
@@ -11186,7 +11259,7 @@ mod tests {
     fn prompt_proxy_result(
         status: reqwest::StatusCode,
         body: &str,
-    ) -> Result<PromptSubmissionResult, String> {
+    ) -> Result<PromptSubmissionResult, PromptSubmissionFailure> {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -11854,6 +11927,56 @@ mod tests {
     }
 
     #[test]
+    fn prompt_proxy_preserves_only_known_pre_execution_rejections() {
+        for (status, code) in [(400, "invalid_programmatic_selection"), (409, "programmatic_execution_busy"), (403, "programmatic_execution_plan_mode")] {
+            let body = serde_json::json!({"error": code, "message": "Wait for the current run.", "history": "private", "token": "private"}).to_string();
+            let failure = prompt_proxy_result(reqwest::StatusCode::from_u16(status).unwrap(), &body).unwrap_err();
+            assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
+                "category": "rejected", "code": code, "message": "Wait for the current run."
+            }));
+        }
+        let body = serde_json::json!({"error": "programmatic_execution_busy", "message": "x".repeat(257)}).to_string();
+        let failure = parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, &body).unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap()["message"], "Opportunity run rejected before execution. Refresh the report before retrying.");
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::OK, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"programmatic_execution_busy","message":"Wait"}"#), Err(PromptSubmissionFailure::Unknown(_))));
+    }
+
+    #[test]
+    fn prompt_proxy_keeps_lost_and_truncated_responses_unknown_without_retry() {
+        use std::io::{Read, Write};
+
+        for truncated in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /prompt HTTP/1.1"));
+                if truncated {
+                    // Even a known rejection code is uncertain if reading its body fails.
+                    stream.write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{\"error\":\"programmatic_execution_busy\"}").unwrap();
+                }
+                drop(stream);
+                listener
+            });
+            let client = http_client_builder().timeout(std::time::Duration::from_secs(5)).build().unwrap();
+            let result = tauri::async_runtime::block_on(post_sidecar_prompt(
+                &client, &format!("http://{address}/prompt"), "test-session",
+                "Run selected opportunity".to_string(), None, None,
+            ));
+            assert!(matches!(result, Err(PromptSubmissionFailure::Unknown(_))));
+            let listener = server.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        }
+    }
+
+    #[test]
     fn prompt_proxy_rejects_malformed_success_shapes() {
         for body in [
             r#"{"accepted":true}"#,
@@ -11872,7 +11995,7 @@ mod tests {
         ] {
             assert_eq!(
                 prompt_proxy_result(reqwest::StatusCode::ACCEPTED, body),
-                Err("invalid prompt submission response".to_string())
+                Err(PromptSubmissionFailure::Unknown("invalid prompt submission response".to_string()))
             );
         }
     }
@@ -11896,7 +12019,7 @@ mod tests {
                 "provider exploded",
             ),
         ] {
-            assert_eq!(prompt_proxy_result(status, body), Err(expected.to_string()));
+            assert_eq!(prompt_proxy_result(status, body), Err(PromptSubmissionFailure::Unknown(expected.to_string())));
         }
     }
 

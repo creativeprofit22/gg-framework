@@ -118,6 +118,30 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     expect(state.configurationFingerprint).toEqual(fingerprint);
   });
 
+  it("serializes a committed failure without claiming the state was unchanged", async () => {
+    const root = await repository();
+    await generateProfile(root);
+    const output = await createProgrammaticScanTool(root, {
+      onFileMutated: (file) => {
+        if (file === path.join(root, PROGRAMMATIC_STATE_PATH)) {
+          throw new Error("injected notification failure");
+        }
+      },
+    }).execute({}, context);
+    if (typeof output !== "string") throw new Error("Expected string tool output");
+    const state = programmaticLifecycleStateV1Schema.parse(
+      JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")),
+    );
+    expect(state.records).toHaveLength(1);
+    expect(JSON.parse(output)).toMatchObject({
+      ok: false, changed: true, recovered: false,
+      state_path: PROGRAMMATIC_STATE_PATH,
+      configuration_fingerprint: state.configurationFingerprint,
+      summary: { new: 1, active: 1, failed: 1 },
+      error: { code: "post-commit-failed", detail: expect.stringContaining("Read the current report") },
+    });
+  });
+
   it("rejects configuration drift in the final commit window without creating lifecycle state", async () => {
     const root = await repository();
     await generateProfile(root);

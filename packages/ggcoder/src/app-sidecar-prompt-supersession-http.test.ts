@@ -6,6 +6,7 @@ import { createAskUserBridge } from "./core/ask-user.js";
 import { resolveChatResearchCommandRoute } from "./app-sidecar-chat-research-handoff.js";
 import { handleAppSidecarChatResearchPrompt } from "./app-sidecar-chat-research-route.js";
 import { withRealSidecar } from "./test-support/real-sidecar.js";
+import { isAppSidecarSessionBusy } from "./app-sidecar-session-mutation.js";
 
 it.each(["research", "attachment", "accepted"] as const)(
   "controller supersession follows acceptance: %s",
@@ -51,7 +52,11 @@ async function promptController(bindings: Record<string, unknown>) {
   const source = ts.createSourceFile("app-sidecar.ts", await fs.readFile(
     new URL("./app-sidecar.ts", import.meta.url), "utf8"), ts.ScriptTarget.ES2022, true);
   const callbacks: ts.ArrowFunction[] = [];
+  const busyProjections: ts.VariableStatement[] = [];
   const visit = (node: ts.Node) => {
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => declaration.name.getText(source) === "sessionBusyState")) {
+      busyProjections.push(node);
+    }
     if (ts.isPropertyAssignment(node) && node.name.getText(source) === "perform" &&
       ts.isArrowFunction(node.initializer) && node.initializer.parameters[0]?.name.getText(source) === "onAccepted") {
       callbacks.push(node.initializer);
@@ -60,10 +65,12 @@ async function promptController(bindings: Record<string, unknown>) {
   };
   visit(source);
   expect(callbacks).toHaveLength(1);
-  const javascript = ts.transpileModule(`const perform = ${callbacks[0]!.getText(source)};`, {
+  expect(busyProjections).toHaveLength(1);
+  // Execute the same busy-state projection as the production controller.
+  const javascript = ts.transpileModule(`${busyProjections[0]!.getText(source)}\nconst perform = ${callbacks[0]!.getText(source)};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
-  const perform = new Function(...Object.keys(bindings), `${javascript}\nreturn perform;`)(...Object.values(bindings)) as
+  const perform = new Function("isAppSidecarSessionBusy", ...Object.keys(bindings), `${javascript}\nreturn perform;`)(isAppSidecarSessionBusy, ...Object.values(bindings)) as
     (onAccepted: () => void) => Promise<void>;
   await perform(() => {});
 }
@@ -83,11 +90,11 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
     try {
       await promptController({
         asks, programmaticExecutionActive: false, text: "Change direction", attachments: [{}],
-        running: true, runClaim: { active: false }, autopilotActive: false, mode: "code", meta: undefined,
+        running: true, runClaim: { active: false }, taskSweepClaim: { active: false }, autopilotActive: false, mode: "code", meta: undefined,
         runLifecycle: { running: true, generation: 1, state, isCancellationRequested: () => state !== "new-question" },
         handleAppSidecarProgrammaticExecution: async () => false,
         resolveChatResearchCommandRoute, handleAppSidecarChatResearchPrompt,
-        runAgent: vi.fn(), session: { queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
+        runAgent: vi.fn(), session: { getPlanMode: () => false, queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
         res: {}, json, broadcast: vi.fn(), cwd: ".",
         prepareAttachments: async () => {
           asks.settle("ask-1", { action: "answer", answers: { q: "yes" } });

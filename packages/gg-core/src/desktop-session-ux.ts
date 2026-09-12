@@ -21,6 +21,9 @@ export function isPromptSubmissionRejection(value: unknown): value is PromptSubm
     Array.from(failure.message).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
 }
 
+/** Enhancement input ceiling in UTF-16 code units (JavaScript string.length), not code points. */
+export const ENHANCE_PROMPT_MAX_CHARS = 12_000;
+
 /** Display-only prompt hints. Never put these fields in model messages. */
 export type PromptSegment =
   | { kind: "text"; text: string }

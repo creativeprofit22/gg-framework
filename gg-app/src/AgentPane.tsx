@@ -1,4 +1,5 @@
 import {
+  ENHANCE_PROMPT_MAX_CHARS,
   CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
   continuationInstructionError,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
@@ -8,6 +9,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -3552,9 +3554,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Run the prompt enhancer: rewrite the current draft via the active model into
   // a tighter, terminology-correct prompt. The result plays in over the input as
   // a Matrix dissolve→decode animation (unless reduced-motion), then fills it.
+  const enhanceLimitReasonId = useId();
+  const enhanceOverLimit = input.length > ENHANCE_PROMPT_MAX_CHARS;
+  const enhanceLimitReason = `Enhancement is limited to ${ENHANCE_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters (some symbols count as two). Shorten the draft to enhance it. You can still send this draft unchanged.`;
+
   async function runEnhance(): Promise<void> {
     const draft = input;
-    if (!draft.trim() || enhancing) return;
+    if (!draft.trim() || draft.length > ENHANCE_PROMPT_MAX_CHARS || enhancing) return;
     const sessionIsCurrent = capturePromptSession();
     const isCurrent = () => sessionIsCurrent() && composerRef.current.input === draft;
     setEnhanceHintVisible(false);
@@ -4888,8 +4894,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           // when there's text and out when there isn't.
           <button
             className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
-            title="Enhance prompt — clearer wording + correct terms"
-            disabled={planReview !== null || enhancing || !enhanceHintVisible}
+            title={enhanceOverLimit ? enhanceLimitReason : "Enhance prompt — clearer wording + correct terms"}
+            aria-describedby={enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined}
+            disabled={planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit}
             aria-hidden={!enhanceHintVisible}
             onClick={() => void runEnhance()}
           >
@@ -4897,6 +4904,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </button>
         )}
       </div>
+
+      {enhanceOverLimit && enhanceHintVisible && (
+        <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
+          {enhanceLimitReason}
+        </p>
+      )}
 
       <div
         className={`footer${workspaceMode === "chat" ? " footer-chat" : ""}`}

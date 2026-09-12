@@ -1,4 +1,6 @@
-export const ENHANCE_PROMPT_MAX_CHARS = 12_000;
+import { ENHANCE_PROMPT_MAX_CHARS } from "@kenkaiiii/gg-core/desktop-session-ux";
+
+export { ENHANCE_PROMPT_MAX_CHARS };
 
 export type EnhancePromptRouteResult<T> =
   | { status: 200; body: T }

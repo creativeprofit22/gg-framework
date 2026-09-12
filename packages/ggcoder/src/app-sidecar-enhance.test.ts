@@ -8,6 +8,7 @@ describe("app sidecar prompt enhancement validation", () => {
     [{ text: 42 }, "text must be a string"],
     [{ text: "   " }, "empty prompt"],
     [{ text: "x".repeat(ENHANCE_PROMPT_MAX_CHARS + 1) }, "prompt exceeds 12000 characters"],
+    [{ text: `${"😀".repeat(6_000)}x` }, "prompt exceeds 12000 characters"],
   ])("rejects invalid input before model invocation: %#", async (body, error) => {
     const enhance = vi.fn(async () => ({ enhanced: "unused", segments: [] }));
     await expect(runEnhancePromptRequest(body, enhance)).resolves.toEqual({
@@ -17,8 +18,8 @@ describe("app sidecar prompt enhancement validation", () => {
     expect(enhance).not.toHaveBeenCalled();
   });
 
-  it("accepts a non-empty prompt at the limit", async () => {
-    const text = "x".repeat(ENHANCE_PROMPT_MAX_CHARS);
+  it.each(["x".repeat(12_000), "😀".repeat(6_000)])("accepts a non-empty prompt at the UTF-16 limit: %#", async (text) => {
+    expect(text.length).toBe(ENHANCE_PROMPT_MAX_CHARS);
     const result = { enhanced: "done", segments: [] };
     const enhance = vi.fn(async () => result);
     await expect(runEnhancePromptRequest({ text }, enhance)).resolves.toEqual({

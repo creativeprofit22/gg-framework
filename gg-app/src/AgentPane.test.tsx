@@ -1063,7 +1063,31 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
   const draft = "Make search wait 300 ms after typing in SearchBox.tsx";
   const enhanced = "Debounce search by 300 ms after typing in SearchBox.tsx";
 
+  async function renderHydratedComposer(pane: PaneAgentClient, running = false): Promise<void> {
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      running,
+      runState: running ? "running" : "idle",
+    });
+    // Keep project selection and real history hydration, without making composer
+    // tests depend on the unrelated lazy Ken Markdown/action renderer.
+    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "user", text: "Existing search request" }]);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect(await screen.findByText("Existing search request")).toBeTruthy();
+    // This footer branch uses readyRef, the same gate as submission, and appears
+    // after history replay and setHydrated (which gates enhancement). Do not type
+    // a readiness probe: that would start/stop the placeholder timers under test.
+    // Finish this real-clock wait before any test starts its animation clock.
+    await waitFor(() => expect(document.querySelector(".footer .footer-left")).not.toBeNull());
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  }
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -1089,7 +1113,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
           { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
         ],
       });
-      await renderKenPromptPane(pane, true);
+      await renderHydratedComposer(pane, true);
       const input = screen.getByRole("textbox") as HTMLTextAreaElement;
       fireEvent.change(input, { target: { value: draft } });
       vi.useFakeTimers();
@@ -1115,6 +1139,44 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     },
   );
 
+  it.each([false, true].flatMap((reduced) =>
+    ["x".repeat(12_000), "😀".repeat(6_000)].map((text) => ({ reduced, text })),
+  ))("enforces UTF-16 enhancement limits (case %#)", async ({ reduced, text }) => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: reduced,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const pane = client("enhance-limit", 1);
+    vi.mocked(pane.enhancePrompt).mockReturnValue(new Promise(() => {}));
+    await renderHydratedComposer(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    const oversized = `${text}x`;
+    expect(text.length).toBe(12_000);
+    expect(oversized.length).toBe(12_001);
+    fireEvent.change(input, { target: { value: oversized } });
+    const unavailable = screen.getByRole("button", { name: "Enhance?" }) as HTMLButtonElement;
+    expect(unavailable.disabled).toBe(true);
+    const reason = document.getElementById(unavailable.getAttribute("aria-describedby")!);
+    expect(reason?.textContent).toContain("12,000");
+    expect(reason?.textContent).toContain("You can still send this draft");
+    fireEvent.click(unavailable);
+    expect(pane.enhancePrompt).not.toHaveBeenCalled();
+    expect(document.querySelector(".enh-diss, .enhance-pill.enhancing, .input-anim")).toBeNull();
+    expect(input.value).toBe(oversized);
+    expect(input.disabled).toBe(false);
+    expect(input.readOnly).toBe(false);
+    expect(input.hasAttribute("maxlength")).toBe(false);
+    fireEvent.change(input, { target: { value: text } });
+    const available = screen.getByRole("button", { name: "Enhance?" }) as HTMLButtonElement;
+    expect(available.disabled).toBe(false);
+    expect(available.hasAttribute("aria-describedby")).toBe(false);
+    fireEvent.click(available);
+    expect(pane.enhancePrompt).toHaveBeenCalledExactlyOnceWith(text);
+    expect(Boolean(document.querySelector(".enh-diss"))).toBe(!reduced);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     "preserves rejected drafts and permits retry (reduced=%s)",
     async (reduced) => {
@@ -1125,7 +1187,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       }));
       const pane = client("enhance-failure", 1);
       vi.mocked(pane.enhancePrompt).mockRejectedValue(new Error("Invalid enhancement response"));
-      await renderKenPromptPane(pane);
+      await renderHydratedComposer(pane);
       const input = screen.getByRole("textbox") as HTMLTextAreaElement;
       fireEvent.change(input, { target: { value: draft } });
       fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
@@ -1156,7 +1218,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
           resolve = done;
         }),
       );
-      await renderKenPromptPane(pane);
+      await renderHydratedComposer(pane);
       const input = screen.getByRole("textbox") as HTMLTextAreaElement;
       const original = `  ${draft}\n`;
       fireEvent.change(input, { target: { value: original } });
@@ -1184,7 +1246,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
     ];
     vi.mocked(pane.enhancePrompt).mockResolvedValue({ enhanced, segments });
-    await renderKenPromptPane(pane);
+    await renderHydratedComposer(pane);
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: draft } });
     fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
@@ -1226,7 +1288,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
 
   it("never offers enhancement for schedule drafts", async () => {
     const pane = client("enhance-schedule", 1);
-    await renderKenPromptPane(pane);
+    await renderHydratedComposer(pane);
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "/schedule Check search | 15m" },
     });
@@ -1238,7 +1300,7 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const interval = vi.spyOn(window, "setInterval");
     const clear = vi.spyOn(window, "clearInterval");
-    await renderKenPromptPane(client("placeholder-focus", 1));
+    await renderHydratedComposer(client("placeholder-focus", 1));
     const timer = interval.mock.calls.findIndex(([, delay]) => delay === 12000);
     expect(timer).toBeGreaterThanOrEqual(0);
     const id = interval.mock.results[timer].value;

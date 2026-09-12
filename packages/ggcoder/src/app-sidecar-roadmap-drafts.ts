@@ -75,7 +75,10 @@ export class AppSidecarRoadmapDraftCoordinator {
     }
     const projectKey = canonicalProjectKey(input.cwd);
     const existing = this.pendingByProject.get(projectKey);
-    if (existing) return { status: "proposal-pending", draft: cloneDraft(existing)! };
+    if (existing) {
+      this.emit(projectKey, existing);
+      return { status: "proposal-pending", draft: cloneDraft(existing)! };
+    }
 
     const draftId = this.createId();
     const referenceIdsByKey = new Map<string, string>();

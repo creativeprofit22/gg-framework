@@ -33,6 +33,16 @@ const request = {
 };
 
 describe("AppSidecarRoadmapDraftCoordinator", () => {
+  it("recovers a missed notification on retry without replacing the pending proposal", () => {
+    const { value, onChange } = coordinator();
+    const first = value.create({ cwd: "/work/app", sessionId: "s1", request });
+    if (first.status !== "drafted") throw new Error("expected draft");
+    onChange.mockClear();
+    const retry = value.create({ cwd: "/work/app", sessionId: "s2", request });
+    expect(retry).toEqual({ status: "proposal-pending", draft: first.draft });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("/work/app", first.draft);
+    expect(value.pending("/work/app")).toEqual(first.draft);
+  });
   it("creates one normalized pending draft and emits defensive copies", () => {
     const { value, onChange } = coordinator();
     const created = value.create({ cwd: "C:\\Work\\App", sessionId: "session-1", request });

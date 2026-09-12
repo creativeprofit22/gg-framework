@@ -150,7 +150,7 @@ const optionalCoordinate = z
   .max(4_096)
   .transform((value) => value.trim())
   .refine((value) => value.length > 0, "Expected a non-empty string")
-  .optional()
+  .nullish()
   .transform((value) => value ?? null);
 
 const RoadmapDraftReferenceParams = z

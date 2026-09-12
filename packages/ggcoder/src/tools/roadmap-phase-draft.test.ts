@@ -25,6 +25,36 @@ const input = {
   phases: [phase],
 };
 
+// Sanitized production OpenAI payload from the native run on 2026-09-10.
+const capturedReference = {
+  reference_key: "typescript-source",
+  provider: "github",
+  tool: null,
+  canonical_url: "https://github.com/microsoft/TypeScript",
+  owner: "microsoft",
+  repo: "TypeScript",
+  revision: null,
+  path: null,
+  range: null,
+  issue: null,
+  pull_request: null,
+  query: null,
+  anchor: null,
+  relevance: "Public source identity used only to verify reference preservation",
+};
+const capturedPayload = {
+  expected_revision: 1,
+  summary: "Native recovery verification 20260910",
+  phases: ["Recovery alpha", "Recovery beta"].map((title) => ({
+    title,
+    goal: "Verify explicit approval on a disposable project",
+    doneWhen: ["Native approval creates this phase exactly once"],
+    sourcePrompt: "Synthetic verification only; do not implement",
+    reference_keys: ["typescript-source"],
+  })),
+  proposed_references: [capturedReference],
+};
+
 describe("RoadmapPhaseDraftParams", () => {
   it("normalizes a strict flat draft using the shared request field shape", () => {
     expect(RoadmapPhaseDraftParams.parse(input)).toEqual({
@@ -97,6 +127,99 @@ describe("RoadmapPhaseDraftParams", () => {
     expect(() => RoadmapPhaseDraftParams.parse({ ...input, summary: "  " })).toThrow();
   });
 
+  it("treats omitted optional reference fields identically to explicit nulls", () => {
+    const omitted = {
+      ...capturedPayload,
+      proposed_references: [
+        {
+          reference_key: "typescript-source",
+          provider: "github",
+          canonical_url: "https://github.com/microsoft/TypeScript",
+          owner: "microsoft",
+          repo: "TypeScript",
+          relevance: "Public source identity used only to verify reference preservation",
+        },
+      ],
+    };
+    expect(RoadmapPhaseDraftParams.parse(omitted)).toEqual(capturedPayload);
+  });
+
+  it.each([
+    ["tool", " search ", "search"],
+    ["revision", " main ", "main"],
+    ["path", " README.md ", "README.md"],
+    ["query", " TypeScript ", "TypeScript"],
+    ["anchor", " overview ", "overview"],
+    ["range", { start_line: 2, end_line: 4 }, { start_line: 2, end_line: 4 }],
+    ["issue", 1, 1],
+    ["pull_request", 2, 2],
+  ] as const)("preserves a valid optional reference %s", (field, value, expected) => {
+    const parsed = RoadmapPhaseDraftParams.parse({
+      ...capturedPayload,
+      proposed_references: [{ ...capturedReference, path: "README.md", [field]: value }],
+    });
+    expect(parsed.proposed_references).toEqual([
+      { ...capturedReference, path: "README.md", [field]: expected },
+    ]);
+  });
+
+  it.each(["tool", "revision", "path", "query", "anchor"])(
+    "rejects malformed non-null optional reference %s values",
+    (field) => {
+      for (const value of ["", "   ", "x".repeat(4_097), 1, false, {}, []]) {
+        const result = RoadmapPhaseDraftParams.safeParse({
+          ...capturedPayload,
+          proposed_references: [{ ...capturedReference, [field]: value }],
+        });
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.issues).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ path: ["proposed_references", 0, field] }),
+            ]),
+          );
+        }
+      }
+    },
+  );
+
+  it.each([
+    ["range", { start_line: 4, end_line: 2 }],
+    ["range", "2-4"],
+    ["issue", 0],
+    ["issue", "1"],
+    ["pull_request", -1],
+    ["pull_request", 1.5],
+  ] as const)("still rejects malformed optional reference %s coordinates", (field, value) => {
+    expect(
+      RoadmapPhaseDraftParams.safeParse({
+        ...capturedPayload,
+        proposed_references: [{ ...capturedReference, [field]: value }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each(["reference_key", "provider", "canonical_url", "owner", "repo", "relevance"])(
+    "does not treat required reference %s as optional",
+    (field) => {
+      expect(
+        RoadmapPhaseDraftParams.safeParse({
+          ...capturedPayload,
+          proposed_references: [{ ...capturedReference, [field]: null }],
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  it("does not relax null handling outside optional reference coordinates", () => {
+    expect(RoadmapPhaseDraftParams.safeParse({ ...capturedPayload, summary: null }).success).toBe(
+      false,
+    );
+    expect(
+      RoadmapPhaseDraftParams.safeParse({ ...capturedPayload, proposed_references: null }).success,
+    ).toBe(false);
+  });
+
   it("normalizes reference proposals and validates phase links", () => {
     const candidate = {
       ...input,
@@ -128,6 +251,37 @@ describe("RoadmapPhaseDraftParams", () => {
 });
 
 describe("createRoadmapPhaseDraftTool", () => {
+  it("validates the captured provider null fields and forwards the normalized reference", async () => {
+    const draft = vi.fn(async (_request: RoadmapPhaseDraftRequest) => ({
+      status: "proposal-pending" as const,
+      draftId: "proposal-1",
+    }));
+    const tool = createRoadmapPhaseDraftTool(draft);
+    // Use the production validation boundary, without stripping provider nulls.
+    const parsed = tool.parameters.parse(capturedPayload);
+    expect(parsed).toEqual(capturedPayload);
+    await tool.execute(parsed, {} as never);
+    expect(draft).toHaveBeenCalledOnce();
+    expect(draft.mock.calls[0]![0].proposedReferences).toEqual([
+      {
+        referenceKey: "typescript-source",
+        provider: "github",
+        tool: null,
+        canonicalUrl: "https://github.com/microsoft/TypeScript",
+        owner: "microsoft",
+        repo: "TypeScript",
+        revision: null,
+        path: null,
+        range: null,
+        issue: null,
+        pullRequest: null,
+        query: null,
+        anchor: null,
+        relevance: "Public source identity used only to verify reference preservation",
+      },
+    ]);
+  });
+
   it("maps expected_revision to the shared request and delegates once", async () => {
     const draft = vi.fn(async (_request: RoadmapPhaseDraftRequest) => ({
       status: "proposal-pending" as const,

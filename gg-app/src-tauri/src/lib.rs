@@ -2286,15 +2286,117 @@ fn normalized_bounded_string(
     let normalized_nfc = candidate.nfc().collect::<String>();
     let normalized_lines = normalized_nfc.replace("\r\n", "\n").replace('\r', "\n");
     let normalized = normalized_lines.trim();
-    let length = normalized.chars().count();
+    // Match the shared TypeScript contract's UTF-16 length bounds.
+    let length = normalized.encode_utf16().count();
     (1..=max_length)
         .contains(&length)
         .then(|| normalized.to_string())
 }
 
+// Reference fields were absent in legacy drafts. Keep exact-key validation for both forms.
+fn has_roadmap_reference_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    base: &[&str],
+    reference_key: &str,
+) -> bool {
+    has_exact_keys(object, base)
+        || (object.len() == base.len() + 1
+            && object.contains_key(reference_key)
+            && base.iter().all(|key| object.contains_key(*key)))
+}
+
+fn roadmap_reference_array(value: Option<&serde_json::Value>) -> Option<&[serde_json::Value]> {
+    match value {
+        None | Some(serde_json::Value::Null) => Some(&[]),
+        Some(value) => value.as_array().map(Vec::as_slice),
+    }
+}
+
+// Mirrors roadmap-workflow normalizeDraftReference and Project Notes reference coordinates.
+fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(String, String)> {
+    let object = value.as_object()?;
+    if !has_exact_keys(object, &[
+        "id", "provider", "tool", "canonicalUrl", "owner", "repo", "revision", "path",
+        "range", "issue", "pullRequest", "query", "anchor", "relevance",
+    ]) {
+        return None;
+    }
+    let id = normalized_bounded_string(object.get("id"), 512)?;
+    let provider = normalized_bounded_string(object.get("provider"), 4_096)?.to_lowercase();
+    let owner = normalized_bounded_string(object.get("owner"), 4_096)?;
+    let repo = normalized_bounded_string(object.get("repo"), 4_096)?;
+    for field in ["tool", "revision", "path", "query", "anchor"] {
+        if !object.get(field)?.is_null() {
+            normalized_bounded_string(object.get(field), 4_096)?;
+        }
+    }
+    let relevance = object.get("relevance")?.as_str()?.nfc().collect::<String>();
+    if relevance.replace("\r\n", "\n").replace('\r', "\n").trim().encode_utf16().count() > 4_096 {
+        return None;
+    }
+    let canonical_url = normalized_bounded_string(object.get("canonicalUrl"), 2_048)?;
+    let mut url = reqwest::Url::parse(&canonical_url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    if url.as_str().trim_end_matches('/').encode_utf16().count() > 2_048 {
+        return None;
+    }
+    let range = object.get("range")?;
+    if !range.is_null() {
+        let range = range.as_object()?;
+        if !has_exact_keys(range, &["startLine", "endLine"]) {
+            return None;
+        }
+        let start = range.get("startLine")?.as_u64()?;
+        let end = range.get("endLine")?.as_u64()?;
+        if start == 0 || end < start || object.get("path")?.is_null() {
+            return None;
+        }
+    }
+    for field in ["issue", "pullRequest"] {
+        let number = object.get(field)?;
+        if !number.is_null() && !number.as_u64().is_some_and(|number| number > 0) {
+            return None;
+        }
+    }
+    if !object.get("issue")?.is_null() && !object.get("pullRequest")?.is_null() {
+        return None;
+    }
+    if provider == "github" {
+        let segments: Vec<_> = url.path().split('/').filter(|part| !part.is_empty()).collect();
+        let normalized_repo = repo.to_lowercase();
+        let url_repo = segments.get(1).copied().unwrap_or_default().to_lowercase();
+        if url.host_str() != Some("github.com") || segments.len() < 2
+            || segments[0].to_lowercase() != owner.to_lowercase()
+            || url_repo.strip_suffix(".git").unwrap_or(&url_repo)
+                != normalized_repo.strip_suffix(".git").unwrap_or(&normalized_repo)
+        {
+            return None;
+        }
+        if let Some(number) = segments.get(3).filter(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())) {
+            let field = match segments[2] {
+                "issues" => Some("issue"),
+                "pull" => Some("pullRequest"),
+                _ => None,
+            };
+            if let Some(field) = field {
+                if object.get(field)?.as_u64() != Some(number.parse::<u64>().ok()?) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((id, format!("{}\n{}", provider, url.as_str().trim_end_matches('/'))))
+}
+
 fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
-    if !has_exact_keys(object, &ROADMAP_DRAFT_PHASE_KEYS) {
+    if !has_roadmap_reference_keys(object, &ROADMAP_DRAFT_PHASE_KEYS, "referenceIds") {
         return None;
     }
 
@@ -2322,7 +2424,7 @@ fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    if !has_exact_keys(object, &ROADMAP_PHASE_DRAFT_KEYS)
+    if !has_roadmap_reference_keys(object, &ROADMAP_PHASE_DRAFT_KEYS, "references")
         || !matches!(
             object.get("status").and_then(serde_json::Value::as_str),
             Some("pending" | "stale")
@@ -2347,10 +2449,46 @@ fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
         return false;
     }
 
+    let Some(references) = roadmap_reference_array(object.get("references")) else {
+        return false;
+    };
+    if references.len() > 20 {
+        return false;
+    }
+    let mut reference_ids = HashSet::new();
+    let mut identities = HashSet::new();
+    for reference in references {
+        let Some((id, identity)) = roadmap_draft_reference(reference) else {
+            return false;
+        };
+        if !reference_ids.insert(id) || !identities.insert(identity) {
+            return false;
+        }
+    }
     let mut phase_ids = HashSet::new();
-    phases.iter().all(|phase| {
-        is_roadmap_draft_phase(phase).is_some_and(|phase_id| phase_ids.insert(phase_id))
-    })
+    let mut linked_ids = HashSet::new();
+    for phase in phases {
+        if !is_roadmap_draft_phase(phase).is_some_and(|id| phase_ids.insert(id)) {
+            return false;
+        }
+        let Some(links) = roadmap_reference_array(phase.get("referenceIds")) else {
+            return false;
+        };
+        if links.len() > 20 {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        for link in links {
+            let Some(id) = normalized_bounded_string(Some(link), 128) else {
+                return false;
+            };
+            if !reference_ids.contains(&id) || !seen.insert(id.clone()) {
+                return false;
+            }
+            linked_ids.insert(id);
+        }
+    }
+    linked_ids == reference_ids
 }
 
 fn is_roadmap_phase_draft_get_outcome(value: &serde_json::Value, outcome: &str) -> bool {
@@ -11367,6 +11505,97 @@ mod tests {
                 ),
                 Err("invalid roadmap phase-draft response".to_string())
             );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_validates_reference_bearing_daemon_payloads() {
+        let pending = serde_json::json!({
+            "status": "ok", "draft": {
+                "id": "draft-1", "projectKey": "project-1", "basedOnRevision": 1,
+                "createdAt": "2026-01-01T00:00:00.000Z", "createdBySessionId": "session-1",
+                "summary": "Implement the referenced issue", "status": "pending",
+                "references": [{
+                    "id": "ref-1", "provider": "github", "tool": "get_issue",
+                    "canonicalUrl": "https://github.com/example/project/issues/42",
+                    "owner": "example", "repo": "project", "revision": null,
+                    "path": null, "range": null, "issue": 42, "pullRequest": null,
+                    "query": null, "anchor": null, "relevance": "Acceptance criteria"
+                }],
+                "phases": [{
+                    "phaseId": "phase-1", "title": "Implement", "goal": "Resolve issue 42",
+                    "doneWhen": ["Acceptance criteria pass"], "sourcePrompt": "Implement issue 42",
+                    "referenceIds": ["ref-1"]
+                }]
+            }
+        });
+        let validate = |value: &serde_json::Value| normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK, &value.to_string(), RoadmapPhaseDraftResponseKind::Get,
+        );
+        assert_eq!(validate(&pending).unwrap(), pending);
+        let mut empty = pending.clone();
+        empty["draft"]["references"] = serde_json::json!([]);
+        empty["draft"]["phases"][0]["referenceIds"] = serde_json::json!([]);
+        assert_eq!(validate(&empty).unwrap(), empty);
+        empty["draft"].as_object_mut().unwrap().remove("references");
+        empty["draft"]["phases"][0].as_object_mut().unwrap().remove("referenceIds");
+        assert!(validate(&empty).is_ok());
+        for (pointer, replacement) in [
+            ("/draft/references", serde_json::json!({})),
+            ("/draft/references", serde_json::json!(vec![pending["draft"]["references"][0].clone(); 21])),
+            ("/draft/references/0/provider", serde_json::json!(" ")),
+            ("/draft/references/0/tool", serde_json::json!(false)),
+            ("/draft/references/0/relevance", serde_json::json!("😀".repeat(2_049))),
+            ("/draft/references/0/owner", serde_json::json!("other")),
+            ("/draft/references/0/repo", serde_json::json!("other")),
+            ("/draft/references/0/repo", serde_json::json!("project.git.git")),
+            ("/draft/references/0/path", serde_json::json!("x".repeat(4_097))),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("file:///etc/passwd")),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("https://user:secret@github.com/example/project/issues/42")),
+            ("/draft/references/0/canonicalUrl", serde_json::json!("https://example.com/example/project/issues/42")),
+            ("/draft/references/0/issue", serde_json::json!(43)),
+            ("/draft/references/0/issue", serde_json::json!(0)),
+            ("/draft/references/0/pullRequest", serde_json::json!(42)),
+            ("/draft/references/0/range", serde_json::json!({"startLine": 1, "endLine": 2})),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["missing"])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["ref-1", " ref-1 "])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(vec!["ref-1"; 21])),
+            ("/draft/phases/0/referenceIds", serde_json::json!(["x".repeat(129)])),
+            ("/draft/phases/0/referenceIds", serde_json::json!([])),
+            ("/draft/phases/0/referenceIds", serde_json::json!({})),
+        ] {
+            let mut invalid = pending.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert!(validate(&invalid).is_err(), "accepted malformed {pointer}");
+        }
+        for pointer in ["/draft", "/draft/phases/0", "/draft/references/0"] {
+            let mut invalid = pending.clone();
+            invalid.pointer_mut(pointer).unwrap()["unknown"] = serde_json::json!(true);
+            assert!(validate(&invalid).is_err(), "accepted unknown field at {pointer}");
+        }
+        for duplicate_id in [true, false] {
+            let mut invalid = pending.clone();
+            let mut duplicate = invalid["draft"]["references"][0].clone();
+            if !duplicate_id {
+                duplicate["id"] = serde_json::json!("ref-2");
+                duplicate["canonicalUrl"] = serde_json::json!("https://GITHUB.com:443/example/project/issues/42/");
+                invalid["draft"]["phases"][0]["referenceIds"] = serde_json::json!(["ref-1", "ref-2"]);
+            }
+            invalid["draft"]["references"].as_array_mut().unwrap().push(duplicate);
+            assert!(validate(&invalid).is_err());
+        }
+        let mut ranged = pending.clone();
+        ranged["draft"]["references"][0]["path"] = serde_json::json!("src/main.ts");
+        ranged["draft"]["references"][0]["range"] = serde_json::json!({"startLine": 1, "endLine": 2});
+        assert!(validate(&ranged).is_ok());
+        for range in [
+            serde_json::json!({"startLine": 2, "endLine": 1}),
+            serde_json::json!({"startLine": 0, "endLine": 2}),
+            serde_json::json!({"startLine": 1.5, "endLine": 2}),
+            serde_json::json!({"startLine": 1, "endLine": 2, "unknown": true}),
+        ] {
+            ranged["draft"]["references"][0]["range"] = range;
+            assert!(validate(&ranged).is_err());
         }
     }
 

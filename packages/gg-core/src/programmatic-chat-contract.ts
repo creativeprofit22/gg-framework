@@ -51,6 +51,24 @@ export interface ProgrammaticChatDetail {
   evidence: ProgrammaticChatEvidence[];
   evidenceTruncated: boolean;
 }
+export interface ProgrammaticExecutionEvidence {
+  basis: "observed" | "inferred" | "assumed";
+  source: string;
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  location?: { path: string; startLine?: number; endLine?: number };
+}
+/** Display-only run_end payload. Never carries a route or child transcript. */
+export type ProgrammaticExecutionResult =
+  | { version: 1; status: "rejected"; reason: string }
+  | {
+      version: 1;
+      status: "succeeded" | "failed" | "cancelled" | "blocked";
+      summary: string;
+      evidence: { version: 1; items: ProgrammaticExecutionEvidence[] };
+    };
+
 export interface ProgrammaticChatConfiguration {
   status: "missing" | "current" | "refresh-required" | "unreadable";
   currentFingerprint: string | null;
@@ -203,6 +221,26 @@ const location: Guard = (value) => {
   const loc = value as { startLine?: number; endLine?: number };
   return loc.endLine === undefined || (loc.startLine !== undefined && loc.endLine >= loc.startLine);
 };
+/** Strict bounded validation at the desktop event boundary; invalid extras fail closed. */
+export function isProgrammaticExecutionResult(value: unknown): value is ProgrammaticExecutionResult {
+  if (typeof value !== "object" || value === null) return false;
+  if ((value as { status?: unknown }).status === "rejected")
+    return object(value, { version: oneOf(1), status: oneOf("rejected"), reason: text(4_000) });
+  return object(value, {
+    version: oneOf(1),
+    status: oneOf("succeeded", "failed", "cancelled", "blocked"),
+    summary: text(4_000),
+    evidence: (evidence) => object(evidence, {
+      version: oneOf(1),
+      items: list((item) => object(item, {
+        basis: oneOf("observed", "inferred", "assumed"),
+        source: text(100), code: text(100),
+        severity: oneOf("info", "warning", "error"), message: text(4_000),
+      }, { location }), 200),
+    }),
+  });
+}
+
 const detail: Guard = (value) =>
   object(value, {
     summary,

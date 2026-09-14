@@ -7,6 +7,7 @@ import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { restoreUserRow, resolveRestoredCommand } from "./session-history.js";
 import { getPromptCommand } from "./prompt-commands.js";
+import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
@@ -116,66 +117,62 @@ describe("slash-command restore", () => {
     await session.dispose();
   }, 20_000);
 
-  it("rejects /programmatic arguments without sending them to the provider", async () => {
+  it("accepts approved focus while rejecting invalid focus, references and attachments", async () => {
     const { AgentSession } = await import("./agent-session.js");
-    const session = new AgentSession({
-      provider: "anthropic",
-      model: "claude-test",
-      cwd: tmpProject,
-      systemPrompt: "sys",
-    });
+    const session = new AgentSession({ provider: "anthropic", model: "claude-test", cwd: tmpProject, systemPrompt: "sys" });
     const output: string[] = [];
     session.eventBus.on("text_delta", ({ text }) => output.push(text));
     await session.initialize();
-
-    expect(await session.willExpandPromptTemplate("/programmatic")).toBe(true);
-    await session.prompt("/programmatic");
-    const barePrompt = getPromptCommand("programmatic")!.prompt;
-    expect(session.getMessages().filter((message) => message.role === "user")).toEqual([
-      expect.objectContaining({ content: barePrompt }),
-    ]);
-    expect(agentLoopMock).toHaveBeenCalledTimes(1);
-
-    const rejectedInputs = [
-      "/programmatic any text",
-      "/programmatic\ncaller instructions",
-      "/programmatic\n\nReferenced files:\n- src/secrets.ts",
-    ];
-    for (const input of rejectedInputs) {
-      expect(await session.willExpandPromptTemplate(input)).toBe(false);
-      expect(await session.willStartAgentRun(input)).toBe(false);
-      await session.prompt(input);
-    }
-    const attachment = {
-      kind: "image" as const,
-      mediaType: "image/png",
-      data: "iVBORw0KGgo=",
-      name: "screenshot.png",
-    };
-    await session.promptWithAttachments("/programmatic", [attachment]);
-    expect(() => session.queueMessage("/programmatic caller instructions")).toThrow(
-      "/programmatic accepts no arguments, file references, or attachments.",
-    );
-    expect(() => session.queueMessage("/programmatic", [attachment])).toThrow(
-      "/programmatic accepts no arguments, file references, or attachments.",
-    );
-    expect(session.getQueuedCount()).toBe(0);
-
-    const providerUserPrompts = session
-      .getMessages()
-      .filter((message) => message.role === "user")
-      .map((message) => message.content);
-    expect(providerUserPrompts).toEqual([barePrompt]);
-    expect(providerUserPrompts).not.toContain(expect.stringContaining("caller instructions"));
-    expect(providerUserPrompts).not.toContain(expect.stringContaining("## User Instructions"));
-    expect(agentLoopMock).toHaveBeenCalledTimes(1);
-    expect(output).toEqual(
-      Array.from(
-        { length: rejectedInputs.length + 1 },
-        () => "/programmatic accepts no arguments, file references, or attachments.\n",
-      ),
-    );
-    await session.dispose();
+    try {
+      expect(await session.willExpandPromptTemplate("/programmatic")).toBe(false);
+      await session.prompt("/programmatic");
+      expect(agentLoopMock).not.toHaveBeenCalled();
+      expect(output[0]).toContain("/setup-programmatic");
+      const proposal = await buildProgrammaticProfileProposal(tmpProject);
+      expect((await persistProgrammaticProfile(tmpProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+      const barePrompt = getPromptCommand("programmatic")!.prompt;
+      for (const focus of ["", "any text", "caller\ninstructions"]) {
+        const input = `/programmatic${focus ? ` ${focus}` : ""}`;
+        expect(await session.willExpandPromptTemplate(input)).toBe(true);
+        await session.prompt(input);
+        const latest = session.getMessages().filter((message) => message.role === "user").at(-1)!;
+        expect(String(latest.content)).toContain(barePrompt);
+        expect(String(latest.content)).toContain(focus ? `## User Instructions\n\n${focus}` : '"intent":"general-assessment"');
+        expect(resolveRestoredCommand(null, String(latest.content), [getPromptCommand("programmatic")!])).toBe(input);
+      }
+      const rejectedInputs = [
+        `/programmatic ${"x".repeat(4001)}`,
+        "/programmatic invalid\u0000focus",
+        "/programmatic\n\nReferenced files:\n- src/secrets.ts",
+      ];
+      for (const input of rejectedInputs) {
+        // The HTTP /prompt handler calls this gate before claiming startup.
+        expect(session.promptInputPolicyError(input)).toBeTruthy();
+        expect(await session.willExpandPromptTemplate(input)).toBe(false);
+        expect(await session.willStartAgentRun(input)).toBe(false);
+        await session.prompt(input);
+        expect(() => session.queueMessage(input)).toThrow();
+      }
+      const attachment = { kind: "image" as const, mediaType: "image/png", data: "iVBORw0KGgo=", name: "screenshot.png" };
+      await session.promptWithAttachments("/programmatic", [attachment]);
+      expect(() => session.queueMessage("/programmatic", [attachment])).toThrow(
+        "/programmatic accepts optional text only, not file references or attachments.",
+      );
+      expect(session.getQueuedCount()).toBe(0);
+      for (const command of ["/programmatic caller instructions", "/setup-programmatic", "/programmatic-run"]) {
+        expect(() => session.queueMessage(command)).toThrow(/Wait for the current work to finish/);
+        expect(session.getQueuedCount()).toBe(0);
+      }
+      expect(session.queueMessage("ordinary steering")).toBe(1);
+      expect(session.getMessages().filter((message) => message.role === "user")).toHaveLength(3);
+      expect(agentLoopMock).toHaveBeenCalledTimes(3);
+      expect(output.slice(1)).toEqual([
+        "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",
+        "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",
+        "/programmatic accepts optional text only, not file references or attachments.\n",
+        "/programmatic accepts optional text only, not file references or attachments.\n",
+      ]);
+    } finally { await session.dispose(); }
   }, 20_000);
 
   it("preserves arguments for other built-in prompt commands", async () => {

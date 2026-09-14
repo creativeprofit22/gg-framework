@@ -36,6 +36,17 @@ export interface SlashCommand {
   execute: (args: string, context: SlashCommandContext) => Promise<string> | string;
 }
 
+/** Split a slash token on whitespace, preserving case and internal argument text. */
+export function parseSlashCommandInput(input: string): { name: string; args: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const commandText = trimmed.slice(1);
+  const separatorIndex = commandText.search(/\s/);
+  const name = separatorIndex === -1 ? commandText : commandText.slice(0, separatorIndex);
+  const args = separatorIndex === -1 ? "" : commandText.slice(separatorIndex + 1).trim();
+  return { name, args };
+}
+
 // ── Registry ───────────────────────────────────────────────
 
 export class SlashCommandRegistry {
@@ -75,13 +86,7 @@ export class SlashCommandRegistry {
   }
 
   parse(input: string): { name: string; args: string } | null {
-    const trimmed = input.trim();
-    if (!trimmed.startsWith("/")) return null;
-    const commandText = trimmed.slice(1);
-    const separatorIndex = commandText.search(/\s/);
-    const name = separatorIndex === -1 ? commandText : commandText.slice(0, separatorIndex);
-    const args = separatorIndex === -1 ? "" : commandText.slice(separatorIndex + 1).trim();
-    return { name, args };
+    return parseSlashCommandInput(input);
   }
 
   async execute(input: string, context: SlashCommandContext): Promise<string | null> {

@@ -1980,7 +1980,7 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
 }
 
 /** List workflow (prompt-template) slash commands the agent can run. */
-export async function listCommands(): Promise<SlashCommand[]> {
+export async function listCommands(): Promise<SlashCommand[] | null> {
   try {
     const response = await invoke<SlashCommandsResponse>("agent_commands", { paneId: "primary" });
     if (!isSlashCommandsResponse(response))
@@ -1988,7 +1988,7 @@ export async function listCommands(): Promise<SlashCommand[]> {
     return [...response.commands];
   } catch (e) {
     await logError(`agent_commands failed: ${String(e)}`);
-    return [];
+    return null;
   }
 }
 
@@ -3172,7 +3172,7 @@ export interface PaneAgentClient extends NotesClient {
   deleteTask(id: string): Promise<ProjectTask[]>;
   killTask(id: string): Promise<string | null>;
   cycleThinking(): Promise<ThinkingState | null>;
-  listCommands(): Promise<SlashCommand[]>;
+  listCommands(): Promise<SlashCommand[] | null>;
   listModels(): Promise<ModelOption[]>;
   switchModel(model: string): Promise<SwitchModelResult | { error: string }>;
   setOpenAICodexContextProfile(
@@ -3677,9 +3677,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async listCommands() {
       try {
         const response = await call<SlashCommandsResponse>("agent_commands");
-        return isSlashCommandsResponse(response) ? [...response.commands] : [];
+        return isSlashCommandsResponse(response) ? [...response.commands] : null;
       } catch {
-        return [];
+        return null;
       }
     },
     listModels: () => safeArray("agent_models", "models"),

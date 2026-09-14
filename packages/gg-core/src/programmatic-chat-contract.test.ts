@@ -1,9 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   isProgrammaticChatRelativePath,
+  isProgrammaticExecutionResult,
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
 } from "./programmatic-chat-contract.js";
+
+describe("execution result display boundary", () => {
+  const item = { basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: "Tool read completed (manifest)." };
+  const result = { version: 1, status: "succeeded", summary: "Summary", evidence: { version: 1, items: [item] } };
+  it.each(["succeeded", "failed", "cancelled", "blocked"])("accepts bounded %s results", (status) => {
+    expect(isProgrammaticExecutionResult({ ...result, status })).toBe(true);
+  });
+  it("accepts rejection separately", () => {
+    expect(isProgrammaticExecutionResult({ version: 1, status: "rejected", reason: "approval-rejected" })).toBe(true);
+    expect(isProgrammaticExecutionResult({ ...result, status: "rejected" })).toBe(false);
+  });
+  it.each([null, {}, { ...result, version: 2 }, { ...result, route: {} }, { ...result, transcript: [] }, { ...result, summary: "x".repeat(4001) }, { ...result, evidence: { version: 1, items: Array(201).fill(item) } }])("rejects malformed or oversized envelopes", (value) => {
+    expect(isProgrammaticExecutionResult(value)).toBe(false);
+  });
+  it.each([{ message: "x".repeat(4001) }, { source: "x".repeat(101) }, { code: "x".repeat(101) }, { severity: "success" }, { basis: "verified" }, { output: "hidden body" }, { message: "bad\u0000text" }, { location: { path: "../secret" } }, { location: { path: "C:/secret" } }, { location: { path: "src/a.ts", endLine: 2 } }, { location: { path: "src/a.ts", startLine: 3, endLine: 2 } }])("rejects unsafe evidence fields", (patch) => {
+    expect(isProgrammaticExecutionResult({ ...result, evidence: { version: 1, items: [{ ...item, ...patch }] } })).toBe(false);
+  });
+  it("accepts bounded citations and plain inert text", () => {
+    expect(isProgrammaticExecutionResult({ ...result, evidence: { version: 1, items: [{ ...item, message: "<script>not executable</script>", location: { path: "src/a.ts", startLine: 1, endLine: 2 } }] } })).toBe(true);
+  });
+});
 
 const hash = "a".repeat(64);
 const route = { available: true, command: "research", reason: "Available", machineLocal: true };

@@ -1,4 +1,5 @@
 import type { Message, MessageProvenance } from "@kenkaiiii/gg-ai";
+import { stripProgrammaticAdvisoryContext } from "./programmatic/advisory-context.js";
 import type { CompactionAnchorRemap } from "./compaction/compactor.js";
 import type {
   AutopilotMarkerPayload,
@@ -459,9 +460,11 @@ export function detectPromptCommand(
 ): string | null {
   for (const c of candidates) {
     if (!c.prompt) continue;
-    if (text === c.prompt) return `/${c.name}`;
-    if (text.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
-      const args = text.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
+    const body = c.name === "programmatic" && text.startsWith(c.prompt)
+      ? stripProgrammaticAdvisoryContext(text) : text;
+    if (body === c.prompt) return `/${c.name}`;
+    if (body.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
+      const args = body.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
       return args ? `/${c.name} ${args}` : `/${c.name}`;
     }
   }

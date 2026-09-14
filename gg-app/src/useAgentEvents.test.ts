@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
-import { createRef } from "react";
+import { renderHook, act, render, screen, cleanup } from "@testing-library/react";
+import { ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
+import { createRef, createElement } from "react";
 import type { MutableRefObject } from "react";
 import type * as AgentModule from "./agent";
 
@@ -95,6 +96,18 @@ it.each(["1536x1024", "1254x1254", "1024x1024"])(
     ]);
   },
 );
+
+it.each(["completed", "aborted", "failed"] as const)("refreshes pane commands after %s runs", async (outcome) => {
+  const { hook, deps } = setup();
+  const refresh = vi.fn(async () => {});
+  deps.refreshCommands = refresh;
+  hook.rerender();
+  await act(async () => {
+    hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
+  });
+  expect(refresh).toHaveBeenCalledOnce();
+  hook.unmount();
+});
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
@@ -216,6 +229,54 @@ function setup(
     setTokens,
   };
 }
+
+const executionEvidence = [
+  { basis: "observed", source: "programmatic-execution", code: "configuration-refresh-required", severity: "warning", message: "Project settings changed or could not be checked. Review setup, approve the current settings and check for opportunities before starting another task. This result does not approve any changed settings." },
+  { basis: "inferred", source: "programmatic-execution", code: "specialist-completed", severity: "info", message: "The task tool reports that its success check passed. GG confirmed the listed tools ran, but did not independently check whether the result is correct." },
+  { basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: "Tool read completed (manifest).", location: { path: "package.json", startLine: 1, endLine: 3 } },
+];
+const executionResult = { version: 1, status: "succeeded", summary: "Bounded specialist summary.", evidence: { version: 1, items: executionEvidence } };
+
+describe("programmatic execution evidence", () => {
+  it.each([
+    ["succeeded", "completed"], ["failed", "failed"], ["cancelled", "cancelled"],
+    ["blocked", "unverified"], ["succeeded", "cancelled"], ["succeeded", "unverified"],
+  ] as const)("renders %s evidence without overriding %s", (status, outcome) => {
+    cleanup();
+    vi.mocked(playSound).mockClear();
+    const { hook, deps, getItems } = setup();
+    const items = status === "succeeded" ? executionEvidence : executionEvidence.map((item) => item.code === "specialist-completed" ? { ...item, code: status, severity: "warning", message: "The task did not finish with a confirmed result. Review its progress and errors before deciding what to do next." } : item);
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("text_delta", { text: executionResult.summary }));
+      hook.result.current.handleEvent(ev("run_end", { outcome, programmaticResult: { ...executionResult, status, evidence: { version: 1, items } } }));
+    });
+    const evidence = getItems().filter((item) => item.kind === "programmatic_execution_evidence");
+    expect(evidence).toHaveLength(1);
+    render(createElement(ProgrammaticExecutionEvidenceView, { items: evidence[0]!.items }));
+    expect(screen.getByRole("region", { name: "Task execution evidence" })).toBeTruthy();
+    for (const item of items) expect(screen.getByText(item.message)).toBeTruthy();
+    expect(screen.getByText("Inferred, not confirmed")).toBeTruthy();
+    expect(screen.getByText("package.json:1–3")).toBeTruthy();
+    expect(screen.getAllByText("Warning:").length).toBeGreaterThan(0);
+    expect(screen.queryByText(executionResult.summary)).toBeNull();
+    expect(getItems().filter((item) => item.kind === "assistant" && item.text.includes(executionResult.summary))).toHaveLength(1);
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
+    expect(deps.setRunning).toHaveBeenLastCalledWith(false);
+    if (outcome === "cancelled") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+    if (outcome === "failed" || outcome === "unverified") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(new RegExp(`^${outcome === "failed" ? "Failed" : "Unverified"} `)));
+    if (outcome !== "completed") expect(playSound).not.toHaveBeenCalledWith("done");
+    cleanup();
+  });
+  it.each([undefined, null, {}, { ...executionResult, route: {} }, { ...executionResult, evidence: { version: 1, items: Array(201).fill(executionEvidence[0]) } }, { ...executionResult, summary: "x".repeat(4001) }, { version: 1, status: "rejected", reason: "approval-rejected" }])("ignores absent, malformed or rejected evidence while settling normally: %j", (programmaticResult) => {
+    const { hook, deps, getItems } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_end", { outcome: "cancelled", programmaticResult })));
+    expect(getItems()).toEqual([]);
+    expect(deps.setRunning).toHaveBeenLastCalledWith(false);
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
+  });
+});
 
 describe("useAgentEvents", () => {
   it("refreshes Roadmap drafts on ready and mapped tool completion, not authored output", () => {

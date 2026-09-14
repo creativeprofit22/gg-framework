@@ -206,7 +206,7 @@ import {
   executeProgrammaticOpportunity,
   type ProgrammaticExecutionOutcome,
 } from "./core/programmatic/execution.js";
-import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
+import { appSidecarCodeCommandsResponse, WORKSPACE_ACTIONS } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
@@ -2303,6 +2303,8 @@ async function createSession(
   ): AgentSession => {
     const created: AgentSession = new AgentSession({
       ...baseSessionOptions,
+      workspaceCommands: WORKSPACE_ACTIONS,
+      advertiseRegistryCommands: false,
       ...(active ?? {}),
       sessionId: sessionPath,
       signal: abort.signal,
@@ -5643,6 +5645,13 @@ async function createSession(
                 });
                 return;
               }
+              const busyWorkflowError = isAppSidecarSessionBusy(sessionBusyState())
+                ? session.queueInputPolicyError(text)
+                : null;
+              if (busyWorkflowError) {
+                json(res, 409, { error: busyWorkflowError });
+                return;
+              }
               const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
                 text,
                 attachmentCount: attachments.length,
@@ -5747,6 +5756,11 @@ async function createSession(
               // `runClaim` covers the gap before `runAgent` flips `running`: a
               // prompt arriving in that window must queue, not start a second run.
               if (isAppSidecarSessionBusy(sessionBusyState())) {
+                const queuePolicyError = session.queueInputPolicyError(text);
+                if (queuePolicyError) {
+                  json(res, 409, { error: queuePolicyError });
+                  return;
+                }
                 // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
                 // an autopilot cycle is active but between injected runs (build idle,
                 // Ken reviewing) so the message never starts a run that collides with

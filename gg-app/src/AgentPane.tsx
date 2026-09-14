@@ -19,15 +19,19 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
+import {
+  isValidProgrammaticFocus,
+  PROGRAMMATIC_FOCUS_GUIDANCE,
+} from "@kenkaiiii/gg-core/slash-command-contract";
 import { autosizeComposer } from "./composer-autosize";
-import { ProgrammaticChat } from "./ProgrammaticChat";
+import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
 import {
   initialProgrammaticChatState,
   programmaticChatReducer,
   canRunProgrammaticSelection,
   canScanProgrammatic,
 } from "./programmatic-chat-state";
-import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import type { ProgrammaticChatRequest, ProgrammaticExecutionEvidence } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   requireContinuationAcceptedEvent,
   PromptSubmissionError,
@@ -366,6 +370,7 @@ export type Item =
   // streamed from the ken_* SSE events. Never mistaken for GG Coder.
   | { kind: "ken"; id: number; text: string }
   | { kind: "info"; id: number; text: string }
+  | { kind: "programmatic_execution_evidence"; id: number; items: ProgrammaticExecutionEvidence[] }
   | {
       kind: "mcp_tool_failure";
       id: number;
@@ -489,8 +494,15 @@ export function noInputSlashSubmissionError(
     referencedFileCount > 0 && match.command.input.references === "none" ? "file references" : null,
     attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
   ].filter((kind): kind is string => kind !== null);
-  if (blocked.length === 0) return null;
-  return `/${match.command.name} does not accept ${blocked.join(", ")}. Remove them and send the command again.`;
+  if (blocked.length > 0)
+    return `/${match.command.name} does not accept ${blocked.join(", ")}. Remove them and send the command again.`;
+  if (
+    match.command.source === "built-in" &&
+    match.command.name === "programmatic" &&
+    match.args &&
+    !isValidProgrammaticFocus(match.args)
+  ) return PROGRAMMATIC_FOCUS_GUIDANCE;
+  return null;
 }
 
 // Thinking-tier color, mirroring the ggcoder TUI footer's getThinkingColor:
@@ -871,6 +883,34 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [modelCatalogRefreshNonce, setModelCatalogRefreshNonce] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const commandRequestRef = useRef(0);
+  const commandClientRef = useRef(client);
+  commandClientRef.current = client;
+  const commandModeRef = useRef<WorkspaceMode>("code");
+  const refreshCommands = useCallback(async () => {
+    const request = ++commandRequestRef.current;
+    const mode = commandModeRef.current;
+    const generation = generationRef.current;
+    const lifecycle = lifecycleEpochRef.current;
+    try {
+      const next = await listCommands();
+      if (next !== null && client === commandClientRef.current && mountedRef.current && request === commandRequestRef.current && mode === commandModeRef.current &&
+        generation === generationRef.current && lifecycle === lifecycleEpochRef.current) {
+        setCommands(next);
+      }
+    } catch {
+      // A failed refresh must not replace a successful catalog.
+    }
+  }, [listCommands, client]);
+  const invalidateCommandRequests = useCallback(() => { commandRequestRef.current++; }, []);
+  useEffect(() => {
+    const onFocus = () => { void refreshCommands(); };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      invalidateCommandRequests();
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refreshCommands, invalidateCommandRequests]);
   const [slashIndex, setSlashIndex] = useState(0);
   // Caret offset in the composer, tracked so the `/schedule` hint can highlight
   // the slot the user is currently typing in.
@@ -940,6 +980,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // separate from picker visibility so restore and reopened pickers are explicit.
   const [needsProject, setNeedsProject] = useState(true);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("code");
+  commandModeRef.current = workspaceMode;
   // False until the boot-time workspace-restore check resolves.
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
@@ -1916,6 +1957,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         if (!unresolvedSessionResetRef.current) setAttachments(next);
       },
       setCommands,
+      refreshCommands,
       setModels,
       onAstraStateChange,
       onRoadmapPhaseDraftChange,
@@ -2005,6 +2047,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           reconcile: ["approve-setup", "scan", "dismiss"].includes(request.action),
         });
     } finally {
+      // The dedicated approval endpoint does not emit a normal agent run_end.
+      // A lost response can still follow a successful save, so refresh on either outcome.
+      if (current() && request.action === "approve-setup") void refreshCommands();
       releaseProgrammaticOwner(owner, current());
     }
   };
@@ -2128,9 +2173,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (!isCurrent()) return;
       // null = the fetch failed; keep whatever the picker already had.
       if (available) setModels(available);
-      const cmds = await listCommands();
+      await refreshCommands();
       if (!isCurrent()) return;
-      if (cmds.length > 0) setCommands(cmds);
       // Project task list for the Tasks modal + nav button.
       try {
         const projectTasks = await listTasks();
@@ -2302,12 +2346,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     client,
     adoptGeneration,
     getState,
-    listCommands,
+    refreshCommands,
     listHistory,
     listModels,
     listTasks,
     replacePlanReview,
-    waitForReady,
     captureKenHydration,
     clearKenStream,
   ]);
@@ -2599,6 +2642,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         )
       : [];
   const slashOpen = slashMatches.length > 0;
+  const discoveringCommands = input.startsWith("/") && !/\s/.test(input);
+  useEffect(() => {
+    if (discoveringCommands) void refreshCommands();
+  }, [discoveringCommands, refreshCommands]);
   // Clamp so a shrinking match list never points past the end.
   const clampedSlashIndex = slashMatches.length > 0 ? slashIndex % slashMatches.length : 0;
 
@@ -2877,12 +2924,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   function reportPromptFailure(error: unknown): void {
+    const rejected = error instanceof PromptSubmissionError && error.category === "rejected";
     pushItem({
       kind: "error",
       id: nextId(),
-      headline: "Prompt wasn’t sent",
+      headline: rejected ? "Prompt wasn’t sent" : "Prompt status is uncertain",
       message: error instanceof Error ? error.message : String(error),
-      guidance: "Retry your prompt.",
+      guidance: rejected
+        ? "Review the error above before sending again."
+        : "The prompt may have been accepted. Check this session’s activity and history before deciding whether to send it again.",
     });
   }
 
@@ -3709,11 +3759,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (promptSubmissionPendingRef.current?.()) return;
     if (!readyRef.current) return;
     const trimmed = input.trim();
-    if (
-      workspaceMode === "code" &&
-      /^\/(?:setup-programmatic|programmatic|programmatic-run)(?:\s|$)/.test(trimmed)
-    )
-      onProgrammaticActivity(true);
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
       typingAskRef.current = null;
@@ -3748,6 +3793,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       });
       return;
     }
+
+    if (
+      workspaceMode === "code" &&
+      /^\/(?:setup-programmatic|programmatic|programmatic-run)(?:\s|$)/.test(trimmed)
+    )
+      onProgrammaticActivity(true);
 
     // `/schedule` registers a recurring prompt instead of sending anything now.
     // An invalid draft is refused outright — sending it would run the raw command
@@ -3873,9 +3924,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       })
       .catch((error) => {
         if (!isCurrent()) return;
-        setItems((current) =>
-          current.filter((item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId),
-        );
+        // Only a definite rejection disproves the optimistic row. A lost receipt
+        // can follow persistence/startup; retain the row with the uncertainty notice
+        // until session history is reloaded rather than pretending it was not sent.
+        if (error instanceof PromptSubmissionError && error.category === "rejected") {
+          setItems((current) =>
+            current.filter((item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId),
+          );
+        }
         reportPromptFailure(error);
       })
       .finally(finishSubmission);
@@ -5555,6 +5611,8 @@ const TranscriptRow = memo(function TranscriptRow({
         </div>
       );
     }
+    case "programmatic_execution_evidence":
+      return <ProgrammaticExecutionEvidenceView items={item.items} />;
     case "info":
       return (
         <div className="line info" style={{ color: theme.textDim }}>

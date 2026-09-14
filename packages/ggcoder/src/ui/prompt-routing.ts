@@ -5,6 +5,7 @@ import type { Provider, TextContent, ImageContent, VideoContent } from "@kenkaii
 import type { ImageAttachment } from "../utils/image.js";
 import { VIDEO_MEDIA_TYPES } from "../utils/image.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { parseSlashCommandInput } from "../core/slash-commands.js";
 import type { CustomCommand } from "../core/custom-commands.js";
 
 export function routePromptCommandInput(
@@ -12,11 +13,9 @@ export function routePromptCommandInput(
   promptCommands = PROMPT_COMMANDS,
   customCommands: Pick<CustomCommand, "name" | "prompt">[] = [],
 ): { cmdName: string; cmdArgs: string; promptText: string; fullPrompt: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith("/")) return null;
-  const parts = trimmed.slice(1).split(" ");
-  const cmdName = parts[0];
-  const cmdArgs = parts.slice(1).join(" ").trim();
+  const parsed = parseSlashCommandInput(input);
+  if (!parsed) return null;
+  const { name: cmdName, args: cmdArgs } = parsed;
   const builtinCmd = promptCommands.find((c) => c.name === cmdName || c.aliases.includes(cmdName));
   const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
   const promptText = builtinCmd?.prompt ?? customCmd?.prompt;

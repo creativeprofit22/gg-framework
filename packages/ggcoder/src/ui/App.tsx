@@ -63,9 +63,10 @@ import {
   stopPeriodicUpdateCheck,
 } from "../core/auto-update.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { discoverCommands } from "../core/command-discovery.js";
+import type { SlashCommandListing } from "@kenkaiiii/gg-core";
 import { getAnnouncedLanguages, markLanguagesAnnounced } from "../core/setup-history.js";
-import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
+import type { CustomCommand } from "../core/custom-commands.js";
 import { detectLanguages, type LanguageId } from "../core/language-detector.js";
 import { detectVerifyCommands } from "../core/verify-commands.js";
 import type { Skill } from "../core/skills.js";
@@ -98,7 +99,7 @@ import { getNextRunnableTask, markTaskInProgress } from "../core/tasks-store.js"
 import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
-import { handleUiSlashCommand } from "./submit-slash-commands.js";
+import { handleUiSlashCommand, UI_SLASH_COMMANDS } from "./submit-slash-commands.js";
 import {
   buildIdealReviewMessage,
   evaluateIdealReview,
@@ -727,11 +728,23 @@ export function App(props: AppProps) {
 
   // Load custom commands from .gg/commands/
   const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
+  const [readyPromptCommands, setReadyPromptCommands] = useState<SlashCommandListing[]>([]);
+  const discoveryRequest = useRef(0);
   const reloadCustomCommands = useCallback(() => {
-    loadCustomCommands(props.cwd).then(setCustomCommands);
+    const request = ++discoveryRequest.current;
+    void discoverCommands(props.cwd, { workspaceActions: UI_SLASH_COMMANDS }).then((discovery) => {
+      if (request !== discoveryRequest.current) return;
+      setCustomCommands(discovery.entries.flatMap((entry) => entry.custom ? [entry.custom] : []));
+      setReadyPromptCommands(discovery.entries.filter((entry) => entry.prompt).map((entry) => entry.listing));
+    }).catch(() => {
+      if (request !== discoveryRequest.current) return;
+      setCustomCommands([]);
+      setReadyPromptCommands([]);
+    });
   }, [props.cwd]);
   useEffect(() => {
     reloadCustomCommands();
+    return () => { discoveryRequest.current++; };
   }, [reloadCustomCommands]);
 
   useEffect(() => {
@@ -2062,14 +2075,15 @@ export function App(props: AppProps) {
 
       if (
         await submitPromptCommand({
+          cwd: props.cwd,
           trimmed,
           inputImages,
           currentModel,
-          customCommands,
           setLastUserMessage,
           setDoneStatus,
           finalizeSubmittedUserItem,
           runAgent: (content) => agentLoop.run(content),
+          isBusy: agentLoop.isBusy,
           setLiveItems,
           getId,
           reloadCustomCommands,
@@ -2103,7 +2117,7 @@ export function App(props: AppProps) {
       );
 
       // ── Queue message if agent is already running ──
-      if (agentLoop.isRunning) {
+      if (agentLoop.isBusy()) {
         log(
           "INFO",
           "queue",
@@ -2427,7 +2441,7 @@ export function App(props: AppProps) {
   // All available slash commands for the command palette — ordered by how
   // commonly they're used and grouped by purpose; /quit stays dead last.
   const allCommands = useMemo<SlashCommandInfo[]>(() => {
-    const promptByName = new Map(PROMPT_COMMANDS.map((c) => [c.name, c]));
+    const promptByName = new Map(readyPromptCommands.map((c) => [c.name, c]));
     const fromPrompt = (name: string): SlashCommandInfo | null => {
       const c = promptByName.get(name);
       return c
@@ -2453,7 +2467,7 @@ export function App(props: AppProps) {
       .map(fromPrompt)
       .filter((c): c is SlashCommandInfo => c !== null);
     const knownPromptNames = new Set(promptOrder);
-    const remainingPromptCommands = PROMPT_COMMANDS.filter(
+    const remainingPromptCommands = readyPromptCommands.filter(
       (c) => !knownPromptNames.has(c.name),
     ).map((c) => ({
       name: c.name,
@@ -2497,7 +2511,7 @@ export function App(props: AppProps) {
         sectionTitle: "built-in",
       },
     ];
-  }, [customCommands, idealReviewEnabled]);
+  }, [customCommands, readyPromptCommands, idealReviewEnabled]);
 
   const renderItem = (item: CompletedItem, index: number, items: CompletedItem[]) =>
     renderTranscriptItem({
@@ -3199,6 +3213,7 @@ export function App(props: AppProps) {
             onToggleMarkdown: () => setRenderMarkdown((prev) => !prev),
             cwd: props.cwd,
             commands: allCommands,
+            onDiscoverCommands: reloadCustomCommands,
             mouseScroll: props.fullscreen,
             onScroll: scrollTranscriptByLines,
           }}

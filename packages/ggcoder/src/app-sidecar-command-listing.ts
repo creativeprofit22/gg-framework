@@ -1,12 +1,7 @@
-import {
-  SLASH_COMMAND_INPUT_ALL,
-  type SlashCommandListing,
-  type SlashCommandsResponse,
-} from "@kenkaiiii/gg-core";
-import { loadCustomCommands } from "./core/custom-commands.js";
-import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
+import type { SlashCommandListing, SlashCommandsResponse } from "@kenkaiiii/gg-core";
+import { discoverCommands } from "./core/command-discovery.js";
 
-const WORKSPACE_ACTIONS: SlashCommandListing[] = [
+export const WORKSPACE_ACTIONS: SlashCommandListing[] = [
   {
     name: "programmatic-run",
     aliases: [],
@@ -31,26 +26,6 @@ const WORKSPACE_ACTIONS: SlashCommandListing[] = [
 ];
 
 export async function appSidecarCodeCommandsResponse(cwd: string): Promise<SlashCommandsResponse> {
-  const builtins: SlashCommandListing[] = PROMPT_COMMANDS.map((command) => ({
-    name: command.name,
-    aliases: command.aliases,
-    description: command.description,
-    input: { ...(command.input ?? SLASH_COMMAND_INPUT_ALL) },
-    source: "built-in",
-  }));
-  const custom: SlashCommandListing[] = (await loadCustomCommands(cwd))
-    .filter(
-      (command) =>
-        !PROMPT_COMMANDS.some((builtin) => builtin.name === command.name) &&
-        !WORKSPACE_ACTIONS.some((action) => action.name === command.name),
-    )
-    .map((command) => ({
-      name: command.name,
-      aliases: [],
-      description: command.description,
-      input: { ...SLASH_COMMAND_INPUT_ALL },
-      source: "custom",
-    }));
-
-  return { commands: [...WORKSPACE_ACTIONS, ...builtins, ...custom] };
+  const discovery = await discoverCommands(cwd, { workspaceActions: WORKSPACE_ACTIONS });
+  return { commands: discovery.entries.map((entry) => entry.listing) };
 }

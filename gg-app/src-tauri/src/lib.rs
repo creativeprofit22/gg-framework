@@ -3556,12 +3556,18 @@ fn parse_prompt_submission_response(
                 let code = value.get("error").and_then(|v| v.as_str()).unwrap_or_default();
                 let known = matches!((status.as_u16(), code),
                     (400, "invalid_programmatic_selection") |
+                    (400, "command_input_not_allowed") |
                     (409, "programmatic_execution_busy") |
                     (403, "programmatic_execution_plan_mode"));
                 if known {
+                    let fallback = if code == "command_input_not_allowed" {
+                        "Command input rejected before execution. Check the command’s allowed text, references and attachments before sending again."
+                    } else {
+                        "Opportunity run rejected before execution. Refresh the report before retrying."
+                    };
                     let message = value.get("message").and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
-                        .unwrap_or("Opportunity run rejected before execution. Refresh the report before retrying.");
+                        .unwrap_or(fallback);
                     return Err(PromptSubmissionFailure::Rejected {
                         category: "rejected", code: code.to_string(), message: message.to_string(),
                     });
@@ -12027,7 +12033,7 @@ mod tests {
 
     #[test]
     fn prompt_proxy_preserves_only_known_pre_execution_rejections() {
-        for (status, code) in [(400, "invalid_programmatic_selection"), (409, "programmatic_execution_busy"), (403, "programmatic_execution_plan_mode")] {
+        for (status, code) in [(400, "invalid_programmatic_selection"), (400, "command_input_not_allowed"), (409, "programmatic_execution_busy"), (403, "programmatic_execution_plan_mode")] {
             let body = serde_json::json!({"error": code, "message": "Wait for the current run.", "history": "private", "token": "private"}).to_string();
             let failure = prompt_proxy_result(reqwest::StatusCode::from_u16(status).unwrap(), &body).unwrap_err();
             assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
@@ -12041,6 +12047,24 @@ mod tests {
         assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
         assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":"programmatic_execution_busy","message":"Wait"}"#), Err(PromptSubmissionFailure::Unknown(_))));
+    }
+
+    #[test]
+    fn prompt_proxy_bounds_input_policy_rejection_and_requires_pre_start_status() {
+        for message in [serde_json::Value::Null, serde_json::json!(""), serde_json::json!("x".repeat(257)), serde_json::json!("private\nhistory")] {
+            let body = serde_json::json!({"error": "command_input_not_allowed", "message": message}).to_string();
+            let failure = parse_prompt_submission_response(reqwest::StatusCode::BAD_REQUEST, &body).unwrap_err();
+            assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
+                "category": "rejected", "code": "command_input_not_allowed",
+                "message": "Command input rejected before execution. Check the command’s allowed text, references and attachments before sending again."
+            }));
+        }
+        for status in [reqwest::StatusCode::OK, reqwest::StatusCode::CONFLICT, reqwest::StatusCode::INTERNAL_SERVER_ERROR] {
+            assert!(matches!(parse_prompt_submission_response(status,
+                r#"{"error":"command_input_not_allowed","message":"Remove attachments."}"#), Err(PromptSubmissionFailure::Unknown(_))));
+        }
+        let oversized = serde_json::json!({"error": "command_input_not_allowed", "message": "Remove attachments.", "extra": "x".repeat(4096)}).to_string();
+        assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::BAD_REQUEST, &oversized), Err(PromptSubmissionFailure::Unknown(_))));
     }
 
     #[test]

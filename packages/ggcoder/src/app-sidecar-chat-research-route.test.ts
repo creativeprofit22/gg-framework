@@ -3,7 +3,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { isSlashCommandsResponse } from "@kenkaiiii/gg-core";
+import * as logger from "./core/logger.js";
 import {
   commitChatResearchTransition,
   resolveChatResearchCommandRoute,
@@ -14,6 +16,7 @@ import {
   handleAppSidecarChatResearchPrompt,
 } from "./app-sidecar-chat-research-route.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
+import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./core/programmatic/profile.js";
 import { useFakeHome } from "./test-support/fake-home.js";
 
 interface FakeMarker {
@@ -309,12 +312,88 @@ describe("app-sidecar chat Research HTTP routes", () => {
     });
   });
 
-  it("advertises /programmatic as fixed-input in coding discovery", async () => {
-    const response = await appSidecarCodeCommandsResponse(process.cwd());
-    expect(response.commands.find((command) => command.name === "programmatic")).toMatchObject({
-      input: { text: "none", references: "none", attachments: "none" },
-      source: "built-in",
-    });
+  it("bounds custom display descriptions and rejects only unrepresentable identities", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "command-listing-home-"));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "command-listing-project-"));
+    const restoreHome = useFakeHome(home);
+    const log = vi.spyOn(logger, "log").mockImplementation(() => {});
+    try {
+      const baseline = await appSidecarCodeCommandsResponse(cwd);
+      const oversizedName = "n".repeat(101);
+      for (const [root, name, description] of [
+        [home, "global-valid", "Global command"],
+        [home, "shared", "Global overridden"],
+        [cwd, "shared", "Project wins"],
+        [cwd, "long-description", "d".repeat(4_001)],
+        [cwd, "n".repeat(100), "Boundary identity"],
+        [cwd, oversizedName, "Rejected identity"],
+        [cwd, "programmatic", "Must not shadow built-in"],
+      ]) {
+        const dir = path.join(root!, ".gg", "commands");
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(
+          path.join(dir, `${name}.md`),
+          `---\nname: ${name}\ndescription: ${description}\n---\nOriginal prompt`,
+        );
+      }
+      const response = await appSidecarCodeCommandsResponse(cwd);
+      expect(isSlashCommandsResponse(response)).toBe(true);
+      expect(response.commands.filter((row) => row.source === "built-in")).toEqual(
+        baseline.commands.filter((row) => row.source === "built-in"),
+      );
+      expect(
+        response.commands.filter((row) => row.source === "custom").map((row) => row.name),
+      ).toEqual(
+        expect.arrayContaining(["global-valid", "shared", "long-description", "n".repeat(100)]),
+      );
+      expect(response.commands.some((row) => row.name === oversizedName)).toBe(false);
+      expect(response.commands.find((row) => row.name === "long-description")?.description).toBe(
+        "d".repeat(4_000),
+      );
+      expect(response.commands.filter((row) => row.name === "shared")).toHaveLength(1);
+      expect(response.commands.find((row) => row.name === "shared")?.description).toBe(
+        "Project wins",
+      );
+      expect(log).toHaveBeenCalledWith("WARN", "command-discovery", expect.any(String), {
+        scope: "project",
+        nameLength: "101",
+      });
+      const loaded = await loadCustomCommands(cwd);
+      expect(loaded.find((row) => row.name === "long-description")?.description).toHaveLength(
+        4_001,
+      );
+      expect(loaded.find((row) => row.name === oversizedName)?.prompt).toBe("Original prompt");
+      expect(appSidecarChatCommandsResponse("chat")?.commands.map((row) => row.name)).toEqual([
+        "research",
+      ]);
+    } finally {
+      log.mockRestore();
+      restoreHome();
+      await fs.rm(home, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("advertises /programmatic with optional focus only after setup approval", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "command-listing-readiness-"));
+    const restoreHome = useFakeHome(path.join(cwd, "home"));
+    try {
+      const before = await appSidecarCodeCommandsResponse(cwd);
+      expect(before.commands.some((command) => command.name === "programmatic")).toBe(false);
+      expect(before.commands.some((command) => command.name === "setup-programmatic")).toBe(true);
+      const proposal = await buildProgrammaticProfileProposal(cwd);
+      expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile, {
+        expectedPriorProfileDigest: proposal.expectedPriorProfileDigest,
+      })).ok).toBe(true);
+      const response = await appSidecarCodeCommandsResponse(cwd);
+      expect(response.commands.find((command) => command.name === "programmatic")).toMatchObject({
+        input: { text: "optional", references: "none", attachments: "none" },
+        source: "built-in",
+      });
+    } finally {
+      restoreHome();
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it.each(["add-dir", "remove-dir"])(

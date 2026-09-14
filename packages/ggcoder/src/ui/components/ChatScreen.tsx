@@ -32,6 +32,7 @@ interface ChatInputControls {
   onToggleMarkdown: () => void;
   cwd: string;
   commands: SlashCommandInfo[];
+  onDiscoverCommands?: () => void;
   /** Fullscreen alt-screen: route mouse-wheel to the transcript scroll. */
   mouseScroll?: boolean;
   onScroll?: (deltaLines: number) => void;
@@ -260,6 +261,7 @@ export function ChatScreen({
           onToggleMarkdown={inputControls.onToggleMarkdown}
           cwd={inputControls.cwd}
           commands={inputControls.commands}
+          onDiscoverCommands={inputControls.onDiscoverCommands}
           mouseScroll={inputControls.mouseScroll}
           onScroll={inputControls.onScroll}
         />

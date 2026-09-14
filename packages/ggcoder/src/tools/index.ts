@@ -13,6 +13,8 @@ import { createBashTool } from "./bash.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
+import { createCommandInformationTool } from "./command-information.js";
+import type { CommandDiscoveryOptions } from "../core/command-discovery.js";
 import { createFindTool } from "./find.js";
 import { createGrepTool } from "./grep.js";
 import { createSearchCodeTool } from "./search-code.js";
@@ -50,6 +52,7 @@ import type { AgentNotificationQueue } from "../core/agent-notifications.js";
 export { BUILTIN_TOOL_NAMES } from "./prompt-hints.js";
 
 export interface CreateToolsOptions {
+  commandDiscovery?: CommandDiscoveryOptions | false;
   agents?: AgentDefinition[];
   skills?: Skill[];
   /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
@@ -232,6 +235,9 @@ export async function createTools(
       onFileMutated: opts?.onFileMutated,
       onPreFileMutation: opts?.onPreFileMutation,
     }),
+    ...(opts?.commandDiscovery === false ? [] : [createCommandInformationTool(cwd, {
+      ...opts?.commandDiscovery, localFilesystem: ops === localOperations,
+    })]),
     createProgrammaticScanTool(cwd, {
       localFilesystem: ops === localOperations,
       planModeRef,

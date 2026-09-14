@@ -29,11 +29,14 @@ import {
   createBuiltinCommands,
   type SlashCommandContext,
 } from "./slash-commands.js";
-import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
+import { getPromptCommand } from "./prompt-commands.js";
 import { loadCustomCommands } from "./custom-commands.js";
+import { workflowQueuePolicyError } from "./workflow-busy-policy.js";
+import { createProgrammaticReadinessReader, discoverCommands, registryCommandListings, programmaticReadinessGuidance, type ProgrammaticReadiness } from "./command-discovery.js";
+import { buildProgrammaticAdvisoryContext, parseProgrammaticAssessmentInput, renderProgrammaticAdvisoryContext } from "./programmatic/advisory-context.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
-import { dualAuthProvider, type NotesWorkspaceSnapshotV1 } from "@kenkaiiii/gg-core";
+import { dualAuthProvider, parseReferencedFiles, type NotesWorkspaceSnapshotV1, type SlashCommandListing } from "@kenkaiiii/gg-core";
 import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { isGrokCliEndpoint } from "./oauth/xai.js";
@@ -372,6 +375,10 @@ export interface AgentSessionOptions {
   sessionRootDir?: string;
   /** Register GG Coder built-in/prompt/custom slash commands. Defaults to true. */
   coderSlashCommands?: boolean;
+  /** Actions intercepted by the owning host, not executable prompt specialists. */
+  workspaceCommands?: SlashCommandListing[];
+  workspaceCommandCaseInsensitive?: boolean;
+  advertiseRegistryCommands?: boolean;
   /** Enable loop-break, re-grounding, and Ideal review hooks. Defaults to true. */
   selfCorrectionHooks?: boolean;
   /** Override the semantic-loop judge LLM call (tests). Receives the finished
@@ -653,6 +660,7 @@ export class AgentSession {
   private contextProfileLocked = false;
   private openAICodexFast = false;
   private cwd: string;
+  private readProgrammaticReadiness: () => Promise<ProgrammaticReadiness>;
   /** accountId from the most recently resolved credentials — cached so sync
    *  callers (e.g. the app-sidecar's context-window footer stat) can reflect
    *  transport-specific windows (e.g. OpenAI Codex OAuth's smaller window)
@@ -731,6 +739,7 @@ export class AgentSession {
     this.provider = options.provider;
     this.model = options.model;
     this.cwd = options.cwd;
+    this.readProgrammaticReadiness = createProgrammaticReadinessReader(this.cwd);
     this.reviewCoverage = new ReviewCoverageTracker(this.cwd);
     this.baseUrl = options.baseUrl;
     this.maxTokens = this.resolveMaxTokens(options.model);
@@ -809,6 +818,11 @@ export class AgentSession {
       lspManager,
       subAgentManager,
     } = await createTools(this.cwd, {
+      commandDiscovery: this.opts.coderSlashCommands === false ? false : {
+        workspaceActions: this.opts.workspaceCommands,
+        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive, readReadiness: this.readProgrammaticReadiness,
+        getRegistryActions: () => this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+      },
       agents,
       skills: this.skills,
       contextLimits: this.contextLimits,
@@ -1001,26 +1015,15 @@ export class AgentSession {
         const registry = this.slashCommands;
         const cwd = this.cwd;
         helpCmd.execute = async () => {
-          const all = registry.getAll();
-          const lines = all.map(
-            (c) =>
-              `  /${c.name}${c.aliases.length ? ` (${c.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${c.description}`,
+          const discovery = await discoverCommands(cwd, {
+            workspaceActions: this.opts.workspaceCommands,
+        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
+            registryActions: registryCommandListings(registry.getAll()),
+            readReadiness: this.readProgrammaticReadiness,
+          });
+          const lines = discovery.entries.map(({ listing: c }) =>
+            `  /${c.name}${c.aliases.length ? ` (${c.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${c.description}`,
           );
-
-          if (PROMPT_COMMANDS.length > 0) {
-            lines.push("", "Prompt commands:");
-            for (const cmd of PROMPT_COMMANDS) {
-              lines.push(
-                `  /${cmd.name}${cmd.aliases.length ? ` (${cmd.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${cmd.description}`,
-              );
-            }
-          }
-
-          const customCmds = await loadCustomCommands(cwd);
-          if (customCmds.length > 0) {
-            lines.push("", "Custom commands:");
-            for (const cmd of customCmds) lines.push(`  /${cmd.name} — ${cmd.description}`);
-          }
           return "Available commands:\n" + lines.join("\n");
         };
       }
@@ -1461,10 +1464,15 @@ export class AgentSession {
     if (!command?.input) return null;
     if (
       (parsed.args && command.input.text === "none") ||
-      (attachmentCount > 0 && command.input.attachments === "none")
+      (attachmentCount > 0 && command.input.attachments === "none") ||
+      (command.input.references === "none" && parseReferencedFiles(content).files.length > 0)
     ) {
-      return `/${command.name} accepts no arguments, file references, or attachments.`;
+      return command.input.text === "none"
+        ? `/${command.name} accepts no arguments, file references, or attachments.`
+        : `/${command.name} accepts optional text only, not file references or attachments.`;
     }
+    if (command.name === "programmatic" && !parseProgrammaticAssessmentInput(parsed.args).success)
+      return "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).";
     return null;
   }
 
@@ -1477,6 +1485,7 @@ export class AgentSession {
    */
   private async resolveSlashInput(
     content: string,
+    includeAdvisory = true,
   ): Promise<
     { kind: "template"; fullPrompt: string } | { kind: "command"; result?: string } | null
   > {
@@ -1489,13 +1498,20 @@ export class AgentSession {
         ? parsedInput
         : null;
     if (!parsed) return null;
+    if (coderCommands && parsed.name === "programmatic-run") {
+      return { kind: "command", result: "Review and select an opportunity in Opportunities, then use its separate task approval. Direct /programmatic-run does not authorize execution." };
+    }
+    if (coderCommands && getPromptCommand(parsed.name)?.name === "programmatic") {
+      const guidance = programmaticReadinessGuidance(await this.readProgrammaticReadiness());
+      if (guidance) return { kind: "command", result: guidance };
+    }
     // GG Coder alone can resolve its prompt-template and project commands.
     const builtinPromptCmd = coderCommands
       ? getPromptCommand(parsed.name, (toolName) =>
           this.tools.some((tool) => tool.name === toolName),
         )
       : undefined;
-    const customCmds = coderCommands ? await loadCustomCommands(this.cwd) : [];
+    const customCmds = coderCommands && !builtinPromptCmd ? await loadCustomCommands(this.cwd) : [];
     const customPromptCmd = !builtinPromptCmd
       ? customCmds.find((c) => c.name === parsed.name)
       : undefined;
@@ -1505,6 +1521,19 @@ export class AgentSession {
     // No template body — a registry/action command that runs and returns text
     // instead of becoming a user message.
     if (!promptText) return { kind: "command" };
+    if (builtinPromptCmd?.name === "programmatic") {
+      const input = parseProgrammaticAssessmentInput(parsed.args);
+      if (!input.success) return { kind: "command", result: "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed)." };
+      if (!includeAdvisory) return { kind: "template", fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") };
+      const discovery = await discoverCommands(this.cwd, {
+        workspaceActions: this.opts.workspaceCommands,
+        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
+        registryActions: this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+        readReadiness: async () => "current",
+      });
+      const advisory = buildProgrammaticAdvisoryContext(input.data, discovery);
+      return { kind: "template", fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") + renderProgrammaticAdvisoryContext(advisory) };
+    }
     return {
       kind: "template",
       fullPrompt: this.expandResolvedPromptCommand(promptText, parsed.args),
@@ -1555,12 +1584,12 @@ export class AgentSession {
    * message when the command turns out NOT to expand.
    */
   async willExpandPromptTemplate(content: string): Promise<boolean> {
-    return (await this.resolveSlashInput(content))?.kind === "template";
+    return (await this.resolveSlashInput(content, false))?.kind === "template";
   }
 
   /** True when this input will enter the provider-backed agent loop. */
   async willStartAgentRun(content: string): Promise<boolean> {
-    return (await this.resolveSlashInput(content))?.kind !== "command";
+    return (await this.resolveSlashInput(content, false))?.kind !== "command";
   }
 
   /**
@@ -3765,12 +3794,19 @@ export class AgentSession {
     this.refreshHookArming();
   }
 
+  /** Queue admission must not bypass setup/readiness/approval dispatch. */
+  queueInputPolicyError(text: string): string | null {
+    return this.opts.coderSlashCommands === false ? null : workflowQueuePolicyError(text);
+  }
+
   /** Queue a user message (optionally with attachments) to be injected mid-run
    *  as steering. Returns the new queue length. No-op semantics are the caller's
    *  concern. */
   queueMessage(text: string, attachments: SessionAttachment[] = [], meta?: PromptMeta): number {
     const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
     if (inputPolicyError) throw new Error(inputPolicyError);
+    const queuePolicyError = this.queueInputPolicyError(text);
+    if (queuePolicyError) throw new Error(queuePolicyError);
     if (attachments.length > 0) this.buildAttachmentParts(text, attachments);
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;

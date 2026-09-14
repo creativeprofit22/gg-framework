@@ -1,3 +1,24 @@
+/** Listing field limits measured in UTF-16 code units, matching string.length. */
+export const SLASH_COMMAND_NAME_MAX_LENGTH = 100;
+export const SLASH_COMMAND_DESCRIPTION_MAX_LENGTH = 4_000;
+
+/** Programmatic focus uses UTF-16 code units, not Unicode code points. */
+export const PROGRAMMATIC_FOCUS_MAX_LENGTH = 4_000;
+export const PROGRAMMATIC_FOCUS_GUIDANCE =
+  "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).";
+
+/** Validates stored focus as-is; callers trim and omit empty optional input first. */
+export function isValidProgrammaticFocus(value: string): boolean {
+  if (value.length > PROGRAMMATIC_FOCUS_MAX_LENGTH || value.trim().length === 0) return false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || (code >= 127 && code <= 159)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export const SLASH_COMMAND_INPUT_MODES = ["none", "optional"] as const;
 
 export type SlashCommandInputMode = (typeof SLASH_COMMAND_INPUT_MODES)[number];
@@ -28,6 +49,8 @@ export interface SlashCommandListing {
   input: SlashCommandInputPolicy;
   source: SlashCommandSource;
   usage?: string;
+  origin?: "built-in" | "project-custom" | "global-custom";
+  invocationKind?: "prompt" | "workspace-action";
 }
 
 export interface SlashCommandsResponse {
@@ -54,12 +77,26 @@ export function isSlashCommandsResponse(value: unknown): value is SlashCommandsR
     const item = command as Record<string, unknown>;
     return (
       typeof item.name === "string" &&
+      item.name.length > 0 &&
+      item.name.length <= SLASH_COMMAND_NAME_MAX_LENGTH &&
       Array.isArray(item.aliases) &&
-      item.aliases.every((alias) => typeof alias === "string") &&
+      item.aliases.length <= 50 &&
+      item.aliases.every(
+        (alias) => typeof alias === "string" && alias.length > 0 && alias.length <= SLASH_COMMAND_NAME_MAX_LENGTH,
+      ) &&
       typeof item.description === "string" &&
+      item.description.length <= SLASH_COMMAND_DESCRIPTION_MAX_LENGTH &&
       isSlashCommandInputPolicy(item.input) &&
       (item.source === "built-in" || item.source === "custom") &&
-      (item.usage === undefined || typeof item.usage === "string")
+      (item.usage === undefined ||
+        (typeof item.usage === "string" && item.usage.length <= 4_000)) &&
+      (item.origin === undefined ||
+        (item.source === "built-in" && item.origin === "built-in") ||
+        (item.source === "custom" &&
+          (item.origin === "project-custom" || item.origin === "global-custom"))) &&
+      (item.invocationKind === undefined ||
+        item.invocationKind === "prompt" ||
+        (item.invocationKind === "workspace-action" && item.source === "built-in"))
     );
   });
 }

@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
 import {
   createPaneAgentClient,
+  listCommands,
   PromptSubmissionError,
   switchKenModel,
   cancelKen,
@@ -24,6 +25,81 @@ import {
   requireContinuationAcceptedEvent,
   requireContinuationHandoffResponse,
 } from "./agent";
+
+it.each(["primary", "auxiliary"])(
+  "preserves bounded discovery rows and metadata through %s native transport",
+  async (paneId) => {
+    const input = { text: "optional", references: "optional", attachments: "optional" };
+    const commands = [
+      { name: "commit", aliases: [], description: "Commit", input, source: "built-in" },
+      {
+        name: "long-description",
+        aliases: [],
+        description: "d".repeat(4_000),
+        input,
+        source: "custom",
+        origin: "project-custom",
+        invocationKind: "prompt",
+      },
+      {
+        name: "n".repeat(100),
+        aliases: [],
+        description: "Boundary",
+        input,
+        source: "custom",
+        origin: "global-custom",
+      },
+      {
+        name: "add-dir",
+        aliases: ["adddir"],
+        description: "Add folder",
+        input,
+        source: "built-in",
+        origin: "built-in",
+        invocationKind: "workspace-action",
+      },
+    ];
+    let response: unknown = { commands };
+    invoke.mockImplementation(async (command) =>
+      command === "agent_pane_status" ? { ready: true, generation: 1 } : response,
+    );
+    try {
+      const read = paneId === "primary" ? listCommands : createPaneAgentClient(paneId).listCommands;
+      expect(await read()).toEqual(commands);
+      expect(invoke).toHaveBeenCalledWith("agent_commands", { paneId });
+      // Refresh must replace the previous catalog, preserving the bounded description.
+      response = { commands: commands.slice(1) };
+      expect(await read()).toEqual(commands.slice(1));
+      // The transport guard remains strict; malformed payloads are not silently accepted.
+      response = { commands: [...commands, { ...commands[1], description: "d".repeat(4_001) }] };
+      expect(await read()).toBeNull();
+      response = { commands: [] };
+      expect(await read()).toEqual([]);
+      response = {
+        commands: [{ ...commands[0], name: "research", usage: "/research [optional focus]" }],
+      };
+      expect(await read()).toEqual((response as { commands: unknown[] }).commands);
+    } finally {
+      invoke.mockReset();
+    }
+  },
+);
+
+it.each(["primary", "auxiliary"])("preserves input-policy rejection through %s prompt transport", async (paneId) => {
+  const failure = { category: "rejected", code: "command_input_not_allowed", message: "Remove attachments and send the command again." };
+  invoke.mockImplementation(async (command) => {
+    if (command === "agent_pane_status") return { ready: true, generation: 1 };
+    throw failure;
+  });
+  try {
+    const { sendPrompt } = await import("./agent");
+    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+    await expect(submit("/programmatic check tests")).rejects.toMatchObject(failure);
+    expect(invoke).toHaveBeenCalledWith("agent_prompt", expect.objectContaining({ paneId }));
+  } finally {
+    invoke.mockReset();
+  }
+});
 
 it("classifies only bounded typed prompt rejections, not English messages or arbitrary internals", () => {
   const rejected = {

@@ -29,8 +29,7 @@ import { isAbortError } from "@kenkaiiii/gg-agent";
 import { getAllModels, getMaxThinkingLevel, getModel } from "@kenkaiiii/gg-core";
 import { AgentSession } from "../core/agent-session.js";
 import type { EventBus } from "../core/event-bus.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { loadCustomCommands } from "../core/custom-commands.js";
+import { discoverCommands, registryCommandListings } from "../core/command-discovery.js";
 import {
   findSessionById,
   listAllSessions,
@@ -492,46 +491,16 @@ function hintFromUsage(name: string, usage: string): { hint: string } | undefine
  * `getPromptCommand` matches — are dropped rather than listed twice.
  */
 async function availableCommands(session: AcpAgentSession, cwd: string): Promise<AcpCommand[]> {
-  const commands: AcpCommand[] = [];
-  const taken = new Set<string>();
-
-  const add = (command: AcpCommand): void => {
-    if (taken.has(command.name)) return;
-    taken.add(command.name);
-    commands.push(command);
-  };
-
-  for (const command of PROMPT_COMMANDS) {
-    for (const alias of command.aliases) taken.add(alias);
-    add({
-      name: command.name,
-      description: command.description,
-      input: { hint: TEMPLATE_ARG_HINT },
-    });
-  }
-
-  // Project commands are files on disk, so a client that never rescans still
-  // gets whatever existed when the session opened.
-  for (const command of await loadCustomCommands(cwd)) {
-    add({
-      name: command.name,
-      description: command.description,
-      input: { hint: TEMPLATE_ARG_HINT },
-    });
-  }
-
-  // Last: anything above with the same NAME beats a registry command. An alias
-  // collision does not, so aliases are deliberately not claimed here — a
-  // project `q.md` shadows `/q` without hiding `/quit` itself.
-  for (const command of session.slashCommands?.getAll() ?? []) {
-    add({
-      name: command.name,
-      description: command.description,
-      input: hintFromUsage(command.name, command.usage),
-    });
-  }
-
-  return commands;
+  const discovery = await discoverCommands(cwd, {
+    registryActions: registryCommandListings(session.slashCommands?.getAll() ?? []),
+  });
+  return discovery.entries.map(({ listing: command }) => ({
+    name: command.name,
+    description: command.description,
+    input: command.invocationKind === "prompt"
+      ? command.input.text === "none" ? undefined : { hint: TEMPLATE_ARG_HINT }
+      : hintFromUsage(command.name, command.usage ?? ""),
+  }));
 }
 
 /** The `modes` block ACP clients like Zed read from session/new and session/load. */
@@ -860,15 +829,17 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
    * has nowhere to put it. The agent is the only party that can know its
    * built-ins, so a client scanning `.gg/commands` on its own would miss them.
    */
+  let commandRequest = 0;
   function notifyAvailableCommands(target: AcpAgentSession): void {
     const forSession = sessionId;
+    const request = ++commandRequest;
     setTimeout(() => {
       // A second session/new (or a dispose) beat us here; that session will
       // announce its own commands.
-      if (session !== target || sessionId !== forSession) return;
+      if (session !== target || sessionId !== forSession || request !== commandRequest) return;
       void availableCommands(target, options.cwd)
         .then((commands) => {
-          if (session !== target || sessionId !== forSession) return;
+          if (session !== target || sessionId !== forSession || request !== commandRequest) return;
           notifyUpdate({
             sessionUpdate: "available_commands_update",
             availableCommands: commands,
@@ -1413,8 +1384,9 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     truncation = undefined;
     hitMaxTurns = false;
 
+    const target = session;
     try {
-      await session.prompt(text);
+      await target.prompt(text);
     } catch (err) {
       // A cancel aborts the loop, which surfaces here. The spec requires the
       // turn to still resolve with `cancelled` rather than reject — the client
@@ -1430,6 +1402,8 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       // Cleared here rather than on `turn_end`, which fires before that turn's
       // tools execute and would discard snapshots still in use.
       diffSnapshots.clear();
+      // Even failed/cancelled turns may have saved setup or edited command files.
+      if (session === target) notifyAvailableCommands(target);
     }
 
     return { stopReason: cancelled ? "cancelled" : stopReasonFor(truncation, hitMaxTurns) };

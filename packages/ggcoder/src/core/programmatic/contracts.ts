@@ -1,5 +1,9 @@
 import path from "node:path";
 import { z } from "zod";
+import {
+  isValidProgrammaticFocus,
+  PROGRAMMATIC_FOCUS_GUIDANCE,
+} from "@kenkaiiii/gg-core/slash-command-contract";
 
 export const PROGRAMMATIC_CONTRACT_VERSION = 1 as const;
 export const PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT = 1_000;
@@ -116,7 +120,9 @@ export const configurationSnapshotSchema = z.strictObject({
   policyRevision: positiveSafeIntegerSchema,
   scannerProfileSchemaRevision: positiveSafeIntegerSchema,
   exclusions: z
-    .array(repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath, "unsafe exclusion path"))
+    .array(
+      repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath, "unsafe exclusion path"),
+    )
     .max(LIMITS.inventoryEntries)
     .refine(isStrictlyAscending, "exclusions must be unique and sorted ascending"),
   inputs: z
@@ -199,6 +205,348 @@ export const evidenceV1Schema = z.strictObject({
   version: versionSchema,
   items: z.array(evidenceItemV1Schema).max(LIMITS.evidenceItems),
 });
+
+// Extension contracts are ephemeral advice/review data, never scanner or lifecycle input.
+const extensionTextSchema = boundedString(LIMITS.opportunityTextChars).refine(
+  (value) =>
+    value.trim().length > 0 &&
+    Array.from(value).every((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        (code >= 32 && (code < 127 || code > 159)) ||
+        character === "\n" ||
+        character === "\r" ||
+        character === "\t"
+      );
+    }),
+  "must contain text without control characters",
+);
+const extensionPathSchema = repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath);
+const extensionTextsSchema = z.array(extensionTextSchema).min(1).max(50);
+
+export const programmaticAssessmentInputV1Schema = z.strictObject({
+  version: z.literal(1),
+  focus: z.string().refine(isValidProgrammaticFocus, PROGRAMMATIC_FOCUS_GUIDANCE).optional(),
+});
+
+// Reference-only subset of slash tokens: preserve case and punctuation, never normalize.
+// ASCII alphanumeric start, then letters/digits/dot/underscore/hyphen; 100 chars max.
+// The absolute-end assertion also rejects a final newline (unlike `$`).
+const commandNameTokenSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])/);
+
+export const programmaticCommandReferenceV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    name: commandNameTokenSchema,
+    source: z.enum(["built-in", "project-custom", "global-custom"]),
+    invocationKind: z.enum(["prompt", "workspace-action"]),
+  })
+  .refine(
+    (value) => value.invocationKind !== "workspace-action" || value.source === "built-in",
+    "workspace actions are host-owned",
+  );
+
+const capabilityKindSchema = z.enum(["prompt-only", "script-backed", "app-backed"]);
+const helperSnapshotSchema = z.strictObject({ path: extensionPathSchema, sha256: sha256Schema });
+export const programmaticCommandSnapshotV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    command: programmaticCommandReferenceV1Schema,
+    capabilityKind: capabilityKindSchema,
+    // Digest the private resolved owner identity; never expose its absolute path.
+    ownerSha256: sha256Schema,
+    bodySha256: sha256Schema,
+    helpers: z.array(helperSnapshotSchema).max(32),
+  })
+  .refine(
+    (value) =>
+      isStrictlyAscending(value.helpers.map((helper) => helper.path)) &&
+      new Set(value.helpers.map((helper) => helper.path.toLowerCase())).size ===
+        value.helpers.length,
+    "helpers must be unique and sorted ascending",
+  )
+  .refine(
+    (value) =>
+      value.capabilityKind === "script-backed"
+        ? value.helpers.length > 0
+        : value.helpers.length === 0,
+    "only script-backed commands declare helpers and must declare at least one",
+  )
+  .refine(
+    (value) =>
+      (value.command.invocationKind === "workspace-action") ===
+      (value.capabilityKind === "app-backed"),
+    "workspace actions require app-backed capabilities",
+  );
+
+export const programmaticCommandAvailabilityV1Schema = z.discriminatedUnion("status", [
+  z.strictObject({ status: z.literal("available"), snapshot: programmaticCommandSnapshotV1Schema }),
+  z.strictObject({
+    status: z.literal("unavailable"),
+    command: programmaticCommandReferenceV1Schema,
+    reason: extensionTextSchema,
+  }),
+]);
+
+const externalReferenceSchema = z.strictObject({
+  kind: z.literal("external-reference"),
+  basis: z.enum(["observed", "inferred", "assumed"]),
+  inspectedUrl: z
+    .string()
+    .min(1)
+    .max(4_000)
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return (
+          /^https?:\/\//.test(value) &&
+          !/\s/.test(value) &&
+          !value.includes("\\") &&
+          (url.protocol === "https:" || url.protocol === "http:") &&
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash
+        );
+      } catch {
+        return false;
+      }
+    }, "must be an HTTP(S) attribution URL without credentials, query or fragment"),
+  revision: z.string().min(1).max(100).optional(),
+  location: evidenceLocationV1Schema
+    .refine((value) => extensionPathSchema.safeParse(value.path).success)
+    .optional(),
+  claim: extensionTextSchema,
+});
+const advisoryEvidenceSchema = z.strictObject({
+  version: z.literal(1),
+  items: z
+    .array(
+      z.union([
+        evidenceItemV1Schema.refine(
+          (value) => !value.location || extensionPathSchema.safeParse(value.location.path).success,
+        ),
+        externalReferenceSchema,
+      ]),
+    )
+    .max(50),
+});
+
+export const programmaticMissingCapabilityV1Schema = z.strictObject({
+  version: z.literal(1),
+  desiredOutcome: extensionTextSchema,
+  capabilityKind: capabilityKindSchema,
+  inputs: extensionTextsSchema,
+  outputs: extensionTextsSchema,
+  prerequisites: extensionTextsSchema,
+  risks: extensionTextsSchema,
+  verificationExpectations: extensionTextsSchema,
+});
+export const programmaticRecommendationV1Schema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("advisory"),
+  outcome: extensionTextSchema,
+  rationale: extensionTextSchema,
+  uncertainty: extensionTextSchema,
+  evidence: advisoryEvidenceSchema,
+  choice: z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("reuse-command"),
+      availability: programmaticCommandAvailabilityV1Schema,
+    }),
+    z.strictObject({
+      kind: z.literal("missing-capability"),
+      proposal: programmaticMissingCapabilityV1Schema,
+    }),
+    z.strictObject({ kind: z.literal("manual"), steps: extensionTextsSchema }),
+  ]),
+});
+export const programmaticAssessmentResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("advisory"),
+  recommendations: z.array(programmaticRecommendationV1Schema).max(50),
+  coverage: z.discriminatedUnion("status", [
+    z.strictObject({ status: z.literal("complete"), scope: extensionTextSchema }),
+    z.strictObject({
+      status: z.literal("limited"),
+      scope: extensionTextSchema,
+      reason: extensionTextSchema,
+    }),
+  ]),
+});
+
+export const programmaticCreationProposalV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    proposalId: z.string().uuid(),
+    purpose: z.literal("creation"),
+    scope: z.literal("project"),
+    requirement: programmaticMissingCapabilityV1Schema,
+    snapshot: programmaticCommandSnapshotV1Schema,
+    commandPath: extensionPathSchema,
+    files: z
+      .array(
+        z.strictObject({
+          path: extensionPathSchema,
+          proposedSha256: sha256Schema,
+          prior: z.discriminatedUnion("status", [
+            z.strictObject({ status: z.literal("absent") }),
+            z.strictObject({ status: z.literal("present"), sha256: sha256Schema }),
+          ]),
+        }),
+      )
+      .min(1)
+      .max(33),
+  })
+  .refine(
+    (value) =>
+      value.snapshot.command.source === "project-custom" &&
+      value.snapshot.capabilityKind !== "app-backed" &&
+      value.requirement.capabilityKind === value.snapshot.capabilityKind,
+    "creation supports only project prompt/script commands",
+  )
+  .refine(
+    (value) => /^\.gg\/commands\/[^/]+\.md$/.test(value.commandPath),
+    "command destination must use the existing project Markdown loader",
+  )
+  .refine(
+    (value) =>
+      isStrictlyAscending(value.files.map((file) => file.path)) &&
+      new Set(value.files.map((file) => file.path.toLowerCase())).size === value.files.length,
+    "files must be unique and sorted ascending",
+  )
+  .refine((value) => {
+    const expected = [
+      { path: value.commandPath, sha256: value.snapshot.bodySha256 },
+      ...value.snapshot.helpers,
+    ];
+    return (
+      new Set(expected.map((file) => file.path)).size === expected.length &&
+      expected.length === value.files.length &&
+      expected.every((file) =>
+        value.files.some(
+          (candidate) => candidate.path === file.path && candidate.proposedSha256 === file.sha256,
+        ),
+      )
+    );
+  }, "files must exactly bind command and helper content");
+
+const verificationCaseSchema = z.strictObject({
+  category: z.enum(["loads", "behavior", "side-effects"]),
+  scenario: z.enum(["normal", "incomplete", "out-of-scope"]),
+  method: z.enum(["deterministic", "model-judgment"]),
+  input: extensionTextSchema,
+  result: z.enum(["passed", "failed", "unavailable"]),
+  evidence: advisoryEvidenceSchema.refine(
+    (value) => value.items.length > 0,
+    "case evidence is required",
+  ),
+});
+export const programmaticVerificationV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    snapshot: programmaticCommandSnapshotV1Schema,
+    result: z.enum(["passed", "failed", "unavailable"]),
+    provider: z.string().min(1).max(100),
+    model: z.string().min(1).max(200),
+    environment: extensionTextSchema,
+    limits: extensionTextsSchema,
+    cases: z.array(verificationCaseSchema).min(1).max(50),
+  })
+  .refine((value) => {
+    if (value.result !== "passed") return true;
+    if (
+      value.snapshot.capabilityKind === "app-backed" ||
+      value.cases.some((item) => item.result !== "passed")
+    )
+      return false;
+    const categories =
+      value.snapshot.capabilityKind === "script-backed"
+        ? ["loads", "behavior", "side-effects"]
+        : ["loads", "behavior"];
+    return categories.every((category) =>
+      (category === "loads" ? ["normal"] : ["normal", "incomplete", "out-of-scope"]).every(
+        (scenario) =>
+          value.cases.some(
+            (item) =>
+              item.category === category &&
+              item.scenario === scenario &&
+              item.method === "deterministic",
+          ),
+      ),
+    );
+  }, "passed verification requires deterministic loading and behavioral coverage, plus script side-effect/error coverage");
+
+export const programmaticExecutionSettingsV1Schema = z.strictObject({
+  version: z.literal(1),
+  policyId: stableIdSchema,
+  policyRevision: positiveSafeIntegerSchema,
+  provider: z.string().min(1).max(100),
+  model: z.string().min(1).max(200),
+  maxTurns: positiveSafeIntegerSchema.max(1_000),
+  deadlineMs: positiveSafeIntegerSchema.max(86_400_000),
+  capabilityProfile: z.enum(["research-read-only", "reviewed-mutation"]),
+});
+export const programmaticExecutionReviewV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    purpose: z.literal("execution"),
+    proposalId: z.string().uuid(),
+    snapshot: programmaticCommandSnapshotV1Schema,
+    arguments: z
+      .string()
+      .max(4_000)
+      .refine((value) => value === "" || extensionTextSchema.safeParse(value).success),
+    configurationFingerprint: configurationFingerprintV1Schema,
+    successCondition: extensionTextSchema,
+    settings: programmaticExecutionSettingsV1Schema,
+  })
+  .refine(
+    (value) => value.snapshot.capabilityKind !== "app-backed",
+    "app-backed execution is unsupported",
+  )
+  .refine(
+    (value) =>
+      value.snapshot.capabilityKind !== "script-backed" ||
+      value.settings.capabilityProfile === "reviewed-mutation",
+    "read-only research cannot execute scripts",
+  );
+
+// Host-only context: never deserialize this from model output. Matching is not approval
+// consumption; the existing callback owner must consume once and re-resolve at dispatch.
+export interface ProgrammaticApprovalContext {
+  pendingProposalId: string;
+  purpose: "creation" | "execution";
+  decision?: "accepted" | "rejected";
+}
+export function isProgrammaticReviewCurrent(
+  reviewed: unknown,
+  current: unknown,
+  expectedPurpose: "creation" | "execution",
+  approval: ProgrammaticApprovalContext | undefined,
+): boolean {
+  if (!approval || approval.decision !== "accepted" || approval.purpose !== expectedPurpose)
+    return false;
+  const schema =
+    expectedPurpose === "creation"
+      ? programmaticCreationProposalV1Schema
+      : expectedPurpose === "execution"
+        ? programmaticExecutionReviewV1Schema
+        : undefined;
+  if (!schema) return false;
+  const before = schema.safeParse(reviewed);
+  const now = schema.safeParse(current);
+  return (
+    before.success &&
+    now.success &&
+    before.data.proposalId === approval.pendingProposalId &&
+    JSON.stringify(before.data) === JSON.stringify(now.data)
+  );
+}
 
 const repositoryPathArraySchema = z
   .array(repositoryRelativePathSchema)

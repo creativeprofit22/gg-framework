@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { ProgrammaticChat } from "./ProgrammaticChat";
+import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
 import {
   initialProgrammaticChatState,
   programmaticChatReducer,
@@ -9,6 +9,16 @@ import {
 } from "./programmatic-chat-state";
 const hash = "a".repeat(64);
 afterEach(cleanup);
+it("renders execution evidence as inert text, not markup or clickable citations", () => {
+  const message = '<b>Specialist claim</b> [citation](https://example.invalid)';
+  const { container } = render(<ProgrammaticExecutionEvidenceView items={[
+    { basis: "assumed", source: "programmatic-execution", code: "test", severity: "error", message },
+  ]} />);
+  expect(screen.getByText(message)).toBeTruthy();
+  expect(screen.getByText("Assumed, not checked")).toBeTruthy();
+  expect(screen.getByText("Error:")).toBeTruthy();
+  expect(container.querySelector("b, a, script, iframe, img")).toBeNull();
+});
 function fixture(overrides: Partial<ProgrammaticChatState> = {}) {
   const summary = {
     id: hash,

@@ -173,10 +173,11 @@ class AcpClient {
   async untilUpdate(
     kind: string,
     timeoutMs = ACP_CLIENT_TIMEOUT_MS,
+    occurrence = 1,
   ): Promise<Record<string, unknown>> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const found = updates(this.frames).find((update) => update.sessionUpdate === kind);
+      const found = updates(this.frames).filter((update) => update.sessionUpdate === kind)[occurrence - 1];
       if (found) return found;
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for ${kind}; stderr=${this.stderr}`);
@@ -703,6 +704,16 @@ describe("ACP mode over stdio", () => {
     // the canonical name is advertised.
     expect(byName.has("q")).toBe(false);
     expect(byName.has("exit")).toBe(false);
+    expect(byName.has("setup-programmatic")).toBe(true);
+    expect(byName.has("programmatic")).toBe(false);
+    expect(byName.has("programmatic-run")).toBe(false);
+    await fs.unlink(path.join(commandsDir, "commit.md"));
+    client.send({ jsonrpc: "2.0", id: 90, method: "session/prompt", params: {
+      sessionId: "acp-fixture-session", prompt: [{ type: "text", text: "refresh commands" }],
+    } });
+    await client.until(90);
+    const refreshed = await client.untilUpdate("available_commands_update", undefined, 2);
+    expect((refreshed.availableCommands as { name: string }[]).some((command) => command.name === "commit")).toBe(false);
   });
 
   it("switches mode via session/set_mode and tells the client with current_mode_update", async () => {

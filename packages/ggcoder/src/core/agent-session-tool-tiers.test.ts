@@ -8,6 +8,8 @@ import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { DEFERRED_TOOL_NAMES } from "../tools/tool-tiers.js";
+import { AgentSession } from "./agent-session.js";
+import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
 
 vi.mock("@kenkaiiii/gg-agent", async () => {
   const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
@@ -63,7 +65,6 @@ async function writeSettings(settings: Record<string, unknown>): Promise<void> {
 }
 
 async function createUninitializedSession(extra: Record<string, unknown> = {}) {
-  const { AgentSession } = await import("./agent-session.js");
   return new AgentSession({
     provider: "anthropic",
     model: "claude-test",
@@ -82,6 +83,39 @@ async function createSession(extra: Record<string, unknown> = {}) {
   await session.initialize();
   return session;
 }
+
+it("blocks a fresh project's direct assessment before entering the model loop", async () => {
+  const session = await createUninitializedSession();
+  try {
+    expect(await session.willStartAgentRun("/programmatic")).toBe(false);
+    expect(await session.willExpandPromptTemplate("/programmatic")).toBe(false);
+    expect(await fs.readdir(tempProject)).toEqual([]);
+  } finally {
+    await session.dispose();
+  }
+});
+
+it("passes validated focus and bounded metadata to the agent request without writing setup", async () => {
+  const proposal = await buildProgrammaticProfileProposal(tempProject);
+  expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+  const profilePath = path.join(tempProject, ".gg/programmatic/profile.json");
+  const before = await fs.readFile(profilePath);
+  const session = await createSession();
+  try {
+    expect(await session.willStartAgentRun(`/programmatic ${"x".repeat(4001)}`)).toBe(false);
+    await session.prompt("/programmatic   café\n日本語  ");
+    const prompt = String(session.getMessages().find((message) => message.role === "user")?.content);
+    expect(prompt).toContain("## User Instructions\n\ncafé\n日本語");
+    const context = JSON.parse(prompt.slice(prompt.indexOf('{"assessment":')));
+    expect(context.assessment).toEqual({ version: 1, focus: "café\n日本語" });
+    expect(context.commands.entries.length).toBeGreaterThan(0);
+    expect(context.commands.entries.every((entry: Record<string, unknown>) => !('prompt' in entry))).toBe(true);
+    expect(prompt).toContain("Call `programmatic_scan` exactly once with an empty argument object");
+    expect(await fs.readFile(profilePath)).toEqual(before);
+  } finally {
+    await session.dispose();
+  }
+});
 
 /** The live tool array is private; tiering is precisely a claim about it. */
 function liveToolNames(session: unknown): string[] {
@@ -122,6 +156,8 @@ describe("AgentSession built-in tool tiering", () => {
         expect(live).toContain(name);
       }
 
+      const proposal = await buildProgrammaticProfileProposal(tempProject);
+      expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
       await session.prompt("/programmatic");
       const commandPrompt = String(
         session.getMessages().find((message) => message.role === "user")?.content,
@@ -262,6 +298,8 @@ describe("AgentSession built-in tool tiering", () => {
       expect(live).not.toContain("tool_search");
       expect(String(session.getMessages()[0]?.content ?? "")).not.toContain("Available on demand");
 
+      const proposal = await buildProgrammaticProfileProposal(tempProject);
+      expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
       await session.prompt("/programmatic");
       const commandPrompt = String(
         session.getMessages().find((message) => message.role === "user")?.content,

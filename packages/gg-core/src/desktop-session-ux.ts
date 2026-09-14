@@ -7,7 +7,7 @@ export function extractImageWarnings(text: string): string {
 /** Definite pre-execution rejection; all other prompt failures remain unknown. */
 export interface PromptSubmissionRejection {
   category: "rejected";
-  code: "invalid_programmatic_selection" | "programmatic_execution_busy" | "programmatic_execution_plan_mode";
+  code: "invalid_programmatic_selection" | "programmatic_execution_busy" | "programmatic_execution_plan_mode" | "command_input_not_allowed";
   message: string;
 }
 
@@ -15,7 +15,7 @@ export function isPromptSubmissionRejection(value: unknown): value is PromptSubm
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const failure = value as Record<string, unknown>;
   return failure.category === "rejected" && typeof failure.code === "string" &&
-    ["invalid_programmatic_selection", "programmatic_execution_busy", "programmatic_execution_plan_mode"].includes(failure.code) &&
+    ["invalid_programmatic_selection", "programmatic_execution_busy", "programmatic_execution_plan_mode", "command_input_not_allowed"].includes(failure.code) &&
     typeof failure.message === "string" && failure.message.trim().length > 0 &&
     failure.message.length <= 256 &&
     Array.from(failure.message).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);

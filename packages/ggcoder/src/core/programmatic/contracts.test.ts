@@ -4,7 +4,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { parseSkillFile } from "../skills.js";
+import { SlashCommandRegistry } from "../slash-commands.js";
 import {
+  isProgrammaticReviewCurrent,
+  type ProgrammaticApprovalContext,
+  programmaticAssessmentInputV1Schema,
+  programmaticAssessmentResultV1Schema,
+  programmaticRecommendationV1Schema,
+  programmaticCommandReferenceV1Schema,
+  programmaticCommandSnapshotV1Schema,
+  programmaticCommandAvailabilityV1Schema,
+  programmaticMissingCapabilityV1Schema,
+  programmaticCreationProposalV1Schema,
+  programmaticVerificationV1Schema,
+  programmaticExecutionSettingsV1Schema,
+  programmaticExecutionReviewV1Schema,
   configurationFingerprintV1Schema,
   configurationSnapshotSchema,
   programmaticProfileEnvelopeV2Schema,
@@ -674,6 +689,533 @@ describe("route and execution boundaries", () => {
   });
 });
 
+describe("programmatic extension contracts", () => {
+  const digest = "c".repeat(64);
+  const command = {
+    version: 1,
+    name: "check-project",
+    source: "project-custom",
+    invocationKind: "prompt",
+  };
+  const snapshot = {
+    version: 1,
+    command,
+    capabilityKind: "prompt-only",
+    ownerSha256: digest,
+    bodySha256: digest,
+    helpers: [],
+  };
+  const helper = { path: "scripts/check.ts", sha256: digest };
+  const script = { ...snapshot, capabilityKind: "script-backed", helpers: [helper] };
+  const app = {
+    ...snapshot,
+    capabilityKind: "app-backed",
+    command: { ...command, source: "built-in", invocationKind: "workspace-action" },
+  };
+  const requirement = {
+    version: 1,
+    desiredOutcome: "Check project",
+    capabilityKind: "prompt-only",
+    inputs: ["Project"],
+    outputs: ["Report"],
+    prerequisites: ["Readable project"],
+    risks: ["Incomplete coverage"],
+    verificationExpectations: ["Fixture assertions"],
+  };
+  const evidence = {
+    version: 1,
+    items: [
+      {
+        basis: "observed",
+        source: "fixture",
+        code: "assertion",
+        severity: "info",
+        message: "Assertion passed",
+      },
+    ],
+  };
+  const recommendation = {
+    version: 1,
+    kind: "advisory",
+    outcome: "Check project",
+    rationale: "Reuse existing work",
+    uncertainty: "Not yet executed",
+    evidence,
+    choice: { kind: "manual", steps: ["Inspect project"] },
+  };
+  const settings = {
+    version: 1,
+    policyId: "reviewed-project",
+    policyRevision: 1,
+    provider: "fixture",
+    model: "fixture-model",
+    maxTurns: 10,
+    deadlineMs: 60_000,
+    capabilityProfile: "reviewed-mutation",
+  };
+  const review = {
+    version: 1,
+    purpose: "execution",
+    proposalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    snapshot,
+    arguments: "",
+    configurationFingerprint,
+    successCondition: "Report checked",
+    settings,
+  };
+  const creation = {
+    version: 1,
+    purpose: "creation",
+    proposalId: review.proposalId,
+    scope: "project",
+    requirement,
+    snapshot,
+    commandPath: ".gg/commands/check-project.md",
+    files: [
+      {
+        path: ".gg/commands/check-project.md",
+        proposedSha256: digest,
+        prior: { status: "absent" },
+      },
+    ],
+  };
+  const approval: ProgrammaticApprovalContext = {
+    pendingProposalId: review.proposalId,
+    purpose: "execution",
+    decision: "accepted",
+  };
+  const caseRecord = {
+    category: "loads",
+    scenario: "normal",
+    method: "deterministic",
+    input: "Fixture project",
+    result: "passed",
+    evidence,
+  };
+  const verification = {
+    version: 1,
+    snapshot,
+    result: "unavailable",
+    provider: "fixture",
+    model: "fixture-model",
+    environment: "Temporary fixture",
+    limits: ["Not production"],
+    cases: [caseRecord],
+  };
+
+  it("preserves raw focus limits and permitted characters at the domain boundary", () => {
+    for (const focus of ["x".repeat(4_000), "😀".repeat(2_000), "检查 café\r\nnext\tstep"]) {
+      expect(programmaticAssessmentInputV1Schema.parse({ version: 1, focus }).focus).toBe(focus);
+    }
+    for (const focus of [" " + "x".repeat(4_000), "😀".repeat(2_000) + "x"]) {
+      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(false);
+    }
+    for (let code = 0; code <= 159; code++) {
+      const focus = `a${String.fromCharCode(code)}b`;
+      const allowed = (code >= 32 && code < 127) || [9, 10, 13].includes(code);
+      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(allowed);
+    }
+  });
+
+  it("accepts general/focused input without changing scanner identities", () => {
+    expect(programmaticAssessmentInputV1Schema.parse({ version: 1 })).toEqual({ version: 1 });
+    expect(
+      programmaticAssessmentInputV1Schema.parse({ version: 1, focus: "Check\n tests\t please" })
+        .focus,
+    ).toBeDefined();
+    for (const focus of ["", "   ", "x".repeat(4_001), "x\0", "x\u007f", "x\u0085", 42]) {
+      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(
+        false,
+      );
+    }
+    expect(
+      programmaticAssessmentInputV1Schema.safeParse({ version: 1, approved: true }).success,
+    ).toBe(false);
+  });
+
+  it("accepts every advisory choice, source, availability and capability kind", () => {
+    for (const source of ["built-in", "project-custom", "global-custom"]) {
+      expect(programmaticCommandReferenceV1Schema.safeParse({ ...command, source }).success).toBe(
+        true,
+      );
+    }
+    for (const content of [snapshot, script, app]) {
+      expect(programmaticCommandSnapshotV1Schema.safeParse(content).success).toBe(true);
+      const availability = { status: "available", snapshot: content };
+      expect(programmaticCommandAvailabilityV1Schema.safeParse(availability).success).toBe(true);
+      expect(
+        programmaticRecommendationV1Schema.safeParse({
+          ...recommendation,
+          choice: { kind: "reuse-command", availability },
+        }).success,
+      ).toBe(true);
+      const proposal = { ...requirement, capabilityKind: content.capabilityKind };
+      expect(programmaticMissingCapabilityV1Schema.safeParse(proposal).success).toBe(true);
+      expect(
+        programmaticRecommendationV1Schema.safeParse({
+          ...recommendation,
+          choice: { kind: "missing-capability", proposal },
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      programmaticCommandAvailabilityV1Schema.safeParse({
+        status: "unavailable",
+        command,
+        reason: "Not installed",
+      }).success,
+    ).toBe(true);
+    expect(programmaticRecommendationV1Schema.safeParse(recommendation).success).toBe(true);
+    const result = {
+      version: 1,
+      kind: "advisory",
+      recommendations: [recommendation],
+      coverage: { status: "limited", scope: "Local commands", reason: "Catalog truncated" },
+    };
+    expect(programmaticAssessmentResultV1Schema.safeParse(result).success).toBe(true);
+    expect(
+      programmaticAssessmentResultV1Schema.safeParse({
+        ...result,
+        coverage: { status: "complete", scope: "Current bounded catalog" },
+      }).success,
+    ).toBe(true);
+    expect(
+      programmaticAssessmentResultV1Schema.safeParse({
+        ...result,
+        recommendations: Array(51).fill(recommendation),
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticAssessmentResultV1Schema.safeParse({
+        ...result,
+        coverage: { status: "limited", scope: "Local" },
+      }).success,
+    ).toBe(false);
+    expect(discoveredOpportunityV1Schema.safeParse(recommendation).success).toBe(false);
+    expect(opportunityDiscoveryResultV1Schema.safeParse(result).success).toBe(false);
+    expect(programmaticLifecycleStateV1Schema.safeParse(result).success).toBe(false);
+  });
+
+  it.each(["check_project", "CheckProject", "check.project", "check-project", "x".repeat(100)])(
+    "preserves loaded command identity %s through slash parsing and reuse records",
+    (name) => {
+      const loaded = parseSkillFile(`---\nname: ${name}\n---\nCheck the project.`, "project");
+      expect(loaded.name).toBe(name);
+      const parsed = new SlashCommandRegistry().parse(`/${loaded.name} project focus`);
+      expect(parsed).toEqual({ name, args: "project focus" });
+      for (const source of ["project-custom", "global-custom"]) {
+        const reference = { ...command, name: parsed!.name, source };
+        expect(programmaticCommandReferenceV1Schema.parse(reference)).toEqual(reference);
+        for (const availability of [
+          { status: "available", snapshot: { ...snapshot, command: reference } },
+          { status: "unavailable", command: reference, reason: "Not executable" },
+        ]) {
+          expect(programmaticCommandAvailabilityV1Schema.parse(availability)).toEqual(availability);
+          const reuse = {
+            ...recommendation,
+            choice: { kind: "reuse-command", availability },
+          };
+          expect(programmaticRecommendationV1Schema.parse(reuse)).toEqual(reuse);
+        }
+      }
+      expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: name }).success)
+        .toBe(false);
+    },
+  );
+
+  it("rejects ambiguous identities, helper dependencies, unsafe paths and forged authority", () => {
+    for (const name of [
+      "", "/check", "check/part", "check\\part", "check now", " check", "check ",
+      "check\targ", "check\n", "check\r", "check\0", "check\u007f", "check\u0085",
+      "check;run", "check|run", "check&run", "$(check)", "`check`", "check>out",
+      "check<in", "check\"arg", "check'arg", "check:run", "check%PATH%", "check*",
+      "-check", "_check", ".check", "..", "chéck", "x".repeat(101),
+    ]) {
+      expect(programmaticCommandReferenceV1Schema.safeParse({ ...command, name }).success).toBe(
+        false,
+      );
+    }
+    for (const content of [
+      { ...snapshot, helpers: [helper] },
+      { ...script, helpers: [] },
+      { ...script, helpers: [helper, helper] },
+      { ...script, helpers: [{ ...helper, path: "scripts/Check.ts" }, helper] },
+      { ...script, helpers: [{ ...helper, path: "z.ts" }, helper] },
+      { ...script, helpers: Array(33).fill(helper) },
+      { ...snapshot, bodySha256: "invalid" },
+      { ...snapshot, approved: true },
+      { ...snapshot, command: { ...command, source: "unknown" } },
+      { ...snapshot, command: { ...command, invocationKind: "workspace-action" } },
+    ])
+      expect(programmaticCommandSnapshotV1Schema.safeParse(content).success).toBe(false);
+    for (const path of ["../escape", "/tmp/x", "C:/x", "a\\b", "a:b", "a\n", "x".repeat(501)]) {
+      expect(
+        programmaticCommandSnapshotV1Schema.safeParse({ ...script, helpers: [{ ...helper, path }] })
+          .success,
+      ).toBe(false);
+    }
+    expect(
+      programmaticRecommendationV1Schema.safeParse({
+        ...recommendation,
+        choice: { ...recommendation.choice, command },
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticRecommendationV1Schema.safeParse({
+        ...recommendation,
+        evidence: { version: 1, items: Array(51).fill(evidence.items[0]) },
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticRecommendationV1Schema.safeParse({
+        ...recommendation,
+        outcome: "x".repeat(4_001),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("bounds external provenance and rejects credential URLs and invalid ranges", () => {
+    const reference = {
+      kind: "external-reference",
+      basis: "observed",
+      inspectedUrl: "https://example.com/repo",
+      revision: "abc123",
+      location: { path: "src/check.ts", startLine: 1, endLine: 3 },
+      claim: "Inspected assertion",
+    };
+    const withReference = (item: unknown) => ({
+      ...recommendation,
+      evidence: { version: 1, items: [item] },
+    });
+    expect(programmaticRecommendationV1Schema.safeParse(withReference(reference)).success).toBe(
+      true,
+    );
+    for (const inspectedUrl of [
+      "file:///tmp/x",
+      "https://user:password@example.com",
+      "https://example.com?token=value",
+      "https://example.com/#secret",
+      "not a URL",
+    ]) {
+      expect(
+        programmaticRecommendationV1Schema.safeParse(withReference({ ...reference, inspectedUrl }))
+          .success,
+      ).toBe(false);
+    }
+    for (const location of [
+      { path: "/private/x" },
+      { path: "src/x", endLine: 3 },
+      { path: "src/x", startLine: 4, endLine: 2 },
+    ]) {
+      expect(
+        programmaticRecommendationV1Schema.safeParse(withReference({ ...reference, location }))
+          .success,
+      ).toBe(false);
+    }
+    expect(
+      programmaticRecommendationV1Schema.safeParse(
+        withReference({ ...reference, body: "fetched source" }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it("binds project-only creation to every exact proposed and prior file", () => {
+    expect(programmaticCreationProposalV1Schema.safeParse(creation).success).toBe(true);
+    const scriptCreation = {
+      ...creation,
+      requirement: { ...requirement, capabilityKind: "script-backed" },
+      snapshot: script,
+      files: [
+        ...creation.files,
+        {
+          path: helper.path,
+          proposedSha256: helper.sha256,
+          prior: { status: "present", sha256: digest },
+        },
+      ],
+    };
+    expect(programmaticCreationProposalV1Schema.safeParse(scriptCreation).success).toBe(true);
+    for (const value of [
+      {
+        ...creation,
+        commandPath: "src/command.md",
+        files: [{ ...creation.files[0], path: "src/command.md" }],
+      },
+      { ...creation, scope: "global" },
+      { ...creation, snapshot: { ...snapshot, command: { ...command, source: "global-custom" } } },
+      { ...creation, files: [] },
+      { ...creation, files: [...creation.files, ...creation.files] },
+      { ...creation, files: [{ ...creation.files[0], proposedSha256: "d".repeat(64) }] },
+      { ...creation, files: [{ ...creation.files[0], prior: {} }] },
+      { ...creation, snapshot: app },
+      { ...scriptCreation, files: creation.files },
+    ])
+      expect(programmaticCreationProposalV1Schema.safeParse(value).success).toBe(false);
+    expect(
+      isProgrammaticReviewCurrent(creation, creation, "creation", {
+        ...approval,
+        purpose: "creation",
+      }),
+    ).toBe(true);
+    expect(
+      isProgrammaticReviewCurrent(
+        creation,
+        {
+          ...creation,
+          files: [{ ...creation.files[0], prior: { status: "present", sha256: digest } }],
+        },
+        "creation",
+        { ...approval, purpose: "creation" },
+      ),
+    ).toBe(false);
+    expect(isProgrammaticReviewCurrent(creation, creation, "execution", approval)).toBe(false);
+  });
+
+  it("requires behavior beyond loading and deterministic script error/side-effect coverage", () => {
+    expect(programmaticVerificationV1Schema.safeParse(verification).success).toBe(true);
+    expect(
+      programmaticVerificationV1Schema.safeParse({ ...verification, result: "failed" }).success,
+    ).toBe(true);
+    expect(
+      programmaticVerificationV1Schema.safeParse({ ...verification, result: "passed" }).success,
+    ).toBe(false);
+    const behaviorCases = ["normal", "incomplete", "out-of-scope"].map((scenario) => ({
+      ...caseRecord,
+      category: "behavior",
+      scenario,
+    }));
+    const passed = { ...verification, result: "passed", cases: [caseRecord, ...behaviorCases] };
+    expect(programmaticVerificationV1Schema.safeParse(passed).success).toBe(true);
+    expect(
+      programmaticVerificationV1Schema.safeParse({ ...passed, snapshot: script }).success,
+    ).toBe(false);
+    const scriptPassed = {
+      ...passed,
+      snapshot: script,
+      cases: [
+        ...passed.cases,
+        ...behaviorCases.map((item) => ({ ...item, category: "side-effects" })),
+      ],
+    };
+    expect(programmaticVerificationV1Schema.safeParse(scriptPassed).success).toBe(true);
+    expect(
+      programmaticVerificationV1Schema.safeParse({
+        ...passed,
+        cases: passed.cases.map((item) => ({ ...item, method: "model-judgment" })),
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticVerificationV1Schema.safeParse({
+        ...passed,
+        cases: [...passed.cases, { ...caseRecord, result: "failed" }],
+      }).success,
+    ).toBe(false);
+    expect(programmaticVerificationV1Schema.safeParse({ ...passed, snapshot: app }).success).toBe(
+      false,
+    );
+  });
+
+  it("accepts bounded host settings but rejects unsupported grants and limits", () => {
+    expect(programmaticExecutionSettingsV1Schema.safeParse(settings).success).toBe(true);
+    expect(programmaticExecutionReviewV1Schema.safeParse(review).success).toBe(true);
+    for (const maxTurns of [0, -1, 1.5, Infinity, NaN, 1_001]) {
+      expect(
+        programmaticExecutionSettingsV1Schema.safeParse({ ...settings, maxTurns }).success,
+      ).toBe(false);
+    }
+    for (const deadlineMs of [0, Infinity, 86_400_001]) {
+      expect(
+        programmaticExecutionSettingsV1Schema.safeParse({ ...settings, deadlineMs }).success,
+      ).toBe(false);
+    }
+    for (const invalid of [
+      { tools: ["bash"] },
+      { apiKey: "forged" },
+      { mcpServers: ["ambient"] },
+      { capabilityProfile: "anything" },
+    ]) {
+      expect(
+        programmaticExecutionSettingsV1Schema.safeParse({ ...settings, ...invalid }).success,
+      ).toBe(false);
+    }
+    expect(
+      programmaticExecutionReviewV1Schema.safeParse({ ...review, snapshot: app }).success,
+    ).toBe(false);
+    expect(
+      programmaticExecutionReviewV1Schema.safeParse({ ...review, arguments: "x".repeat(4_001) })
+        .success,
+    ).toBe(false);
+    expect(
+      programmaticExecutionReviewV1Schema.safeParse({
+        ...review,
+        snapshot: script,
+        settings: { ...settings, capabilityProfile: "research-read-only" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("fails closed on missing/denied/wrong-purpose approval and every reviewed field drift", () => {
+    expect(isProgrammaticReviewCurrent(review, review, "execution", approval)).toBe(true);
+    for (const context of [
+      undefined,
+      { ...approval, decision: undefined },
+      { ...approval, decision: "rejected" as const },
+      { ...approval, purpose: "creation" as const },
+      { ...approval, pendingProposalId: "other" },
+    ]) {
+      expect(isProgrammaticReviewCurrent(review, review, "execution", context)).toBe(false);
+    }
+    const changed = [
+      { arguments: "Other instructions" },
+      { successCondition: "Different outcome" },
+      { configurationFingerprint: { version: 1, sha256: digest } },
+      { snapshot: { ...snapshot, bodySha256: "d".repeat(64) } },
+      { snapshot: { ...snapshot, ownerSha256: "d".repeat(64) } },
+      { snapshot: { ...snapshot, command: { ...command, source: "global-custom" } } },
+      { snapshot: { ...snapshot, command: { ...command, name: "other" } } },
+      ...Object.entries({
+        policyId: "another-policy",
+        policyRevision: 2,
+        provider: "other",
+        model: "other",
+        maxTurns: 11,
+        deadlineMs: 61_000,
+        capabilityProfile: "research-read-only",
+      }).map(([key, value]) => ({ settings: { ...settings, [key]: value } })),
+      { proposalId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+      { approved: true },
+    ];
+    for (const change of changed)
+      expect(
+        isProgrammaticReviewCurrent(review, { ...review, ...change }, "execution", approval),
+      ).toBe(false);
+    const scriptReview = { ...review, snapshot: script };
+    expect(isProgrammaticReviewCurrent(scriptReview, scriptReview, "execution", approval)).toBe(
+      true,
+    );
+    expect(
+      isProgrammaticReviewCurrent(
+        scriptReview,
+        {
+          ...scriptReview,
+          snapshot: { ...script, helpers: [{ ...helper, sha256: "d".repeat(64) }] },
+        },
+        "execution",
+        approval,
+      ),
+    ).toBe(false);
+    // Parsing order, not incoming object property order, determines equality.
+    expect(
+      isProgrammaticReviewCurrent(
+        review,
+        Object.fromEntries(Object.entries(review).reverse()),
+        "execution",
+        approval,
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("Phase 1 structural bloat audit", () => {
   const root = fileURLToPath(new URL("../../../../../", import.meta.url));
   const subject = "packages/ggcoder/src/core/programmatic/contracts.ts";
@@ -734,7 +1276,8 @@ describe("Phase 1 structural bloat audit", () => {
     source.statements.flatMap((node): string[] => {
       if (ts.isImportDeclaration(node)) {
         return ts.isStringLiteral(node.moduleSpecifier) &&
-          ["node:path", "zod"].includes(node.moduleSpecifier.text)
+          // Focus rules are shared with the browser, not copied into the domain.
+          ["node:path", "zod", "@kenkaiiii/gg-core/slash-command-contract"].includes(node.moduleSpecifier.text)
           ? []
           : ["disallowed import"];
       }
@@ -751,10 +1294,16 @@ describe("Phase 1 structural bloat audit", () => {
       }
       if (ts.isFunctionDeclaration(node)) {
         return node.name &&
-          ["isStrictlyAscending", "isSafeConfigurationSnapshotPath"].includes(node.name.text)
+          [
+            "isStrictlyAscending",
+            "isSafeConfigurationSnapshotPath",
+            "isProgrammaticReviewCurrent",
+          ].includes(node.name.text)
           ? []
           : ["unreviewed helper"];
       }
+      if (ts.isInterfaceDeclaration(node) && node.name.text === "ProgrammaticApprovalContext")
+        return [];
       return [ts.SyntaxKind[node.kind]];
     });
   const duplicateDeclarations = (source: ts.SourceFile, canonicalNames: Set<string>) =>
@@ -955,6 +1504,19 @@ describe("Phase 1 structural bloat audit", () => {
     }
     // Exact public-schema requirements justify fixture-only surfaces, not speculative type aliases.
     const requiredFixtures = {
+      ProgrammaticApprovalContext: "host-only pending decision, not model data",
+      isProgrammaticReviewCurrent: "pure content/settings and purpose freshness check",
+      programmaticAssessmentInputV1Schema: "optional non-authorizing focus",
+      programmaticAssessmentResultV1Schema: "bounded advice and explicit coverage",
+      programmaticRecommendationV1Schema: "advisory choices separate from discovery",
+      programmaticCommandReferenceV1Schema: "source-aware advisory identity",
+      programmaticCommandSnapshotV1Schema: "body/helper content identity",
+      programmaticCommandAvailabilityV1Schema: "availability without permission",
+      programmaticMissingCapabilityV1Schema: "prompt/script/app requirements",
+      programmaticCreationProposalV1Schema: "project-only exact content and prior versions",
+      programmaticVerificationV1Schema: "content-specific deterministic evidence categories",
+      programmaticExecutionSettingsV1Schema: "bounded host policy settings",
+      programmaticExecutionReviewV1Schema: "separate execution review snapshot",
       repositoryRelativePathSchema: "normalized inventory/evidence/route path boundary",
       scannerProfileV1Schema: "versioned scanner ID and specialist allowlist",
       inventoryEntryV1Schema: "inventory path and content fingerprint",

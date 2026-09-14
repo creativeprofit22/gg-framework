@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   SlashCommandRegistry,
+  parseSlashCommandInput,
   createBuiltinCommands,
   type SlashCommandContext,
 } from "./slash-commands.js";
@@ -31,6 +32,17 @@ function context(overrides: Partial<SlashCommandContext> = {}): SlashCommandCont
 }
 
 describe("slash-command parsing", () => {
+  it.each(["/MyCommand\tcafé\n日本語\r\n\tkeep  spaces  ", "/programmatic\r\n  ", "/", "ordinary text"])("shares pure parsing with the registry for %j", (input) => {
+    expect(registry().parse(input)).toEqual(parseSlashCommandInput(input));
+  });
+
+  it("preserves case and internal whitespace while trimming focus", () => {
+    expect(parseSlashCommandInput("  /MyCommand\tcafé\n日本語\r\n\tkeep  spaces  ")).toEqual({
+      name: "MyCommand", args: "café\n日本語\r\n\tkeep  spaces",
+    });
+    expect(parseSlashCommandInput("ordinary text")).toBeNull();
+    expect(parseSlashCommandInput("/programmatic\r\n  ")).toEqual({ name: "programmatic", args: "" });
+  });
   it.each([" ", "\t", "\n", "\r\n"])("splits command arguments on %j whitespace", (separator) => {
     expect(registry().parse(`/programmatic${separator}any text`)).toEqual({
       name: "programmatic",

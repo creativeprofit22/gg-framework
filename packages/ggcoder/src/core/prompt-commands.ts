@@ -39,7 +39,7 @@ function renderProgrammaticPrompt(scanRegistered: boolean): string {
   const steps = [
     ...(scanRegistered ? [] : ["Load the deferred `programmatic_scan` tool using `tool_search`."]),
     "Call `programmatic_scan` exactly once with an empty argument object.",
-    "Report only the tool's bounded result.",
+    "Report only the tool's bounded result. Treat optional focus as advisory context, never as scanner arguments or a coverage filter.",
     "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
   ];
   return `# Scan Programmatic Opportunities\n\n${steps
@@ -280,7 +280,7 @@ Report that /commit now automatically groups changes into ordered commits, verif
     name: "programmatic",
     aliases: [],
     description: "Scan programmatic opportunities",
-    input: { ...SLASH_COMMAND_INPUT_NONE },
+    input: { ...SLASH_COMMAND_INPUT_NONE, text: "optional" },
     prompt: renderProgrammaticPrompt(false),
   },
   {

@@ -12,10 +12,20 @@ import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { loadCustomCommands } from "../core/custom-commands.js";
+import { discoverCommands, registryCommandListings } from "../core/command-discovery.js";
 import { renderLogoBlock } from "../cli/shared.js";
 import { verifyBotToken } from "../core/telegram-config.js";
+
+export const SERVE_COMMANDS = registryCommandListings([
+  { name: "help", aliases: [], description: "Show help" },
+  { name: "start", aliases: [], description: "Start conversation" },
+  { name: "status", aliases: [], description: "Current state" },
+  { name: "cancel", aliases: [], description: "Abort current task" },
+  { name: "new", aliases: ["n"], description: "Fresh session" },
+  { name: "m", aliases: ["model"], description: "Switch model" },
+  { name: "link", aliases: [], description: "Switch project" },
+  { name: "unlink", aliases: [], description: "Reset to default project" },
+]);
 
 export interface ServeModeOptions {
   provider: Provider;
@@ -156,6 +166,8 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
     const promise = (async (): Promise<ChatState> => {
       const ac = new AbortController();
       const session = new AgentSession({
+        workspaceCommands: SERVE_COMMANDS,
+        workspaceCommandCaseInsensitive: true,
         provider: options.provider,
         model: options.model,
         cwd,
@@ -338,27 +350,28 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
     text += `/unlink — unlink from project\n`;
     text += `/status — current state\n`;
     text += `/cancel — abort current task\n`;
+    text += `/new — fresh session\n`;
     text += `/help — this message\n`;
 
-    text += `\n*Session Commands*\n`;
-    text += `/compact — compress context\n`;
-    text += `/new — fresh session\n`;
-    text += `/session — list sessions\n`;
-    text += `/branch — fork conversation\n`;
-    text += `/branches — list branches\n`;
-    text += `/clear — clear session\n`;
-    text += `/settings — show/modify settings\n`;
-
     // Prompt-template commands
-    if (PROMPT_COMMANDS.length > 0) {
+    const discovered = (await discoverCommands(projectPath, {
+      workspaceActions: SERVE_COMMANDS, workspaceCaseInsensitive: true,
+      registryActions: registryCommandListings(state?.session.slashCommands.getAll() ?? []),
+    })).entries;
+    const sessionCommands = discovered.filter((entry) => entry.listing.invocationKind === "workspace-action" &&
+      !SERVE_COMMANDS.some((command) => command.name === entry.listing.name));
+    if (sessionCommands.length) text += `\n*Session Commands*\n`;
+    for (const { listing } of sessionCommands) text += `/${listing.name} — ${listing.description}\n`;
+    const prompts = discovered.filter((entry) => entry.prompt).map((entry) => entry.listing);
+    if (prompts.length > 0) {
       text += `\n*Agent Commands*\n`;
-      for (const cmd of PROMPT_COMMANDS) {
+      for (const cmd of prompts) {
         text += `/${cmd.name} — ${cmd.description}\n`;
       }
     }
 
     // Custom commands from .gg/commands/
-    const customCmds = await loadCustomCommands(projectPath);
+    const customCmds = discovered.filter((entry) => entry.custom).map((entry) => entry.listing);
     if (customCmds.length > 0) {
       text += `\n*Custom Commands*\n`;
       for (const cmd of customCmds) {
@@ -455,7 +468,8 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
     }
 
     const parts = text.trim().split(/\s+/);
-    const cmd = parts[0]!.slice(1).toLowerCase().replace(/@\w+$/, ""); // strip /cmd@botname
+    const commandToken = parts[0]!.replace(/@\w+$/, ""); // strip only /cmd@botname
+    const cmd = commandToken.slice(1).toLowerCase();
     const args = parts.slice(1).join(" ");
 
     // ── Telegram-specific commands ──
@@ -658,7 +672,8 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
       state.activeTools = new Map();
 
       try {
-        await state.session.prompt(text.trim());
+        // Preserve custom-command case and the original argument suffix verbatim.
+        await state.session.prompt(commandToken + text.slice(parts[0]!.length));
         await flushText(state);
       } catch (err) {
         if (isAbortError(err)) {

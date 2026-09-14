@@ -77,6 +77,8 @@ import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
+import { UI_SLASH_COMMANDS } from "./ui/submit-slash-commands.js";
+import { detectPromptCommand } from "./core/session-history.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
@@ -731,6 +733,7 @@ async function runInkTUI(opts: {
   const { tools, processManager, rebuildReadTool, lspManager, subAgentManager } = await createTools(
     cwd,
     {
+      commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
       agents,
       skills,
       provider,
@@ -1622,15 +1625,7 @@ function extractText(content: string | Array<{ type: string; text?: string }>): 
 }
 
 function restoredPromptCommandDisplayText(text: string): string | null {
-  for (const command of PROMPT_COMMANDS) {
-    if (text === command.prompt) return `/${command.name}`;
-    const prefix = `${command.prompt}\n\n## User Instructions\n\n`;
-    if (text.startsWith(prefix)) {
-      const args = text.slice(prefix.length).trim();
-      return args ? `/${command.name} ${args}` : `/${command.name}`;
-    }
-  }
-  return null;
+  return detectPromptCommand(text, PROMPT_COMMANDS);
 }
 
 export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {

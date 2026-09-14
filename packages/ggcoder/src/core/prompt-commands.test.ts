@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { getPromptCommand, PROMPT_COMMANDS } from "./prompt-commands.js";
 
 describe("prompt commands", () => {
+  it("accepts optional advisory focus without references or attachments", () => {
+    expect(getPromptCommand("programmatic")?.input).toEqual({
+      text: "optional", references: "none", attachments: "none",
+    });
+  });
   it("no longer defines the /goal command", () => {
     expect(PROMPT_COMMANDS.find((command) => command.name === "goal")).toBeUndefined();
     expect(PROMPT_COMMANDS.find((command) => command.aliases.includes("g"))).toBeUndefined();
@@ -232,7 +237,7 @@ describe("prompt commands", () => {
       aliases: [],
       description: "Inspect and propose programmatic setup",
     });
-    expect(scan?.input).toEqual({ text: "none", references: "none", attachments: "none" });
+    expect(scan?.input).toEqual({ text: "optional", references: "none", attachments: "none" });
     expect(programmaticCommands.map((command) => command.name)).toEqual([
       "setup-programmatic",
       "programmatic",

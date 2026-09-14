@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
+import { isProgrammaticExecutionResult } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   parseContextProfileEligibility,
   listCommands as listPrimaryCommands,
@@ -188,6 +189,7 @@ export interface AgentEventsDeps {
   setQueuedMessages: Dispatch<SetStateAction<QueuedMessage[]>>;
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
+  refreshCommands?: () => Promise<void>;
   setModels: Dispatch<SetStateAction<ModelOption[]>>;
   onAstraStateChange?: () => void;
   onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
@@ -250,6 +252,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setQueuedMessages,
     setAttachments,
     setCommands,
+    refreshCommands,
     setModels,
     onAstraStateChange,
     onRoadmapPhaseDraftChange,
@@ -1111,6 +1114,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // parked tool call is still waiting, so closing here would kill a
           // question the user can still answer and strand the agent until it
           // timed out ten minutes later.
+          // Evidence supplements the streamed summary; it never determines the generic outcome.
+          const result = d.programmaticResult;
+          if (isProgrammaticExecutionResult(result) && result.status !== "rejected" && result.evidence.items.length > 0) {
+            pushItem({ kind: "programmatic_execution_evidence", id: nextId(), items: result.evidence.items });
+          }
           const outcome = resolveRunEndOutcome(d);
           const runCancelled = outcome === "cancelled";
           const runFailed = outcome === "failed";
@@ -1172,10 +1180,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
-            void listCommands().then((cmds) => {
-              if (cmds.length > 0) setCommands(cmds);
-            });
           }
+          // Cancelled and failed runs can still have saved setup or edited commands.
+          void (refreshCommands ? refreshCommands() : listCommands().then((commands) => {
+            if (commands !== null) setCommands(commands);
+          })).catch(() => {});
           break;
         }
         case "context_profile_change": {
@@ -1607,6 +1616,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setQueuedMessages,
       setAttachments,
       setCommands,
+    refreshCommands,
       setModels,
       planDoneRef,
       planTotalRef,

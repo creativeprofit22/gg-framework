@@ -7,6 +7,7 @@ import {
   type TransformContextOptions,
 } from "@kenkaiiii/gg-agent";
 import { ProviderError } from "@kenkaiiii/gg-ai";
+import { WORKFLOW_BUSY_MESSAGE, workflowQueuePolicyError } from "../../core/workflow-busy-policy.js";
 import type {
   Message,
   Provider,
@@ -206,6 +207,7 @@ export interface StreamSnapshot {
 
 export interface UseAgentLoopReturn {
   run: (userContent: UserContent) => Promise<void>;
+  isBusy: () => boolean;
   abort: () => void;
   reset: () => void;
   /** Queue a message to be processed after the current run completes.
@@ -341,6 +343,9 @@ export function useAgentLoop(
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
+  // React state can lag submissions and turns idle before teardown/queue draining ends.
+  const runOwnedRef = useRef(false);
+  const isBusy = useCallback(() => runOwnedRef.current, []);
   const queueRef = useRef<{ content: UserContent; text: string }[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const activeToolCallsRef = useRef<ActiveToolCall[]>([]);
@@ -454,6 +459,9 @@ export function useAgentLoop(
   }, []);
 
   const queueMessage = useCallback((content: UserContent, text?: string) => {
+    const error = workflowQueuePolicyError(text ?? textFromUserContent(content)) ??
+      workflowQueuePolicyError(textFromUserContent(content));
+    if (error) throw new Error(error);
     queueRef.current.push({ content, text: text ?? textFromUserContent(content) });
     setQueuedCount(queueRef.current.length);
   }, []);
@@ -476,6 +484,8 @@ export function useAgentLoop(
 
   const run = useCallback(
     async (userContent: UserContent) => {
+      if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
+      runOwnedRef.current = true;
       /** Run a single user message through the agent loop. Returns true if aborted. */
       const runSingle = async (
         content: UserContent,
@@ -1262,51 +1272,55 @@ export function useAgentLoop(
         return wasAborted;
       }; // end runSingle
 
-      // Run the initial message.
-      // On 401, force-refresh the OAuth token and retry once — the provider may
-      // have revoked the token server-side before the stored expiry.
       try {
-        await runSingle(userContent);
-      } catch (err) {
-        if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
-          // Pop the user message we pushed — runSingle will re-push it
-          messages.current.pop();
-          await runSingle(userContent, {
-            forceRefresh: true,
-            // Name the token the provider rejected so the refresh can adopt a
-            // sibling process's newer token instead of minting one that would
-            // in turn revoke theirs.
-            ...(lastResolvedApiKey.current !== undefined
-              ? { rejectedToken: lastResolvedApiKey.current }
-              : {}),
-          });
-        } else {
-          throw err;
+        // Run the initial message.
+        // On 401, force-refresh the OAuth token and retry once — the provider may
+        // have revoked the token server-side before the stored expiry.
+        try {
+          await runSingle(userContent);
+        } catch (err) {
+          if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
+            // Pop the user message we pushed — runSingle will re-push it
+            messages.current.pop();
+            await runSingle(userContent, {
+              forceRefresh: true,
+              // Name the token the provider rejected so the refresh can adopt a
+              // sibling process's newer token instead of minting one that would
+              // in turn revoke theirs.
+              ...(lastResolvedApiKey.current !== undefined
+                ? { rejectedToken: lastResolvedApiKey.current }
+                : {}),
+            });
+          } else {
+            throw err;
+          }
         }
-      }
 
-      // Drain the queue: process follow-up messages that arrived after agent_done.
-      // Most queued messages are consumed mid-run via getSteeringMessages, but
-      // messages that arrive after the agent finishes (no more tool calls to
-      // trigger steering) land here. Batch all remaining into a single run.
-      //
-      // This drains even when the run was aborted. After an interrupt, the
-      // teardown (process kills, stream finish, finally block, React commit of
-      // isRunning=false) is async — during that window a reprompt sees
-      // isRunning still true and gets queued instead of run. Pre-abort queued
-      // messages were already restored to the composer by handleAbort's
-      // drainQueuedText (and reset()/abort paths clear the queue), so anything
-      // left here arrived *after* the abort and is a fresh user intent. Without
-      // this it would be orphaned in the queue forever with no loop to pick it
-      // up.
-      if (queueRef.current.length > 0) {
-        const batch = queueRef.current.splice(0);
-        setQueuedCount(0);
-        const merged = mergeUserContent(batch.map((q) => q.content));
-        // Let React process the onDone state updates before starting next run
-        await new Promise((r) => setTimeout(r, 100));
-        onQueuedStart?.(merged);
-        await runSingle(merged);
+        // Drain the queue: process follow-up messages that arrived after agent_done.
+        // Most queued messages are consumed mid-run via getSteeringMessages, but
+        // messages that arrive after the agent finishes (no more tool calls to
+        // trigger steering) land here. Batch all remaining into a single run.
+        //
+        // This drains even when the run was aborted. After an interrupt, the
+        // teardown (process kills, stream finish, finally block, React commit of
+        // isRunning=false) is async — during that window a reprompt sees
+        // isRunning still true and gets queued instead of run. Pre-abort queued
+        // messages were already restored to the composer by handleAbort's
+        // drainQueuedText (and reset()/abort paths clear the queue), so anything
+        // left here arrived *after* the abort and is a fresh user intent. Without
+        // this it would be orphaned in the queue forever with no loop to pick it
+        // up.
+        if (queueRef.current.length > 0) {
+          const batch = queueRef.current.splice(0);
+          setQueuedCount(0);
+          const merged = mergeUserContent(batch.map((q) => q.content));
+          // Let React process the onDone state updates before starting next run
+          await new Promise((r) => setTimeout(r, 100));
+          onQueuedStart?.(merged);
+          await runSingle(merged);
+        }
+      } finally {
+        runOwnedRef.current = false;
       }
     },
     [
@@ -1342,6 +1356,7 @@ export function useAgentLoop(
 
   return {
     run,
+    isBusy,
     abort,
     reset,
     queueMessage,

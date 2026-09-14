@@ -1,4 +1,5 @@
 // @kenkaiiii/gg-core — provider-agnostic, UI-free shared foundation.
+export * from "./referenced-files.js";
 export * from "./model-registry.js";
 export * from "./thinking-level.js";
 export * from "./local-models.js";

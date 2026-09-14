@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/referenced-files.ts",
     "src/desktop-session-ux.ts",
     "src/model-registry.ts",
     "src/paths.ts",

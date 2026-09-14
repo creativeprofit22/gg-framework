@@ -15,6 +15,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./referenced-files": {
+      "types": "./dist/referenced-files.d.ts",
+      "import": "./dist/referenced-files.js",
+      "require": "./dist/referenced-files.cjs"
+    },
     "./desktop-session-ux": {
       "types": "./dist/desktop-session-ux.d.ts",
       "import": "./dist/desktop-session-ux.js",

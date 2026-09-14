@@ -53,6 +53,10 @@ jobs:
         shell: bash
         run: pnpm --filter @kenkaiiii/ggcoder lint:programmatic
 
+      - name: Lint command discovery and desktop refresh
+        shell: bash
+        run: pnpm lint:command-discovery
+
       # `shell: bash` on EVERY multi-line step is load-bearing, not cosmetic.
       # On Windows the default shell is PowerShell, which does not abort a
       # multi-line script when an intermediate command exits non-zero — only the
@@ -260,6 +264,7 @@ jobs:
             ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/failure.json
             ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/cleanup.json
             ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/developer.log
+            ${{ runner.temp }}/programmatic-execution-dev-smoke/gg-programmatic-execution-*/audit/native-minimized.json
           if-no-files-found: error
           retention-days: 7
 

@@ -78,6 +78,41 @@ test("ggcoder programmatic lint remains a non-mutating CI gate", () => {
   assert.doesNotMatch(lintStep, /--fix/);
 });
 
+test("command discovery and desktop refresh lint is a mandatory non-mutating CI gate", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const lintCommand = packageJson.scripts["lint:command-discovery"];
+  assert.equal(lintCommand, [
+    "eslint",
+    "packages/ggcoder/src/core/command-discovery.ts",
+    "packages/ggcoder/src/tools/command-information.ts",
+    "packages/gg-core/src/referenced-files.ts",
+    "gg-app/src/ReferencedFiles.tsx",
+    "gg-app/src/AgentPane.tsx",
+    "gg-app/src/agent.ts",
+    "gg-app/src/useAgentEvents.ts",
+  ].join(" "));
+  assert.doesNotMatch(lintCommand, /--fix|--max-warnings/);
+
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const testJob = workflow.split("\n  test:")[1].split("\n  app:")[0];
+  const lintStep = testJob.match(
+    /      - name: Lint command discovery and desktop refresh\r?\n[\s\S]*?(?=\r?\n      - name:)/,
+  )?.[0];
+  assert.ok(lintStep);
+  assert.match(lintStep, /^        shell: bash\r?$/m);
+  assert.match(lintStep, /^        run: pnpm lint:command-discovery\r?$/m);
+  assert.doesNotMatch(lintStep, /--fix|--max-warnings|continue-on-error|\|\|/);
+  assert.doesNotMatch(lintStep, /^\s*if:/m);
+  assert.doesNotMatch(testJob, /^\s*continue-on-error:/m);
+  assert.doesNotMatch(testJob, /^    if:/m);
+  const aggregate = workflow.split("\n  release-gate:")[1];
+  assert.match(aggregate, /needs: \[test, app\]/);
+  assert.match(aggregate, /if: always\(\)/);
+  assert.ok(aggregate.includes('[[ "$TEST_RESULT" == "success" ]]'));
+});
+
 test("roadmap reliability native smoke remains an isolated Windows app gate", () => {
   const packageJson = JSON.parse(
     readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),
@@ -113,7 +148,7 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
   assert.match(smoke, /mkdir -p "\$TEMP"/);
   assert.match(smoke, /node gg-app\/scripts\/programmatic-execution-dev-smoke\.mjs --identity com\.ggcoder\.local-fork 2>&1 \| tee "\$TEMP\/console\.log"/);
   assert.doesNotMatch(appJob, /continue-on-error/);
-  assert.doesNotMatch(smoke, /\|\| true|--visual|--preflight/);
+  assert.doesNotMatch(smoke, /\|\| true|--visual|--preflight|--reuse-built-dev|--allow-normal-window/);
   for (const variable of ["TEMP", "TMP"]) {
     assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/programmatic-execution-dev-smoke`));
   }
@@ -146,13 +181,33 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
   const root = "${{ runner.temp }}/programmatic-execution-dev-smoke";
   assert.deepEqual(evidencePaths, [
     `${root}/console.log`,
-    ...["result.json", "failure.json", "cleanup.json", "developer.log"].map((name) => `${root}/gg-programmatic-execution-*/audit/${name}`),
+    ...["result.json", "failure.json", "cleanup.json", "developer.log", "native-minimized.json"].map((name) => `${root}/gg-programmatic-execution-*/audit/${name}`),
   ]);
   const fixture = readFileSync(new URL("../gg-app/scripts/programmatic-execution-dev-smoke.mjs", import.meta.url), "utf8");
   assert.match(fixture, /mkdtempSync\(join\(tmpdir\(\), "gg-programmatic-execution-"\)\)/);
-  assert.match(fixture, /json\(join\(paths.audit, "failure.json"\), \{ error: error.message \}\);\s*if \(client\)/);
-  assert.match(fixture, /GG_APP_DEV_SMOKE_WINDOW: "minimized"/);
-  assert.equal(fixture.split("const native = spawn(").length - 1, 1);
+  const lifecycle = readFileSync(new URL("../gg-app/scripts/programmatic-smoke-lifecycle.mjs", import.meta.url), "utf8");
+  assert.match(fixture, /const result = await runSmokeLifecycle\(\{\s*audit,\s*workflow,/);
+  assert.match(fixture, /beforeCleanup: async \(\) => \{ await observeMinimized\?\.\("before-cleanup"\); \}/);
+  assert.match(fixture, /if \(!visual\) validateNativeSmokeEvidence\(paths.audit, result, \{ driftOnly, integratedRecovery, allowNormalWindow \}\)/);
+  assert.match(lifecycle, /writeFileSync\(join\(audit, "failure.json"\)/);
+  assert.match(fixture, /const visual = process\.argv\.includes\("--visual"\)/);
+  assert.match(fixture, /GG_APP_DEV_SMOKE_WINDOW: visual \? "visible" : "minimized"/);
+  assert.match(fixture, /assert\.deepEqual\(process\.argv\.slice\(2\),/);
+  assert.match(fixture, /if \(reuseBuiltDev\) \{\s*assert\.match\(process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/);
+  assert.match(fixture, /assert\.equal\(createHash\("sha256"\)\.update\(readFileSync\(builtDev\)\)\.digest\("hex"\), process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/);
+  assert.match(fixture, /const native = reuseBuiltDev\s*\? spawn\(builtDev, \[\],[^\n]+\s*: spawn\(process\.env\.ComSpec \?\? "cmd.exe", \["\/d", "\/s", "\/c", nativeCommand\]/);
+  assert.match(fixture, /const nativeCommand = `pnpm exec tauri dev --config/);
+  assert.match(fixture, /const sample = \{ boundary, timestamp:/);
+  assert.match(lifecycle, /const expectedLabels = \["native-ready", "approved-scanned-selected"/);
+  assert.match(lifecycle, /observations\.samples\.map\(\(sample\) => sample\.boundary\), expectedLabels/);
+  assert.match(fixture, /!integratedRecovery \|\| \(!driftOnly && !visual\)/);
+  assert.match(fixture, /assert\.equal\(parentState\.provider, "azure"\)/);
+  assert.match(fixture, /assert\.equal\(parentState\.model, "azure:fixture"\)/);
+  for (const field of ["provider", "model", "sessionId", "messageCount"]) {
+    assert.ok(fixture.includes(`assert.equal(finalParent.${field}, parentState.${field})`));
+    assert.ok(fixture.includes(`${field}: parentState.${field}`));
+    assert.ok(fixture.includes(`${field}: finalParent.${field}`));
+  }
   const vite = readFileSync(new URL("../gg-app/vite.config.ts", import.meta.url), "utf8");
   assert.match(vite, /port: 1420,\s*strictPort: true/);
 });

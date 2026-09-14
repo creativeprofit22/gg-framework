@@ -1,8 +1,8 @@
-import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isProgrammaticChatResponse } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import type {
   DiscoveredOpportunityV1,
@@ -15,6 +15,7 @@ import {
   programmaticLifecycleStateV1Schema,
 } from "./contracts.js";
 import {
+  PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT,
   PROGRAMMATIC_PREVIOUS_STATE_PATH,
   PROGRAMMATIC_STATE_PATH,
   reconcileProgrammaticLifecycle,
@@ -105,6 +106,161 @@ async function persistedState(root: string): Promise<ProgrammaticLifecycleStateV
   );
 }
 
+describe("lifecycle byte limits", () => {
+  // Synthetic metadata exercises the boundary without allocating large fixtures.
+  const byteLimit = PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT;
+
+  it.each([byteLimit + 1, 2 ** 40, Number.POSITIVE_INFINITY, Number.NaN, -1])(
+    "does not read a primary with invalid size %s and preserves owned recovery",
+    async (size) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const state = await persistedState(root);
+      const record = state.records[0]!;
+      record.lifecycle.state = "running";
+      record.lifecycle.runId = randomUUID();
+      const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+      const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+      const bytes = Buffer.from(JSON.stringify(state));
+      await writeFile(primaryPath, bytes);
+      await writeFile(previousPath, bytes);
+      const read = vi.fn((filePath: string) => readFile(filePath));
+      const options = { operations: {
+        lstat: async (filePath: string) => {
+          const stat = await lstat(filePath);
+          if (path.basename(filePath) === "state.json") stat.size = size;
+          return stat;
+        },
+        readFile: read,
+      } };
+      expect(await readProgrammaticChatReport(root, 0, options)).toMatchObject({
+        status: "recovered", scan: { available: false },
+      });
+      const detail = await readProgrammaticChatDetail(root, record.opportunity.identity.id, options);
+      expect(detail.detail?.summary.state).toBe("running");
+      expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.json")).toBe(false);
+      expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json")).toBe(true);
+      expect(await readFile(primaryPath)).toEqual(bytes);
+      expect(await readFile(previousPath)).toEqual(bytes);
+      expect((await persistedState(root)).records[0]!.lifecycle).toEqual(record.lifecycle);
+    },
+  );
+
+  it("does not read an oversized previous snapshot when the primary is invalid", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const previous = await readFile(primaryPath);
+    await writeFile(primaryPath, "invalid primary");
+    await writeFile(previousPath, previous);
+    const read = vi.fn((filePath: string) => readFile(filePath));
+    await expect(readProgrammaticChatReport(root, 0, { operations: {
+      lstat: async (filePath) => {
+        const stat = await lstat(filePath);
+        if (path.basename(filePath) === "state.previous.json") stat.size = byteLimit + 1;
+        return stat;
+      },
+      readFile: read,
+    } })).rejects.toThrow(/recovery is required/);
+    expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json")).toBe(false);
+    expect(await readFile(primaryPath, "utf8")).toBe("invalid primary");
+    expect(await readFile(previousPath)).toEqual(previous);
+  });
+
+  it("accepts metadata exactly at the byte ceiling", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    expect(await readProgrammaticChatReport(root, 0, { operations: {
+      lstat: async (filePath) => {
+        const stat = await lstat(filePath);
+        if (path.basename(filePath) === "state.json") stat.size = byteLimit;
+        return stat;
+      },
+    } })).toMatchObject({ status: "current" });
+  });
+
+  it("refuses oversized serialized output before any state-file mutation", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const bytes = await readFile(primaryPath);
+    await writeFile(previousPath, bytes);
+    await writeFile(path.join(root, "src-tauri/tauri.conf.json"), '{"productName":"Changed"}');
+    await approveProfile(root);
+    const measure = Buffer.byteLength;
+    const size = vi.spyOn(Buffer, "byteLength").mockImplementation((value, encoding) =>
+      typeof value === "string" && value.includes('"records":')
+        ? byteLimit + 1 : measure(value, encoding));
+    const write = vi.fn(async () => { throw new Error("Unexpected write"); });
+    const remove = vi.fn((filePath: string, options: { force: true }) => rm(filePath, options));
+    try {
+      expect(await runProgrammaticScan(root, { operations: { writeFile: write, rm: remove } }))
+        .toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+      expect(write).not.toHaveBeenCalled();
+      // The scan cleans stale managed siblings before reading; replacement must
+      // reject overflow before performing any additional temporary mutation.
+      expect(remove.mock.calls.map(([filePath]) => path.basename(filePath)))
+        .toEqual([".state.tmp", ".state.previous.tmp"]);
+      expect(size.mock.calls.some(([value]) =>
+        typeof value === "string" && value.includes('"records":'))).toBe(true);
+    } finally {
+      size.mockRestore();
+    }
+    expect(await readFile(primaryPath)).toEqual(bytes);
+    expect(await readFile(previousPath)).toEqual(bytes);
+  });
+
+  it.each(["metadata", "buffer"] as const)("rejects oversized temporary %s before commit", async (source) => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const bytes = await readFile(primaryPath);
+    await writeFile(previousPath, bytes);
+    await writeFile(path.join(root, "src-tauri/tauri.conf.json"), '{"productName":"Changed"}');
+    await approveProfile(root);
+    const raw = Buffer.from(bytes);
+    Object.defineProperty(raw, "length", { value: byteLimit + 1 });
+    const decode = vi.spyOn(raw, "toString");
+    const read = vi.fn(async (filePath: string) =>
+      filePath.endsWith(".tmp") ? raw : readFile(filePath));
+    expect(await runProgrammaticScan(root, { operations: {
+      lstat: async (filePath) => {
+        const stat = await lstat(filePath);
+        if (source === "metadata" && filePath.endsWith(".tmp")) stat.size = byteLimit + 1;
+        return stat;
+      },
+      readFile: read,
+    } })).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+    if (source === "metadata") {
+      expect(read.mock.calls.some(([filePath]) => filePath.endsWith(".tmp"))).toBe(false);
+    }
+    expect(decode).not.toHaveBeenCalled();
+    expect(await readFile(primaryPath)).toEqual(bytes);
+    expect(await readFile(previousPath)).toEqual(bytes);
+  });
+
+  it("rejects an oversized returned buffer before decoding despite understated metadata", async () => {
+    const root = await createRepository();
+    await runProgrammaticScan(root);
+    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const bytes = await readFile(primaryPath);
+    await writeFile(previousPath, bytes);
+    const raw = Buffer.from(bytes);
+    Object.defineProperty(raw, "length", { value: byteLimit + 1 });
+    const decode = vi.spyOn(raw, "toString");
+    expect(await readProgrammaticChatReport(root, 0, { operations: {
+      readFile: async (filePath) => path.basename(filePath) === "state.json" ? raw : readFile(filePath),
+    } })).toMatchObject({ status: "recovered" });
+    expect(decode).not.toHaveBeenCalled();
+    expect(await readFile(primaryPath)).toEqual(bytes);
+    expect(await readFile(previousPath)).toEqual(bytes);
+  });
+});
+
 describe("configuration drift reconciliation", () => {
   it.each(["completed", "dismissed"] as const)("preserves %s identity/history through refresh and failed scan retry", async (terminal) => {
     const root = await createRepository();
@@ -181,7 +337,7 @@ describe("configuration drift reconciliation", () => {
 });
 
 describe("chat report and dismissal", () => {
-  it("refuses a rescan while a stored opportunity is owned without changing its snapshot", async () => {
+  it("refuses fresh-owner rescan and inspection repair while a stored opportunity remains owned", async () => {
     const root = await createRepository();
     await runProgrammaticScan(root);
     const state = await persistedState(root);
@@ -189,7 +345,13 @@ describe("chat report and dismissal", () => {
     await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, { from: "discovered", to: "queued" });
     await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, { from: "queued", to: "running", runId: randomUUID() });
     const bytes = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
-    expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, changed: false });
+    vi.resetModules();
+    const fresh = await import("./lifecycle.js");
+    expect(fresh.readProgrammaticChatReport).not.toBe(readProgrammaticChatReport);
+    expect((await fresh.readProgrammaticChatReport(root)).scan.available).toBe(false);
+    expect((await fresh.readProgrammaticChatDetail(root, id)).detail?.summary.state).toBe("running");
+    expect(await fresh.runProgrammaticScan(root)).toMatchObject({ ok: false, changed: false });
+    await expect(fresh.accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint)).rejects.toThrow("running");
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(bytes);
   });
   it.each([1, 50])("blocks conflicting actions with an owner at index %i and restores them after settlement", async (ownerIndex) => {

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
+import * as opportunities from "./opportunities.js";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
@@ -21,7 +23,7 @@ import { discoverTauriPackages } from "../tauri-package/discover.js";
 import { detectHostTarget } from "../tauri-package/paths.js";
 import { createAskUserBridge, type AskUserRequest, type AskUserResult } from "../ask-user.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./profile.js";
-import { runProgrammaticScan, PROGRAMMATIC_STATE_PATH } from "./lifecycle.js";
+import { runProgrammaticScan, readProgrammaticChatReport, readProgrammaticChatDetail, PROGRAMMATIC_STATE_PATH, PROGRAMMATIC_PREVIOUS_STATE_PATH } from "./lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "./contracts.js";
 import { executeProgrammaticOpportunity, createResearchCorpusTool, RESEARCH_TOOLS, EXECUTION_DEADLINE_MS, type ProgrammaticExecutionOptions } from "./execution.js";
 
@@ -150,6 +152,96 @@ afterEach(async () => {
 });
 
 describe("real transient specialist execution (mocked provider HTTP only)", () => {
+  it("connects clean discovery and separate approvals through execution, drift refresh and fresh-owner recovery", async () => {
+    const parentRoot = root;
+    root = path.join(parentRoot, "clean-workflow");
+    await fs.mkdir(path.join(root, "src-tauri"), { recursive: true });
+    for (const file of [".gitignore", "AGENTS.md", "package.json", "src-tauri/Cargo.toml", "src-tauri/tauri.conf.json"]) {
+      await fs.copyFile(path.join(parentRoot, file), path.join(root, file));
+    }
+    // Only the detector route is substituted; discovery, approvals, storage and dispatch are real.
+    const discover = opportunities.discoverProgrammaticOpportunities;
+    const researchDiscovery: typeof discover = (inventory) => {
+      const result = discover(inventory);
+      return { ...result, opportunities: result.opportunities.map((item) => ({ ...item, route: { status: "routable", specialistCommand: "research" } })) };
+    };
+    vi.spyOn(opportunities, "discoverProgrammaticOpportunities").mockImplementation(researchDiscovery);
+    const profilePath = path.join(root, ".gg/programmatic/profile.json");
+    const statePath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+    try {
+      const initialFiles = await fs.readdir(root, { recursive: true });
+      const initial = await buildProgrammaticProfileProposal(root);
+      expect(initial.operation).toBe("initial");
+      expect(initial.profile.scanners).toHaveLength(1);
+      expect(await fs.readdir(root, { recursive: true })).toEqual(initialFiles);
+      expect(requests).toHaveLength(0);
+      expect((await persistProgrammaticProfile(root, initial.configurationFingerprint, initial.profile, { expectedPriorProfileDigest: initial.expectedPriorProfileDigest })).ok).toBe(true);
+      await expect(fs.stat(statePath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await runProgrammaticScan(root)).ok).toBe(true);
+      const discovered = await state();
+      expect(discovered.records).toHaveLength(1);
+      selected = discovered.records[0]!.opportunity.identity.id;
+      sha256 = discovered.configurationFingerprint.sha256;
+      condition = discovered.records[0]!.opportunity.verification;
+      const selectedBytes = await fs.readFile(statePath);
+      expect((await readProgrammaticChatDetail(root, selected)).detail?.summary.state).toBe("discovered");
+      expect(await fs.readFile(statePath)).toEqual(selectedBytes);
+      const ask = vi.fn(async (request: AskUserRequest) => { expect(requests).toHaveLength(0); return answer(request); });
+      await executeThroughApp(options({ ask }), "succeeded");
+      expect(ask).toHaveBeenCalledTimes(1);
+      const completed = (await state()).records[0]!;
+      expect(completed.lifecycle.state).toBe("completed");
+      expect(requests).toHaveLength(3);
+      expect((await runProgrammaticScan(root)).ok).toBe(true);
+      const settledBytes = await fs.readFile(statePath);
+      expect((await runProgrammaticScan(root)).ok).toBe(true);
+      expect(await fs.readFile(statePath)).toEqual(settledBytes);
+      const profileBytes = await fs.readFile(profilePath);
+      await json(path.join(root, "package.json"), { name: "approved-refresh-fixture" });
+      expect((await readProgrammaticChatReport(root)).status).toBe("stale");
+      expect((await runProgrammaticScan(root)).ok).toBe(false);
+      const refresh = await buildProgrammaticProfileProposal(root);
+      expect(refresh.operation).toBe("refresh");
+      expect(refresh.drift?.files).toEqual([expect.objectContaining({ path: "package.json", kind: "modified" })]);
+      expect(await fs.readFile(profilePath)).toEqual(profileBytes);
+      expect(await fs.readFile(statePath)).toEqual(settledBytes);
+      expect((await persistProgrammaticProfile(root, refresh.configurationFingerprint, refresh.profile, { expectedPriorProfileDigest: refresh.expectedPriorProfileDigest })).ok).toBe(true);
+      expect(await fs.readFile(statePath)).toEqual(settledBytes);
+      expect((await runProgrammaticScan(root)).ok).toBe(true);
+      const reconciled = await state();
+      expect(reconciled.configurationFingerprint.sha256).not.toBe(sha256);
+      expect(reconciled.records[0]!.opportunity.identity.id).toBe(selected);
+      expect(reconciled.records[0]!.lifecycle).toEqual(completed.lifecycle);
+
+      // Explicit controlled previous snapshot: only this isolated fixture is corrupted.
+      const valid = await fs.readFile(statePath);
+      programmaticLifecycleStateV1Schema.parse(JSON.parse(valid.toString()));
+      await fs.writeFile(previousPath, valid);
+      await fs.writeFile(statePath, "{interrupted fixture primary");
+      const corruptHash = hash(await fs.readFile(statePath));
+      const previousHash = hash(await fs.readFile(previousPath));
+      vi.resetModules();
+      const fresh = await import("./lifecycle.js");
+      expect(fresh.readProgrammaticChatReport).not.toBe(readProgrammaticChatReport);
+      const recovered = await fresh.readProgrammaticChatReport(root);
+      expect(recovered.status).toBe("recovered");
+      expect((await fresh.readProgrammaticChatDetail(root, selected)).detail?.summary.state).toBe("completed");
+      expect(hash(await fs.readFile(statePath))).toBe(corruptHash);
+      expect(hash(await fs.readFile(previousPath))).toBe(previousHash);
+      // Reconciliation uses the same explicit detector substitution in the new module owner.
+      const freshDetector = await import("./opportunities.js");
+      vi.spyOn(freshDetector, "discoverProgrammaticOpportunities").mockImplementation(researchDiscovery);
+      expect((await fresh.runProgrammaticScan(root)).ok).toBe(true);
+      expect((await state()).records[0]!.lifecycle).toEqual(completed.lifecycle);
+      expect((await state()).records[0]!.opportunity.identity.id).toBe(selected);
+      expect(hash(await fs.readFile(previousPath))).toBe(previousHash);
+      expect(requests).toHaveLength(3);
+      expect((await fs.readdir(home, { recursive: true })).filter((file) => file.endsWith(".jsonl"))).toEqual([]);
+    } finally { root = parentRoot; }
+  }, 20_000);
+
   it("rejects an idle planning parent without a checkpoint before any execution side effects", async () => {
     const parent = new AgentSession({ provider: "azure", model: "azure:fixture", baseUrl: providerUrl, cwd: root, transient: true, allowedTools: [], mcpEnabled: false, loadExtensions: false, projectCustomization: false });
     await parent.initialize();

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
+import { isProgrammaticExecutionResult } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
@@ -69,6 +70,7 @@ describe("explicit single-opportunity app command", () => {
       const { generation } = lifecycle.begin(() => {});
       const settlement = settleProgrammaticRun(await run())!;
       expect(settlement.succeeded).toBe(status === "succeeded");
+      expect(isProgrammaticExecutionResult(settlement.event.programmaticResult)).toBe(true);
       lifecycle.settle(generation, settlement.journalOutcome);
       broadcast("run_end", { ...settlement.event, ...createRunEndPayload(settlement.journalOutcome, lifecycle.state) });
     });

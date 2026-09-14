@@ -45,6 +45,10 @@ import {
 
 export const PROGRAMMATIC_STATE_PATH = ".gg/programmatic/state.json";
 export const PROGRAMMATIC_PREVIOUS_STATE_PATH = ".gg/programmatic/state.previous.json";
+// Aggregate budget, separate from per-field schema maxima: ~16 KiB per record
+// at the 1,000-record cap, matching the profile reader's 16 MiB budget. Richer
+// records share this budget; overflow fails closed rather than truncating history.
+export const PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT = 16 * 1024 * 1024;
 const STATE_TEMPORARY_PATH = ".gg/programmatic/.state.tmp";
 const PREVIOUS_STATE_TEMPORARY_PATH = ".gg/programmatic/.state.previous.tmp";
 
@@ -228,8 +232,13 @@ async function readStateCandidate(
 ): Promise<StateCandidate> {
   try {
     const stat = await operations.lstat(absolutePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { status: "invalid" };
+    if (
+      stat.isSymbolicLink() || !stat.isFile() ||
+      !Number.isFinite(stat.size) || stat.size < 0 ||
+      stat.size > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT
+    ) return { status: "invalid" };
     const raw = await operations.readFile(absolutePath);
+    if (raw.length > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) return { status: "invalid" };
     const state = programmaticLifecycleStateV1Schema.parse(
       JSON.parse(raw.toString("utf8")) as unknown,
     );
@@ -258,13 +267,26 @@ async function replaceStateFile(
   const destination = containedPath(root, repositoryPath);
   const temporary = containedPath(root, temporaryRepositoryPath);
   const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
-  const bytes = Buffer.from(canonicalJson(state), "utf8");
+  const serialized = canonicalJson(state);
+  if (Buffer.byteLength(serialized, "utf8") > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) {
+    throw new Error("Lifecycle state exceeds the byte limit");
+  }
+  const bytes = Buffer.from(serialized, "utf8");
   await operations.rm(temporary, { force: true });
   let committed = false;
   const failures: unknown[] = [];
   try {
     await operations.writeFile(temporary, bytes, { flag: "wx" });
+    const temporaryStat = await operations.lstat(temporary);
+    if (
+      temporaryStat.isSymbolicLink() || !temporaryStat.isFile() ||
+      !Number.isFinite(temporaryStat.size) || temporaryStat.size < 0 ||
+      temporaryStat.size > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT
+    ) throw new Error("Temporary lifecycle state validation failed");
     const temporaryBytes = await operations.readFile(temporary);
+    if (temporaryBytes.length > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) {
+      throw new Error("Temporary lifecycle state exceeds the byte limit");
+    }
     const validated = programmaticLifecycleStateV1Schema.parse(
       JSON.parse(temporaryBytes.toString("utf8")) as unknown,
     );

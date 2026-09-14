@@ -124,7 +124,11 @@ Plus built-in workflows that ship with the binary:
 /setup-commit  # Generate a /commit command with quality checks
 /setup-tauri-package  # Generate a safe project-scoped Tauri packaging harness
 /setup-skills  # Audit and recommend reusable skills
+/setup-programmatic  # Inspect repeatable-work setup; saving needs separate approval
+/programmatic  # Scan the approved profile without starting a specialist
 ```
+
+See the [programmatic workflow guide](../../docs/programmatic-workflow.md) for code-mode scope, command ownership, separate task approval, configuration refresh and recovery limits.
 
 ---
 

@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type SharpNamespace from "sharp";
+import type sharp from "sharp";
+import type { FormatEnum } from "sharp";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,7 +20,7 @@ const execFileAsync = promisify(execFile);
  * Cached after first call so repeated image operations don't re-hit the
  * dynamic import resolver.
  */
-type SharpFn = typeof SharpNamespace;
+type SharpFn = typeof sharp;
 let sharpFn: SharpFn | null = null;
 async function loadSharp(): Promise<SharpFn> {
   if (sharpFn) return sharpFn;
@@ -34,11 +35,82 @@ async function loadSharp(): Promise<SharpFn> {
 
 /** Anthropic's maximum image size in bytes (5 MB). */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Bound ffmpeg image fallback output before Sharp applies final provider limits. */
+const FFMPEG_IMAGE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+/** Prevent malformed inputs from holding an ffmpeg child process indefinitely. */
+const FFMPEG_IMAGE_TIMEOUT_MS = 15_000;
 /** Max width (px) for inline terminal-graphics previews so scrollback stays small. */
 const PREVIEW_MAX_WIDTH = 480;
-/** Anthropic's hard per-dimension cap for many-image requests. Exceeding this
- *  in either dimension causes a 400 even if the byte size is fine. */
-const MAX_IMAGE_DIMENSION = 2000;
+/**
+ * Visual token budget — vision encoders tile an image into fixed-size patches
+ * and charge per patch, so pixels beyond the budget are re-scaled away by the
+ * provider *after* we paid to upload them. Bounding here instead means fewer
+ * bytes on the wire and fewer image tokens billed, with no loss of detail the
+ * model would have seen anyway.
+ *
+ * `VISUAL_PATCH_PX` is the encoder's patch edge; `VISUAL_MAX_PATCHES` the patch
+ * budget; `VISUAL_MAX_EDGE` the hard per-side cap (a 3000x400 panorama is well
+ * inside the patch budget but still gets downscaled on the long edge).
+ */
+const VISUAL_PATCH_PX = 28;
+const VISUAL_MAX_PATCHES = 1568;
+const VISUAL_MAX_EDGE = 1568;
+
+/**
+ * Does a `width x height` image fit the visual token budget — both per-side
+ * cap and total patch count?
+ *
+ * Patch count is measured as continuous area (`w*h / patch^2`) rather than
+ * `ceil(w/patch) * ceil(h/patch)`: the encoder resizes to a patch-aligned grid
+ * before tiling, so area is what actually determines the token cost.
+ */
+export function fitsVisualBudget(width: number, height: number): boolean {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
+  if (width <= 0 || height <= 0) return true;
+  if (width > VISUAL_MAX_EDGE || height > VISUAL_MAX_EDGE) return false;
+  return (width * height) / (VISUAL_PATCH_PX * VISUAL_PATCH_PX) <= VISUAL_MAX_PATCHES;
+}
+
+/**
+ * Largest aspect-preserving size that still satisfies {@link fitsVisualBudget}.
+ * Returns the input untouched when it already fits (so ordinary screenshots are
+ * never re-encoded).
+ *
+ * Binary-searches the long edge because the short edge is rounded to whole
+ * pixels — the closed-form area scale can overshoot the budget by a patch or
+ * two once that rounding is applied.
+ */
+export function boundedSize(width: number, height: number): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+    return { width, height };
+  }
+  if (fitsVisualBudget(width, height)) return { width, height };
+
+  const landscape = width >= height;
+  const longEdge = landscape ? width : height;
+  const shortEdge = landscape ? height : width;
+  const ratio = shortEdge / longEdge;
+  const project = (edge: number): { width: number; height: number } => {
+    const long = Math.max(1, Math.round(edge));
+    const short = Math.max(1, Math.round(long * ratio));
+    return landscape ? { width: long, height: short } : { width: short, height: long };
+  };
+
+  let lo = 1;
+  let hi = Math.floor(Math.min(longEdge, VISUAL_MAX_EDGE));
+  let best = project(1);
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = project(mid);
+    if (fitsVisualBudget(candidate.width, candidate.height)) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
 
 export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 export const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".avi", ".mkv"]);
@@ -360,12 +432,68 @@ export async function validateVisionImage(buffer: Buffer): Promise<string | null
   }
 }
 
+function conciseProcessError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+async function transcodeImageToPngWithFfmpeg(buffer: Buffer): Promise<Buffer> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ggcoder-image-transcode-"));
+  const inputPath = path.join(tempDir, "input-image");
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+    const { stdout } = await execFileAsync(
+      "ffmpeg",
+      [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-c:v",
+        "png",
+        "pipe:1",
+      ],
+      {
+        encoding: "buffer",
+        maxBuffer: FFMPEG_IMAGE_MAX_OUTPUT_BYTES,
+        timeout: FFMPEG_IMAGE_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+    if (!Buffer.isBuffer(stdout) || stdout.length === 0) {
+      throw new Error("ffmpeg produced no image output");
+    }
+    return stdout;
+  } catch (err) {
+    if (isMissingBinary(err)) {
+      throw new Error("ffmpeg is not installed", { cause: err });
+    }
+    throw new Error(`ffmpeg image transcode failed: ${conciseProcessError(err)}`, { cause: err });
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /**
- * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
- * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
- * Preserves format (PNG→PNG, JPEG→JPEG, etc.) and aspect ratio.
+ * Downscale an image buffer so it fits within both the visual token budget
+ * ({@link boundedSize}) and MAX_IMAGE_BYTES. Preserves format (PNG→PNG,
+ * JPEG→JPEG, etc.) and aspect ratio — a lossless PNG screenshot of UI stays a
+ * lossless PNG with its alpha channel intact.
  */
-export async function shrinkToFit(
+async function shrinkToFitWithSharp(
   buffer: Buffer,
   mediaType: string,
 ): Promise<{ buffer: Buffer; mediaType: string }> {
@@ -373,23 +501,31 @@ export async function shrinkToFit(
   const meta = await sharp(buffer).metadata();
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
-  const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
+  const bounded = boundedSize(origW, origH);
+  const exceedsDim = bounded.width !== origW || bounded.height !== origH;
 
   // Trust the buffer over the caller-supplied mediaType: if a file was named
   // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
   // rejects mismatched media types with a 400.
   const detected = meta.format ? SHARP_FORMAT_TO_MEDIA[meta.format] : undefined;
+  const requiresVisionTranscode = !detected;
   if (detected && detected !== mediaType) {
     mediaType = detected;
+  } else if (requiresVisionTranscode) {
+    // libvips can decode more formats than vision providers accept. A common case
+    // is CDN AVIF data saved with a .jpg suffix: forwarding the small original
+    // unchanged makes OpenAI reject the entire turn as an invalid JPEG. Convert
+    // unsupported-but-decodable inputs to PNG before applying the normal limits.
+    mediaType = "image/png";
   }
 
-  // Short-circuit: within both limits — return as-is.
-  if (!exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
+  // Short-circuit only when the original encoding itself is provider-supported.
+  if (!requiresVisionTranscode && !exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
     return { buffer, mediaType };
   }
 
   // Determine output format from mediaType
-  const formatMap: Record<string, keyof SharpNamespace.FormatEnum> = {
+  const formatMap: Record<string, keyof FormatEnum> = {
     "image/png": "png",
     "image/jpeg": "jpeg",
     "image/gif": "gif",
@@ -399,14 +535,13 @@ export async function shrinkToFit(
   let outFormat = formatMap[mediaType] ?? "png";
   let outMediaType = mediaType === "image/bmp" ? "image/png" : mediaType;
 
-  // Compute the initial target dimensions: fit within MAX_IMAGE_DIMENSION,
-  // preserving aspect ratio. Sharp's fit: "inside" does the same math but we
-  // want explicit width/height so we can shrink them further in the byte loop.
-  const scale = exceedsDim ? Math.min(MAX_IMAGE_DIMENSION / origW, MAX_IMAGE_DIMENSION / origH) : 1;
-  let width = Math.max(1, Math.round(origW * scale));
-  let height = Math.max(1, Math.round(origH * scale));
+  // Initial target dimensions come from the visual token budget. Explicit
+  // width/height (rather than leaning on sharp's fit: "inside") so the byte
+  // loop below can shrink them further.
+  let width = bounded.width;
+  let height = bounded.height;
 
-  // Encode at the dimension-capped size first — often this is already under
+  // Encode at the budget-capped size first — often this is already under
   // MAX_IMAGE_BYTES and we're done.
   {
     const first = await sharp(buffer)
@@ -449,6 +584,32 @@ export async function shrinkToFit(
     .jpeg({ quality: 60 })
     .toBuffer();
   return { buffer: result, mediaType: "image/jpeg" };
+}
+
+export async function shrinkToFit(
+  buffer: Buffer,
+  mediaType: string,
+): Promise<{ buffer: Buffer; mediaType: string }> {
+  try {
+    return await shrinkToFitWithSharp(buffer, mediaType);
+  } catch (sharpError) {
+    let pngBuffer: Buffer;
+    try {
+      pngBuffer = await transcodeImageToPngWithFfmpeg(buffer);
+    } catch (ffmpegError) {
+      throw new Error(
+        `image decode failed (${conciseProcessError(sharpError)}); ${conciseProcessError(ffmpegError)}`,
+        { cause: ffmpegError },
+      );
+    }
+
+    const fitted = await shrinkToFitWithSharp(pngBuffer, "image/png");
+    const validatedType = await validateVisionImage(fitted.buffer);
+    if (!validatedType) {
+      throw new Error("ffmpeg image transcode produced an invalid image", { cause: sharpError });
+    }
+    return { buffer: fitted.buffer, mediaType: validatedType };
+  }
 }
 
 /**

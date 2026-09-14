@@ -12,6 +12,7 @@ export interface RpcModeOptions {
   baseUrl?: string;
   systemPrompt?: string;
   thinkingLevel?: ThinkingLevel;
+  maxTurns?: number;
 }
 
 // ── RPC Command Types ──────────────────────────────────────
@@ -109,6 +110,7 @@ export async function runRpcMode(options: RpcModeOptions): Promise<void> {
     baseUrl: options.baseUrl,
     systemPrompt: options.systemPrompt,
     thinkingLevel: options.thinkingLevel,
+    maxTurns: options.maxTurns,
     signal: ac.signal,
   });
 

@@ -31,6 +31,8 @@
  *
  * Env overrides:
  *   GG_HL_PROVIDER / GG_HL_MODEL   (default anthropic / claude-sonnet-5)
+ *   GG_HL_AUTH_KEY                 (auth.json key when it differs from the provider name,
+ *                                   e.g. `xiaomi-credits` for provider `xiaomi`)
  *   GG_HL_REPEAT                   (runs per task, default 1 — raise to average noise)
  */
 
@@ -514,7 +516,9 @@ async function main(): Promise<void> {
 
   const auth = new AuthStorage();
   await auth.load();
-  const cr = await auth.resolveCredentials(provider);
+  // Credit-based accounts store under a key that is not the provider name
+  // (`xiaomi-credits` serves provider `xiaomi`), so the two stay separable.
+  const cr = await auth.resolveCredentials(process.env.GG_HL_AUTH_KEY ?? provider);
   const creds: Creds = { apiKey: cr.accessToken, baseUrl: cr.baseUrl, accountId: cr.accountId };
 
   console.log(`\n🔗 Hashline edit benchmark — ${provider}/${model} (repeat ${repeat})\n`);

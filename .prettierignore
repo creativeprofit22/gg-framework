@@ -4,3 +4,8 @@ release
 coverage
 node_modules
 pnpm-lock.yaml
+
+# Byte-exact fixtures: config.test.ts asserts their SHA-256 to detect drift in
+# the seeded agent files. Formatting them would change the hash and break that
+# test — the fixture's whole job is to preserve the shipped bytes verbatim.
+packages/ggcoder/src/__fixtures__/

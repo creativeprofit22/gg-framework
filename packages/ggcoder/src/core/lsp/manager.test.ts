@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
+import { removeWhenReleased } from "./test-support.js";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { LspManager } from "./manager.js";
+import { setEditTelemetryPathForTests } from "./edit-telemetry.js";
 import type { LspServerSpec } from "./servers.js";
 
 const FIXTURE = path.resolve(
@@ -34,7 +36,7 @@ describe("LspManager", () => {
 
   afterEach(async () => {
     for (const manager of managers) manager.shutdownAll();
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await removeWhenReleased(tmpDir);
   });
 
   function makeManager(
@@ -58,6 +60,10 @@ describe("LspManager", () => {
 
     expect(result).toContain("Diagnostics in broken.fake");
     expect(result).toContain("L2:5 fake error on line 2 (fake)");
+    expect(manager.getLatestOutcome(filePath)).toMatchObject({
+      kind: "diagnostics",
+      filePath: path.resolve(filePath),
+    });
   });
 
   it("returns empty string once a follow-up edit fixes the file", async () => {
@@ -74,6 +80,63 @@ describe("LspManager", () => {
     expect(rebroken).toContain("fake error on line 2");
   });
 
+  it("records a high-confidence clean outcome", async () => {
+    const manager = makeManager(fakeSpec());
+    const filePath = path.join(tmpDir, "clean.fake");
+    const outcome = await manager.diagnosticsAfterWriteDetailed(filePath, "all good\n");
+    expect(outcome).toMatchObject({ kind: "clean", filePath: path.resolve(filePath) });
+  });
+
+  it("records low confidence for an empty result while indexing is active", async () => {
+    const manager = makeManager(fakeSpec(["--progress"]));
+    const filePath = path.join(tmpDir, "indexing.fake");
+    const outcome = await manager.diagnosticsAfterWriteDetailed(filePath, "all good\n");
+    expect(outcome.kind).toBe("low_confidence");
+    expect(await manager.diagnosticsAfterWrite(filePath, "still good\n")).toBe("");
+  });
+
+  it("keeps found errors high confidence while indexing is active", async () => {
+    const manager = makeManager(fakeSpec(["--progress"]));
+    const filePath = path.join(tmpDir, "indexing-error.fake");
+    const outcome = await manager.diagnosticsAfterWriteDetailed(filePath, "ERROR\n");
+    expect(outcome.kind).toBe("diagnostics");
+  });
+
+  it("records clean after indexing progress ends", async () => {
+    const manager = makeManager(fakeSpec(["--progress-end"]));
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "indexed.fake"),
+      "all good\n",
+    );
+    expect(outcome.kind).toBe("clean");
+  });
+
+  // Regression guard for the Windows CI failure in `windows.test.ts`: on a cold
+  // project load tsserver ends its load progress and publishes an EMPTY set for
+  // the open file BEFORE type-checking it, then publishes the real diagnostics.
+  // Taking that first publish at face value reported a broken file as clean, so
+  // inline diagnostics silently did nothing on the first edit in a project.
+  it("does not report clean on a server's premature empty publish during cold load", async () => {
+    const manager = makeManager(fakeSpec(["--premature-empty"]));
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "premature.fake"),
+      "ERROR\n",
+    );
+    expect(outcome.kind).toBe("diagnostics");
+  });
+
+  // The settle window must not turn a genuinely clean cold file into a stall or
+  // a wrong verdict: no follow-up publish ever arrives here, so it still has to
+  // land on `clean`.
+  it("still reports clean when the follow-up publish never comes", async () => {
+    const manager = makeManager(fakeSpec(["--progress-end"]));
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "cold-clean.fake"),
+      "all good\n",
+    );
+    expect(outcome.kind).toBe("clean");
+  });
+
   it("works with pull-diagnostics servers", async () => {
     const manager = makeManager(fakeSpec(["--pull"]));
     const filePath = path.join(tmpDir, "pull.fake");
@@ -83,12 +146,14 @@ describe("LspManager", () => {
     expect(result).toContain("fake error on line 1");
   });
 
-  it("returns empty string for unsupported extensions without spawning", async () => {
+  it("returns empty string and records unsupported extensions without spawning", async () => {
     const manager = makeManager(fakeSpec());
+    const filePath = path.join(tmpDir, "readme.md");
 
-    const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "readme.md"), "# hi");
+    const result = await manager.diagnosticsAfterWrite(filePath, "# hi");
 
     expect(result).toBe("");
+    expect(manager.getLatestOutcome(filePath)?.kind).toBe("unsupported");
   });
 
   it("returns empty string when the time budget is exceeded", async () => {
@@ -100,6 +165,7 @@ describe("LspManager", () => {
 
     expect(result).toBe("");
     expect(Date.now() - started).toBeLessThan(1500);
+    expect(manager.getLatestOutcome(filePath)?.kind).toBe("timeout");
   });
 
   it("marks a server broken after spawn failure and never retries", async () => {
@@ -118,13 +184,79 @@ describe("LspManager", () => {
     expect(resolveCalls).toBe(1);
   });
 
-  it("returns empty string when no server command resolves", async () => {
+  it("returns empty string and records unavailable when no server command resolves", async () => {
     const spec = fakeSpec([], { resolveCommand: () => null });
     const manager = makeManager(spec);
+    const filePath = path.join(tmpDir, "a.fake");
 
-    const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "a.fake"), "ERROR\n");
+    const result = await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
 
     expect(result).toBe("");
+    expect(manager.getLatestOutcome(filePath)?.kind).toBe("unavailable");
+  });
+
+  it("records initialization failure separately", async () => {
+    const manager = makeManager(fakeSpec(["--init-error"]));
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "init-failed.fake"),
+      "ERROR\n",
+    );
+    expect(outcome.kind).toBe("server_failed");
+  });
+
+  it("kills a server that fails to initialize instead of leaking it", async () => {
+    // `new LspClient` SPAWNS the process, so an initialize that rejects used to
+    // drop the only reference to a LIVE server: one orphan per (server, root)
+    // for the whole session. Invisible on POSIX; on Windows the orphan holds
+    // handles in the project directory, which is how it surfaced — as an EBUSY
+    // rmdir in this suite's teardown, long after the assertions had passed.
+    const pidFile = path.join(tmpDir, "server.pid");
+    const manager = makeManager(fakeSpec(["--init-error", `--pid-file=${pidFile}`]));
+
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "init-failed.fake"),
+      "ERROR\n",
+    );
+    expect(outcome.kind).toBe("server_failed");
+
+    const pid = Number(await fs.readFile(pidFile, "utf-8"));
+    expect(Number.isInteger(pid)).toBe(true);
+
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // Termination is asynchronous (taskkill on Windows); give it a moment.
+    for (let attempt = 0; attempt < 50 && alive(); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (alive()) {
+      process.kill(pid, "SIGKILL"); // never leak a live process out of the suite
+      throw new Error(`language server ${pid} survived a failed initialize`);
+    }
+  }, 30_000);
+
+  it("records a post-initialization server crash", async () => {
+    const manager = makeManager(fakeSpec(["--crash-on-open"]));
+    const outcome = await manager.diagnosticsAfterWriteDetailed(
+      path.join(tmpDir, "crashed.fake"),
+      "ERROR\n",
+    );
+    expect(outcome.kind).toBe("server_failed");
+  });
+
+  it("bounds latest per-file outcomes", async () => {
+    const manager = new LspManager(tmpDir, { catalog: [fakeSpec()], snapshotLimit: 2 });
+    managers.push(manager);
+    for (const name of ["one.md", "two.md", "three.md"]) {
+      await manager.diagnosticsAfterWriteDetailed(path.join(tmpDir, name), "safe");
+    }
+    expect(manager.getLatestOutcomes()).toHaveLength(2);
+    expect(manager.getLatestOutcome(path.join(tmpDir, "one.md"))).toBeUndefined();
   });
 
   it("performs the shutdown handshake on shutdownAll", async () => {
@@ -155,5 +287,92 @@ describe("LspManager", () => {
     const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "a.fake"), "ERROR\n");
 
     expect(result).toBe("");
+  });
+
+  // Without attribution, "this edit broke the file" and "this file was already
+  // failing" produce byte-identical output, so neither the model nor we can
+  // tell them apart.
+  describe("regression attribution", () => {
+    let telemetry: string;
+
+    beforeEach(() => {
+      telemetry = path.join(tmpDir, "edit-quality.jsonl");
+      setEditTelemetryPathForTests(telemetry);
+    });
+
+    afterEach(() => setEditTelemetryPathForTests(undefined));
+
+    async function logged(): Promise<Record<string, unknown>[]> {
+      const raw = await fs.readFile(telemetry, "utf8").catch(() => "");
+      return raw
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    }
+
+    it("names the edit as the cause when a clean file breaks, and records it", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "regressed.fake");
+
+      expect(await manager.diagnosticsAfterWrite(filePath, "all good\n")).toBe("");
+      const after = await manager.diagnosticsAfterWrite(filePath, "ERROR\n", "dotdotdot");
+
+      expect(after).toContain("introduced 1 error that was not present before");
+      expect(await logged()).toEqual([
+        expect.objectContaining({ ext: ".fake", source: "dotdotdot", before: 0, after: 1 }),
+      ]);
+    });
+
+    it("does not blame the edit for errors that were already there", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "already-broken.fake");
+
+      await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
+      const after = await manager.diagnosticsAfterWrite(
+        filePath,
+        "ERROR\nunrelated change\n",
+        "span",
+      );
+
+      expect(after).toContain("already present before this change");
+      expect(after).not.toContain("introduced");
+      // Only valid→invalid transitions are worth recording.
+      expect(await logged()).toEqual([]);
+    });
+
+    it("counts only the newly added errors when a broken file gets worse", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "worse.fake");
+
+      await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
+      const after = await manager.diagnosticsAfterWrite(filePath, "ERROR\nERROR\nERROR\n", "text");
+
+      expect(after).toContain("introduced 2 errors that were not present before");
+      expect(await logged()).toEqual([
+        expect.objectContaining({ source: "text", before: 1, after: 3, introduced: 2 }),
+      ]);
+    });
+
+    it("says nothing at all when there is no baseline to compare against", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "first-touch.fake");
+
+      // First edit of the session: the file's prior state was never measured,
+      // and guessing would manufacture a regression that may not exist.
+      const result = await manager.diagnosticsAfterWrite(filePath, "ERROR\n", "write");
+
+      expect(result).toContain("fake error on line 1");
+      expect(result).not.toContain("introduced");
+      expect(result).not.toContain("already present");
+      expect(await logged()).toEqual([]);
+    });
+
+    it("stays silent for a language with no server, baseline or not", async () => {
+      const manager = makeManager(fakeSpec());
+      const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "notes.md"), "ERROR\n");
+
+      expect(result).toBe("");
+      expect(await logged()).toEqual([]);
+    });
   });
 });

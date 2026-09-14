@@ -3,7 +3,7 @@
 // so the desktop app and the terminal stay in lockstep. The app fetches this
 // (plus live connection status) from the sidecar's /auth/status endpoint.
 
-import { XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import { XIAOMI_CREDITS_KEY, dualAuthProvider } from "@kenkaiiii/gg-core";
 
 export type AuthMethod = "oauth" | "apikey";
 
@@ -42,38 +42,102 @@ export interface AuthProviderMeta {
    * for every provider with a single API-key credential.
    */
   apiKeyVariants?: ApiKeyVariant[];
+  /**
+   * Per-method guidance overrides. Only providers whose methods differ in
+   * billing/entitlement (the dual-auth ones) need these; everything else is
+   * described generically by {@link describeAuthMethods}.
+   */
+  methodDetails?: Partial<Record<AuthMethod, AuthMethodMeta>>;
 }
 
+/**
+ * What one auth method means for a provider, so both UIs can answer "which do I
+ * pick?" without hardcoding provider knowledge in a component.
+ */
+export interface AuthMethodMeta {
+  method: AuthMethod;
+  /** Button/row label, e.g. "Sign in with Grok (SuperGrok / X Premium)". */
+  label: string;
+  /** What the user spends on this method. */
+  billing: string;
+  /** When to choose it. */
+  when: string;
+  /** Prerequisite the user must already have, if any. */
+  requires?: string;
+}
+
+/**
+ * Every provider a user can connect, in login-screen order. `description`
+ * lists that provider's models and feeds both the CLI login screen and the
+ * app's provider list, so `auth-providers.test.ts` pins each one to the model
+ * registry — a registry change that isn't reflected here fails the suite.
+ */
 export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "anthropic",
     label: "Anthropic",
-    description: "Claude Opus 4.8, Fable 5, Sonnet 5, Haiku 4.5",
+    description: "Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5",
     methods: ["oauth"],
   },
   {
     value: "openai",
     label: "OpenAI",
-    description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex",
+    description: "GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna",
     methods: ["oauth"],
   },
   {
     value: "gemini",
     label: "Gemini",
-    description: "Gemini 3.1 Flash Lite Preview",
+    description:
+      "Gemini 3.8 Flash, 3.5 Flash Lite, 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
     methods: ["oauth"],
+  },
+  {
+    value: "xai",
+    label: "xAI (Grok)",
+    description: "Grok 4.6, Grok 4.5 · OAuth or API key",
+    methods: ["oauth", "apikey"],
+    apiKeyLabel: "xAI",
+    methodDetails: {
+      oauth: {
+        method: "oauth",
+        label: "Sign in with Grok",
+        billing: "Included with SuperGrok or X Premium.",
+        when: "",
+      },
+      apikey: {
+        method: "apikey",
+        label: "xAI API key",
+        billing: "Pay-per-token on console.x.ai credits.",
+        when: "",
+      },
+    },
   },
   {
     value: "moonshot",
     label: "Moonshot",
-    description: "Kimi K2.7 · OAuth or API key",
+    description: "Kimi K3, K2.7 Code · OAuth or API key",
     methods: ["oauth", "apikey"],
     apiKeyLabel: "Moonshot",
+    methodDetails: {
+      oauth: {
+        method: "oauth",
+        label: "Sign in with Kimi",
+        billing: "Included with a Kimi For Coding plan.",
+        when: "",
+      },
+      apikey: {
+        method: "apikey",
+        label: "Moonshot API key",
+        billing: "Pay-per-token on Moonshot credits.",
+        when: "",
+      },
+    },
   },
   {
     value: "glm",
     label: "Z.AI (GLM)",
-    description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+    description: "GLM-5.3, GLM-5.3-Flash",
     methods: ["apikey"],
     apiKeyLabel: "Z.AI",
   },
@@ -107,16 +171,9 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "deepseek",
     label: "DeepSeek",
-    description: "DeepSeek V4 Pro, V4 Flash",
+    description: "DeepSeek V4 Pro, V4 Flash, V4 Flash Vision (Experimental)",
     methods: ["apikey"],
     apiKeyLabel: "DeepSeek",
-  },
-  {
-    value: "openrouter",
-    label: "OpenRouter",
-    description: "Qwen3.6-Plus, multi-provider gateway",
-    methods: ["apikey"],
-    apiKeyLabel: "OpenRouter",
   },
   {
     value: "sakana",
@@ -125,8 +182,66 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
     methods: ["apikey"],
     apiKeyLabel: "Sakana",
   },
+  {
+    value: "openrouter",
+    label: "OpenRouter",
+    description: "Qwen3.6-Plus · multi-provider gateway",
+    methods: ["apikey"],
+    apiKeyLabel: "OpenRouter",
+  },
+  {
+    value: "huggingface",
+    label: "Hugging Face",
+    description: "Qwen3 Coder 480B, GPT-OSS 120B",
+    methods: ["apikey"],
+    apiKeyLabel: "Hugging Face",
+  },
 ];
 
 export function getAuthProvider(value: string): AuthProviderMeta | undefined {
   return AUTH_PROVIDERS.find((p) => p.value === value);
+}
+
+/**
+ * Per-method guidance for a provider, in resolution order. Providers with a
+ * single method get a generic description; the dual-auth ones (Kimi, Grok) carry
+ * explicit `methodDetails` because the choice changes what the user is billed.
+ */
+export function describeAuthMethods(provider: string): AuthMethodMeta[] {
+  const meta = getAuthProvider(provider);
+  if (!meta) return [];
+  return meta.methods.map((method) => {
+    const override = meta.methodDetails?.[method];
+    // Copy rather than hand back the table entry itself: callers serialize this
+    // alongside the provider meta, and a shared reference appearing twice in one
+    // payload trips the sidecar's cycle-safe JSON encoder ([CIRCULAR]).
+    if (override) return { ...override };
+    return method === "oauth"
+      ? {
+          method,
+          label: `Sign in with ${meta.label}`,
+          billing: "Uses your existing plan with this provider.",
+          when: "",
+        }
+      : {
+          method,
+          label: `${meta.apiKeyLabel ?? meta.label} API key`,
+          billing: "Pay-per-token on this provider's API credits.",
+          when: "",
+        };
+  });
+}
+
+/**
+ * How the runtime picks between two connected methods, phrased for the UI. Only
+ * dual-auth providers have a choice to explain; everything else returns
+ * undefined so callers can omit the note entirely.
+ *
+ * Keep this wording in sync with AuthStorage's actual resolution order in
+ * gg-core (`DUAL_AUTH_PROVIDERS`) — it is the user-facing description of it.
+ */
+export function authPriorityNote(provider: string): string | undefined {
+  const dual = dualAuthProvider(provider);
+  if (!dual) return undefined;
+  return `Uses ${dual.oauthLabel} first; the ${dual.apiKeyLabel} takes over when it runs out, then switches back.`;
 }

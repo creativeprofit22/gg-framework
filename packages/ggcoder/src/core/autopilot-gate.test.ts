@@ -12,9 +12,12 @@ import {
 } from "./autopilot-gate.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 
+// Synthetic: no shipped prompt command has an alias, so alias matching needs a
+// fixture to exercise it. Real commands are covered by the PROMPT_COMMANDS
+// loops below.
 const COMMANDS: WorkflowCommandSpec[] = [
   { name: "compare", aliases: [], prompt: "Compare the code you just created…" },
-  { name: "bullet-proof", aliases: ["bp"], prompt: "Audit the project…" },
+  { name: "audit-fixture", aliases: ["af"], prompt: "Audit the project…" },
 ];
 
 describe("isWorkflowCommandText", () => {
@@ -27,9 +30,9 @@ describe("isWorkflowCommandText", () => {
   });
 
   it("matches aliases and is case-insensitive", () => {
-    expect(isWorkflowCommandText("/bp", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/af", COMMANDS)).toBe(true);
     expect(isWorkflowCommandText("/COMPARE", COMMANDS)).toBe(true);
-    expect(isWorkflowCommandText("/Bullet-Proof", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/Audit-Fixture", COMMANDS)).toBe(true);
   });
 
   it("tolerates leading whitespace (matches trim semantics of the prompt path)", () => {
@@ -69,7 +72,7 @@ describe("matchExpandedCommand", () => {
   it("matches template + user-instructions suffix and extracts the args", () => {
     const text = `Audit the project…${USER_INSTRUCTIONS_HEADER}only the auth module`;
     const m = matchExpandedCommand(text, COMMANDS);
-    expect(m?.command.name).toBe("bullet-proof");
+    expect(m?.command.name).toBe("audit-fixture");
     expect(m?.args).toBe("only the auth module");
   });
 

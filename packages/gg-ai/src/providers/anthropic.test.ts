@@ -70,7 +70,13 @@ describe("streamAnthropic request shaping", () => {
       nextEvents: unknown[] | null;
     };
     AnthropicMock.nextError = null;
-    AnthropicMock.nextEvents = [{ type: "message_stop" }];
+    // A realistic terminal sequence: the protocol always emits message_delta
+    // (carrying stop_reason) before message_stop. Omitting it now trips the
+    // silent-partial truncation guard, so keep the fixture protocol-accurate.
+    AnthropicMock.nextEvents = [
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
 
     const result = streamAnthropic({
       provider: "anthropic",
@@ -137,7 +143,7 @@ describe("streamAnthropic non-streaming fallback", () => {
 
     const result = streamAnthropic({
       provider: "anthropic",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-ant-test",
       // A large max_tokens is exactly what tripped the SDK's client-side
@@ -260,6 +266,33 @@ describe("streamAnthropic error normalization", () => {
     await expect(result.response).rejects.not.toThrow(/"message"/);
   });
 
+  it("replaces a raw HTML response body with a clean provider message", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      APIError: new (status: number, error: unknown, message: string) => Error;
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextEvents = null;
+    AnthropicMock.nextError = new AnthropicMock.APIError(
+      500,
+      {},
+      "500 <!DOCTYPE html><html><body>Internal Server Error</body></html>",
+    );
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    await expect(result.response).rejects.toMatchObject({
+      provider: "anthropic",
+      statusCode: 500,
+      message: "The provider returned an HTML error page (HTTP 500) instead of an API response.",
+    } satisfies Partial<ProviderError>);
+  });
   it("maps an OAuth usage-window 429 to a usage-limit error with reset time", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const AnthropicMock = Anthropic as unknown as {
@@ -609,5 +642,87 @@ describe("streamAnthropic error normalization", () => {
       if (prevCC === undefined) delete process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING;
       else process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING = prevCC;
     }
+  });
+
+  it("rejects with a 504 when the stream ends before a stop_reason (silent partial)", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    // Valid prefix, then a CLEAN end with NO message_delta / message_stop --
+    // as if the provider hung up early but politely (the truncate-silent mode).
+    AnthropicMock.nextEvents = [
+      { type: "message_start", message: { usage: { input_tokens: 7 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial-" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "text" } },
+      { type: "content_block_stop", index: 0 },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    // Attach the response handler up front so its rejection is never orphaned.
+    // StreamResult's background pump rejects the `.response` promise independently
+    // of the async iterator; swallow on both the thenable and `.response` so an
+    // iterator-throws-first race can't surface as a process-level unhandled
+    // rejection (the same footgun the 08 baseline flagged).
+    const caught = result.response.catch((err: unknown) => err);
+    const events: StreamEvent[] = [];
+    const error = await caught;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).provider).toBe("anthropic");
+    // 504 routes into the agent-loop retry bucket via classifyOverload --
+    // the same retryable path a mid-stream socket destroy already takes.
+    expect((error as ProviderError).statusCode).toBe(504);
+    expect((error as ProviderError).message).toMatch(/before completion/i);
+    // The raw partial is preserved on cause for debugging, never returned as a
+    // phantom-complete response.
+    const cause = (error as { cause?: { partialContent?: unknown } }).cause;
+    expect(cause).toBeTruthy();
+    expect(Array.isArray(cause?.partialContent)).toBe(true);
+    // No "done" event with a phantom end_turn ever leaked out.
+    expect(events.find((e) => e.type === "done")).toBeUndefined();
+  });
+
+  it("resolves normally on a full sequence (guard does not false-positive)", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = [
+      { type: "message_start", message: { usage: { input_tokens: 7 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 6 } },
+      { type: "message_stop" },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    let text = "";
+    for await (const event of result) {
+      if (event.type === "text_delta") text += event.text;
+    }
+
+    await expect(result.response).resolves.toMatchObject({
+      stopReason: "end_turn",
+      usage: { outputTokens: 6 },
+    });
+    expect(text).toBe("Hello");
   });
 });

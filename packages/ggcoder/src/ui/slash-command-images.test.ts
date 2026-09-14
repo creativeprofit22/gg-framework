@@ -69,6 +69,62 @@ describe("prompt-template slash commands with attachments", () => {
     expect(buildUserContentWithAttachments(fullPrompt, [], true, false)).toBe(fullPrompt);
   });
 
+  it("injects the real zai vision tool hint for GLM models without image support", () => {
+    const imageAttachment: ImageAttachment = {
+      kind: "image",
+      fileName: "screenshot.png",
+      filePath: "/tmp/screenshot.png",
+      mediaType: "image/png",
+      data: "iVBORw0KGgo=",
+    };
+
+    const content = buildUserContentWithAttachments(
+      "What is this?",
+      [imageAttachment],
+      false,
+      false,
+      "glm",
+    );
+
+    expect(Array.isArray(content)).toBe(true);
+    const parts = content as { type: string; text?: string }[];
+    expect(parts[1]!.type).toBe("text");
+    // GLM only: names the REAL MCP tool (the zai_vision server connects only
+    // for the GLM provider) plus the tool_search unlock path for deferred MCP.
+    expect(parts[1]!.text).toContain("mcp__zai_vision__analyze_image");
+    expect(parts[1]!.text).toContain("tool_search");
+    expect(parts[1]!.text).not.toContain("image_analysis tool");
+    expect(parts[1]!.text).toMatch(/ggcoder-img-\d+\.png/);
+  });
+
+  it("keeps the non-GLM no-vision hint byte-identical (no zai tool named)", () => {
+    const imageAttachment: ImageAttachment = {
+      kind: "image",
+      fileName: "screenshot.png",
+      filePath: "/tmp/screenshot.png",
+      mediaType: "image/png",
+      data: "iVBORw0KGgo=",
+    };
+
+    // DeepSeek also lacks native image support but has NO zai_vision server —
+    // the zai hint must never leak to it.
+    const content = buildUserContentWithAttachments(
+      "What is this?",
+      [imageAttachment],
+      false,
+      false,
+      "deepseek",
+    );
+
+    expect(Array.isArray(content)).toBe(true);
+    const parts = content as { type: string; text?: string }[];
+    expect(parts[1]!.text).not.toContain("zai_vision");
+    expect(parts[1]!.text).not.toContain("tool_search");
+    expect(parts[1]!.text).toMatch(
+      /^\[User attached an image saved at: .*ggcoder-img-\d+\.png — use the image_analysis tool to view and analyze it]$/,
+    );
+  });
+
   it("routes video via the read tool when the model supports video", () => {
     const videoAttachment: ImageAttachment = {
       kind: "video",

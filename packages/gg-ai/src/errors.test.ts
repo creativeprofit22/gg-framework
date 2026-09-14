@@ -7,6 +7,8 @@ import {
   formatError,
   formatErrorForDisplay,
   isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
+  providerHtmlErrorMessage,
   isUsageLimitError,
   readHeader,
 } from "./errors.js";
@@ -55,6 +57,38 @@ describe("formatError usage limit", () => {
     expect(formatted.message).toBe("Your Anthropic usage is finished.");
     expect(formatted.resetsAt).toBeUndefined();
   });
+
+  it("uses the xAI display name for Grok errors", () => {
+    const formatted = formatError(
+      new ProviderError("xai", "usage limit reached: You have exceeded your current quota", {
+        statusCode: 429,
+      }),
+    );
+    expect(formatted.headline).toBe("xAI (Grok) usage limit reached.");
+  });
+});
+
+describe("formatError transient reset guidance", () => {
+  it("keeps diagnostics out of display text while exposing reset metadata", () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 30;
+    const formatted = formatError(
+      new ProviderError("azure", "Temporary capacity failure", {
+        statusCode: 429,
+        requestId: "req_safe-123",
+        resetsAt,
+      }),
+    );
+
+    expect(formatted).toMatchObject({
+      headline: "Azure OpenAI returned an error.",
+      message: "Temporary capacity failure",
+      requestId: "req_safe-123",
+      resetsAt,
+    });
+    expect(formatted.guidance).toContain("The provider says to retry after");
+    expect(formatted.message).not.toContain("req_safe-123");
+    expect(formatted.guidance).not.toContain("req_safe-123");
+  });
 });
 
 describe("formatError Mythos access", () => {
@@ -69,7 +103,7 @@ describe("formatError Mythos access", () => {
     expect(formatted.guidance).toContain(
       "platform.claude.com/docs/en/about-claude/models/overview",
     );
-    expect(formatted.guidance).toContain("claude-fable-5");
+    expect(formatted.guidance).toContain("Claude Fable 5.1");
   });
 
   it("does not hijack not_found errors for other models", () => {
@@ -82,6 +116,43 @@ describe("formatError Mythos access", () => {
   });
 });
 
+describe("formatError request too large", () => {
+  it("routes an Anthropic 413 request_too_large to compact, not a blind retry", () => {
+    const f = formatError(
+      new ProviderError("anthropic", "request_too_large: Request exceeds the maximum size", {
+        statusCode: 413,
+      }),
+    );
+    expect(f.guidance).toContain("too large");
+    expect(f.guidance).toContain("Compact");
+    expect(f.guidance).not.toContain("status.anthropic.com");
+  });
+
+  it("routes Anthropic's many-image dimension error to local recovery", () => {
+    const f = formatError(
+      new ProviderError(
+        "anthropic",
+        "invalid_request_error: At least one of the image dimensions exceed max allowed size for many-image requests: 2000 pixels",
+        { statusCode: 400 },
+      ),
+    );
+    expect(f.guidance).toContain("Restart GG Coder");
+    expect(f.guidance).toContain("restored images are resized");
+    expect(f.guidance).not.toContain("status.anthropic.com");
+  });
+
+  it("explains the recovery after OpenAI's request retry buffer overflows", () => {
+    const f = formatError(
+      new ProviderError("openai", "exceeded request buffer limit while retrying upstream", {
+        statusCode: 507,
+      }),
+    );
+    expect(f.guidance).toContain("already retried automatically");
+    expect(f.guidance).toContain("compact the conversation");
+    expect(f.guidance).not.toContain("status.openai.com");
+  });
+});
+
 describe("VideoUnsupportedError", () => {
   it("formats as a clean capability error naming video-capable models", () => {
     const f = formatError(new VideoUnsupportedError());
@@ -91,13 +162,13 @@ describe("VideoUnsupportedError", () => {
     expect(f.guidance).toContain("Gemini");
     expect(f.guidance).toContain("MiniMax");
     expect(f.guidance).toContain("MiMo");
-    expect(f.guidance).toContain("/model");
+    expect(f.guidance).toContain("model selector");
   });
 
   it("renders headline + guidance only (no bug-report framing)", () => {
     const out = formatErrorForDisplay(new VideoUnsupportedError());
     expect(out).toContain("This model can't analyze video.");
-    expect(out).not.toContain("ggcoder bug");
+    expect(out).not.toContain("GG Coder bug");
   });
 });
 
@@ -110,9 +181,23 @@ describe("formatErrorForDisplay", () => {
       [
         "Anthropic returned an error.",
         "  overloaded_error: Overloaded",
-        "  \u2192 Anthropic's servers are overloaded right now. Retry in a moment \u2014 not a ggcoder issue.",
+        "  → Anthropic's servers are overloaded right now. Retry in a moment — not a GG Coder issue.",
       ].join("\n"),
     );
+  });
+
+  it("tells the user to update GG Coder when the ChatGPT backend rejects the client version", () => {
+    const out = formatErrorForDisplay(
+      new ProviderError(
+        "openai",
+        "The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.",
+        { statusCode: 400 },
+      ),
+    );
+    expect(out).toContain(
+      "→ OpenAI needs a newer GG Coder to serve this model. Update GG Coder to the latest version and retry, or switch to another OpenAI model via the model selector.",
+    );
+    expect(out).not.toContain("status.openai.com");
   });
 
   it("renders an OpenAI 500 server_error pointing at the status page", () => {
@@ -123,7 +208,7 @@ describe("formatErrorForDisplay", () => {
       [
         "OpenAI returned an error.",
         "  server_error: something broke",
-        "  \u2192 This is an error from OpenAI, not ggcoder. Retry \u2014 if it keeps happening, check status.openai.com.",
+        "  \u2192 This is an error from OpenAI, not GG Coder. Retry \u2014 if it keeps happening, check status.openai.com.",
       ].join("\n"),
     );
   });
@@ -132,14 +217,14 @@ describe("formatErrorForDisplay", () => {
     const out = formatErrorForDisplay(
       new ProviderError("openai", "This model is not available.", {
         statusCode: 404,
-        hint: "Run /model and choose a listed model.",
+        hint: "Switch to a listed model via the model selector.",
       }),
     );
     expect(out).toBe(
       [
         "OpenAI returned an error.",
         "  This model is not available.",
-        "  \u2192 Run /model and choose a listed model.",
+        "  \u2192 Switch to a listed model via the model selector.",
       ].join("\n"),
     );
   });
@@ -152,29 +237,29 @@ describe("formatErrorForDisplay", () => {
       [
         "Gemini returned an error.",
         "  quota exceeded",
-        "  \u2192 Your Gemini account has a billing or quota issue \u2014 check your balance. Not a ggcoder issue.",
+        "  \u2192 Your Gemini account has a billing or quota issue \u2014 check your balance. Not a GG Coder issue.",
       ].join("\n"),
     );
   });
 
-  it("classifies a network GGAIError without a ggcoder bug headline", () => {
+  it("classifies a network GGAIError without a GG Coder bug headline", () => {
     const out = formatErrorForDisplay(new GGAIError("fetch failed", { source: "network" }));
     expect(out).toBe(
       [
         "Network error \u2014 couldn't reach the provider.",
         "  fetch failed",
-        "  \u2192 Check your internet connection. Not a ggcoder issue \u2014 retry shortly.",
+        "  → Check your internet connection. Not a GG Coder issue — retry shortly.",
       ].join("\n"),
     );
   });
 
-  it("falls back to the ggcoder-bug headline for unknown errors", () => {
+  it("falls back to the GG Coder-bug headline for unknown errors", () => {
     const out = formatErrorForDisplay(new Error("Cannot read property 'foo' of undefined"));
     expect(out).toBe(
       [
-        "ggcoder hit an unexpected error.",
+        "GG Coder hit an unexpected error.",
         "  Cannot read property 'foo' of undefined",
-        "  \u2192 This looks like a ggcoder bug \u2014 please report it to the developer (see /help).",
+        "  → This looks like a GG Coder bug — please report it to the developer.",
       ].join("\n"),
     );
   });
@@ -196,6 +281,39 @@ describe("isRawJsonErrorEcho", () => {
 
   it("does not flag a message with a non-numeric prefix before a brace", () => {
     expect(isRawJsonErrorEcho("See docs at https://example.com/{id}")).toBe(false);
+  });
+});
+
+describe("raw HTML provider errors", () => {
+  it("detects bare, status-prefixed, and doctype HTML responses", () => {
+    expect(
+      isRawHtmlErrorEcho("<html><head><title>Internal Server Error</title></head></html>"),
+    ).toBe(true);
+    expect(isRawHtmlErrorEcho("502 <!DOCTYPE html><html><body>Bad Gateway</body></html>")).toBe(
+      true,
+    );
+  });
+
+  it("does not flag human-readable messages that merely mention HTML", () => {
+    expect(isRawHtmlErrorEcho("The response included an <html> tag.")).toBe(false);
+  });
+
+  it("replaces transport markup at the final formatting boundary", () => {
+    const formatted = formatError(
+      new ProviderError("openai", "500 <html><body>upstream failed</body></html>", {
+        statusCode: 500,
+      }),
+    );
+
+    expect(formatted.message).toBe(
+      "The provider returned an HTML error page (HTTP 500) instead of an API response.",
+    );
+    expect(formatted.message).not.toContain("<html>");
+    expect(formatted.guidance).toContain("status.openai.com");
+  });
+
+  it("omits the HTTP clause when the status is unknown", () => {
+    expect(providerHtmlErrorMessage(undefined)).not.toContain("HTTP");
   });
 });
 

@@ -21,18 +21,20 @@ import {
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
-import { ensureAppDirs } from "./config.js";
+import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { getContextWindow } from "./core/model-registry.js";
+import { resolveCompactionPolicy } from "./core/compaction/policy.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
   const { provider, model, cwd } = config;
 
   // Load auth & ensure dirs
   const paths = await ensureAppDirs();
+  const savedSettings = loadSavedSettings(paths.settingsFile);
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -108,7 +110,14 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   if (messages.length > 1) {
     const creds = await authStorage.resolveCredentials(provider);
     const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
-    if (shouldCompact(messages, contextWindow, 0.8)) {
+    const policy = resolveCompactionPolicy({
+      provider,
+      model,
+      contextWindow,
+      threshold: savedSettings.compactThreshold,
+      accountId: creds.accountId,
+    });
+    if (savedSettings.autoCompact && shouldCompact(messages, contextWindow, policy.threshold)) {
       stdout.write("Compacting restored session...\n");
       const compactionAbort = new AbortController();
       const onSigint = () => compactionAbort.abort();
@@ -122,6 +131,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
           projectId: creds.projectId,
           baseUrl: config.baseUrl ?? creds.baseUrl,
           contextWindow,
+          targetTokens: policy.targetTokens,
           signal: compactionAbort.signal,
         });
         messages.length = 0;
@@ -155,7 +165,11 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     if (!input) continue;
 
     // Push user message
-    const userMessage: Message = { role: "user", content: input };
+    const userMessage: Message = {
+      role: "user",
+      content: input,
+      provenance: { source: "human", kind: "prompt", visibility: "transcript" },
+    };
     messages.push(userMessage);
     await persistMessage(session, userMessage);
 

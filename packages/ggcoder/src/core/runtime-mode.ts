@@ -2,6 +2,17 @@ export interface RuntimeModeRefs {
   planModeRef?: { current: boolean };
 }
 
+/**
+ * True when this process is the gg-app sidecar. Tauri always spawns it with
+ * `GG_APP_PORT` set (even to "0"); the plain `ggcoder` CLI never sets it.
+ *
+ * Used to phrase user-facing notices in terms of the desktop app's UI instead
+ * of TUI keybinds, and to hide TUI-only surfaces the app doesn't render.
+ */
+export function isGgApp(): boolean {
+  return process.env.GG_APP_PORT !== undefined;
+}
+
 export function isPlanModeActive(planModeRef?: { current: boolean }): boolean {
   return planModeRef?.current === true;
 }

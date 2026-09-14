@@ -85,4 +85,31 @@ describe("continued session replay display filtering", () => {
     expect(replayedText).toContain("/help");
     expect(replayedText).toContain("Here are the available commands.");
   });
+
+  it("uses provenance before role or legacy prefixes", () => {
+    const persisted: Message[] = [
+      {
+        role: "user",
+        content: "generated control with ordinary text",
+        provenance: { source: "runtime", kind: "automation", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "queued follow-up",
+        provenance: { source: "human", kind: "steering", visibility: "transcript" },
+      },
+      {
+        role: "assistant",
+        content: "generated acknowledgement",
+        provenance: { source: "runtime", kind: "compaction_ack", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "summary without prefix",
+        provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+      },
+    ];
+
+    expect(replayTexts(persisted)).toEqual(["queued follow-up", "summary without prefix"]);
+  });
 });

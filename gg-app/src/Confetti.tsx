@@ -29,7 +29,7 @@ const COLORS = [
   theme.info,
   theme.error,
 ];
-const COUNT = 140;
+const COUNT = 80;
 const GRAVITY = 0.18;
 const DRAG = 0.985;
 const FADE_AFTER_MS = 900;
@@ -66,7 +66,7 @@ export function Confetti(): React.ReactElement | null {
         vy: Math.sin(angle) * speed - 3, // bias upward so it arcs nicely
         rot: Math.random() * Math.PI,
         vrot: (Math.random() - 0.5) * 0.4,
-        size: 5 + Math.random() * 6,
+        size: 4 + Math.random() * 4,
         color: COLORS[Math.floor(Math.random() * COLORS.length)] ?? theme.primary,
       };
     });

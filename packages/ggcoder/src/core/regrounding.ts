@@ -33,6 +33,7 @@ export function buildRegroundingMessage(originalRequest: string): Message {
       : " The original request is in the earlier messages that remain. ";
   return {
     role: "user",
+    provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
     content:
       "Re-ground. The conversation was just compacted, so earlier detail is now a summary and " +
       "easy to drift from." +

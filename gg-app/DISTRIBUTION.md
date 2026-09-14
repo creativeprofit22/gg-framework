@@ -21,9 +21,11 @@ to make that work:
 
 2. **A single-file sidecar bundle** (`scripts/bundle-sidecar.mjs`). esbuild
    bundles `packages/ggcoder/dist/app-sidecar.js` → `src-tauri/sidecar/app-sidecar.mjs`
-   (ESM, `platform=node`) and ships it under `bundle.resources`. Native / heavy
-   optional packages can't be inlined, so they are marked `external` and copied
-   verbatim (with their dependency trees, pnpm symlinks dereferenced) into
+   (ESM, `platform=node`) and ships it under `bundle.resources`. Bundled default
+   skills are copied into `src-tauri/sidecar/skills/` so every installed app can
+   discover them without a user-local setup step. Native / heavy optional packages
+   can't be inlined, so they are marked `external` and copied verbatim (with their
+   dependency trees, pnpm symlinks dereferenced) into
    `src-tauri/sidecar/node_modules/`.
 
 At runtime the Rust shell resolves both from the bundle in production and falls
@@ -51,7 +53,7 @@ correctly skipped (they don't exist on the build machine).
 ## Build & verify locally
 
 ```bash
-pnpm --filter @kenkaiiii/ggcoder build      # produce dist/app-sidecar.js
+pnpm --filter @kenkaiiii/ggcoder... build   # produce dist/app-sidecar.js
 pnpm --filter gg-app stage:node             # download + stage the Node runtime
 pnpm --filter gg-app bundle:sidecar         # esbuild bundle + copy externals
 node gg-app/scripts/smoke-sidecar.mjs       # boot bundled node + sidecar, hit /state
@@ -87,50 +89,58 @@ top offset on Windows/Linux.
 
 ## Release pipeline
 
-`.github/workflows/release.yml` runs on a `v*` tag: a matrix (`macos-14` arm64,
-`windows-latest`, `ubuntu-latest`) stages node + sidecar, smoke tests, then
-`tauri-apps/tauri-action` bundles, signs the updater artifacts, uploads them to
-a draft GitHub release, and generates `latest.json` for the updater endpoint in
-`tauri.conf.json`. Linux builds `deb` + `rpm` (AppImage is skipped — its
-`linuxdeploy` step reliably hangs on CI for Node-bundling apps).
+`.github/workflows/release.yml` runs on a `v*` tag only after a fail-closed
+preflight proves the exact tagged SHA has a successful `main` push run of
+`.github/workflows/ci.yml`. The required `Release CI gate` job aggregates every
+framework and desktop CI matrix leg; missing, pending, skipped, or failed CI
+stops the release before the protected environment or signing credentials are
+used.
 
-Platform coverage: Apple Silicon macOS (signed + notarized), Windows
-(NSIS `.exe` + `.msi`), and Linux (`deb`/`rpm`). Intel macOS is intentionally
-not built — see the matrix comment in `release.yml`.
+The release matrix (`macos-14` arm64 and `windows-latest`) stages Node plus the
+sidecar, smoke tests, then uses `tauri-apps/tauri-action` to bundle and sign the
+installers. Apple Silicon macOS is signed and notarized; Windows publishes NSIS
+`.exe` and `.msi` artifacts. Intel macOS and Linux are intentionally not
+released.
 
-`.github/workflows/ci.yml`'s `app` job exercises the same cross-OS spawn path on
-every push/PR (stage + bundle + smoke + `cargo test`) without a full bundle.
+The CI `app` matrix exercises the same cross-OS spawn path on every push/PR
+(stage + bundle + smoke + `cargo test`) and runs the Windows packaged MSI smoke.
 
-### Required secrets
+### Protected release environment and required secrets
+
+Create a GitHub Actions environment named **`desktop-production`**, require the
+release approvers there, restrict deployment to protected `v*` tags, and store
+all secrets below in that environment—not as unprotected repository secrets.
+The workflow validates the tag is on `main` and fails before building if any
+target-required credential is missing.
 
 Updater signing (every OS):
 
-| Secret | Purpose |
-|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | minisign private key for updater signatures. **Must match** `plugins.updater.pubkey` in `tauri.conf.json`. |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password for that key. |
+| Secret                               | Purpose                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | minisign private key for updater signatures. **Must match** `plugins.updater.pubkey` in `tauri.conf.json`. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password for that key.                                                                                     |
 
 If the updater key is lost, rotate both the key and the `pubkey` in
 `tauri.conf.json` (old installs won't auto-update across the rotation).
 
-macOS code signing + notarization (only consumed by the macOS matrix legs;
-leave unset to ship an unsigned build — the workflow stays green):
+macOS code signing + notarization (required on the macOS matrix leg; an absent
+value fails preflight rather than publishing an unsigned build):
 
-| Secret | Purpose |
-|---|---|
-| `APPLE_CERTIFICATE` | base64 of the exported **Developer ID Application** `.p12`. |
-| `APPLE_CERTIFICATE_PASSWORD` | the password chosen when exporting that `.p12`. |
-| `APPLE_SIGNING_IDENTITY` | full identity name, e.g. `Developer ID Application: NAME (396M7LY29W)`. |
-| `KEYCHAIN_PASSWORD` | any throwaway password for the ephemeral CI keychain. |
-| `APPLE_ID` | Apple ID email used for notarization. |
-| `APPLE_PASSWORD` | an **app-specific** password for that Apple ID (not the account password). |
-| `APPLE_TEAM_ID` | Apple Team ID — `396M7LY29W`. |
+| Secret                       | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `APPLE_CERTIFICATE`          | base64 of the exported **Developer ID Application** `.p12`.                |
+| `APPLE_CERTIFICATE_PASSWORD` | the password chosen when exporting that `.p12`.                            |
+| `APPLE_SIGNING_IDENTITY`     | full identity name, e.g. `Developer ID Application: NAME (396M7LY29W)`.    |
+| `KEYCHAIN_PASSWORD`          | any throwaway password for the ephemeral CI keychain.                      |
+| `APPLE_ID`                   | Apple ID email used for notarization.                                      |
+| `APPLE_PASSWORD`             | an **app-specific** password for that Apple ID (not the account password). |
+| `APPLE_TEAM_ID`              | Apple Team ID — `396M7LY29W`.                                              |
 
 ## macOS signing setup (one-time)
 
 1. **Create a Developer ID Application certificate.** On your Mac, Keychain
-   Access → Certificate Assistant → *Request a Certificate From a Certificate
-   Authority* to make a CSR. In the Apple Developer portal
+   Access → Certificate Assistant → _Request a Certificate From a Certificate
+   Authority_ to make a CSR. In the Apple Developer portal
    (Certificates, IDs & Profiles) create a **Developer ID Application**
    certificate, upload the CSR, download the `.cer`, and open it to install
    into your login keychain.
@@ -149,8 +159,9 @@ leave unset to ship an unsigned build — the workflow stays green):
    Security → App-Specific Passwords → generate one (→ `APPLE_PASSWORD`). Never
    commit it; store it only as a GitHub secret. If one leaks, revoke and
    regenerate.
-5. **Add all seven secrets** under repo Settings → Secrets and variables →
-   Actions, then push a `v*` tag to trigger the release.
+5. **Add all seven Apple secrets** plus both updater-signing secrets to the
+   protected `desktop-production` environment, then push a `v*` tag that points
+   to a commit on `main`. An environment reviewer must approve before the jobs run.
 
 > Notarization uses the Apple ID path (`APPLE_ID` + `APPLE_PASSWORD` +
 > `APPLE_TEAM_ID`). To switch to the App Store Connect API key path instead, set

@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { ensureAppDirs } from "../config.js";
+import { ensureAppDirs, loadSavedSettings, projectScopeAllowed } from "../config.js";
 import { initLogger, log, closeLogger } from "../core/logger.js";
 import {
   MCPClientManager,
@@ -101,19 +101,48 @@ async function buildRows(cwd: string): Promise<McpServerRow[]> {
   const scoped = await loadServers(cwd);
   if (scoped.length === 0) return [];
 
+  // Project-scope servers run repo-controlled commands; even listing them
+  // spawns the process to probe status. Unless the user trusts project MCP
+  // (trustProjectMcpServers), show those rows as blocked without connecting.
+  const settings = loadSavedSettings();
+  const trustProject = projectScopeAllowed(
+    settings.trustProjectMcpServers,
+    settings.trustedProjects,
+    cwd,
+  );
+  const connectable = scoped.filter((s) => trustProject || s.scope !== "project");
+  const blocked = scoped.filter((s) => !trustProject && s.scope === "project");
+
   const manager = new MCPClientManager();
   try {
-    const results = await manager.connectAllDetailed(scoped.map((s) => s.config));
-    return scoped.map((s): McpServerRow => {
-      const result = results.find((r) => r.name === s.config.name);
-      return {
-        config: s.config,
-        scope: s.scope,
-        ok: result?.ok ?? false,
-        toolCount: result?.toolCount ?? 0,
-        error: result?.error,
-      };
-    });
+    const results =
+      connectable.length > 0
+        ? await manager.connectAllDetailed(connectable.map((s) => s.config))
+        : [];
+    return [
+      ...connectable.map((s): McpServerRow => {
+        const result = results.find((r) => r.name === s.config.name);
+        return {
+          config: s.config,
+          scope: s.scope,
+          ok: result?.ok ?? false,
+          toolCount: result?.toolCount ?? 0,
+          error: result?.error,
+        };
+      }),
+      ...blocked.map(
+        (s): McpServerRow => ({
+          config: s.config,
+          scope: s.scope,
+          ok: false,
+          toolCount: 0,
+          error:
+            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+            "repo-controlled commands. Add or re-add a server in this project via " +
+            "the MCP modal to trust it.",
+        }),
+      ),
+    ];
   } finally {
     await manager.dispose();
   }

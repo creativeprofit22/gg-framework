@@ -1,11 +1,11 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { resolvePath } from "./path-utils.js";
-import { truncateTail } from "./truncate.js";
+import { chunkFile, bm25Rank, CHUNKABLE_EXTENSIONS, type Chunk } from "../core/code-retrieval.js";
+import { loadGitignore } from "./gitignore.js";
 import { localOperations, type ToolOperations } from "./operations.js";
-import { chunkFile, bm25Rank, type Chunk } from "../core/code-retrieval.js";
+import { resolvePath, toPosixPath } from "./path-utils.js";
+import { truncateTail } from "./truncate.js";
 
 const SearchCodeParams = z.object({
   query: z.string().describe("Natural-language description of the code you're looking for"),
@@ -19,8 +19,8 @@ const SearchCodeParams = z.object({
 });
 
 const DEFAULT_MAX_RESULTS = 8;
-/** TS/JS only — matches our AST chunking capability. Non-TS files are out of scope. */
-const SOURCE_GLOB = "**/*.{ts,tsx,js,jsx,mts,cts}";
+/** Every language with a symbol chunker; anything else has no symbols to rank. */
+const SOURCE_GLOB = `**/*.{${CHUNKABLE_EXTENSIONS.join(",")}}`;
 const MAX_CANDIDATE_FILES = 5000;
 
 export function createSearchCodeTool(
@@ -31,8 +31,9 @@ export function createSearchCodeTool(
     name: "code_search",
     description:
       "Find the most relevant functions/classes/types for a query. Returns whole ranked " +
-      "symbol chunks (not lines), AST-aware — far fewer tokens than reading whole files. " +
-      "TS/JS only; use grep for text/other languages.",
+      "symbol chunks (not lines) — far fewer tokens than reading whole files. Indexes " +
+      "TypeScript/JavaScript, Python, Go, Rust, Java and C#; use grep for other languages " +
+      "or exact strings.",
     parameters: SearchCodeParams,
     async execute({ query, path: searchPath, max_results }) {
       const dir = searchPath ? resolvePath(cwd, searchPath) : cwd;
@@ -55,7 +56,7 @@ export function createSearchCodeTool(
 
       const files = entries.filter((entry) => !ig.ignores(entry)).slice(0, MAX_CANDIDATE_FILES);
       if (files.length === 0) {
-        return "No TS/JS files to search. code_search indexes TypeScript/JavaScript only — use grep for other languages.";
+        return "No indexable source files here. code_search covers TypeScript/JavaScript, Python, Go, Rust, Java and C# — use grep for other languages.";
       }
 
       const chunks: Chunk[] = [];
@@ -67,13 +68,15 @@ export function createSearchCodeTool(
         } catch {
           continue; // unreadable file — skip
         }
-        // Use the cwd-relative path so headers are stable regardless of `path` scope.
-        const rel = path.relative(cwd, abs);
+        // cwd-relative so headers are stable regardless of `path` scope, and
+        // forward-slashed so the `file:line → symbol` headers the model reads
+        // (and echoes back into read/edit calls) are identical on every OS.
+        const rel = toPosixPath(path.relative(cwd, abs));
         for (const chunk of chunkFile(rel, source)) chunks.push(chunk);
       }
 
       if (chunks.length === 0) {
-        return `No top-level symbols found in ${files.length} TS/JS file(s) under ${path.relative(cwd, dir) || "."}.`;
+        return `No top-level symbols found in ${files.length} TS/JS file(s) under ${toPosixPath(path.relative(cwd, dir)) || "."}.`;
       }
 
       const ranked = bm25Rank(query, chunks, maxResults);
@@ -95,16 +98,4 @@ export function createSearchCodeTool(
       return body;
     },
   };
-}
-
-async function loadGitignore(dir: string): Promise<string[]> {
-  try {
-    const content = await fs.readFile(path.join(dir, ".gitignore"), "utf-8");
-    return content
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"));
-  } catch {
-    return [];
-  }
 }

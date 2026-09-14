@@ -1,6 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
+import {
+  agentLoop,
+  type AgentEvent,
+  type AgentTool,
+  type AgentTurnTiming,
+  type TransformContextOptions,
+} from "@kenkaiiii/gg-agent";
 import { ProviderError } from "@kenkaiiii/gg-ai";
+import { WORKFLOW_BUSY_MESSAGE, workflowQueuePolicyError } from "../../core/workflow-busy-policy.js";
 import type {
   Message,
   Provider,
@@ -9,13 +16,24 @@ import type {
   ImageContent,
   VideoContent,
 } from "@kenkaiiii/gg-ai";
-import type { IdealReviewStats } from "../../core/ideal-review.js";
 import {
+  buildReviewCoverageEscalationMessage,
+  buildReviewCoverageMessage,
+  MAX_REVIEW_COVERAGE_INJECTIONS,
+  withReviewCoverageRequirements,
+  type IdealReviewStats,
+  type ReviewCoverageTracker,
+} from "../../core/ideal-review.js";
+import type { LspManager } from "../../core/lsp/manager.js";
+import {
+  CycleDetector,
   detectTextRepetition,
-  toolCallSignature,
+  ToolCallProgressTracker,
+  type CycleDetection,
   type LoopBreakStats,
 } from "../../core/loop-breaker.js";
 import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
+import { resolveSessionTurnToolResultCharLimit } from "../../core/agent-session.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "../../core/oauth/kimi.js";
 import { log } from "../../core/logger.js";
 import { wrapSteeringContent } from "../../core/steering.js";
@@ -88,6 +106,31 @@ export function shouldRetainThinkingDelta(): boolean {
   return false;
 }
 
+function withLspReviewEvidence(
+  message: Message,
+  files: readonly string[],
+  lspManager: LspManager | undefined,
+): Message {
+  const lowConfidence: string[] = [];
+  const missing: string[] = [];
+  for (const filePath of files) {
+    const outcome = lspManager?.getLatestOutcome(filePath);
+    if (outcome?.kind === "low_confidence") lowConfidence.push(filePath);
+    else if (outcome?.kind !== "clean" && outcome?.kind !== "diagnostics") missing.push(filePath);
+  }
+  if (lowConfidence.length === 0 && missing.length === 0) return message;
+  const notes = [
+    ...(lowConfidence.length > 0
+      ? [`Diagnostics are low confidence while indexing: ${lowConfidence.join(", ")}.`]
+      : []),
+    ...(missing.length > 0
+      ? [`Diagnostics evidence is unavailable or missing: ${missing.join(", ")}.`]
+      : []),
+    "Do not describe those files as compiler-clean without other evidence.",
+  ];
+  return { role: "user", content: `${String(message.content)}\n\n${notes.join(" ")}` };
+}
+
 export interface ActiveToolCall {
   toolCallId: string;
   name: string;
@@ -102,6 +145,7 @@ export interface AgentLoopOptions {
   tools: AgentTool[];
   webSearch?: boolean;
   maxTokens: number;
+  maxTurns?: number;
   /** Whether the active model supports native image input. */
   supportsImages?: boolean;
   /** Whether the active model supports native video input. */
@@ -115,15 +159,22 @@ export interface AgentLoopOptions {
    *  When `forceRefresh` is true, bypass cache and fetch a new token (used on 401 retry). */
   resolveCredentials?: (opts?: {
     forceRefresh?: boolean;
+    /** Access token the provider just rejected, so the refresh can adopt a
+     *  newer token another process already wrote instead of minting one. */
+    rejectedToken?: string;
   }) => Promise<{ apiKey: string; accountId?: string; projectId?: string }>;
   transformContext?: (
     messages: Message[],
-    options?: { force?: boolean },
+    options: TransformContextOptions,
   ) => Message[] | Promise<Message[]>;
   getIdealReviewMessage?: (stats: IdealReviewStats, touchedFiles: string[]) => Message | null;
+  /** Harness-owned successful read/mutation evidence for fail-closed Ideal review. */
+  reviewCoverageTracker?: ReviewCoverageTracker;
+  /** Detailed diagnostics evidence shown only to the internal review turn. */
+  lspManager?: LspManager;
   /** Polled mid-loop when the agent appears stuck (repeated failures / calls /
    *  edits, or degenerate output). Return a user message to break the loop. */
-  getLoopBreakMessage?: (stats: LoopBreakStats) => Message | null;
+  getLoopBreakMessage?: (stats: LoopBreakStats, stage: 1 | 2) => Message | null;
   /** Polled mid-loop after a compaction reduced the context. Return a user
    *  message that re-pins the original request. */
   getRegroundingMessage?: (originalRequest: string) => Message | null;
@@ -139,7 +190,8 @@ export interface RetryInfo {
     | "empty_response"
     | "stream_stall"
     | "overflow_compact"
-    | "tool_argument_glitch";
+    | "tool_argument_glitch"
+    | "runaway_toolcall";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -155,6 +207,7 @@ export interface StreamSnapshot {
 
 export interface UseAgentLoopReturn {
   run: (userContent: UserContent) => Promise<void>;
+  isBusy: () => boolean;
   abort: () => void;
   reset: () => void;
   /** Queue a message to be processed after the current run completes.
@@ -198,6 +251,7 @@ export function useAgentLoop(
   messages: React.MutableRefObject<Message[]>,
   options: AgentLoopOptions,
   callbacks?: {
+    onRunStart?: (startedAt: number) => void;
     onComplete?: (newMessages: Message[]) => void;
     onTurnText?: (text: string, thinking: string, thinkingMs: number) => void;
     onToolStart?: (
@@ -232,6 +286,7 @@ export function useAgentLoop(
         cacheRead?: number;
         cacheWrite?: number;
       },
+      timing: AgentTurnTiming,
     ) => void;
     onDone?: (
       durationMs: number,
@@ -245,11 +300,18 @@ export function useAgentLoop(
      *  The UI should roll back any pending progressive flushes from the
      *  aborted attempt so the retry's regenerated text doesn't duplicate. */
     onRetry?: () => void;
+    /** Called when a turn ended on a non-clean stop (max_tokens/refusal/error)
+     *  so the UI can warn instead of presenting truncated output as done. */
+    onTruncated?: (
+      reason: "max_tokens" | "refusal" | "provider_error" | "empty_response",
+      continued: boolean,
+    ) => void;
     /** Polled when the agent would otherwise stop. Return a user message to
      *  inject and continue the loop (e.g. "continue with the next plan step"). */
     getFollowUpMessages?: () => Message[] | null;
   },
 ): UseAgentLoopReturn {
+  const onRunStart = callbacks?.onRunStart;
   const onComplete = callbacks?.onComplete;
   const onTurnText = callbacks?.onTurnText;
   const onToolStart = callbacks?.onToolStart;
@@ -262,6 +324,7 @@ export function useAgentLoop(
   const onAborted = callbacks?.onAborted;
   const onQueuedStart = callbacks?.onQueuedStart;
   const onRetry = callbacks?.onRetry;
+  const onTruncated = callbacks?.onTruncated;
   const getFollowUpMessages = callbacks?.getFollowUpMessages;
   const [isRunning, setIsRunning] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -280,6 +343,9 @@ export function useAgentLoop(
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
+  // React state can lag submissions and turns idle before teardown/queue draining ends.
+  const runOwnedRef = useRef(false);
+  const isBusy = useCallback(() => runOwnedRef.current, []);
   const queueRef = useRef<{ content: UserContent; text: string }[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const activeToolCallsRef = useRef<ActiveToolCall[]>([]);
@@ -287,6 +353,9 @@ export function useAgentLoop(
   const thinkingBufferRef = useRef("");
   const thinkingVisibleRef = useRef("");
   const runStartRef = useRef(0);
+  /** Access token most recently handed to the provider, so a 401 retry can name
+   *  the token that was actually rejected. */
+  const lastResolvedApiKey = useRef<string | undefined>(undefined);
   const toolsUsedRef = useRef<Set<string>>(new Set());
   const toolCountsRef = useRef<Map<string, number>>(new Map());
   const idealReviewStatsRef = useRef<IdealReviewStats>({
@@ -298,14 +367,26 @@ export function useAgentLoop(
     editCalls: 0,
     bashCalls: 0,
   });
-  const idealReviewInjectedRef = useRef(false);
+  const idealReviewPhaseRef = useRef<"idle" | "reviewing" | "complete">("idle");
+  /** Coverage follow-ups spent this run, capped by MAX_REVIEW_COVERAGE_INJECTIONS. */
+  const reviewCoverageInjectedRef = useRef(0);
   // ── Loop-breaker tracking ──
-  const loopSignatureCountsRef = useRef<Map<string, number>>(new Map());
+  const loopProgressTrackerRef = useRef(new ToolCallProgressTracker());
+  const cycleDetectorRef = useRef(new CycleDetector());
+  const cyclicPatternRef = useRef<CycleDetection | null>(null);
   const fileEditCountsRef = useRef<Map<string, number>>(new Map());
   const consecutiveFailuresRef = useRef(0);
-  const maxSignatureRepeatsRef = useRef(0);
-  const maxSameFileEditsRef = useRef(0);
-  const loopBreakInjectedRef = useRef(false);
+  const repeatedNoProgressCallsRef = useRef(0);
+  // 0 = no loop-break injected yet; 1 = first nudge sent; 2 = final stop-and-
+  // report injected (no further injections — maxTurns is the backstop).
+  const loopBreakInjectedRef = useRef<0 | 1 | 2>(0);
+  // Text snapshot taken at loop-break injection. textVisibleRef doubles as UI
+  // streaming state (can't be cleared here), so stage 2 only evaluates text
+  // streamed AFTER the snapshot — otherwise a stage-1 text-repetition trigger
+  // would immediately re-fire on the same stale tail. If the buffer no longer
+  // starts with the snapshot, it was cleared at a turn boundary and the whole
+  // buffer is fresh evidence.
+  const loopBreakTextMarkRef = useRef("");
   // ── Re-grounding tracking ──
   const compactionOccurredRef = useRef(false);
   const regroundingInjectedRef = useRef(false);
@@ -378,6 +459,9 @@ export function useAgentLoop(
   }, []);
 
   const queueMessage = useCallback((content: UserContent, text?: string) => {
+    const error = workflowQueuePolicyError(text ?? textFromUserContent(content)) ??
+      workflowQueuePolicyError(textFromUserContent(content));
+    if (error) throw new Error(error);
     queueRef.current.push({ content, text: text ?? textFromUserContent(content) });
     setQueuedCount(queueRef.current.length);
   }, []);
@@ -400,10 +484,12 @@ export function useAgentLoop(
 
   const run = useCallback(
     async (userContent: UserContent) => {
+      if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
+      runOwnedRef.current = true;
       /** Run a single user message through the agent loop. Returns true if aborted. */
       const runSingle = async (
         content: UserContent,
-        credentialOpts?: { forceRefresh?: boolean },
+        credentialOpts?: { forceRefresh?: boolean; rejectedToken?: string },
       ): Promise<boolean> => {
         const ac = new AbortController();
         abortRef.current = ac;
@@ -413,7 +499,7 @@ export function useAgentLoop(
         // only call setState at 100ms intervals to avoid saturating the event
         // loop with React renders during fast token streaming. 100ms (10fps) is
         // imperceptible for prose but cuts streaming render CPU ~49% vs 16ms
-        // (bench/RESULTS.md, bench B — the Markdown re-render dominates, so CPU
+        // (the Markdown re-render dominates, so CPU
         // scales with flush count, not delta count). Worst case it adds 100ms
         // to the first visible token — noise next to seconds of provider TTFT.
         let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -470,6 +556,7 @@ export function useAgentLoop(
         thinkingBufferRef.current = "";
         thinkingVisibleRef.current = "";
         runStartRef.current = Date.now();
+        onRunStart?.(runStartRef.current);
         log("INFO", "ui", "run_start", {
           provider: options.provider,
           model: options.model,
@@ -487,13 +574,17 @@ export function useAgentLoop(
           editCalls: 0,
           bashCalls: 0,
         };
-        idealReviewInjectedRef.current = false;
-        loopSignatureCountsRef.current = new Map();
+        idealReviewPhaseRef.current = "idle";
+        reviewCoverageInjectedRef.current = 0;
+        options.reviewCoverageTracker?.reset();
+        loopProgressTrackerRef.current.reset();
+        cycleDetectorRef.current.reset();
+        cyclicPatternRef.current = null;
         fileEditCountsRef.current = new Map();
         consecutiveFailuresRef.current = 0;
-        maxSignatureRepeatsRef.current = 0;
-        maxSameFileEditsRef.current = 0;
-        loopBreakInjectedRef.current = false;
+        repeatedNoProgressCallsRef.current = 0;
+        loopBreakInjectedRef.current = 0;
+        loopBreakTextMarkRef.current = "";
         compactionOccurredRef.current = false;
         regroundingInjectedRef.current = false;
         charCountRef.current = 0;
@@ -561,6 +652,7 @@ export function useAgentLoop(
             accountId = creds.accountId;
             projectId = creds.projectId;
           }
+          lastResolvedApiKey.current = apiKey;
           log("INFO", "ui", "creds_resolved", {
             ms: String(Date.now() - credsStart),
             sinceRunStartMs: String(Date.now() - runStartRef.current),
@@ -592,13 +684,34 @@ export function useAgentLoop(
             tools: options.tools,
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
+            maxTurns: options.maxTurns,
             supportsImages: options.supportsImages,
             supportsVideo: options.supportsVideo,
             thinking: options.thinking,
             apiKey,
+            // Per-turn credential resolution. A run can span many minutes; any
+            // process sharing auth.json that refreshes this grant invalidates
+            // the token resolved above, which would otherwise kill every
+            // remaining turn with an authentication error.
+            ...(options.resolveCredentials
+              ? {
+                  resolveCredentials: async () => {
+                    const live = await options.resolveCredentials!();
+                    lastResolvedApiKey.current = live.apiKey;
+                    return live;
+                  },
+                }
+              : {}),
             baseUrl: options.baseUrl,
             accountId,
             projectId,
+            // Aggregate per-turn budget across parallel tool results — same
+            // fan-out guard the AgentSession applies (see agent-session.ts).
+            maxTurnToolResultChars: resolveSessionTurnToolResultCharLimit(
+              options.model,
+              options.provider,
+              accountId,
+            ),
             signal: ac.signal,
             userAgent,
             defaultHeaders,
@@ -630,16 +743,38 @@ export function useAgentLoop(
                 return [{ role: "user" as const, content: wrapSteeringContent(merged) }];
               }
 
-              // Loop-breaker: at most once per run, when the agent looks stuck.
-              if (!loopBreakInjectedRef.current && options.getLoopBreakMessage) {
-                const loopBreakMessage = options.getLoopBreakMessage({
-                  consecutiveFailures: consecutiveFailuresRef.current,
-                  maxSignatureRepeats: maxSignatureRepeatsRef.current,
-                  maxSameFileEdits: maxSameFileEditsRef.current,
-                  textRepetitionDetected: detectTextRepetition(textVisibleRef.current),
-                });
+              // Loop-breaker: two-stage. Stage 1 nudges the agent to break the
+              // pattern; a FRESH detection after that injects the harsher final
+              // stop-and-report prompt. All loop signals reset after each
+              // injection so stage 2 only fires on new evidence.
+              if (loopBreakInjectedRef.current < 2 && options.getLoopBreakMessage) {
+                const stage = loopBreakInjectedRef.current === 0 ? (1 as const) : (2 as const);
+                // Only evaluate text streamed after the last injection snapshot
+                // (stale repeated tails must not escalate to stage 2).
+                const mark = loopBreakTextMarkRef.current;
+                const freshText =
+                  mark && textVisibleRef.current.startsWith(mark)
+                    ? textVisibleRef.current.slice(mark.length)
+                    : textVisibleRef.current;
+                const loopBreakMessage = options.getLoopBreakMessage(
+                  {
+                    consecutiveFailures: consecutiveFailuresRef.current,
+                    repeatedNoProgressCalls: repeatedNoProgressCallsRef.current,
+                    textRepetitionDetected: detectTextRepetition(freshText),
+                    ...(cyclicPatternRef.current
+                      ? { cyclicPattern: cyclicPatternRef.current }
+                      : {}),
+                  },
+                  stage,
+                );
                 if (loopBreakMessage) {
-                  loopBreakInjectedRef.current = true;
+                  loopBreakInjectedRef.current = stage;
+                  loopProgressTrackerRef.current.reset();
+                  cycleDetectorRef.current.reset();
+                  cyclicPatternRef.current = null;
+                  consecutiveFailuresRef.current = 0;
+                  repeatedNoProgressCallsRef.current = 0;
+                  loopBreakTextMarkRef.current = textVisibleRef.current;
                   return [loopBreakMessage];
                 }
               }
@@ -667,14 +802,65 @@ export function useAgentLoop(
             getFollowUpMessages: async () => {
               const followUp = (await getFollowUpMessages?.()) ?? null;
               if (followUp && followUp.length > 0) return followUp;
-              if (idealReviewInjectedRef.current || !options.getIdealReviewMessage) return null;
+              const coverageTracker = options.reviewCoverageTracker;
+              if (idealReviewPhaseRef.current === "reviewing") {
+                const coverage = coverageTracker?.evidence() ?? {
+                  expected: [],
+                  covered: [],
+                  missing: [],
+                };
+                log("INFO", "ideal", "Ideal review coverage check", {
+                  covered: coverage.covered,
+                  missing: coverage.missing,
+                });
+                if (coverage.missing.length > 0) {
+                  if (reviewCoverageInjectedRef.current < MAX_REVIEW_COVERAGE_INJECTIONS) {
+                    reviewCoverageInjectedRef.current += 1;
+                    return [
+                      withLspReviewEvidence(
+                        buildReviewCoverageMessage(coverage.missing),
+                        coverage.expected,
+                        options.lspManager,
+                      ),
+                    ];
+                  }
+                  // Budget spent: close the gate rather than re-injecting the
+                  // same unreadable-file checklist for the rest of the run.
+                  idealReviewPhaseRef.current = "complete";
+                  log("INFO", "ideal", "Ideal review coverage escalated after retry budget", {
+                    injected: String(reviewCoverageInjectedRef.current),
+                    missing: coverage.missing,
+                  });
+                  return [buildReviewCoverageEscalationMessage(coverage.missing)];
+                }
+                idealReviewPhaseRef.current = "complete";
+                return null;
+              }
+              if (idealReviewPhaseRef.current === "complete" || !options.getIdealReviewMessage)
+                return null;
               const idealReviewMessage = options.getIdealReviewMessage(
                 { ...idealReviewStatsRef.current },
                 [...fileEditCountsRef.current.keys()],
               );
               if (!idealReviewMessage) return null;
-              idealReviewInjectedRef.current = true;
-              return [idealReviewMessage];
+              coverageTracker?.start();
+              idealReviewPhaseRef.current = "reviewing";
+              const coverage = coverageTracker?.evidence() ?? {
+                expected: [],
+                covered: [],
+                missing: [],
+              };
+              log("INFO", "ideal", "Ideal review coverage started", {
+                expected: coverage.expected,
+                missing: coverage.missing,
+              });
+              return [
+                withLspReviewEvidence(
+                  withReviewCoverageRequirements(idealReviewMessage, coverage.missing),
+                  coverage.expected,
+                  options.lspManager,
+                ),
+              ];
             },
             // clearToolUses disabled — causes model to output unsolicited context
             // summaries ("KEY CONTEXT TO REMEMBER") when it sees gaps from stripped
@@ -828,18 +1014,23 @@ export function useAgentLoop(
                 } else {
                   consecutiveFailuresRef.current = 0;
                 }
-                {
-                  const sig = toolCallSignature(toolName, tc?.args);
-                  const next = (loopSignatureCountsRef.current.get(sig) ?? 0) + 1;
-                  loopSignatureCountsRef.current.set(sig, next);
-                  if (next > maxSignatureRepeatsRef.current) maxSignatureRepeatsRef.current = next;
-                }
-                if ((toolName === "edit" || toolName === "write") && tc?.args) {
+                repeatedNoProgressCallsRef.current = loopProgressTrackerRef.current.record(
+                  toolName,
+                  tc?.args,
+                  event.result,
+                  event.isError,
+                );
+                cyclicPatternRef.current = cycleDetectorRef.current.record(
+                  toolName,
+                  tc?.args,
+                  event.result,
+                  event.isError,
+                );
+                if (!event.isError && (toolName === "edit" || toolName === "write") && tc?.args) {
                   const filePath = (tc.args as { file_path?: unknown }).file_path;
                   if (typeof filePath === "string") {
                     const next = (fileEditCountsRef.current.get(filePath) ?? 0) + 1;
                     fileEditCountsRef.current.set(filePath, next);
-                    if (next > maxSameFileEditsRef.current) maxSameFileEditsRef.current = next;
                   }
                 }
                 // Track lines changed for edit tools
@@ -906,6 +1097,12 @@ export function useAgentLoop(
                 setStallError(event.error.message);
                 break;
 
+              case "truncated":
+                // Non-clean stop (max_tokens/refusal/provider error) — surface
+                // a warning so truncated output never reads as a clean finish.
+                onTruncated?.(event.reason, event.continued);
+                break;
+
               case "retry": {
                 // The stream restarts from scratch on retry — the provider
                 // will re-emit text from the beginning. Without clearing
@@ -959,7 +1156,7 @@ export function useAgentLoop(
                 flushStreamState();
                 setRetryInfo(null);
                 idealReviewStatsRef.current.turns = event.turn;
-                onTurnEnd?.(event.turn, event.stopReason, event.usage);
+                onTurnEnd?.(event.turn, event.stopReason, event.usage, event.timing);
                 setCurrentTurn(event.turn);
                 setTotalTokens((prev) => ({
                   input: prev.input + event.usage.inputTokens,
@@ -1075,48 +1272,61 @@ export function useAgentLoop(
         return wasAborted;
       }; // end runSingle
 
-      // Run the initial message.
-      // On 401, force-refresh the OAuth token and retry once — the provider may
-      // have revoked the token server-side before the stored expiry.
       try {
-        await runSingle(userContent);
-      } catch (err) {
-        if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
-          // Pop the user message we pushed — runSingle will re-push it
-          messages.current.pop();
-          await runSingle(userContent, { forceRefresh: true });
-        } else {
-          throw err;
+        // Run the initial message.
+        // On 401, force-refresh the OAuth token and retry once — the provider may
+        // have revoked the token server-side before the stored expiry.
+        try {
+          await runSingle(userContent);
+        } catch (err) {
+          if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
+            // Pop the user message we pushed — runSingle will re-push it
+            messages.current.pop();
+            await runSingle(userContent, {
+              forceRefresh: true,
+              // Name the token the provider rejected so the refresh can adopt a
+              // sibling process's newer token instead of minting one that would
+              // in turn revoke theirs.
+              ...(lastResolvedApiKey.current !== undefined
+                ? { rejectedToken: lastResolvedApiKey.current }
+                : {}),
+            });
+          } else {
+            throw err;
+          }
         }
-      }
 
-      // Drain the queue: process follow-up messages that arrived after agent_done.
-      // Most queued messages are consumed mid-run via getSteeringMessages, but
-      // messages that arrive after the agent finishes (no more tool calls to
-      // trigger steering) land here. Batch all remaining into a single run.
-      //
-      // This drains even when the run was aborted. After an interrupt, the
-      // teardown (process kills, stream finish, finally block, React commit of
-      // isRunning=false) is async — during that window a reprompt sees
-      // isRunning still true and gets queued instead of run. Pre-abort queued
-      // messages were already restored to the composer by handleAbort's
-      // drainQueuedText (and reset()/abort paths clear the queue), so anything
-      // left here arrived *after* the abort and is a fresh user intent. Without
-      // this it would be orphaned in the queue forever with no loop to pick it
-      // up.
-      if (queueRef.current.length > 0) {
-        const batch = queueRef.current.splice(0);
-        setQueuedCount(0);
-        const merged = mergeUserContent(batch.map((q) => q.content));
-        // Let React process the onDone state updates before starting next run
-        await new Promise((r) => setTimeout(r, 100));
-        onQueuedStart?.(merged);
-        await runSingle(merged);
+        // Drain the queue: process follow-up messages that arrived after agent_done.
+        // Most queued messages are consumed mid-run via getSteeringMessages, but
+        // messages that arrive after the agent finishes (no more tool calls to
+        // trigger steering) land here. Batch all remaining into a single run.
+        //
+        // This drains even when the run was aborted. After an interrupt, the
+        // teardown (process kills, stream finish, finally block, React commit of
+        // isRunning=false) is async — during that window a reprompt sees
+        // isRunning still true and gets queued instead of run. Pre-abort queued
+        // messages were already restored to the composer by handleAbort's
+        // drainQueuedText (and reset()/abort paths clear the queue), so anything
+        // left here arrived *after* the abort and is a fresh user intent. Without
+        // this it would be orphaned in the queue forever with no loop to pick it
+        // up.
+        if (queueRef.current.length > 0) {
+          const batch = queueRef.current.splice(0);
+          setQueuedCount(0);
+          const merged = mergeUserContent(batch.map((q) => q.content));
+          // Let React process the onDone state updates before starting next run
+          await new Promise((r) => setTimeout(r, 100));
+          onQueuedStart?.(merged);
+          await runSingle(merged);
+        }
+      } finally {
+        runOwnedRef.current = false;
       }
     },
     [
       messages,
       options,
+      onRunStart,
       onComplete,
       onTurnText,
       onToolStart,
@@ -1128,6 +1338,7 @@ export function useAgentLoop(
       onDone,
       onAborted,
       onQueuedStart,
+      onTruncated,
       getFollowUpMessages,
     ],
   );
@@ -1145,6 +1356,7 @@ export function useAgentLoop(
 
   return {
     run,
+    isBusy,
     abort,
     reset,
     queueMessage,

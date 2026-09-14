@@ -1,4 +1,6 @@
 import { useCallback, useRef, useState } from "react";
+import type { KenRunIdentity, KenState, KenTarget } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { MENTOR_DISPLAY_NAME } from "./brand";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
 import type { Item } from "./App";
@@ -36,6 +38,12 @@ export interface KenMentor {
    * and was consumed, so the caller can early-return; false for anything else.
    */
   handleKenEvent: (e: SidecarEvent) => boolean;
+  hydrateKen: (value: unknown, replaceHistory?: boolean) => void;
+  clearKenStream: () => void;
+  captureKenHydration: () => (value: unknown) => void;
+  captureKenTarget: () => KenTarget | null;
+  captureKenRun: () => KenRunIdentity | null;
+  captureKenOperation: () => () => boolean;
 }
 
 export function useKenMentor(opts: {
@@ -57,6 +65,91 @@ export function useKenMentor(opts: {
   const kenThinkingAccumRef = useRef(0);
   // Id of the active Ken streaming bubble (null when Ken isn't streaming).
   const kenStreamingIdRef = useRef<number | null>(null);
+  const authority = useRef<KenState | null>(null);
+  const authorityVersion = useRef(0);
+  const operationVersion = useRef(0);
+  const closedRuns = useRef(new Set<string>());
+  const clearStream = useCallback(() => {
+    kenStreamingIdRef.current = null;
+    kenTokensRef.current = 0;
+    kenThinkingStartRef.current = null;
+    kenThinkingAccumRef.current = 0;
+    setKenRunning(false);
+    setKenTokens(0);
+    setKenRunStartTs(null);
+    setKenIsThinking(false);
+    setKenThinkingStartTs(null);
+    setKenThinkingAccumMs(0);
+  }, []);
+  const hydrateKen = useCallback(
+    (value: unknown, replaceHistory = false) => {
+      authorityVersion.current++;
+      const v = value as Partial<KenState> | null | undefined;
+      const valid =
+        v &&
+        typeof v.conversationId === "string" &&
+        v.conversationId.length > 0 &&
+        typeof v.activationEpoch === "string" &&
+        v.activationEpoch.length > 0 &&
+        (v.activeRunId === null || (typeof v.activeRunId === "string" && v.activeRunId.length > 0));
+      const next = valid ? ({ ...v } as KenState) : null;
+      const prev = authority.current;
+      const targetChanged =
+        prev?.conversationId !== next?.conversationId ||
+        prev?.activationEpoch !== next?.activationEpoch;
+      if (targetChanged || replaceHistory) operationVersion.current++;
+      if (targetChanged) closedRuns.current.clear();
+      if (next?.activeRunId && closedRuns.current.has(next.activeRunId)) next.activeRunId = null;
+      if (
+        replaceHistory ||
+        prev?.conversationId !== next?.conversationId ||
+        prev?.activationEpoch !== next?.activationEpoch ||
+        prev?.activeRunId !== next?.activeRunId
+      ) {
+        if (!targetChanged && prev?.activeRunId && prev.activeRunId !== next?.activeRunId)
+          closedRuns.current.add(prev.activeRunId);
+        clearStream();
+      }
+      authority.current = next;
+      setKenRunning(!!next?.activeRunId);
+    },
+    [clearStream],
+  );
+  const clearKenStream = useCallback(() => {
+    clearStream();
+    setKenRunning(!!authority.current?.activeRunId);
+  }, [clearStream]);
+  const captureKenHydration = useCallback(() => {
+    const version = authorityVersion.current;
+    return (value: unknown) => {
+      if (version === authorityVersion.current) hydrateKen(value);
+    };
+  }, [hydrateKen]);
+  const captureKenOperation = useCallback(() => {
+    const owner = ++operationVersion.current;
+    const captured = authority.current;
+    return () =>
+      owner === operationVersion.current &&
+      captured?.conversationId === authority.current?.conversationId &&
+      captured?.activationEpoch === authority.current?.activationEpoch &&
+      captured?.activeRunId === authority.current?.activeRunId;
+  }, []);
+  const captureKenTarget = useCallback((): KenTarget | null => {
+    const current = authority.current;
+    return current
+      ? { conversationId: current.conversationId, activationEpoch: current.activationEpoch }
+      : null;
+  }, []);
+  const captureKenRun = useCallback((): KenRunIdentity | null => {
+    const current = authority.current;
+    return current?.activeRunId
+      ? {
+          conversationId: current.conversationId,
+          activationEpoch: current.activationEpoch,
+          runId: current.activeRunId,
+        }
+      : null;
+  }, []);
 
   // Ken's streaming bubble. Ken's replies are short, so a direct setItems per
   // delta (no rAF buffering) is fine and keeps his path independent of GG
@@ -100,7 +193,28 @@ export function useKenMentor(opts: {
 
   const handleKenEvent = useCallback(
     (e: SidecarEvent): boolean => {
+      const mentorEvent = e.type.startsWith("ken_") && e.type !== "ken_model_change";
+      if (!e.data || typeof e.data !== "object" || Array.isArray(e.data)) {
+        if (e.type === "ready" || e.type === "extras") hydrateKen(null);
+        return mentorEvent;
+      }
       const d = e.data as Record<string, unknown>;
+      // Reset authority is deliberately handled ONLY after reset correlation in useAgentEvents.
+      if (e.type === "ready" || e.type === "extras") {
+        if (e.type === "ready" || "kenState" in d) hydrateKen(d.kenState);
+        return false;
+      }
+      if (!e.type.startsWith("ken_") || e.type === "ken_model_change") return false;
+      const identity = d.ken as Partial<KenRunIdentity> | undefined;
+      const current = authority.current;
+      if (
+        !current?.activeRunId ||
+        !identity ||
+        identity.conversationId !== current.conversationId ||
+        identity.activationEpoch !== current.activationEpoch ||
+        identity.runId !== current.activeRunId
+      )
+        return true;
       switch (e.type) {
         // ── Ken Kai (mentor agent) ──────────────────────────────
         // Separate event family so Ken's reply renders in its own magenta
@@ -135,7 +249,7 @@ export function useKenMentor(opts: {
         // the tool starts a fresh paragraph instead of gluing onto the pre-tool
         // text ("...work.Local tools..."). Mirrors the build session's
         // tool_call_start / server_tool_call handling. Covers both client tools
-        // (read/grep/kencode-search) and Anthropic's native server web_search.
+        // (read/grep/steroids) and Anthropic's native server web_search.
         case "ken_tool_call_start":
         case "ken_server_tool_call":
           // Close any open thinking span (mirrors the build's finalizeThinking on
@@ -152,6 +266,9 @@ export function useKenMentor(opts: {
           return true;
         }
         case "ken_run_end":
+          closedRuns.current.add(current.activeRunId);
+          authority.current = { ...current, activeRunId: null };
+          authorityVersion.current++;
           setKenRunning(false);
           endKenStreaming();
           // Close any open thinking span so the final readout is accurate.
@@ -159,6 +276,10 @@ export function useKenMentor(opts: {
           setKenRunStartTs(null);
           return true;
         case "ken_error": {
+          closedRuns.current.add(current.activeRunId);
+          authority.current = { ...current, activeRunId: null };
+          authorityVersion.current++;
+          finalizeKenThinking();
           setKenRunning(false);
           endKenStreaming();
           setKenIsThinking(false);
@@ -172,11 +293,15 @@ export function useKenMentor(opts: {
               ? {
                   kind: "error",
                   id: nextId(),
-                  headline: `Ken: ${headline}`,
+                  headline: `${MENTOR_DISPLAY_NAME}: ${headline}`,
                   message: typeof d.message === "string" ? d.message : undefined,
                   guidance: typeof d.guidance === "string" ? d.guidance : undefined,
                 }
-              : { kind: "error", id: nextId(), text: `Ken: ${String(d.message ?? "unknown")}` },
+              : {
+                  kind: "error",
+                  id: nextId(),
+                  text: `${MENTOR_DISPLAY_NAME}: ${String(d.message ?? "unknown")}`,
+                },
           ]);
           return true;
         }
@@ -189,10 +314,10 @@ export function useKenMentor(opts: {
         case "ken_tool_call_end":
           return true;
         default:
-          return false;
+          return true;
       }
     },
-    [appendKen, endKenStreaming, finalizeKenThinking, setItems, nextId],
+    [appendKen, endKenStreaming, finalizeKenThinking, setItems, nextId, hydrateKen],
   );
 
   return {
@@ -203,5 +328,11 @@ export function useKenMentor(opts: {
     kenThinkingStartTs,
     kenThinkingAccumMs,
     handleKenEvent,
+    hydrateKen,
+    clearKenStream,
+    captureKenHydration,
+    captureKenTarget,
+    captureKenRun,
+    captureKenOperation,
   };
 }

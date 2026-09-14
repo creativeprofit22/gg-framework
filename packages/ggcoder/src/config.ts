@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import { createHash } from "node:crypto";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getAppPaths, type AppPaths } from "@kenkaiiii/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
@@ -16,6 +17,7 @@ export type { AppPaths };
 export async function ensureAppDirs(): Promise<AppPaths> {
   const paths = getAppPaths();
   await fs.mkdir(paths.agentDir, { recursive: true, mode: 0o700 });
+  await fs.mkdir(path.join(paths.agentDir, "commands"), { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.sessionsDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.skillsDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.extensionsDir, { recursive: true, mode: 0o700 });
@@ -28,12 +30,25 @@ export async function ensureAppDirs(): Promise<AppPaths> {
 export interface SavedSettings {
   provider?: Provider;
   model?: string;
+  autoCompact: boolean;
+  compactThreshold: number;
   thinkingEnabled: boolean;
   thinkingLevel?: ThinkingLevel;
   theme: "auto" | ThemeName;
   idealReviewEnabled: boolean;
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: boolean;
+  /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). */
+  allowOutsideWorkspaceWrites: boolean;
+  /** Connect MCP servers declared in the opened repo's .gg/mcp.json. That file
+   *  is repo-controlled, so a malicious repo could run a command the moment
+   *  the project opens. Default false — enable only for repos you trust. */
+  trustProjectMcpServers: boolean;
+  /** Repo paths individually trusted for project-scope MCP (the per-repo
+   *  complement to the global `trustProjectMcpServers`). */
+  trustedProjects: string[];
+  /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
+  subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
   sessionRetentionDays: number;
   /** Speed optimization profile.
@@ -47,13 +62,16 @@ const VALID_PROVIDERS = new Set<Provider>([
   "anthropic",
   "xiaomi",
   "openai",
+  "azure",
   "gemini",
   "glm",
   "moonshot",
   "minimax",
   "deepseek",
   "openrouter",
+  "huggingface",
   "sakana",
+  "xai",
 ]);
 
 function isValidProvider(value: unknown): value is Provider {
@@ -64,11 +82,16 @@ function isValidProvider(value: unknown): value is Provider {
 export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
   const filePath = settingsFilePath ?? getAppPaths().settingsFile;
   const result: SavedSettings = {
+    autoCompact: true,
+    compactThreshold: 0.85,
     thinkingEnabled: false,
     theme: "auto",
     idealReviewEnabled: true,
     lspDiagnostics: true,
+    allowOutsideWorkspaceWrites: false,
     sessionRetentionDays: 30,
+    trustProjectMcpServers: false,
+    trustedProjects: [],
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -81,11 +104,29 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
       // otherwise a model from the removed provider would leak through.
       if (typeof raw.defaultModel === "string") result.model = raw.defaultModel;
     }
+    if (raw.autoCompact === false) result.autoCompact = false;
+    if (
+      typeof raw.compactThreshold === "number" &&
+      Number.isFinite(raw.compactThreshold) &&
+      raw.compactThreshold >= 0.1 &&
+      raw.compactThreshold <= 1
+    ) {
+      result.compactThreshold = raw.compactThreshold;
+    }
     if (raw.thinkingEnabled === true) result.thinkingEnabled = true;
     if (isValidThinkingLevel(raw.thinkingLevel)) result.thinkingLevel = raw.thinkingLevel;
     if (typeof raw.theme === "string" && isValidThemeSetting(raw.theme)) result.theme = raw.theme;
     if (raw.idealReviewEnabled === false) result.idealReviewEnabled = false;
     if (raw.lspDiagnostics === false) result.lspDiagnostics = false;
+    if (raw.allowOutsideWorkspaceWrites === true) result.allowOutsideWorkspaceWrites = true;
+    if (
+      typeof raw.subagentMaxPerModel === "number" &&
+      Number.isInteger(raw.subagentMaxPerModel) &&
+      raw.subagentMaxPerModel >= 1 &&
+      raw.subagentMaxPerModel <= 4
+    ) {
+      result.subagentMaxPerModel = raw.subagentMaxPerModel;
+    }
     if (
       typeof raw.sessionRetentionDays === "number" &&
       Number.isInteger(raw.sessionRetentionDays) &&
@@ -96,13 +137,38 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     if (raw.speedProfile === "optimized" || raw.speedProfile === "baseline") {
       result.speedProfile = raw.speedProfile;
     }
+    if (raw.trustProjectMcpServers === true) result.trustProjectMcpServers = true;
+    if (Array.isArray(raw.trustedProjects))
+      result.trustedProjects = raw.trustedProjects.filter(
+        (x: unknown): x is string => typeof x === "string",
+      );
   } catch {
     // No settings file or invalid JSON — use defaults
   }
   return result;
 }
 
-const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
+/** Whether project-scope MCP is allowed for the given cwd. True when EITHER the
+ *  global `trustProjectMcpServers` toggle is on OR the resolved cwd is in the
+ *  per-repo `trustedProjects` list. Shared so the CLI, sidecar, and dashboard
+ *  all agree on the same decision. */
+export function projectScopeAllowed(
+  globalTrust: boolean,
+  trustedProjects: string[],
+  cwd: string,
+): boolean {
+  if (globalTrust) return true;
+  return trustedProjects.includes(path.resolve(cwd));
+}
+
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 
 function isValidThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === "string" && VALID_THINKING_LEVELS.has(value as ThinkingLevel);
@@ -122,68 +188,65 @@ function isValidThemeSetting(value: string): value is "auto" | ThemeName {
   return VALID_THEME_SETTINGS.has(value);
 }
 
-/** Seed built-in agent definitions on first run (won't overwrite user edits). */
-async function seedDefaultAgents(agentsDir: string): Promise<void> {
-  const defaults: Record<string, string> = {
-    "owl.md": `---
-name: owl
-description: "In-repo code explorer \u2014 traces symbols, call chains, and structure (no web)"
-tools: read, grep, find, ls, source_path
----
+/**
+ * SHA-256 of every agent body ggcoder has ever seeded into `~/.gg/agents`.
+ *
+ * All of those names now ship as BUNDLED_AGENTS with richer prompts, and user-dir
+ * agents take precedence — so a seeded copy silently shadows the bundled one
+ * and freezes it at the version that happened to be written on first run.
+ * Delete those copies, but ONLY when the file is byte-identical to something we
+ * wrote, so a user who edited or authored their own agent of that name keeps
+ * it. Hashes cover every historical variant (`git log -p -- src/config.ts`); a
+ * variant we missed just means that user keeps an old shadowing copy.
+ */
+export const SHADOWING_SEEDED_AGENT_HASHES: Record<string, readonly string[]> = {
+  "auditor.md": ["7c8c6c1ff892a7ebf45164b0367e340f099cf2cd611bfec23eb39ecc24592502"],
+  "skeptic.md": ["7def72d81da78919efb4934f396d8da47912786a49176badf996eac4d57a285d"],
+  "owl.md": [
+    "aace1c0aa0f25971f8ea24058a2581baa790aea1d83972f3fd3498e56ff05f8a",
+    "896a41bcd0c253c77619fb96903d8ab880005fa2f21fe2a22f89f9716156527d",
+    "a1066c116dc8381937cf67ea567c3c449891a525a3fca874ec59a8d7040249e7",
+    "705180ca682a29f40803b063e198526295c8d1d536b2eabe2462f9757ebf2a9c",
+  ],
+  "bee.md": [
+    "f2f09824758ea6207d470a64249d3c0ebc9b2cb790d2517608959a77d40f6688",
+    "3cd4a051e30c3eebed8b1f068f18a3f425b27eaeeb6eacc4d65916abf8f1b45a",
+    "7ef25f058a58099358f19fb6ca874a21f7101f0e037bdffc7bb9de2713a8ee92",
+  ],
+};
 
-You are Owl, a sharp-eyed codebase explorer.
-You map how THIS repository fits together \u2014 structure, symbols, call chains, patterns. You work only from local code and never research the web (that's \`researcher\`).
+/**
+ * Reclaim agent files ggcoder seeded into the user agents dir in past versions.
+ *
+ * Nothing is seeded anymore: bee/owl/researcher/worker/auditor/skeptic ship as
+ * BUNDLED_AGENTS, which stay improvable across upgrades. A file written to
+ * `~/.gg/agents` never would.
+ *
+ * Exported for tests: `getAppPaths()` resolves `os.homedir()` inside gg-core's
+ * prebuilt dist, which vitest does not transform, so a homedir spy would not
+ * apply and the test would operate on the developer's real `~/.gg`. Tests must
+ * call this with an explicit temp directory instead of going via ensureAppDirs.
+ */
+export async function seedDefaultAgents(agentsDir: string): Promise<void> {
+  await removeShadowingSeededAgents(agentsDir);
+}
 
-When given a task:
-1. Fix the scope \u2014 the exact symbol, pattern, or question to resolve
-2. \`find\`/\`ls\` to map the relevant directories
-3. \`grep\` to locate symbols, imports, and call sites
-4. \`read\` the key files to confirm details
-5. Trace connections \u2014 exports, imports, callers, data flow
-
-Return findings tightly:
-- **Answer**: the direct answer, first
-- **Files**: each relevant path + one line on what it holds
-- **Connections**: who calls/imports what
-- **Flags**: anything surprising, risky, or ambiguous
-
-Explore widely, report tightly. Miss nothing, waste no words.
-`,
-    "bee.md": `---
-name: bee
-description: "Task worker \u2014 writes code, runs commands, fixes bugs, does anything"
-tools: read, write, edit, bash, find, grep, ls, source_path
----
-
-You are Bee, an industrious task worker.
-You complete an assigned task end-to-end \u2014 writing code, running commands, fixing bugs, refactoring \u2014 and deliver a working result, not a description of one.
-
-When given a task:
-1. Understand what's asked and explore the relevant code for context
-2. Implement directly, in minimal focused changes
-3. Verify: run the narrowest check that proves the change (typecheck or the nearest test), and fix what breaks
-4. Report concisely
-
-## Stop when
-- The task is done and your verification passes \u2014 OR
-- You're blocked (ambiguous requirement, missing dependency, a failure you can't resolve without guessing). Stop and report the blocker; don't thrash or expand scope to force it.
-
-## Report (end with this)
-- **Done**: what you changed, file by file, one line each
-- **Verified**: the exact command you ran and its result \u2014 never claim a check you didn't run
-- **Blocked/Notes**: anything unfinished, assumed, or left for follow-up
-
-Do the work, don't just describe it. Don't over-engineer.
-`,
-  };
-
-  for (const [filename, content] of Object.entries(defaults)) {
+/**
+ * Delete agent files that are byte-identical to one we seeded ourselves.
+ *
+ * Anything else — a user-authored agent of the same name, or a seeded file the
+ * user has since edited — is left untouched. That precedence is the point:
+ * user agents beat bundled ones.
+ */
+async function removeShadowingSeededAgents(agentsDir: string): Promise<void> {
+  for (const [filename, seededHashes] of Object.entries(SHADOWING_SEEDED_AGENT_HASHES)) {
     const filePath = path.join(agentsDir, filename);
     try {
-      await fs.access(filePath);
-      // File exists — don't overwrite user edits
+      const content = await fs.readFile(filePath, "utf-8");
+      const hash = createHash("sha256").update(content, "utf-8").digest("hex");
+      if (seededHashes.includes(hash)) await fs.rm(filePath, { force: true });
     } catch {
-      await fs.writeFile(filePath, content, "utf-8");
+      // Missing or unreadable — nothing to clean up.
     }
   }
 }

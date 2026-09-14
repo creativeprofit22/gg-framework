@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createConnection } from "node:net";
+import os from "node:os";
 import path from "node:path";
+import type { Writable } from "node:stream";
 import { log } from "./logger.js";
 
 /**
@@ -49,6 +52,96 @@ export const RADIO_STATIONS: readonly RadioStation[] = [
     url: "http://ice1.somafm.com/dronezone-128-mp3",
   },
   {
+    id: "somafm-heavyweight-reggae",
+    name: "SomaFM · Heavyweight Reggae",
+    description: "Roots reggae, dub, ska, and rocksteady",
+    url: "https://ice5.somafm.com/reggae-128-mp3",
+  },
+  {
+    id: "somafm-dark-zone",
+    name: "SomaFM · The Dark Zone",
+    description: "The darker side of deep ambient",
+    url: "https://ice1.somafm.com/darkzone-128-mp3",
+  },
+  {
+    id: "somafm-drone-zone-2",
+    name: "SomaFM · Drone Zone 2",
+    description: "Eclectic alternative mix of atmospheric textures",
+    url: "https://ice1.somafm.com/dz2-128-mp3",
+  },
+  {
+    id: "somafm-deep-space-one",
+    name: "SomaFM · Deep Space One",
+    description: "Deep ambient electronic and space music",
+    url: "https://ice1.somafm.com/deepspaceone-128-mp3",
+  },
+  {
+    id: "somafm-doomed",
+    name: "SomaFM · Doomed",
+    description: "Dark industrial ambient for tortured souls",
+    url: "https://ice1.somafm.com/doomed-128-mp3",
+  },
+  {
+    id: "somafm-synphaera",
+    name: "SomaFM · Synphaera",
+    description: "Modern electronic ambient — space, time, matter",
+    url: "https://ice1.somafm.com/synphaera-128-mp3",
+  },
+  {
+    id: "bluemars",
+    name: "Echoes of Bluemars",
+    description: "Music for the space traveler",
+    url: "http://streams.echoesofbluemars.org:8000/bluemars",
+  },
+  {
+    id: "bluemars-cryosleep",
+    name: "Bluemars · Cryosleep",
+    description: "Zero-beat deep space ambient",
+    url: "http://streams.echoesofbluemars.org:8000/cryosleep",
+  },
+  {
+    id: "bluemars-voices",
+    name: "Bluemars · Voices From Within",
+    description: "Ambient with ethereal vocal textures",
+    url: "http://streams.echoesofbluemars.org:8000/voicesfromwithin",
+  },
+  {
+    id: "ambient-sleeping-pill",
+    name: "Ambient Sleeping Pill",
+    description: "No beats, no breaks — tranquil and deep",
+    url: "https://radio.stereoscenic.com/asp-h",
+  },
+  {
+    id: "radcap-dark-ambient",
+    name: "Radio Caprice · Dark Ambient",
+    description: "Industrial, dark and ritual ambient (AAC+)",
+    url: "http://79.120.39.202:8000/darkambient",
+  },
+  {
+    id: "nightride-chillsynth",
+    name: "Nightride FM · Chillsynth",
+    description: "Rain-on-neon downtempo synthwave",
+    url: "https://stream.nightride.fm/chillsynth.mp3",
+  },
+  {
+    id: "nightride-datawave",
+    name: "Nightride FM · Datawave",
+    description: "Cyberpunk synthwave and retro electronics",
+    url: "https://stream.nightride.fm/datawave.mp3",
+  },
+  {
+    id: "nightride-darksynth",
+    name: "Nightride FM · Darksynth",
+    description: "Heavier, darker synthwave",
+    url: "https://stream.nightride.fm/darksynth.mp3",
+  },
+  {
+    id: "nightwave-plaza",
+    name: "Nightwave Plaza",
+    description: "24/7 vaporwave and future funk",
+    url: "https://radio.plaza.one/mp3",
+  },
+  {
     id: "radio-paradise",
     name: "Radio Paradise",
     description: "Eclectic mix — rock, electronica, jazz",
@@ -64,7 +157,7 @@ export const RADIO_STATIONS: readonly RadioStation[] = [
 
 interface PlayerCandidate {
   cmd: string;
-  args: (url: string) => string[];
+  args: (url: string, volume: number) => string[];
 }
 
 /**
@@ -120,17 +213,51 @@ function resolvePlayerPath(cmd: string): string | null {
  * spam. Stdio is also redirected to "ignore" at spawn time.
  */
 const PLAYERS: readonly PlayerCandidate[] = [
-  { cmd: "mpv", args: (u) => ["--really-quiet", "--no-video", "--no-terminal", u] },
-  { cmd: "ffplay", args: (u) => ["-nodisp", "-autoexit", "-loglevel", "quiet", u] },
-  { cmd: "mpg123", args: (u) => ["-q", u] },
-  { cmd: "cvlc", args: (u) => ["--play-and-exit", "--quiet", u] },
+  {
+    cmd: "mpv",
+    args: (url, volume) => [
+      "--really-quiet",
+      "--no-video",
+      "--no-terminal",
+      `--volume=${volume}`,
+      url,
+    ],
+  },
+  {
+    cmd: "ffplay",
+    args: (url, volume) => [
+      "-nodisp",
+      "-autoexit",
+      "-loglevel",
+      "quiet",
+      "-volume",
+      String(volume),
+      url,
+    ],
+  },
+  {
+    cmd: "mpg123",
+    args: (url, volume) => ["-q", "-f", String(Math.round(32768 * (volume / 100))), url],
+  },
+  {
+    cmd: "cvlc",
+    args: (url, volume) => ["--play-and-exit", "--quiet", "--gain", (volume / 100).toFixed(2), url],
+  },
 ];
 
 let currentChild: ChildProcess | null = null;
 let currentStationId: string | null = null;
+let currentMpvIpcPath: string | null = null;
+let currentFfmpegInput: Writable | null = null;
+let ipcSequence = 0;
+let currentVolume = 70;
 
 export function getCurrentStation(): string | null {
   return currentStationId;
+}
+
+export function getRadioVolume(): number {
+  return currentVolume;
 }
 
 /**
@@ -139,31 +266,114 @@ export function getCurrentStation(): string | null {
  */
 export function stopRadio(): void {
   if (!currentChild) return;
+  terminateChild(currentChild);
+  currentChild = null;
+  currentStationId = null;
+  currentMpvIpcPath = null;
+  currentFfmpegInput = null;
+  log("INFO", "radio", "stopped");
+}
+
+function terminateChild(child: ChildProcess | null): void {
+  if (!child) return;
   try {
-    // Detached children sit in their own process group on POSIX; kill the
-    // whole group so any helper threads/forks die too. On Windows there's no
-    // process group concept — kill() targets the child only.
-    if (process.platform !== "win32" && currentChild.pid) {
+    // Detached children may own a process group on POSIX. Fall back to the
+    // direct child when they share the sidecar's process group.
+    if (process.platform !== "win32" && child.pid) {
       try {
-        process.kill(-currentChild.pid, "SIGTERM");
+        process.kill(-child.pid, "SIGTERM");
       } catch {
-        currentChild.kill("SIGTERM");
+        child.kill("SIGTERM");
       }
     } else {
-      currentChild.kill("SIGTERM");
+      child.kill("SIGTERM");
     }
   } catch {
     // Already exited — nothing to do.
   }
-  currentChild = null;
-  currentStationId = null;
-  log("INFO", "radio", "stopped");
 }
 
 export interface PlayResult {
   ok: boolean;
   /** Friendly error to surface to the user when ok=false. */
   error?: string;
+}
+
+/** Set app-wide radio volume without interrupting a live stream. */
+export function setRadioVolume(volume: number): PlayResult {
+  currentVolume = Math.min(100, Math.max(0, Math.round(volume)));
+  if (currentFfmpegInput) {
+    sendFfmpegVolume(currentFfmpegInput, currentVolume);
+    return { ok: true };
+  }
+  if (currentMpvIpcPath) {
+    sendMpvVolume(currentMpvIpcPath, currentVolume);
+    return { ok: true };
+  }
+  const station = currentStationId;
+  return station ? playRadio(station) : { ok: true };
+}
+
+function sendFfmpegVolume(input: Writable, volume: number): void {
+  input.write(`cvolume@radio -1 volume ${volume / 100}\n`);
+}
+
+function sendMpvVolume(ipcPath: string, volume: number, attempt = 1): void {
+  const socket = createConnection(ipcPath);
+  let connected = false;
+  socket.once("connect", () => {
+    connected = true;
+    socket.end(`${JSON.stringify({ command: ["set_property", "volume", volume] })}\n`);
+  });
+  socket.once("error", (error) => {
+    socket.destroy();
+    if (!connected && attempt < 3 && currentMpvIpcPath === ipcPath) {
+      setTimeout(() => sendMpvVolume(ipcPath, volume, attempt + 1), 40);
+      return;
+    }
+    log("WARN", "radio", "could not update mpv volume", { error: error.message });
+  });
+}
+
+function nextMpvIpcPath(): string {
+  const name = `gg-radio-${process.pid}-${++ipcSequence}`;
+  return process.platform === "win32"
+    ? `\\\\.\\pipe\\${name}`
+    : path.join(os.tmpdir(), `${name}.sock`);
+}
+
+function tryStartNativeFfmpeg(ffplayBin: string, url: string): ChildProcess | null {
+  if (process.platform !== "darwin") return null;
+  const adjacentFfmpeg = path.join(path.dirname(ffplayBin), "ffmpeg");
+  const ffmpegBin = existsSync(adjacentFfmpeg) ? adjacentFfmpeg : resolvePlayerPath("ffmpeg");
+  if (!ffmpegBin) return null;
+
+  try {
+    const child = spawn(
+      ffmpegBin,
+      [
+        "-loglevel",
+        "quiet",
+        "-i",
+        url,
+        "-vn",
+        "-af",
+        `volume@radio=${currentVolume / 100}`,
+        "-f",
+        "audiotoolbox",
+        "-",
+      ],
+      { detached: false, stdio: ["pipe", "ignore", "ignore"] },
+    );
+    if (!child.stdin) {
+      terminateChild(child);
+      return null;
+    }
+    child.stdin.on("error", () => {});
+    return child;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -191,17 +401,20 @@ function tryPlayOnWindowsHost(station: RadioStation): ChildProcess | null {
     "Add-Type -AssemblyName WindowsBase;",
     "$p = New-Object System.Windows.Media.MediaPlayer;",
     "$p.Open([uri]$env:GG_RADIO_URL);",
+    "$p.Volume = [double]$env:GG_RADIO_VOLUME;",
     "$p.Play();",
     "[System.Windows.Threading.Dispatcher]::Run();",
   ].join(" ");
   try {
     return spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript], {
-      detached: true,
+      detached: false,
       stdio: "ignore",
       env: {
         ...process.env,
         GG_RADIO_URL: station.url,
-        WSLENV: (process.env.WSLENV ? process.env.WSLENV + ":" : "") + "GG_RADIO_URL",
+        GG_RADIO_VOLUME: String(currentVolume / 100),
+        WSLENV:
+          (process.env.WSLENV ? process.env.WSLENV + ":" : "") + "GG_RADIO_URL:GG_RADIO_VOLUME",
       },
     });
   } catch {
@@ -247,11 +460,19 @@ export function playRadio(stationId: string): PlayResult {
     // dirs that a GUI app's minimal PATH omits. Skip when not installed.
     const bin = resolvePlayerPath(player.cmd);
     if (!bin) continue;
+    const nativeFfmpeg = player.cmd === "ffplay" ? tryStartNativeFfmpeg(bin, station.url) : null;
+    const mpvIpcPath = player.cmd === "mpv" ? nextMpvIpcPath() : null;
+    const playerArgs = player.args(station.url, currentVolume);
+    if (mpvIpcPath) playerArgs.unshift(`--input-ipc-server=${mpvIpcPath}`);
     try {
-      const child = spawn(bin, player.args(station.url), {
-        detached: process.platform !== "win32",
-        stdio: "ignore",
-      });
+      const child =
+        nativeFfmpeg ??
+        spawn(bin, playerArgs, {
+          // Stay in the sidecar's process group so Rust teardown and the parent
+          // watchdog cannot leave audio playing after GG Coder closes.
+          detached: false,
+          stdio: "ignore",
+        });
       let errored = false;
       child.once("error", () => {
         errored = true;
@@ -259,9 +480,11 @@ export function playRadio(stationId: string): PlayResult {
       if (child.pid && !errored) {
         currentChild = child;
         currentStationId = stationId;
+        currentMpvIpcPath = mpvIpcPath;
+        currentFfmpegInput = nativeFfmpeg?.stdin ?? null;
         log("INFO", "radio", "playing", {
           station: station.id,
-          player: player.cmd,
+          player: nativeFfmpeg ? "ffmpeg (AudioToolbox live gain)" : player.cmd,
           url: station.url,
         });
         child.unref();

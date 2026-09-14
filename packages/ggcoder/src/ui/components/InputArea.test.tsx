@@ -1,4 +1,4 @@
-import React from "react";
+import React, { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "ink";
 import { Writable } from "node:stream";
@@ -39,7 +39,7 @@ vi.mock("../../utils/image.js", () => {
   };
 });
 
-function renderInputArea(onSubmit = vi.fn()) {
+function renderInputArea(onSubmit = vi.fn(), onDiscoverCommands = vi.fn()) {
   inputHandlers.length = 0;
   let output = "";
   const stdout = new Writable({
@@ -55,7 +55,7 @@ function renderInputArea(onSubmit = vi.fn()) {
   const theme = loadTheme("dark");
   const result = render(
     <ThemeContext.Provider value={theme}>
-      <InputArea onSubmit={onSubmit} onAbort={vi.fn()} cwd={process.cwd()} disableMouseTracking />
+      <InputArea onSubmit={onSubmit} onAbort={vi.fn()} cwd={process.cwd()} disableMouseTracking onDiscoverCommands={onDiscoverCommands} />
     </ThemeContext.Provider>,
     { stdout, patchConsole: false },
   );
@@ -75,6 +75,24 @@ function stripAnsi(value: string): string {
 }
 
 describe("InputArea pasted slash commands", () => {
+  it("refreshes on each palette opening, not each character", async () => {
+    const discover = vi.fn();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let view!: ReturnType<typeof renderInputArea>;
+    await act(async () => { view = renderInputArea(vi.fn(), discover); });
+    try {
+      await act(async () => { enterText("/"); });
+      await vi.waitFor(() => expect(discover).toHaveBeenCalledOnce());
+      await act(async () => { enterText("f"); });
+      expect(discover).toHaveBeenCalledOnce();
+      await act(async () => { pressEnter(); });
+      await act(async () => { enterText("/"); });
+      await vi.waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    } finally {
+      await act(async () => { view.unmount(); });
+      vi.unstubAllGlobals();
+    }
+  });
   it("keeps the slash command prefix styled while a pasted placeholder is displayed and submits the original paste", async () => {
     vi.useFakeTimers();
     const onSubmit = vi.fn();

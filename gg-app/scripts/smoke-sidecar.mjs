@@ -2,20 +2,22 @@
 // BUNDLED daemon, wait for the GG_APP_LISTENING handshake, create a session
 // (POST /session), hit /state for that session, then terminate and assert a
 // clean shutdown. Proves the per-platform runtime + single-file bundle + copied
-// native deps (sharp) actually load on this OS, AND that the shared-daemon
-// session protocol works in the bundle.
+// native deps (sharp) actually load on this OS, bundled default skills are
+// present, AND the shared-daemon session protocol works in the bundle.
 //
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcTauri = join(here, "..", "src-tauri");
 const binDir = join(srcTauri, "binaries");
 const sidecar = join(srcTauri, "sidecar", "app-sidecar.mjs");
+const evidenceSkill = join(srcTauri, "sidecar", "skills", "evidence-led-ui", "SKILL.md");
+const daemonAuthToken = "gg-app-sidecar-smoke-bootstrap-token";
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -39,13 +41,100 @@ function nodeBin() {
   return "";
 }
 
+/**
+ * TS/JS diagnostics resolve these packages by physical path and spawn the
+ * language server with the bundled Node runtime. A bundle-load smoke cannot
+ * detect their absence because neither package is imported by the sidecar.
+ */
+function smokeTypescriptLanguageServer(node) {
+  const languageServer = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "typescript-language-server",
+    "lib",
+    "cli.mjs",
+  );
+  const tsserver = join(srcTauri, "sidecar", "node_modules", "typescript", "lib", "tsserver.js");
+  if (!existsSync(languageServer))
+    fail(`bundled TypeScript language server missing: ${languageServer}`);
+  if (!existsSync(tsserver)) fail(`bundled tsserver missing: ${tsserver}`);
+
+  const version = execFileSync(node, [languageServer, "--version"], { encoding: "utf8" }).trim();
+  if (!/^\d+\.\d+\.\d+/.test(version)) {
+    fail(`bundled TypeScript language server returned invalid version: ${version}`);
+  }
+  console.log(`smoke: bundled TypeScript language server starts cleanly (${version})`);
+}
+
+/** source_path also spawns a copied CLI that esbuild cannot discover. */
+function smokeOpenSrc(node) {
+  const bin = join(srcTauri, "sidecar", "node_modules", "opensrc", "bin", "opensrc.js");
+  if (!existsSync(bin)) fail(`bundled opensrc missing: ${bin}`);
+  const help = execFileSync(node, [bin, "--help"], { encoding: "utf8" });
+  if (!help.includes("Fetch source code for packages")) {
+    fail("bundled opensrc did not return its CLI help");
+  }
+  console.log("smoke: bundled opensrc starts cleanly");
+}
+
+/** Bash executes through SRT's copied physical CLI; bundling it is load-bearing. */
+function smokeSandboxRuntime(node) {
+  const bin = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "@anthropic-ai",
+    "sandbox-runtime",
+    "dist",
+    "cli.js",
+  );
+  if (!existsSync(bin)) fail(`bundled sandbox runtime missing: ${bin}`);
+  const help = execFileSync(node, [bin, "--help"], { encoding: "utf8" });
+  if (!help.includes("sandbox")) fail("bundled sandbox runtime did not return its CLI help");
+  console.log("smoke: bundled sandbox runtime starts cleanly");
+}
+
+/**
+ * Payload gate: bundle-sidecar strips dev-only weight after copying the
+ * dependency tree (source maps; onnxruntime-web's browser wasm/webgl/webgpu
+ * payloads, which the Node exports map never resolves). If either returns,
+ * ~120 MB of dead files ships in every desktop build unnoticed.
+ */
+function smokeLeanPayload() {
+  const nodeModules = join(srcTauri, "sidecar", "node_modules");
+  const files = existsSync(nodeModules)
+    ? readdirSync(nodeModules, { recursive: true }).filter((f) => {
+        const base = basename(String(f));
+        return (
+          base.endsWith(".map") || (String(f).includes("onnxruntime-web") && base.endsWith(".wasm"))
+        );
+      })
+    : [];
+  if (files.length > 0) {
+    fail(`bundled payload carries pruned file types (first 3: ${files.slice(0, 3).join(", ")})`);
+  }
+  console.log("smoke: bundled payload is lean (no source maps, no browser onnx wasm)");
+}
+
 async function main() {
   if (!existsSync(sidecar)) fail(`bundled sidecar missing: ${sidecar}`);
+  if (!existsSync(evidenceSkill)) fail(`bundled evidence-led-ui skill missing: ${evidenceSkill}`);
   const node = nodeBin();
   console.log(`smoke: ${node} ${sidecar}`);
 
+  smokeTypescriptLanguageServer(node);
+  smokeOpenSrc(node);
+  smokeSandboxRuntime(node);
+  smokeLeanPayload();
+
   const child = spawn(node, [sidecar], {
-    env: { ...process.env, GG_APP_PORT: "0", GG_APP_CWD: process.cwd() },
+    env: {
+      ...process.env,
+      GG_APP_PORT: "0",
+      GG_APP_CWD: process.cwd(),
+      GG_APP_AUTH_TOKEN: daemonAuthToken,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -56,14 +145,13 @@ async function main() {
   // native deps (sharp) loaded on this OS. (Older bundles fataled with "Not
   // logged in" instead; that's still accepted as a legacy pass.)
   //
-  // Timeout is generous (120s): session.initialize() connects the default
-  // `kencode-search` MCP server via `npx -y …` with a 30s connect timeout, and a
-  // cold npx cache on a fresh CI runner can take the full 30s before MCP fails
-  // gracefully and boot continues to server.listen(). 30s here used to race that
-  // and time out; 120s clears it with margin.
+  // Timeout is generous (120s): session.initialize() may connect user MCP
+  // servers via `npx -y …` with a 30s connect timeout, and a cold npx cache on
+  // a fresh CI runner can take the full 30s before MCP fails gracefully and
+  // boot continues to server.listen(). 120s clears it with margin.
   const LOADED_BUT_UNAUTHED = Symbol("loaded-but-unauthed");
 
-  const port = await new Promise((resolve, reject) => {
+  const handshake = await new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error("timed out waiting for GG_APP_LISTENING")),
       120000,
@@ -72,10 +160,10 @@ async function main() {
     let err = "";
     child.stdout.on("data", (d) => {
       out += d.toString();
-      const m = out.match(/GG_APP_LISTENING (\d+)/);
+      const m = out.match(/GG_APP_LISTENING (\d+) (\S+)/);
       if (m) {
         clearTimeout(timer);
-        resolve(Number(m[1]));
+        resolve({ port: Number(m[1]), token: m[2] });
       }
     });
     child.stderr.on("data", (d) => {
@@ -95,11 +183,12 @@ async function main() {
     fail(err.message);
   });
 
-  if (port === LOADED_BUT_UNAUTHED) {
+  if (handshake === LOADED_BUT_UNAUTHED) {
     console.log("smoke: bundle loaded cleanly (sidecar reached auth check; no credentials on CI)");
     console.log("SMOKE PASS");
     process.exit(0);
   }
+  const { port, token } = handshake;
 
   // The daemon holds sessions as in-process objects keyed by id. Create one
   // (POST /session), then read its /state via the `x-gg-session` header — the
@@ -109,7 +198,11 @@ async function main() {
   try {
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-gg-daemon-token": daemonAuthToken,
+        "x-gg-token": token,
+      },
       body: JSON.stringify({ cwd: process.cwd() }),
     });
     if (mk.status !== 200) {
@@ -130,7 +223,7 @@ async function main() {
   let res;
   try {
     res = await fetch(`http://127.0.0.1:${port}/state`, {
-      headers: { "x-gg-session": sessionId },
+      headers: { "x-gg-session": sessionId, "x-gg-token": token },
     });
   } catch (err) {
     child.kill("SIGKILL");

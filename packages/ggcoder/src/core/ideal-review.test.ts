@@ -1,5 +1,192 @@
 import { describe, expect, it } from "vitest";
-import { buildIdealReviewMessage, detectTestDrift, evaluateIdealReview } from "./ideal-review.js";
+import path from "node:path";
+import {
+  buildIdealReviewMessage,
+  buildReviewCoverageEscalationMessage,
+  buildReviewCoverageMessage,
+  detectTestDrift,
+  evaluateIdealReview,
+  MAX_REVIEW_COVERAGE_INJECTIONS,
+  ReviewCoverageTracker,
+  withReviewCoverageRequirements,
+} from "./ideal-review.js";
+
+/** These fixtures use virtual paths, so every expected file "exists". */
+const allFilesExist = () => true;
+
+describe("Ideal review implementation comparison", () => {
+  it("benchmarks substantial work and preserves approval and honest fallback rules", () => {
+    const { content } = buildIdealReviewMessage(["120 changed lines"]);
+    expect(content).toContain("For substantial implementations, use Steroids");
+    expect(content).toContain(
+      "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
+    );
+    expect(content).toContain("Reuse samples already examined");
+    expect(content).toContain("they do not replace tests or prove correctness");
+    expect(content).toContain("Empty corpus or no hits: discover suitable repos");
+    expect(content).toContain("propose them via ask_user, add only on approval");
+    expect(content).toContain(
+      "unavailable, discovery finds nothing suitable, or the user declines",
+    );
+    expect(content).toContain("not cross-checked against real-world implementations");
+    expect(content).toContain("or a required cross-check could not be completed");
+  });
+});
+
+describe("ReviewCoverageTracker", () => {
+  it("counts only successful read callbacks after review starts", () => {
+    const tracker = new ReviewCoverageTracker("/project", allFilesExist);
+    tracker.recordChanged("src/a.ts");
+    tracker.recordRead("src/a.ts");
+    tracker.start();
+    expect(tracker.evidence()).toEqual({
+      expected: ["src/a.ts"],
+      covered: [],
+      missing: ["src/a.ts"],
+    });
+    tracker.recordRead("/project/src/a.ts");
+    expect(tracker.evidence().missing).toEqual([]);
+  });
+
+  it("expands expected coverage for review-time edits and deduplicates paths", () => {
+    const tracker = new ReviewCoverageTracker("/project", allFilesExist);
+    tracker.recordChanged("src/a.ts");
+    tracker.recordChanged("/project/src/a.ts");
+    tracker.start();
+    tracker.recordChanged("src/../src/b.ts");
+    tracker.recordRead("src/a.ts");
+    expect(tracker.evidence()).toEqual({
+      expected: ["src/a.ts", "src/b.ts"],
+      covered: ["src/a.ts"],
+      missing: ["src/b.ts"],
+    });
+  });
+
+  it("drops changed files that no longer exist on disk", () => {
+    // Reproduces the observed loop: the run created a scratch script, deleted
+    // it, and then could never satisfy the read requirement for it.
+    const deleted = path.resolve("/project", "scripts/probe-many.mjs");
+    const tracker = new ReviewCoverageTracker("/project", (p) => p !== deleted);
+    tracker.recordChanged("src/a.ts");
+    tracker.recordChanged("scripts/probe-many.mjs");
+    tracker.start();
+
+    expect(tracker.evidence().missing).toEqual(["src/a.ts"]);
+
+    tracker.recordRead("src/a.ts");
+    expect(tracker.evidence()).toEqual({
+      expected: ["src/a.ts"],
+      covered: ["src/a.ts"],
+      missing: [],
+    });
+  });
+
+  it("keeps gating a changed file that still exists", () => {
+    const tracker = new ReviewCoverageTracker("/project", allFilesExist);
+    tracker.recordChanged("src/a.ts");
+    tracker.start();
+    expect(tracker.evidence().missing).toEqual(["src/a.ts"]);
+  });
+
+  it("builds a deterministic fail-closed follow-up", () => {
+    const message = buildReviewCoverageMessage(["src/a.ts", "src/b.ts"]);
+    expect(message.content).toContain("model-authored claims do not count");
+    expect(message.content).toContain("- src/a.ts\n- src/b.ts");
+  });
+
+  it("puts missing read evidence on the initial review prompt", () => {
+    const message = withReviewCoverageRequirements(buildIdealReviewMessage(["120 changed lines"]), [
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+
+    expect(message.content).toContain("Ideal?");
+    expect(message.content).toContain("before finalizing");
+    expect(message.content).toContain("- src/a.ts\n- src/b.ts");
+  });
+
+  it("escalates to a report-what-you-could-not-verify message", () => {
+    const message = buildReviewCoverageEscalationMessage(["src/a.ts"]);
+    expect(message.content).toContain("Stop trying to read these files");
+    expect(message.content).toContain("do not repeat your previous answer");
+    expect(message.content).toContain("could not verify");
+    expect(message.content).toContain("- src/a.ts");
+  });
+});
+
+/**
+ * The gate as AgentSession and useAgentLoop both drive it: inject the read
+ * checklist up to the budget, then escalate exactly once and go quiet.
+ */
+function runCoverageGate(
+  tracker: ReviewCoverageTracker,
+  turns: number,
+): { messages: string[]; phases: string[] } {
+  let phase: "reviewing" | "complete" = "reviewing";
+  let injected = 0;
+  const messages: string[] = [];
+  const phases: string[] = [];
+
+  for (let turn = 0; turn < turns; turn += 1) {
+    if (phase === "complete") {
+      messages.push("<none>");
+      phases.push(phase);
+      continue;
+    }
+    const { missing } = tracker.evidence();
+    if (missing.length > 0) {
+      if (injected < MAX_REVIEW_COVERAGE_INJECTIONS) {
+        injected += 1;
+        messages.push(String(buildReviewCoverageMessage(missing).content));
+      } else {
+        phase = "complete";
+        messages.push(String(buildReviewCoverageEscalationMessage(missing).content));
+      }
+    } else {
+      phase = "complete";
+      messages.push("<none>");
+    }
+    phases.push(phase);
+  }
+  return { messages, phases };
+}
+
+describe("ideal review coverage gate budget", () => {
+  it("escalates on the third injection and stops looping", () => {
+    const tracker = new ReviewCoverageTracker("/project", allFilesExist);
+    tracker.recordChanged("src/a.ts");
+    tracker.start();
+
+    const { messages, phases } = runCoverageGate(tracker, 6);
+
+    expect(messages[0]).toContain("coverage is incomplete");
+    expect(messages[1]).toContain("coverage is incomplete");
+    expect(messages[2]).toContain("could not verify");
+    // Escalation is terminal: never re-injected, never re-asked.
+    expect(messages.slice(3)).toEqual(["<none>", "<none>", "<none>"]);
+    expect(messages.filter((m) => m.includes("could not verify"))).toHaveLength(1);
+    expect(phases).toEqual([
+      "reviewing",
+      "reviewing",
+      "complete",
+      "complete",
+      "complete",
+      "complete",
+    ]);
+  });
+
+  it("never escalates when the only missing file was deleted", () => {
+    const deleted = path.resolve("/project", "scripts/probe-many.mjs");
+    const tracker = new ReviewCoverageTracker("/project", (p) => p !== deleted);
+    tracker.recordChanged("scripts/probe-many.mjs");
+    tracker.start();
+
+    const { messages, phases } = runCoverageGate(tracker, 3);
+
+    expect(messages).toEqual(["<none>", "<none>", "<none>"]);
+    expect(phases[0]).toBe("complete");
+  });
+});
 
 describe("evaluateIdealReview", () => {
   it("skips tiny text-only changes", () => {
@@ -59,11 +246,14 @@ describe("buildIdealReviewMessage", () => {
     expect(message.content).toContain("120 changed lines");
   });
 
-  it("defers builds/typechecks/tests to commit time instead of running them now", () => {
+  it("reuses unchanged checks but requires affected checks and rereads after fixes", () => {
     const message = buildIdealReviewMessage([]);
 
-    expect(message.content).toContain("do NOT run builds, typechecks, linters, or test suites now");
-    expect(message.content).toContain("/commit");
+    expect(message.content).toContain("reuse completed checks while code is unchanged");
+    expect(message.content).toContain("rerun the affected checks and reread those changes");
+    expect(message.content).toContain("earlier results do not verify later edits");
+    expect(message.content).toContain("Do not claim coverage without corresponding assertions");
+    expect(message.content).not.toContain("do NOT run builds");
   });
 
   it("calls out drifted files and their stale tests", () => {
@@ -76,9 +266,13 @@ describe("buildIdealReviewMessage", () => {
 
 describe("detectTestDrift", () => {
   const cwd = "/proj";
+  // Fixture paths are written POSIX-style for readability, but the code under
+  // test builds candidates with path.join/path.resolve — which on Windows
+  // yields `D:\proj\src\foo.test.ts`. Resolve BOTH sides so the lookup compares
+  // like with like instead of silently never matching.
   const exists = (files: string[]) => {
-    const set = new Set(files);
-    return (p: string) => set.has(p);
+    const set = new Set(files.map((f) => path.resolve(cwd, f)));
+    return (p: string) => set.has(path.resolve(cwd, p));
   };
 
   it("flags a changed source whose sibling test exists but was not touched", () => {

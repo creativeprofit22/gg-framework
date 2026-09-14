@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { toPosixPath } from "../tools/path-utils.js";
 import type { Message } from "@kenkaiiii/gg-ai";
 
 export interface IdealReviewStats {
@@ -18,13 +19,160 @@ export interface IdealReviewDecision {
   reasons: string[];
 }
 
+export interface ReviewCoverageEvidence {
+  expected: string[];
+  covered: string[];
+  missing: string[];
+}
+
+/**
+ * Harness-owned proof that every successfully changed file was opened with the
+ * read tool after Ideal review began. Model-authored claims never enter it.
+ */
+export class ReviewCoverageTracker {
+  private readonly expected = new Set<string>();
+  private readonly covered = new Set<string>();
+  private active = false;
+
+  /**
+   * `fileExists` is injectable for tests and defaults to the real filesystem.
+   * A file the run created and then deleted can never be re-read, so without
+   * this check it stayed in `missing` forever and the coverage gate re-injected
+   * the same follow-up on every turn.
+   */
+  constructor(
+    private readonly cwd: string,
+    private readonly fileExists: (p: string) => boolean = existsSync,
+  ) {}
+
+  reset(): void {
+    this.expected.clear();
+    this.covered.clear();
+    this.active = false;
+  }
+
+  /** Successful mutations are retained before and during review. */
+  recordChanged(filePath: string): void {
+    const normalized = this.normalize(filePath);
+    this.expected.add(normalized);
+    this.covered.delete(normalized);
+  }
+
+  /** Start the evidence window; reads observed before this call never count. */
+  start(changedFiles: Iterable<string> = []): void {
+    for (const filePath of changedFiles) this.recordChanged(filePath);
+    this.covered.clear();
+    this.active = true;
+  }
+
+  /** Called only by the successful read-tool callback. */
+  recordRead(filePath: string): void {
+    if (!this.active) return;
+    const normalized = this.normalize(filePath);
+    if (this.expected.has(normalized)) this.covered.add(normalized);
+  }
+
+  evidence(): ReviewCoverageEvidence {
+    // Deleted files are dropped, not reported unread: review evidence can only
+    // come from reading a file that is still on disk.
+    const expected = [...this.expected].filter((filePath) => this.fileExists(filePath)).sort();
+    const covered = expected.filter((filePath) => this.covered.has(filePath));
+    const missing = expected.filter((filePath) => !this.covered.has(filePath));
+    return {
+      expected: expected.map((filePath) => this.display(filePath)),
+      covered: covered.map((filePath) => this.display(filePath)),
+      missing: missing.map((filePath) => this.display(filePath)),
+    };
+  }
+
+  private normalize(filePath: string): string {
+    return path.normalize(path.resolve(this.cwd, filePath));
+  }
+
+  private display(filePath: string): string {
+    const relative = path.relative(this.cwd, filePath);
+    // Forward-slashed: this string is shown to the model and matched against
+    // the paths it echoes back, which are always forward-slashed. A native
+    // `src\a.ts` on Windows never matched the model's `src/a.ts`, so review
+    // coverage counted every changed file as unread.
+    return relative && !relative.startsWith(`..${path.sep}`) && relative !== ".."
+      ? toPosixPath(relative)
+      : filePath;
+  }
+}
+
+export function buildReviewCoverageMessage(missingFiles: readonly string[]): Message {
+  return {
+    role: "user",
+    provenance: { source: "runtime", kind: "review_follow_up", visibility: "hidden" },
+    content:
+      "Ideal review coverage is incomplete. Open every changed file below with the read tool " +
+      "before finalizing; model-authored claims do not count as evidence:\n" +
+      missingFiles.map((filePath) => `- ${filePath}`).join("\n"),
+  };
+}
+
+/**
+ * Coverage follow-ups spent before the gate gives up. The gate is fail-closed,
+ * but a file the agent genuinely cannot read (permissions, a path outside the
+ * workspace, a race with an external delete) must not cost an unbounded number
+ * of identical turns — it escalates once and lets the run finish.
+ */
+export const MAX_REVIEW_COVERAGE_INJECTIONS = 2;
+
+/**
+ * Terminal coverage message: stop demanding reads, require an honest statement
+ * of what went unverified in the final answer.
+ */
+export function buildReviewCoverageEscalationMessage(missingFiles: readonly string[]): Message {
+  return {
+    role: "user",
+    provenance: { source: "runtime", kind: "review_follow_up", visibility: "hidden" },
+    content:
+      `Ideal review coverage is still incomplete after ${MAX_REVIEW_COVERAGE_INJECTIONS} attempts. ` +
+      "Stop trying to read these files and do not repeat your previous answer:\n" +
+      missingFiles.map((filePath) => `- ${filePath}`).join("\n") +
+      "\n\nGive your final response now, and state plainly in it that you could not verify the " +
+      "files above (say why if you know) so the user can check them.",
+  };
+}
+
+/**
+ * Put the harness-owned read checklist on the first Ideal review turn. The
+ * fail-closed follow-up remains as a fallback, but compliant reviews can now
+ * gather all evidence before emitting their single user-facing final answer.
+ */
+export function withReviewCoverageRequirements(
+  message: Message,
+  missingFiles: readonly string[],
+): Message {
+  if (missingFiles.length === 0) return message;
+  const requirement = buildReviewCoverageMessage(missingFiles);
+  return {
+    role: "user",
+    provenance: message.provenance,
+    content: `${String(message.content)}\n\n${String(requirement.content)}`,
+  };
+}
+
 export const IDEAL_REVIEW_PROMPT =
   "Ideal? Review the actual work against the user's request before the final response. " +
   "Is it simple, focused, correct, and aligned? Did you over-edit, leave TODOs, miss an obvious " +
-  "case the request called for, or introduce risk? Judge this by reading the code you changed \u2014 " +
-  "do NOT run builds, typechecks, linters, or test suites now; that happens at commit time via " +
-  "/commit. If anything is wrong, fix it now. If everything is good, respond with the final " +
-  "answer only; do not mention this ideal review unless it changed the work.";
+  "case the request called for, or introduce risk? For substantial implementations, use Steroids " +
+  "when available to compare the finished work against comparable real-world code for architecture, " +
+  "simplicity, completeness, edge cases, error handling, security, and performance. Reuse samples " +
+  "already examined; search and read further where evidence is missing. Fix concrete gaps relevant " +
+  "to the user's request and project constraints, not differences in taste. Examples inform judgment; " +
+  "they do not replace tests or prove correctness. Empty corpus or no hits: discover suitable repos, " +
+  "propose them via ask_user, add only on approval, then search and read again. If Steroids is " +
+  "unavailable, discovery finds nothing suitable, or the user declines, use installed source and " +
+  "official docs and state that the work was not cross-checked against real-world implementations. " +
+  "Judge this by reading the code you changed \u2014 " +
+  "reuse completed checks while code is unchanged. If anything is wrong, fix it now; rerun the affected " +
+  "checks and reread those changes before finishing; earlier results do not verify later edits. " +
+  "Do not claim coverage without corresponding assertions. If everything is good, respond with the final " +
+  "answer only; do not mention this ideal review unless it changed the work or a required " +
+  "cross-check could not be completed.";
 
 const RISKY_TOOL_NAMES = new Set(["bash", "write", "edit"]);
 
@@ -84,6 +232,7 @@ export function buildIdealReviewMessage(
       : "";
   return {
     role: "user",
+    provenance: { source: "runtime", kind: "review_follow_up", visibility: "hidden" },
     content: `${IDEAL_REVIEW_PROMPT}${reasonText}${driftText}`,
   };
 }

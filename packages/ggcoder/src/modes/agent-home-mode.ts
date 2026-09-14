@@ -7,12 +7,22 @@ import { isAbortError } from "@kenkaiiii/gg-agent";
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
 import { log, closeLogger } from "../core/logger.js";
+import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { loadCustomCommands } from "../core/custom-commands.js";
+import { discoverCommands, registryCommandListings } from "../core/command-discovery.js";
 import { renderLogoBlock } from "../cli/shared.js";
+
+export const AGENT_HOME_COMMANDS = registryCommandListings([
+  { name: "help", aliases: ["start"], description: "Show help" },
+  { name: "status", aliases: [], description: "Current state" },
+  { name: "cancel", aliases: [], description: "Abort current task" },
+  { name: "new", aliases: ["n"], description: "Fresh session" },
+  { name: "m", aliases: ["model"], description: "Switch model" },
+  { name: "link", aliases: [], description: "Switch project" },
+  { name: "unlink", aliases: [], description: "Reset to default project" },
+]);
 
 export const AGENT_HOME_RELAY_URL = "wss://agent-home-relay.buzzbeamaustralia.workers.dev/ws";
 
@@ -131,6 +141,8 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
   async function createSession(sessionId: string, cwd: string): Promise<SessionState> {
     const ac = new AbortController();
     const session = new AgentSession({
+      workspaceCommands: AGENT_HOME_COMMANDS,
+      workspaceCommandCaseInsensitive: true,
       provider: options.provider,
       model: options.model,
       cwd,
@@ -210,25 +222,26 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     text += `\`/unlink\` \u2014 Reset to default project\n`;
     text += `\`/status\` \u2014 Current state\n`;
     text += `\`/cancel\` \u2014 Abort current task\n`;
+    text += `\`/new\` \u2014 Fresh session\n`;
     text += `\`/help\` \u2014 This message\n\n`;
 
-    text += `**Session**\n`;
-    text += `\`/compact\` \u2014 Compress context\n`;
-    text += `\`/new\` \u2014 Fresh session\n`;
-    text += `\`/session\` \u2014 List sessions\n`;
-    text += `\`/branch\` \u2014 Fork conversation\n`;
-    text += `\`/branches\` \u2014 List branches\n`;
-    text += `\`/clear\` \u2014 Clear session\n`;
-    text += `\`/settings\` \u2014 Show/modify settings\n`;
-
-    if (PROMPT_COMMANDS.length > 0) {
+    const discovered = (await discoverCommands(currentCwd, {
+      workspaceActions: AGENT_HOME_COMMANDS, workspaceCaseInsensitive: true,
+      registryActions: registryCommandListings(state?.session.slashCommands.getAll() ?? []),
+    })).entries;
+    const sessionCommands = discovered.filter((entry) => entry.listing.invocationKind === "workspace-action" &&
+      !AGENT_HOME_COMMANDS.some((command) => command.name === entry.listing.name));
+    if (sessionCommands.length) text += `\n**Session**\n`;
+    for (const { listing } of sessionCommands) text += `\`/${listing.name}\` — ${listing.description}\n`;
+    const prompts = discovered.filter((entry) => entry.prompt).map((entry) => entry.listing);
+    if (prompts.length > 0) {
       text += `\n**Agent**\n`;
-      for (const cmd of PROMPT_COMMANDS) {
+      for (const cmd of prompts) {
         text += `\`/${cmd.name}\` \u2014 ${cmd.description}\n`;
       }
     }
 
-    const customCmds = await loadCustomCommands(currentCwd);
+    const customCmds = discovered.filter((entry) => entry.custom).map((entry) => entry.listing);
     if (customCmds.length > 0) {
       text += `\n**Custom**\n`;
       for (const cmd of customCmds) {
@@ -333,7 +346,11 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
         const sessionState = state.session.getState();
         const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-        const contextWindow = getContextWindow(sessionState.model);
+        const contextWindow = getContextWindow(sessionState.model, {
+          provider: sessionState.provider,
+          accountId: sessionState.accountId,
+          openAICodexContextProfile: sessionState.openAICodexContextProfile,
+        });
         const contextTokens = estimateConversationTokens(state.session.getMessages());
         const pctRaw = (contextTokens / contextWindow) * 100;
         const contextStr = pctRaw > 0 && pctRaw < 1 ? "<1" : String(Math.round(pctRaw));
@@ -556,8 +573,12 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
       const finalText = state.textBuffer.trim() || "Done.";
 
-      const modelId = state.session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = state.session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =
@@ -639,17 +660,20 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     console.log(chalk.hex("#6b7280")("  Connecting to relay..."));
     console.log();
 
-    const shutdown = async () => {
-      console.log("\nShutting down...");
-      client.disconnect();
-      for (const state of sessionStates.values()) {
-        await state.session.dispose();
-      }
-      closeLogger();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    // Sessions dispose MCP/LSP/extension resources that can hang; without a
+    // deadline one wedged server keeps this process attached to the relay after
+    // the user quit. SIGHUP is the terminal-close case, which arrives once.
+    installTerminationHandlers({
+      scope: "agent-home",
+      onShutdownStart: () => console.log("\nShutting down..."),
+      teardown: async () => {
+        client.disconnect();
+        for (const state of sessionStates.values()) {
+          await state.session.dispose();
+        }
+        closeLogger();
+      },
+    });
 
     client.connect();
   } catch (err) {

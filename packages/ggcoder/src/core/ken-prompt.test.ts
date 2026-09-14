@@ -21,6 +21,12 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     }
   });
 
+  it("keeps ordinary Autopilot review read-only from Roadmap mutation", () => {
+    expect(prompt).toContain("you can't implement fixes or run their verification yourself");
+    expect(prompt).not.toContain("roadmap_status with final_review");
+    expect(prompt).not.toContain("Reviewer-authorized control actions are yours");
+  });
+
   it("routes only real user-level questions/options to HUMAN", () => {
     // Leak regression: without this rule, GG Coder ending with "want me to…?"
     // or an A/B/C menu reads as "unfinished" and Ken answers for the user.
@@ -36,16 +42,80 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("Use PROMPT with the concrete next step");
   });
 
+  it("requires comparison evidence without approving indexing or repeating settled reviews", () => {
+    expect(prompt).toContain("compare against Steroids evidence before your verdict");
+    expect(prompt).toContain("use HUMAN with the proposed repos when approval is pending");
+    expect(prompt).toContain("never approve it on the user's behalf");
+    expect(prompt).toContain("accept the disclosed source/docs fallback");
+    expect(prompt).toContain("or repeat a completed comparison on every turn");
+  });
+
+  it("distinguishes observed outcomes from certification and missing evidence from failures", () => {
+    expect(prompt).toContain("Command observations report outcomes, not certification");
+    expect(prompt).toContain("Historical reports were not rerun");
+    expect(prompt).toContain("unclassified or unavailable results are not failed tests");
+    expect(prompt).toContain("Choose relevant checks, not one per criterion");
+    expect(prompt).toContain("Audits, approved planning and honest partial progress may stop without completing a phase");
+    expect(prompt).not.toContain("trust only PASSED rows");
+  });
+
   it("makes Ken the plan reviewer (no automatic HUMAN on plan submissions)", () => {
-    // In autopilot, a submitted plan is reviewed by Ken himself — approve,
-    // revise, or (rarely) hand a genuine product decision to the user.
+    // Ken reviews readiness; only the human can authorize implementation.
     expect(prompt).toContain("Plans are YOURS to review");
     expect(prompt).toContain("'Plan under review' section");
-    expect(prompt).toContain("implementation starts immediately");
-    expect(prompt).toContain("Default to approving a sound plan");
+    expect(prompt).toContain("ready for explicit human approval");
+    expect(prompt).toContain("never authorizes implementation");
+    expect(prompt).toContain("Default to marking a sound plan ready");
     expect(prompt).toContain("Never IGNORE a plan");
     // The old auto-HUMAN clause must be gone.
     expect(prompt).not.toContain("submitting a plan for approval");
+  });
+
+  it("gives plan review a design bar: steps, boundaries, order, uncovered paths", () => {
+    // Post-turn review deliberately cannot ask "is this shape right?" — it
+    // judges a finished diff against the ask, and relitigating structure every
+    // turn is how the autopilot loop stops terminating. Plan review is the one
+    // branch where the question is both answerable and cheap, because no code
+    // exists yet. Each of the four tests below is load-bearing; a plan can be
+    // internally sound and still fail any one of them.
+    expect(prompt).toContain("judge the shape");
+    expect(prompt).toContain("does every step earn its existence");
+    expect(prompt).toContain("boundary between steps sit where the work actually splits");
+    expect(prompt).toContain("is the order forced by real dependencies");
+    expect(prompt).toContain("what happens on the paths the plan never names");
+
+    // A structural flaw has to be actionable and separable from taste, or the
+    // bar collapses back into the nitpicking the contract already forbids.
+    expect(prompt).toContain("is a structural flaw");
+    expect(prompt).toContain("PROMPT it, naming the step");
+    expect(prompt).toContain("taste nitpicks are still not blockers");
+    expect(prompt).toContain("is taste unless you can name what it breaks");
+  });
+
+  it("keeps the design bar out of post-turn verdicts", async () => {
+    // Scope guard: the bar lives in the plan-review bullet only. If it ever
+    // leaks into the turn-review rules, Ken starts re-opening architecture on
+    // finished work and ALL_CLEAR stops being reachable.
+    const planBullet = prompt.slice(
+      prompt.indexOf("- Plans are YOURS to review"),
+      prompt.indexOf("- Transcript lines labeled"),
+    );
+    expect(planBullet).toContain("judge the shape");
+    expect(prompt.match(/judge the shape/g) ?? []).toHaveLength(1);
+    expect(prompt.match(/earn its existence/g) ?? []).toHaveLength(1);
+
+    // The turn-review default survives untouched.
+    const chat = await buildKenSystemPrompt(TEST_CWD);
+    expect(chat).not.toContain("ALL_CLEAR");
+  });
+
+  it("limits structured approval warnings to corpus availability, not failed verification", () => {
+    expect(prompt).toContain('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}');
+    expect(prompt).toContain("Never append prose to ALL_CLEAR");
+    expect(prompt).toContain("For otherwise approved work ONLY, if the corpus comparison was unavailable or declined");
+    expect(prompt).toContain("Report known failures and unavailable checks honestly");
+    expect(prompt).toContain("missing transcript evidence alone is not a failure");
+    expect(prompt).toContain("PROMPT only when something real is wrong or unfinished: a failing/absent test, a broken build");
   });
 
   it("tells Ken injected transcript lines are his own, not user asks", () => {
@@ -102,6 +172,50 @@ describe("buildKenSystemPrompt — chat mode unaffected", () => {
     expect(prompt).toContain("Send to GG Coder");
     // The verdict contract is autopilot-only.
     expect(prompt).not.toContain("ALL_CLEAR");
+  });
+});
+
+describe("Steroids guidance alignment", () => {
+  it("gives chat Ken and Autopilot the same evidence bar and corpus-gap rules", async () => {
+    for (const prompt of [
+      await buildKenSystemPrompt(TEST_CWD),
+      await buildKenAutopilotSystemPrompt(TEST_CWD),
+    ]) {
+      expect(prompt).toContain(
+        "benchmark substantial implementations against comparable real-world code",
+      );
+      expect(prompt).toContain(
+        "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
+      );
+      expect(prompt).toContain("Reuse samples already examined or supplied in context");
+      expect(prompt).toContain("Empty corpus or no hits: discover suitable repos");
+      expect(prompt).toContain("hand indexing to GG Coder, which must ask_user before add");
+      expect(prompt).toContain(
+        "unavailable, discovery finds nothing suitable, or the user declines",
+      );
+      expect(prompt).toContain("not cross-checked against real-world implementations");
+      expect(prompt).toContain("Do not keep requesting indexing after a decline");
+      expect(prompt).toContain("they do not replace tests or prove correctness");
+      expect(prompt).not.toContain("repo that ships is proof");
+    }
+  });
+});
+
+describe("UI guidance alignment", () => {
+  it("reviews UI through the matching skill and evidence without wholesale copying", async () => {
+    for (const prompt of [
+      await buildKenSystemPrompt(TEST_CWD),
+      await buildKenAutopilotSystemPrompt(TEST_CWD),
+    ]) {
+      expect(prompt).toContain("UI: evidence over imitation");
+      expect(prompt).toContain("use an invoked matching UI skill as specialized guidance");
+      expect(prompt).toContain("explicitly shows that the skill was available and applicable");
+      expect(prompt).toContain("existing components and tokens");
+      expect(prompt).toContain("rendered desktop and mobile output");
+      expect(prompt).toContain("References are evidence, not templates to clone");
+      expect(prompt).not.toContain("copy proven winners");
+      expect(prompt).not.toContain("pull the actual markup and computed styles");
+    }
   });
 });
 

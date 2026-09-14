@@ -1,0 +1,134 @@
+{
+  "description": "Sanitized terminal sequence from a completed task: two hidden runtime verification prompts, followed by a public final answer. All prose, identifiers, commands, timestamps and paths are synthetic; provider raw blocks and credentials are omitted. Events reconstruct the hook protocol, not a recorded SSE capture; history is the exact response verified against both source and the affected bundle.",
+  "finalAnswer": "Regression coverage was added without weakening existing assertions. The requested change is complete.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Update the sample window.",
+      "provenance": { "source": "runtime", "kind": "automation", "visibility": "hidden" }
+    },
+    { "role": "user", "content": "Preserve existing changes and update only the sample window." },
+    {
+      "role": "assistant",
+      "content": [{ "type": "text", "text": "Initial implementation draft." }]
+    },
+    {
+      "role": "user",
+      "content": "Verification gate: a command that can rewrite files ran after verification. Re-run the checks.",
+      "provenance": { "source": "runtime", "kind": "completion_gate", "visibility": "hidden" }
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_call",
+          "id": "check-1",
+          "name": "bash",
+          "args": { "command": "node --test sample.test.mjs" }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "toolCallId": "check-1",
+          "content": "All checks passed.",
+          "isError": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [{ "type": "text", "text": "Verification completed draft." }]
+    },
+    {
+      "role": "user",
+      "content": "Verification gate: a check passed in this run, but this run also changed what the checks assert or how they execute.",
+      "provenance": { "source": "runtime", "kind": "completion_gate", "visibility": "hidden" }
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Regression coverage was added without weakening existing assertions. The requested change is complete."
+        }
+      ]
+    }
+  ],
+  "history": [
+    { "role": "assistant", "text": "", "task": { "title": "Update sample window" } },
+    {
+      "role": "user",
+      "text": "Preserve existing changes and update only the sample window.",
+      "images": [],
+      "hook": null,
+      "command": false,
+      "compacted": false
+    },
+    {
+      "role": "assistant",
+      "text": "Initial implementation draft.",
+      "images": [],
+      "hook": null,
+      "command": false,
+      "compacted": false
+    },
+    {
+      "role": "assistant",
+      "text": "Verification completed draft.",
+      "images": [],
+      "hook": null,
+      "command": false,
+      "compacted": false
+    },
+    {
+      "role": "assistant",
+      "text": "Regression coverage was added without weakening existing assertions. The requested change is complete.",
+      "images": [],
+      "hook": null,
+      "command": false,
+      "compacted": false
+    }
+  ],
+  "events": [
+    { "type": "run_start", "data": {} },
+    { "type": "task_start", "data": { "id": "task-1", "title": "Update sample window" } },
+    { "type": "hook_armed", "data": { "kind": "verification" } },
+    { "type": "text_delta", "data": { "text": "Initial implementation draft." } },
+    { "type": "turn_end", "data": { "turn": 1 } },
+    { "type": "hook", "data": { "kind": "verification", "verificationReason": "recheck" } },
+    {
+      "type": "tool_call_start",
+      "data": {
+        "toolCallId": "check-1",
+        "name": "bash",
+        "args": { "command": "node --test sample.test.mjs" }
+      }
+    },
+    {
+      "type": "tool_call_end",
+      "data": {
+        "toolCallId": "check-1",
+        "name": "bash",
+        "result": "All checks passed.",
+        "isError": false,
+        "durationMs": 1
+      }
+    },
+    { "type": "hook_armed", "data": { "kind": "verification", "armed": true } },
+    { "type": "text_delta", "data": { "text": "Verification completed draft." } },
+    { "type": "turn_end", "data": { "turn": 2 } },
+    { "type": "hook", "data": { "kind": "verification", "verificationReason": "missing" } },
+    {
+      "type": "text_delta",
+      "data": { "text": "Regression coverage was added without weakening existing assertions. " }
+    },
+    { "type": "text_delta", "data": { "text": "The requested change is complete." } },
+    { "type": "turn_end", "data": { "turn": 3 } },
+    { "type": "agent_done", "data": {} },
+    { "type": "run_end", "data": { "outcome": "completed", "cancelled": false } }
+  ]
+}

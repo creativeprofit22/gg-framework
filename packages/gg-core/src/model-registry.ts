@@ -1,10 +1,13 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 
 export interface ModelInfo {
   id: string;
   name: string;
   provider: Provider;
+  /** Canonical capability identity when the provider routes through a deployment alias. */
+  modelIdentity?: string;
   contextWindow: number;
   /**
    * ChatGPT Codex transport uses product-specific windows that can differ from
@@ -12,6 +15,8 @@ export interface ModelInfo {
    * route through `/codex/responses`; API-key requests do not.
    */
   codexContextWindow?: number;
+  /** Explicit opt-in Codex window; never replaces the stable default. */
+  codexExperimentalContextWindow?: number;
   maxOutputTokens: number;
   supportsThinking: boolean;
   supportsImages: boolean;
@@ -32,12 +37,15 @@ export interface ModelInfo {
   /**
    * The top reasoning tier this model genuinely uses. Used when thinking is
    * enabled to pick the strongest setting per model:
-   *   - OpenAI GPT-5.5-era: `xhigh`
+   *   - OpenAI GPT-6 Astra: `ultra` (Codex orchestration preset above `max`)
+   *   - OpenAI GPT-5.6-era (Sol/Terra/Luna): `max`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
-   *   - Claude Fable 5 / Mythos 5, Opus 4.8 / 4.7 / 4.6 and Sonnet 5: `max`
-   *     (Fable 5 / Mythos 5 use always-on adaptive thinking, low→max ladder)
+   *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5 and Sonnet 5: `max`
+   *     (the Fable / Mythos line uses always-on adaptive thinking, low→max)
    *   - Claude Haiku 4.5: `high` (no adaptive `max` tier)
-   *   - GLM / Moonshot / Xiaomi / MiniMax / Qwen: `high` — binary-thinking
+   *   - Kimi K3: `max` (always-on reasoning; currently the only API effort)
+   *   - xAI Grok 4.6: `xhigh` (new top rung; 4.5 caps at `high`)
+   *   - GLM / Kimi K2.x / Xiaomi / MiniMax / Qwen: `high` — binary-thinking
    *     providers ignore the level on the wire, so the value is cosmetic
    *   - DeepSeek V4: `xhigh` (DeepSeek maps `xhigh` → its internal `max`)
    */
@@ -68,8 +76,13 @@ export const MODELS: ModelInfo[] = [
   // Project Glasswing (limited, invitation-only) model unavailable to most
   // users. Re-enable once it's generally available.
   {
-    id: "claude-fable-5",
-    name: "Claude Fable 5",
+    // Released 2026-09-01 — replaces Fable 5 at the same $10/$50 MTok (cache
+    // reads drop to $0.25). Always-on adaptive thinking steered by effort;
+    // forced tool use is rejected with a 400, which gg-ai never sends on the
+    // Anthropic path. Fable 5 is retired here — a session that still has it
+    // saved falls back to the provider default on next start.
+    id: "claude-fable-5-1",
+    name: "Claude Fable 5.1",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -81,7 +94,7 @@ export const MODELS: ModelInfo[] = [
   },
   // {
   //   // Mythos-class model offered through Project Glasswing (limited
-  //   // availability, invitation-only). Same underlying model as Fable 5 with
+  //   // availability, invitation-only). Same underlying model as Fable 5.1 with
   //   // some safeguards lifted; kept here so approved accounts can select it.
   //   id: "claude-mythos-5",
   //   name: "Claude Mythos 5",
@@ -95,8 +108,12 @@ export const MODELS: ModelInfo[] = [
   //   maxThinkingLevel: "max",
   // },
   {
-    id: "claude-opus-4-8",
-    name: "Claude Opus 4.8",
+    // Released 2026-07-24 — "For complex agentic coding and enterprise work".
+    // Near-Fable capability at half the price ($5/$25 vs $10/$50). Adaptive
+    // thinking with the full effort ladder (low→max, xhigh included); dateless
+    // ID is the canonical pinned snapshot (post-4.6 naming scheme).
+    id: "claude-opus-5",
+    name: "Claude Opus 5",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -132,8 +149,42 @@ export const MODELS: ModelInfo[] = [
   },
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
-    id: "gpt-5.5",
-    name: "GPT-5.5",
+    // GPT-6 Astra — "Our most capable model for complex, demanding work."
+    // (Codex catalog priority 1, listed for every ChatGPT plan, requires a
+    // Codex client >= 0.153.0 — see CODEX_CLIENT_VERSION). Same split as 5.6:
+    // 1.05M on the public Responses API, 272K on the ChatGPT OAuth route
+    // (openai/codex models.json, `gpt-6-astra`). Reasoning ladder low → medium
+    // → high → xhigh → max → ultra; `ultra` is the Codex orchestration preset
+    // (multi_agent v2) and is Codex-only — the public API tops out at `max`.
+    // Note: through a plain API key OpenAI requires the Responses API for tool
+    // calling on Astra, so the Chat Completions path is text-only; the OAuth
+    // Codex route is the supported way to use it as an agent.
+    id: "gpt-6-astra",
+    name: "GPT-6 Astra",
+    provider: "openai",
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
+    codexExperimentalContextWindow: 872_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "high",
+    maxThinkingLevel: "ultra",
+  },
+  // GPT-5.6 family — three agentic coding tiers launched July 2026. The public
+  // Responses API advertises a 1.05M context window; OpenAI's Codex product
+  // catalog advertises 272K on the ChatGPT OAuth route (corrected from the
+  // initially advertised 372K — openai/codex PR #33972, Jul 18 2026 hotfix). All three take
+  // text+image input, freeform apply_patch, text+image web search, and parallel
+  // tool calls.
+  {
+    // Sol — "Latest frontier agentic coding model." (priority 1, default low).
+    // Reasoning ladder: low → medium → high → xhigh → max → ultra. Ultra is a
+    // Codex orchestration preset: the request uses max effort while the local
+    // runtime proactively delegates suitable independent work to subagents.
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6 Sol",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
@@ -142,11 +193,13 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: false,
     costTier: "high",
-    maxThinkingLevel: "xhigh",
+    maxThinkingLevel: "ultra",
   },
   {
-    id: "gpt-5.4",
-    name: "GPT-5.4",
+    // Terra — "Balanced agentic coding model for everyday work." (priority 2,
+    // default medium).
+    id: "gpt-5.6-terra",
+    name: "GPT-5.6 Terra",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
@@ -154,38 +207,29 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     supportsVideo: false,
-    costTier: "high",
-    maxThinkingLevel: "xhigh",
+    costTier: "medium",
+    maxThinkingLevel: "ultra",
   },
   {
-    id: "gpt-5.4-mini",
-    name: "GPT-5.4 Mini",
+    // Luna — "Fast and affordable agentic coding model." (priority 3, default
+    // medium). Reasoning tops out at `max`.
+    id: "gpt-5.6-luna",
+    name: "GPT-5.6 Luna",
     provider: "openai",
-    contextWindow: 400_000,
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
     supportsVideo: false,
     costTier: "low",
-    maxThinkingLevel: "xhigh",
-  },
-  {
-    id: "gpt-5.3-codex",
-    name: "GPT-5.3 Codex",
-    provider: "openai",
-    contextWindow: 400_000,
-    maxOutputTokens: 128_000,
-    supportsThinking: true,
-    supportsImages: true,
-    supportsVideo: false,
-    costTier: "high",
-    maxThinkingLevel: "xhigh",
+    maxThinkingLevel: "max",
   },
   // ── Sakana (Fugu) ──────────────────────────────────────
   // Sakana Fugu is a multi-agent system surfaced as a standard LLM via the
   // OpenAI-compatible Sakana API (https://api.sakana.ai/v1). Both models take
-  // text + image input and only accept "high"/"xhigh" reasoning effort, so the
-  // top tier is `xhigh`. `fugu` routes across all providers; `fugu-ultra` is
+  // text + image input. Plain Fugu stops at xhigh; Ultra v1.1 also supports max.
+  // `fugu` routes across all providers; `fugu-ultra` is
   // the heavier tier (may need larger client timeouts on complex tasks).
   {
     id: "fugu",
@@ -209,12 +253,66 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: false,
     costTier: "high",
+    // The rolling alias now serves v1.1, which adds a distinct max effort.
+    maxThinkingLevel: "max",
+  },
+  // ── xAI (Grok) ─────────────────────────────────────────
+  // Grok 4.6 (released 2026-08-12) is xAI's flagship for coding, agentic tasks,
+  // and knowledge work, with a focus on long-running agents — 500K context,
+  // text+image input, and a `reasoning_effort` ladder that adds a new `xhigh`
+  // top rung (low/medium/high default/xhigh; reasoning still can't be fully
+  // disabled). $2/$6 per MTok under 200K prompt tokens ($4/$12 at or above),
+  // and it's the default model of the Grok Build coding agent. xAI advertises "no text output limit"; we keep the same
+  // 131K practical cap as 4.5 for budget predictability and input headroom.
+  {
+    id: "grok-4.6",
+    name: "Grok 4.6",
+    provider: "xai",
+    contextWindow: 500_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "medium",
     maxThinkingLevel: "xhigh",
   },
-  // ── Gemini ─────────────────────────────────────────────
+  // Grok 4.5 (released 2026-07-08) — superseded by 4.6 but retained as an explicit option. 500K context, text+image input,
+  // configurable `reasoning_effort` (low/medium/high, server default high;
+  // reasoning can't be fully disabled). Served over the OpenAI-compatible API
+  // at https://api.x.ai/v1 (API key from console.x.ai). xAI hasn't published an
+  // official max-output cap for 4.5; 131K matches the Grok Responses ceiling
+  // third-party integrations use.
   {
-    id: "gemini-3.1-flash-lite-preview",
-    name: "Gemini 3.1 Flash Lite Preview",
+    id: "grok-4.5",
+    name: "Grok 4.5",
+    provider: "xai",
+    contextWindow: 500_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "high",
+  },
+  // ── Gemini ─────────────────────────────────────────
+  {
+    id: "gemini-3.1-flash-lite",
+    name: "Gemini 3.1 Flash Lite",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
+  // Keep 3.1 Flash Lite first for the working OAuth default and fast-model routing.
+  // New GA models are opt-in; Code Assist access varies by account.
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
     provider: "gemini",
     contextWindow: 1_048_576,
     maxOutputTokens: 65_536,
@@ -226,7 +324,45 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   {
-    id: "gemini-3.5-flash",
+    id: "gemini-3.5-flash-lite",
+    name: "Gemini 3.5 Flash Lite",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
+  {
+    // Gemini 3.7 Flash (released 2026-08-13) — Google's most capable Flash for
+    // coding, agents, and multi-step execution; GA-stable on the Gemini API as
+    // `gemini-3.7-flash`. 1M context, 64K output, thinking low/medium/high.
+    // Sent over our Code Assist (OAuth) transport ahead of gemini-cli — upstream
+    // hasn't listed 3.7 yet (google-gemini/gemini-cli#28802, still open) — so
+    // free/personal accounts 404 (entitlement-gated) while Code Assist
+    // Standard/Enterprise accounts get it. Kept after the working flash-lite:
+    // getFastModel picks the first low-tier entry, and flash-lite is the one
+    // that works on every account.
+    id: "gemini-3.7-flash",
+    name: "Gemini 3.7 Flash",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
+  {
+    // Wire name `gemini-3-flash` — the Code Assist (OAuth) backend rejects the
+    // display string `gemini-3.5-flash` with a 404, so gemini-cli keeps this
+    // alternative name (SECONDARY_GEMINI_3_5_FLASH_MODEL) for that endpoint.
+    id: "gemini-3-flash",
     name: "Gemini 3.5 Flash",
     provider: "gemini",
     contextWindow: 1_048_576,
@@ -238,10 +374,46 @@ export const MODELS: ModelInfo[] = [
     costTier: "low",
     maxThinkingLevel: "high",
   },
+  {
+    // Gemini 3.1 Pro is public preview — gated behind Code Assist preview
+    // enablement, so free/personal OAuth accounts 404 on it (see
+    // ACCOUNT_GATED_MODELS in gg-ai's gemini provider).
+    id: "gemini-3.1-pro-preview",
+    name: "Gemini 3.1 Pro (Preview)",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "high",
+    maxThinkingLevel: "high",
+  },
   // ── Moonshot (Kimi) ────────────────────────────────────
+  // K3 is Kimi's 2.8T-parameter flagship for long-horizon coding, knowledge
+  // work, and deep reasoning. Its effort ladder is server-declared as
+  // low/high/max on both the public API (default max) and the Kimi For Coding
+  // OAuth endpoint (default high); thinking can also be fully disabled.
+  {
+    id: "kimi-k3",
+    name: "Kimi K3",
+    provider: "moonshot",
+    contextWindow: 1_048_576,
+    // The API can be raised as high as the full context window, but 131K is the
+    // documented default and keeps room for input in AgentSession's fixed cap.
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 100 * 1024 * 1024,
+    costTier: "high",
+    maxThinkingLevel: "max",
+  },
+  // Retain the cheaper dedicated coding model as an explicit alternative.
   {
     id: "kimi-k2.7-code",
-    name: "Kimi K2.7",
+    name: "Kimi K2.7 Code",
     provider: "moonshot",
     contextWindow: 262_144,
     maxOutputTokens: 262_144,
@@ -253,11 +425,15 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
-  // GLM-5.2: coding-first flagship with a usable 1M-token context window
-  // (5x jump over GLM-5.1's ~200K) and 131K max output. Released 2026-06-13.
+  // Two GLM entries, both live on the coding endpoint (verified against its
+  // /models list). The pre-5.3 ids stay retired: they routed to strictly worse
+  // coding for the same plan quota, and the endpoint already answers `glm-5.2`
+  // requests as glm-5.3.
+  // `max` is both the ceiling and Z.AI's own default — the rungs below it live
+  // in thinking-level.ts.
   {
-    id: "glm-5.2",
-    name: "GLM-5.2",
+    id: "glm-5.3",
+    name: "GLM-5.3",
     provider: "glm",
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
@@ -265,43 +441,31 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "max",
   },
+  // GLM-5.3-Flash (released 2026-08-26): 320B-A18B natively multimodal sibling
+  // at ~1/20th of 5.3's API price with 3× the coding-plan quota, so it is the
+  // provider's `low` tier — scout sub-agents and compaction summaries route
+  // here instead of paying 5.3 rates.
+  // Images are native on the coding endpoint (verified: base64 data URL in an
+  // `image_url` block answers correctly), which also means GLM image
+  // attachments go inline for this model rather than through the zai_vision MCP
+  // detour that `supportsImages: false` triggers.
+  // Video/file input is documented but unverified on this transport, so it
+  // stays off until measured. Thinking cannot be disabled server-side (Z.AI
+  // maps a `disabled` toggle to the `low` rung and answers 200), and unlike
+  // 5.3 it accepts any reasoning_effort string without a 400.
   {
-    id: "glm-5.1",
-    name: "GLM-5.1",
+    id: "glm-5.3-flash",
+    name: "GLM-5.3-Flash",
     provider: "glm",
-    contextWindow: 204_800,
+    contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
     supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "medium",
-    maxThinkingLevel: "high",
-  },
-  {
-    id: "glm-4.7",
-    name: "GLM-4.7",
-    provider: "glm",
-    contextWindow: 200_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "low",
-    maxThinkingLevel: "high",
-  },
-  {
-    id: "glm-4.7-flash",
-    name: "GLM-4.7 Flash",
-    provider: "glm",
-    contextWindow: 200_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
+    supportsImages: true,
     supportsVideo: false,
     costTier: "low",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "max",
   },
   // ── MiniMax ────────────────────────────────────────────
   {
@@ -369,6 +533,11 @@ export const MODELS: ModelInfo[] = [
   },
   // ── DeepSeek ───────────────────────────────────────────
   {
+    // `deepseek-v4-pro` now serves DeepSeek-V4-Pro-0813 (released 2026-08-13,
+    // first STABLE V4 Pro — supersedes the April preview; calling name
+    // unchanged, same 1.6T/49B MoE). 1M context, text-only, low/high/max effort.
+    // Docs abbreviate output as 384K; use the same conservative 384,000-token
+    // application cap across V4 models rather than mixing decimal/binary units.
     id: "deepseek-v4-pro",
     name: "DeepSeek V4 Pro",
     provider: "deepseek",
@@ -377,9 +546,8 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     supportsVideo: false,
-    costTier: "high",
-    // DeepSeek V4 maps `xhigh` → its internal `max` tier.
-    maxThinkingLevel: "xhigh",
+    costTier: "medium",
+    maxThinkingLevel: "max",
   },
   {
     id: "deepseek-v4-flash",
@@ -391,7 +559,20 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     supportsVideo: false,
     costTier: "low",
-    maxThinkingLevel: "xhigh",
+    maxThinkingLevel: "max",
+  },
+  // Opt-in experimental vision sibling; never replaces the stable summary model.
+  {
+    id: "deepseek-v4-flash-vision-exp",
+    name: "DeepSeek V4 Flash Vision (Experimental)",
+    provider: "deepseek",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 384_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "low",
+    maxThinkingLevel: "max",
   },
   // ── OpenRouter ─────────────────────────────────────────
   {
@@ -401,19 +582,92 @@ export const MODELS: ModelInfo[] = [
     contextWindow: 1_000_000,
     maxOutputTokens: 65_536,
     supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    // Practical inline-payload cap, not an asserted provider maximum.
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "medium",
+    maxThinkingLevel: "high",
+  },
+  // ── Hugging Face (Inference Providers router) ────────
+  // One HF token (hf.co/settings/tokens, "Make calls to Inference Providers"
+  // permission) routes to whichever hosted backend serves each open model;
+  // billing follows each backend's rates on the HF account (small free tier).
+  // Model ids are Hub repo paths, so they intentionally contain a slash — the
+  // same shape local/ vLLM ids already use (`local/vllm/Qwen/Qwen3-32B`).
+  {
+    // Qwen's open flagship for agentic coding — tool-calling native, non-thinking
+    // (the Coder line dropped the <think> block). 262K native context (1M needs
+    // YaRN, which the router doesn't apply), 131K max output. :auto suffix lets
+    // HF pick the backend with capacity; we keep the bare repo id so the picker
+    // matches what GET /v1/models reports.
+    id: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    name: "Qwen3 Coder 480B",
+    provider: "huggingface",
+    contextWindow: 262_144,
+    maxOutputTokens: 131_072,
+    supportsThinking: false,
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
+    maxThinkingLevel: "low",
+  },
+  {
+    // OpenAI's open-weight 120B MoE (5.1B active) — general-purpose, tool-calling
+    // native, adjustable reasoning effort (low/medium/high, default medium) over
+    // the router's Chat Completions API. Cheap enough to be the low-tier sibling
+    // for summaries and fast sub-agents.
+    id: "openai/gpt-oss-120b",
+    name: "GPT-OSS 120B",
+    provider: "huggingface",
+    contextWindow: 131_072,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "low",
     maxThinkingLevel: "high",
   },
 ];
 
+/**
+ * Models discovered at runtime rather than shipped in `MODELS` — today only
+ * locally hosted ones (Ollama/LM Studio/llama.cpp/vLLM), whose ids and context
+ * windows depend on what the user has installed. Kept in a separate map so
+ * `MODELS` stays a static, reviewable table.
+ */
+const runtimeModels = new Map<string, ModelInfo>();
+
+/** Add (or replace) runtime-discovered models. Later registrations win by id. */
+export function registerRuntimeModels(models: readonly ModelInfo[]): void {
+  for (const model of models) runtimeModels.set(model.id, model);
+}
+
+/**
+ * Remove runtime models matching `predicate` (all of them when omitted) — e.g.
+ * every model from an endpoint the user just deleted.
+ */
+export function clearRuntimeModels(predicate?: (model: ModelInfo) => boolean): void {
+  if (!predicate) {
+    runtimeModels.clear();
+    return;
+  }
+  for (const [id, model] of runtimeModels) {
+    if (predicate(model)) runtimeModels.delete(id);
+  }
+}
+
+/** Static table plus everything discovered at runtime. */
+export function getAllModels(): ModelInfo[] {
+  return [...MODELS, ...runtimeModels.values()];
+}
+
 export function getModel(id: string): ModelInfo | undefined {
-  return MODELS.find((m) => m.id === id);
+  return MODELS.find((m) => m.id === id) ?? runtimeModels.get(id);
 }
 
 export function getModelsForProvider(provider: Provider): ModelInfo[] {
-  return MODELS.filter((m) => m.provider === provider);
+  return getAllModels().filter((m) => m.provider === provider);
 }
 
 /**
@@ -425,7 +679,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
  * Credits, while the API-only `mimo-v2.5-pro-ultraspeed` has no fallback.
  */
 export function getAuthStorageKeys(provider: Provider, modelId: string): string[] {
-  const model = MODELS.find((m) => m.id === modelId && m.provider === provider);
+  const model = getAllModels().find((m) => m.id === modelId && m.provider === provider);
   return model?.authStorageKeys ?? [provider];
 }
 
@@ -450,33 +704,101 @@ export function getVideoByteLimit(modelId: string): number | undefined {
 
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
-  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
-  if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite-preview")!;
-  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.2")!;
-  if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.7-code")!;
+  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-6-astra")!;
+  if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite")!;
+  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.3")!;
+  if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k3")!;
   if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M3")!;
   if (provider === "deepseek") return MODELS.find((m) => m.id === "deepseek-v4-pro")!;
+  if (provider === "huggingface")
+    return MODELS.find((m) => m.id === "Qwen/Qwen3-Coder-480B-A35B-Instruct")!;
   if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
   if (provider === "sakana") return MODELS.find((m) => m.id === "fugu")!;
+  if (provider === "xai") return MODELS.find((m) => m.id === "grok-4.6")!;
+  if (provider === "azure") return MODELS.find((model) => model.provider === "azure")!;
+  // Local models only exist once discovery has run, and there's no "the" local
+  // model. Never throw here (callers rely on a ModelInfo): fall back to a
+  // placeholder that carries the conservative defaults, so a caller asking
+  // before a scan gets a coherent object instead of a crash.
+  if (provider === "local") {
+    return getModelsForProvider("local")[0] ?? PLACEHOLDER_LOCAL_MODEL;
+  }
   return MODELS.find((m) => m.id === "claude-sonnet-5")!;
 }
+
+/**
+ * Stand-in returned by `getDefaultModel("local")` before any local model has
+ * been discovered. Not registered, never selectable in the UI — it exists only
+ * so the non-null contract of `getDefaultModel` holds.
+ */
+const PLACEHOLDER_LOCAL_MODEL: ModelInfo = {
+  id: "local/none/none",
+  name: "No local model discovered",
+  provider: "local",
+  contextWindow: 8192,
+  maxOutputTokens: 2048,
+  supportsThinking: false,
+  supportsImages: false,
+  supportsVideo: false,
+  costTier: "low",
+  maxThinkingLevel: "high",
+};
+
+export type OpenAICodexContextProfile = "stable" | "experimental";
 
 export interface ContextWindowOptions {
   provider?: Provider;
   accountId?: string;
+  openAICodexContextProfile?: OpenAICodexContextProfile;
 }
 
 export function usesOpenAICodexTransport(options?: ContextWindowOptions): boolean {
   return options?.provider === "openai" && Boolean(options.accountId);
 }
 
+/**
+ * Codex applies a 10K-token history cap to every tool/function output. GG's
+ * generic 30%-of-context allowance is far larger on 272K/372K Codex windows
+ * and can turn a few reads into 100K+ fresh input tokens. Four characters per
+ * token matches Codex's byte approximation and keeps this provider policy in
+ * the shared model registry instead of an app-specific copy.
+ */
+export function getToolResultCharLimit(
+  _modelId: string,
+  options?: ContextWindowOptions,
+): number | undefined {
+  return usesOpenAICodexTransport(options) ? 10_000 * 4 : undefined;
+}
+
 export function getContextWindow(modelId: string, options?: ContextWindowOptions): number {
   const model = getModel(modelId);
   if (!model) return 200_000;
-  if (usesOpenAICodexTransport(options) && model.codexContextWindow) {
-    return model.codexContextWindow;
+  if (usesOpenAICodexTransport(options)) {
+    if (
+      options?.openAICodexContextProfile === "experimental" &&
+      model.codexExperimentalContextWindow
+    ) {
+      return model.codexExperimentalContextWindow;
+    }
+    if (model.codexContextWindow) return model.codexContextWindow;
   }
   return model.contextWindow;
+}
+
+export function assertOpenAICodexContextProfileFitsUsage(
+  modelId: string,
+  profile: OpenAICodexContextProfile,
+  activeUsage: number,
+): void {
+  const contextWindow = getContextWindow(modelId, {
+    provider: "openai",
+    accountId: "codex-context-profile",
+    openAICodexContextProfile: profile,
+  });
+  if (activeUsage <= contextWindow) return;
+  throw new Error(
+    `Cannot switch to the ${profile} context profile: active usage (${activeUsage} tokens) exceeds its ${contextWindow}-token limit. Compact or start a new session first.`,
+  );
 }
 
 /**
@@ -488,18 +810,43 @@ export function getMaxThinkingLevel(modelId: string): ThinkingLevel {
 }
 
 /**
+ * The thinking level a fresh session starts at. Identical to
+ * {@link getMaxThinkingLevel} except where the provider declares a lower
+ * default effort server-side — Kimi K3's Kimi For Coding OAuth endpoint
+ * declares `default_effort: "high"` in its /models think_efforts (the public
+ * Moonshot API declares "max"), and the official kimi-code CLI starts there.
+ * Pass the active credential's baseUrl so the endpoint-aware default resolves;
+ * matching it keeps plan-usage burn identical to the official CLI (users can
+ * still toggle up to max).
+ */
+export function getDefaultThinkingLevel(
+  modelId: string,
+  options?: { baseUrl?: string },
+): ThinkingLevel {
+  const model = getModel(modelId);
+  if (model?.id === "gpt-6-astra") return "low";
+  if (model?.id === "kimi-k3" && isKimiCodingEndpoint(options?.baseUrl)) return "high";
+  return model?.maxThinkingLevel ?? "high";
+}
+
+/**
  * Get the model to use for compaction summarization.
  * - Anthropic: always Sonnet 5
  * - OpenAI: cheapest (Codex Mini)
  * - Gemini: use the current model
- * - GLM: GLM-4.7 Flash (cheap alternative)
- * - Moonshot: use the current model (no cheap alternative)
+ * - GLM: GLM-5.3-Flash (the registered low-cost sibling)
+ * - Moonshot: use the current model (no cheap alternative registered)
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "anthropic") {
     return MODELS.find((m) => m.id === "claude-sonnet-5")!;
   }
-  if (provider === "openai" || provider === "glm" || provider === "deepseek") {
+  if (
+    provider === "openai" ||
+    provider === "glm" ||
+    provider === "deepseek" ||
+    provider === "huggingface"
+  ) {
     const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
     if (low) return low;
   }
@@ -514,9 +861,9 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
  *
  * Routes off each model's `costTier` — the single source of truth that already
  * travels with the registry entry — so a model rename/bump needs no change
- * here. Providers with no low-tier sibling (Moonshot, MiniMax, Xiaomi, Sakana,
- * OpenRouter) gracefully keep the parent model, so there's never a crash or a
- * cross-provider jump to a login the user may not have.
+ * here. Providers with no low-tier sibling (Moonshot, MiniMax, Xiaomi,
+ * Sakana, OpenRouter) gracefully keep the parent model, so there's never a
+ * crash or a cross-provider jump to a login the user may not have.
  */
 export function getFastModel(provider: Provider, currentModelId: string): ModelInfo {
   const low = getModelsForProvider(provider).find((m) => m.costTier === "low");

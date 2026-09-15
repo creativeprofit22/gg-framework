@@ -20,6 +20,9 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
+import { WorkingBeam } from "./WorkingBeam";
+import { ActionMetal } from "./ActionMetal";
+import { MetalButton } from "./MetalButton";
 import {
   isValidProgrammaticFocus,
   PROGRAMMATIC_FOCUS_GUIDANCE,
@@ -33,7 +36,10 @@ import {
   canRunProgrammaticSelection,
   canScanProgrammatic,
 } from "./programmatic-chat-state";
-import type { ProgrammaticChatRequest, ProgrammaticExecutionEvidence } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import type {
+  ProgrammaticChatRequest,
+  ProgrammaticExecutionEvidence,
+} from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   requireContinuationAcceptedEvent,
   PromptSubmissionError,
@@ -163,7 +169,12 @@ import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps"
 import { ArrowUp, Paperclip, AtSign, GitBranch, Square } from "lucide-react";
 import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
-import { dropSupersededAsks, mergeAskAnswers, reconcilePendingAsks, type AskAnswerDelta } from "./ask-user";
+import {
+  dropSupersededAsks,
+  mergeAskAnswers,
+  reconcilePendingAsks,
+  type AskAnswerDelta,
+} from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
@@ -495,7 +506,8 @@ export function noInputSlashSubmissionError(
     match.args && match.command.input.text === "none" ? "additional text" : null,
     match.command.input.references === "none" &&
     (referencedFileCount > 0 || parseReferencedFiles(input.trim()).files.length > 0)
-      ? "file references" : null,
+      ? "file references"
+      : null,
     attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
   ].filter((kind): kind is string => kind !== null);
   if (blocked.length > 0)
@@ -505,7 +517,8 @@ export function noInputSlashSubmissionError(
     match.command.name === "programmatic" &&
     match.args &&
     !isValidProgrammaticFocus(match.args)
-  ) return PROGRAMMATIC_FOCUS_GUIDANCE;
+  )
+    return PROGRAMMATIC_FOCUS_GUIDANCE;
   return null;
 }
 
@@ -898,17 +911,28 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const lifecycle = lifecycleEpochRef.current;
     try {
       const next = await listCommands();
-      if (next !== null && client === commandClientRef.current && mountedRef.current && request === commandRequestRef.current && mode === commandModeRef.current &&
-        generation === generationRef.current && lifecycle === lifecycleEpochRef.current) {
+      if (
+        next !== null &&
+        client === commandClientRef.current &&
+        mountedRef.current &&
+        request === commandRequestRef.current &&
+        mode === commandModeRef.current &&
+        generation === generationRef.current &&
+        lifecycle === lifecycleEpochRef.current
+      ) {
         setCommands(next);
       }
     } catch {
       // A failed refresh must not replace a successful catalog.
     }
   }, [listCommands, client]);
-  const invalidateCommandRequests = useCallback(() => { commandRequestRef.current++; }, []);
+  const invalidateCommandRequests = useCallback(() => {
+    commandRequestRef.current++;
+  }, []);
   useEffect(() => {
-    const onFocus = () => { void refreshCommands(); };
+    const onFocus = () => {
+      void refreshCommands();
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       invalidateCommandRequests();
@@ -3937,7 +3961,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         // until session history is reloaded rather than pretending it was not sent.
         if (error instanceof PromptSubmissionError && error.category === "rejected") {
           setItems((current) =>
-            current.filter((item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId),
+            current.filter(
+              (item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId,
+            ),
           );
         }
         reportPromptFailure(error);
@@ -4538,14 +4564,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         {workspaceMode === "chat" ? (
           <span className="picker-head-actions">
             {roadmapDraftTrigger}
-            <button
+            <MetalButton
+              windowFocused={
+                windowFocused && props.windowFocused !== false && props.focused !== false
+              }
               className="btn btn-primary btn-sm"
               disabled={running || autopilotReviewing || newSessionBusy}
               title="Start a new chat"
               onClick={() => setConfirmNewSession(true)}
             >
               {"+ New"}
-            </button>
+            </MetalButton>
             <button
               className="btn btn-sm btn-ghost"
               title="View and curate chat memories and Jiwa"
@@ -4570,14 +4599,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 }
                 onChange={(next) => void handleAutopilotChange(next)}
               />
-              <button
+              <MetalButton
+                windowFocused={
+                  windowFocused && props.windowFocused !== false && props.focused !== false
+                }
                 className="btn btn-primary btn-sm"
                 disabled={running || autopilotReviewing || newSessionBusy}
                 title="Start a new session for this project"
                 onClick={() => setConfirmNewSession(true)}
               >
                 {"+ New"}
-              </button>
+              </MetalButton>
               <ProjectNotes
                 ref={projectNotesActionsRef}
                 cwd={state?.cwd ?? null}
@@ -4636,7 +4668,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 </button>
               ) : (
                 commitCommand && (
-                  <button
+                  <MetalButton
+                    windowFocused={
+                      windowFocused && props.windowFocused !== false && props.focused !== false
+                    }
                     className={`btn btn-sm ${hasCommit ? "btn-success" : "btn-ghost"}`}
                     disabled={running || planReview !== null}
                     title={
@@ -4654,7 +4689,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     }
                   >
                     {`/${commitCommand}`}
-                  </button>
+                  </MetalButton>
                 )
               )}
             </span>
@@ -4780,6 +4815,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           scheduleInvalid ? " schedule-invalid" : ""
         }`}
       >
+        <WorkingBeam active={running || kenRunning || autopilotReviewing} />
         {scheduleDraft ? (
           <ScheduleHint input={input} caret={caret} onPickInterval={fillScheduleInterval} />
         ) : (
@@ -4989,9 +5025,22 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             </button>
           )}
           <div className="inputactions-trailing">
+            <WorkingBeam active={running} size="sm" />
+            <ActionMetal
+              active={
+                !running &&
+                !cancelling &&
+                readyRef.current &&
+                planReview === null &&
+                (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
+              }
+              windowFocused={
+                windowFocused && props.windowFocused !== false && props.focused !== false
+              }
+            />
             <button
               type="button"
-              className={`composer-send-icon${running ? " is-stop" : ""}`}
+              className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
               aria-label={running ? "Stop response" : "Send message"}
               title={running ? (cancelling ? "Stopping…" : "Stop response") : "Send message"}
               disabled={
@@ -5014,22 +5063,31 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           // stay clear of the status row's "esc to cancel". Always mounted (so it
           // can transition both ways); the `visible` class fades/slides it in
           // when there's text and out when there isn't.
-          <button
-            className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
-            title={
-              enhanceOverLimit
-                ? enhanceLimitReason
-                : "Enhance prompt — clearer wording + correct terms"
-            }
-            aria-describedby={
-              enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
-            }
-            disabled={planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit}
-            aria-hidden={!enhanceHintVisible}
-            onClick={() => void runEnhance()}
-          >
-            {enhancing ? "Enhancing…" : "Enhance?"}
-          </button>
+          <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
+            <ActionMetal
+              active={enhanceHintVisible && !enhancing && !enhanceOverLimit && planReview === null}
+              windowFocused={
+                windowFocused && props.windowFocused !== false && props.focused !== false
+              }
+              variant="button"
+            />
+            <button
+              className={`enhance-pill${enhancing ? " enhancing" : ""}`}
+              title={
+                enhanceOverLimit
+                  ? enhanceLimitReason
+                  : "Enhance prompt — clearer wording + correct terms"
+              }
+              aria-describedby={
+                enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+              }
+              disabled={planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit}
+              aria-hidden={!enhanceHintVisible}
+              onClick={() => void runEnhance()}
+            >
+              {enhancing ? "Enhancing…" : "Enhance?"}
+            </button>
+          </div>
         )}
       </div>
 

@@ -15,6 +15,8 @@ import { BackButton } from "./BackButton";
 import { ListSkeleton } from "./Skeleton";
 import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
+import { MetalButton } from "./MetalButton";
+import { useWindowFocused } from "./useWindowFocused";
 
 interface Props {
   onChosen: (cwd: string) => void;
@@ -40,6 +42,7 @@ export function ChatPicker({
   bindChat = (cwd, sessionPath, chatAgent) => selectWorkspace("chat", cwd, sessionPath, chatAgent),
   showWindowControls = true,
 }: Props): React.ReactElement {
+  const windowFocused = useWindowFocused();
   const [projectsRoot, setProjectsRoot] = useState("");
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -115,13 +118,14 @@ export function ChatPicker({
         <span className="picker-title">Chats</span>
         {!loading && !error && <Badge>{sessions.length}</Badge>}
         <span className="picker-head-actions">
-          <button
+          <MetalButton
+            windowFocused={windowFocused}
             className="btn btn-primary btn-sm"
             disabled={busy || loading || !projectsRoot}
             onClick={() => choose()}
           >
             {"+ New chat"}
-          </button>
+          </MetalButton>
           {showWindowControls && (
             <>
               <RadioButton />
@@ -146,9 +150,14 @@ export function ChatPicker({
         {!loading && !error && sessions.length === 0 && (
           <div className="picker-empty">
             <span style={{ color: theme.textMuted }}>No previous chats yet.</span>
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => choose()}>
+            <MetalButton
+              windowFocused={windowFocused}
+              className="btn btn-primary btn-sm"
+              disabled={busy}
+              onClick={() => choose()}
+            >
               {"+ New chat"}
-            </button>
+            </MetalButton>
           </div>
         )}
         {!loading && !error && sessions.length > 0 && (

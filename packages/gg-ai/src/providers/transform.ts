@@ -511,10 +511,7 @@ export function toAnthropicMessages(
                     source: {
                       type: "base64" as const,
                       media_type: part.mediaType as
-                        | "image/jpeg"
-                        | "image/png"
-                        | "image/gif"
-                        | "image/webp",
+                        "image/jpeg" | "image/png" | "image/gif" | "image/webp",
                       data: part.data,
                     },
                   };
@@ -810,13 +807,11 @@ export function toOpenAIMessages(
               .filter(
                 (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
               )
-              .map(
-                (tc): OpenAI.ChatCompletionMessageToolCall => ({
-                  id: remapToolCallId(tc.id, idMap),
-                  type: "function",
-                  function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-                }),
-              )
+              .map((tc): OpenAI.ChatCompletionMessageToolCall => ({
+                id: remapToolCallId(tc.id, idMap),
+                type: "function",
+                function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+              }))
           : undefined;
       const textParts =
         typeof msg.content !== "string"

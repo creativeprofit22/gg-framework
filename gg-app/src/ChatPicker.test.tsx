@@ -18,6 +18,7 @@ vi.mock("./agent", () => ({
   selectWorkspace: vi.fn(),
   waitForReady: vi.fn(),
 }));
+vi.mock("./useWindowFocused", () => ({ useWindowFocused: () => false }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({
   WindowLayoutButton: () => <button>Windows</button>,
@@ -43,6 +44,28 @@ afterEach(() => {
 });
 
 describe("ChatPicker", () => {
+  it("keeps decorated new-chat buttons native with pane window controls hidden", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([]);
+    const bindChat = vi.fn(() => new Promise<void>(() => {}));
+    render(<ChatPicker onChosen={vi.fn()} bindChat={bindChat} showWindowControls={false} />);
+
+    await screen.findByText("No previous chats yet.");
+    const buttons = screen.getAllByRole<HTMLButtonElement>("button", { name: "+ New chat" });
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.parentElement?.classList.contains("metal-button")).toBe(true);
+      expect(button.disabled).toBe(false);
+    }
+    expect(screen.queryByRole("button", { name: "Radio" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Windows" })).toBeNull();
+    fireEvent.click(buttons[1]);
+    expect(bindChat).toHaveBeenCalledWith("/workspaces", undefined, "general");
+    for (const button of buttons) expect(button.disabled).toBe(true);
+    fireEvent.click(buttons[0]);
+    expect(bindChat).toHaveBeenCalledOnce();
+  });
   it("loads sessions from projectsRoot and resumes them in chat mode", async () => {
     getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();

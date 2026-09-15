@@ -228,11 +228,7 @@ export interface NotesSaveResult {
 export type ProjectNotesReadOutcome = ProjectNotesLoadOutcome;
 
 export type NotesOperationFailureReason =
-  | "invalid"
-  | "missing"
-  | "corrupt"
-  | "unavailable"
-  | "storage";
+  "invalid" | "missing" | "corrupt" | "unavailable" | "storage";
 
 export type NotesReferenceOperationResult =
   | { status: "committed"; referenceId: string }
@@ -350,8 +346,7 @@ export type ReminderClaimOutcome =
   | { status: "invalid"; error: NotesValidationError };
 
 export type ReminderReleaseOutcome =
-  | { status: "released" }
-  | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
+  { status: "released" } | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
 
 export interface ProjectNotesRoadmapBlockerResolutionRequest {
   resolutionId: string;

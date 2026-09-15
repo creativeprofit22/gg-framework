@@ -1,15 +1,7 @@
 import type { Theme } from "../theme/theme.js";
 
 export type ToolTone =
-  | "read"
-  | "search"
-  | "write"
-  | "run"
-  | "web"
-  | "agent"
-  | "state"
-  | "source"
-  | "default";
+  "read" | "search" | "write" | "run" | "web" | "agent" | "state" | "source" | "default";
 
 export interface ToolPalette {
   primary: string;

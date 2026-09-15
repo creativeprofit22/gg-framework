@@ -9,12 +9,7 @@ import lightDaltonizedTheme from "./light-daltonized.json" with { type: "json" }
 export type Theme = typeof darkTheme;
 
 export type ThemeName =
-  | "dark"
-  | "light"
-  | "dark-ansi"
-  | "light-ansi"
-  | "dark-daltonized"
-  | "light-daltonized";
+  "dark" | "light" | "dark-ansi" | "light-ansi" | "dark-daltonized" | "light-daltonized";
 
 export function loadTheme(name: ThemeName): Theme {
   switch (name) {

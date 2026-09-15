@@ -1,0 +1,13 @@
+diff --git a/dist/index.es.js b/dist/index.es.js
+index f059a1d92d4ae6343a0b8b8f058af09d1328291d..dbb864750fe8a45517ae7386bce3b8cf5e90571a 100644
+--- a/dist/index.es.js
++++ b/dist/index.es.js
+@@ -1898,7 +1898,7 @@ const za = Ge(
+       ...a === "pulse-outside" ? { "--pulse-glow-sx": j.x, "--pulse-glow-sy": j.y } : {}
+     };
+     return /* @__PURE__ */ he(Ce, { children: [
+-      /* @__PURE__ */ ze("style", { children: Se }),
++      /* @__PURE__ */ ze("style", { nonce: typeof document === "undefined" ? undefined : document.getElementById("app-style-nonce")?.nonce || undefined, children: Se }),
+       /* @__PURE__ */ he(
+         "div",
+         {

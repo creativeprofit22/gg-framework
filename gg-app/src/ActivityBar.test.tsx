@@ -28,15 +28,27 @@ describe("ActivityBar plan progress", () => {
   });
 });
 
+describe("ActivityBar orb", () => {
+  it("keeps the listening orb during reasoning and disappears when idle", () => {
+    const { container, rerender } = render(<ActivityBar {...baseProps} isThinking />);
+    expect(container.querySelector("canvas")?.getAttribute("aria-label")).toBe("Listening…");
+    expect(screen.getByText("Agent is working…").classList.contains("shimmer-text")).toBe(true);
+
+    rerender(<ActivityBar {...baseProps} running={false} />);
+    expect(container.querySelector("canvas")).toBeNull();
+  });
+});
+
 describe("ActivityBar cancellation state", () => {
   it("shows an enabled cancel action during a normal run", () => {
     render(<ActivityBar {...baseProps} />);
     expect(
       (screen.getByRole("button", { name: "Cancel agent run" }) as HTMLButtonElement).disabled,
     ).toBe(false);
-    expect(screen.getByRole("status").querySelector(".spinner")?.getAttribute("aria-hidden")).toBe(
-      "true",
-    );
+    const orb = screen.getByRole("status").querySelector("canvas");
+    expect(orb?.getAttribute("aria-hidden")).toBe("true");
+    expect(orb?.getAttribute("aria-label")).toBe("Listening…");
+    expect(orb?.style.width).toBe("20px");
   });
 
   it("announces and disables cancellation while awaiting settlement", () => {

@@ -320,7 +320,9 @@ export function AskBand({
           q.options?.find((option) => valueOf(option) === pick)?.label ?? pick;
         return Array.isArray(value)
           ? value.map(labelOf).join(", ")
-          : value === undefined ? undefined : labelOf(value);
+          : value === undefined
+            ? undefined
+            : labelOf(value);
       })
       .filter(Boolean)
       .join(" · ");

@@ -992,6 +992,8 @@ async function main() {
         entryPoints: [sidecarEntry],
         outfile: stagedOutFile,
         bundle: true,
+        // Trim formatting without changing identifiers or syntax.
+        minifyWhitespace: true,
         platform: "node",
         format: "esm",
         target: "node22",

@@ -150,8 +150,7 @@ function parseLocations(raw: unknown): LspLocation[] {
     // not the whole declaration body.
     const uri = (record.uri ?? record.targetUri) as string | undefined;
     const range = (record.range ?? record.targetSelectionRange ?? record.targetRange) as
-      | LspRange
-      | undefined;
+      LspRange | undefined;
     if (typeof uri === "string" && range) locations.push({ uri, range });
   }
   return locations;
@@ -172,8 +171,7 @@ function parseSymbols(raw: unknown): LspSymbolEntry[] {
     if (typeof name !== "string") return;
     const location = record.location as { range?: LspRange } | undefined;
     const range = (record.selectionRange ?? record.range ?? location?.range) as
-      | LspRange
-      | undefined;
+      LspRange | undefined;
     if (!range) return;
     const containerName = record.containerName;
     const kind = typeof record.kind === "number" ? record.kind : 0;

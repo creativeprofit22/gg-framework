@@ -78,10 +78,7 @@ interface GeminiFunctionResponsePart {
 }
 
 type GeminiPart =
-  | GeminiTextPart
-  | GeminiInlineDataPart
-  | GeminiFunctionCallPart
-  | GeminiFunctionResponsePart;
+  GeminiTextPart | GeminiInlineDataPart | GeminiFunctionCallPart | GeminiFunctionResponsePart;
 
 interface GeminiContent {
   role?: "user" | "model";

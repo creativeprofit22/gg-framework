@@ -29,8 +29,7 @@ import type { LspServerSpec } from "./servers.js";
 
 /** Outcome of asking for a client: ready, or why it cannot be used. */
 export type PooledClient =
-  | { status: "ready"; client: LspClient }
-  | { status: "unavailable" | "server_failed" };
+  { status: "ready"; client: LspClient } | { status: "unavailable" | "server_failed" };
 
 interface PoolEntry {
   key: string;

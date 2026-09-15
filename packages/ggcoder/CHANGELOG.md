@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.60.2
+
+### Patch Changes
+
+- Update AI provider, local transcription, and sandbox dependencies while preserving the framework APIs and keeping the CLI and desktop engine aligned.
+  - @kenkaiiii/gg-ai@5.60.2
+  - @kenkaiiii/gg-agent@5.60.2
+  - @kenkaiiii/gg-core@5.60.2
+
+## 5.60.1
+
+### Patch Changes
+
+- Recover from rejected OpenAI Codex encrypted reasoning with one automatic retry that preserves visible conversation and tool history without changing saved sessions.
+  - @kenkaiiii/gg-ai@5.60.1
+  - @kenkaiiii/gg-agent@5.60.1
+  - @kenkaiiii/gg-core@5.60.1
+
+## 5.60.0
+
+### Minor Changes
+
+- Add built-in refactoring guidance for existing projects, optional focus text for /compact, and opt-in internal session diagnostics.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.60.0
+- @kenkaiiii/gg-agent@5.60.0
+- @kenkaiiii/gg-core@5.60.0
+
 ## 5.59.4
 
 ### Patch Changes

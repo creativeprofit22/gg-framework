@@ -130,18 +130,16 @@ async function buildRows(cwd: string): Promise<McpServerRow[]> {
           error: result?.error,
         };
       }),
-      ...blocked.map(
-        (s): McpServerRow => ({
-          config: s.config,
-          scope: s.scope,
-          ok: false,
-          toolCount: 0,
-          error:
-            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
-            "repo-controlled commands. Add or re-add a server in this project via " +
-            "the MCP modal to trust it.",
-        }),
-      ),
+      ...blocked.map((s): McpServerRow => ({
+        config: s.config,
+        scope: s.scope,
+        ok: false,
+        toolCount: 0,
+        error:
+          "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+          "repo-controlled commands. Add or re-add a server in this project via " +
+          "the MCP modal to trust it.",
+      })),
     ];
   } finally {
     await manager.dispose();

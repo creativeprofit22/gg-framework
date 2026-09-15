@@ -108,8 +108,7 @@ function fakeRetryClock() {
     pendingDelays: () => [...timers.values()].map((timer) => timer.delayMs),
     async runNext() {
       const next = timers.entries().next().value as
-        | [number, { callback: () => void; delayMs: number }]
-        | undefined;
+        [number, { callback: () => void; delayMs: number }] | undefined;
       if (!next) return;
       timers.delete(next[0]);
       next[1].callback();

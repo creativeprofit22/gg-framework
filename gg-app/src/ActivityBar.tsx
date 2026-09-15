@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { ThinkingOrb } from "thinking-orbs";
 import { theme } from "./theme";
+import { ShimmerText } from "./ShimmerText";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
@@ -18,8 +20,6 @@ export const SPINNER_FRAMES = [
   "\u280f",
 ];
 export const SPINNER_FRAME_MS = 80;
-const FRAMES = SPINNER_FRAMES;
-const FRAME_MS = SPINNER_FRAME_MS;
 
 /**
  * Idle-line variations for the ready state — rotated so the quiet line under
@@ -124,8 +124,8 @@ function ToolsToggle({
 }
 
 /**
- * Live activity bar beneath the transcript. While running: sparkle spinner +
- * "Working…" + `elapsed · ↓ N tokens` + esc-to-cancel. After a run: a quiet
+ * Live activity bar beneath the transcript. While running: inline thinking orb +
+ * "Agent is working…" + `elapsed · ↓ N tokens` + esc-to-cancel. After a run: a quiet
  * done-status phrase. Otherwise: a quiet ready line.
  */
 export function ActivityBar({
@@ -149,7 +149,6 @@ export function ActivityBar({
   // next run. Only the bare idle "Ready for work" line stays uncluttered.
   const showToolsToggle =
     Boolean(onToggleTools) && (hasToolFeed || toolsHidden || Boolean(doneStatus));
-  const [frame, setFrame] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [, setNow] = useState(0);
   const startRef = useRef(0);
@@ -169,14 +168,12 @@ export function ActivityBar({
     }
     startRef.current = Date.now();
     setElapsed(0);
-    const spin = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), FRAME_MS);
     const tick = setInterval(() => {
       setElapsed(Date.now() - startRef.current);
       // Repaint so the live thinking timer advances each tick.
       setNow((n) => n + 1);
     }, 250);
     return () => {
-      clearInterval(spin);
       clearInterval(tick);
     };
   }, [running]);
@@ -254,16 +251,16 @@ export function ActivityBar({
       aria-live="polite"
     >
       <span className="statusrow-left">
-        <span
-          className="statusrow-icon spinner"
-          style={{ color: theme.primary }}
+        <ThinkingOrb
+          state="listening"
+          size={20}
+          theme="dark"
           aria-hidden="true"
-        >
-          {FRAMES[frame]}
-        </span>
-        <span className="working" style={{ color: theme.text }}>
-          {"Working\u2026"}
-        </span>
+          style={{ flexShrink: 0 }}
+        />
+        <ShimmerText base={theme.textMuted} bright={theme.text}>
+          {"Agent is working…"}
+        </ShimmerText>
         <span style={{ color: theme.textMuted }}>
           {"("}
           {meta.map((part, i) => (

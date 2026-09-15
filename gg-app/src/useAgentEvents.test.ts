@@ -34,25 +34,41 @@ import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
-it.each(["completed", "failed", "aborted"] as const)("keeps host recommendations separate from tool results and drafts after %s (mocked native IPC)", (outcome) => {
-  const { hook, getItems, getLiveToolFeed } = setup();
-  const text = "## Recommendations — not started\nInspect configuration manually.\nAdvice only.";
-  act(() => {
-    const send = (type: string, data: Record<string, unknown>) => hook.result.current.handleEvent(ev(type, data));
-    send("tool_call_start", { toolCallId: "advice", name: "programmatic_advisory_result", args: {} });
-    send("tool_call_end", { toolCallId: "advice", result: text, isError: false });
-    send("hook_armed", { kind: "ideal", armed: true });
-    send("text_delta", { text, standalone: true });
-  });
-  expect(getItems()).toEqual([expect.objectContaining({ kind: "assistant", text })]);
-  expect(getLiveToolFeed()).toEqual([expect.objectContaining({ name: "programmatic_advisory_result", result: text, status: "done" })]);
-  act(() => {
-    hook.result.current.handleEvent(ev("text_delta", { text: "Generic provider ending." }));
-    hook.result.current.handleEvent(ev("run_end", { outcome, cancelled: outcome === "aborted" }));
-  });
-  expect(getItems().filter((item) => item.kind === "assistant" && item.text === text)).toHaveLength(1);
-  expect(getItems().some((item) => item.kind.startsWith("programmatic"))).toBe(false);
-});
+it.each(["completed", "failed", "aborted"] as const)(
+  "keeps host recommendations separate from tool results and drafts after %s (mocked native IPC)",
+  (outcome) => {
+    const { hook, getItems, getLiveToolFeed } = setup();
+    const text = "## Recommendations — not started\nInspect configuration manually.\nAdvice only.";
+    act(() => {
+      const send = (type: string, data: Record<string, unknown>) =>
+        hook.result.current.handleEvent(ev(type, data));
+      send("tool_call_start", {
+        toolCallId: "advice",
+        name: "programmatic_advisory_result",
+        args: {},
+      });
+      send("tool_call_end", { toolCallId: "advice", result: text, isError: false });
+      send("hook_armed", { kind: "ideal", armed: true });
+      send("text_delta", { text, standalone: true });
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "assistant", text })]);
+    expect(getLiveToolFeed()).toEqual([
+      expect.objectContaining({
+        name: "programmatic_advisory_result",
+        result: text,
+        status: "done",
+      }),
+    ]);
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Generic provider ending." }));
+      hook.result.current.handleEvent(ev("run_end", { outcome, cancelled: outcome === "aborted" }));
+    });
+    expect(
+      getItems().filter((item) => item.kind === "assistant" && item.text === text),
+    ).toHaveLength(1);
+    expect(getItems().some((item) => item.kind.startsWith("programmatic"))).toBe(false);
+  },
+);
 
 it.each([
   "Image generation failed: OpenAI Image API (400): unsupported tool",
@@ -117,17 +133,20 @@ it.each(["1536x1024", "1254x1254", "1024x1024"])(
   },
 );
 
-it.each(["completed", "aborted", "failed"] as const)("refreshes pane commands after %s runs", async (outcome) => {
-  const { hook, deps } = setup();
-  const refresh = vi.fn(async () => {});
-  deps.refreshCommands = refresh;
-  hook.rerender();
-  await act(async () => {
-    hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
-  });
-  expect(refresh).toHaveBeenCalledOnce();
-  hook.unmount();
-});
+it.each(["completed", "aborted", "failed"] as const)(
+  "refreshes pane commands after %s runs",
+  async (outcome) => {
+    const { hook, deps } = setup();
+    const refresh = vi.fn(async () => {});
+    deps.refreshCommands = refresh;
+    hook.rerender();
+    await act(async () => {
+      hook.result.current.handleEvent(ev("run_end", { ...createRunEndPayload(outcome, "idle") }));
+    });
+    expect(refresh).toHaveBeenCalledOnce();
+    hook.unmount();
+  },
+);
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
@@ -251,25 +270,73 @@ function setup(
 }
 
 const executionEvidence = [
-  { basis: "observed", source: "programmatic-execution", code: "configuration-refresh-required", severity: "warning", message: "Project settings changed or could not be checked. Review setup, approve the current settings and check for opportunities before starting another task. This result does not approve any changed settings." },
-  { basis: "inferred", source: "programmatic-execution", code: "specialist-completed", severity: "info", message: "The task tool reports that its success check passed. GG confirmed the listed tools ran, but did not independently check whether the result is correct." },
-  { basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: "Tool read completed (manifest).", location: { path: "package.json", startLine: 1, endLine: 3 } },
+  {
+    basis: "observed",
+    source: "programmatic-execution",
+    code: "configuration-refresh-required",
+    severity: "warning",
+    message:
+      "Project settings changed or could not be checked. Review setup, approve the current settings and check for opportunities before starting another task. This result does not approve any changed settings.",
+  },
+  {
+    basis: "inferred",
+    source: "programmatic-execution",
+    code: "specialist-completed",
+    severity: "info",
+    message:
+      "The task tool reports that its success check passed. GG confirmed the listed tools ran, but did not independently check whether the result is correct.",
+  },
+  {
+    basis: "observed",
+    source: "programmatic-execution",
+    code: "tool-completed",
+    severity: "info",
+    message: "Tool read completed (manifest).",
+    location: { path: "package.json", startLine: 1, endLine: 3 },
+  },
 ];
-const executionResult = { version: 1, status: "succeeded", summary: "Bounded specialist summary.", evidence: { version: 1, items: executionEvidence } };
+const executionResult = {
+  version: 1,
+  status: "succeeded",
+  summary: "Bounded specialist summary.",
+  evidence: { version: 1, items: executionEvidence },
+};
 
 describe("programmatic execution evidence", () => {
   it.each([
-    ["succeeded", "completed"], ["failed", "failed"], ["cancelled", "cancelled"],
-    ["blocked", "unverified"], ["succeeded", "cancelled"], ["succeeded", "unverified"],
+    ["succeeded", "completed"],
+    ["failed", "failed"],
+    ["cancelled", "cancelled"],
+    ["blocked", "unverified"],
+    ["succeeded", "cancelled"],
+    ["succeeded", "unverified"],
   ] as const)("renders %s evidence without overriding %s", (status, outcome) => {
     cleanup();
     vi.mocked(playSound).mockClear();
     const { hook, deps, getItems } = setup();
-    const items = status === "succeeded" ? executionEvidence : executionEvidence.map((item) => item.code === "specialist-completed" ? { ...item, code: status, severity: "warning", message: "The task did not finish with a confirmed result. Review its progress and errors before deciding what to do next." } : item);
+    const items =
+      status === "succeeded"
+        ? executionEvidence
+        : executionEvidence.map((item) =>
+            item.code === "specialist-completed"
+              ? {
+                  ...item,
+                  code: status,
+                  severity: "warning",
+                  message:
+                    "The task did not finish with a confirmed result. Review its progress and errors before deciding what to do next.",
+                }
+              : item,
+          );
     act(() => {
       hook.result.current.handleEvent(ev("run_start"));
       hook.result.current.handleEvent(ev("text_delta", { text: executionResult.summary }));
-      hook.result.current.handleEvent(ev("run_end", { outcome, programmaticResult: { ...executionResult, status, evidence: { version: 1, items } } }));
+      hook.result.current.handleEvent(
+        ev("run_end", {
+          outcome,
+          programmaticResult: { ...executionResult, status, evidence: { version: 1, items } },
+        }),
+      );
     });
     const evidence = getItems().filter((item) => item.kind === "programmatic_execution_evidence");
     expect(evidence).toHaveLength(1);
@@ -280,22 +347,44 @@ describe("programmatic execution evidence", () => {
     expect(screen.getByText("package.json:1–3")).toBeTruthy();
     expect(screen.getAllByText("Warning:").length).toBeGreaterThan(0);
     expect(screen.queryByText(executionResult.summary)).toBeNull();
-    expect(getItems().filter((item) => item.kind === "assistant" && item.text.includes(executionResult.summary))).toHaveLength(1);
+    expect(
+      getItems().filter(
+        (item) => item.kind === "assistant" && item.text.includes(executionResult.summary),
+      ),
+    ).toHaveLength(1);
     expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
     expect(deps.setRunning).toHaveBeenLastCalledWith(false);
     if (outcome === "cancelled") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
-    if (outcome === "failed" || outcome === "unverified") expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(new RegExp(`^${outcome === "failed" ? "Failed" : "Unverified"} `)));
+    if (outcome === "failed" || outcome === "unverified")
+      expect(deps.setDoneStatus).toHaveBeenLastCalledWith(
+        expect.stringMatching(new RegExp(`^${outcome === "failed" ? "Failed" : "Unverified"} `)),
+      );
     if (outcome !== "completed") expect(playSound).not.toHaveBeenCalledWith("done");
     cleanup();
   });
-  it.each([undefined, null, {}, { ...executionResult, route: {} }, { ...executionResult, evidence: { version: 1, items: Array(201).fill(executionEvidence[0]) } }, { ...executionResult, summary: "x".repeat(4001) }, { version: 1, status: "rejected", reason: "approval-rejected" }])("ignores absent, malformed or rejected evidence while settling normally: %j", (programmaticResult) => {
-    const { hook, deps, getItems } = setup();
-    act(() => hook.result.current.handleEvent(ev("run_end", { outcome: "cancelled", programmaticResult })));
-    expect(getItems()).toEqual([]);
-    expect(deps.setRunning).toHaveBeenLastCalledWith(false);
-    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
-    expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
-  });
+  it.each([
+    undefined,
+    null,
+    {},
+    { ...executionResult, route: {} },
+    { ...executionResult, evidence: { version: 1, items: Array(201).fill(executionEvidence[0]) } },
+    { ...executionResult, summary: "x".repeat(4001) },
+    { version: 1, status: "rejected", reason: "approval-rejected" },
+  ])(
+    "ignores absent, malformed or rejected evidence while settling normally: %j",
+    (programmaticResult) => {
+      const { hook, deps, getItems } = setup();
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("run_end", { outcome: "cancelled", programmaticResult }),
+        ),
+      );
+      expect(getItems()).toEqual([]);
+      expect(deps.setRunning).toHaveBeenLastCalledWith(false);
+      expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+      expect(deps.onProgrammaticActivity).toHaveBeenLastCalledWith(false);
+    },
+  );
 });
 
 describe("useAgentEvents", () => {
@@ -2272,7 +2361,10 @@ describe("models_change", () => {
 
     it("restores a missed question exactly once from repeated ready snapshots", () => {
       const { hook, getItems } = setup();
-      const prompt = { id: "ask-live", questions: [{ ...question, detail: "Exact reviewed preview\n+ files", allowOther: false }] };
+      const prompt = {
+        id: "ask-live",
+        questions: [{ ...question, detail: "Exact reviewed preview\n+ files", allowOther: false }],
+      };
       act(() => {
         hook.result.current.handleEvent(ev("ready", { pendingAsks: [prompt] }));
         hook.result.current.handleEvent(ev("ready", { pendingAsks: [prompt] }));
@@ -2290,11 +2382,18 @@ describe("models_change", () => {
       act(() => {
         hook.result.current.handleEvent(ev("ask_user", { id: "ask-stale", questions: [question] }));
         hook.result.current.handleEvent(ev("ask_user", live));
-        deps.setItems((items) => items.map((item) => item.kind === "ask" && item.prompt.id === live.id
-          ? { ...item, answers: { flag: "Yes" } } : item));
+        deps.setItems((items) =>
+          items.map((item) =>
+            item.kind === "ask" && item.prompt.id === live.id
+              ? { ...item, answers: { flag: "Yes" } }
+              : item,
+          ),
+        );
       });
       const draft = getItems()[1];
-      act(() => hook.result.current.handleEvent(ev("ready", { pendingAsks: [structuredClone(live)] })));
+      act(() =>
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [structuredClone(live)] })),
+      );
       expect(getItems()[0]).toMatchObject({ kind: "ask", cancelled: true });
       expect(getItems()[0]).not.toHaveProperty("sent");
       expect(getItems()[0]).not.toHaveProperty("answers");
@@ -2306,7 +2405,9 @@ describe("models_change", () => {
       act(() => {
         for (const id of ["old-daemon-open", "old-daemon-answered"])
           hook.result.current.handleEvent(ev("ask_user", { id, questions: [question] }));
-        hook.result.current.handleEvent(ev("ask_user_settled", { id: "old-daemon-answered", action: "answer" }));
+        hook.result.current.handleEvent(
+          ev("ask_user_settled", { id: "old-daemon-answered", action: "answer" }),
+        );
         hook.result.current.handleEvent(ev("ready", { pendingAsks: [] }));
         hook.result.current.handleEvent(ev("ready", { pendingAsks: [] }));
       });
@@ -2314,13 +2415,20 @@ describe("models_change", () => {
         expect.objectContaining({ kind: "ask", cancelled: true }),
         expect.objectContaining({ kind: "ask", sent: true }),
       ]);
-      expect(getItems().filter((item) => item.kind === "ask" && !item.sent && !item.cancelled)).toHaveLength(0);
+      expect(
+        getItems().filter((item) => item.kind === "ask" && !item.sent && !item.cancelled),
+      ).toHaveLength(0);
     });
 
     it.each([{}, { pendingAsks: null }, { pendingAsks: [{ id: "broken", questions: [] }] }])(
-      "preserves local cards for legacy absent or malformed snapshots: %j", (snapshot) => {
+      "preserves local cards for legacy absent or malformed snapshots: %j",
+      (snapshot) => {
         const { hook, getItems } = setup();
-        act(() => hook.result.current.handleEvent(ev("ask_user", { id: "ask-live", questions: [question] })));
+        act(() =>
+          hook.result.current.handleEvent(
+            ev("ask_user", { id: "ask-live", questions: [question] }),
+          ),
+        );
         const original = getItems()[0];
         act(() => hook.result.current.handleEvent(ev("ready", snapshot)));
         expect(getItems()).toEqual([original]);
@@ -2331,14 +2439,32 @@ describe("models_change", () => {
     it("does not carry local answers onto changed content or a new daemon request identity", () => {
       const { hook, deps, getItems } = setup();
       act(() => {
-        hook.result.current.handleEvent(ev("ask_user", { id: "old-request", questions: [question] }));
-        deps.setItems((items) => items.map((item) => item.kind === "ask" ? { ...item, answers: { flag: "Yes" } } : item));
-        hook.result.current.handleEvent(ev("ready", { pendingAsks: [{ id: "old-request", questions: [{ ...question, detail: "changed preview" }] }] }));
+        hook.result.current.handleEvent(
+          ev("ask_user", { id: "old-request", questions: [question] }),
+        );
+        deps.setItems((items) =>
+          items.map((item) => (item.kind === "ask" ? { ...item, answers: { flag: "Yes" } } : item)),
+        );
+        hook.result.current.handleEvent(
+          ev("ready", {
+            pendingAsks: [
+              { id: "old-request", questions: [{ ...question, detail: "changed preview" }] },
+            ],
+          }),
+        );
       });
       expect(getItems()[0]).not.toHaveProperty("answers");
-      act(() => hook.result.current.handleEvent(ev("ready", { pendingAsks: [{ id: "fresh-request", questions: [question] }] })));
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("ready", { pendingAsks: [{ id: "fresh-request", questions: [question] }] }),
+        ),
+      );
       expect(getItems()[0]).toMatchObject({ cancelled: true });
-      expect(getItems()[1]).toEqual({ kind: "ask", id: 3, prompt: { id: "fresh-request", questions: [question] } });
+      expect(getItems()[1]).toEqual({
+        kind: "ask",
+        id: 3,
+        prompt: { id: "fresh-request", questions: [question] },
+      });
     });
 
     it("renders a question the agent is parked on", () => {

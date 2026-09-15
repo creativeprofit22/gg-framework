@@ -7,15 +7,7 @@ import { theme } from "./theme";
 const MAX_DETAIL = 44;
 
 export type ToolTone =
-  | "read"
-  | "search"
-  | "write"
-  | "run"
-  | "web"
-  | "agent"
-  | "state"
-  | "source"
-  | "default";
+  "read" | "search" | "write" | "run" | "web" | "agent" | "state" | "source" | "default";
 
 export interface ToolLinePart {
   text: string;

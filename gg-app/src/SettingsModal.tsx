@@ -15,6 +15,7 @@ import { SoundButton } from "./SoundButton";
 import { formatBuildIdentity } from "./build-info";
 import { AzureConnectionSettings } from "./AzureConnectionSettings";
 import { MemesButton } from "./MemesButton";
+import { GgUiButton } from "./GgUiButton";
 
 interface Props {
   onClose: () => void;
@@ -101,6 +102,7 @@ export function SettingsModal({
       <div className="modal-row">
         <SoundButton variant="settings" />
         <MemesButton variant="settings" />
+        <GgUiButton />
       </div>
       <div className="modal-label" style={{ color: theme.textMuted }}>
         Project folder

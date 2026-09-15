@@ -22,6 +22,57 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.65.0",
+    date: "2026-09-15",
+    items: [
+      "Your buttons, your style. I added `GG UI` under `Settings > Effects` so you can switch between the metallic finish and the original look, with your choice remembered across restarts and windows. I also fixed those doubled edges when you zoom, so the shine stays neatly on your buttons.",
+    ],
+  },
+  {
+    version: "0.64.5",
+    date: "2026-09-15",
+    items: [
+      "I fixed the desktop effects that went missing after the last update. Your input's animated glow is back, and the metal finish on `Send`, `Enhance?`, and your New and Commit buttons follows their rounded edges instead of spilling into square corners.",
+    ],
+  },
+  {
+    version: "0.64.4",
+    date: "2026-09-15",
+    items: [
+      "You can spot active work at a glance now. I gave `Agent is working…` and `Ken` animated orbs and shimmering labels, plus a moving glow around your input and `Stop` button while the action happens.",
+      "I gave `Send`, `Enhance?`, and your New and Commit actions a liquid-metal finish. Your New and Commit buttons keep their familiar colors, with a little extra shine where you reach most.",
+    ],
+  },
+  {
+    version: "0.64.3",
+    date: "2026-09-15",
+    items: [
+      "I refreshed `GG Coder`'s AI and voice engines and trimmed the code it ships with. Your desktop app and command-line tools get the same updated engine, with no new workflows to learn.",
+    ],
+  },
+  {
+    version: "0.64.2",
+    date: "2026-09-14",
+    items: [
+      "A little housekeeping for your `GG Coder`. I refreshed the desktop foundations in this update, with no new buttons or workflows for you to learn.",
+    ],
+  },
+  {
+    version: "0.64.1",
+    date: "2026-09-13",
+    items: [
+      "Your `OpenAI` chats now get a second chance when the dreaded `encrypted content` error strikes. I added an automatic recovery attempt that keeps your messages and tool results intact, so you can get back to building without starting over.",
+    ],
+  },
+  {
+    version: "0.64.0",
+    date: "2026-09-12",
+    items: [
+      "Your existing projects now get a dedicated `refactoring` skill. I built in guidance for small, test-checked changes and older code without tests, so you can ask for a cleanup with clearer safeguards around what already works.",
+      "Tell GG Coder what matters before shrinking a long conversation. I added `/compact [focus]` so you can name the decisions or topics you want the summary to prioritize, instead of leaving that choice entirely to the agent.",
+    ],
+  },
+  {
     version: "0.63.4",
     date: "2026-09-12",
     items: [

@@ -112,8 +112,7 @@ export function extractTurnToolCalls(
   messages: ReadonlyArray<{
     role: string;
     content:
-      | string
-      | ReadonlyArray<{ type: string; name?: string; args?: Record<string, unknown> }>;
+      string | ReadonlyArray<{ type: string; name?: string; args?: Record<string, unknown> }>;
   }>,
   startIndex: number,
 ): TurnToolCall[] {
@@ -159,8 +158,7 @@ export interface AutopilotGateInput {
 }
 
 export type AutopilotGateDecision =
-  | { start: true; kind: "work" | "plan" }
-  | { start: false; reason: AutopilotSkipReason };
+  { start: true; kind: "work" | "plan" } | { start: false; reason: AutopilotSkipReason };
 
 /**
  * Decide whether the autopilot cycle may start for a just-finished turn.

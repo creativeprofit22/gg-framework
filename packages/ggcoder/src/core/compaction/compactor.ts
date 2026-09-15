@@ -164,10 +164,7 @@ const COMPACTION_USER_PROMPT =
   "Output only the summary, nothing else.";
 
 export type CompactionReductionStatus =
-  | "material"
-  | "insufficient_reduction"
-  | "above_target"
-  | "not_attempted";
+  "material" | "insufficient_reduction" | "above_target" | "not_attempted";
 
 export interface CompactionContextSelection {
   strategy: "query_aware" | "fallback";

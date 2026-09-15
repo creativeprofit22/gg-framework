@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isProgrammaticChatResponse, type ProgrammaticChatConfiguration, type ProgrammaticChatResponse } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import {
+  isProgrammaticChatResponse,
+  type ProgrammaticChatConfiguration,
+  type ProgrammaticChatResponse,
+} from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   initialProgrammaticChatState,
   programmaticChatReducer,
@@ -13,43 +17,110 @@ const hash = "a".repeat(64);
 const proposal = {
   handle: hash,
   operation: "initial" as const,
-  configuration: { status: "missing" as const, currentFingerprint: hash, refreshAvailable: false,
-    baselineUnavailable: false, diagnostic: null, drift: null },
+  configuration: {
+    status: "missing" as const,
+    currentFingerprint: hash,
+    refreshAvailable: false,
+    baselineUnavailable: false,
+    diagnostic: null,
+    drift: null,
+  },
   fingerprint: hash,
   profileJson: "exact profile",
   routes: [],
   exclusions: [],
   configurationInputs: [],
 };
-const currentConfiguration: ProgrammaticChatConfiguration = { ...proposal.configuration, status: "current" };
-const driftConfiguration: ProgrammaticChatConfiguration = {
-  ...currentConfiguration, status: "refresh-required", currentFingerprint: "b".repeat(64), refreshAvailable: true,
-  drift: { files: [{ path: "package.json", kind: "modified", before: hash, after: "b".repeat(64) }],
-    policy: null, schema: null, exclusions: null },
+const currentConfiguration: ProgrammaticChatConfiguration = {
+  ...proposal.configuration,
+  status: "current",
 };
-function receive(state: ProgrammaticChatState, response: ProgrammaticChatResponse): ProgrammaticChatState {
+const driftConfiguration: ProgrammaticChatConfiguration = {
+  ...currentConfiguration,
+  status: "refresh-required",
+  currentFingerprint: "b".repeat(64),
+  refreshAvailable: true,
+  drift: {
+    files: [{ path: "package.json", kind: "modified", before: hash, after: "b".repeat(64) }],
+    policy: null,
+    schema: null,
+    exclusions: null,
+  },
+};
+function receive(
+  state: ProgrammaticChatState,
+  response: ProgrammaticChatResponse,
+): ProgrammaticChatState {
   expect(isProgrammaticChatResponse(response)).toBe(true);
-  return programmaticChatReducer(state, { type: "response", generation: state.generation, epoch: state.epoch, response });
+  return programmaticChatReducer(state, {
+    type: "response",
+    generation: state.generation,
+    epoch: state.epoch,
+    response,
+  });
 }
 function loadedState(): ProgrammaticChatState {
-  const summary = { id: hash, expectedOutput: "Review packaging", state: "discovered" as const,
-    presence: "present" as const, mutationPaths: [],
+  const summary = {
+    id: hash,
+    expectedOutput: "Review packaging",
+    state: "discovered" as const,
+    presence: "present" as const,
+    mutationPaths: [],
     route: { available: true, command: "research" as const, reason: "Ready", machineLocal: false },
-    actions: { run: { available: true, reason: "Ready" }, dismiss: { available: true, reason: "Allowed" } } };
-  let state = receive(initialProgrammaticChatState("one"), { version: 1, action: "report", ok: true,
-    report: { status: "current", reason: "Current", scan: { available: true, reason: "Ready" },
-      configuration: currentConfiguration, snapshot: hash, fingerprint: hash, offset: 0, total: 1, rows: [summary] } });
+    actions: {
+      run: { available: true, reason: "Ready" },
+      dismiss: { available: true, reason: "Allowed" },
+    },
+  };
+  let state = receive(initialProgrammaticChatState("one"), {
+    version: 1,
+    action: "report",
+    ok: true,
+    report: {
+      status: "current",
+      reason: "Current",
+      scan: { available: true, reason: "Ready" },
+      configuration: currentConfiguration,
+      snapshot: hash,
+      fingerprint: hash,
+      offset: 0,
+      total: 1,
+      rows: [summary],
+    },
+  });
   state = programmaticChatReducer(state, { type: "select", id: hash });
-  return receive(state, { version: 1, action: "detail", ok: true, snapshot: hash,
-    detail: { summary, trigger: "Manifest", verification: "Check", risks: [], evidence: [], evidenceTruncated: false } });
+  return receive(state, {
+    version: 1,
+    action: "detail",
+    ok: true,
+    snapshot: hash,
+    detail: {
+      summary,
+      trigger: "Manifest",
+      verification: "Check",
+      risks: [],
+      evidence: [],
+      evidenceTruncated: false,
+    },
+  });
 }
-function inspect(state: ProgrammaticChatState, configuration: ProgrammaticChatConfiguration): ProgrammaticChatState {
-  return receive(state, { version: 1, action: "inspect-setup", ok: true, proposal: {
-    ...proposal, configuration, fingerprint: configuration.currentFingerprint!,
-    profileJson: `${JSON.stringify({ scanners: [], version: 1 }, null, 2)}\n`,
-    operation: configuration.status === "current" ? "current" : "refresh",
-    handle: configuration.status === "current" ? null : hash,
-  } });
+function inspect(
+  state: ProgrammaticChatState,
+  configuration: ProgrammaticChatConfiguration,
+): ProgrammaticChatState {
+  return receive(state, {
+    version: 1,
+    action: "inspect-setup",
+    ok: true,
+    proposal: {
+      ...proposal,
+      configuration,
+      fingerprint: configuration.currentFingerprint!,
+      profileJson: `${JSON.stringify({ scanners: [], version: 1 }, null, 2)}\n`,
+      operation: configuration.status === "current" ? "current" : "refresh",
+      handle: configuration.status === "current" ? null : hash,
+    },
+  });
 }
 
 describe("programmatic state", () => {
@@ -67,74 +138,181 @@ describe("programmatic state", () => {
     expect(state.detailSnapshot).toBe(hash);
     expect(state.detail?.summary.actions.dismiss.available).toBe(true);
   });
-  it.each(["refresh-required", "unreadable", "missing"] as const)("supersedes current reviews after a %s report", (status) => {
-    const reviewed = inspect(loadedState(), currentConfiguration);
-    expect(isProgrammaticCurrentReview(reviewed)).toBe(true);
-    const configuration = { ...driftConfiguration, status, refreshAvailable: status === "refresh-required",
-      currentFingerprint: status === "unreadable" ? null : driftConfiguration.currentFingerprint };
-    const state = receive(reviewed, { version: 1, action: "report", ok: true,
-      report: { ...reviewed.report!, status: "stale", scan: { available: false, reason: "Setup changed" }, configuration } });
-    expect(state.report?.snapshot).toBe(hash); // Config-only edits do not change lifecycle bytes.
-    expect(state.proposal).toBe(reviewed.proposal);
-    expect(isProgrammaticCurrentReview(state)).toBe(false);
-    expect(programmaticConfiguration(state)).toEqual(configuration);
-    expect(canScanProgrammatic(state)).toBe(false);
-    expect(canRunProgrammaticSelection(state)).toBe(false);
-  });
+  it.each(["refresh-required", "unreadable", "missing"] as const)(
+    "supersedes current reviews after a %s report",
+    (status) => {
+      const reviewed = inspect(loadedState(), currentConfiguration);
+      expect(isProgrammaticCurrentReview(reviewed)).toBe(true);
+      const configuration = {
+        ...driftConfiguration,
+        status,
+        refreshAvailable: status === "refresh-required",
+        currentFingerprint: status === "unreadable" ? null : driftConfiguration.currentFingerprint,
+      };
+      const state = receive(reviewed, {
+        version: 1,
+        action: "report",
+        ok: true,
+        report: {
+          ...reviewed.report!,
+          status: "stale",
+          scan: { available: false, reason: "Setup changed" },
+          configuration,
+        },
+      });
+      expect(state.report?.snapshot).toBe(hash); // Config-only edits do not change lifecycle bytes.
+      expect(state.proposal).toBe(reviewed.proposal);
+      expect(isProgrammaticCurrentReview(state)).toBe(false);
+      expect(programmaticConfiguration(state)).toEqual(configuration);
+      expect(canScanProgrammatic(state)).toBe(false);
+      expect(canRunProgrammaticSelection(state)).toBe(false);
+    },
+  );
   it("accepts a current inspection after a stale report without inventing fresh scan permissions", () => {
     const old = loadedState();
-    const stale = receive(old, { version: 1, action: "report", ok: true,
-      report: { ...old.report!, status: "stale", configuration: driftConfiguration,
-        scan: { available: false, reason: "Setup changed" } } });
+    const stale = receive(old, {
+      version: 1,
+      action: "report",
+      ok: true,
+      report: {
+        ...old.report!,
+        status: "stale",
+        configuration: driftConfiguration,
+        scan: { available: false, reason: "Setup changed" },
+      },
+    });
     const reverted = inspect(stale, currentConfiguration);
     expect(programmaticConfiguration(reverted)).toEqual(currentConfiguration);
     expect(isProgrammaticCurrentReview(reverted)).toBe(true);
     expect(canScanProgrammatic(reverted)).toBe(false);
     expect(canRunProgrammaticSelection(reverted)).toBe(false);
-    const fresh = receive(reverted, { version: 1, action: "report", ok: true, report: old.report! });
+    const fresh = receive(reverted, {
+      version: 1,
+      action: "report",
+      ok: true,
+      report: old.report!,
+    });
     expect(canScanProgrammatic(fresh)).toBe(true);
     expect(canRunProgrammaticSelection(fresh)).toBe(true);
   });
   it("retains matching refresh approval independently of lifecycle snapshot changes", () => {
     const reviewed = inspect(loadedState(), driftConfiguration);
-    const matching = receive(reviewed, { version: 1, action: "report", ok: true,
-      report: { ...reviewed.report!, snapshot: "c".repeat(64), status: "stale", configuration: driftConfiguration,
-        scan: { available: false, reason: "Approve refresh" } } });
+    const matching = receive(reviewed, {
+      version: 1,
+      action: "report",
+      ok: true,
+      report: {
+        ...reviewed.report!,
+        snapshot: "c".repeat(64),
+        status: "stale",
+        configuration: driftConfiguration,
+        scan: { available: false, reason: "Approve refresh" },
+      },
+    });
     expect(matching.proposalApprovable).toBe(true);
     expect(matching.proposal?.handle).toBe(reviewed.proposal?.handle);
-    const missing = receive(matching, { version: 1, action: "report", ok: true,
-      report: { ...matching.report!, configuration: { ...driftConfiguration, status: "missing", refreshAvailable: false } } });
+    const missing = receive(matching, {
+      version: 1,
+      action: "report",
+      ok: true,
+      report: {
+        ...matching.report!,
+        configuration: { ...driftConfiguration, status: "missing", refreshAvailable: false },
+      },
+    });
     expect(missing.proposalApprovable).toBe(false);
   });
   it("ignores late configuration assessments and preserves all execution locks", () => {
     const drifted = inspect(loadedState(), driftConfiguration);
-    const state = programmaticChatReducer(drifted, { type: "start", generation: "one", epoch: 2, operation: "report" });
-    for (const identity of [{ generation: "one", epoch: 1 }, { generation: "old", epoch: 2 }]) {
-      expect(programmaticChatReducer(state, { type: "response", ...identity,
-        response: { version: 1, action: "report", ok: true, report: loadedState().report! } })).toBe(state);
-      expect(programmaticChatReducer(state, { type: "response", ...identity,
-        response: { version: 1, action: "inspect-setup", ok: true, proposal: inspect(loadedState(), currentConfiguration).proposal! } })).toBe(state);
+    const state = programmaticChatReducer(drifted, {
+      type: "start",
+      generation: "one",
+      epoch: 2,
+      operation: "report",
+    });
+    for (const identity of [
+      { generation: "one", epoch: 1 },
+      { generation: "old", epoch: 2 },
+    ]) {
+      expect(
+        programmaticChatReducer(state, {
+          type: "response",
+          ...identity,
+          response: { version: 1, action: "report", ok: true, report: loadedState().report! },
+        }),
+      ).toBe(state);
+      expect(
+        programmaticChatReducer(state, {
+          type: "response",
+          ...identity,
+          response: {
+            version: 1,
+            action: "inspect-setup",
+            ok: true,
+            proposal: inspect(loadedState(), currentConfiguration).proposal!,
+          },
+        }),
+      ).toBe(state);
     }
-    for (const locked of [{ ...loadedState(), reconcile: true }, { ...loadedState(), operation: "report" as const }]) {
+    for (const locked of [
+      { ...loadedState(), reconcile: true },
+      { ...loadedState(), operation: "report" as const },
+    ]) {
       expect(canScanProgrammatic(locked)).toBe(false);
       expect(canRunProgrammaticSelection(locked)).toBe(false);
     }
   });
   it("invalidates approval when inspection says current or a report changes configuration", () => {
     const reviewed = programmaticChatReducer(initialProgrammaticChatState("one"), {
-      type: "response", generation: "one", epoch: 0,
+      type: "response",
+      generation: "one",
+      epoch: 0,
       response: { version: 1, action: "inspect-setup", ok: true, proposal },
     });
-    const current = programmaticChatReducer(reviewed, { type: "response", generation: "one", epoch: 0,
-      response: { version: 1, action: "inspect-setup", ok: true, proposal: { ...proposal,
-        operation: "current", handle: null, configuration: { ...proposal.configuration, status: "current" } } } });
+    const current = programmaticChatReducer(reviewed, {
+      type: "response",
+      generation: "one",
+      epoch: 0,
+      response: {
+        version: 1,
+        action: "inspect-setup",
+        ok: true,
+        proposal: {
+          ...proposal,
+          operation: "current",
+          handle: null,
+          configuration: { ...proposal.configuration, status: "current" },
+        },
+      },
+    });
     expect(current.proposalApprovable).toBe(false);
     expect(current.notice).toContain("No regeneration");
-    const changed = programmaticChatReducer(reviewed, { type: "response", generation: "one", epoch: 0,
-      response: { version: 1, action: "report", ok: true, report: { status: "stale", reason: "Changed",
-        scan: { available: false, reason: "Review setup" }, snapshot: hash, fingerprint: hash,
-        offset: 0, total: 0, rows: [], configuration: { ...proposal.configuration,
-          currentFingerprint: "b".repeat(64), status: "refresh-required", refreshAvailable: true } } } });
+    const changed = programmaticChatReducer(reviewed, {
+      type: "response",
+      generation: "one",
+      epoch: 0,
+      response: {
+        version: 1,
+        action: "report",
+        ok: true,
+        report: {
+          status: "stale",
+          reason: "Changed",
+          scan: { available: false, reason: "Review setup" },
+          snapshot: hash,
+          fingerprint: hash,
+          offset: 0,
+          total: 0,
+          rows: [],
+          configuration: {
+            ...proposal.configuration,
+            currentFingerprint: "b".repeat(64),
+            status: "refresh-required",
+            refreshAvailable: true,
+          },
+        },
+      },
+    });
     expect(changed.proposalApprovable).toBe(false);
     expect(changed.proposal).toBe(proposal);
   });

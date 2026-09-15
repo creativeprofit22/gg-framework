@@ -164,7 +164,9 @@ describe("What's New feeds", () => {
 
   it("preserves the prior shipped Local Fork identities and dates", () => {
     expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
-    expect(LOCAL_CHANGELOG[1].label).toBe("Upstream 0.63.0, with clearer prompts and image results");
+    expect(LOCAL_CHANGELOG[1].label).toBe(
+      "Upstream 0.63.0, with clearer prompts and image results",
+    );
     expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-09");
     expect(LOCAL_CHANGELOG[1].items).toHaveLength(8);
     expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");

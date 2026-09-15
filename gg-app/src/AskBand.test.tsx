@@ -18,8 +18,15 @@ afterEach(() => {
 describe("AskBand", () => {
   it("keeps the focused review option in view on resize without answering or stealing focus", () => {
     const onAnswer = vi.fn();
-    const p = prompt({ id: "review", question: "Run the reviewed task?", kind: "choice", options: [{ label: "Approve task" }, { label: "Cancel" }] });
-    const { rerender, unmount } = render(<AskBand prompt={p} onAnswer={onAnswer} onTypeInstead={onTypeInstead} />);
+    const p = prompt({
+      id: "review",
+      question: "Run the reviewed task?",
+      kind: "choice",
+      options: [{ label: "Approve task" }, { label: "Cancel" }],
+    });
+    const { rerender, unmount } = render(
+      <AskBand prompt={p} onAnswer={onAnswer} onTypeInstead={onTypeInstead} />,
+    );
     const button = screen.getByRole("button", { name: /Approve task/ });
     const scrollIntoView = vi.fn();
     Object.defineProperty(button, "scrollIntoView", { value: scrollIntoView });
@@ -168,9 +175,17 @@ describe("AskBand", () => {
     expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ checks: ["tests", "types", "Build"] });
     const answers = onAnswer.mock.calls[0]![0];
     rerender(
-      <AskBand prompt={p} answers={answers} sent onAnswer={onAnswer} onTypeInstead={onTypeInstead} />,
+      <AskBand
+        prompt={p}
+        answers={answers}
+        sent
+        onAnswer={onAnswer}
+        onTypeInstead={onTypeInstead}
+      />,
     );
-    expect(container.querySelector(".ask-answered")?.textContent).toBe("Test suite, Typecheck, Build");
+    expect(container.querySelector(".ask-answered")?.textContent).toBe(
+      "Test suite, Typecheck, Build",
+    );
     expect(answers).toEqual({ checks: ["tests", "types", "Build"] });
     expect(onAnswer).toHaveBeenCalledTimes(1);
   });
@@ -180,8 +195,18 @@ describe("AskBand", () => {
     const { container } = render(
       <AskBand
         prompt={prompt(
-          { id: "choice", question: "Which?", kind: "choice", options: [{ label: "Known", value: "known" }] },
-          { id: "multi", question: "Which ones?", kind: "multi", options: [{ label: "Known", value: "known" }] },
+          {
+            id: "choice",
+            question: "Which?",
+            kind: "choice",
+            options: [{ label: "Known", value: "known" }],
+          },
+          {
+            id: "multi",
+            question: "Which ones?",
+            kind: "multi",
+            options: [{ label: "Known", value: "known" }],
+          },
           { id: "text", question: "Details?", kind: "text" },
         )}
         answers={{ choice: "unmatched", multi: ["known", "another answer"], text }}

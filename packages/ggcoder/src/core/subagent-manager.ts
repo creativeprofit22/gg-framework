@@ -27,13 +27,7 @@ import {
 } from "../tools/subagent-shared.js";
 
 export type SubAgentState =
-  | "starting"
-  | "running"
-  | "completed"
-  | "failed"
-  | "interrupted"
-  | "closed"
-  | "reaped";
+  "starting" | "running" | "completed" | "failed" | "interrupted" | "closed" | "reaped";
 
 export interface SubAgentSnapshot {
   agent_id: string;
@@ -922,12 +916,10 @@ export class SubAgentManager {
           this.persistPending = false;
           const parentSessionId = this.parentSessionId;
           if (!parentSessionId) continue;
-          const records = [...this.snapshots.values()].map(
-            (snapshot): PersistedSubAgentRecord => ({
-              ...snapshot,
-              token_usage: { ...snapshot.token_usage },
-            }),
-          );
+          const records = [...this.snapshots.values()].map((snapshot): PersistedSubAgentRecord => ({
+            ...snapshot,
+            token_usage: { ...snapshot.token_usage },
+          }));
           await this.store.save(this.options.cwd, parentSessionId, records);
         }
       })

@@ -257,6 +257,27 @@
   pointer-events: none;
 }
 
+/* Keep each button's existing fill/ink beneath a non-interactive metal rim. */
+.metal-button {
+  position: relative;
+  display: inline-grid;
+  vertical-align: middle;
+  isolation: isolate;
+}
+.metal-button > .action-metal.metal-fx-root {
+  background: transparent;
+  color: inherit;
+}
+.metal-button > .action-metal .metal-fx-inner {
+  display: none;
+}
+.metal-button > .action-metal.metal-fx-root::before {
+  background-image: radial-gradient(ellipse at 50% 40%, rgb(255 255 255 / 12%), transparent 70%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 45%),
+    inset 0 0 8px rgb(255 255 255 / 15%);
+}
+
 /* Primary — a flat, luminous periwinkle pill carrying near-black text. The
    fill is bright enough to hold a dark label, which is what makes it read as
    the one thing on screen to act on. */
@@ -4940,12 +4961,41 @@ select {
 .inputwrap:focus-within {
   border-color: var(--border-strong);
 }
-/* Focused window: prominent primary border + subtle ring so the active window's
-   input is unmistakable when multiple windows are tiled. Layers ABOVE the
-   subtle :focus-within (which only reacts to the textarea being focused). */
-.app.window-focused .inputwrap {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
+/* Sibling overlays avoid nesting Beam's generated descendant selectors. They
+   cannot intercept clicks, clip menus, or change the composer's layout. */
+.working-beam[data-beam] {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.inputwrap > .working-beam {
+  inset: -1px;
+}
+.working-beam-surface {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-input);
+}
+.working-beam-sm .working-beam-surface {
+  border-radius: var(--radius-pill);
+}
+.app:not(.window-focused) .working-beam,
+.app:not(.window-focused) .working-beam::before,
+.app:not(.window-focused) .working-beam::after,
+.app:not(.window-focused) .working-beam [data-beam-bloom] {
+  animation-play-state: paused !important;
+}
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  /* These decorative beams are optional; retain the existing status text and
+     focus borders without motion. Rotate presets lack this package fallback. */
+  .working-beam[data-beam],
+  .working-beam[data-beam]::before,
+  .working-beam[data-beam]::after,
+  .working-beam[data-beam] [data-beam-bloom] {
+    display: none;
+    animation: none !important;
+  }
 }
 .inputwrap.dragover {
   border-color: var(--primary);
@@ -5001,6 +5051,7 @@ select {
   opacity: 0.42;
 }
 .inputactions-trailing {
+  position: relative;
   display: flex;
   gap: 6px;
   /* Pin to the right edge once the field has taken the row above. */
@@ -5053,6 +5104,26 @@ select {
 .icon-circle:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+/* Decorative rim only; the original button remains the hit target and fallback. */
+.inputactions-trailing > .action-metal,
+.enhance-pill-host > .action-metal,
+.metal-button > .action-metal {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.action-metal-surface {
+  border-radius: var(--radius-pill);
+}
+.inputactions-trailing:has(> .action-metal.metal-fx-root) > .icon-circle-primary,
+.enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  color: var(--text);
 }
 
 /* Chat-input stack: the textarea plus (transiently) the enhance animation layer.
@@ -5276,7 +5347,7 @@ select {
    so it's fully decoupled from the textarea's text flow: it can't overlap text,
    drift with wrapping, shift the caret, or jump the box height. Nudged up by
    ~half its height so it straddles the top border like a tab. */
-.enhance-pill {
+.enhance-pill-host {
   position: absolute;
   top: -11px;
   /* Centered on the top border (not top-right) so it stays clear of the status
@@ -5284,10 +5355,6 @@ select {
   left: 50%;
   z-index: 4;
   display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  /* Cap band measured 2.10px HIGH; half the correction sits on top. */
-  padding: 0.95px 10px 3.05px;
   /* Hidden resting state. Always mounted so it can animate BOTH ways: the
      `.visible` class fades + slides it in; removing it fades + slides it out.
      pointer-events off while hidden so it can't be clicked mid-fade.
@@ -5299,7 +5366,14 @@ select {
     opacity var(--t-fast) ease,
     transform var(--t-fast) ease,
     filter var(--t-fast) ease;
-  /* Match the "+ New" button: luminous primary pill so it's clearly visible. */
+}
+.enhance-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Cap band measured 2.10px HIGH; half the correction sits on top. */
+  padding: 0.95px 10px 3.05px;
+  /* Plain fallback when Metal is inactive or WebGL is unavailable. */
   background: var(--primary);
   border: 1px solid transparent;
   box-shadow: none;
@@ -5310,7 +5384,7 @@ select {
   font-weight: 600;
   cursor: pointer;
 }
-.enhance-pill.visible {
+.enhance-pill-host.visible {
   opacity: 1;
   transform: translate(-50%, 0) scale(1);
   pointer-events: auto;
@@ -5323,7 +5397,7 @@ select {
 }
 /* Pulse only while visible — scoped so the animation can't override the hidden
    state's opacity:0 and flash a hidden pill. */
-.enhance-pill.visible.enhancing {
+.enhance-pill-host.visible .enhance-pill.enhancing {
   animation: enhance-pulse 1s ease-in-out infinite;
 }
 @keyframes enhance-pulse {
@@ -5333,6 +5407,15 @@ select {
   }
   50% {
     opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .enhance-pill-host {
+    transition: none;
+  }
+  .enhance-pill-host.visible .enhance-pill.enhancing {
+    animation: none;
   }
 }
 

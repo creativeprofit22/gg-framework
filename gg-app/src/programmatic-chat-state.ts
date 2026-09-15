@@ -112,13 +112,13 @@ export function programmaticChatReducer(
         ...base,
         report: response.report,
         configuration: response.report.configuration ?? state.configuration,
-        proposalApprovable: state.proposalApprovable &&
-          (!response.report.configuration || (
-            response.report.configuration.status !== "current" &&
-            response.report.configuration.status !== "unreadable" &&
-            response.report.configuration.status === state.proposal?.configuration.status &&
-            response.report.configuration.currentFingerprint === state.proposal?.fingerprint
-          )),
+        proposalApprovable:
+          state.proposalApprovable &&
+          (!response.report.configuration ||
+            (response.report.configuration.status !== "current" &&
+              response.report.configuration.status !== "unreadable" &&
+              response.report.configuration.status === state.proposal?.configuration.status &&
+              response.report.configuration.currentFingerprint === state.proposal?.fingerprint)),
         reconcile: false,
         notice: `${response.report.total} opportunities. ${response.report.reason}`,
       };
@@ -136,12 +136,14 @@ export function programmaticChatReducer(
         ...base,
         proposal: response.proposal,
         configuration: response.proposal.configuration,
-        proposalApprovable: response.proposal.handle !== null && response.proposal.operation !== "current",
-        notice: response.proposal.operation === "current"
-          ? "Saved setup is current. No regeneration or approval is needed."
-          : response.proposal.operation === "refresh"
-            ? "Setup refresh is ready to review. No files have been changed."
-            : "Setup is ready to review. No files have been changed.",
+        proposalApprovable:
+          response.proposal.handle !== null && response.proposal.operation !== "current",
+        notice:
+          response.proposal.operation === "current"
+            ? "Saved setup is current. No regeneration or approval is needed."
+            : response.proposal.operation === "refresh"
+              ? "Setup refresh is ready to review. No files have been changed."
+              : "Setup is ready to review. No files have been changed.",
       };
     case "approve-setup":
       return {
@@ -161,15 +163,21 @@ export function programmaticChatReducer(
   }
 }
 
-export function programmaticConfiguration(state: ProgrammaticChatState): ProgrammaticChatConfiguration | null {
-  return state.configuration ?? state.report?.configuration ?? state.proposal?.configuration ?? null;
+export function programmaticConfiguration(
+  state: ProgrammaticChatState,
+): ProgrammaticChatConfiguration | null {
+  return (
+    state.configuration ?? state.report?.configuration ?? state.proposal?.configuration ?? null
+  );
 }
 
 export function isProgrammaticCurrentReview(state: ProgrammaticChatState): boolean {
   const configuration = programmaticConfiguration(state);
-  return state.proposal?.operation === "current" &&
+  return (
+    state.proposal?.operation === "current" &&
     configuration?.status === "current" &&
-    configuration.currentFingerprint === state.proposal.fingerprint;
+    configuration.currentFingerprint === state.proposal.fingerprint
+  );
 }
 
 function setupAllowsProgrammaticExecution(state: ProgrammaticChatState): boolean {
@@ -179,8 +187,12 @@ function setupAllowsProgrammaticExecution(state: ProgrammaticChatState): boolean
 }
 
 export function canScanProgrammatic(state: ProgrammaticChatState): boolean {
-  return !state.operation && !state.reconcile &&
-    setupAllowsProgrammaticExecution(state) && state.report?.scan.available === true;
+  return (
+    !state.operation &&
+    !state.reconcile &&
+    setupAllowsProgrammaticExecution(state) &&
+    state.report?.scan.available === true
+  );
 }
 
 export function canRunProgrammaticSelection(state: ProgrammaticChatState): boolean {

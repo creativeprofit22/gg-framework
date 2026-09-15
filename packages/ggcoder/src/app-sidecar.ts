@@ -897,20 +897,18 @@ async function buildMcpRows(cwd: string, settingsFile: string): Promise<McpWireR
           requiresAuth: result?.requiresAuth,
         };
       }),
-      ...blocked.map(
-        (s): McpWireRow => ({
-          name: s.config.name,
-          scope: s.scope,
-          ok: false,
-          toolCount: 0,
-          error:
-            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
-            "repo-controlled commands. Add or re-add a server in this project via " +
-            "the MCP modal to trust it.",
-          kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
-          summary: mcpRowSummary(s.config),
-        }),
-      ),
+      ...blocked.map((s): McpWireRow => ({
+        name: s.config.name,
+        scope: s.scope,
+        ok: false,
+        toolCount: 0,
+        error:
+          "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+          "repo-controlled commands. Add or re-add a server in this project via " +
+          "the MCP modal to trust it.",
+        kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
+        summary: mcpRowSummary(s.config),
+      })),
     ];
   } finally {
     await manager.dispose();

@@ -390,12 +390,7 @@ export type WorkspaceMode = "code" | "chat";
 export type ChatAgentId = "general" | "therapist" | "research";
 
 export type MemoryCategory =
-  | "identity"
-  | "preference"
-  | "project"
-  | "relationship"
-  | "health"
-  | "other";
+  "identity" | "preference" | "project" | "relationship" | "health" | "other";
 
 export interface Memory {
   id: string;
@@ -413,12 +408,7 @@ export interface MemorySnapshot {
 }
 
 export type JiwaCategory =
-  | "identity"
-  | "voice"
-  | "interaction"
-  | "boundaries"
-  | "workflow"
-  | "other";
+  "identity" | "voice" | "interaction" | "boundaries" | "workflow" | "other";
 
 export interface JiwaEntry {
   id: string;

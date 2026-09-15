@@ -423,14 +423,13 @@ describe("Ken prompt actions", () => {
   });
 
   it("closes the save editor on Escape and returns focus to Save to Notes", async () => {
-    const dispatch = vi.fn(
-      async (action: KenPromptAction): Promise<KenPromptActionResult> =>
-        action.type === "prepare-save"
-          ? {
-              status: "preview",
-              preview: { prompt: action.prompt, suggestedTitle: "Draft", destinations: [] },
-            }
-          : { status: "sent", session: "current" },
+    const dispatch = vi.fn(async (action: KenPromptAction): Promise<KenPromptActionResult> =>
+      action.type === "prepare-save"
+        ? {
+            status: "preview",
+            preview: { prompt: action.prompt, suggestedTitle: "Draft", destinations: [] },
+          }
+        : { status: "sent", session: "current" },
     );
     renderPrompt(dispatch);
     const save = screen.getByRole("button", { name: "Save to Notes" });
@@ -494,14 +493,13 @@ describe("Ken prompt actions", () => {
   });
 
   it("validates an empty draft title, preserves the editor, and focuses the invalid field", async () => {
-    const dispatch = vi.fn(
-      async (action: KenPromptAction): Promise<KenPromptActionResult> =>
-        action.type === "prepare-save"
-          ? {
-              status: "preview",
-              preview: { prompt: action.prompt, suggestedTitle: "Draft", destinations: [] },
-            }
-          : { status: "sent", session: "current" },
+    const dispatch = vi.fn(async (action: KenPromptAction): Promise<KenPromptActionResult> =>
+      action.type === "prepare-save"
+        ? {
+            status: "preview",
+            preview: { prompt: action.prompt, suggestedTitle: "Draft", destinations: [] },
+          }
+        : { status: "sent", session: "current" },
     );
     renderPrompt(dispatch);
 

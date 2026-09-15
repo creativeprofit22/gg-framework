@@ -4,10 +4,7 @@ export interface PhaseCompletionSession {
 }
 
 export type PhaseCompletionReconciliationKind =
-  | "phase-start"
-  | "status-update"
-  | "implementation-checkpoint"
-  | "completion-review";
+  "phase-start" | "status-update" | "implementation-checkpoint" | "completion-review";
 
 export interface PhaseCompletionReconciliationOwner {
   operationId: string;
@@ -64,9 +61,7 @@ export interface PhaseCompletionReviewFailedEvent {
 }
 
 export type PhaseCompletionBlockedGateOutcome =
-  | "review"
-  | "needs-attention"
-  | "waiting-for-approval";
+  "review" | "needs-attention" | "waiting-for-approval";
 
 export type PhaseCompletionUnmetGateCode =
   | "missing-implementation"

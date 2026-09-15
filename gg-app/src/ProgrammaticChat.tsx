@@ -7,22 +7,46 @@ import {
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
 import {
-  canRunProgrammaticSelection, canScanProgrammatic, isProgrammaticCurrentReview,
-  programmaticConfiguration, type ProgrammaticChatState,
+  canRunProgrammaticSelection,
+  canScanProgrammatic,
+  isProgrammaticCurrentReview,
+  programmaticConfiguration,
+  type ProgrammaticChatState,
 } from "./programmatic-chat-state";
 
 /** Plain text only: citations are not executable links or rendered Markdown. */
-export function ProgrammaticExecutionEvidenceView({ items }: { items: ProgrammaticExecutionEvidence[] }) {
+export function ProgrammaticExecutionEvidenceView({
+  items,
+}: {
+  items: ProgrammaticExecutionEvidence[];
+}) {
   return (
     <section className="programmatic-chat" aria-label="Task execution evidence">
       <h4>Task execution evidence</h4>
       <ul>
         {items.map((item, index) => (
           <li key={index}>
-            <Badge>{item.basis === "observed" ? "Checked directly" : item.basis === "inferred" ? "Inferred, not confirmed" : "Assumed, not checked"}</Badge>{" "}
-            {item.severity !== "info" && <strong>{item.severity === "warning" ? "Warning: " : "Error: "}</strong>}
+            <Badge>
+              {item.basis === "observed"
+                ? "Checked directly"
+                : item.basis === "inferred"
+                  ? "Inferred, not confirmed"
+                  : "Assumed, not checked"}
+            </Badge>{" "}
+            {item.severity !== "info" && (
+              <strong>{item.severity === "warning" ? "Warning: " : "Error: "}</strong>
+            )}
             <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.message}</span>
-            {item.location && <> <code>{item.location.path}{item.location.startLine ? `:${item.location.startLine}` : ""}{item.location.endLine ? `–${item.location.endLine}` : ""}</code></>}
+            {item.location && (
+              <>
+                {" "}
+                <code>
+                  {item.location.path}
+                  {item.location.startLine ? `:${item.location.startLine}` : ""}
+                  {item.location.endLine ? `–${item.location.endLine}` : ""}
+                </code>
+              </>
+            )}
           </li>
         ))}
       </ul>
@@ -69,12 +93,15 @@ export function ProgrammaticChat({
   const selected = state.detail;
   const configuration = programmaticConfiguration(state);
   const currentReview = isProgrammaticCurrentReview(state);
-  const reportAssessmentSuperseded = !!configuration && !!report &&
+  const reportAssessmentSuperseded =
+    !!configuration &&
+    !!report &&
     (configuration.status !== report.configuration?.status ||
       configuration.currentFingerprint !== report.configuration?.currentFingerprint);
-  const setupBlockedReason = configuration && configuration.status !== "current"
-    ? "Review and approve setup before checking for opportunities or starting a task."
-    : undefined;
+  const setupBlockedReason =
+    configuration && configuration.status !== "current"
+      ? "Review and approve setup before checking for opportunities or starting a task."
+      : undefined;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
       title: "Ready to review",
@@ -120,30 +147,68 @@ export function ProgrammaticChat({
           checking for opportunities, starting work or dismissing an item.
         </p>
       )}
-      {reportAssessmentSuperseded ? <p>These results predate the latest setup review. Refresh results to update task availability.</p> : <>
-        {report && <p>{report.reason}</p>}
-        {report && !report.scan.available && <p>{report.scan.reason}</p>}
-      </>}
+      {reportAssessmentSuperseded ? (
+        <p>
+          These results predate the latest setup review. Refresh results to update task
+          availability.
+        </p>
+      ) : (
+        <>
+          {report && <p>{report.reason}</p>}
+          {report && !report.scan.available && <p>{report.scan.reason}</p>}
+        </>
+      )}
       {setupBlockedReason && <p>{setupBlockedReason}</p>}
-      {report?.status === "stale" && <p>Older results remain available below. Saving setup does not update these results; run Check for opportunities afterward.</p>}
+      {report?.status === "stale" && (
+        <p>
+          Older results remain available below. Saving setup does not update these results; run
+          Check for opportunities afterward.
+        </p>
+      )}
       {configuration?.diagnostic && <p>{configuration.diagnostic}</p>}
       {configuration?.status === "refresh-required" && (
         <details>
           <summary>Why setup needs a refresh</summary>
-          {configuration.baselineUnavailable && <p>Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable; review all current inputs in the setup below.</p>}
-          {configuration.drift && <>
-            <ul>{configuration.drift.files.map((file) => <li key={file.path}>
-              {file.kind}: <code>{file.path}</code>
-            </li>)}</ul>
-            {configuration.drift.policy && <p>Configuration policy: {configuration.drift.policy.before} → {configuration.drift.policy.after}</p>}
-            {configuration.drift.schema && <p>Scanner settings schema: {configuration.drift.schema.before} → {configuration.drift.schema.after}</p>}
-            {configuration.drift.exclusions && <>
-              <p>Skipped-item rules changed.</p>
-              <p>Previously: {configuration.drift.exclusions.before.join(", ") || "None"}</p>
-              <p>Now: {configuration.drift.exclusions.after.join(", ") || "None"}</p>
-            </>}
-          </>}
-          <p>Any byte change in a recognized configuration file needs review, including cosmetic manifest edits.</p>
+          {configuration.baselineUnavailable && (
+            <p>
+              Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable; review
+              all current inputs in the setup below.
+            </p>
+          )}
+          {configuration.drift && (
+            <>
+              <ul>
+                {configuration.drift.files.map((file) => (
+                  <li key={file.path}>
+                    {file.kind}: <code>{file.path}</code>
+                  </li>
+                ))}
+              </ul>
+              {configuration.drift.policy && (
+                <p>
+                  Configuration policy: {configuration.drift.policy.before} →{" "}
+                  {configuration.drift.policy.after}
+                </p>
+              )}
+              {configuration.drift.schema && (
+                <p>
+                  Scanner settings schema: {configuration.drift.schema.before} →{" "}
+                  {configuration.drift.schema.after}
+                </p>
+              )}
+              {configuration.drift.exclusions && (
+                <>
+                  <p>Skipped-item rules changed.</p>
+                  <p>Previously: {configuration.drift.exclusions.before.join(", ") || "None"}</p>
+                  <p>Now: {configuration.drift.exclusions.after.join(", ") || "None"}</p>
+                </>
+              )}
+            </>
+          )}
+          <p>
+            Any byte change in a recognized configuration file needs review, including cosmetic
+            manifest edits.
+          </p>
         </details>
       )}
       {state.error && <p role="alert">{state.error}</p>}
@@ -181,15 +246,29 @@ export function ProgrammaticChat({
       </div>
       {state.proposal && (
         <div className="programmatic-proposal">
-          <h3>{state.proposal.operation === "current" ? currentReview ? "Saved setup is current" : "Previous setup review" : "Review what to enable"}</h3>
-          {state.proposal.operation === "current" ? currentReview
-            ? <p>No regeneration or approval is needed. Source changes only need a rescan.</p>
-            : <p>This review has been superseded by a newer setup assessment. These older settings are shown for reference only.</p>
-            : <p>
-            Find repeatable tasks GG can help with. Reviewing setup changes no files. Approve and
-            save setup writes the check settings shown below to this project. It does not start the
-            work; each task needs a separate approval.
-          </p>}
+          <h3>
+            {state.proposal.operation === "current"
+              ? currentReview
+                ? "Saved setup is current"
+                : "Previous setup review"
+              : "Review what to enable"}
+          </h3>
+          {state.proposal.operation === "current" ? (
+            currentReview ? (
+              <p>No regeneration or approval is needed. Source changes only need a rescan.</p>
+            ) : (
+              <p>
+                This review has been superseded by a newer setup assessment. These older settings
+                are shown for reference only.
+              </p>
+            )
+          ) : (
+            <p>
+              Find repeatable tasks GG can help with. Reviewing setup changes no files. Approve and
+              save setup writes the check settings shown below to this project. It does not start
+              the work; each task needs a separate approval.
+            </p>
+          )}
           <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
           <p>
             Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
@@ -228,19 +307,24 @@ export function ProgrammaticChat({
               reference only.
             </p>
           )}
-          {state.proposal.handle && <button
-            className="btn btn-primary btn-sm"
-            disabled={mutationLocked || !state.proposalApprovable}
-            onClick={() => {
-              if (state.proposal?.handle) onAction({
-                version: 1,
-                action: "approve-setup",
-                proposalHandle: state.proposal.handle,
-              });
-            }}
-          >
-            {state.proposal.operation === "refresh" ? "Approve and save refresh" : "Approve and save setup"}
-          </button>}
+          {state.proposal.handle && (
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={mutationLocked || !state.proposalApprovable}
+              onClick={() => {
+                if (state.proposal?.handle)
+                  onAction({
+                    version: 1,
+                    action: "approve-setup",
+                    proposalHandle: state.proposal.handle,
+                  });
+              }}
+            >
+              {state.proposal.operation === "refresh"
+                ? "Approve and save refresh"
+                : "Approve and save setup"}
+            </button>
+          )}
         </div>
       )}
       {report?.status === "setup-required" && (

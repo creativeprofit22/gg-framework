@@ -26,8 +26,7 @@ const bridge = vi.hoisted(() => ({
   newWindow: vi.fn(() => Promise.resolve()),
   setWindowTitle: vi.fn(),
   nativeDropHandler: null as
-    | null
-    | ((event: { payload: { type: string; paths: string[] } }) => void),
+    null | ((event: { payload: { type: string; paths: string[] } }) => void),
 }));
 const paneMounts = new Map<string, number>();
 const paneUnmounts = new Map<string, number>();

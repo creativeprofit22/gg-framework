@@ -919,8 +919,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const groupId = subagentGroupIdRef.current;
           if (groupId !== null) {
             const endDetails = details as
-              | { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] }
-              | undefined;
+              { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] } | undefined;
             const durationMs = endDetails?.durationMs;
             const finalTokens = endDetails?.tokenUsage;
             setItems((prev) =>
@@ -1132,8 +1131,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // timed out ten minutes later.
           // Evidence supplements the streamed summary; it never determines the generic outcome.
           const result = d.programmaticResult;
-          if (isProgrammaticExecutionResult(result) && result.status !== "rejected" && result.evidence.items.length > 0) {
-            pushItem({ kind: "programmatic_execution_evidence", id: nextId(), items: result.evidence.items });
+          if (
+            isProgrammaticExecutionResult(result) &&
+            result.status !== "rejected" &&
+            result.evidence.items.length > 0
+          ) {
+            pushItem({
+              kind: "programmatic_execution_evidence",
+              id: nextId(),
+              items: result.evidence.items,
+            });
           }
           const outcome = resolveRunEndOutcome(d);
           const runCancelled = outcome === "cancelled";
@@ -1198,9 +1205,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             // commit button flips /setup-commit → /commit without a restart.
           }
           // Cancelled and failed runs can still have saved setup or edited commands.
-          void (refreshCommands ? refreshCommands() : listCommands().then((commands) => {
-            if (commands !== null) setCommands(commands);
-          })).catch(() => {});
+          void (
+            refreshCommands
+              ? refreshCommands()
+              : listCommands().then((commands) => {
+                  if (commands !== null) setCommands(commands);
+                })
+          ).catch(() => {});
           break;
         }
         case "context_profile_change": {
@@ -1265,8 +1276,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // malformed frame is dropped rather than rendered as an empty band
           // the user could never answer.
           if (isAskUserPrompt(d)) {
-            setItems((previous) => previous.some((item) => item.kind === "ask" && item.prompt.id === d.id)
-              ? previous : [...previous, { kind: "ask", id: nextId(), prompt: d }]);
+            setItems((previous) =>
+              previous.some((item) => item.kind === "ask" && item.prompt.id === d.id)
+                ? previous
+                : [...previous, { kind: "ask", id: nextId(), prompt: d }],
+            );
           }
           break;
         case "plan_progress": {
@@ -1635,7 +1649,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setQueuedMessages,
       setAttachments,
       setCommands,
-    refreshCommands,
+      refreshCommands,
       setModels,
       planDoneRef,
       planTotalRef,

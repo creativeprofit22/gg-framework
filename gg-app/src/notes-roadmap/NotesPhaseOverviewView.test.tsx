@@ -278,33 +278,31 @@ describe("phase rebind confirmation", () => {
   });
 
   it("disables takeover while the current writer is running", async () => {
-    const onMutateLease = vi.fn(
-      async (): Promise<PhaseLeaseOutcome> => ({
-        status: "inspected",
-        roadmapRevision: 7,
-        leaseRevision: 1,
+    const onMutateLease = vi.fn(async (): Promise<PhaseLeaseOutcome> => ({
+      status: "inspected",
+      roadmapRevision: 7,
+      leaseRevision: 1,
+      phaseId: phase.id,
+      lease: {
+        version: 1,
+        projectKey: diagnostics.projectKey,
         phaseId: phase.id,
-        lease: {
-          version: 1,
-          projectKey: diagnostics.projectKey,
-          phaseId: phase.id,
-          planId: null,
-          leaseId: "lease-1",
-          fence: 4,
-          holder: {
-            daemonInstanceId: "daemon-a",
-            sessionId: "session-a",
-            sessionPath: previousSession.sessionPath,
-            processId: 42,
-          },
-          runState: "running",
-          acquiredAt: "2026-08-30T10:00:00.000Z",
-          renewedAt: "2026-08-30T10:00:30.000Z",
-          expiresAt: "2026-08-30T10:02:30.000Z",
-          operationId: "acquire-1",
+        planId: null,
+        leaseId: "lease-1",
+        fence: 4,
+        holder: {
+          daemonInstanceId: "daemon-a",
+          sessionId: "session-a",
+          sessionPath: previousSession.sessionPath,
+          processId: 42,
         },
-      }),
-    );
+        runState: "running",
+        acquiredAt: "2026-08-30T10:00:00.000Z",
+        renewedAt: "2026-08-30T10:00:30.000Z",
+        expiresAt: "2026-08-30T10:02:30.000Z",
+        operationId: "acquire-1",
+      },
+    }));
     render(
       <PhaseRebindControl
         phase={phase}

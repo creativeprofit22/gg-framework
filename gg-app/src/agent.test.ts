@@ -85,21 +85,28 @@ it.each(["primary", "auxiliary"])(
   },
 );
 
-it.each(["primary", "auxiliary"])("preserves input-policy rejection through %s prompt transport", async (paneId) => {
-  const failure = { category: "rejected", code: "command_input_not_allowed", message: "Remove attachments and send the command again." };
-  invoke.mockImplementation(async (command) => {
-    if (command === "agent_pane_status") return { ready: true, generation: 1 };
-    throw failure;
-  });
-  try {
-    const { sendPrompt } = await import("./agent");
-    const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
-    await expect(submit("/programmatic check tests")).rejects.toMatchObject(failure);
-    expect(invoke).toHaveBeenCalledWith("agent_prompt", expect.objectContaining({ paneId }));
-  } finally {
-    invoke.mockReset();
-  }
-});
+it.each(["primary", "auxiliary"])(
+  "preserves input-policy rejection through %s prompt transport",
+  async (paneId) => {
+    const failure = {
+      category: "rejected",
+      code: "command_input_not_allowed",
+      message: "Remove attachments and send the command again.",
+    };
+    invoke.mockImplementation(async (command) => {
+      if (command === "agent_pane_status") return { ready: true, generation: 1 };
+      throw failure;
+    });
+    try {
+      const { sendPrompt } = await import("./agent");
+      const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
+      await expect(submit("/programmatic check tests")).rejects.toMatchObject(failure);
+      expect(invoke).toHaveBeenCalledWith("agent_prompt", expect.objectContaining({ paneId }));
+    } finally {
+      invoke.mockReset();
+    }
+  },
+);
 
 it("classifies only bounded typed prompt rejections, not English messages or arbitrary internals", () => {
   const rejected = {

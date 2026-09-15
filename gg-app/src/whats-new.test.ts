@@ -155,22 +155,26 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-09-09-upstream-0630-images-and-prompts",
+      id: "local-2026-09-12-upstream-0634-reviews-and-replies",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),
     });
   });
 
-  it("preserves the prior shipped Local Fork identity and date", () => {
-    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
-    expect(LOCAL_CHANGELOG[1].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
-    expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-07");
-    expect(LOCAL_CHANGELOG[1].items).toHaveLength(5);
-    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
-    expect(LOCAL_CHANGELOG[2].label).toBe("Upstream 0.62.0, still your Local Fork");
-    expect(LOCAL_CHANGELOG[2].date).toBe("2026-09-06");
-    expect(LOCAL_CHANGELOG[2].items).toHaveLength(14);
+  it("preserves the prior shipped Local Fork identities and dates", () => {
+    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
+    expect(LOCAL_CHANGELOG[1].label).toBe("Upstream 0.63.0, with clearer prompts and image results");
+    expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-09");
+    expect(LOCAL_CHANGELOG[1].items).toHaveLength(8);
+    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
+    expect(LOCAL_CHANGELOG[2].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
+    expect(LOCAL_CHANGELOG[2].date).toBe("2026-09-07");
+    expect(LOCAL_CHANGELOG[2].items).toHaveLength(5);
+    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
+    expect(LOCAL_CHANGELOG[3].label).toBe("Upstream 0.62.0, still your Local Fork");
+    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-06");
+    expect(LOCAL_CHANGELOG[3].items).toHaveLength(14);
   });
 
   it.each([

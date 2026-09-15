@@ -1,5 +1,8 @@
 import {
+  copyFileSync,
   existsSync,
+  readdirSync,
+  realpathSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +14,7 @@ import {
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildAndPromoteDirectory,
@@ -131,7 +135,7 @@ function createPackagePruneFixture() {
   temporaryDirectories.push(root);
   const nodeModules = join(root, "node_modules");
 
-  createVersionedPackage(nodeModules, "onnxruntime-web", "1.22.0-dev.20250409-89f8206ba4", [
+  createVersionedPackage(nodeModules, "onnxruntime-web", "1.26.0-dev.20260416-b7804b056c", [
     "README.md",
     "__commit.txt",
     "types.d.ts",
@@ -141,10 +145,9 @@ function createPackagePruneFixture() {
     "docs/webgl-operators.md",
     "lib/index.ts",
   ]);
-  createVersionedPackage(nodeModules, "@huggingface/transformers", "3.8.1", [
+  createVersionedPackage(nodeModules, "@huggingface/transformers", "4.2.0", [
     "LICENSE",
     "dist/ort-wasm-simd-threaded.jsep.mjs",
-    "dist/ort-wasm-simd-threaded.jsep.wasm",
     "dist/transformers.js",
     "dist/transformers.min.js",
     "dist/transformers.node.cjs",
@@ -154,13 +157,13 @@ function createPackagePruneFixture() {
     "dist/transformers.web.js",
     "dist/transformers.web.min.js",
   ]);
-  createVersionedPackage(nodeModules, "ogg-opus-decoder", "1.7.3", [
+  createVersionedPackage(nodeModules, "ogg-opus-decoder", "1.7.5", [
     "index.js",
     "types.d.ts",
     "dist/ogg-opus-decoder.min.js",
     "dist/ogg-opus-decoder.opus-ml.min.js",
   ]);
-  createVersionedPackage(nodeModules, "@wasm-audio-decoders/opus-ml", "0.0.2", [
+  createVersionedPackage(nodeModules, "@wasm-audio-decoders/opus-ml", "0.0.3", [
     "index.js",
     "types.d.ts",
     "dist/opus-ml-decoder.min.js",
@@ -180,9 +183,11 @@ function createPackagePruneFixture() {
     ".yarn/plugins/plugin.cjs",
     ".yarn/versions/version.yml",
   ]);
-  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.67", [
+  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.75", [
     "LICENSE",
     "dist/cli.js",
+    "vendor/java-proxy-agent/build.ts",
+    "vendor/java-proxy-agent/srt-proxy-agent.jar",
     "vendor/seccomp/arm64/apply-seccomp",
     "vendor/seccomp/build.ts",
     "vendor/seccomp/x64/apply-seccomp",
@@ -193,7 +198,93 @@ function createPackagePruneFixture() {
   return { nodeModules };
 }
 
+// Resolve from the actual dependency graph, never scan parallel versions in .pnpm.
+function installedPackageRoot(name, fromManifest) {
+  const require = createRequire(fromManifest);
+  let directory = dirname(require.resolve(name));
+  while (true) {
+    const manifest = join(directory, "package.json");
+    if (existsSync(manifest) && JSON.parse(readFileSync(manifest, "utf8")).name === name) {
+      return realpathSync(directory);
+    }
+    const parent = dirname(directory);
+    if (parent === directory) throw new Error(`Cannot locate installed ${name}`);
+    directory = parent;
+  }
+}
+
+function createInstalledPruneFixture() {
+  const root = mkdtempSync(join(tmpdir(), "gg-installed-prune-"));
+  temporaryDirectories.push(root);
+  const nodeModules = join(root, "node_modules");
+  const manifest = fileURLToPath(new URL("../../packages/ggcoder/package.json", import.meta.url));
+  const packages = [
+    ["@huggingface/transformers"],
+    ["onnxruntime-web", "@huggingface/transformers"],
+    ["ogg-opus-decoder"],
+    ["@wasm-audio-decoders/opus-ml", "ogg-opus-decoder"],
+    ["@mixmark-io/domino", "turndown"],
+    ["@anthropic-ai/sandbox-runtime"],
+  ];
+  const copiedFiles = [];
+  for (const [name, parent] of packages) {
+    const source = installedPackageRoot(
+      name,
+      parent ? join(installedPackageRoot(parent, manifest), "package.json") : manifest,
+    );
+    const destination = join(nodeModules, ...name.split("/"));
+    const visit = (relativePath = "") => {
+      mkdirSync(join(destination, relativePath), { recursive: true });
+      for (const entry of readdirSync(join(source, relativePath), { withFileTypes: true })) {
+        // Production removes source maps before applying immutable inventories.
+        if (entry.name.endsWith(".map")) continue;
+        const path = join(relativePath, entry.name);
+        if (entry.isDirectory()) visit(path);
+        else {
+          expect(entry.isFile()).toBe(true);
+          const from = join(source, path);
+          const to = join(destination, path);
+          // Preserve the complete real layout without copying hundreds of MB of
+          // discarded WASM/native bundles. Copy manifests, licenses and entry JS.
+          if (
+            (!relativePath && /^(package\.json|LICENSE|NOTICE|index\.js)$/.test(entry.name)) ||
+            (relativePath === "dist" &&
+              /^(ort\.node\.min\.(js|mjs)|transformers\.node\.mjs|cli\.js)$/.test(entry.name)) ||
+            path === join("vendor", "java-proxy-agent", "srt-proxy-agent.jar")
+          ) {
+            copyFileSync(from, to);
+            copiedFiles.push({ from, to });
+          } else writeFileSync(to, "");
+        }
+      }
+    };
+    visit();
+  }
+  return { nodeModules, copiedFiles };
+}
+
 describe("allowlisted package payload pruning", () => {
+  it("accepts current installed layouts and preserves copied runtime/license bytes", () => {
+    const { nodeModules, copiedFiles } = createInstalledPruneFixture();
+    pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" });
+    for (const { from, to } of copiedFiles) {
+      expect(readFileSync(to).equals(readFileSync(from))).toBe(true);
+    }
+  });
+
+  it("rejects a missing JVM agent before pruning any package", () => {
+    const { nodeModules } = createPackagePruneFixture();
+    rmSync(
+      join(
+        nodeModules,
+        "@anthropic-ai/sandbox-runtime/vendor/java-proxy-agent/srt-proxy-agent.jar",
+      ),
+    );
+    expect(() =>
+      pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" }),
+    ).toThrow(/missing.*srt-proxy-agent.jar/);
+    expect(existsSync(join(nodeModules, "ogg-opus-decoder/dist"))).toBe(true);
+  });
   it("retains required Windows runtime and license files while removing forbidden payloads", () => {
     const { nodeModules } = createPackagePruneFixture();
     const result = pruneAllowlistedPackagePayloads(nodeModules, {
@@ -319,6 +410,8 @@ describe("allowlisted package payload pruning", () => {
     ];
 
     expect(result.sandboxRuntime).toBe(expectedRuntime);
+    expect(existsSync(join(vendor, "java-proxy-agent/srt-proxy-agent.jar"))).toBe(true);
+    expect(existsSync(join(vendor, "java-proxy-agent/build.ts"))).toBe(false);
     expect(runtimePaths.filter((path) => existsSync(join(vendor, ...path.split("/"))))).toEqual(
       expectedRuntime ? [expectedRuntime] : [],
     );

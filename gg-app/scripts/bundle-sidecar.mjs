@@ -95,10 +95,12 @@ const OPENSRC_BINARIES = new Set([
   "opensrc-linux-musl-arm64",
 ]);
 
+// Inventories describe the locked packages AFTER pruneSourceMaps. In particular,
+// decoder 1.7.5 / opus-ml 0.0.3 add .map siblings, not new runtime entry points.
 const PACKAGE_PAYLOAD_ALLOWLISTS = [
   {
     name: "onnxruntime-web",
-    version: "1.22.0-dev.20250409-89f8206ba4",
+    version: "1.26.0-dev.20260416-b7804b056c",
     requiredPaths: ["package.json", "types.d.ts", "dist/ort.node.min.js", "dist/ort.node.min.mjs"],
     operations: [
       {
@@ -123,14 +125,15 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@huggingface/transformers",
-    version: "3.8.1",
+    version: "4.2.0",
+    // Node import still selects this self-contained ESM bundle and onnxruntime-node;
+    // 4.2.0 no longer publishes the browser JSEP WASM alongside its dist loader.
     requiredPaths: ["package.json", "LICENSE", "dist/transformers.node.mjs"],
     operations: [
       {
         path: "dist",
         expectedEntries: [
           "ort-wasm-simd-threaded.jsep.mjs",
-          "ort-wasm-simd-threaded.jsep.wasm",
           "transformers.js",
           "transformers.min.js",
           "transformers.node.cjs",
@@ -146,7 +149,7 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "ogg-opus-decoder",
-    version: "1.7.3",
+    version: "1.7.5",
     requiredPaths: ["package.json", "index.js", "types.d.ts"],
     operations: [
       {
@@ -158,7 +161,7 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@wasm-audio-decoders/opus-ml",
-    version: "0.0.2",
+    version: "0.0.3",
     requiredPaths: ["package.json", "index.js", "types.d.ts"],
     operations: [
       {
@@ -198,12 +201,19 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@anthropic-ai/sandbox-runtime",
-    version: "0.0.67",
-    requiredPaths: ["package.json", "LICENSE", "dist/cli.js"],
+    version: "0.0.75",
+    requiredPaths: [
+      "package.json",
+      "LICENSE",
+      "dist/cli.js",
+      "vendor/java-proxy-agent/srt-proxy-agent.jar",
+    ],
     operations: [
       {
         path: "vendor",
         expectedFiles: [
+          "java-proxy-agent/build.ts",
+          "java-proxy-agent/srt-proxy-agent.jar",
           "seccomp/arm64/apply-seccomp",
           "seccomp/build.ts",
           "seccomp/x64/apply-seccomp",
@@ -213,7 +223,9 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
         ],
         retainFiles: ({ platform, arch }) => {
           const runtime = sandboxRuntimePath(platform, arch);
-          return runtime ? [runtime] : [];
+          // The platform-independent JVM agent is resolved by sandbox-manager;
+          // keep it alongside the selected OS helper (also on hosts without one).
+          return ["java-proxy-agent/srt-proxy-agent.jar", ...(runtime ? [runtime] : [])];
         },
       },
     ],

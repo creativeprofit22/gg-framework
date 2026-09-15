@@ -155,7 +155,7 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-09-12-upstream-0634-reviews-and-replies",
+      id: "local-2026-09-15-upstream-0650-reviewed-commands",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),
@@ -163,20 +163,36 @@ describe("What's New feeds", () => {
   });
 
   it("preserves the prior shipped Local Fork identities and dates", () => {
-    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
-    expect(LOCAL_CHANGELOG[1].label).toBe(
+    expect(LOCAL_CHANGELOG[1]).toEqual({
+      id: "local-2026-09-12-upstream-0634-reviews-and-replies",
+      label: "Upstream 0.63.4, with reviews that stay in reach",
+      date: "2026-09-12",
+      items: [
+        "Review without losing your conversation. `Pending reviews` keeps plan approvals and proposed `Roadmap` phases inside the pane, with room to read and scroll while your chat and draft stay in place. A missed notification can recover the same pending proposal while its session is still running; it does not create a second proposal or approve it for you.",
+        "Finished an existing `Roadmap` phase? You can now ask the coding agent to record `Done` from your completion report, checking the phase's own goal and completion criteria rather than unrelated release gates. Supporting evidence is still required, and newly proposed phases still wait for your approval.",
+        "Get an answer shaped around your question, not a fixed checklist. Replies now favor readable paragraphs and an actionable opening, with room for the detail your task needs instead of a rigid line limit or mandatory status label.",
+        "Keep your intent when you use `Enhance?`. The rewrite instructions now make your questions, exclusions, and restart boundaries explicit, so polishing a request is not permission to add work or turn a question into an implementation task.",
+        "Let your build finish. Foreground commands now run without a time limit unless one is explicitly requested, including commands that reuse a shell. A hidden five-minute cutoff no longer overrides that choice. You can still stop the work yourself.",
+        "Long conversations keep a clearer trail of unfinished fixes. Failing test names now stay in the agent's compacted memory until matching passing results clear them, so shortening the conversation does not silently drop the failures it still needs to address.",
+        "Replace repeated text without duplicating the replacement. Global `replace_all` edits now handle each match once, including replacements that contain the original text, rather than accidentally editing their own output.",
+        "Read the conversation, not raw diagnostic dumps. Post-edit checks still send problems to the agent, but their internal output stays out of your chat. Your Local Fork also keeps automatic check reminders removed without calling failed or unfinished commands passed.",
+        "Know an image limit before chasing another retry. `Flare` and `Sunburst` explain that `transparent backgrounds` are unavailable through your ChatGPT connection, rather than switching models or silently substituting an opaque image.",
+      ],
+    });
+    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
+    expect(LOCAL_CHANGELOG[2].label).toBe(
       "Upstream 0.63.0, with clearer prompts and image results",
     );
-    expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-09");
-    expect(LOCAL_CHANGELOG[1].items).toHaveLength(8);
-    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
-    expect(LOCAL_CHANGELOG[2].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
-    expect(LOCAL_CHANGELOG[2].date).toBe("2026-09-07");
-    expect(LOCAL_CHANGELOG[2].items).toHaveLength(5);
-    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
-    expect(LOCAL_CHANGELOG[3].label).toBe("Upstream 0.62.0, still your Local Fork");
-    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-06");
-    expect(LOCAL_CHANGELOG[3].items).toHaveLength(14);
+    expect(LOCAL_CHANGELOG[2].date).toBe("2026-09-09");
+    expect(LOCAL_CHANGELOG[2].items).toHaveLength(8);
+    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
+    expect(LOCAL_CHANGELOG[3].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
+    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-07");
+    expect(LOCAL_CHANGELOG[3].items).toHaveLength(5);
+    expect(LOCAL_CHANGELOG[4].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
+    expect(LOCAL_CHANGELOG[4].label).toBe("Upstream 0.62.0, still your Local Fork");
+    expect(LOCAL_CHANGELOG[4].date).toBe("2026-09-06");
+    expect(LOCAL_CHANGELOG[4].items).toHaveLength(14);
   });
 
   it.each([

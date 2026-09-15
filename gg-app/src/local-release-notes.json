@@ -1,25 +1,23 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-12",
-  "label": "Upstream 0.63.4, with reviews that stay in reach",
+  "date": "2026-09-15",
+  "label": "Upstream 0.65.0, with commands you can review and reuse",
   "sections": [
     {
-      "title": "Keep the decision close to the work",
+      "title": "From repeatable work to a reviewed run",
       "items": [
-        "Review without losing your conversation. `Pending reviews` keeps plan approvals and proposed `Roadmap` phases inside the pane, with room to read and scroll while your chat and draft stay in place. A missed notification can recover the same pending proposal while its session is still running; it does not create a second proposal or approve it for you.",
-        "Finished an existing `Roadmap` phase? You can now ask the coding agent to record `Done` from your completion report, checking the phase's own goal and completion criteria rather than unrelated release gates. Supporting evidence is still required, and newly proposed phases still wait for your approval.",
-        "Get an answer shaped around your question, not a fixed checklist. Replies now favor readable paragraphs and an actionable opening, with room for the detail your task needs instead of a rigid line limit or mandatory status label.",
-        "Keep your intent when you use `Enhance?`. The rewrite instructions now make your questions, exclusions, and restart boundaries explicit, so polishing a request is not permission to add work or turn a question into an implementation task."
+        "Find a useful starting point with `Opportunities`. Review the project setup before scanning, then choose `Approve and save setup` when it looks right. Add an optional focus with `/programmatic` to steer the advice without changing the scan or losing completed and dismissed history. Advice can compare available commands, suggest a manual alternative, or explain what is missing rather than forcing every task into a command.",
+        "Turn a missing command into something you can reuse, with two separate decisions. Review the proposed command and helper contents before creation; existing files are not overwritten. Running an existing or newly created command needs its own approval for the selected contents and actions. Creating or successfully loading it does not prove its behavior or give it permission to run.",
+        "Read the result without a second conversation spilling into yours. `Opportunities` shows a readable execution summary and `Evidence` with backend attribution and completed-tool details, while the child conversation stays out of your transcript. Direct command runs use the same separate session without receiving your chat history; this is not a filesystem sandbox.",
+        "Keep the next decision within reach. Reconnecting to a still-running session restores live review questions and matching answer drafts without submitting them. Resizing a review keeps its focused option visible as you scroll, and prompts queued during an overlapping `Opportunities` report can continue when that report finishes instead of being left waiting."
       ]
     },
     {
-      "title": "Upstream fixes, without giving up your Local Fork",
+      "title": "Less friction in everyday conversations",
       "items": [
-        "Let your build finish. Foreground commands now run without a time limit unless one is explicitly requested, including commands that reuse a shell. A hidden five-minute cutoff no longer overrides that choice. You can still stop the work yourself.",
-        "Long conversations keep a clearer trail of unfinished fixes. Failing test names now stay in the agent's compacted memory until matching passing results clear them, so shortening the conversation does not silently drop the failures it still needs to address.",
-        "Replace repeated text without duplicating the replacement. Global `replace_all` edits now handle each match once, including replacements that contain the original text, rather than accidentally editing their own output.",
-        "Read the conversation, not raw diagnostic dumps. Post-edit checks still send problems to the agent, but their internal output stays out of your chat. Your Local Fork also keeps automatic check reminders removed without calling failed or unfinished commands passed.",
-        "Know an image limit before chasing another retry. `Flare` and `Sunburst` explain that `transparent backgrounds` are unavailable through your ChatGPT connection, rather than switching models or silently substituting an opaque image."
+        "Get to the point sooner. Default replies now aim to be shorter while keeping essential context, risks, and verification. Ask for a full explanation whenever you need one; there is no hard length limit or reduction in the work requested.",
+        "Give a stalled `OpenAI` chat one more chance. Through your ChatGPT connection, a rejected `encrypted content` replay gets one automatic recovery attempt using visible messages and tool results, without changing saved history. This targets that specific error, not every provider failure.",
+        "Choose your button style with `GG UI` under `Settings > Effects`. Switch the metallic finish on or off, with your choice remembered across windows and restarts. Animated working indicators and the input glow return, while rounded button finishes follow their edges more cleanly when you zoom."
       ]
     }
   ]

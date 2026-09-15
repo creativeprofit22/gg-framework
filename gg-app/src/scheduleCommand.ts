@@ -31,8 +31,11 @@
  * into actual fire times is a later step's job.
  */
 
+import { CLIENT_OWNED_SLASH_COMMANDS } from "@kenkaiiii/gg-core/slash-command-contract";
+
 /** Command tokens that may lead the raw input. Stripped before parsing. */
-const COMMAND_TOKENS = ["/schedule", "/sched"];
+const COMMAND_TOKENS = [CLIENT_OWNED_SLASH_COMMANDS.schedule.name, ...CLIENT_OWNED_SLASH_COMMANDS.schedule.aliases]
+  .map((name) => `/${name}`);
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;

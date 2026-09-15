@@ -39,14 +39,14 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
       const allNames = tools.map((t) => t.name);
       // Sanity: the mutating tools DO exist in the unfiltered set — so the
       // filter is what removes them, not their absence.
-      for (const mutating of ["write", "edit", "bash"]) {
+      for (const mutating of ["write", "edit", "bash", "programmatic_command"]) {
         expect(allNames).toContain(mutating);
       }
 
       const allowedNames = filterToAllowed(allNames, agent.tools);
 
       // The mutating tools must NOT survive the agent's allow-list.
-      for (const banned of ["write", "edit", "bash"]) {
+      for (const banned of ["write", "edit", "bash", "programmatic_command"]) {
         expect(allowedNames).not.toContain(banned);
       }
       // Exactly the declared read-only tools survive.
@@ -55,6 +55,12 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
       processManager.shutdownAll();
       lspManager?.shutdownAll();
     }
+  });
+
+  it("does not automatically give persistent child workers command creation", async () => {
+    const result = await createTools(os.tmpdir(), { lspDiagnostics: false, disableSubagents: true });
+    try { expect(result.tools.map((tool) => tool.name)).not.toContain("programmatic_command"); }
+    finally { result.commandCreation?.dispose(); result.processManager.shutdownAll(); result.lspManager?.shutdownAll(); }
   });
 
   it("an agent with no `tools:` frontmatter keeps the full toolset (backward compatible)", async () => {

@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -105,6 +105,49 @@ async function persistedState(root: string): Promise<ProgrammaticLifecycleStateV
     JSON.parse(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")) as unknown,
   );
 }
+
+describe("lifecycle cancellation", () => {
+  it.each(["inventory", "precommit", "revalidation", "backup-committed"] as const)("preserves history and reports publication honestly at %s", async (when) => {
+    const root = await createRepository();
+    expect(await runProgrammaticScan(root)).toMatchObject({ ok: true });
+    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+    const primary = await readFile(primaryPath);
+    const historical = await persistedState(root);
+    historical.records = [];
+    const previous = Buffer.from(JSON.stringify(historical));
+    await writeFile(previousPath, previous);
+    await writeFile(path.join(root, "package.json"), '{"name":"updated"}\n');
+    await approveProfile(root);
+    const controller = new AbortController();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    let paused = false;
+    let precommit = false;
+    const pause = async () => { if (!paused) { paused = true; entered(); await held; } };
+    const running = runProgrammaticScan(root, {
+      signal: controller.signal,
+      inventoryOperations: { readFile: async (file) => {
+        if (when === "inventory" || (when === "revalidation" && precommit)) await pause();
+        return readFile(file);
+      } },
+      onPreFileMutation: async () => { precommit = true; if (when === "precommit") await pause(); },
+      onFileMutated: async (file) => {
+        if (when === "backup-committed" && file === PROGRAMMATIC_PREVIOUS_STATE_PATH) await pause();
+      },
+    });
+    await ready;
+    controller.abort();
+    release();
+    expect(await running).toMatchObject({ ok: false, changed: when === "backup-committed",
+      error: when === "backup-committed" ? "post-commit-failed" : "cancelled" });
+    expect(await readFile(primaryPath)).toEqual(primary);
+    expect(await readFile(previousPath)).toEqual(when === "backup-committed" ? primary : previous);
+    expect((await readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(["profile.json", "state.json", "state.previous.json"]);
+  });
+});
 
 describe("lifecycle byte limits", () => {
   // Synthetic metadata exercises the boundary without allocating large fixtures.
@@ -1130,7 +1173,11 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
         },
       });
       expect(failed).toBe(true);
-      expect(result).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+      expect(result).toMatchObject(failurePath === PROGRAMMATIC_STATE_PATH
+        ? { ok: false, changed: true, error: "post-commit-failed", detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") }
+        : { ok: false, changed: false, error: "persistence-failed" });
+      if (failurePath === PROGRAMMATIC_STATE_PATH)
+        expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
       expect(await readFile(primaryPath)).toEqual(before);
     },
   );
@@ -1146,7 +1193,8 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
         if (file === PROGRAMMATIC_PREVIOUS_STATE_PATH) throw new Error("backup notification failed");
       },
     });
-    expect(result).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+    expect(result).toMatchObject({ ok: false, changed: true, error: "post-commit-failed",
+      detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") });
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
     expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
   });
@@ -1233,7 +1281,8 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
         },
       });
 
-      expect(result).toMatchObject({ ok: false, error: "persistence-failed", changed: false });
+      expect(result).toMatchObject({ ok: false, error: "post-commit-failed", changed: true,
+        detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") });
       expect(await readFile(primaryPath)).toEqual(before);
       expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
     },

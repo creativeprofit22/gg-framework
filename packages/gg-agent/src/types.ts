@@ -50,6 +50,10 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * Omission retains the finite default for ordinary tools.
    */
   timeoutMs?: number;
+  /** Host-only notification after both batch result caps, before the next provider request.
+   * This describes prepared model input, not provider acknowledgement or tool success.
+   */
+  onResultPrepared?: (result: Readonly<ToolResult>) => void;
   execute: (
     args: z.infer<T>,
     context: ToolContext,

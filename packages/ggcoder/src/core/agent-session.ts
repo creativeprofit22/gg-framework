@@ -30,10 +30,13 @@ import {
   type SlashCommandContext,
 } from "./slash-commands.js";
 import { getPromptCommand } from "./prompt-commands.js";
-import { loadCustomCommands } from "./custom-commands.js";
+import { appendCommandArguments, loadCustomCommands } from "./custom-commands.js";
 import { workflowQueuePolicyError } from "./workflow-busy-policy.js";
 import { createProgrammaticReadinessReader, discoverCommands, registryCommandListings, programmaticReadinessGuidance, type ProgrammaticReadiness } from "./command-discovery.js";
 import { buildProgrammaticAdvisoryContext, parseProgrammaticAssessmentInput, renderProgrammaticAdvisoryContext } from "./programmatic/advisory-context.js";
+import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, ADVISORY_READ_TOOLS } from "./programmatic/advisory.js";
+import { createCommandInformationTool } from "../tools/command-information.js";
+import { createProgrammaticAdvisoryResultTool } from "../tools/programmatic-advisory-result.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
 import { dualAuthProvider, parseReferencedFiles, type NotesWorkspaceSnapshotV1, type SlashCommandListing } from "@kenkaiiii/gg-core";
@@ -97,8 +100,12 @@ import {
   createWebSearchTool,
   type LspManager,
   type ProcessManager,
+  type CreateToolsResult,
 } from "../tools/index.js";
 import { partitionToolsByTier } from "../tools/tool-tiers.js";
+import type { CommandCreationReviewer } from "./programmatic/command-creation.js";
+import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
+import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
@@ -113,6 +120,7 @@ import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
+import { claimAdvisoryTool, executeAdvisoryTool } from "./programmatic/advisory-tools.js";
 import { clampMcpToolDescription, DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import { CONTEXT_LIMITS, resolveContextLimits, type ContextLimits } from "./context-limits.js";
 import { McpCatalogCache, type CachedTool } from "./mcp/catalog-cache.js";
@@ -242,6 +250,9 @@ function isTerminalSubAgentState(state: SubAgentState): boolean {
 }
 
 export interface AgentSessionOptions {
+  reviewCommandCreation?: CommandCreationReviewer;
+  reviewProgrammaticSetup?: CommandCreationReviewer;
+  executeReviewedCommand?: DirectCommandExecutor;
   provider: Provider;
   model: string;
   cwd: string;
@@ -377,6 +388,8 @@ export interface AgentSessionOptions {
   coderSlashCommands?: boolean;
   /** Actions intercepted by the owning host, not executable prompt specialists. */
   workspaceCommands?: SlashCommandListing[];
+  /** Client-owned names/aliases reserved for creation, without backend handlers. */
+  reservedCommandIdentities?: readonly string[];
   workspaceCommandCaseInsensitive?: boolean;
   advertiseRegistryCommands?: boolean;
   /** Enable loop-break, re-grounding, and Ideal review hooks. Defaults to true. */
@@ -397,6 +410,8 @@ export interface AgentSessionOptions {
   additionalTools?: AgentTool[];
   /** Host approval gate, applied to every registered tool including stale references. */
   approveToolExecution?: (name: string, args: unknown, signal?: AbortSignal) => Promise<boolean>;
+  /** Host freshness check after approval/receipt waits, immediately before guarded dispatch. */
+  validateToolExecution?: () => Promise<void>;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -516,6 +531,9 @@ export class AgentSession {
   /** Canonical guarded tool registry; `tools` is the policy-filtered live view used by the loop. */
   private registeredTools = new Map<string, AgentTool>();
   private unavailableToolNames = new Set<string>();
+  private advisoryTurn?: ProgrammaticAdvisoryTurn;
+  private pendingAdvisoryPresentation: { turn: ProgrammaticAdvisoryTurn; text: string; signal: AbortSignal } | undefined;
+  private readonly advisoryEvidence = new AdvisoryEvidence();
   private toolCapabilityPolicy: {
     allowedNames: Set<string>;
     allowedPrefixes: string[];
@@ -616,6 +634,9 @@ export class AgentSession {
   private queueSeq = 0;
   private processManager?: ProcessManager;
   private lspManager?: LspManager;
+  private commandCreation?: CreateToolsResult["commandCreation"];
+  private programmaticProfile?: CreateToolsResult["programmaticProfile"];
+  private setupInspection?: ProgrammaticSetupInspection;
   private subAgentManager?: SubAgentManager;
   /**
    * Out-of-band push notifications (finished children, background-process
@@ -625,6 +646,10 @@ export class AgentSession {
   private readonly notifications = new AgentNotificationQueue();
   private managerAbortSignal?: AbortSignal;
   private readonly managerAbortHandler = () => {
+    // Command proposals and receipts outlive tool calls, but never a real stop.
+    this.commandCreation?.cancel();
+    this.programmaticProfile?.cancel();
+    this.setupInspection?.close();
     this.lspManager?.clearPendingDiagnostics();
     void this.subAgentManager?.interruptAll();
   };
@@ -817,12 +842,29 @@ export class AgentSession {
       rebuildReadTool,
       lspManager,
       subAgentManager,
+      commandCreation,
+      programmaticProfile,
     } = await createTools(this.cwd, {
       commandDiscovery: this.opts.coderSlashCommands === false ? false : {
+        reservedCommandIdentities: this.opts.reservedCommandIdentities,
         workspaceActions: this.opts.workspaceCommands,
         workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive, readReadiness: this.readProgrammaticReadiness,
         getRegistryActions: () => this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
       },
+      reviewCommandCreation: this.opts.reviewCommandCreation,
+      reviewProgrammaticSetup: this.opts.reviewProgrammaticSetup,
+      setupOwner: () => `${this.sessionId}:${this.cwd}`,
+      assertSetupAllowed: () => {
+        if (this.setupInspection || !this.isToolCapabilityAllowed("programmatic_profile") || this.unavailableToolNames.has("programmatic_profile"))
+          throw new Error("Setup generation is unavailable under the current invocation policy.");
+      },
+      executeReviewedCommand: this.opts.executeReviewedCommand ? async (request) => {
+        if (this.planModeRef.current || this.advisoryTurn || this.opts.coderSlashCommands === false || this.opts.transient || this.opts.allowedTools || this.opts.subagentWorker || this.opts.agentContext === "none")
+          throw new Error("Reviewed execution requires an unrestricted desktop code-mode parent outside plan/advisory mode.");
+        return this.opts.executeReviewedCommand!(request);
+      } : undefined,
+      getAvailableToolNames: () => [...new Set([...this.registeredTools.keys(), ...this.deferredBuiltinTools.keys()])]
+        .filter((name) => this.isToolCapabilityAllowed(name) && !this.unavailableToolNames.has(name)),
       agents,
       skills: this.skills,
       contextLimits: this.contextLimits,
@@ -918,6 +960,8 @@ export class AgentSession {
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
+    this.commandCreation = commandCreation;
+    this.programmaticProfile = programmaticProfile;
     this.subAgentManager = subAgentManager;
     this.bindManagerCancellation(this.opts.signal);
 
@@ -1487,7 +1531,7 @@ export class AgentSession {
     content: string,
     includeAdvisory = true,
   ): Promise<
-    { kind: "template"; fullPrompt: string } | { kind: "command"; result?: string } | null
+    { kind: "template"; fullPrompt: string; setupInspection?: boolean; advisory?: ReturnType<typeof buildProgrammaticAdvisoryContext> } | { kind: "command"; result?: string } | null
   > {
     const parsedInput = this.slashCommands.parse(content);
     const coderCommands = this.opts.coderSlashCommands !== false;
@@ -1532,16 +1576,17 @@ export class AgentSession {
         readReadiness: async () => "current",
       });
       const advisory = buildProgrammaticAdvisoryContext(input.data, discovery);
-      return { kind: "template", fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") + renderProgrammaticAdvisoryContext(advisory) };
+      return { kind: "template", advisory, fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") + renderProgrammaticAdvisoryContext(advisory) };
     }
     return {
       kind: "template",
       fullPrompt: this.expandResolvedPromptCommand(promptText, parsed.args),
+      setupInspection: builtinPromptCmd?.name === "setup-programmatic",
     };
   }
 
   private expandResolvedPromptCommand(prompt: string, args: string): string {
-    return args ? `${prompt}\n\n## User Instructions\n\n${args}` : prompt;
+    return appendCommandArguments(prompt, args);
   }
 
   /** Host-only pinned command entry: no slash lookup or project override. */
@@ -1612,7 +1657,73 @@ export class AgentSession {
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
     if (slash?.kind === "template") {
-      await this.acceptPromptTemplate(slash.fullPrompt, provenance, options);
+      if (slash.setupInspection) {
+        this.programmaticProfile?.cancel();
+        this.setupInspection?.close();
+        const scope = new ProgrammaticSetupInspection();
+        this.setupInspection = scope;
+        this.reconcileRegisteredTools();
+        try { await this.acceptPromptTemplate(slash.fullPrompt, provenance, options); }
+        finally {
+          scope.close();
+          if (this.setupInspection === scope) this.setupInspection = undefined;
+          this.reconcileRegisteredTools();
+        }
+        return;
+      }
+      if (slash.advisory && !this.advisoryTurn) {
+        const turn = new ProgrammaticAdvisoryTurn(this.advisoryEvidence);
+        this.advisoryTurn = turn;
+        const promoted = new Set<string>();
+        const information = createCommandInformationTool(this.cwd, {
+          workspaceActions: this.opts.workspaceCommands,
+          workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
+          registryActions: this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+          readReadiness: () => this.readProgrammaticReadiness(),
+        });
+        const freshInformation: typeof information = { ...information, execute: async (args, context) => {
+          // Internal freshness reads use the same resolver and host approvals, not candidate budgets.
+          if (this.advisoryTurn !== turn || !turn.active || !this.supportsToolCall("command_information", args)) throw new Error("Command information is unavailable under the current host policy.");
+          if (this.opts.approveToolExecution && !(await this.opts.approveToolExecution("command_information", args, context.signal))) throw new Error("Tool execution was not approved.");
+          if (this.advisoryTurn !== turn || !turn.active || !this.supportsToolCall("command_information", args)) throw new Error("Advisory permissions changed.");
+          context.signal.throwIfAborted();
+          return information.execute(args, context);
+        } };
+        try {
+          turn.claim("command_information", { action: "list" });
+          turn.observePage(slash.advisory.commands);
+          this.registerTool(createProgrammaticAdvisoryResultTool(() => this.advisoryTurn, freshInformation));
+          for (const name of ADVISORY_READ_TOOLS) {
+            const deferred = this.deferredBuiltinTools.get(name);
+            if (deferred && !this.registeredTools.has(name) && this.isToolCapabilityAllowed(name)) {
+              this.registeredTools.set(name, this.guardRegisteredTool(deferred));
+              promoted.add(name);
+            }
+          }
+          this.reconcileRegisteredTools();
+          if (!this.supportsToolCall("research_corpus")) turn.limitations.add("Read-only corpus tooling is unavailable; no installation or indexing was attempted.");
+          const receipts = this.advisoryEvidence.list();
+          await this.acceptPromptTemplate(slash.fullPrompt + (receipts.length ? `\n\nReusable host evidence receipts (retrieval, not verified conclusions):\n${JSON.stringify(receipts)}` : ""), provenance, options);
+        } finally {
+          const reportIncomplete = turn.active && !turn.submitted;
+          turn.close();
+          if (this.advisoryTurn === turn) this.advisoryTurn = undefined;
+          this.pendingAdvisoryPresentation = undefined;
+          this.registeredTools.delete("programmatic_advisory_result");
+          for (const name of promoted) {
+            if (!this.searchedPromotedBuiltinNames.has(name) && !this.capabilityPromotedBuiltinNames.has(name)) this.registeredTools.delete(name);
+          }
+          this.reconcileRegisteredTools();
+          if (reportIncomplete) {
+            const content = "## Recommendations — not started\n\nAssessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.";
+            this.eventBus.emit("text_delta", { text: `\n\n${content}\n` });
+            const notice: Message = { role: "assistant", content };
+            this.messages.push(notice);
+            await this.persistMessage(notice);
+            this.lastPersistedIndex = this.messages.length;
+          }
+        }
+      } else await this.acceptPromptTemplate(slash.fullPrompt, provenance, options);
       return;
     }
     if (slash?.kind === "command") {
@@ -1932,8 +2043,29 @@ export class AgentSession {
         // already hit the filesystem. Flushing here is what makes a crash lose
         // at most the in-flight step instead of the entire turn.
         await this.flushPendingMessages();
+        await this.publishAdvisoryPresentation();
         break;
     }
+  }
+
+  private async publishAdvisoryPresentation(): Promise<void> {
+    const pending = this.pendingAdvisoryPresentation;
+    this.pendingAdvisoryPresentation = undefined;
+    if (!pending || this.advisoryTurn !== pending.turn || !pending.turn.active ||
+        pending.signal.aborted) return;
+    // Tool results must precede this assistant message in provider/history order.
+    // Consume before awaiting so later checkpoints cannot publish it twice.
+    const messages = this.activeLoopMessages ?? this.messages;
+    const message: Message = { role: "assistant", content: pending.text };
+    messages.push(message);
+    const target = messages.length;
+    while (this.lastPersistedIndex < target) {
+      await this.persistMessage(messages[this.lastPersistedIndex], true);
+      this.lastPersistedIndex++;
+    }
+    if (this.advisoryTurn !== pending.turn || !pending.turn.active ||
+        pending.signal.aborted) return;
+    this.eventBus.emit("text_delta", { text: pending.text, standalone: true });
   }
 
   /**
@@ -3452,6 +3584,9 @@ export class AgentSession {
   }
 
   async newSession(preserveConversation = false): Promise<void> {
+    this.commandCreation?.cancel();
+    this.programmaticProfile?.cancel();
+    this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.(
       preserveConversation ? "checkpoint" : "reset",
     );
@@ -3519,7 +3654,14 @@ export class AgentSession {
           );
         throw error;
       }
-      // Commit: only successful reset retires source-checkpoint evidence.
+      // Commit: advisory receipts belong to the live conversation, not the
+      // AgentSession object or physical checkpoint. A preserving checkpoint
+      // continues that conversation; failed resets must retain its receipts.
+      if (!preserveConversation) {
+        this.advisoryTurn?.close();
+        this.advisoryEvidence.clear();
+      }
+      // Only successful reset retires source-checkpoint verification evidence.
       // Preserve conversation/phase identity when requested, never its approval.
       this.verificationEvidenceLedger.clear();
       this.hookToolCalls.clear();
@@ -3589,6 +3731,9 @@ export class AgentSession {
   }
 
   async loadSession(sessionPath: string): Promise<void> {
+    this.commandCreation?.cancel();
+    this.programmaticProfile?.cancel();
+    this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.("restore");
     try {
       await this.loadExistingSession(sessionPath);
@@ -3605,6 +3750,9 @@ export class AgentSession {
     const retain = Boolean(
       expectedConversationId && expectedConversationId === this.conversationId,
     );
+    this.commandCreation?.cancel();
+    this.programmaticProfile?.cancel();
+    this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
     try {
       await this.loadExistingSession(sessionPath, false, expectedConversationId);
@@ -3624,6 +3772,9 @@ export class AgentSession {
    * @param stepsBack Number of messages to rewind (default: 2 — backs up past last assistant + tool)
    */
   async branch(stepsBack = 2): Promise<{ branchedFrom: number; messagesKept: number }> {
+    this.commandCreation?.cancel();
+    this.programmaticProfile?.cancel();
+    this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.("history");
     try {
       return await this.branchSession(stepsBack);
@@ -3974,6 +4125,11 @@ export class AgentSession {
     const identity = getMcpToolIdentity(tool);
     const guardedTool: AgentTool = {
       ...tool,
+      onResultPrepared: (result) => {
+        this.advisoryTurn?.resultPrepared(result);
+        this.commandCreation?.verification.resultPrepared(result, tool.name);
+        tool.onResultPrepared?.(result);
+      },
       execute: async (args, context) => {
         const current = this.registeredTools.get(tool.name);
         let executionTarget = tool;
@@ -3995,14 +4151,46 @@ export class AgentSession {
               `${tool.name} is unavailable under the active tool capability policy.`,
           );
         }
-        if (
-          this.opts.approveToolExecution &&
-          !(await this.opts.approveToolExecution(tool.name, args, context.signal))
-        ) {
-          throw new Error("Tool execution was not approved.");
+        const setupInspection = this.setupInspection;
+        setupInspection?.claim(tool, args);
+        const advisory = this.advisoryTurn;
+        if (advisory) {
+          claimAdvisoryTool(advisory, tool, args, identity !== undefined);
         }
-        context.signal?.throwIfAborted();
-        return executionTarget.execute(args, context);
+        let commandReceipt: string | undefined;
+        let output: Awaited<ReturnType<AgentTool["execute"]>> | undefined;
+        try {
+          output = await executeAdvisoryTool(advisory, this.cwd, executionTarget, args, context, async () => {
+            try {
+              if (
+                this.opts.approveToolExecution &&
+                !(await this.opts.approveToolExecution(tool.name, args, context.signal))
+              ) {
+                throw new Error("Tool execution was not approved.");
+              }
+              context.signal.throwIfAborted();
+              if (this.setupInspection !== setupInspection || (setupInspection && !setupInspection.active) || this.advisoryTurn !== advisory || (advisory && !advisory.active) || this.registeredTools.get(tool.name) !== current || !this.isToolCapabilityAllowed(tool.name) || this.unavailableToolNames.has(tool.name)) throw new Error("Tool permissions changed before execution.");
+              commandReceipt = await this.commandCreation?.verification.observeStart(tool.name, args, context);
+              await this.opts.validateToolExecution?.();
+              context.signal.throwIfAborted();
+              if (this.setupInspection !== setupInspection || (setupInspection && !setupInspection.active) || this.advisoryTurn !== advisory || this.registeredTools.get(tool.name) !== current || !this.isToolCapabilityAllowed(tool.name) || this.unavailableToolNames.has(tool.name)) throw new Error("Tool permissions changed while observing verification inputs.");
+            } catch (error) {
+              if (advisory && tool.name === "programmatic_scan")
+                advisory.settleScan(context.signal.aborted ? "cancelled" : "denied");
+              throw error;
+            }
+          });
+          // Do not accept result evidence against content that changed while the tool ran.
+          await this.opts.validateToolExecution?.();
+        } finally {
+          await this.commandCreation?.verification.observeEnd(commandReceipt, output, context.signal);
+        }
+        if (advisory && tool.name === "programmatic_advisory_result" && advisory.submitted &&
+            this.advisoryTurn === advisory && advisory.active && !context.signal.aborted &&
+            typeof output === "string") {
+          this.pendingAdvisoryPresentation = { turn: advisory, text: output, signal: context.signal };
+        }
+        return output;
       },
     };
     return identity ? withMcpToolIdentity(guardedTool, identity) : guardedTool;
@@ -4010,6 +4198,8 @@ export class AgentSession {
 
   private isToolCapabilityAllowed(toolName: string): boolean {
     if (!this.isToolAllowed(toolName)) return false;
+    if (this.setupInspection && !this.setupInspection.allows(toolName)) return false;
+    if (this.advisoryTurn && !ADVISORY_READ_TOOLS.has(toolName)) return false;
     const policy = this.toolCapabilityPolicy;
     if (!policy) return true;
     if (policy.allowedNames.has(toolName)) return true;
@@ -5060,6 +5250,11 @@ export class AgentSession {
   }
 
   async dispose(beforeSessionReset?: () => Promise<void>, awaitProcesses = false): Promise<void> {
+    this.commandCreation?.dispose();
+    this.programmaticProfile?.dispose();
+    this.setupInspection?.close();
+    this.advisoryTurn?.close();
+    this.advisoryEvidence.clear();
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
     this.diagnosticsRecorder?.finalize();
@@ -5156,7 +5351,15 @@ export class AgentSession {
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.hookToolCalls.clear();
     this.checkpointGeneration = loaded.header.generation ?? 0;
-    this.conversationId = loaded.header.conversationId ?? loaded.header.id;
+    const restoredConversationId = loaded.header.conversationId ?? loaded.header.id;
+    // Retire the old conversation's receipts at the identity transition, after
+    // loading and validating the destination. Same-conversation checkpoints and
+    // restores rejected before this point keep their evidence.
+    if (this.conversationId !== restoredConversationId) {
+      this.advisoryTurn?.close();
+      this.advisoryEvidence.clear();
+    }
+    this.conversationId = restoredConversationId;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
     this.openAICodexFast = loaded.header.openAICodexFast ?? false;
     const legacyLabel = [...loaded.entries]

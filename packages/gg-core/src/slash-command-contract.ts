@@ -1,3 +1,12 @@
+/** Client-owned identities reserve names without implying backend execution handlers. */
+export const CLIENT_OWNED_SLASH_COMMANDS = Object.freeze({
+  schedule: Object.freeze({ name: "schedule", aliases: Object.freeze(["sched"]) }),
+});
+
+export const CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES: readonly string[] = Object.freeze(
+  Object.values(CLIENT_OWNED_SLASH_COMMANDS).flatMap(({ name, aliases }) => [name, ...aliases]),
+);
+
 /** Listing field limits measured in UTF-16 code units, matching string.length. */
 export const SLASH_COMMAND_NAME_MAX_LENGTH = 100;
 export const SLASH_COMMAND_DESCRIPTION_MAX_LENGTH = 4_000;

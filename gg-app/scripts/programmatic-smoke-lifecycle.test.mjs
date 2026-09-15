@@ -40,6 +40,18 @@ function smokeFixture() {
   return { audit, options, failure, nativeEvidence };
 }
 
+it("requires extended native boundaries and rejects normal-window fallback", () => {
+  const { audit, nativeEvidence } = smokeFixture();
+  expect(() => validateNativeSmokeEvidence(audit, {}, { extendedWorkflow: true })).toThrow(/ordered native/);
+  const evidence = JSON.parse(nativeEvidence);
+  evidence.samples.splice(-1, 0, ...["extended-advice-settled", "extended-run-settled"].map((boundary) => ({ boundary, verified: true, minimized: true })));
+  writeFileSync(join(audit, "native-minimized.json"), JSON.stringify(evidence));
+  const result = {};
+  validateNativeSmokeEvidence(audit, result, { extendedWorkflow: true });
+  expect(result.minimized).toBe(true);
+  expect(() => validateNativeSmokeEvidence(audit, {}, { extendedWorkflow: true, allowNormalWindow: true })).toThrow(/forbids normal-window/);
+});
+
 it("publishes final ordered native-verdict failure, not success, without rewriting native diagnostics", async () => {
   const { audit, options, failure } = smokeFixture();
   const original = JSON.stringify({ samples: [{ boundary: "native-ready", verified: true, minimized: true }] });

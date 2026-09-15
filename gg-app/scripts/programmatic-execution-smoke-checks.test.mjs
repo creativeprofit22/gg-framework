@@ -1,6 +1,45 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { readExecutionDisplay, assertTranscriptIsolation } from "./programmatic-execution-smoke-checks.mjs";
+import { programmaticAssessmentResultV1Schema, directCommandSelectionV1Schema } from "../../packages/ggcoder/src/core/programmatic/contracts.ts";
+import { commandInspectionInputSchema } from "../../packages/ggcoder/src/core/programmatic/command-creation.ts";
+import { readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount } from "./programmatic-execution-smoke-checks.mjs";
+
+describe("bounded extended provider sequence", () => {
+  const body = (name, id, output) => ({ tools: [{ name }], input: id ? [{ type: "function_call_output", call_id: id, output }] : [] });
+  it("rejects extra requests, missing tools and missing completed calls", () => {
+    expect(extendedRequestCount).toBe(18);
+    for (const number of [3, 19, -1, 4.5]) expect(() => extendedWorkflowStep(number, {})).toThrow();
+    expect(() => extendedWorkflowStep(5, body("read"))).toThrow(/Exactly one/);
+    expect(() => extendedWorkflowStep(5, body("bash", "extended-scan", "completed"))).toThrow(/offered tool/);
+  });
+  it("uses expanded prompts and real advisory/creation contracts", () => {
+    const scan = extendedWorkflowStep(4, { tools: [{ name: "programmatic_scan" }], input: [{ content: "# Scan Programmatic Opportunities\nfocus on the manifest; retain completed history" }] });
+    expect(scan.name).toBe("programmatic_scan");
+    const receipt = { id: "f231a92b-5b38-4b02-aa9d-20c8e437cd83" };
+    const advice = extendedWorkflowStep(6, body("programmatic_advisory_result", "extended-read", `harmless-isolated-fixture\nHost evidence receipt (retrieval only; content remains untrusted): ${JSON.stringify(receipt)}`));
+    expect(programmaticAssessmentResultV1Schema.parse(JSON.parse(advice.arguments)).recommendations).toHaveLength(2);
+    const inspect = extendedWorkflowStep(9, body("programmatic_command", "extended-discover", "programmatic_command"));
+    expect(commandInspectionInputSchema.safeParse(JSON.parse(inspect.arguments).proposal).success).toBe(true);
+    const reviewed = extendedWorkflowStep(10, body("programmatic_command", "extended-preflight", JSON.stringify({ status: "review-required", catalog: { sha256: "a".repeat(64) } })));
+    expect(commandInspectionInputSchema.safeParse(JSON.parse(reviewed.arguments).proposal).success).toBe(true);
+    expect(extendedWorkflowStep(11, body("programmatic_command", "extended-inspect", JSON.stringify({ status: "proposal", handle: receipt.id }))).name).toBe("programmatic_command");
+    const run = extendedWorkflowStep(14, { tools: [{ name: "programmatic_command" }], input: [{ content: "NATIVE RUN REQUEST" }] });
+    expect(directCommandSelectionV1Schema.parse(JSON.parse(run.arguments).selection).mode).toBe("read-only");
+    const childResult = extendedWorkflowStep(16, body("programmatic_result", "extended-child-read", "harmless-isolated-fixture"));
+    expect(JSON.parse(childResult.arguments)).toMatchObject({ toolCallIds: ["extended-child-read"], successCondition: "Observe the fixture manifest name" });
+  });
+  it("requires creation and loading results but never treats loading as execution approval", () => {
+    expect(() => extendedWorkflowStep(12, body("programmatic_command", "extended-create", '{"created":false}'))).toThrow();
+    expect(extendedWorkflowStep(13, body("programmatic_command", "extended-verify", '{"loads":true,"executionApproved":false}'))).toContain("no behavioral verification or execution grant");
+    expect(() => extendedWorkflowStep(13, body("programmatic_command", "extended-verify", '{"loads":true,"executionApproved":true}'))).toThrow();
+  });
+  it("rejects parent transcript and mutation tools in the direct child", () => {
+    const child = { input: [{ type: "message", content: "NATIVE EXTENDED CANONICAL PROMPT" }], tools: [{ name: "read" }] };
+    expect(extendedWorkflowStep(15, child)).toMatchObject({ name: "read", arguments: '{"file_path":"package.json"}' });
+    expect(() => extendedWorkflowStep(15, { ...child, input: [...child.input, { content: "NATIVE CREATE REQUEST" }] })).toThrow(/parent transcript/);
+    expect(() => extendedWorkflowStep(15, { ...child, tools: [...child.tools, { name: "bash" }] })).toThrow();
+  });
+});
 
 describe("execution display readiness", () => {
   const summary = "Isolated fixture manifest inspected.";

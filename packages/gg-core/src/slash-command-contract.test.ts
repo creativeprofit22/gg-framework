@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLIENT_OWNED_SLASH_COMMANDS,
+  CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES,
   isSlashCommandsResponse,
   isValidProgrammaticFocus,
   PROGRAMMATIC_FOCUS_MAX_LENGTH,
@@ -17,6 +19,15 @@ const response: SlashCommandsResponse = {
     },
   ],
 };
+
+describe("client-owned slash namespace", () => {
+  it("reserves the scheduling canonical name and alias without listing backend handlers", () => {
+    expect(CLIENT_OWNED_SLASH_COMMANDS.schedule).toEqual({ name: "schedule", aliases: ["sched"] });
+    expect(CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES).toEqual(["schedule", "sched"]);
+    expect(Object.isFrozen(CLIENT_OWNED_SLASH_COMMANDS.schedule.aliases)).toBe(true);
+    expect(Object.isFrozen(CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES)).toBe(true);
+  });
+});
 
 describe("programmatic focus contract", () => {
   it("bounds UTF-16 units without trimming stored text or rejecting Unicode", () => {

@@ -83,7 +83,7 @@ describe("terminal live custom command resolution", () => {
     await writeCommand(path.join(cwd, ".gg/commands"), builtin.name, "Shadow body");
     const opts = options(`/${builtin.name}`);
     expect(await submitPromptCommand(opts)).toBe(true);
-    expect(opts.runAgent).toHaveBeenCalledWith(builtin.prompt);
+    expect(opts.runAgent).toHaveBeenCalledWith(builtin.prompt, { programmaticSetupInspection: true });
     expect(load).not.toHaveBeenCalled();
     expect(discover).not.toHaveBeenCalled();
     expect(readiness).not.toHaveBeenCalled();
@@ -124,6 +124,7 @@ describe("terminal setup-first submission", () => {
       expect(approved.runAgent).toHaveBeenCalledOnce();
       const content = String(vi.mocked(approved.runAgent).mock.calls[0]![0]);
       const advisory = JSON.parse(content.slice(content.lastIndexOf("\n\n{") + 2));
+      expect(vi.mocked(approved.runAgent).mock.calls[0]![1]).toEqual({ programmaticAdvisory: { cwd, context: advisory } });
       expect(advisory.assessment).toEqual({ version: 1, ...(focus.trim() ? { focus: focus.trim() } : {}) });
       expect(advisory.intent).toBe(focus.trim() ? "focused-assessment" : "general-assessment");
       expect(advisory.commands.entries.length).toBeGreaterThan(0);

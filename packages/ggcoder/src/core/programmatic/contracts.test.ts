@@ -7,6 +7,11 @@ import { describe, expect, it } from "vitest";
 import { parseSkillFile } from "../skills.js";
 import { SlashCommandRegistry } from "../slash-commands.js";
 import {
+  programmaticCommandVerificationStateSchema,
+  directCommandSelectionV1Schema,
+  directExecutionPolicyV1Schema,
+  directExecutionSnapshotV1Schema,
+  directCommandResultV1Schema,
   isProgrammaticReviewCurrent,
   type ProgrammaticApprovalContext,
   programmaticAssessmentInputV1Schema,
@@ -60,6 +65,73 @@ const programmaticProfileEnvelope = {
   profile: programmaticProfile,
 };
 const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
+
+describe("independent command verification state", () => {
+  it("preserves unknown/false/true loading without granting behavior or execution", () => {
+    for (const loads of [undefined, false, true]) {
+      const value = { ...(loads === undefined ? {} : { loads }), reviewedContent: "unavailable", behavior: "unavailable", executionApproved: false };
+      expect(programmaticCommandVerificationStateSchema.parse(value)).toEqual(value);
+      expect(programmaticCommandVerificationStateSchema.safeParse({ ...value, executionApproved: true }).success).toBe(false);
+      expect(programmaticCommandVerificationStateSchema.safeParse({ ...value, behavior: "passed" }).success).toBe(false);
+    }
+  });
+});
+
+describe("direct reviewed execution contracts", () => {
+  const selection = {
+    version: 1, command: { version: 1, name: "custom-check", source: "project-custom", invocationKind: "prompt" },
+    arguments: "input", outcome: "Check input", successCondition: "Input is checked",
+    helpers: ["scripts/check.mjs"], prerequisites: ["package.json"], requiredTools: ["bash"],
+    mode: "general-work", containment: "agent-session",
+  };
+  const policy = {
+    version: 1, revision: 1, mode: "general-work", tools: ["bash", "read"], actionApprovalTools: ["bash"],
+    containment: "agent-session", disclosure: "Not an OS sandbox", maxTurns: 30, deadlineMs: 600_000,
+    provider: "fixture", model: "fixture", runtimeSha256: "a".repeat(64),
+  };
+  const file = { path: "scripts/check.mjs", sha256: "b".repeat(64), identitySha256: "c".repeat(64), bytes: 100 };
+  const snapshot = {
+    version: 1, selection, policy,
+    command: { version: 1, command: selection.command, capabilityKind: "script-backed", ownerSha256: "d".repeat(64), bodySha256: "e".repeat(64), helpers: [{ path: file.path, sha256: file.sha256 }] },
+    repositorySha256: "f".repeat(64), rawMarkdownSha256: "a".repeat(64), sourceIdentitySha256: "b".repeat(64),
+    helpers: [file], prerequisites: [{ ...file, path: "package.json" }],
+  };
+  it("accepts an existing custom command without a creation receipt or Opportunity", () => {
+    expect(directCommandSelectionV1Schema.parse(selection)).toEqual(selection);
+    expect(directExecutionSnapshotV1Schema.parse(snapshot)).toEqual(snapshot);
+    expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: "custom-check" }).success).toBe(false);
+  });
+  it.each([
+    { approval: true }, { helpers: ["../escape"] }, { helpers: ["C:/escape"] },
+    { helpers: ["scripts/a", "scripts/A"] }, { prerequisites: selection.helpers },
+    { requiredTools: ["bash", "bash"] }, { mode: "unrestricted" }, { arguments: "x".repeat(4001) },
+  ])("rejects invalid or caller-authorized selection %j", (change) => {
+    expect(directCommandSelectionV1Schema.safeParse({ ...selection, ...change }).success).toBe(false);
+  });
+  it("binds every declaration and rejects unsupported or over-budget host envelopes", () => {
+    for (const change of [
+      { selection: { ...selection, containment: "os-confined" } },
+      { selection: { ...selection, requiredTools: ["steroids"] } },
+      { helpers: [{ ...file, sha256: "a".repeat(64) }] },
+      { prerequisites: [] }, { helpers: [{ ...file, bytes: 128 * 1024 + 1 }] },
+      { policy: { ...policy, mode: "read-only" } },
+      { command: { ...snapshot.command, command: { ...selection.command, name: "other" } } },
+    ]) expect(directExecutionSnapshotV1Schema.safeParse({ ...snapshot, ...change }).success).toBe(false);
+    expect(directExecutionPolicyV1Schema.safeParse({ ...policy, actionApprovalTools: ["write"] }).success).toBe(false);
+    expect(directExecutionPolicyV1Schema.safeParse({ ...policy, maxTurns: 31 }).success).toBe(false);
+  });
+  it("requires bounded content-specific results without certifying behavior", () => {
+    const result = {
+      version: 1, runId: "00000000-0000-4000-8000-000000000000", status: "completed", summary: "Finished",
+      snapshot, executionSha256: "a".repeat(64), evidence: [], behavior: "unverified", limitations: ["Tool completion does not prove correctness."],
+    };
+    expect(directCommandResultV1Schema.parse(result)).toEqual(result);
+    expect(directCommandResultV1Schema.safeParse({ ...result, behavior: "passed" }).success).toBe(false);
+    expect(directCommandResultV1Schema.safeParse({ ...result, snapshot: undefined }).success).toBe(false);
+    expect(directCommandResultV1Schema.safeParse({ ...result, limitations: [] }).success).toBe(false);
+    expect(directCommandResultV1Schema.safeParse({ ...result, conversation: [] }).success).toBe(false);
+  });
+});
 
 describe("independent stored setup envelope", () => {
   const snapshot = {
@@ -1035,6 +1107,14 @@ describe("programmatic extension contracts", () => {
       ],
     };
     expect(programmaticCreationProposalV1Schema.safeParse(scriptCreation).success).toBe(true);
+    const frontmatterEdit = {
+      ...creation,
+      files: [{ ...creation.files[0], proposedSha256: "d".repeat(64) }],
+    };
+    expect(programmaticCreationProposalV1Schema.safeParse(frontmatterEdit).success).toBe(true);
+    expect(isProgrammaticReviewCurrent(creation, frontmatterEdit, "creation", {
+      ...approval, purpose: "creation",
+    })).toBe(false);
     for (const value of [
       {
         ...creation,
@@ -1045,7 +1125,8 @@ describe("programmatic extension contracts", () => {
       { ...creation, snapshot: { ...snapshot, command: { ...command, source: "global-custom" } } },
       { ...creation, files: [] },
       { ...creation, files: [...creation.files, ...creation.files] },
-      { ...creation, files: [{ ...creation.files[0], proposedSha256: "d".repeat(64) }] },
+      { ...creation, files: [{ ...creation.files[0], path: ".gg/commands/wrong.md" }] },
+      { ...scriptCreation, files: [...creation.files, { ...scriptCreation.files[1], proposedSha256: "d".repeat(64) }] },
       { ...creation, files: [{ ...creation.files[0], prior: {} }] },
       { ...creation, snapshot: app },
       { ...scriptCreation, files: creation.files },

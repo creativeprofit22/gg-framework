@@ -59,6 +59,18 @@ describe("plan mode", () => {
     }
   });
 
+  it("denies reviewed command publication before asking or touching the filesystem", async () => {
+    const cwd = await makeTempDir();
+    const result = await createTools(cwd, { planModeRef: { current: true },
+      reviewCommandCreation: async () => { throw new Error("review must not be requested in plan mode"); } });
+    try {
+      const tool = result.tools.find((item) => item.name === "programmatic_command")!;
+      expect(await tool.execute({ action: "create", handle: "0283ca0c-d407-4bae-9b7f-74ed60134814" }, toolContext()))
+        .toContain("restricted in plan mode");
+      expect(await fs.readdir(cwd)).toEqual([]);
+    } finally { result.commandCreation?.dispose(); result.processManager.shutdownAll(); result.lspManager?.shutdownAll(); await fs.rm(cwd, { recursive: true, force: true }); }
+  });
+
   it("allows write only under .gg/plans while plan mode is active", async () => {
     const cwd = await makeTempDir();
     const planModeRef = { current: true };

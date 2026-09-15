@@ -50,6 +50,7 @@ export class AppSidecarProgrammaticChat {
     private readonly claim: () => boolean,
     private readonly release: () => void,
     private readonly implementations = engines,
+    private readonly onSettled: () => void = () => {},
   ) {}
 
   reset(): void {
@@ -220,6 +221,9 @@ export class AppSidecarProgrammaticChat {
       );
     } finally {
       this.release();
+      // These short I/O owners can receive queued prompts without a provider
+      // turn to drain them. Hand off only after releasing exclusive ownership.
+      this.onSettled();
     }
   }
 }

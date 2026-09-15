@@ -5,6 +5,11 @@ import { parseSkillFile } from "./skills.js";
 
 export type CustomCommandScope = "global" | "project";
 
+/** Arguments stay appended data; there is no template-substitution language. */
+export function appendCommandArguments(prompt: string, args: string): string {
+  return args ? `${prompt}\n\n## User Instructions\n\n${args}` : prompt;
+}
+
 export interface CustomCommand {
   name: string;
   description: string;
@@ -33,7 +38,8 @@ function commandDirsForHome(home: string | undefined): string[] {
   return dirs;
 }
 
-function getGlobalCommandDirs(): string[] {
+/** Shared by loading and pre-deduplication creation collision checks. */
+export function getGlobalCommandDirs(): string[] {
   return [
     ...new Set([
       path.join(getAppPaths().agentDir, "commands"),

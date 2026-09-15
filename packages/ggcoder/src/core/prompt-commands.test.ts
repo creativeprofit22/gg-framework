@@ -255,18 +255,22 @@ describe("prompt commands", () => {
     expect(getPromptCommand("generate-programmatic-profile")).toBeUndefined();
   });
 
-  it("renders /programmatic discovery only when the scan tool is unavailable", () => {
+  it("renders bounded advice without tool discovery while keeping exactly one scan", () => {
     const deferred = getPromptCommand("programmatic", () => false)!.prompt;
     const eager = getPromptCommand("programmatic", (name) => name === "programmatic_scan")!.prompt;
 
-    expect(deferred).toContain("Load the deferred `programmatic_scan` tool using `tool_search`");
+    expect(deferred).toContain("The host supplies permitted assessment tools");
     expect(eager).not.toContain("tool_search");
     for (const prompt of [deferred, eager]) {
+      expect(prompt).toContain("Submit programmatic_advisory_result");
+      expect(prompt).toContain("Recommendations — not started");
+      expect(prompt).toContain("not just three executable specialists");
+      expect(prompt).toContain("prefer simpler manual work");
       expect(prompt.match(/Call `programmatic_scan`/g)).toHaveLength(1);
       expect(prompt).toContain("exactly once with an empty argument object");
-      expect(prompt).toContain("Report only the tool's bounded result");
+      expect(prompt).toContain("Report the tool's bounded result separately as Deterministic scan");
       expect(prompt).toContain(
-        "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+        "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
       );
     }
   });

@@ -1,4 +1,7 @@
-import type { AskUserSettledEvent } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { randomUUID } from "node:crypto";
+import { ASK_USER_MAX_PENDING, isAskUserPrompt, type AskUserSettledEvent, type AskUserRequest, type AskUserPrompt } from "@kenkaiiii/gg-core/desktop-session-ux";
+export type { AskOption, AskQuestionKind, AskQuestion, AskUserRequest, AskUserPrompt } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type { AskQuestion } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { createParkedRequests, type ParkedRequests } from "./parked-requests.js";
 
 /**
@@ -7,40 +10,6 @@ import { createParkedRequests, type ParkedRequests } from "./parked-requests.js"
  * user may be reading the reply the question belongs to.
  */
 export const ASK_USER_TIMEOUT_MS = 10 * 60_000;
-
-/** One selectable answer. `value` is what the agent gets back; `label` is UI. */
-export interface AskOption {
-  label: string;
-  value?: string;
-  /** One short line under the label, for rows the user has to weigh up. */
-  hint?: string;
-  /** Marks the agent's recommendation. Tagged in the UI, never preselected. */
-  recommended?: boolean;
-}
-
-export type AskQuestionKind = "confirm" | "choice" | "multi" | "text";
-
-export interface AskQuestion {
-  /** Stable key this question's answer is returned under. */
-  id: string;
-  question: string;
-  kind: AskQuestionKind;
-  /** Optional one-line elaboration shown under the question. */
-  detail?: string;
-  /** Choices for `choice`/`multi`. `confirm` defaults to Yes/No when omitted. */
-  options?: AskOption[];
-  /** Whether the free-text escape is offered (default true, forced on `text`). */
-  allowOther?: boolean;
-}
-
-export interface AskUserRequest {
-  questions: AskQuestion[];
-}
-
-/** The frame a host broadcasts so its UI can render the band. */
-export interface AskUserPrompt extends AskUserRequest {
-  id: string;
-}
 
 export type AskUserResult =
   | { action: "answer"; answers: Record<string, string | string[]> }
@@ -58,14 +27,26 @@ export function createAskUserBridge(opts: {
   onSettled?: (event: AskUserSettledEvent) => void;
   timeoutMs?: number;
 }): AskUserBridge {
-  return createParkedRequests<AskUserRequest, AskUserResult>({
-    idPrefix: "ask",
+  // A delayed answer from a previous daemon/bridge can never address this one.
+  const idPrefix = `ask-${randomUUID()}`;
+  const bridge = createParkedRequests<AskUserRequest, AskUserResult>({
+    idPrefix,
     broadcast: opts.broadcast,
     onSettled: (id, result) => opts.onSettled?.({ id, action: result.action }),
     cancelValue: () => ({ action: "cancel" }),
     timeoutMs: opts.timeoutMs ?? ASK_USER_TIMEOUT_MS,
     ...(opts.onTimeout ? { onTimeout: opts.onTimeout } : {}),
   });
+  const park = bridge.park;
+  bridge.park = async (request) => {
+    const detached = structuredClone(request);
+    if (bridge.pendingCount >= ASK_USER_MAX_PENDING ||
+      !isAskUserPrompt({ ...detached, id: `${idPrefix}-${Number.MAX_SAFE_INTEGER}` })) {
+      throw new Error("Question cannot be parked: invalid content or live-question limit exceeded.");
+    }
+    return park(detached);
+  };
+  return bridge;
 }
 
 /**

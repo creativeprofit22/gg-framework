@@ -283,6 +283,102 @@ export const programmaticCommandSnapshotV1Schema = z
     "workspace actions require app-backed capabilities",
   );
 
+// Execution envelopes are independent of advisory snapshots and never constitute approval.
+const executionPathsSchema = z.array(
+  repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath, "unsafe declared file path"),
+).max(32).refine(
+  (values) => isStrictlyAscending(values) && new Set(values.map((value) => value.toLowerCase())).size === values.length,
+  "declared paths must be unique and sorted ascending",
+);
+const executionToolNamesSchema = z.array(z.string().min(1).max(100).regex(/^[a-z][a-z0-9_]*(?![\s\S])/)).max(64)
+  .refine(isStrictlyAscending, "tool names must be unique and sorted ascending");
+export const directCommandSelectionV1Schema = z.strictObject({
+  version: z.literal(1),
+  command: programmaticCommandReferenceV1Schema,
+  arguments: z.string().max(4_000),
+  outcome: boundedString(4_000),
+  successCondition: boundedString(4_000),
+  helpers: executionPathsSchema,
+  prerequisites: executionPathsSchema,
+  requiredTools: executionToolNamesSchema,
+  mode: z.enum(["read-only", "general-work"]),
+  containment: z.enum(["agent-session", "os-confined"]),
+}).refine(
+  (value) => new Set([...value.helpers, ...value.prerequisites].map((entry) => entry.toLowerCase())).size === value.helpers.length + value.prerequisites.length,
+  "helper and prerequisite declarations must not overlap",
+);
+export const directExecutionPolicyV1Schema = z.strictObject({
+  version: z.literal(1),
+  revision: positiveSafeIntegerSchema,
+  mode: z.enum(["read-only", "general-work"]),
+  tools: executionToolNamesSchema,
+  actionApprovalTools: executionToolNamesSchema,
+  containment: z.literal("agent-session"),
+  disclosure: boundedString(4_000),
+  maxTurns: positiveSafeIntegerSchema.max(30),
+  deadlineMs: positiveSafeIntegerSchema.max(600_000),
+  provider: boundedString(100),
+  model: boundedString(200),
+  runtimeSha256: sha256Schema,
+}).refine(
+  (value) => value.actionApprovalTools.every((name) => value.tools.includes(name)),
+  "action approval tools must be in the effective tool set",
+);
+const executionFileSnapshotSchema = z.strictObject({
+  path: repositoryRelativePathSchema.refine(isSafeConfigurationSnapshotPath, "unsafe declared file path"),
+  sha256: sha256Schema,
+  identitySha256: sha256Schema,
+  bytes: nonnegativeSafeIntegerSchema.max(128 * 1024),
+});
+const executionFilesSchema = z.array(executionFileSnapshotSchema).max(32).refine(
+  (files) => isStrictlyAscending(files.map((file) => file.path)) && new Set(files.map((file) => file.path.toLowerCase())).size === files.length,
+  "files must be unique and sorted ascending",
+);
+export const directExecutionSnapshotV1Schema = z.strictObject({
+  version: z.literal(1),
+  selection: directCommandSelectionV1Schema,
+  command: programmaticCommandSnapshotV1Schema,
+  repositorySha256: sha256Schema,
+  rawMarkdownSha256: sha256Schema,
+  sourceIdentitySha256: sha256Schema,
+  helpers: executionFilesSchema,
+  prerequisites: executionFilesSchema,
+  policy: directExecutionPolicyV1Schema,
+}).refine((value) =>
+  JSON.stringify(value.selection.command) === JSON.stringify(value.command.command) &&
+  JSON.stringify(value.selection.helpers) === JSON.stringify(value.helpers.map((file) => file.path)) &&
+  JSON.stringify(value.selection.prerequisites) === JSON.stringify(value.prerequisites.map((file) => file.path)) &&
+  JSON.stringify(value.command.helpers) === JSON.stringify(value.helpers.map(({ path, sha256 }) => ({ path, sha256 }))) &&
+  value.selection.mode === value.policy.mode && value.selection.containment === value.policy.containment &&
+  value.selection.command.invocationKind === "prompt" &&
+  value.selection.requiredTools.every((name) => value.policy.tools.includes(name)) &&
+  [...value.helpers, ...value.prerequisites].reduce((total, file) => total + file.bytes, 0) <= 512 * 1024,
+  "execution snapshot must bind the exact supported selection, files and effective policy",
+);
+export const directCommandResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  runId: z.string().uuid(),
+  status: z.enum(["rejected", "failed", "cancelled", "completed"]),
+  summary: boundedString(4_000),
+  executionSha256: sha256Schema.optional(),
+  snapshot: directExecutionSnapshotV1Schema.optional(),
+  evidence: z.array(z.strictObject({
+    toolCallId: boundedString(256), tool: boundedString(100),
+    argumentsSha256: sha256Schema, resultSha256: sha256Schema,
+    basis: z.literal("tool-completed"),
+  })).max(32),
+  behavior: z.literal("unverified"),
+  limitations: z.array(boundedString(4_000)).min(1).max(16),
+}).refine((value) =>
+  (value.snapshot === undefined) === (value.executionSha256 === undefined) &&
+  (value.status === "rejected" || value.snapshot !== undefined),
+  "dispatched results require content-specific provenance",
+);
+export type DirectCommandSelection = z.infer<typeof directCommandSelectionV1Schema>;
+export type DirectExecutionPolicy = z.infer<typeof directExecutionPolicyV1Schema>;
+export type DirectExecutionSnapshot = z.infer<typeof directExecutionSnapshotV1Schema>;
+export type DirectCommandResult = z.infer<typeof directCommandResultV1Schema>;
+
 export const programmaticCommandAvailabilityV1Schema = z.discriminatedUnion("status", [
   z.strictObject({ status: z.literal("available"), snapshot: programmaticCommandSnapshotV1Schema }),
   z.strictObject({
@@ -420,20 +516,32 @@ export const programmaticCreationProposalV1Schema = z
     "files must be unique and sorted ascending",
   )
   .refine((value) => {
-    const expected = [
-      { path: value.commandPath, sha256: value.snapshot.bodySha256 },
-      ...value.snapshot.helpers,
-    ];
+    // bodySha256 identifies parsed prompt content, not raw Markdown/frontmatter.
+    // Only the host holding the bytes can enforce their correspondence. The review
+    // still binds the raw file digest, so even frontmatter-only edits invalidate it.
+    const expected = [value.commandPath, ...value.snapshot.helpers.map((file) => file.path)];
     return (
-      new Set(expected.map((file) => file.path)).size === expected.length &&
+      new Set(expected).size === expected.length &&
       expected.length === value.files.length &&
-      expected.every((file) =>
-        value.files.some(
-          (candidate) => candidate.path === file.path && candidate.proposedSha256 === file.sha256,
-        ),
+      expected.every((filePath) => value.files.some((file) => file.path === filePath)) &&
+      value.snapshot.helpers.every((helper) =>
+        value.files.some((file) => file.path === helper.path && file.proposedSha256 === helper.sha256),
       )
     );
-  }, "files must exactly bind command and helper content");
+  }, "files must exactly bind command path and helper content; host validates raw Markdown against parsed body");
+
+/** Independent observations on a session-local command inspection, not approval. */
+export const programmaticCommandVerificationStateSchema = z.strictObject({
+  /** Actual discovery resolved the expected project owner; false means no resolution.
+   * Omitted when discovery/owner could not be established, never inferred from bad evidence. */
+  loads: z.boolean().optional(),
+  /** Exact reviewed files, prerequisites, owner, parsed prompt and environment rechecked.
+   * Unavailable also covers unchecked identity; it does not mean Markdown cannot load. */
+  reviewedContent: z.enum(["current", "unavailable"]),
+  behavior: z.literal("unavailable"),
+  executionApproved: z.literal(false),
+});
+export type ProgrammaticCommandVerificationState = z.infer<typeof programmaticCommandVerificationStateSchema>;
 
 const verificationCaseSchema = z.strictObject({
   category: z.enum(["loads", "behavior", "side-effects"]),

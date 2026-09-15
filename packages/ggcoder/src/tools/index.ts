@@ -13,6 +13,9 @@ import { createBashTool } from "./bash.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
+import { createProgrammaticCommandTool } from "./programmatic-command.js";
+import type { CommandCreationReviewer } from "../core/programmatic/command-creation.js";
+import type { DirectCommandExecutor } from "../core/programmatic/execution.js";
 import { createCommandInformationTool } from "./command-information.js";
 import type { CommandDiscoveryOptions } from "../core/command-discovery.js";
 import { createFindTool } from "./find.js";
@@ -36,6 +39,7 @@ import { createGenerateImageTool, type GenerateImageAuth } from "./generate-imag
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
 import { createSteroidsTool } from "./steroids.js";
+import { createResearchCorpusTool } from "./research-corpus.js";
 import { findSteroidsBinary } from "../core/steroids.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
@@ -53,6 +57,12 @@ export { BUILTIN_TOOL_NAMES } from "./prompt-hints.js";
 
 export interface CreateToolsOptions {
   commandDiscovery?: CommandDiscoveryOptions | false;
+  reviewCommandCreation?: CommandCreationReviewer;
+  reviewProgrammaticSetup?: CommandCreationReviewer;
+  setupOwner?: () => string;
+  assertSetupAllowed?: () => void;
+  executeReviewedCommand?: DirectCommandExecutor;
+  getAvailableToolNames?: () => readonly string[];
   agents?: AgentDefinition[];
   skills?: Skill[];
   /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
@@ -145,6 +155,7 @@ export interface CreateToolsOptions {
 
 export interface CreateToolsResult {
   tools: AgentTool[];
+  programmaticProfile: ReturnType<typeof createProgrammaticProfileTool>;
   processManager: ProcessManager;
   /**
    * Rebuild the `read` tool for a different model, reusing the SAME read
@@ -163,6 +174,7 @@ export interface CreateToolsResult {
    */
   lspManager?: LspManager;
   subAgentManager?: SubAgentManager;
+  commandCreation?: ReturnType<typeof createProgrammaticCommandTool>;
 }
 
 export async function createTools(
@@ -191,6 +203,12 @@ export async function createTools(
   // drives auto-compression. Non-video models get `undefined` — video falls back
   // to the plain binary-file notice, never offered to models that can't watch it.
   const videoByteLimit = opts?.model ? getVideoByteLimit(opts.model) : undefined;
+  const programmaticProfile = createProgrammaticProfileTool(cwd, {
+    localFilesystem: ops === localOperations, planModeRef,
+    reviewer: opts?.reviewProgrammaticSetup, owner: opts?.setupOwner,
+    assertAllowed: opts?.assertSetupAllowed,
+    onPreFileMutation: opts?.onPreFileMutation, onFileMutated: opts?.onFileMutated,
+  });
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, videoByteLimit),
     createWriteTool(
@@ -229,12 +247,7 @@ export async function createTools(
       onPreFileMutation: opts?.onPreFileMutation,
       getSandboxPolicy: ops === localOperations ? opts?.getSandboxPolicy : undefined,
     }),
-    createProgrammaticProfileTool(cwd, {
-      localFilesystem: ops === localOperations,
-      planModeRef,
-      onFileMutated: opts?.onFileMutated,
-      onPreFileMutation: opts?.onPreFileMutation,
-    }),
+    programmaticProfile,
     ...(opts?.commandDiscovery === false ? [] : [createCommandInformationTool(cwd, {
       ...opts?.commandDiscovery, localFilesystem: ops === localOperations,
     })]),
@@ -260,7 +273,7 @@ export async function createTools(
 
   // Local corpus of real repos; only when the CLI is actually on this machine.
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
-  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin));
+  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin));
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {
@@ -328,7 +341,19 @@ export async function createTools(
   const rebuildReadTool = (model: string): AgentTool =>
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, getVideoByteLimit(model));
 
-  return { tools, processManager, rebuildReadTool, lspManager, subAgentManager };
+  const commandCreation = opts?.commandDiscovery === false || opts?.disableSubagents ? undefined : createProgrammaticCommandTool(cwd, {
+    ...opts?.commandDiscovery,
+    availableTools: () => opts?.getAvailableToolNames?.() ?? tools.map((tool) => tool.name),
+    localFilesystem: ops === localOperations,
+    planModeRef,
+    reviewCreation: opts?.reviewCommandCreation,
+    executeCommand: opts?.executeReviewedCommand,
+    getModel: () => ({ provider: opts?.getProvider?.() ?? opts?.provider ?? "deterministic", model: opts?.getModel?.() ?? opts?.model ?? "no-model" }),
+    onPreFileMutation: opts?.onPreFileMutation,
+    onFileMutated: opts?.onFileMutated,
+  });
+  if (commandCreation) tools.push(commandCreation.tool);
+  return { tools, processManager, rebuildReadTool, lspManager, subAgentManager, commandCreation, programmaticProfile };
 }
 
 export { createReadTool } from "./read.js";

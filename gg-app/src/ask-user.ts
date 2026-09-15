@@ -4,28 +4,9 @@
  * The IPC call that answers one lives in `agent.ts`.
  */
 
-/** One selectable answer. `value` is what the agent gets back; `label` is UI. */
-export interface AskOption {
-  label: string;
-  value?: string;
-  hint?: string;
-  recommended?: boolean;
-}
-
-export interface AskQuestion {
-  id: string;
-  question: string;
-  kind: "confirm" | "choice" | "multi" | "text";
-  detail?: string;
-  options?: AskOption[];
-  allowOther?: boolean;
-}
-
-/** The `ask_user` frame: the turn stays blocked until this is answered. */
-export interface AskUserPrompt {
-  id: string;
-  questions: AskQuestion[];
-}
+import type { AskQuestion, AskUserPrompt } from "@kenkaiiii/gg-core/desktop-session-ux";
+import type { Item } from "./App";
+export { isAskUserPrompt, type AskOption, type AskQuestion, type AskUserPrompt } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 export type AskAnswers = Record<string, string | string[]>;
 
@@ -79,19 +60,43 @@ export function dropSupersededAsks<T extends { kind: string; sent?: boolean; can
   return items.filter((it) => !(it.kind === "ask" && it.sent !== true && it.cancelled !== true));
 }
 
-export function isAskUserPrompt(data: unknown): data is AskUserPrompt {
-  if (typeof data !== "object" || data === null) return false;
-  const { id, questions } = data as { id?: unknown; questions?: unknown };
-  return (
-    typeof id === "string" &&
-    Array.isArray(questions) &&
-    questions.length > 0 &&
-    questions.every(
-      (q) =>
-        typeof q === "object" &&
-        q !== null &&
-        typeof (q as AskQuestion).id === "string" &&
-        typeof (q as AskQuestion).question === "string",
-    )
-  );
+/** Compare the displayed contract, independent of JSON property order. */
+function sameAskPrompt(a: AskUserPrompt, b: AskUserPrompt): boolean {
+  return a.id === b.id && a.questions.length === b.questions.length && a.questions.every((q, i) => {
+    const other = b.questions[i]!;
+    return q.id === other.id && q.question === other.question && q.kind === other.kind &&
+      q.detail === other.detail && q.allowOther === other.allowOther &&
+      (q.options === undefined ? other.options === undefined :
+        other.options !== undefined && q.options.length === other.options.length &&
+        q.options.every((option, j) => {
+          const compared = other.options![j]!;
+          return option.label === compared.label && option.value === compared.value &&
+            option.hint === compared.hint && option.recommended === compared.recommended;
+        }));
+  });
+}
+
+/** Reconcile display state only. Never send, infer, or replay an answer. */
+export function reconcilePendingAsks(
+  items: Item[],
+  prompts: readonly AskUserPrompt[],
+  nextId: () => number,
+): Item[] {
+  const pending = new Map(prompts.map((prompt) => [prompt.id, prompt]));
+  const seen = new Set<string>();
+  const result = items.flatMap((item): Item[] => {
+    if (item.kind !== "ask") return [item];
+    const prompt = pending.get(item.prompt.id);
+    if (!prompt) return [item.sent || item.cancelled ? item : { ...item, cancelled: true }];
+    if (seen.has(prompt.id)) return [];
+    seen.add(prompt.id);
+    // Preserve row identity (including component-local drafts) only for the exact live prompt.
+    if (!item.sent && !item.cancelled && sameAskPrompt(item.prompt, prompt))
+      return [item];
+    return [{ kind: "ask", id: nextId(), prompt }];
+  });
+  for (const prompt of prompts) {
+    if (!seen.has(prompt.id)) result.push({ kind: "ask", id: nextId(), prompt });
+  }
+  return result;
 }

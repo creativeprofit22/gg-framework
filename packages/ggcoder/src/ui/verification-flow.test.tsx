@@ -1,6 +1,8 @@
 import React from "react";
-import { renderToString } from "ink";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PassThrough } from "node:stream";
+import { render } from "ink";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ScreenRecorder, makeRecordingStdout } from "./testing/screen-recorder.js";
 import type * as AgentModule from "@kenkaiiii/gg-agent";
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -84,14 +86,31 @@ const launch = () => [
 ];
 const output = () => [start("output", "task_output", { id: "bg" }), end("output")];
 
-beforeEach(() => {
+let mounted: ReturnType<typeof render>;
+let stdin: PassThrough;
+afterEach(() => {
+  mounted.unmount();
+  mounted.cleanup();
+  stdin.destroy();
+  vi.restoreAllMocks();
+});
+
+beforeEach(async () => {
   processes = [];
   vi.spyOn(processManager, "list").mockImplementation(() => processes);
   flow.events = [];
   flow.stops = [];
   flow.stopCount = 1;
   flow.loop = undefined;
-  renderToString(
+  stdin = new PassThrough();
+  const terminalInput = Object.assign(stdin, {
+    isTTY: true,
+    setRawMode: vi.fn(),
+    ref: vi.fn(),
+    unref: vi.fn(),
+  });
+  const screen = new ScreenRecorder({ columns: 100, rows: 100 });
+  mounted = render(
     <TerminalSizeProvider>
       <App
         provider="anthropic"
@@ -104,8 +123,14 @@ beforeEach(() => {
         processManager={processManager}
       />
     </TerminalSizeProvider>,
-    { columns: 100 },
+    {
+      stdout: makeRecordingStdout(screen),
+      stdin: terminalInput as unknown as NodeJS.ReadStream,
+      patchConsole: false,
+    },
   );
+  await vi.waitFor(() => expect(flow.loop).toBeDefined());
+  expect(screen.viewportLines().join("\n")).not.toContain("ERROR");
 });
 
 describe("CLI reports without verification stop gates", () => {

@@ -22,10 +22,12 @@ import {
 } from "./agent";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
-import { isAskUserPrompt } from "./ask-user";
+import { isAskUserPrompt, reconcilePendingAsks } from "./ask-user";
 import {
   extractImageWarnings,
+  type AssistantTextDeltaPayload,
   isAskUserSettledEvent,
+  isPendingAskSnapshot,
   resolveRunEndOutcome,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { formatTokenCount } from "./ActivityBar";
@@ -689,6 +691,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           } as unknown as AgentState;
           onAstraStateChange?.();
           setState(readyState);
+          // Legacy absence is not an empty snapshot. Invalid snapshots are ignored
+          // as a whole rather than turning a partial list into settlement evidence.
+          if (isPendingAskSnapshot(d.pendingAsks)) {
+            const pendingAsks = d.pendingAsks;
+            setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId));
+          }
           setRunning(readyState.running);
           setContextTokens(readyState.contextTokens);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
@@ -747,6 +755,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "text_delta": {
           finalizeThinking();
           const chunk = String(d.text ?? "");
+          if ((d as Partial<AssistantTextDeltaPayload>).standalone === true) {
+            // Validated host output is not a model draft and must survive hooks
+            // and provider errors. Keep it out of both streaming and tool state.
+            releaseHeldText();
+            endStreamingText();
+            pushItem({ kind: "assistant", id: nextId(), text: chunk });
+            break;
+          }
           appendAssistant(chunk);
           // Track plan-step completion for the activity bar. Accumulate the
           // run's assistant text (markers can split across deltas) and union in
@@ -1248,7 +1264,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // answers back (or the run ends and `run_end` closes the band). A
           // malformed frame is dropped rather than rendered as an empty band
           // the user could never answer.
-          if (isAskUserPrompt(d)) pushItem({ kind: "ask", id: nextId(), prompt: d });
+          if (isAskUserPrompt(d)) {
+            setItems((previous) => previous.some((item) => item.kind === "ask" && item.prompt.id === d.id)
+              ? previous : [...previous, { kind: "ask", id: nextId(), prompt: d }]);
+          }
           break;
         case "plan_progress": {
           // The sidecar reads the live approved-plan file, so this snapshot

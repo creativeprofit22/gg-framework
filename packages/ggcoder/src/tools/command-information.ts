@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { discoverCommands, projectAdvisoryCommands, type CommandDiscoveryOptions } from "../core/command-discovery.js";
-import { programmaticCommandReferenceV1Schema } from "../core/programmatic/contracts.js";
+import { programmaticCommandReferenceV1Schema, programmaticCommandSnapshotV1Schema } from "../core/programmatic/contracts.js";
 import { parseSkillFile } from "../core/skills.js";
+import { readCommandText } from "../core/programmatic/command-creation.js";
 
 export const CommandInformationParams = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("list"), offset: z.number().int().nonnegative().optional() }),
@@ -26,6 +28,19 @@ async function regularOwner(file: string) {
   const realStat = await fs.lstat(await fs.realpath(absolute));
   if (!stat.isFile() || realStat.dev !== stat.dev || realStat.ino !== stat.ino) throw new Error("unsafe-owner");
   return stat;
+}
+
+/** Submission freshness uses the same bounded safe resolver, never model-authored hashes. */
+export async function checkAdvisoryCommandSnapshot(
+  tool: AgentTool<typeof CommandInformationParams>,
+  snapshot: z.infer<typeof programmaticCommandSnapshotV1Schema>,
+  context: Parameters<AgentTool["execute"]>[1],
+): Promise<boolean> {
+  const valid = programmaticCommandSnapshotV1Schema.safeParse(snapshot);
+  if (!valid.success || valid.data.capabilityKind !== "prompt-only" || context.signal.aborted) return false;
+  const result: unknown = JSON.parse(String(await tool.execute({ action: "resolve", command: valid.data.command }, context)));
+  const current = z.object({ status: z.literal("prompt"), snapshot: programmaticCommandSnapshotV1Schema }).safeParse(result);
+  return current.success && !context.signal.aborted && JSON.stringify(current.data.snapshot) === JSON.stringify(valid.data);
 }
 
 export function createCommandInformationTool(
@@ -57,30 +72,27 @@ export function createCommandInformationTool(
           const before = await regularOwner(entry.custom.filePath);
           // Bound raw Markdown as well as the parsed body. Never emit partial executable templates.
           if (before.size > 128_000) return unavailable("body-exceeds-limit");
-          const handle = await fs.open(entry.custom.filePath, "r");
-          try {
-            const opened = await handle.stat();
-            if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size)
-              return unavailable("owner-changed");
-            // Recheck linked ancestors and cancellation immediately before the new body read.
-            const pinned = await regularOwner(entry.custom.filePath);
-            if (pinned.dev !== opened.dev || pinned.ino !== opened.ino) return unavailable("owner-changed");
-            context.signal.throwIfAborted();
-            const bytes = Buffer.alloc(128_001);
-            const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-            const after = await regularOwner(entry.custom.filePath);
-            if (bytesRead > 128_000) return unavailable("body-exceeds-limit");
-            if (after.dev !== opened.dev || after.ino !== opened.ino || after.mtimeMs !== opened.mtimeMs || after.size !== opened.size)
-              return unavailable("owner-changed");
-            const command = parseSkillFile(bytes.subarray(0, bytesRead).toString("utf8"), entry.custom.scope);
-            if ((command.name || path.basename(entry.custom.filePath, ".md")) !== reference.name || command.content !== entry.custom.prompt)
-              return unavailable("command-changed");
-            body = command.content;
-          } finally { await handle.close(); }
+          const raw = await readCommandText(entry.custom.filePath, context.signal);
+          const after = await regularOwner(entry.custom.filePath);
+          if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeMs !== before.mtimeMs || after.size !== before.size)
+            return unavailable("owner-changed");
+          const command = parseSkillFile(raw, entry.custom.scope);
+          if ((command.name || path.basename(entry.custom.filePath, ".md")) !== reference.name || command.content !== entry.custom.prompt)
+            return unavailable("command-changed");
+          body = command.content;
         }
         context.signal.throwIfAborted();
         if (!body) return unavailable("body-unavailable");
-        const result = JSON.stringify({ status: "prompt", command: reference, untrusted: true, body });
+        const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+        const snapshot = programmaticCommandSnapshotV1Schema.parse({
+          version: 1, command: reference, capabilityKind: "prompt-only",
+          // Canonical spelling also agrees with creation on Windows 8.3 aliases.
+          ownerSha256: sha256(entry.custom ? `${entry.custom.scope}:${await fs.realpath(entry.custom.filePath)}` : `built-in:${reference.name}`),
+          bodySha256: sha256(body), helpers: [],
+        });
+        const result = JSON.stringify({ status: "prompt", command: reference, untrusted: true, body, snapshot,
+          limitation: "Prompt identity only, not a host capability guarantee. Helper prerequisites and suitability require separate local inspection; script-backed and app-backed availability is not established.",
+        });
         return result.length <= 32_000 ? result : unavailable("body-exceeds-limit");
       } catch {
         // No raw OS errors: those can disclose private absolute owner paths.

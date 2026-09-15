@@ -1,5 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildLlmsCandidates, createWebFetchTool, htmlToCleanText } from "./web-fetch.js";
+import {
+  buildLlmsCandidates,
+  createWebFetchTool as createStructuredWebFetchTool,
+  htmlToCleanText,
+} from "./web-fetch.js";
+
+// Existing rendering assertions exercise the real tool's caller-visible content.
+function createWebFetchTool(...args: Parameters<typeof createStructuredWebFetchTool>) {
+  const tool = createStructuredWebFetchTool(...args);
+  return {
+    ...tool,
+    execute: async (...input: Parameters<typeof tool.execute>) => {
+      const result = await tool.execute(...input);
+      const content = typeof result === "string" ? result : result.content;
+      expect(typeof content).toBe("string");
+      return content as string;
+    },
+  };
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -10,6 +28,52 @@ function context() {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
+});
+
+describe("host retrieval details", () => {
+  it("keeps a successful error-looking source body untrusted but retrieved", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response("Error is a documented API type."),
+    ) as typeof fetch;
+    const result = await createStructuredWebFetchTool().execute(
+      { url: "https://example.com/page" },
+      context(),
+    );
+    expect(result).toEqual({
+      content: "Error is a documented API type.",
+      details: {
+        kind: "host-retrieval-v1",
+        resources: [{ outcome: "retrieved", sourceUrl: "https://example.com/page" }],
+      },
+    });
+  });
+  it("reports invalid follow requests as failed metadata", async () => {
+    const result = await createStructuredWebFetchTool().execute({ follow: 1 }, context());
+    expect(result).toMatchObject({ details: { resources: [{ outcome: "failed" }] } });
+  });
+  it("rejects cancelled cache reads and rechecks a cached redirect destination's policy", async () => {
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith("/old")
+        ? new Response(null, {
+            status: 302,
+            headers: { location: "https://other.example.com/new" },
+          })
+        : new Response("# Content\n\nSource text"),
+    ) as typeof fetch;
+    let blocked = false;
+    const tool = createStructuredWebFetchTool(() =>
+      blocked ? { mode: "allowlist", allow: ["example.com"] } : undefined,
+    );
+    const args = { url: "https://example.com/old", format: "outline" as const };
+    await tool.execute(args, context());
+    await expect(
+      tool.execute(args, { ...context(), signal: AbortSignal.abort() }),
+    ).rejects.toThrow();
+    blocked = true;
+    const denied = await tool.execute(args, context());
+    expect(denied).toMatchObject({ details: { resources: [{ outcome: "failed" }] } });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("htmlToCleanText", () => {

@@ -11,7 +11,7 @@ import { parseReferencedFiles } from "@kenkaiiii/gg-core";
 import { log } from "../core/logger.js";
 import { buildUserContentWithAttachments, routePromptCommandInput } from "./prompt-routing.js";
 import type { CompletedItem, UserItem } from "./app-items.js";
-import type { UserContent } from "./hooks/useAgentLoop.js";
+import type { AgentInvocationOptions, UserContent } from "./hooks/useAgentLoop.js";
 import { toErrorItem } from "./error-item.js";
 import { UI_SLASH_COMMANDS } from "./submit-slash-commands.js";
 
@@ -23,7 +23,7 @@ interface PromptCommandSubmitOptions {
   setLastUserMessage: (message: string) => void;
   setDoneStatus: (status: { verb: string; durationMs: number; toolsUsed: string[] } | null) => void;
   finalizeSubmittedUserItem: (item: UserItem) => void;
-  runAgent: (content: UserContent) => Promise<void>;
+  runAgent: (content: UserContent, invocation?: AgentInvocationOptions) => Promise<void>;
   isBusy: () => boolean;
   setLiveItems: React.Dispatch<React.SetStateAction<CompletedItem[]>>;
   getId: () => string;
@@ -63,6 +63,8 @@ export async function submitPromptCommand({
 
   const { cmdName } = promptCommandRoute;
   let { fullPrompt } = promptCommandRoute;
+  let invocation: AgentInvocationOptions | undefined = cmdName === "setup-programmatic"
+    ? { programmaticSetupInspection: true } : undefined;
   if (cmdName === "programmatic") {
     const input = parseProgrammaticAssessmentInput(promptCommandRoute.cmdArgs);
     if (!input.success) return guidance("Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).");
@@ -71,7 +73,9 @@ export async function submitPromptCommand({
     const blocked = programmaticReadinessGuidance(readiness);
     if (blocked) return guidance(blocked);
     const discovery = await discoverCommands(cwd, { workspaceActions: UI_SLASH_COMMANDS, readReadiness: async () => readiness });
-    fullPrompt += renderProgrammaticAdvisoryContext(buildProgrammaticAdvisoryContext(input.data, discovery));
+    const context = buildProgrammaticAdvisoryContext(input.data, discovery);
+    fullPrompt += renderProgrammaticAdvisoryContext(context);
+    invocation = { programmaticAdvisory: { cwd, context } };
   }
   log("INFO", "command", `Prompt command: /${cmdName}`);
 
@@ -101,7 +105,8 @@ export async function submitPromptCommand({
   finalizeSubmittedUserItem(userItem);
 
   try {
-    await runAgent(userContent);
+    if (invocation) await runAgent(userContent, invocation);
+    else await runAgent(userContent);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log("ERROR", "error", msg);

@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
+import type { AssistantTextDeltaPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { SubAgentSnapshot } from "./subagent-manager.js";
 
 // ── Event Map ──────────────────────────────────────────────
@@ -14,7 +15,7 @@ export interface McpToolEventIdentity {
 
 export interface BusEventMap {
   // Agent events (forwarded from agentLoop)
-  text_delta: { text: string };
+  text_delta: AssistantTextDeltaPayload;
   thinking_delta: { text: string };
   tool_call_start: {
     toolCallId: string;

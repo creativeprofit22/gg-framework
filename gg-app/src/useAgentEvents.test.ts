@@ -34,6 +34,26 @@ import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
+it.each(["completed", "failed", "aborted"] as const)("keeps host recommendations separate from tool results and drafts after %s (mocked native IPC)", (outcome) => {
+  const { hook, getItems, getLiveToolFeed } = setup();
+  const text = "## Recommendations — not started\nInspect configuration manually.\nAdvice only.";
+  act(() => {
+    const send = (type: string, data: Record<string, unknown>) => hook.result.current.handleEvent(ev(type, data));
+    send("tool_call_start", { toolCallId: "advice", name: "programmatic_advisory_result", args: {} });
+    send("tool_call_end", { toolCallId: "advice", result: text, isError: false });
+    send("hook_armed", { kind: "ideal", armed: true });
+    send("text_delta", { text, standalone: true });
+  });
+  expect(getItems()).toEqual([expect.objectContaining({ kind: "assistant", text })]);
+  expect(getLiveToolFeed()).toEqual([expect.objectContaining({ name: "programmatic_advisory_result", result: text, status: "done" })]);
+  act(() => {
+    hook.result.current.handleEvent(ev("text_delta", { text: "Generic provider ending." }));
+    hook.result.current.handleEvent(ev("run_end", { outcome, cancelled: outcome === "aborted" }));
+  });
+  expect(getItems().filter((item) => item.kind === "assistant" && item.text === text)).toHaveLength(1);
+  expect(getItems().some((item) => item.kind.startsWith("programmatic"))).toBe(false);
+});
+
 it.each([
   "Image generation failed: OpenAI Image API (400): unsupported tool",
   "Image generation failed: Astra image request failed (response.failed).",
@@ -2249,6 +2269,77 @@ describe("models_change", () => {
       kind: "confirm",
       options: [{ label: "Yes" }, { label: "No" }],
     };
+
+    it("restores a missed question exactly once from repeated ready snapshots", () => {
+      const { hook, getItems } = setup();
+      const prompt = { id: "ask-live", questions: [{ ...question, detail: "Exact reviewed preview\n+ files", allowOther: false }] };
+      act(() => {
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [prompt] }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [prompt] }));
+      });
+      expect(getItems()).toEqual([{ kind: "ask", id: 1, prompt }]);
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", prompt));
+      });
+      expect(getItems()).toEqual([{ kind: "ask", id: 1, prompt }]);
+    });
+
+    it("retires a missed settlement without inventing an answer and preserves other live drafts", () => {
+      const { hook, deps, getItems } = setup();
+      const live = { id: "ask-live", questions: [question] };
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-stale", questions: [question] }));
+        hook.result.current.handleEvent(ev("ask_user", live));
+        deps.setItems((items) => items.map((item) => item.kind === "ask" && item.prompt.id === live.id
+          ? { ...item, answers: { flag: "Yes" } } : item));
+      });
+      const draft = getItems()[1];
+      act(() => hook.result.current.handleEvent(ev("ready", { pendingAsks: [structuredClone(live)] })));
+      expect(getItems()[0]).toMatchObject({ kind: "ask", cancelled: true });
+      expect(getItems()[0]).not.toHaveProperty("sent");
+      expect(getItems()[0]).not.toHaveProperty("answers");
+      expect(getItems()[1]).toBe(draft);
+    });
+
+    it("explicit empty fresh-daemon state retires open cards but leaves transcript history", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        for (const id of ["old-daemon-open", "old-daemon-answered"])
+          hook.result.current.handleEvent(ev("ask_user", { id, questions: [question] }));
+        hook.result.current.handleEvent(ev("ask_user_settled", { id: "old-daemon-answered", action: "answer" }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [] }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ kind: "ask", cancelled: true }),
+        expect.objectContaining({ kind: "ask", sent: true }),
+      ]);
+      expect(getItems().filter((item) => item.kind === "ask" && !item.sent && !item.cancelled)).toHaveLength(0);
+    });
+
+    it.each([{}, { pendingAsks: null }, { pendingAsks: [{ id: "broken", questions: [] }] }])(
+      "preserves local cards for legacy absent or malformed snapshots: %j", (snapshot) => {
+        const { hook, getItems } = setup();
+        act(() => hook.result.current.handleEvent(ev("ask_user", { id: "ask-live", questions: [question] })));
+        const original = getItems()[0];
+        act(() => hook.result.current.handleEvent(ev("ready", snapshot)));
+        expect(getItems()).toEqual([original]);
+        expect(getItems()[0]).toBe(original);
+      },
+    );
+
+    it("does not carry local answers onto changed content or a new daemon request identity", () => {
+      const { hook, deps, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "old-request", questions: [question] }));
+        deps.setItems((items) => items.map((item) => item.kind === "ask" ? { ...item, answers: { flag: "Yes" } } : item));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [{ id: "old-request", questions: [{ ...question, detail: "changed preview" }] }] }));
+      });
+      expect(getItems()[0]).not.toHaveProperty("answers");
+      act(() => hook.result.current.handleEvent(ev("ready", { pendingAsks: [{ id: "fresh-request", questions: [question] }] })));
+      expect(getItems()[0]).toMatchObject({ cancelled: true });
+      expect(getItems()[1]).toEqual({ kind: "ask", id: 3, prompt: { id: "fresh-request", questions: [question] } });
+    });
 
     it("renders a question the agent is parked on", () => {
       const { hook, getItems } = setup();

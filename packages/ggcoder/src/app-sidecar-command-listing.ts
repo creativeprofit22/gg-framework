@@ -1,5 +1,5 @@
-import type { SlashCommandListing, SlashCommandsResponse } from "@kenkaiiii/gg-core";
-import { discoverCommands } from "./core/command-discovery.js";
+import { CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES, type SlashCommandListing, type SlashCommandsResponse } from "@kenkaiiii/gg-core";
+import { discoverCommands, type CommandDiscoveryOptions } from "./core/command-discovery.js";
 
 export const WORKSPACE_ACTIONS: SlashCommandListing[] = [
   {
@@ -25,7 +25,12 @@ export const WORKSPACE_ACTIONS: SlashCommandListing[] = [
   },
 ];
 
+export const DESKTOP_COMMAND_DISCOVERY_OPTIONS = {
+  workspaceActions: WORKSPACE_ACTIONS,
+  reservedCommandIdentities: CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES,
+} satisfies CommandDiscoveryOptions;
+
 export async function appSidecarCodeCommandsResponse(cwd: string): Promise<SlashCommandsResponse> {
-  const discovery = await discoverCommands(cwd, { workspaceActions: WORKSPACE_ACTIONS });
+  const discovery = await discoverCommands(cwd, DESKTOP_COMMAND_DISCOVERY_OPTIONS);
   return { commands: discovery.entries.map((entry) => entry.listing) };
 }

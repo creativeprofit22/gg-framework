@@ -45,6 +45,14 @@ describe("tool tiers", () => {
     }
   });
 
+  it("keeps reviewed commands deferred and discloses separate run approval", () => {
+    expect(DEFERRED_TOOL_NAMES).toContain("programmatic_command");
+    expect(CORE_TOOL_NAMES).not.toContain("programmatic_command");
+    expect(DEFAULT_TOOL_NAMES).toContain("programmatic_command");
+    expect(BUILTIN_TOOL_NAMES).toContain("programmatic_command");
+    expect(TOOL_PROMPT_HINTS.programmatic_command).toBe("Review/create commands; separately approve isolated runs.");
+  });
+
   it("keeps programmatic profile deferred, discoverable, and built in", () => {
     expect(DEFERRED_TOOL_NAMES).toContain("programmatic_profile");
     expect(DEFAULT_TOOL_NAMES).toContain("programmatic_profile");

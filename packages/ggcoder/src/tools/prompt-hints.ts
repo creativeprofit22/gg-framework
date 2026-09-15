@@ -19,25 +19,24 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
     "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
   source_path:
-    "Resolve installed dependency source via opensrc; inspect returned files before assuming APIs.",
-  tauri_package: "Inspect, configure, package, or verify supported Tauri v2 JSON apps.",
+    "Resolve installed dependency source; inspect before use.",
+  tauri_package: "Inspect/configure/package/verify Tauri v2 JSON apps.",
   programmatic_profile: "Inspect/persist.",
-  programmatic_scan: "Run one approved-profile scan and persist bounded lifecycle summary state.",
-  command_information: "Read current command metadata pages or one exact prompt body; information only, never execution permission.",
+  programmatic_command: "Review/create commands; separately approve isolated runs.",
+  programmatic_scan: "Scan approved profiles; persist lifecycle summaries.",
+  command_information: "Read command metadata/prompt; no execution permission.",
   web_search:
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
     "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
   task_output: "Read new output from a background process by id; wait_ms blocks until it exits.",
   task_stop: "Stop a background process by id.",
-  screenshot: "Capture a browser PNG of a URL or local server; supports waits and interactions.",
-  send_message: "Queue steering into a running child agent without starting another turn.",
-  followup_task: "Start another turn in an idle child agent, preserving its context.",
-  wait_agent:
-    "Block until named child agents finish and return their snapshots; child agents " +
-    "only (background: task_output wait_ms).",
-  list_agents: "List child agent IDs, states, turns and token totals.",
-  interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
+  screenshot: "Capture browser PNGs; supports waits/interactions.",
+  send_message: "Steer a running child without a new turn.",
+  followup_task: "Start an idle child's next turn with its context.",
+  wait_agent: "Wait for child agents; for processes use task_output.",
+  list_agents: "List child IDs, states, turns and tokens.",
+  interrupt_agent: "Interrupt a child's turn; preserve follow-up context.",
   tasks:
     "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
   enter_plan:
@@ -51,7 +50,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
   generate_image:
-    "Generate/edit images with Flare/Sunburst, orchestrated by GPT-6 Astra. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
+    "Generate/edit images only on explicit request; `image` edits.",
+  research_corpus: "Read-only corpus search/show; no indexing or installs.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };
@@ -122,6 +122,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "ls",
   "programmatic_profile",
   "programmatic_scan",
+  "programmatic_command",
   "command_information",
   "read",
   "screenshot",
@@ -158,6 +159,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "tauri_package",
   "programmatic_profile",
   "programmatic_scan",
+  "programmatic_command",
   "command_information",
   "web_fetch",
   "task_output",

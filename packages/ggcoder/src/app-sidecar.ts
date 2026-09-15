@@ -204,9 +204,11 @@ import {
 } from "./app-sidecar-programmatic-execution.js";
 import {
   executeProgrammaticOpportunity,
+  executeDirectCommand,
+  type DirectCommandExecutor,
   type ProgrammaticExecutionOutcome,
 } from "./core/programmatic/execution.js";
-import { appSidecarCodeCommandsResponse, WORKSPACE_ACTIONS } from "./app-sidecar-command-listing.js";
+import { appSidecarCodeCommandsResponse, DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
@@ -247,6 +249,7 @@ import {
 import type { ElicitResult } from "@modelcontextprotocol/client";
 import { createAskUserBridge, type AskUserResult, type AskUserPrompt } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
+import { commandCreationReviewer } from "./core/programmatic/command-creation.js";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
 import { awardPrompt, awardCommits } from "./core/progress/engine.js";
@@ -2235,6 +2238,32 @@ async function createSession(
     backgroundMcpConnect: true,
     sharedMcpPool,
     onMcpElicit: elicitations.onElicit,
+    reviewCommandCreation: commandCreationReviewer(asks),
+    reviewProgrammaticSetup: commandCreationReviewer(asks),
+    executeReviewedCommand: (async (request) => {
+      if (mode === "chat" || session.getPlanMode() || programmaticExecutionActive)
+        throw new Error("Reviewed execution is unavailable in chat, plan mode, or while another command runs.");
+      programmaticExecutionActive = true;
+      const scopedAbort = new AbortController();
+      const review = commandCreationReviewer(asks);
+      try {
+        const active = session.getState();
+        return await executeDirectCommand({
+          ...request, cwd, provider: active.provider, model: active.model,
+          availableTools: () => {
+            if (session.getPlanMode()) throw new Error("Parent entered plan mode; review again in code mode.");
+            return request.availableTools();
+          },
+          signal: AbortSignal.any([request.signal, abort.signal]),
+          ask: (question) => review(question, scopedAbort.signal),
+          cancelQuestions: () => scopedAbort.abort(),
+          progress: (text) => broadcast("text_delta", { text }),
+        });
+      } finally {
+        scopedAbort.abort();
+        programmaticExecutionActive = false;
+      }
+    }) satisfies DirectCommandExecutor,
     // Keep restore-time auto-compaction off the readiness path too: its summary
     // LLM call (30s timeout) used to freeze waitForReady — and with it the whole
     // window (project picker, session list) — whenever a resumed session was
@@ -2303,7 +2332,8 @@ async function createSession(
   ): AgentSession => {
     const created: AgentSession = new AgentSession({
       ...baseSessionOptions,
-      workspaceCommands: WORKSPACE_ACTIONS,
+      workspaceCommands: DESKTOP_COMMAND_DISCOVERY_OPTIONS.workspaceActions,
+      reservedCommandIdentities: DESKTOP_COMMAND_DISCOVERY_OPTIONS.reservedCommandIdentities,
       advertiseRegistryCommands: false,
       ...(active ?? {}),
       sessionId: sessionPath,
@@ -2974,7 +3004,8 @@ async function createSession(
   function bindSessionEvents(target: AgentSession): void {
     target.eventBus.on("text_delta", (data) => {
       broadcast("text_delta", data);
-      recordApprovedPlanMarkers(data.text);
+      // Host-authored advice is display content, never evidence of executed steps.
+      if (!data.standalone) recordApprovedPlanMarkers(data.text);
     });
     target.eventBus.on("thinking_delta", (data) => broadcast("thinking_delta", data));
     target.eventBus.on("queue_drained", (data) =>
@@ -4567,6 +4598,12 @@ async function createSession(
     }),
     () => runClaim.claim(),
     () => runClaim.release(),
+    undefined,
+    () => {
+      void runStrandedQueue().catch((error) => {
+        broadcastError("error", "queued prompt failed after opportunity request", error);
+      });
+    },
   );
   const decisionSummaryService = new AppSidecarDecisionSummaryService(
     (options: DecisionSummarySessionOptions) => new AgentSession(options),
@@ -4647,6 +4684,7 @@ async function createSession(
       ...kenStatePayload(),
       ...footerExtras(),
       pendingPlanReview: planGate.pending(),
+      pendingAsks: asks.pendingRequests,
     };
   }
 

@@ -188,7 +188,13 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
   const lifecycle = readFileSync(new URL("../gg-app/scripts/programmatic-smoke-lifecycle.mjs", import.meta.url), "utf8");
   assert.match(fixture, /const result = await runSmokeLifecycle\(\{\s*audit,\s*workflow,/);
   assert.match(fixture, /beforeCleanup: async \(\) => \{ await observeMinimized\?\.\("before-cleanup"\); \}/);
-  assert.match(fixture, /if \(!visual\) validateNativeSmokeEvidence\(paths.audit, result, \{ driftOnly, integratedRecovery, allowNormalWindow \}\)/);
+  assert.match(fixture, /if \(!visual\) validateNativeSmokeEvidence\(paths.audit, result, \{ driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow \}\)/);
+  assert.match(fixture, /const extendedWorkflow = process\.argv\.includes\("--extended-workflow"\)/);
+  assert.match(fixture, /!extendedWorkflow \|\| \(!driftOnly && !integratedRecovery\)/);
+  assert.match(fixture, /!extendedWorkflow \|\| !allowNormalWindow/);
+  assert.match(fixture, /requests\.length < \(extendedWorkflow \? extendedRequestCount : 3\)/);
+  assert.match(fixture, /extendedWorkflowStep\(requests\.length, body\)/);
+  assert.doesNotMatch(smoke, /--extended-workflow/);
   assert.match(lifecycle, /writeFileSync\(join\(audit, "failure.json"\)/);
   assert.match(fixture, /const visual = process\.argv\.includes\("--visual"\)/);
   assert.match(fixture, /GG_APP_DEV_SMOKE_WINDOW: visual \? "visible" : "minimized"/);

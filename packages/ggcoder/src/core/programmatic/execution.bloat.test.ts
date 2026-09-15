@@ -7,6 +7,10 @@ describe("isolated execution touched-file architecture", () => {
   it("reuses one transient session and its loop, tools, context and disposal", async () => {
     const execution = await source("./execution.ts");
     expect(execution.match(/new AgentSession\(/g)).toHaveLength(1);
+    expect(execution).toContain('return executeSelectedCommand({ ...options, kind: "opportunity" })');
+    expect(execution).toContain('return executeSelectedCommand({ ...options, kind: "direct" })');
+    expect(execution).toContain('options.kind === "opportunity" && running && cleanupOk');
+    expect(execution).not.toMatch(/direct.*(?:detectorId|opportunityId):/);
     expect(execution).toContain("transient: true");
     expect(execution).toContain('agentContext: "project"');
     expect(execution).toContain("session!.promptResolvedCommand(");
@@ -30,7 +34,11 @@ describe("isolated execution touched-file architecture", () => {
 
   it("shares command expansion", async () => {
     const session = await source("../agent-session.ts");
-    expect(session.match(/## User Instructions\\n\\n/g)).toHaveLength(1);
+    const commands = await source("../custom-commands.ts");
+    expect(commands.match(/## User Instructions\\n\\n/g)).toHaveLength(1);
+    expect(session).toContain("return appendCommandArguments(prompt, args)");
+    expect(await source("./command-verification.ts")).toContain("appendCommandArguments(current.prompt, args)");
+    expect(session).not.toMatch(/## User Instructions\\n\\n/g);
 
   });
 });

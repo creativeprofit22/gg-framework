@@ -1,3 +1,10 @@
+/** Existing text channel; complete host-authored messages bypass provider draft buffering. */
+export interface AssistantTextDeltaPayload {
+  text: string;
+  /** Render as one separate, completed ordinary assistant section. */
+  standalone?: true;
+}
+
 /** Preserve saved-image warnings verbatim in both live and restored transcripts. */
 export function extractImageWarnings(text: string): string {
   if (/^Partial completion: saved \d+ of \d+ requested images\./.test(text)) return text;
@@ -95,6 +102,64 @@ export function resolveRunEndOutcome(data: Record<string, unknown>): RunEndOutco
   }
 }
 
+/** Live display state only: never persisted or interpreted as an answer. */
+export interface AskOption {
+  label: string;
+  value?: string;
+  hint?: string;
+  recommended?: boolean;
+}
+export type AskQuestionKind = "confirm" | "choice" | "multi" | "text";
+export interface AskQuestion {
+  id: string;
+  question: string;
+  kind: AskQuestionKind;
+  detail?: string;
+  options?: AskOption[];
+  allowOther?: boolean;
+}
+export interface AskUserRequest { questions: AskQuestion[] }
+export interface AskUserPrompt extends AskUserRequest { id: string }
+
+// Bound admission, not a truncated projection: every live question must fit in ready.
+// The string ceiling includes the command creator's complete 64K preview.
+export const ASK_USER_MAX_PENDING = 32;
+export const ASK_USER_MAX_PROMPT_CHARS = 512_000;
+const askText = (value: unknown, minimum = 0): value is string =>
+  typeof value === "string" && value.length >= minimum && value.length <= 128_000;
+const askRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+export function isAskUserPrompt(value: unknown): value is AskUserPrompt {
+  if (!askRecord(value) || !askText(value.id, 1) || value.id.length > 256 ||
+    !Array.isArray(value.questions) || value.questions.length < 1 || value.questions.length > 5) return false;
+  const ids = new Set<string>();
+  for (const q of value.questions) {
+    if (!askRecord(q) || !askText(q.id, 1) || ids.has(q.id) || !askText(q.question, 1) ||
+      typeof q.kind !== "string" || !["confirm", "choice", "multi", "text"].includes(q.kind) ||
+      (q.detail !== undefined && !askText(q.detail)) ||
+      (q.allowOther !== undefined && typeof q.allowOther !== "boolean")) return false;
+    ids.add(q.id);
+    if (q.options !== undefined) {
+      if (!Array.isArray(q.options) || q.options.length > 6 || !q.options.every((o: unknown) =>
+        askRecord(o) && askText(o.label, 1) &&
+        (o.value === undefined || askText(o.value)) &&
+        (o.hint === undefined || askText(o.hint)) &&
+        (o.recommended === undefined || typeof o.recommended === "boolean"))) return false;
+    }
+    if ((q.kind === "choice" || q.kind === "multi") &&
+      (!Array.isArray(q.options) || q.options.length === 0)) return false;
+  }
+  try { return JSON.stringify(value).length <= ASK_USER_MAX_PROMPT_CHARS; }
+  catch { return false; }
+}
+
+/** Reject malformed/partial snapshots as a whole; [] alone means no live questions. */
+export function isPendingAskSnapshot(value: unknown): value is AskUserPrompt[] {
+  return Array.isArray(value) && value.length <= ASK_USER_MAX_PENDING &&
+    value.every(isAskUserPrompt) && new Set(value.map((prompt) => prompt.id)).size === value.length;
+}
+
 /** Host settlement of one question, independent of parent run boundaries. */
 export interface AskUserSettledEvent {
   id: string;
@@ -143,6 +208,8 @@ export type OpenAICodexContextProfileEligibility =
 
 /** Session UX authority carried by initial state and context extras. */
 export interface DesktopSessionUXState {
+  /** Authoritative live-only asks. Legacy absence preserves cards; [] retires open cards. */
+  pendingAsks?: AskUserPrompt[];
   openAICodexContextProfileEligibility: OpenAICodexContextProfileEligibility;
   /** Last completed explicit reset; recovery must match both operation and current identity. */
   lastNewSessionReset?: {

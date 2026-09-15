@@ -563,6 +563,34 @@ describe("pane-local opening (mocked native transport)", () => {
     await import("./Markdown");
   }, 0);
 
+  it.each(["live", "restored"])("renders %s host recommendations in the transcript without run controls (mocked native IPC)", async (mode) => {
+    nativeMocks.realMentor = true; // Use the real event hook and transcript renderer.
+    const pane = client("pane-advisory-section", 1);
+    const emit = liveEvents(pane);
+    const text = "## Recommendations — not started\n\nInspect configuration manually.\n\nAdvice only: no execution is authorized.";
+    if (mode === "restored") vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text }]);
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    await screen.findByRole("textbox");
+    if (mode === "live") {
+      act(() => {
+        emit("run_start", {});
+        emit("tool_call_start", { toolCallId: "advice", name: "programmatic_advisory_result", args: {} });
+        emit("tool_call_end", { toolCallId: "advice", result: text, isError: false });
+        emit("text_delta", { text, standalone: true });
+        emit("text_delta", { text: "Generic final sentence." });
+        emit("error", { message: "Provider failed after submission" });
+        emit("run_end", { outcome: "failed", cancelled: false });
+      });
+    }
+    expect(await screen.findAllByRole("heading", { name: "Recommendations — not started" })).toHaveLength(1);
+    expect(screen.getByText("Inspect configuration manually.")).toBeTruthy();
+    expect(screen.getByText("Advice only: no execution is authorized.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Run(?:\s|$)/i })).toBeNull();
+    expect(pane.programmatic).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it("gates submissions with drafts intact until history and buffered live events are applied", async () => {
     nativeMocks.realMentor = true;
     const pane = client("pane-hydrating", 1);
@@ -1516,12 +1544,115 @@ describe("command refresh ordering (mocked native transport)", () => {
 });
 
 describe("AgentPane question acknowledgement", () => {
+  beforeAll(async () => {
+    // Same cold-renderer setup as the opening fixtures, outside the interaction deadline.
+    await import("./Markdown");
+  }, 0);
+
   const question = {
     id: "approval",
     kind: "choice",
     question: "Allow this action?",
     options: [{ label: "Allow action", value: "allow" }],
   };
+
+  it.each(["ready", "state"] as const)("restores exact creation review through %s without replaying approval (mocked native IPC)", async (source) => {
+    nativeMocks.realMentor = true;
+    const pane = client(`ask-reconnect-${source}`, 1);
+    const emit = liveEvents(pane);
+    const prompt = { id: "ask-reconnect", questions: [{ ...question, kind: "choice" as const,
+      detail: "Exact reviewed files: + fixture command", allowOther: false,
+      options: [{ label: "Create reviewed files", value: "host-exact-content-nonce", hint: "Creation does not run them" },
+        { label: "Do not create files", value: "reject", recommended: true }] }] };
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"),
+      ...(source === "state" ? { pendingAsks: [prompt] } : {}) });
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    if (source === "ready") act(() => emit("ready", { ...agentState("azure:gpt-test"), pendingAsks: [prompt] }));
+    await screen.findByRole("button", { name: /Create reviewed files/ });
+    act(() => {
+      emit("ready", { ...agentState("azure:gpt-test"), pendingAsks: [structuredClone(prompt)] });
+      emit("ask_user", prompt);
+    });
+    expect(container.querySelectorAll(".ask-band")).toHaveLength(1);
+    expect(screen.getByText(prompt.questions[0].detail)).toBeTruthy();
+    expect(screen.getByText("Creation does not run them")).toBeTruthy();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Create reviewed files/ }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-reconnect", "answer", { approval: "host-exact-content-nonce" }));
+  });
+
+  it("connects advice, creation catalog refresh and a distinct run review without replay (mocked native IPC)", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("extended-workflow", 1);
+    const emit = liveEvents(pane);
+    const advice = "## Recommendations — not started\n\nMissing fixture count command. Creation and execution need separate approval.";
+    vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text: advice }]);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await screen.findByRole("heading", { name: "Recommendations — not started" });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    const creation = { id: "create-files-request", questions: [{ id: "create-files", kind: "choice" as const,
+      question: "Create the reviewed fixture command?", detail: "Exact file preview: fixture-count.md; creation does not run it.", allowOther: false,
+      options: [{ label: "Create reviewed files", value: "create-content-nonce" }, { label: "Do not create", value: "reject" }] }] };
+    act(() => emit("ask_user", creation));
+    fireEvent.click(await screen.findByRole("button", { name: /Create reviewed files/ }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("create-files-request", "answer", { "create-files": "create-content-nonce" }));
+    const run = { id: "run-command-request", questions: [{ id: "run-command", kind: "choice" as const,
+      question: "Run the separately reviewed fixture command?", detail: "Reviewed read-only run; creating files did not authorize this run.", allowOther: false,
+      options: [{ label: "Run reviewed command", value: "run-content-nonce" }, { label: "Do not run", value: "reject" }] }] };
+    act(() => emit("ask_user_answered", { id: creation.id, action: "answer", answers: { "create-files": "create-content-nonce" } }));
+    vi.mocked(pane.listCommands).mockResolvedValue([{ name: "fixture-count", aliases: [], description: "New project fixture command", source: "custom", origin: "project-custom",
+      input: { text: "optional", references: "optional", attachments: "optional" } }]);
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "/fixture" } });
+    fireEvent.click(await screen.findByText("/fixture-count"));
+    expect((input as HTMLTextAreaElement).value.trim()).toBe("/fixture-count");
+    fireEvent.change(input, { target: { value: "/fixture-count two items" } });
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    // The native host owns dispatch and emits a different question; renderer must not infer approval.
+    act(() => emit("ask_user", run));
+    await screen.findByRole("button", { name: /Run reviewed command/ });
+    act(() => {
+      emit("ready", { ...agentState("azure:gpt-test"), pendingAsks: [structuredClone(run)] });
+      emit("ask_user_answered", { id: creation.id, action: "answer", answers: { "create-files": "create-content-nonce" } });
+    });
+    // Resolved creation remains in history; only the run card is actionable.
+    expect(container.querySelectorAll(".ask-band")).toHaveLength(2);
+    expect(container.querySelectorAll(".ask-band.is-done")).toHaveLength(1);
+    expect(screen.getAllByRole("group", { name: "GG Coder needs your answer" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /Create reviewed files/ })).toBeNull();
+    expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /Run reviewed command/ })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Recommendations — not started" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Run reviewed command/ }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenNthCalledWith(2, "run-command-request", "answer", { "run-command": "run-content-nonce" }));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.programmatic).not.toHaveBeenCalled();
+  });
+
+  it("keeps unconfirmed local multi-select drafts across matching ready snapshots", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-reconnect-draft", 1);
+    const emit = liveEvents(pane);
+    const prompt = { id: "ask-draft", questions: [{ id: "checks", kind: "multi", question: "Which checks?",
+      options: [{ label: "Typecheck" }, { label: "Tests" }] }] };
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => emit("ask_user", prompt));
+    fireEvent.click(await screen.findByRole("button", { name: "Typecheck" }));
+    act(() => emit("ready", { ...agentState("azure:gpt-test"), pendingAsks: [structuredClone(prompt)] }));
+    expect(screen.getByRole("button", { name: "Typecheck" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Confirm 1 selected" })).toBeTruthy();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    act(() => emit("ready", { ...agentState("azure:gpt-test"), pendingAsks: [] }));
+    expect(screen.queryByRole("button", { name: "Confirm 1 selected" })).toBeNull();
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+  });
 
   it.each(["click", "typed"] as const)(
     "does not submit a cleared multi-select when the next answer arrives by %s",
@@ -1713,6 +1844,8 @@ describe("AgentPane question acknowledgement", () => {
               await stream.waitFor("ask_user");
             });
             await screen.findByRole("button", { name: /Allow action/ });
+            const askId = stream.events.find((event) => event.type === "ask_user")!.data.id;
+            expect(askId).toMatch(/^ask-[0-9a-f-]+-1$/);
             const text = accepted ? "Change direction" : "/research";
             const input = screen.getByRole("textbox");
             fireEvent.change(input, { target: { value: text } });
@@ -1728,7 +1861,7 @@ describe("AgentPane question acknowledgement", () => {
                 stream.events
                   .filter((event) => event.type === "ask_user_settled")
                   .map((event) => event.data),
-              ).toEqual([{ id: "ask-1", action: "cancel" }]);
+              ).toEqual([{ id: askId, action: "cancel" }]);
               expect(pane.answerAskUser).not.toHaveBeenCalled();
             } else {
               await screen.findByText("Prompt status is uncertain");
@@ -1749,7 +1882,7 @@ describe("AgentPane question acknowledgement", () => {
                 stream.events
                   .filter((event) => event.type === "ask_user_settled")
                   .map((event) => event.data),
-              ).toEqual([{ id: "ask-1", action: "answer" }]);
+              ).toEqual([{ id: askId, action: "answer" }]);
             }
           } finally {
             cleanup();
@@ -3599,6 +3732,45 @@ describe("AgentPane lifecycle", () => {
     expect(pane.programmatic).not.toHaveBeenCalled();
   });
 
+  it("retains pasted programmatic references with zero chips without sending", async () => {
+    const pane = client("pane-pasted-references", 8);
+    const commands: AgentModule.SlashCommand[] = [{
+      name: "programmatic", aliases: [], description: "Scan",
+      input: { text: "optional", references: "none", attachments: "none" },
+      source: "built-in",
+    }];
+    vi.mocked(pane.listCommands).mockResolvedValue(commands);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    const draft = "/programmatic focus\n\nReferenced files:\n- src/example.ts";
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(await screen.findByText("Command input blocked")).toBeTruthy();
+    expect(screen.getByText(/does not accept file references/)).toBeTruthy();
+    expect((input as HTMLTextAreaElement).value).toBe(draft);
+    expect(noInputSlashSubmissionError(draft, commands, 0, 0)).toContain("file references");
+    expect(noInputSlashSubmissionError("/programmatic focus", commands, 0, 1)).toContain("file references");
+  });
+
+  it("sends pasted references unchanged for custom commands allowing references", async () => {
+    const pane = client("pane-allowed-references", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([{
+      name: "custom-review", aliases: [], description: "Review",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "custom",
+    }]);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    const draft = "/custom-review focus\n\nReferenced files:\n- src/example.ts";
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(draft, [], undefined));
+    expect(screen.queryByText("Command input blocked")).toBeNull();
+  });
+
   it.each([
     ["overlong trimmed focus", `  ${"x".repeat(4_001)}  `],
     ["NUL", "check\u0000tests"],
@@ -3629,6 +3801,7 @@ describe("AgentPane lifecycle", () => {
   it.each([
     ["4,000 trimmed UTF-16 units", `  ${"😀".repeat(2_000)}  `],
     ["Unicode, multiline and tabs", "检查 café 😀\nnext\tstep"],
+    ["literal reference heading without a block", "focus\n\nReferenced files:\nnot a chip"],
     ["empty focus", ""],
     ["whitespace-only focus", " \t\n "],
   ])("sends valid programmatic %s unchanged apart from outer trim", async (_label, focus) => {

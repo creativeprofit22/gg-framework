@@ -2102,6 +2102,10 @@ async function* executeToolCallsMixed(
   const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
+  for (const result of toolResults) {
+    const call = toolCalls.find((call) => call.id === result.toolCallId);
+    if (call) options.toolMap.get(call.name)?.onResultPrepared?.(result);
+  }
   return { toolResults, aborted };
 }
 
@@ -2154,6 +2158,10 @@ async function* executeToolCallsParallel(
   const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
+  for (const result of toolResults) {
+    const call = toolCalls.find((call) => call.id === result.toolCallId);
+    if (call) options.toolMap.get(call.name)?.onResultPrepared?.(result);
+  }
   return { toolResults, aborted };
 }
 

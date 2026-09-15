@@ -16,7 +16,10 @@ describe(
       .map((match) => match[1]!)
       .filter((specifier) => !specifier.startsWith("."));
 
-    expect(externalImports).toEqual([]);
+    // Native path identity is needed for reviewed direct selections; no package dependency or I/O owner is added.
+    expect(externalImports).toEqual(["node:path"]);
+    expect(routes.match(/discoverCommands\(/g)).toHaveLength(1);
+    expect(routes.match(/observeCommandSources\(/g)).toHaveLength(1);
     expect(routes.match(/loadCustomCommands\(/g)).toHaveLength(1);
     expect(routes.match(/export const SPECIALIST_ROUTES/g)).toHaveLength(1);
     expect(profile.match(/resolveProgrammaticRoutes\(/g)).toHaveLength(1);

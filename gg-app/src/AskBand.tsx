@@ -236,6 +236,20 @@ export function AskBand({
   const questions = prompt.questions;
   const done = sent === true;
 
+  // A narrower window can wrap the review and move its focused option below
+  // the transcript viewport. Preserve visibility, not a new focus or answer.
+  useEffect(() => {
+    if (done || cancelled) return;
+    const keepFocusedOptionVisible = (): void => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && bandRef.current?.contains(active)) {
+        active.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    };
+    window.addEventListener("resize", keepFocusedOptionVisible);
+    return () => window.removeEventListener("resize", keepFocusedOptionVisible);
+  }, [done, cancelled]);
+
   // Number accelerators + type-to-open. Both are deliberately inert while the
   // user is typing anywhere else (the composer is a focused textarea), so the
   // band never steals a keystroke meant for the prompt box.
@@ -301,7 +315,12 @@ export function AskBand({
     const text = questions
       .map((q) => {
         const value = answers[q.id];
-        return Array.isArray(value) ? value.join(", ") : value;
+        // Labels are display-only; keep the original values for exact host approval.
+        const labelOf = (pick: string): string =>
+          q.options?.find((option) => valueOf(option) === pick)?.label ?? pick;
+        return Array.isArray(value)
+          ? value.map(labelOf).join(", ")
+          : value === undefined ? undefined : labelOf(value);
       })
       .filter(Boolean)
       .join(" · ");

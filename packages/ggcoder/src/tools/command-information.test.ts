@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppPaths } from "../config.js";
 import { useFakeHome } from "../test-support/fake-home.js";
-import { createCommandInformationTool } from "./command-information.js";
+import { createCommandInformationTool, checkAdvisoryCommandSnapshot } from "./command-information.js";
+import { createHash } from "node:crypto";
 let root: string;
 let cwd: string;
 let restore: () => void;
@@ -22,6 +23,23 @@ async function command(body: string) {
 }
 
 describe("read-only command information", () => {
+  it("returns host hashes and rejects forged, edited, removed and script-backed snapshots", async () => {
+    await command("Inspect the real prerequisite script before recommending it.");
+    const tool = createCommandInformationTool(cwd);
+    const resolved = JSON.parse(String(await tool.execute({ action: "resolve", command: reference }, context)));
+    expect(resolved.snapshot).toMatchObject({ command: reference, capabilityKind: "prompt-only", helpers: [],
+      bodySha256: createHash("sha256").update(resolved.body).digest("hex"), ownerSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(JSON.stringify(resolved)).not.toContain(cwd);
+    expect(resolved.limitation).toContain("not a host capability guarantee");
+    expect(await checkAdvisoryCommandSnapshot(tool, resolved.snapshot, context)).toBe(true);
+    expect(await checkAdvisoryCommandSnapshot(tool, { ...resolved.snapshot, ownerSha256: "a".repeat(64) }, context)).toBe(false);
+    expect(await checkAdvisoryCommandSnapshot(tool, { ...resolved.snapshot, capabilityKind: "script-backed", helpers: [{ path: "helper.ts", sha256: "a".repeat(64) }] }, context)).toBe(false);
+    await command("Changed instructions");
+    expect(await checkAdvisoryCommandSnapshot(tool, resolved.snapshot, context)).toBe(false);
+    await fs.unlink(path.join(cwd, ".gg/commands/fixture.md"));
+    expect(await checkAdvisoryCommandSnapshot(tool, resolved.snapshot, context)).toBe(false);
+  });
+
   it("honors active-global, fallback-global and project ownership without exposing paths", async () => {
     const active = path.join(getAppPaths().agentDir, "commands");
     const fallback = path.join(root, "fallback/.gg/commands");

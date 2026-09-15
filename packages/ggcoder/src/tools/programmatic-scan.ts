@@ -46,13 +46,16 @@ export function createProgrammaticScanTool(
       "Run the approved fixed-profile programmatic scanner once, reconcile lifecycle state, and return bounded summary counts. Accepts no paths, commands, scanners, opportunities, or lifecycle actions.",
     parameters: ProgrammaticScanParams,
     executionMode: "sequential",
-    async execute() {
+    async execute(_input, context) {
       if (options.localFilesystem === false) return unavailable("local-filesystem-required");
       if (isPlanModeActive(options.planModeRef)) return unavailable("plan-mode-read-only");
 
       const result = await runProgrammaticScan(cwd, {
-        onPreFileMutation: (repositoryPath) =>
-          options.onPreFileMutation?.(containedPath(cwd, repositoryPath)),
+        signal: context.signal,
+        onPreFileMutation: async (repositoryPath) => {
+          await options.onPreFileMutation?.(containedPath(cwd, repositoryPath));
+          if (isPlanModeActive(options.planModeRef)) throw new Error("Plan mode is read-only.");
+        },
         onFileMutated: (repositoryPath) =>
           options.onFileMutated?.(containedPath(cwd, repositoryPath)),
       });

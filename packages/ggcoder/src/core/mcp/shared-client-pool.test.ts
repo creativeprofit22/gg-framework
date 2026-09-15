@@ -230,7 +230,10 @@ describe("SharedMcpClientPool", () => {
         const toolSearch = internals.tools.find((tool) => tool.name === "tool_search");
         expect(toolSearch).toBeDefined();
         activations.push(
-          Promise.resolve(toolSearch!.execute({ query: "echo routing marker" }, {} as never)),
+          Promise.resolve(toolSearch!.execute({ query: "echo routing marker" }, {
+            signal: new AbortController().signal,
+            toolCallId: `activation-${activations.length}`,
+          })),
         );
       };
       return session;

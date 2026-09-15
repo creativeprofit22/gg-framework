@@ -41,6 +41,11 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
     backwards = backwards || await client.evaluate(`Boolean(document.activeElement.compareDocumentPosition(${expression}) & Node.DOCUMENT_POSITION_PRECEDING)`);
     let steps = 0;
     const trace = [];
+    // Do not call an already pointer-focused control a keyboard observation.
+    if (await client.evaluate(`document.activeElement === (${expression}) && !document.activeElement.matches(':focus-visible')`)) {
+      await key("Tab", "Tab", 9, backwards ? 8 : 0);
+      steps++;
+    }
     while (!(await client.evaluate(`document.activeElement === (${expression})`))) {
       trace.push(await client.evaluate(`({tag:document.activeElement.tagName,text:document.activeElement.textContent.slice(0,100),before:!!(document.activeElement.compareDocumentPosition(${expression}) & Node.DOCUMENT_POSITION_PRECEDING)})`));
       if (steps >= 140) { evidence.failedTraversal = {label,trace}; save(); }
@@ -50,6 +55,7 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
     }
     const observation = await client.evaluate(`(() => { const e=document.activeElement, r=e.getBoundingClientRect(), s=getComputedStyle(e); return {label:e.textContent.trim(), focusVisible:e.matches(':focus-visible'), outline:s.outline, rect:{left:r.left,top:r.top,right:r.right,bottom:r.bottom}, viewport:{width:innerWidth,height:innerHeight}, hit:e.contains(document.elementFromPoint(Math.max(1,Math.min(innerWidth-1,(r.left+r.right)/2)),Math.max(1,Math.min(innerHeight-1,(r.top+r.bottom)/2))))}; })()`);
     evidence.focus.push({ target: label, steps, backwards, ...observation }); save();
+    if (!observation.focusVisible || !observation.hit) await capture(`failed-focus-${evidence.focus.length}`);
     assert.equal(observation.focusVisible, true, `Visible keyboard focus: ${label}`);
     assert.equal(observation.hit, true, `Focused control not obscured: ${label}`);
     return observation;
@@ -94,6 +100,21 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
     await capture("pointer-resting");
     await focus("document.querySelector('.programmatic-detail summary')", "keyboard resumes after pointer", true);
   };
+  const type = async (text) => {
+    assert.ok(typeof text === "string" && text.length <= 1000);
+    await focus("document.querySelector('.agent-pane textarea')", "Optional command input");
+    await key("a", "KeyA", 65, 2);
+    await client.send("Input.insertText", { text });
+    assert.equal(await client.evaluate("document.querySelector('.agent-pane textarea').value"), text);
+  };
+  const threadLayout = async (name, target) => {
+    await focus(target, name);
+    const result = await client.evaluate(`(() => { const e=(${target}).closest('.ask-band'); const r=e.getBoundingClientRect(); return {name:${JSON.stringify(name)},viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},section:{client:e.clientWidth,scroll:e.scrollWidth,left:r.left,right:r.right},document:{client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth},review:e.textContent}; })()`);
+    evidence.layouts.push(result); save();
+    assert.ok(result.section.scroll <= result.section.client + 1, `${name}: question horizontal overflow`);
+    assert.ok(result.document.scroll <= result.document.client + 1, `${name}: document horizontal overflow`);
+    await capture(name);
+  };
   await resize(1280, 900);
-  return { evidence, save, key, capture, resize, focus, button, activate, zoom, layout, pointer };
+  return { evidence, save, key, capture, resize, focus, button, activate, zoom, layout, pointer, type, threadLayout };
 }

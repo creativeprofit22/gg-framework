@@ -1,4 +1,6 @@
 import path from "node:path";
+import { realpath } from "node:fs/promises";
+import type { InspectedLocalLocation } from "./retrieval-metadata.js";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { chunkFile, bm25Rank, CHUNKABLE_EXTENSIONS, type Chunk } from "../core/code-retrieval.js";
@@ -88,14 +90,27 @@ export function createSearchCodeTool(
         .map((c) => `// ${c.file}:${c.startLine} → ${c.symbol}\n${c.text}`)
         .join("\n\n");
       const result = truncateTail(body);
-      if (result.truncated) {
-        return (
-          `${result.content}\n\n` +
-          `[Truncated: showing ${result.keptLines} of ${result.totalLines} lines. ` +
-          `Lower max_results or refine the query for fewer chunks.]`
-        );
+      // Tail truncation can omit a header or part of a declaration. Credit only
+      // whole chunks whose header and body survive, using host offsets, not text parsing.
+      const localLocations: InspectedLocalLocation[] = [];
+      const omittedLines = result.totalLines - result.keptLines;
+      const root = ops === localOperations ? await realpath(cwd).catch(() => undefined) : undefined;
+      let lineOffset = 0;
+      for (const chunk of ranked) {
+        const textLines = chunk.text.split("\n").length;
+        if (root && lineOffset >= omittedLines && localLocations.length < 64) {
+          const actual = await realpath(path.resolve(cwd, chunk.file)).catch(() => undefined);
+          const relative = actual ? path.relative(root, actual) : undefined;
+          if (relative && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)) {
+            localLocations.push({ path: chunk.file, startLine: chunk.startLine, endLine: chunk.startLine + textLines - 1 });
+          }
+        }
+        lineOffset += textLines + 2; // header plus blank separator
       }
-      return body;
+      const content = result.truncated
+        ? `${result.content}\n\n[Truncated: showing ${result.keptLines} of ${result.totalLines} lines. Lower max_results or refine the query for fewer chunks.]`
+        : body;
+      return { content, details: { kind: "host-retrieval-v1", resources: [{ outcome: "retrieved", localLocations }] } };
     },
   };
 }

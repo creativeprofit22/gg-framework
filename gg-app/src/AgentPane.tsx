@@ -2,6 +2,7 @@ import {
   ENHANCE_PROMPT_MAX_CHARS,
   CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
   continuationInstructionError,
+  isPendingAskSnapshot,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import {
   createElement,
@@ -22,6 +23,7 @@ import { theme } from "./theme";
 import {
   isValidProgrammaticFocus,
   PROGRAMMATIC_FOCUS_GUIDANCE,
+  CLIENT_OWNED_SLASH_COMMANDS,
 } from "@kenkaiiii/gg-core/slash-command-contract";
 import { autosizeComposer } from "./composer-autosize";
 import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
@@ -161,7 +163,7 @@ import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps"
 import { ArrowUp, Paperclip, AtSign, GitBranch, Square } from "lucide-react";
 import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
-import { dropSupersededAsks, mergeAskAnswers, type AskAnswerDelta } from "./ask-user";
+import { dropSupersededAsks, mergeAskAnswers, reconcilePendingAsks, type AskAnswerDelta } from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
@@ -462,8 +464,8 @@ const DOT = "\u23FA";
 // registers a recurring timer instead of prompting the agent. Declared here so
 // the palette can still discover it alongside the real slash commands.
 const SCHEDULE_COMMAND: SlashCommand = {
-  name: "schedule",
-  aliases: ["sched"],
+  name: CLIENT_OWNED_SLASH_COMMANDS.schedule.name,
+  aliases: [...CLIENT_OWNED_SLASH_COMMANDS.schedule.aliases],
   description: "Run a prompt on a repeating schedule — <prompt> | 15m | [times]",
   input: { text: "optional", references: "optional", attachments: "optional" },
   source: "built-in",
@@ -491,7 +493,9 @@ export function noInputSlashSubmissionError(
   if (!match) return null;
   const blocked = [
     match.args && match.command.input.text === "none" ? "additional text" : null,
-    referencedFileCount > 0 && match.command.input.references === "none" ? "file references" : null,
+    match.command.input.references === "none" &&
+    (referencedFileCount > 0 || parseReferencedFiles(input.trim()).files.length > 0)
+      ? "file references" : null,
     attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
   ].filter((kind): kind is string => kind !== null);
   if (blocked.length > 0)
@@ -2331,6 +2335,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setStatus(st?.runState === "cancelling" ? "cancelling..." : "ready");
       // Apply the snapshot before live events, including their buffered stream
       // writes. Never replace a transcript after opening the submission gate.
+      if (isPendingAskSnapshot(st?.pendingAsks)) {
+        const pendingAsks = st.pendingAsks;
+        setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId));
+      }
       replayEvents();
       readyRef.current = true;
       setHydrated(true);

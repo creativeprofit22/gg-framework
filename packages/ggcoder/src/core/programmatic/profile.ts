@@ -73,10 +73,13 @@ export interface ProgrammaticProfileOperations {
 }
 
 export interface PersistProgrammaticProfileOptions {
+  signal?: AbortSignal;
   operations?: Partial<ProgrammaticProfileOperations>;
   expectedPriorProfileDigest?: string | null;
   onPreMutation?: (repositoryPath: string) => Promise<void> | void;
   onCommitted?: (repositoryPath: string) => Promise<void> | void;
+  /** Host-owned live authorization check; never supplied by tool arguments. */
+  validateBeforeCommit?: () => Promise<void> | void;
 }
 
 export type PersistProgrammaticProfileResult =
@@ -372,6 +375,7 @@ export async function persistProgrammaticProfile(
   approvedProfile: ProgrammaticProfileV1,
   options: PersistProgrammaticProfileOptions = {},
 ): Promise<PersistProgrammaticProfileResult> {
+  options.signal?.throwIfAborted();
   const fingerprint = configurationFingerprintV1Schema.parse(approvedConfigurationFingerprint);
   const profile = programmaticProfileV1Schema.parse(approvedProfile);
   const expectedPriorDigest = options.expectedPriorProfileDigest ?? null;
@@ -380,7 +384,9 @@ export async function persistProgrammaticProfile(
   }
   const operations = { ...localOperations, ...options.operations };
   const root = await canonicalRepositoryRoot(repositoryRoot);
+  options.signal?.throwIfAborted();
   const initial = await assessProgrammaticSetup(root, { operations });
+  options.signal?.throwIfAborted();
   if (initial.status === "unreadable" || !initial.inventory) throw new Error(initial.diagnostic!);
   if (!sameValue(fingerprint, initial.inventory.inventory.configurationFingerprint)) {
     return staleResult(fingerprint, initial.inventory.inventory.configurationFingerprint);
@@ -391,12 +397,15 @@ export async function persistProgrammaticProfile(
   await ensureDirectory(profileDirectory, operations);
   await rejectLinks(root, ".gg/programmatic");
   return withFileLock(destination, async () => {
+    options.signal?.throwIfAborted();
     const temporaryName = `.profile-${process.pid}-${randomUUID()}.tmp`;
     const temporary = path.join(profileDirectory, temporaryName);
     const managedTemporaryPath = `.gg/programmatic/${temporaryName}`;
     const assess = () => assessProgrammaticSetup(root, { operations, managedTemporaryPath });
     const current = await assess();
+    options.signal?.throwIfAborted();
     const proposal = await buildProfileProposal(root, current);
+    options.signal?.throwIfAborted();
     if (!sameValue(fingerprint, proposal.configurationFingerprint)) {
       return staleResult(fingerprint, proposal.configurationFingerprint);
     }
@@ -434,7 +443,9 @@ export async function persistProgrammaticProfile(
         }
       };
       await validateTemporary();
+      options.signal?.throwIfAborted();
       await options.onPreMutation?.(PROGRAMMATIC_PROFILE_PATH);
+      options.signal?.throwIfAborted();
       // Callbacks are mutation boundaries too: recheck configuration, profile bytes and temp contents.
       const finalAssessment = await assess();
       const finalProposal = await buildProfileProposal(root, finalAssessment);
@@ -448,6 +459,8 @@ export async function persistProgrammaticProfile(
       await rejectLinks(root, ".gg/programmatic");
       await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH, true);
       await validateTemporary();
+      await options.validateBeforeCommit?.();
+      options.signal?.throwIfAborted();
       await operations.rename(temporary, destination);
       committed = true;
       await options.onCommitted?.(PROGRAMMATIC_PROFILE_PATH);

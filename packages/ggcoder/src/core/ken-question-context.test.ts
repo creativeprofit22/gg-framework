@@ -170,7 +170,7 @@ describe("Ken question context", () => {
   it("budgets escaped fields across a full valid batch without losing decision slots", async () => {
     const bridge = createAskUserBridge({ broadcast: () => {} });
     const tool = createAskUserTool(bridge.park);
-    const long = '\u0000"\\\\````😀'.repeat(4000);
+    const long = '\u0000"\\\\````😀'.repeat(200);
     const parsed = tool.parameters.parse({
       questions: Array.from({ length: 5 }, (_, q) => ({
         id: `question-${q}`,
@@ -186,6 +186,9 @@ describe("Ken question context", () => {
         })),
       })),
     });
+    // Exceed the digest budget while remaining a valid bounded live prompt.
+    expect(JSON.stringify(parsed).length).toBeGreaterThan(16_000);
+    expect(JSON.stringify(parsed).length).toBeLessThan(512_000);
     const execution = tool.execute(parsed, {
       signal: new AbortController().signal,
       toolCallId: "full-valid",

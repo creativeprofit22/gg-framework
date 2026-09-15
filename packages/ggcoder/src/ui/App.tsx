@@ -2082,7 +2082,7 @@ export function App(props: AppProps) {
           setLastUserMessage,
           setDoneStatus,
           finalizeSubmittedUserItem,
-          runAgent: (content) => agentLoop.run(content),
+          runAgent: (content, invocation) => agentLoop.run(content, invocation),
           isBusy: agentLoop.isBusy,
           setLiveItems,
           getId,

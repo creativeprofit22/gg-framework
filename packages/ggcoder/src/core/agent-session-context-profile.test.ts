@@ -504,7 +504,9 @@ describe("daemon startup with actual AgentSession persistence", () => {
               { onAccepted },
             );
           } else {
-            await session.prompt(kind === "template" ? "/programmatic" : "first", undefined, {
+            // Use an ordinary model template; /programmatic now has its own
+            // deterministic setup/approval path, covered by provider integration tests.
+            await session.prompt(kind === "template" ? "/expand" : "first", undefined, {
               onAccepted,
             });
           }

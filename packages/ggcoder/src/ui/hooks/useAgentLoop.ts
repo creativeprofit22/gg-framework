@@ -1,4 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { ProgrammaticSetupInspection, guardSetupInspectionTools } from "../../core/programmatic/setup-inspection.js";
+import {
+  guardTerminalTools,
+  INCOMPLETE_ADVISORY_NOTICE,
+  ProgrammaticAdvisoryTools,
+  type ProgrammaticAdvisoryContext,
+} from "../../core/programmatic/advisory-tools.js";
 import {
   agentLoop,
   type AgentEvent,
@@ -205,8 +212,14 @@ export interface StreamSnapshot {
   thinkingMs: number;
 }
 
+/** Host-resolved built-in invocation metadata, never inferred from model/prompt text. */
+export interface AgentInvocationOptions {
+  programmaticSetupInspection?: boolean;
+  programmaticAdvisory?: { cwd: string; context: ProgrammaticAdvisoryContext };
+}
+
 export interface UseAgentLoopReturn {
-  run: (userContent: UserContent) => Promise<void>;
+  run: (userContent: UserContent, invocation?: AgentInvocationOptions) => Promise<void>;
   isBusy: () => boolean;
   abort: () => void;
   reset: () => void;
@@ -343,6 +356,11 @@ export function useAgentLoop(
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
+  const advisoryRef = useRef<ProgrammaticAdvisoryTools | undefined>(undefined);
+  const setupInspectionRef = useRef<ProgrammaticSetupInspection | undefined>(undefined);
+  const disposedRef = useRef(false);
+  const liveToolsRef = useRef(options.tools);
+  liveToolsRef.current = options.tools;
   // React state can lag submissions and turns idle before teardown/queue draining ends.
   const runOwnedRef = useRef(false);
   const isBusy = useCallback(() => runOwnedRef.current, []);
@@ -434,11 +452,15 @@ export function useAgentLoop(
   }, [streamingText]);
 
   const abort = useCallback(() => {
+    advisoryRef.current?.close();
+    setupInspectionRef.current?.close();
     abortRef.current?.abort();
   }, []);
 
   const reset = useCallback(() => {
     // Abort any running agent loop first — this kills in-flight subagent processes
+    advisoryRef.current?.close();
+    setupInspectionRef.current?.close();
     abortRef.current?.abort();
     setIsRunning(false);
     setCurrentTurn(0);
@@ -483,9 +505,12 @@ export function useAgentLoop(
   }, []);
 
   const run = useCallback(
-    async (userContent: UserContent) => {
+    async (userContent: UserContent, invocation?: AgentInvocationOptions) => {
+      if (disposedRef.current) throw new Error("Terminal loop is disposed.");
       if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
       runOwnedRef.current = true;
+      let advisory: ProgrammaticAdvisoryTools | undefined;
+      let setupInspection: ProgrammaticSetupInspection | undefined;
       /** Run a single user message through the agent loop. Returns true if aborted. */
       const runSingle = async (
         content: UserContent,
@@ -681,7 +706,12 @@ export function useAgentLoop(
           const generator = agentLoop(messages.current, {
             provider: options.provider,
             model: options.model,
-            tools: options.tools,
+            tools: setupInspection ? guardSetupInspectionTools(setupInspection, () => liveToolsRef.current)
+              : advisory?.tools ?? guardTerminalTools(
+                () => liveToolsRef.current,
+                () => advisoryRef.current,
+                () => setupInspectionRef.current !== undefined,
+              ),
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
             maxTurns: options.maxTurns,
@@ -1273,6 +1303,15 @@ export function useAgentLoop(
       }; // end runSingle
 
       try {
+        if (invocation?.programmaticSetupInspection) {
+          setupInspection = new ProgrammaticSetupInspection();
+          setupInspectionRef.current = setupInspection;
+        }
+        if (invocation?.programmaticAdvisory) {
+          const { cwd, context } = invocation.programmaticAdvisory;
+          advisory = new ProgrammaticAdvisoryTools(cwd, context, () => liveToolsRef.current);
+          advisoryRef.current = advisory;
+        }
         // Run the initial message.
         // On 401, force-refresh the OAuth token and retry once — the provider may
         // have revoked the token server-side before the stored expiry.
@@ -1294,6 +1333,22 @@ export function useAgentLoop(
           } else {
             throw err;
           }
+        } finally {
+          setupInspection?.close();
+          setupInspectionRef.current = undefined;
+          setupInspection = undefined;
+          if (advisory) {
+            const incomplete = !advisory.turn.submitted;
+            advisory.close();
+            advisoryRef.current = undefined;
+            advisory = undefined;
+            if (incomplete) {
+              const notice: Message = { role: "assistant", content: INCOMPLETE_ADVISORY_NOTICE };
+              messages.current.push(notice);
+              onTurnText?.(INCOMPLETE_ADVISORY_NOTICE, "", 0);
+              onComplete?.([notice]);
+            }
+          }
         }
 
         // Drain the queue: process follow-up messages that arrived after agent_done.
@@ -1310,16 +1365,21 @@ export function useAgentLoop(
         // left here arrived *after* the abort and is a fresh user intent. Without
         // this it would be orphaned in the queue forever with no loop to pick it
         // up.
-        if (queueRef.current.length > 0) {
+        if (!disposedRef.current && queueRef.current.length > 0) {
           const batch = queueRef.current.splice(0);
           setQueuedCount(0);
           const merged = mergeUserContent(batch.map((q) => q.content));
           // Let React process the onDone state updates before starting next run
           await new Promise((r) => setTimeout(r, 100));
+          if (disposedRef.current) return;
           onQueuedStart?.(merged);
           await runSingle(merged);
         }
       } finally {
+        setupInspection?.close();
+        setupInspectionRef.current = undefined;
+        advisory?.close();
+        advisoryRef.current = undefined;
         runOwnedRef.current = false;
       }
     },
@@ -1345,7 +1405,12 @@ export function useAgentLoop(
 
   // Cleanup on unmount
   useEffect(() => {
+    disposedRef.current = false;
     return () => {
+      disposedRef.current = true;
+      advisoryRef.current?.close();
+      setupInspectionRef.current?.close();
+      liveToolsRef.current = [];
       abortRef.current?.abort();
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);

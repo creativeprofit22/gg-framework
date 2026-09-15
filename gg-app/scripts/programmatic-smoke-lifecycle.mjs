@@ -52,12 +52,14 @@ export async function runSmokeLifecycle({ audit, workflow, diagnose, beforeClean
   throw new AggregateError(failures.map(({ error }) => error), "Smoke failed; original workflow/finalization errors retained");
 }
 
-export function validateNativeSmokeEvidence(audit, result, { driftOnly, integratedRecovery, allowNormalWindow }) {
+export function validateNativeSmokeEvidence(audit, result, { driftOnly, integratedRecovery, extendedWorkflow = false, allowNormalWindow }) {
   const observations = JSON.parse(readFileSync(join(audit, "native-minimized.json"), "utf8"));
   const expectedLabels = ["native-ready", "approved-scanned-selected",
     ...(driftOnly ? ["dismissed-exact-drift", "refresh-approved-before-rescan"] : ["task-awaiting-separate-approval", "read-only-task-completed"]),
     ...(integratedRecovery ? ["execution-rescanned", "completed-exact-drift", "refresh-approved-before-rescan"] : []),
-    "scenario-rescanned", ...(integratedRecovery ? ["recovered-inspection", "recovered-rescanned"] : []), "before-cleanup"];
+    "scenario-rescanned", ...(integratedRecovery ? ["recovered-inspection", "recovered-rescanned"] : []),
+    ...(extendedWorkflow ? ["extended-advice-settled", "extended-run-settled"] : []), "before-cleanup"];
+  assert.ok(!extendedWorkflow || !allowNormalWindow, "Extended workflow forbids normal-window fallback");
   assert.deepEqual(observations.samples.map((sample) => sample.boundary), expectedLabels, "All ordered native scenario boundaries observed");
   assert.ok(observations.samples.every((sample) => sample.verified === true));
   result.minimized = observations.samples.every((sample) => sample.minimized);

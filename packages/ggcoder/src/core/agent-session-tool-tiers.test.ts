@@ -163,7 +163,7 @@ describe("AgentSession built-in tool tiering", () => {
         session.getMessages().find((message) => message.role === "user")?.content,
       );
       expect(commandPrompt).toContain(
-        "Load the deferred `programmatic_scan` tool using `tool_search`",
+        "The host supplies permitted assessment tools",
       );
     } finally {
       await session.dispose();
@@ -237,6 +237,7 @@ describe("AgentSession built-in tool tiering", () => {
       "read",
       "grep",
       "source_path",
+      "programmatic_command",
       "screenshot",
       "allowed_extra",
       "late_allowed",

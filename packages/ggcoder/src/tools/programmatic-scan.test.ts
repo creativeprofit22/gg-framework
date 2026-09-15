@@ -20,6 +20,8 @@ import {
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
+import { ProgrammaticAdvisoryTurn, AdvisoryEvidence } from "../core/programmatic/advisory.js";
+import { executeAdvisoryTool } from "../core/programmatic/advisory-tools.js";
 
 const roots: string[] = [];
 const context = {
@@ -42,7 +44,9 @@ async function repository(): Promise<string> {
 }
 
 async function generateProfile(root: string): Promise<void> {
-  const tool = createProgrammaticProfileTool(root);
+  const tool = createProgrammaticProfileTool(root, {
+    reviewer: async (request) => ({ action: "answer", answers: { [request.questions[0]!.id]: "save-setup" } }),
+  });
   const inspected = JSON.parse((await tool.execute({ action: "inspect" }, context)) as string) as {
     configuration_fingerprint: ConfigurationFingerprintV1;
     profile: ProgrammaticProfileV1;
@@ -66,8 +70,42 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
+describe("scan cancellation", () => {
+  it.each(["before", "paused", "committed"] as const)("honestly reports cancellation %s publication", async (when) => {
+    const root = await repository();
+    await generateProfile(root);
+    const profile = await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH));
+    const controller = new AbortController();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    let notifications = 0;
+    const tool = createProgrammaticScanTool(root, {
+      onPreFileMutation: async () => { if (when === "paused") { entered(); await held; } },
+      onFileMutated: () => { notifications++; if (when === "committed") controller.abort(); },
+    });
+    if (when === "before") controller.abort();
+    const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+    turn.claim("programmatic_scan", {});
+    const executionContext = { ...context, signal: controller.signal };
+    const running = when === "committed"
+      ? executeAdvisoryTool(turn, root, tool, {}, executionContext)
+      : tool.execute({}, executionContext);
+    if (when === "paused") { await ready; controller.abort(); release(); }
+    const result = JSON.parse(await running as string);
+    expect(result).toMatchObject({ ok: when === "committed", changed: when === "committed" });
+    expect(notifications).toBe(when === "committed" ? 1 : 0);
+    if (when === "committed") expect([...turn.limitations]).not.toContain("programmatic_scan: cancelled.");
+    expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH))).toEqual(profile);
+    expect((await fs.readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(
+      when === "committed" ? ["profile.json", "state.json"] : ["profile.json"],
+    );
+  });
+});
+
 describe("`/programmatic` validates the stored profile and configuration fingerprint before running a read-only scan", () => {
-  it("loads and invokes only the argument-free scan tool once", () => {
+  it("invokes one argument-free scan separately from read-only advice", () => {
     const command = PROMPT_COMMANDS.find(({ name }) => name === "programmatic");
 
     expect(command).toMatchObject({
@@ -75,13 +113,13 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
       description: "Scan programmatic opportunities",
     });
     expect(command?.prompt).toContain(
-      "Load the deferred `programmatic_scan` tool using `tool_search`.",
+      "The host supplies permitted assessment tools for this turn.",
     );
     expect(command?.prompt.match(/Call `[^`]+`/g)).toEqual(["Call `programmatic_scan`"]);
     expect(command?.prompt).toContain("exactly once with an empty argument object");
-    expect(command?.prompt).toContain("Report only the tool's bounded result");
+    expect(command?.prompt).toContain("Report the tool's bounded result separately as Deterministic scan");
     expect(command?.prompt).toContain(
-      "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+      "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
     );
   });
 

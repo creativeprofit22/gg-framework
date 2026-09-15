@@ -61,6 +61,7 @@ export interface ProgrammaticLifecycleOperations {
 }
 
 export interface RunProgrammaticScanOptions {
+  signal?: AbortSignal;
   operations?: Partial<ProgrammaticLifecycleOperations>;
   inventoryOperations?: Partial<InventoryOperations>;
   onPreFileMutation?: (repositoryPath: string) => Promise<void> | void;
@@ -88,6 +89,7 @@ export type RunProgrammaticScanResult =
         | "profile-invalid"
         | "stale-configuration"
         | "scan-failed"
+        | "cancelled"
         | "state-corrupt"
         | "persistence-failed";
       detail: string;
@@ -264,6 +266,7 @@ async function replaceStateFile(
   options: RunProgrammaticScanOptions,
   revalidateCommit: () => Promise<void>,
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   const destination = containedPath(root, repositoryPath);
   const temporary = containedPath(root, temporaryRepositoryPath);
   const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
@@ -294,9 +297,13 @@ async function replaceStateFile(
       throw new Error("Temporary lifecycle state validation failed");
     }
     await rejectLinks(root, repositoryPath, true);
+    options.signal?.throwIfAborted();
     await options.onPreFileMutation?.(repositoryPath);
+    options.signal?.throwIfAborted();
     await withFileLock(profilePath, async () => {
+      options.signal?.throwIfAborted();
       await revalidateCommit();
+      options.signal?.throwIfAborted();
       await operations.rename(temporary, destination);
       committed = true;
     });
@@ -918,7 +925,16 @@ export async function runProgrammaticScan(
   repositoryRoot: string,
   options: RunProgrammaticScanOptions = {},
 ): Promise<RunProgrammaticScanResult> {
+  const cancelled = () => errorResult("cancelled", "Programmatic scan was cancelled before publication.");
+  if (options.signal?.aborted) return cancelled();
   const operations = { ...localOperations, ...options.operations };
+  let committedPath: string | undefined;
+  const renameState = operations.rename;
+  operations.rename = async (from, to) => {
+    const result = await renameState(from, to);
+    committedPath = to;
+    return result;
+  };
   let root: string;
   try {
     root = await canonicalRepositoryRoot(repositoryRoot);
@@ -927,7 +943,9 @@ export async function runProgrammaticScan(
     return errorResult("profile-invalid", "Programmatic profile is invalid or unsafe.");
   }
 
+  if (options.signal?.aborted) return cancelled();
   const loadedProfile = await loadProfile(root, operations);
+  if (options.signal?.aborted) return cancelled();
   if (loadedProfile.status === "missing") {
     return errorResult("profile-missing", "Programmatic profile is missing.");
   }
@@ -942,6 +960,7 @@ export async function runProgrammaticScan(
     const inventory = await buildProgrammaticInventory(root, {
       operations: options.inventoryOperations,
     });
+    options.signal?.throwIfAborted();
     fingerprint = configurationFingerprintV1Schema.parse(
       inventory.inventory.configurationFingerprint,
     );
@@ -985,12 +1004,15 @@ export async function runProgrammaticScan(
       })
       .map(({ identity }) => identity.id);
   } catch {
+    if (options.signal?.aborted) return cancelled();
     return errorResult("scan-failed", "Programmatic scan failed.");
   }
 
   const statePath = containedPath(root, PROGRAMMATIC_STATE_PATH);
   try {
+    options.signal?.throwIfAborted();
     return await withFileLock(statePath, async () => {
+      options.signal?.throwIfAborted();
       await rejectLinks(root, ".gg/programmatic");
       const revalidateProfile = () => ensureProfileUnchanged(root, operations, loadedProfile.bytes);
       const revalidateCommit = () =>
@@ -1002,6 +1024,7 @@ export async function runProgrammaticScan(
           fingerprint,
         );
       await revalidateProfile();
+      options.signal?.throwIfAborted();
       await operations.rm(containedPath(root, STATE_TEMPORARY_PATH), { force: true });
       await operations.rm(containedPath(root, PREVIOUS_STATE_TEMPORARY_PATH), { force: true });
       const primary = await readStateCandidate(statePath, operations);
@@ -1041,6 +1064,7 @@ export async function runProgrammaticScan(
       const unchanged = loaded.status === "valid" && loaded.bytes.equals(nextBytes);
       if (unchanged && !recovered) {
         await revalidateCommit();
+        options.signal?.throwIfAborted();
         return {
           ok: true,
           changed: false,
@@ -1098,6 +1122,15 @@ export async function runProgrammaticScan(
       };
     });
   } catch (error) {
+    // The recovery copy is user state too. Never disguise its completed rename as a no-op.
+    if (committedPath) return {
+      ok: false, changed: true, recovered: false, path: PROGRAMMATIC_STATE_PATH,
+      configurationFingerprint: fingerprint, summary: failedSummary(), error: "post-commit-failed",
+      detail: committedPath === statePath
+        ? "Lifecycle state was persisted before processing stopped. Read the current report before retrying."
+        : "The lifecycle recovery copy was persisted, but primary state was not replaced. Read the current report before retrying.",
+    };
+    if (options.signal?.aborted) return cancelled();
     if (error instanceof StaleConfigurationError) {
       return errorResult("stale-configuration", error.message, fingerprint);
     }

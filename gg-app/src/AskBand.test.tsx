@@ -16,6 +16,27 @@ afterEach(() => {
 });
 
 describe("AskBand", () => {
+  it("keeps the focused review option in view on resize without answering or stealing focus", () => {
+    const onAnswer = vi.fn();
+    const p = prompt({ id: "review", question: "Run the reviewed task?", kind: "choice", options: [{ label: "Approve task" }, { label: "Cancel" }] });
+    const { rerender, unmount } = render(<AskBand prompt={p} onAnswer={onAnswer} onTypeInstead={onTypeInstead} />);
+    const button = screen.getByRole("button", { name: /Approve task/ });
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(button, "scrollIntoView", { value: scrollIntoView });
+    fireEvent(window, new Event("resize"));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    button.focus();
+    fireEvent(window, new Event("resize"));
+    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest", inline: "nearest" });
+    expect(document.activeElement).toBe(button);
+    expect(onAnswer).not.toHaveBeenCalled();
+    rerender(<AskBand prompt={p} onAnswer={onAnswer} onTypeInstead={onTypeInstead} sent />);
+    fireEvent(window, new Event("resize"));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    unmount();
+    fireEvent(window, new Event("resize"));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
   it("answers a confirm with one click", () => {
     const onAnswer = vi.fn();
     render(
@@ -74,6 +95,105 @@ describe("AskBand", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Postgres/ }));
     expect(onAnswer).toHaveBeenCalledWith({ store: "pg" });
+  });
+
+  it.each([
+    { label: "Postgres", value: "pg" },
+    {
+      label: "Create reviewed files",
+      value: `create:${"a".repeat(64)}:12345678-1234-4234-8234-123456789abc`,
+    },
+    { label: "Do not create files", value: "reject" },
+  ])("displays $label after completion but submits its exact value", (selected) => {
+    const onAnswer = vi.fn();
+    const submit = vi.fn();
+    let retained: Record<string, string | string[]> = {};
+    const p = prompt({
+      id: "decision",
+      question: "Which action?",
+      kind: "choice",
+      options: [selected],
+      allowOther: false,
+    });
+    function Controlled(): React.ReactElement {
+      const [answers, setAnswers] = useState(retained);
+      const [sent, setSent] = useState(false);
+      return (
+        <AskBand
+          prompt={p}
+          answers={answers}
+          sent={sent}
+          onAnswer={(delta) => {
+            onAnswer(delta);
+            const merged = mergeAskAnswers(answers, delta, p.questions);
+            retained = merged.answers;
+            setAnswers(merged.answers);
+            if (merged.complete) {
+              submit(p.id, "answer", merged.answers);
+              setSent(true);
+            }
+          }}
+          onTypeInstead={onTypeInstead}
+        />
+      );
+    }
+    const { container } = render(<Controlled />);
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(selected.label) }));
+    expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ decision: selected.value });
+    expect(submit).toHaveBeenCalledExactlyOnceWith(p.id, "answer", { decision: selected.value });
+    expect(retained).toEqual({ decision: selected.value });
+    expect(container.querySelector(".ask-answered")?.textContent).toBe(selected.label);
+    expect(screen.queryByText(selected.value)).toBeNull();
+  });
+
+  it("displays completed multi labels in selection order without changing raw answers", () => {
+    const onAnswer = vi.fn();
+    const p = prompt({
+      id: "checks",
+      question: "Which checks?",
+      kind: "multi",
+      options: [
+        { label: "Typecheck", value: "types" },
+        { label: "Test suite", value: "tests" },
+        { label: "Build" },
+      ],
+    });
+    const { container, rerender } = render(
+      <AskBand prompt={p} onAnswer={onAnswer} onTypeInstead={onTypeInstead} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test suite" }));
+    fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
+    fireEvent.click(screen.getByRole("button", { name: "Build" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm 3 selected" }));
+    expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ checks: ["tests", "types", "Build"] });
+    const answers = onAnswer.mock.calls[0]![0];
+    rerender(
+      <AskBand prompt={p} answers={answers} sent onAnswer={onAnswer} onTypeInstead={onTypeInstead} />,
+    );
+    expect(container.querySelector(".ask-answered")?.textContent).toBe("Test suite, Typecheck, Build");
+    expect(answers).toEqual({ checks: ["tests", "types", "Build"] });
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unmatched and free-text answers as literal text in completed cards", () => {
+    const text = "<b>My own answer</b>";
+    const { container } = render(
+      <AskBand
+        prompt={prompt(
+          { id: "choice", question: "Which?", kind: "choice", options: [{ label: "Known", value: "known" }] },
+          { id: "multi", question: "Which ones?", kind: "multi", options: [{ label: "Known", value: "known" }] },
+          { id: "text", question: "Details?", kind: "text" },
+        )}
+        answers={{ choice: "unmatched", multi: ["known", "another answer"], text }}
+        sent
+        onAnswer={vi.fn()}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    expect(container.querySelector(".ask-answered")?.textContent).toBe(
+      `unmatched · Known, another answer · ${text}`,
+    );
+    expect(container.querySelector("b")).toBeNull();
   });
 
   it("renders long labels as rows, with their hints", () => {

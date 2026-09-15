@@ -81,10 +81,11 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
     const asks = createAskUserBridge({ broadcast: () => {}, onSettled: settled });
     const question = { questions: [{ id: "q", question: "Continue?", kind: "confirm" as const }] };
     const original = asks.park(question);
+    const originalId = asks.pendingRequests[0]!.id;
     const json = vi.fn();
     const queued = vi.fn(() => {
       // The blocked tool has not resumed before its replacement enters the queue.
-      expect(settled.mock.calls).toEqual(state === "new-question" ? [[{ id: "ask-1", action: "answer" }]] : []);
+      expect(settled.mock.calls).toEqual(state === "new-question" ? [[{ id: originalId, action: "answer" }]] : []);
       return 1;
     });
     try {
@@ -94,10 +95,10 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         runLifecycle: { running: true, generation: 1, state, isCancellationRequested: () => state !== "new-question" },
         handleAppSidecarProgrammaticExecution: async () => false,
         resolveChatResearchCommandRoute, handleAppSidecarChatResearchPrompt,
-        runAgent: vi.fn(), session: { getPlanMode: () => false, queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
+        runAgent: vi.fn(), session: { getPlanMode: () => false, queueInputPolicyError: () => undefined, queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
         res: {}, json, broadcast: vi.fn(), cwd: ".",
         prepareAttachments: async () => {
-          asks.settle("ask-1", { action: "answer", answers: { q: "yes" } });
+          asks.settle(originalId, { action: "answer", answers: { q: "yes" } });
           void asks.park(question);
           return [];
         },
@@ -105,13 +106,15 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
       expect(asks.pendingCount).toBe(1);
       if (state === "new-question") {
         expect(json).toHaveBeenCalledWith({}, 202, { queued: true, count: 1, queueId: "q1" });
-        expect(settled).toHaveBeenCalledExactlyOnceWith({ id: "ask-1", action: "answer" });
-        expect(asks.settle("ask-2", { action: "answer", answers: { q: "yes" } })).toBe(true);
+        expect(settled).toHaveBeenCalledExactlyOnceWith({ id: originalId, action: "answer" });
+        const replacementId = asks.pendingRequests[0]!.id;
+        expect(replacementId).not.toBe(originalId);
+        expect(asks.settle(replacementId, { action: "answer", answers: { q: "yes" } })).toBe(true);
       } else {
         expect(json).toHaveBeenCalledWith({}, 409, { error: state === "cancelling" ? "run_cancelling" : "cancel_failed", runState: state });
         expect(settled).not.toHaveBeenCalled();
         expect(queued).not.toHaveBeenCalled();
-        expect(asks.settle("ask-1", { action: "answer", answers: { q: "yes" } })).toBe(true);
+        expect(asks.settle(originalId, { action: "answer", answers: { q: "yes" } })).toBe(true);
       }
       await expect(original).resolves.toEqual({ action: "answer", answers: { q: "yes" } });
     } finally { asks.cancelAll(); }

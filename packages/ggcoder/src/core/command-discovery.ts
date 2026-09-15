@@ -50,6 +50,8 @@ export function registryCommandListings(commands: readonly { name: string; alias
 }
 
 export interface CommandDiscoveryOptions {
+  /** Host-owned namespace reservations only, not discoverable backend handlers. */
+  reservedCommandIdentities?: readonly string[];
   /** Intercepted by the host before normal GG slash dispatch. */
   workspaceActions?: readonly SlashCommandListing[];
   workspaceCaseInsensitive?: boolean;

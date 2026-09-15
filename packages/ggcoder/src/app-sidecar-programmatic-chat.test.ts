@@ -10,6 +10,8 @@ import { programmaticLifecycleStateV1Schema } from "./core/programmatic/contract
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { RunClaim } from "./core/run-claim.js";
+import { createStrandedQueueDrain } from "./app-sidecar-user-turn.js";
 import {
   AppSidecarProgrammaticChat,
   type ProgrammaticChatTarget,
@@ -54,6 +56,52 @@ async function fixture() {
   return { cwd, target, adapter, call, inspect };
 }
 describe("session-scoped programmatic adapter", () => {
+  it.each([false, true])("drains a prompt queued during report I/O after releasing its claim (failure=%s)", async (fail) => {
+    const f = await fixture();
+    const claim = new RunClaim();
+    const queued: string[] = [];
+    const delivered: string[] = [];
+    let unblock!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { unblock = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let drainRun: Promise<void> | undefined;
+    const drain = createStrandedQueueDrain(() => false, async () => {
+      expect(claim.active).toBe(false);
+      delivered.push(...queued.splice(0));
+    });
+    let settlements = 0;
+    const adapter = new AppSidecarProgrammaticChat(
+      () => ({ ...f.target, busy: claim.active }),
+      () => claim.claim(),
+      () => claim.release(),
+      {
+        inspect: buildProgrammaticProfileProposal, persist: persistProgrammaticProfile,
+        report: async (...args) => {
+          entered();
+          await gate;
+          if (fail) throw new Error("fixture report read failed");
+          return readProgrammaticChatReport(...args);
+        },
+        detail: readProgrammaticChatDetail, dismiss: dismissProgrammaticOpportunity, scan: runProgrammaticScan,
+      },
+      () => { settlements++; drainRun = drain(); },
+    );
+    const request = adapter.handle({ version: 1, action: "report", offset: 0 });
+    await started;
+    expect(claim.active).toBe(true);
+    queued.push("Create the reviewed command");
+    expect((await adapter.handle({ version: 1, action: "report", offset: 0 })).status).toBe(409);
+    expect(settlements).toBe(0);
+    expect(delivered).toEqual([]);
+    unblock();
+    expect((await request).status).toBe(fail ? 409 : 200);
+    await drainRun;
+    expect(settlements).toBe(1);
+    expect(claim.active).toBe(false);
+    expect(queued).toEqual([]);
+    expect(delivered).toEqual(["Create the reviewed command"]);
+  });
   it("exposes exact drift read-only, gates current setup and preserves dismissed history through separately approved refresh", async () => {
     const f = await fixture();
     const initial = await f.inspect();

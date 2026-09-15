@@ -6,6 +6,7 @@ import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
 import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import { stripInvisibleUnicode } from "../utils/text.js";
 import { log } from "../core/logger.js";
+import { safeRetrievalUrl, type RetrievalResource } from "./retrieval-metadata.js";
 
 /**
  * Block requests to private/internal network addresses to prevent SSRF.
@@ -338,6 +339,7 @@ async function renderOutline(
 
 /** A page already rendered in this session, keyed by URL + budget. */
 interface CachedPage {
+  finalUrl: string;
   text: string;
   links: OutlineLink[];
 }
@@ -397,6 +399,7 @@ interface LlmsCandidate {
 }
 
 interface FetchOptions {
+  onRetrieval?: (outcome: RetrievalResource["outcome"], sourceUrl?: string) => void;
   maxLength: number;
   format: FetchFormat;
   preferLlmsTxt: boolean;
@@ -583,7 +586,11 @@ function looksLikePdf(contentType: string, url: string, head: Uint8Array): boole
 }
 
 /** Process a fetched PDF body into extracted text or an explanatory error. */
-async function processPdf(response: RawResponse, maxLength: number): Promise<string> {
+async function processPdf(
+  response: RawResponse,
+  maxLength: number,
+  onRetrieval: FetchOptions["onRetrieval"],
+): Promise<string> {
   if (response.contentLength !== null && response.contentLength > MAX_PDF_BYTES) {
     return `Error: PDF too large (${response.contentLength} bytes; limit ${MAX_PDF_BYTES}).`;
   }
@@ -593,9 +600,11 @@ async function processPdf(response: RawResponse, maxLength: number): Promise<str
   }
   try {
     const { text, pages } = await extractPdfText(new Uint8Array(buffer));
+    onRetrieval?.(text.trim() ? "retrieved" : "unavailable", response.finalUrl);
     return `[PDF · ${pages} page${pages === 1 ? "" : "s"}]\n\n${truncate(text.trim(), maxLength)}`;
   } catch (err) {
     if (err instanceof PdfExtractorUnavailable) {
+      onRetrieval?.("unavailable", response.finalUrl);
       return "PDF detected but the optional 'unpdf' dependency is not installed. Add it: pnpm add -w unpdf";
     }
     const msg = err instanceof Error ? err.message : String(err);
@@ -679,11 +688,13 @@ async function fetchAndProcess(
         body: new Response(bytes.slice().buffer),
         contentLength: bytes.byteLength,
       };
-      return await processPdf(pdfResponse, opts.maxLength);
+      return await processPdf(pdfResponse, opts.maxLength, opts.onRetrieval);
     }
 
     const text = new TextDecoder().decode(bytes);
-    return await processHtmlOrText(response, text, opts);
+    const content = await processHtmlOrText(response, text, opts);
+    opts.onRetrieval?.(content.trim() ? "retrieved" : "unavailable", response.finalUrl);
+    return content;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return `Error fetching ${url}: ${msg}`;
@@ -831,13 +842,19 @@ async function tryLlmsResource(
       const bytes = await readBoundedBody(response.body);
       const text = new TextDecoder().decode(bytes);
       if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
-      return `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`;
+      return {
+        finalUrl: response.finalUrl,
+        content: `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`,
+      };
     } catch {
       return null;
     }
   });
 
-  return probes.find((probe): probe is string => probe !== null) ?? null;
+  const selected = probes.find((probe) => probe !== null);
+  if (!selected) return null;
+  opts.onRetrieval?.("retrieved", selected.finalUrl);
+  return selected.content;
 }
 
 async function fetchWithPreferredDocs(
@@ -903,6 +920,11 @@ async function fetchPage(
   const requestKey = cacheKey(url, opts.maxLength);
   const hit = cacheGet(cache, requestKey);
   if (hit) {
+    if (isBlockedUrl(hit.finalUrl)) return BLOCKED_URL_MESSAGE;
+    const finalPolicyError = checkUrlPolicy(hit.finalUrl, opts.getNetworkPolicy);
+    if (finalPolicyError) return `Error: ${finalPolicyError}`;
+    signal.throwIfAborted();
+    opts.onRetrieval?.(hit.text.trim() ? "retrieved" : "unavailable", hit.finalUrl);
     opts.numbers?.reserve(hit.links);
     return sanitizeFetched(url, hit.text);
   }
@@ -913,7 +935,8 @@ async function fetchPage(
     {
       ...opts,
       onRender: (finalUrl, text, links) => {
-        rendered = { text, links };
+        if (signal.aborted) return;
+        rendered = { finalUrl, text, links };
         // Keyed by the post-redirect URL, plus the requested URL below.
         cacheSet(cache, cacheKey(finalUrl, opts.maxLength), rendered);
       },
@@ -947,6 +970,36 @@ export function createWebFetchTool(
       "same session are served from cache. Outline mode skips the /llms.txt probe.",
     parameters,
     async execute(args, context: ToolContext) {
+      const observed: RetrievalResource[] = [];
+      const finish = (content: string) => ({
+        content,
+        details: {
+          kind: "host-retrieval-v1",
+          resources: observed.length
+            ? observed
+            : [{ outcome: context.signal.aborted ? "cancelled" : "failed" }],
+        },
+      });
+      const fetchObserved = async (url: string, opts: FetchOptions) => {
+        let resource: RetrievalResource = { outcome: "failed" };
+        const content = await fetchPage(
+          url,
+          {
+            ...opts,
+            onRetrieval: (outcome, sourceUrl) => {
+              resource = {
+                outcome,
+                sourceUrl: sourceUrl ? safeRetrievalUrl(sourceUrl) : undefined,
+              };
+            },
+          },
+          context.signal,
+          pageCache,
+        );
+        if (context.signal.aborted) resource = { outcome: "cancelled" };
+        return { content, resource };
+      };
+      context.signal.throwIfAborted();
       const format: FetchFormat = args.format ?? "markdown";
       const maxLength =
         args.max_length ?? (format === "outline" ? OUTLINE_DEFAULT_MAX_LENGTH : 10000);
@@ -960,9 +1013,11 @@ export function createWebFetchTool(
       if (args.follow !== undefined) {
         followUrl = followTargets.get(args.follow);
         if (!followUrl) {
-          return followTargets.size === 0
-            ? 'Error: no numbered links available — fetch a page with format: "outline" first.'
-            : `Error: link [${args.follow}] is not in the last outline (known: ${[...followTargets.keys()].join(", ")}).`;
+          return finish(
+            followTargets.size === 0
+              ? 'Error: no numbered links available — fetch a page with format: "outline" first.'
+              : `Error: link [${args.follow}] is not in the last outline (known: ${[...followTargets.keys()].join(", ")}).`,
+          );
         }
       }
 
@@ -989,19 +1044,22 @@ export function createWebFetchTool(
           getNetworkPolicy,
           numbers,
         };
-        const sections = await runPool(urls, MAX_CONCURRENCY, (u) =>
-          fetchPage(u, opts, context.signal, pageCache),
+        const sections = await runPool(urls, MAX_CONCURRENCY, (u) => fetchObserved(u, opts));
+        observed.push(...sections.map((section) => section.resource));
+        return finish(
+          remember(urls.map((u, i) => `## ${u}\n${sections[i]!.content}`).join("\n\n")),
         );
-        return remember(urls.map((u, i) => `## ${u}\n${sections[i]}`).join("\n\n"));
       }
 
       const url = followUrl ?? args.url;
       if (!url) {
-        return "Error: provide either `url`, `urls`, or `follow`.";
+        return finish("Error: provide either `url`, `urls`, or `follow`.");
       }
 
       const opts: FetchOptions = { maxLength, format, preferLlmsTxt, getNetworkPolicy, numbers };
-      return remember(await fetchPage(url, opts, context.signal, pageCache));
+      const result = await fetchObserved(url, opts);
+      observed.push(result.resource);
+      return finish(remember(result.content));
     },
   };
 }

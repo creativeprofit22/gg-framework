@@ -13,7 +13,14 @@ describe("opportunity discovery touched-files bloat audit", () => {
 
     expect(
       imports.filter((specifier) => !specifier.startsWith(".") && specifier !== "node:path"),
-    ).toEqual(["zod"]);
+    ).toEqual(["zod", "@kenkaiiii/gg-core/slash-command-contract"]);
+    // Existing focus validation is shared with desktop consumers. Pin that exact
+    // pure module, not the gg-core barrel or an open-ended workspace allowance.
+    const sharedContract = await fs.readFile(
+      new URL("../../../../gg-core/src/slash-command-contract.ts", import.meta.url), "utf8",
+    );
+    expect(sharedContract).not.toMatch(/\bimport\b|\brequire\s*\(|\bexport\s+[^;]*\bfrom\s+["']|\bfetch\s*\(|\bprocess\s*\./);
+    expect(sharedContract).toContain("export function isValidProgrammaticFocus");
     expect(opportunities).toContain("GENERATED_PATHS");
     expect(
       opportunities.match(/^function detect(?:CanonicalTauri|UnsupportedTauriConfig)\(/gm),

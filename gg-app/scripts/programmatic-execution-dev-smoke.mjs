@@ -12,7 +12,7 @@ import { connectToDevWebview, createIsolatedProfile, reserveHeldTcpPort, sanitiz
 import { readProcessTable, processTreeSnapshot } from "./workspace-shell-evidence.mjs";
 import { runSmokeLifecycle, validateNativeSmokeEvidence, trackOwnedProcess, waitForLiveProcess } from "./programmatic-smoke-lifecycle.mjs";
 import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
-import { readExecutionDisplay, assertTranscriptIsolation } from "./programmatic-execution-smoke-checks.mjs";
+import { readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspace = resolve(app, "..");
@@ -120,12 +120,15 @@ async function run() {
   const visual = process.argv.includes("--visual");
   const driftOnly = process.argv.includes("--drift-only");
   const integratedRecovery = process.argv.includes("--integrated-recovery");
+  const extendedWorkflow = process.argv.includes("--extended-workflow");
+  assert.ok(!extendedWorkflow || (!driftOnly && !integratedRecovery), "Extended workflow is a separate bounded scenario");
   assert.ok(!integratedRecovery || (!driftOnly && !visual), "Integrated recovery excludes drift-only and visual modes");
   const allowNormalWindow = process.argv.includes("--allow-normal-window");
+  assert.ok(!extendedWorkflow || !allowNormalWindow, "Extended minimized verification never allows normal-window fallback");
   assert.ok(!allowNormalWindow || !visual, "Normal-window fallback does not enable visual/input checks");
   assert.ok(!driftOnly || !visual, "Drift-only smoke does not repeat visual/input checks");
   const reuseBuiltDev = process.argv.includes("--reuse-built-dev");
-  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
+  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(extendedWorkflow ? ["--extended-workflow"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
   const builtDev = join(app, "src-tauri/target/debug/gg-app.exe");
   if (reuseBuiltDev) {
     assert.match(process.env.GG_PROGRAMMATIC_BUILT_DEV_SHA256 ?? "", /^[a-f0-9]{64}$/);
@@ -167,16 +170,24 @@ async function run() {
     let providerFailure;
     server = http.createServer(async (request, response) => {
       try {
+        if (providerFailure) throw providerFailure;
         assert.equal(request.method, "POST");
         assert.equal(request.url, "/openai/v1/responses");
         const chunks = [];
         let size = 0;
         for await (const chunk of request) { size += chunk.length; assert.ok(size < 1_000_000); chunks.push(chunk); }
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        assert.ok(requests.length < 3, "No automatic specialist rerun");
+        assert.ok(requests.length < (extendedWorkflow ? extendedRequestCount : 3), "No automatic specialist rerun or unexpected continuation");
         requests.push(body);
         let events;
-        if (requests.length < 3) {
+        if (extendedWorkflow && requests.length > 3) {
+          const step = extendedWorkflowStep(requests.length, body);
+          events = typeof step === "string" ? [{ type: "response.output_text.delta", delta: step }] : [
+            { type: "response.output_item.added", output_index: 0, item: step },
+            { type: "response.function_call_arguments.done", output_index: 0, item_id: step.id, arguments: step.arguments },
+            { type: "response.output_item.done", output_index: 0, item: step },
+          ];
+        } else if (requests.length < 3) {
           const first = requests.length === 1;
           const item = { type: "function_call", id: first ? "fc_read" : "fc_complete", call_id: first ? "fixture-read" : "fixture-complete",
             name: first ? "read" : "programmatic_result",
@@ -188,7 +199,11 @@ async function run() {
         events.push({ type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 4 } } });
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
-      } catch (error) { providerFailure = error; response.writeHead(500); response.end("Fixture rejected request"); }
+      } catch (error) {
+        providerFailure ??= error;
+        json(join(paths.audit, "provider-failure.json"), { request: requests.length, error: String(providerFailure) });
+        response.writeHead(400); response.end("Fixture rejected request");
+      }
     });
     await new Promise((done) => server.listen(0, "127.0.0.1", done));
     const providerUrl = `http://127.0.0.1:${server.address().port}/openai/v1/responses`;
@@ -398,24 +413,106 @@ async function run() {
       await observeMinimized?.("recovered-rescanned");
       json(join(paths.audit, "recovery.json"), { recoverySource: "previous", controlledPreviousSnapshot: true, previousBeforePreparation, validHash: hash(validBytes), previousHash, corruptHash, restoredHash: hash(readFileSync(fixture.statePath)), identity: fixture.id, lifecycleBefore: valid.records[0].lifecycle, lifecycleAfter: restored.records[0].lifecycle, readPreservedBytes: true, requests: requests.length });
     }
+    let eventsBeforeRendererReload;
+    if (extendedWorkflow) {
+      const stateBytes = readFileSync(fixture.statePath);
+      const profileBytes = readFileSync(join(paths.project, ".gg/programmatic/profile.json"));
+      const commandFile = join(paths.project, `.gg/commands/${extendedCommandName}.md`);
+      const invoke = (command, args) => client.evaluate(`window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify({ paneId: "primary", ...args })})`);
+      const settled = async (count) => {
+        await waitFor(`extended provider boundary ${count}`, async () => {
+          if (providerFailure) throw providerFailure;
+          return requests.length === count && !(await invoke("agent_state", {})).running
+            && await client.evaluate(`Boolean(document.querySelector('.agent-pane button[aria-label="Send message"]'))`);
+        });
+        if (providerFailure) throw providerFailure;
+      };
+      const typePrompt = async (text) => {
+        if (input) return input.type(text);
+        await client.evaluate(`(() => { const e=document.querySelector('.agent-pane textarea'); const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set; setter.call(e,${JSON.stringify(text)}); e.dispatchEvent(new Event('input',{bubbles:true})); return true; })()`);
+      };
+      const sendTyped = async () => {
+        if (input) await input.key("Enter", "Enter", 13);
+        else await client.evaluate(`document.querySelector('.agent-pane textarea').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true}))`);
+      };
+      const review = async (label, beforeCount, previousId) => {
+        const question = await waitFor(`${label} native question`, () => client.evaluate(`window.fixtureEvents.filter(e=>e.type==='ask_user').map(e=>e.data).findLast(q=>q.id!==${JSON.stringify(previousId)} && q.id!==${JSON.stringify(questionId)})`));
+        assert.equal(requests.length, beforeCount, `${label}: zero child/next dispatch before approval`);
+        assert.notEqual(question.id, previousId);
+        const target = `Array.from(document.querySelectorAll('.ask-band:not(.is-done):not(.is-closed) [data-ask-option]')).find(b=>b.textContent.includes(${JSON.stringify(question.questions[0].options[0].label)}))`;
+        await waitFor(`${label} rendered`, () => client.evaluate(`Boolean(${target})`));
+        if (input) {
+          for (const width of [600, 480]) {
+            await input.resize(width, 640);
+            await input.threadLayout(`${label}-${width}x640`, target);
+          }
+          await input.activate(target, label);
+        } else await client.evaluate(`(${target}).click()`);
+        return question.id;
+      };
+      const questionId = await client.evaluate(`window.fixtureEvents.find(e=>e.type==='ask_user').data.id`);
+      await click("Opportunities"); // Close the panel; the extension lives in the ordinary transcript.
+      await typePrompt("/programmatic focus on the manifest; retain completed history");
+      assert.equal(requests.length, 3, "Optional typing does not dispatch");
+      await sendTyped();
+      await settled(7);
+      await waitFor("in-thread extended advice", () => client.evaluate(`document.body.innerText.includes('NATIVE EXTENDED ADVICE')`));
+      assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
+      assert.deepEqual(readFileSync(join(paths.project, ".gg/programmatic/profile.json")), profileBytes);
+      assert.equal(existsSync(commandFile), false);
+      await observeMinimized?.("extended-advice-settled");
+      await typePrompt("NATIVE CREATE REQUEST: create only the reviewed manifest prompt, not execution.");
+      await sendTyped();
+      const creationId = await review("extended-creation-review", 11, questionId);
+      await settled(13);
+      assert.equal(existsSync(commandFile), true);
+      const catalog = await invoke("agent_commands", {});
+      assert.ok(catalog.commands.some((entry) => entry.name === extendedCommandName), "New command is in the native catalog");
+      // Narrow sizes exercise review cards; optional typing uses the normal
+      // viewport, including its command suggestion popup.
+      if (input) await input.resize(1280, 900);
+      await typePrompt(`/${extendedCommandName}`);
+      await waitFor("renderer catalog refresh", () => client.evaluate(`Array.from(document.querySelectorAll('.slash-item')).some(e=>e.textContent.includes(${JSON.stringify(extendedCommandName)}))`));
+      assert.equal(requests.length, 13, "Discovery does not execute newly created command");
+      await typePrompt("NATIVE RUN REQUEST: request a separate read-only review of the created command.");
+      await sendTyped();
+      const executionId = await review("extended-execution-review", 14, creationId);
+      await settled(extendedRequestCount);
+      assert.notEqual(creationId, executionId);
+      assert.deepEqual(readFileSync(fixture.statePath), stateBytes, "Direct run creates no synthetic Opportunity");
+      assert.deepEqual(readFileSync(join(paths.project, ".gg/programmatic/profile.json")), profileBytes);
+      await observeMinimized?.("extended-run-settled");
+      eventsBeforeRendererReload = await client.evaluate(`window.fixtureEvents`);
+      assert.ok(Array.isArray(eventsBeforeRendererReload));
+      await client.send("Page.reload");
+      await waitFor("restored extension history", () => client.evaluate(`document.body.innerText.includes('NATIVE EXTENDED ADVICE') && document.body.innerText.includes('NATIVE CREATION SETTLED') && document.body.innerText.includes('NATIVE RUN SETTLED')`));
+      assert.equal(requests.length, extendedRequestCount, "Reload cannot replay creation or execution");
+      await click("Opportunities");
+      await click("Check for opportunities");
+      await waitFor("retained terminal history after extension", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Completed')`));
+      assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
+      json(join(paths.audit, "extended-workflow.json"), { passed: true, creationId, executionId, requests: requests.length, history: "native renderer reload, same daemon/session; not daemon restart", verification: "canonical loading only; deterministic helper checks are backend evidence", profilePreserved: true, lifecyclePreserved: true });
+      if (input) { input.evidence.passed = true; input.save(); }
+    }
     const after = snapshot(paths.project);
     const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]);
-    assert.deepEqual(changes.sort(), [".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...(driftOnly || integratedRecovery ? ["package.json"] : [])]);
+    assert.deepEqual(changes.sort(), [...(extendedWorkflow ? [`.gg/commands/${extendedCommandName}.md`] : []), ".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...(driftOnly || integratedRecovery ? ["package.json"] : [])].sort());
     const finalParent = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     assert.equal(finalParent.provider, parentState.provider);
     assert.equal(finalParent.model, parentState.model);
     assert.equal(finalParent.sessionId, parentState.sessionId);
-    assert.equal(finalParent.messageCount, parentState.messageCount);
+    if (extendedWorkflow) assert.ok(finalParent.messageCount > parentState.messageCount, "Only explicit parent turns extend its transcript");
+    else assert.equal(finalParent.messageCount, parentState.messageCount);
     // Startup/reload may create an empty earlier host session. Prove the task adds no child
     // transcript and leaves every non-active host transcript byte-for-byte unchanged.
     const transcriptsAfter = transcriptSnapshot();
     assertTranscriptIsolation(transcriptsBefore, transcriptsAfter, hostTranscripts[0]);
     json(join(paths.audit, "transcript-isolation.json"), { passed: true, hostTranscript: hostTranscripts[0], before: transcriptsBefore, after: transcriptsAfter });
-    const events = await client.evaluate(`window.fixtureEvents`);
+    const events = eventsBeforeRendererReload ?? await client.evaluate(`window.fixtureEvents`);
     if (driftOnly) assert.deepEqual(events, [], "No task approval, execution output or completion events");
     else assert.ok(events.some((event) => event.type === "text_delta" && event.data.text.includes("[research] read")));
     const parentIsolation = { before: { provider: parentState.provider, model: parentState.model, sessionId: parentState.sessionId, messageCount: parentState.messageCount }, after: { provider: finalParent.provider, model: finalParent.model, sessionId: finalParent.sessionId, messageCount: finalParent.messageCount } };
-    return { passed: true, parentIsolation, driftOnly, integratedRecovery, minimized: false, nativeInputSmoke: visual, real: [driftOnly ? "rendered initial approval, scan, dismissal, exact drift inspection, separate refresh approval and rescan" : "rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", ...(driftOnly ? [] : ["Node dispatcher", "AgentSession", "read tool"]), "lifecycle storage", ...(integratedRecovery ? ["completed-history drift and approved refresh", "previous-state inspection without writes, then explicit recovery scan"] : [])], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false };
+    return { passed: true, parentIsolation, driftOnly, integratedRecovery, extendedWorkflow, minimized: false, nativeInputSmoke: visual, real: [driftOnly ? "rendered initial approval, scan, dismissal, exact drift inspection, separate refresh approval and rescan" : "rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", ...(driftOnly ? [] : ["Node dispatcher", "AgentSession", "read tool"]), "lifecycle storage", ...(integratedRecovery ? ["completed-history drift and approved refresh", "previous-state inspection without writes, then explicit recovery scan"] : [])], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false };
   }
   const result = await runSmokeLifecycle({
     audit,
@@ -454,10 +551,10 @@ async function run() {
       if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Fixture cleanup failed");
     },
     validate: (result) => {
-      if (!visual) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, allowNormalWindow });
+      if (!visual) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow });
     },
   });
-  console.log(`PROGRAMMATIC ${integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
+  console.log(`PROGRAMMATIC ${extendedWorkflow ? "EXTENDED WORKFLOW" : integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
 }
 
 if (mode === "sidecar") {

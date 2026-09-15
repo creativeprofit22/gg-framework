@@ -2525,6 +2525,29 @@ describe("capTurnToolResults", () => {
 // Fix D (baseline #2): capping mutates the model-input/persistent transcript in
 // place while the tool_call_end event already carried the FULL preview. The
 // `capped` marker makes that divergence programmatically visible.
+describe("post-cap result preparation", () => {
+  it.each(["parallel", "sequential"] as const)("notifies the host before the next provider request in %s mode", async (executionMode) => {
+    mockStream.mockReset();
+    const prepared = vi.fn();
+    mockStream.mockReturnValueOnce(mockToolCallResult("read", { inputTokens: 1, outputTokens: 1 }) as unknown as ReturnType<typeof stream>);
+    mockStream.mockImplementationOnce((options) => {
+      expect(prepared).toHaveBeenCalledOnce();
+      const result = options.messages.flatMap((message) => message.role === "tool" ? message.content : [])[0]!;
+      expect(prepared).toHaveBeenCalledWith(result);
+      expect(result.capped).toEqual({ originalChars: 10_000, keptChars: String(result.content).length, scope: "per-turn" });
+      expect(String(result.content)).toContain("per-turn budget");
+      return mockOkResult("done") as unknown as ReturnType<typeof stream>;
+    });
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic", model: "fixture", maxToolResultChars: 5000, maxTurnToolResultChars: 1000,
+      tools: [{ name: "read", description: "Fixture", parameters: emptyParams, executionMode,
+        execute: () => { expect(prepared).not.toHaveBeenCalled(); return "x".repeat(10_000); }, onResultPrepared: prepared }],
+    });
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    expect(prepared).toHaveBeenCalledOnce();
+  });
+});
+
 describe("tool-result cap divergence marker", () => {
   const result = (id: string, content: string): ToolResult => ({
     type: "tool_result",

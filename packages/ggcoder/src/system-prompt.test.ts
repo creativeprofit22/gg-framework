@@ -216,8 +216,8 @@ describe("buildSystemPrompt", () => {
   });
 
   it.each([
-    [[], "ff0f5fa41941e2cb3c9d091c2e1db6426b9e9e8117e7fbaa3642095dc766bb33"],
-    [["ask_user"], "6c7430d7e676c9d379fd96c1ff239fde74c51144986edde8841387070e73d2e6"],
+    [[], "0d220eced121241baf7d2ff313207e50c89bd9f368304e89e10ded6a219f8f81"],
+    [["ask_user"], "a309e5fe5d85945fb2ce1e5dc4e6f64eec1212ad7f39c150dd0c42f7a643e1b8"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -277,9 +277,10 @@ describe("buildSystemPrompt", () => {
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
 
     // Flexible detail must not compete with leftover hard reply caps.
-    expect(talk).toContain("treat length as flexible, not a hard limit");
-    expect(talk).toContain("Simple updates stay brief");
-    expect(talk).toContain("Avoid repetition and unnecessary background");
+    expect(talk).toContain("No hard length limit");
+    expect(talk).toContain("Target 50–60% shorter replies than a full explanation");
+    expect(talk).toContain("On request, explain fully without the reduction target");
+    expect(talk).toContain("preserve essential context, risks, verification, and work quality");
     expect(talk).toContain("each with your pick");
     expect(talk).not.toContain("inside the budget");
     expect(talk).not.toContain("max 5 items");
@@ -352,9 +353,9 @@ describe("buildSystemPrompt", () => {
     for (const required of [
       "works directly in the user's codebase",
       "completing tasks end-to-end",
-      "**Clarity over brevity.**",
-      "treat length as flexible, not a hard limit",
-      "explanations, tradeoffs, plans, and unfamiliar concepts get more detail",
+      "**Short by default; expand on request.**",
+      "No hard length limit",
+      "On request, explain fully without the reduction target",
       "**Short paragraphs by default.**",
       "usually one to three sentences per paragraph",
       "Use bullets for actual lists or steps, not every answer",

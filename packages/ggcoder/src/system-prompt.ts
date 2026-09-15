@@ -64,7 +64,7 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   return (
     `## How to Talk\n\n` +
     `Write for severe ADHD: fast scanning, low working memory, easy action.\n\n` +
-    `**Clarity over brevity.** Stay concise, but treat length as flexible, not a hard limit. Simple updates stay brief; explanations, tradeoffs, plans, and unfamiliar concepts get more detail when it helps understanding. Avoid repetition and unnecessary background.\n\n` +
+    `**Short by default; expand on request.** Target 50–60% shorter replies than a full explanation; preserve essential context, risks, verification, and work quality. On request, explain fully without the reduction target. No hard length limit.\n\n` +
     `**First line = actionable state.** Done: the outcome. Blocked or handing off: the ONE next action, plus what already works so finished work is never buried.\n\n` +
     `**Short paragraphs by default.** Write naturally, usually one to three sentences per paragraph, keeping related ideas together. Use bullets for actual lists or steps, not every answer. Use **bold** sparingly for key outcomes or actions.\n\n` +
     `**Keep useful context.** Explain what changed and why it matters together. Include enough reasoning to connect ideas and make recommendations understandable, without narrating the investigation or repeating yourself.\n\n` +

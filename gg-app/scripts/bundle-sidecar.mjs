@@ -546,24 +546,53 @@ export function copyPackage(
  * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
  * and adds roughly 180 MB of unused files before compression.
  */
-function pruneForeignNativePayloads(stagedOutDir) {
-  const runtimes = join(stagedOutDir, "node_modules", "onnxruntime-node", "bin", "napi-v3");
-  if (!existsSync(runtimes)) return;
-
-  const selected = join(runtimes, process.platform, process.arch);
+export function pruneForeignNativePayloads(
+  stagedOutDir,
+  { platform = process.platform, arch = process.arch } = {},
+) {
+  const packageRoot = join(stagedOutDir, "node_modules", "onnxruntime-node");
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  if (
+    manifest.name !== "onnxruntime-node" ||
+    manifest.version !== "1.24.3" ||
+    JSON.stringify(manifest.binary?.napi_versions) !== "[6]"
+  ) {
+    throw new Error("onnxruntime-node version or N-API layout changed: expected 1.24.3 / [6]");
+  }
+  const bin = join(packageRoot, "bin");
+  if (JSON.stringify(readdirSync(bin).sort()) !== '["napi-v6"]') {
+    throw new Error("onnxruntime-node bin layout changed: expected only napi-v6");
+  }
+  const runtimes = join(bin, "napi-v6");
+  const selected = join(runtimes, platform, arch);
   if (!existsSync(selected)) {
-    throw new Error(
-      `onnxruntime-node has no native payload for ${process.platform}/${process.arch}`,
-    );
+    throw new Error(`onnxruntime-node has no native payload for ${platform}/${arch}`);
   }
 
+  // Validate regular files (and reject links) before changing the candidate.
+  const nativeFiles = walkFiles(selected).map((file) => file.relative);
+  if (!nativeFiles.includes("onnxruntime_binding.node")) {
+    throw new Error("onnxruntime-node selected runtime is missing its native binding");
+  }
+  if (platform === "win32" && arch === "x64") {
+    const expected = [
+      "DirectML.dll",
+      "dxcompiler.dll",
+      "dxil.dll",
+      "onnxruntime.dll",
+      "onnxruntime_binding.node",
+    ].sort();
+    if (JSON.stringify(nativeFiles.sort()) !== JSON.stringify(expected)) {
+      throw new Error("onnxruntime-node Windows x64 payload layout changed");
+    }
+  }
   const keep = join(stagedOutDir, `.gg-onnxruntime-${process.pid}`);
   cpSync(selected, keep, { recursive: true });
   rmSync(runtimes, { recursive: true, force: true });
-  mkdirSync(join(runtimes, process.platform), { recursive: true });
+  mkdirSync(join(runtimes, platform), { recursive: true });
   cpSync(keep, selected, { recursive: true });
   rmSync(keep, { recursive: true, force: true });
-  console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
+  console.log(`pruned onnxruntime-node payloads to ${platform}/${arch}`);
 }
 
 function pruneSourceMaps(stagedOutDir) {
@@ -709,7 +738,7 @@ function assertPrunedLayout(
     "node_modules/typescript-language-server/lib/cli.mjs",
     "node_modules/opensrc/bin/opensrc.js",
     `node_modules/opensrc/bin/${selectedOpenSrcBinary}`,
-    `node_modules/onnxruntime-node/bin/napi-v3/${process.platform}/${process.arch}`,
+    `node_modules/onnxruntime-node/bin/napi-v6/${process.platform}/${process.arch}`,
   ];
   for (const path of requiredFiles) {
     if (!existsSync(join(stagedOutDir, ...path.split("/"))))

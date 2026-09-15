@@ -20,6 +20,7 @@ import {
   buildAndPromoteDirectory,
   copyPackage,
   pruneAllowlistedPackagePayloads,
+  pruneForeignNativePayloads,
   selectedOptionalDependencies,
 } from "./bundle-sidecar.mjs";
 
@@ -129,6 +130,69 @@ function createVersionedPackage(nodeModules, name, version, files) {
   for (const file of files) writeFixtureFile(root, file);
   return root;
 }
+
+function createNativePruneFixture() {
+  const root = mkdtempSync(join(tmpdir(), "gg-native-prune-"));
+  temporaryDirectories.push(root);
+  const packageRoot = join(root, "node_modules", "onnxruntime-node");
+  writeFixtureFile(
+    packageRoot,
+    "package.json",
+    JSON.stringify({
+      name: "onnxruntime-node",
+      version: "1.24.3",
+      binary: { napi_versions: [6] },
+    }),
+  );
+  for (const name of [
+    "DirectML.dll",
+    "dxcompiler.dll",
+    "dxil.dll",
+    "onnxruntime.dll",
+    "onnxruntime_binding.node",
+  ]) {
+    writeFixtureFile(packageRoot, `bin/napi-v6/win32/x64/${name}`, `runtime:${name}`);
+  }
+  writeFixtureFile(packageRoot, "bin/napi-v6/linux/x64/onnxruntime_binding.node", "foreign");
+  return { root, packageRoot };
+}
+
+describe("locked ONNX native runtime selection", () => {
+  it("keeps every Windows N-API 6 DLL and removes foreign runtimes", () => {
+    const { root, packageRoot } = createNativePruneFixture();
+    const selected = join(packageRoot, "bin/napi-v6/win32/x64");
+    const before = readdirSync(selected).map((name) => [name, readFileSync(join(selected, name))]);
+    pruneForeignNativePayloads(root, { platform: "win32", arch: "x64" });
+    expect(existsSync(join(packageRoot, "bin/napi-v6/linux"))).toBe(false);
+    for (const [name, bytes] of before)
+      expect(readFileSync(join(selected, name)).equals(bytes)).toBe(true);
+  });
+
+  it.each(["version", "abi", "extra-root", "missing-dll", "missing-platform"])(
+    "rejects %s drift before removing foreign files",
+    (kind) => {
+      const { root, packageRoot } = createNativePruneFixture();
+      if (kind === "version" || kind === "abi") {
+        const p = join(packageRoot, "package.json");
+        const manifest = JSON.parse(readFileSync(p, "utf8"));
+        if (kind === "version") manifest.version = "1.24.4";
+        else manifest.binary.napi_versions = [3];
+        writeFileSync(p, JSON.stringify(manifest));
+      } else if (kind === "extra-root") writeFixtureFile(packageRoot, "bin/unreviewed/file");
+      else if (kind === "missing-dll")
+        rmSync(join(packageRoot, "bin/napi-v6/win32/x64/onnxruntime.dll"));
+      expect(() =>
+        pruneForeignNativePayloads(root, {
+          platform: kind === "missing-platform" ? "darwin" : "win32",
+          arch: "x64",
+        }),
+      ).toThrow(/onnxruntime-node/);
+      expect(
+        readFileSync(join(packageRoot, "bin/napi-v6/linux/x64/onnxruntime_binding.node"), "utf8"),
+      ).toBe("foreign");
+    },
+  );
+});
 
 function createPackagePruneFixture() {
   const root = mkdtempSync(join(tmpdir(), "gg-sidecar-prune-"));

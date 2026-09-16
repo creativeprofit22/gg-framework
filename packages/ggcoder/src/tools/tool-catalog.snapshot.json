@@ -160,7 +160,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 100,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
               },
               "source": {
                 "type": "string",
@@ -191,7 +191,7 @@
           "action"
         ]
       },
-      "hash": "5def26f2b809ce76de9b475f9f09e1f5bfe780f8baf3203cd5b82d43a6c6fe94"
+      "hash": "fbc3a629c582d9d95d67e9aa48b296df869aec222c334888b3a8e2fbb2b9016b"
     },
     {
       "name": "edit",
@@ -423,7 +423,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 100,
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                   },
                   "source": {
                     "type": "string",
@@ -488,7 +488,7 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 100,
-                  "pattern": "^[a-z][a-z0-9_]*(?![\\s\\S])"
+                  "pattern": "^[a-z][a-z0-9_]*$"
                 }
               },
               "mode": {
@@ -831,7 +831,7 @@
           "action"
         ]
       },
-      "hash": "7fbb5c444bc409ee7863873dc3d1d2f996fd2c2fcb9010ff4a38136d2645c250"
+      "hash": "2f1365d5fd7efb60c1fe8e641506b9d924478b75b8e07e20302965fd59edfd90"
     },
     {
       "name": "programmatic_profile",

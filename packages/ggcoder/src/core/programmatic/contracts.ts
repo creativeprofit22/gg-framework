@@ -231,12 +231,14 @@ export const programmaticAssessmentInputV1Schema = z.strictObject({
 
 // Reference-only subset of slash tokens: preserve case and punctuation, never normalize.
 // ASCII alphanumeric start, then letters/digits/dot/underscore/hyphen; 100 chars max.
-// The absolute-end assertion also rejects a final newline (unlike `$`).
+// Keep the emitted pattern compatible with provider strict schemas (no lookaround).
+// JavaScript `$` permits a final line terminator; reject those separately at runtime.
 const commandNameTokenSchema = z
   .string()
   .min(1)
   .max(100)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])/);
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+  .refine((value) => !/[\r\n\u2028\u2029]/.test(value), "must not contain line terminators");
 
 export const programmaticCommandReferenceV1Schema = z
   .strictObject({
@@ -290,7 +292,8 @@ const executionPathsSchema = z.array(
   (values) => isStrictlyAscending(values) && new Set(values.map((value) => value.toLowerCase())).size === values.length,
   "declared paths must be unique and sorted ascending",
 );
-const executionToolNamesSchema = z.array(z.string().min(1).max(100).regex(/^[a-z][a-z0-9_]*(?![\s\S])/)).max(64)
+const executionToolNamesSchema = z.array(z.string().min(1).max(100).regex(/^[a-z][a-z0-9_]*$/)
+  .refine((value) => !/[\r\n\u2028\u2029]/.test(value), "must not contain line terminators")).max(64)
   .refine(isStrictlyAscending, "tool names must be unique and sorted ascending");
 export const directCommandSelectionV1Schema = z.strictObject({
   version: z.literal(1),

@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
+import type { ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import type { AssistantTextDeltaPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { SubAgentSnapshot } from "./subagent-manager.js";
 
@@ -14,6 +15,8 @@ export interface McpToolEventIdentity {
 }
 
 export interface BusEventMap {
+  /** Host assessment status only; never forwarded from provider tool output. */
+  programmatic_assessment: ProgrammaticAssessmentEvent;
   // Agent events (forwarded from agentLoop)
   text_delta: AssistantTextDeltaPayload;
   thinking_delta: { text: string };

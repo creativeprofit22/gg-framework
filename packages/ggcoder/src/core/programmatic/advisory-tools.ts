@@ -4,7 +4,7 @@ import { getMcpToolIdentity, withMcpToolIdentity } from "../mcp/tool-identity.js
 import { createProgrammaticAdvisoryResultTool } from "../../tools/programmatic-advisory-result.js";
 import { CommandInformationParams } from "../../tools/command-information.js";
 import type { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
-import { ADVISORY_READ_TOOLS, AdvisoryEvidence, ProgrammaticAdvisoryTurn } from "./advisory.js";
+import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
 
 export type ProgrammaticAdvisoryContext = ReturnType<typeof buildProgrammaticAdvisoryContext>;
 
@@ -70,6 +70,7 @@ export async function executeAdvisoryTool(
       !turn.active ||
       context.signal.aborted ||
       tool.name === "programmatic_scan" ||
+      tool.name === "programmatic_profile" ||
       tool.name === "programmatic_advisory_result"
     )
       return output;
@@ -178,22 +179,28 @@ export const INCOMPLETE_ADVISORY_NOTICE =
 export class ProgrammaticAdvisoryTools {
   readonly turn: ProgrammaticAdvisoryTurn;
   readonly tools: AgentTool[];
-  constructor(cwd: string, advisory: ProgrammaticAdvisoryContext, getTools: () => AgentTool[]) {
-    this.turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+  constructor(cwd: string, advisory: ProgrammaticAdvisoryContext, getTools: () => AgentTool[], policy: ProgrammaticAdvisoryPolicy = { mode: "configured" }) {
+    this.turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), policy);
     const turn = this.turn;
     turn.claim("command_information", { action: "list" });
     turn.observePage(advisory.commands);
     const allowed = (tool: AgentTool) =>
       turn.active &&
       getTools().includes(tool) &&
-      ADVISORY_READ_TOOLS.has(tool.name) &&
+      turn.allows(tool.name) &&
+      (tool.name !== "programmatic_scan" || policy.scanAvailable !== false) &&
       !getMcpToolIdentity(tool);
+    const refreshScanPolicy = () => {
+      if (!getTools().some((tool) => tool.name === "programmatic_scan" && allowed(tool))) turn.markScanUnavailable();
+    };
+    refreshScanPolicy();
     const guard = (tool: AgentTool, registered = true): AgentTool => ({
       ...tool,
       onResultPrepared: (result) => turn.resultPrepared(result),
       execute: async (args, context) => {
         if (!turn.active || (registered && !allowed(tool)))
           throw new Error("Tool unavailable in read-only advisory scope.");
+        refreshScanPolicy();
         claimAdvisoryTool(turn, tool, args);
         return executeAdvisoryTool(turn, cwd, tool, args, context);
       },
@@ -227,8 +234,11 @@ export class ProgrammaticAdvisoryTools {
           false,
         ),
       );
+    } else {
+      turn.limitations.add("Command catalog tooling is unavailable; command availability cannot be established.");
+      this.tools.push(guard(createProgrammaticAdvisoryResultTool(() => turn.active ? turn : undefined), false));
     }
-    if (!this.tools.some((tool) => tool.name === "research_corpus"))
+    if (turn.mode === "configured" && !this.tools.some((tool) => tool.name === "research_corpus"))
       turn.limitations.add(
         "Read-only corpus tooling is unavailable; no installation or indexing was attempted.",
       );

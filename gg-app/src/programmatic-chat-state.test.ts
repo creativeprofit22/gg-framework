@@ -13,6 +13,59 @@ import {
   programmaticConfiguration,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
+it("retains bounded assessment through reports, rejects stale outcomes and clears on reset", () => {
+  const assessment = {
+    version: 1 as const, mode: "setup" as const, status: "incomplete" as const,
+    summary: "Only documentation inspected", limitations: ["Source budget exhausted"],
+    coverage: [], observations: [], deterministic: { status: "not-run" as const, reason: "setup" as const },
+  };
+  const exactProposal = { ...proposal, profileJson: `${JSON.stringify({ scanners: [], version: 1 }, null, 2)}\n` };
+  let state = receive(initialProgrammaticChatState("one"), {
+    version: 1, action: "inspect-setup", ok: true, proposal: exactProposal, assessment,
+  });
+  expect(state.assessment).toEqual(assessment);
+  expect(state.proposal).toBe(exactProposal);
+  expect(state.proposalApprovable).toBe(true);
+  state = receive(state, { version: 1, action: "report", ok: true, report: loadedState().report! });
+  expect(state.assessment).toEqual(assessment);
+  const response = { version: 1 as const, action: "scan" as const, ok: true as const, changed: false };
+  expect(programmaticChatReducer(state, { type: "response", generation: "old", epoch: state.epoch, response })).toBe(state);
+  expect(programmaticChatReducer(state, { type: "response", generation: "one", epoch: state.epoch - 1, response })).toBe(state);
+  expect(programmaticChatReducer(state, { type: "reset", generation: "two" }).assessment).toBeNull();
+  expect(receive(state, response).assessment).toBeNull();
+  const failed = receive(state, {
+    version: 1, action: "inspect-setup", ok: false, error: "Cannot propose settings", reconcile: false,
+    assessment: { ...assessment, status: "unavailable" },
+  });
+  expect(failed.assessment?.status).toBe("unavailable");
+  expect(failed.proposalApprovable).toBe(false);
+});
+
+it("replaces assessment without changing in-flight setup ownership and rejects retired updates", () => {
+  const assessment = { version: 1 as const, mode: "setup" as const, status: "unavailable" as const,
+    summary: "Unavailable", limitations: [], coverage: [], observations: [],
+    deterministic: { status: "not-run" as const, reason: "setup" as const } };
+  let state = programmaticChatReducer(initialProgrammaticChatState("one"), {
+    type: "start", generation: "one", epoch: 1, operation: "inspect-setup",
+  });
+  const identity = { conversationId: "chat", sessionId: "session", sequence: 2 };
+  state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: { ...identity, phase: "started" } });
+  expect(state.assessment).toBeNull();
+  const completion = { type: "assessment" as const, generation: "one", event: { ...identity, phase: "completed" as const, assessment } };
+  state = programmaticChatReducer(state, completion);
+  expect(state).toMatchObject({ epoch: 1, operation: "inspect-setup", assessment });
+  const exactProposal = { ...proposal, profileJson: `${JSON.stringify({ scanners: [], version: 1 }, null, 2)}\n` };
+  state = receive(state, { version: 1, action: "inspect-setup", ok: true, proposal: exactProposal, assessment });
+  expect(state.proposal).toBe(exactProposal);
+  expect(state.proposalApprovable).toBe(true);
+  expect(programmaticChatReducer(state, completion)).toBe(state);
+  expect(programmaticChatReducer(state, { ...completion, generation: "retired" })).toBe(state);
+  expect(programmaticChatReducer(state, { ...completion, event: { ...completion.event, sequence: 1 } })).toBe(state);
+  state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: { ...identity, sequence: 3, phase: "started" } });
+  expect(state.assessment).toBeNull();
+  expect(state.proposal).toBe(exactProposal);
+});
+
 const hash = "a".repeat(64);
 const proposal = {
   handle: hash,

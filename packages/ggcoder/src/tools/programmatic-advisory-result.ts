@@ -9,7 +9,7 @@ import {
 /** Scoped transcript result tool; owns no persistence, scanner or execution state. */
 export function createProgrammaticAdvisoryResultTool(
   getTurn: () => ProgrammaticAdvisoryTurn | undefined,
-  commandInformation: AgentTool<typeof CommandInformationParams>,
+  commandInformation?: AgentTool<typeof CommandInformationParams>,
 ): AgentTool<typeof programmaticAssessmentResultV1Schema> {
   return {
     name: "programmatic_advisory_result",
@@ -20,11 +20,12 @@ export function createProgrammaticAdvisoryResultTool(
       const turn = getTurn();
       if (!turn) throw new Error("No active host advisory turn.");
       return turn.submit(input, {
-        snapshot: (snapshot) => checkAdvisoryCommandSnapshot(commandInformation, snapshot, context),
-        page: async (offset) =>
-          JSON.parse(
-            String(await commandInformation.execute({ action: "list", offset }, context)),
-          ) as unknown,
+        snapshot: (snapshot) => commandInformation
+          ? checkAdvisoryCommandSnapshot(commandInformation, snapshot, context) : Promise.resolve(false),
+        page: async (offset) => {
+          if (!commandInformation) throw new Error("Command catalog unavailable under host policy.");
+          return JSON.parse(String(await commandInformation.execute({ action: "list", offset }, context))) as unknown;
+        },
         signal: context.signal,
       });
     },

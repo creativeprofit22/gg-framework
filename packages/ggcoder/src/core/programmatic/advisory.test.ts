@@ -46,8 +46,8 @@ function scannedTurn(evidence: AdvisoryEvidence): ProgrammaticAdvisoryTurn {
   return turn;
 }
 
-it("does not credit successful execution before post-cap preparation", async () => {
-  const turn = scannedTurn(new AdvisoryEvidence());
+it.each(["setup", "configured"] as const)("%s does not credit successful execution before post-cap preparation", async (mode) => {
+  const turn = mode === "setup" ? new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), { mode }) : scannedTurn(new AdvisoryEvidence());
   const output = await executeAdvisoryTool(turn, process.cwd(),
     { name: "read", description: "Fixture", parameters: z.object({}), execute: () => "1\tSource" },
     { file_path: "fixture.ts" }, { signal: new AbortController().signal, toolCallId: "pending" });

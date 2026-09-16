@@ -412,19 +412,31 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
         getId: () => "fixture",
         reloadCustomCommands: vi.fn(),
       });
-      if (ending === "error")
-        expect(JSON.stringify(displayError.mock.calls[0]![0]([]))).toContain(
-          "terminal fixture failure",
-        );
-      else expect(displayError).not.toHaveBeenCalled();
+      // Assessment failures settle as bounded outcomes, not raw provider errors.
+      expect(displayError).not.toHaveBeenCalled();
+      const notice = messages.current.find((message) =>
+        message.role === "assistant" && typeof message.content === "string" &&
+        message.content.startsWith("## Needs assessment\n\n"));
+      expect(notice).toBeDefined();
+      const assessment = JSON.parse(String(notice!.content).slice("## Needs assessment\n\n".length));
+      expect(assessment.status).toBe(["abort", "reset", "disposal"].includes(ending)
+        ? "cancelled" : ["result", "plan"].includes(ending) ? "completed" : "incomplete");
+      expect(assessment.deterministic).toMatchObject({ status: ending === "plan" ? "failed" : "succeeded" });
+      expect(String(notice!.content)).not.toContain("terminal fixture failure");
       const results = messages.current.flatMap((message) =>
         message.role === "tool" ? message.content : [],
       );
       expect(scanExecute).toHaveBeenCalledOnce();
       if (ending !== "reset") {
         const firstScan = results.find((item) => item.toolCallId === "first-scan")!;
-        expect(firstScan.isError ?? false).toBe(false);
-        const scanResult = JSON.parse(String(firstScan.content));
+        // The host has already consumed the sole scan before the provider runs.
+        expect(firstScan.isError).toBe(true);
+        expect(String(firstScan.content)).toContain("one unchanged");
+        const prompt = messages.current.find((message) => message.role === "user" &&
+          typeof message.content === "string" && message.content.includes("Host-owned exact facts"));
+        const scanResult = JSON.parse(String(prompt!.content).split(
+          "Host-owned exact facts (not model authority; already collected, do not repeat):\n",
+        )[1]!.split("\nReusable host evidence receipts:")[0]!).scanFacts;
         expect(scanResult.ok).toBe(ending !== "plan");
         if (ending === "plan") expect(scanResult.error.code).toBe("plan-mode-read-only");
         expect(
@@ -440,14 +452,10 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
         expect(String(results.find((item) => item.toolCallId === "indexing")?.content)).toContain(
           "Corpus mutation is unavailable",
         );
-      } else
-        expect(
-          messages.current.some(
-            (message) =>
-              typeof message.content === "string" &&
-              message.content.includes("Assessment did not submit a validated result"),
-          ),
-        ).toBe(true);
+      } else {
+        expect(assessment.status).not.toBe("completed");
+        expect(assessment.summary).toContain(`Needs assessment ${assessment.status}`);
+      }
       expect(mutation).not.toHaveBeenCalled();
       expect(await fs.readFile(statePath)).toEqual(baseline);
       expect(await fs.readFile(path.join(cwd, ".gg/programmatic/profile.json"))).toEqual(profile);

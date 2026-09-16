@@ -196,7 +196,7 @@ import {
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
-import { AppSidecarProgrammaticChat } from "./app-sidecar-programmatic-chat.js";
+import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   handleAppSidecarProgrammaticExecution,
@@ -3000,6 +3000,7 @@ async function createSession(
 
   // Bind the complete event surface to both initial and phase-replacement sessions.
   function bindSessionEvents(target: AgentSession): void {
+    bindProgrammaticAssessmentEvents(target, () => session, broadcast);
     target.eventBus.on("text_delta", (data) => {
       broadcast("text_delta", data);
       // Host-authored advice is display content, never evidence of executed steps.
@@ -4601,6 +4602,24 @@ async function createSession(
       void runStrandedQueue().catch((error) => {
         broadcastError("error", "queued prompt failed after opportunity request", error);
       });
+    },
+    async (assessmentMode) => {
+      // The adapter already owns runClaim. Use the current session and its current
+      // stop signal inside the ordinary run lifecycle, never a claiming wrapper.
+      const owner = session;
+      let outcome: Awaited<ReturnType<AgentSession["assessProgrammatic"]>> | undefined;
+      let failure: unknown;
+      await runAgent(assessmentMode === "setup" ? "Review setup" : "Check for opportunities", async () => {
+        try {
+          outcome = await owner.assessProgrammatic(assessmentMode);
+        } catch (error) {
+          failure = error;
+          throw error;
+        }
+      });
+      if (failure) throw failure;
+      if (!outcome) throw new Error("The assessment was cancelled before it started.");
+      return outcome;
     },
   );
   const decisionSummaryService = new AppSidecarDecisionSummaryService(

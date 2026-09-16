@@ -77,6 +77,40 @@ const detail = {
 const response = (action: string, fields: object) => ({ version: 1, action, ok: true, ...fields });
 
 describe("programmatic chat transport", () => {
+  const assessment = {
+    version: 1, mode: "setup", status: "incomplete", summary: "Limited read-only assessment.",
+    limitations: ["Model stopped early."], coverage: [], observations: [],
+    deterministic: { status: "not-run", reason: "setup" },
+  };
+  const configuredAssessment = { ...assessment, mode: "configured", status: "unavailable",
+    deterministic: { status: "succeeded", enabledCount: 0, applicableCount: 0 } };
+  it("accepts optional setup and scan projections while preserving legacy responses", () => {
+    for (const extra of [{}, { assessment }]) {
+      expect(isProgrammaticChatResponse(response("inspect-setup", { proposal, ...extra }))).toBe(true);
+    }
+    for (const extra of [{}, { assessment: configuredAssessment }]) {
+      expect(isProgrammaticChatResponse(response("scan", { changed: false, ...extra }))).toBe(true);
+    }
+  });
+  it("retains limited assessment on setup/scan failure without authorizing replacement settings", () => {
+    for (const [action, projection] of [["inspect-setup", assessment], ["scan", configuredAssessment]]) {
+      expect(isProgrammaticChatResponse({ version: 1, action, ok: false, error: "Unavailable", reconcile: false, assessment: projection })).toBe(true);
+    }
+    expect(isProgrammaticChatResponse(response("inspect-setup", { assessment }))).toBe(false);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal: { ...proposal, handle: null }, assessment }))).toBe(false);
+  });
+  it("rejects mode spoofing, malformed projections and assessment approval authority", () => {
+    expect(isProgrammaticChatResponse(response("scan", { changed: false, assessment }))).toBe(false);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal, assessment: configuredAssessment }))).toBe(false);
+    expect(isProgrammaticChatResponse(response("scan", { changed: false, assessment: { ...configuredAssessment, summary: "x".repeat(4001) } }))).toBe(false);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal, assessment: { ...assessment, proposalHandle: hash } }))).toBe(false);
+    for (const action of ["approve-setup", "dismiss"]) {
+      expect(isProgrammaticChatResponse(response(action, { changed: true, assessment }))).toBe(false);
+      expect(isProgrammaticChatResponse({ version: 1, action, ok: false, error: "Failed", reconcile: false, assessment })).toBe(false);
+    }
+    expect(isProgrammaticChatRequest({ version: 1, action: "approve-setup", proposalHandle: hash, assessment })).toBe(false);
+    expect(isProgrammaticChatRequest({ version: 1, action: "scan", assessment: configuredAssessment })).toBe(false);
+  });
   it("requires current setup to have no approvable handle", () => {
     const current = { ...proposal, handle: null, operation: "current",
       configuration: { ...configuration, status: "current" } };

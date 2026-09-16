@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import { isProgrammaticExecutionResult } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { isProgrammaticAssessmentEvent, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   parseContextProfileEligibility,
   listCommands as listPrimaryCommands,
@@ -197,6 +198,8 @@ export interface AgentEventsDeps {
   onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
   onRoadmapPhaseDraftRefresh?: () => void;
   onProgrammaticActivity?: (open: boolean) => void;
+  onProgrammaticAssessment?: (event: ProgrammaticAssessmentEvent) => void;
+  programmaticGeneration?: string;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -260,6 +263,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     onRoadmapPhaseDraftChange,
     onRoadmapPhaseDraftRefresh,
     onProgrammaticActivity,
+    onProgrammaticAssessment,
+    programmaticGeneration,
+    stateRef,
     planDoneRef,
     planTotalRef,
     planReviewPathRef,
@@ -653,6 +659,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setIsThinking(false);
   }, [setThinkingAccumMs, setThinkingStartTs, setIsThinking]);
 
+  const assessmentEventRef = useRef<{ generation?: string; event: ProgrammaticAssessmentEvent } | null>(null);
   const handleEvent = useCallback(
     (e: SidecarEvent) => {
       // Ken (mentor) events are owned by the useKenMentor hook; delegate and
@@ -663,6 +670,20 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       if (handleAutopilotEvent(e)) return;
       if (isRoadmapPhaseDraftChangeEvent(e)) {
         onRoadmapPhaseDraftChange?.(e.data);
+        return;
+      }
+      if (e.type === "programmatic_assessment") {
+        const event = e.data;
+        const current = stateRef.current;
+        if (!isProgrammaticAssessmentEvent(event) ||
+          event.sessionId !== current?.sessionId || event.conversationId !== current?.conversationId) return;
+        const previous = assessmentEventRef.current?.generation === programmaticGeneration
+          ? assessmentEventRef.current?.event : undefined;
+        if (previous?.sessionId === event.sessionId && previous.conversationId === event.conversationId &&
+          (event.sequence < previous.sequence || (event.sequence === previous.sequence &&
+            (previous.phase === "completed" || event.phase === "started")))) return;
+        assessmentEventRef.current = { generation: programmaticGeneration, event };
+        onProgrammaticAssessment?.(event);
         return;
       }
       const d = e.data as Record<string, unknown>;
@@ -1616,6 +1637,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       onRoadmapPhaseDraftChange,
       onRoadmapPhaseDraftRefresh,
       onProgrammaticActivity,
+      onProgrammaticAssessment,
+      programmaticGeneration,
+      stateRef,
       onAstraStateChange,
       appendAssistant,
       pushItem,

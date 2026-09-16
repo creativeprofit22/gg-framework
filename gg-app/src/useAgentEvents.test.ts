@@ -242,6 +242,7 @@ function setup(
     onRoadmapPhaseDraftChange,
     onRoadmapPhaseDraftRefresh: vi.fn(),
     onProgrammaticActivity: vi.fn(),
+    onProgrammaticAssessment: vi.fn(),
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
@@ -268,6 +269,33 @@ function setup(
     setTokens,
   };
 }
+
+it("accepts only current bounded assessment events and ignores duplicates and retired runs", () => {
+  const { hook, deps, getItems } = setup(undefined, { conversationId: "conversation", sessionId: "session" });
+  const identity = { conversationId: "conversation", sessionId: "session", sequence: 2 };
+  const assessment = { version: 1, mode: "setup", status: "unavailable", summary: "Unavailable",
+    limitations: [], observations: [], coverage: [], deterministic: { status: "not-run", reason: "setup" } };
+  const send = (data: Record<string, unknown>) => act(() => hook.result.current.handleEvent(ev("programmatic_assessment", data)));
+  send({ ...identity, phase: "started" });
+  send({ ...identity, phase: "completed", assessment });
+  expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(2);
+  send({ ...identity, phase: "completed", assessment });
+  send({ ...identity, phase: "started" });
+  send({ ...identity, sequence: 1, phase: "completed", assessment });
+  send({ ...identity, sequence: 3, sessionId: "retired", phase: "completed", assessment });
+  send({ ...identity, sequence: 3, conversationId: "retired", phase: "completed", assessment });
+  send({ ...identity, sequence: 3, phase: "completed", assessment, proposalHandle: "untrusted" });
+  send({ ...identity, sequence: 3, phase: "completed", assessment: { ...assessment, approval: true } });
+  expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(2);
+  expect(deps.onProgrammaticActivity).not.toHaveBeenCalled();
+  expect(getItems()).toEqual([]);
+  // Native generation filtering retires old deliveries; a replacement daemon
+  // may restore this same conversation with a fresh sequence counter.
+  deps.programmaticGeneration = "replacement-daemon";
+  hook.rerender();
+  send({ ...identity, sequence: 1, phase: "started" });
+  expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(3);
+});
 
 const executionEvidence = [
   {

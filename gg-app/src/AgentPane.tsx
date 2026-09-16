@@ -40,6 +40,7 @@ import type {
   ProgrammaticChatRequest,
   ProgrammaticExecutionEvidence,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import type { ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   requireContinuationAcceptedEvent,
   PromptSubmissionError,
@@ -1940,6 +1941,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     (value: number) => value + 1,
     0,
   );
+  const onProgrammaticAssessment = useCallback((event: ProgrammaticAssessmentEvent) => {
+    if (workspaceMode !== "code") return;
+    dispatchProgrammatic({ type: "assessment", generation: programmaticTargetRef.current, event });
+    setProgrammaticOpen(true);
+    // A button request owns its exact response until it settles. Its normal
+    // run-end refresh is already deferred; do not schedule a competing report.
+    if (programmaticOwner.current === null) invalidateProgrammatic();
+  }, [workspaceMode]);
   const onProgrammaticActivity = useCallback(
     (open: boolean) => {
       if (workspaceMode !== "code") return;
@@ -1991,6 +2000,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       onRoadmapPhaseDraftChange,
       onRoadmapPhaseDraftRefresh: refreshRoadmapDraft,
       onProgrammaticActivity,
+      onProgrammaticAssessment,
+      programmaticGeneration,
       stateRef,
       planDoneRef,
       planTotalRef,
@@ -2011,6 +2022,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (current && pending) invalidateProgrammatic();
   };
   const performProgrammatic = async (request: ProgrammaticChatRequest): Promise<void> => {
+    if (request.action === "inspect-setup" && stateRef.current?.planMode) return;
     const selection = programmaticRef.current;
     if (
       request.action === "approve-setup" &&
@@ -2055,6 +2067,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         if (!current()) return;
         dispatchProgrammatic({ type: "response", generation, epoch, response });
         if (!response.ok) return;
+        // Provider-backed setup emits run_end before its native response settles.
+        // Its exact proposal is newer than that queued report refresh; retain it
+        // until an explicit refresh or a subsequent independent run invalidates it.
+        if (active.action === "inspect-setup") programmaticRefreshPending.current = false;
         pending = null;
         if (["approve-setup", "scan", "dismiss"].includes(active.action))
           pending = {

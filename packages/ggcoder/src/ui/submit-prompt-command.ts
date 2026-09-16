@@ -3,8 +3,8 @@ import { workflowQueuePolicyError } from "../core/workflow-busy-policy.js";
 import type { ImageAttachment } from "../utils/image.js";
 import { getModel } from "../core/model-registry.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { createProgrammaticReadinessReader, discoverCommands, programmaticReadinessGuidance } from "../core/command-discovery.js";
-import { buildProgrammaticAdvisoryContext, parseProgrammaticAssessmentInput, renderProgrammaticAdvisoryContext } from "../core/programmatic/advisory-context.js";
+import { createProgrammaticReadinessReader, programmaticReadinessGuidance } from "../core/command-discovery.js";
+import { parseProgrammaticAssessmentInput } from "../core/programmatic/advisory-context.js";
 import { loadCustomCommands } from "../core/custom-commands.js";
 import { parseSlashCommandInput } from "../core/slash-commands.js";
 import { parseReferencedFiles } from "@kenkaiiii/gg-core";
@@ -13,7 +13,6 @@ import { buildUserContentWithAttachments, routePromptCommandInput } from "./prom
 import type { CompletedItem, UserItem } from "./app-items.js";
 import type { AgentInvocationOptions, UserContent } from "./hooks/useAgentLoop.js";
 import { toErrorItem } from "./error-item.js";
-import { UI_SLASH_COMMANDS } from "./submit-slash-commands.js";
 
 interface PromptCommandSubmitOptions {
   cwd: string;
@@ -62,20 +61,17 @@ export async function submitPromptCommand({
   if (!promptCommandRoute) return false;
 
   const { cmdName } = promptCommandRoute;
-  let { fullPrompt } = promptCommandRoute;
-  let invocation: AgentInvocationOptions | undefined = cmdName === "setup-programmatic"
-    ? { programmaticSetupInspection: true } : undefined;
-  if (cmdName === "programmatic") {
+  const { fullPrompt } = promptCommandRoute;
+  let invocation: AgentInvocationOptions | undefined;
+  if (cmdName === "programmatic" || cmdName === "setup-programmatic") {
     const input = parseProgrammaticAssessmentInput(promptCommandRoute.cmdArgs);
     if (!input.success) return guidance("Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).");
-    if (inputImages.length || parseReferencedFiles(trimmed).files.length) return guidance("/programmatic accepts optional text only, not file references or attachments.");
-    const readiness = await createProgrammaticReadinessReader(cwd)();
-    const blocked = programmaticReadinessGuidance(readiness);
-    if (blocked) return guidance(blocked);
-    const discovery = await discoverCommands(cwd, { workspaceActions: UI_SLASH_COMMANDS, readReadiness: async () => readiness });
-    const context = buildProgrammaticAdvisoryContext(input.data, discovery);
-    fullPrompt += renderProgrammaticAdvisoryContext(context);
-    invocation = { programmaticAdvisory: { cwd, context } };
+    if (inputImages.length || parseReferencedFiles(trimmed).files.length) return guidance(`/${cmdName} accepts optional text only, not file references or attachments.`);
+    if (cmdName === "programmatic") {
+      const blocked = programmaticReadinessGuidance(await createProgrammaticReadinessReader(cwd)());
+      if (blocked) return guidance(blocked);
+    }
+    invocation = { programmaticAssessment: { cwd, mode: cmdName === "programmatic" ? "configured" : "setup", focus: input.data.focus } };
   }
   log("INFO", "command", `Prompt command: /${cmdName}`);
 

@@ -89,7 +89,9 @@ it.each([" café\n日本語", "  café\t  details\n\n日本語  "])("preserves t
   expect(content).toContain(`## User Instructions\n\n${suffix.trim()}`);
   expect(content).toContain("Untrusted advisory context");
   expect(content).toContain(`"focus":${JSON.stringify(suffix.trim())}`);
-  expect(content).toContain("empty argument object");
+  expect(content).toContain("`programmatic_scan({})` exactly once; do not call it again");
+  expect(content).toContain('"scanFacts":');
+  expect(content).toContain('"scan_counts":{"applicableCount":0,"enabledCount":0}');
 });
 
 it("preserves custom command case and strips only the token's bot mention", async () => {

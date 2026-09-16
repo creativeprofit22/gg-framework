@@ -9,7 +9,7 @@ import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./
 import { programmaticLifecycleStateV1Schema } from "./core/programmatic/contracts.js";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunClaim } from "./core/run-claim.js";
 import { createStrandedQueueDrain } from "./app-sidecar-user-turn.js";
 import {
@@ -56,6 +56,47 @@ async function fixture() {
   return { cwd, target, adapter, call, inspect };
 }
 describe("session-scoped programmatic adapter", () => {
+  it("project-agnostic discovery returns an assessment separately from the desktop Check scanner result", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "gg-check-discovery-"));
+    roots.push(cwd);
+    await writeFile(path.join(cwd, "WORKFLOW"), "Weekly dispatch needs paper-ledger reconciliation.\n");
+    const proposal = await buildProgrammaticProfileProposal(cwd);
+    expect(proposal.profile.scanners).toEqual([]);
+    expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+    const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
+    const priorProfile = await readFile(profilePath);
+    const claim = new RunClaim();
+    let scans = 0;
+    let settlements = 0;
+    const adapter = new AppSidecarProgrammaticChat(
+      () => ({ cwd, identity: "discovery", codeMode: true, planMode: false, busy: claim.active }),
+      () => claim.claim(), () => claim.release(),
+      {
+        inspect: buildProgrammaticProfileProposal, persist: persistProgrammaticProfile,
+        report: readProgrammaticChatReport, detail: readProgrammaticChatDetail, dismiss: dismissProgrammaticOpportunity,
+        scan: async (...args) => { scans++; return runProgrammaticScan(...args); },
+      },
+      () => { settlements++; },
+    );
+    try {
+      // This is the existing Check for opportunities request, not a direct scanner test.
+      const result = await adapter.handle({ version: 1, action: "scan" });
+      expect(result.status).toBe(200);
+      expect(scans).toBe(1);
+      expect(claim.active).toBe(false);
+      expect(settlements).toBe(1);
+      expect(await readFile(profilePath)).toEqual(priorProfile);
+      await expect(access(path.join(cwd, ".gg/commands"))).rejects.toThrow();
+      // This adapter fixture has no provider owner: scanner success must not imply
+      // completed needs assessment. A host-only result must explicitly say unavailable.
+      expect(result.body).toMatchObject({ ok: true, action: "scan", assessment: {
+        mode: "configured", status: "unavailable",
+        deterministic: { status: "succeeded", enabledCount: 0, applicableCount: 0 },
+        coverage: [{ scope: "project", status: "uninspected" }],
+        observations: [],
+      } });
+    } finally { adapter.dispose(); }
+  });
   it.each([false, true])("drains a prompt queued during report I/O after releasing its claim (failure=%s)", async (fail) => {
     const f = await fixture();
     const claim = new RunClaim();
@@ -299,6 +340,18 @@ describe("session-scoped programmatic adapter", () => {
       ok: true, detail: { summary: { id, route: { available: true } } },
     });
   });
+  it("rejects Plan-mode setup review before claiming work or calling the provider", async () => {
+    const f = await fixture();
+    f.target.planMode = true;
+    const claim = vi.fn(() => true);
+    const assess = vi.fn<NonNullable<ConstructorParameters<typeof AppSidecarProgrammaticChat>[5]>>();
+    const adapter = new AppSidecarProgrammaticChat(
+      () => f.target, claim, () => {}, undefined, undefined, assess,
+    );
+    expect((await adapter.handle({ version: 1, action: "inspect-setup" })).status).toBe(403);
+    expect(claim).not.toHaveBeenCalled();
+    expect(assess).not.toHaveBeenCalled();
+  });
   it("rejects extra inputs, chat, busy, plan writes, missing and replaced approval handles", async () => {
     const f = await fixture();
     expect((await f.call("scan", { command: "shell" })).status).toBe(400);
@@ -308,9 +361,12 @@ describe("session-scoped programmatic adapter", () => {
     f.target.busy = true;
     expect((await f.call("scan")).status).toBe(409);
     f.target.busy = false;
+    const old = await f.inspect();
     f.target.planMode = true;
     expect((await f.call("scan")).status).toBe(403);
-    const old = await f.inspect();
+    expect((await f.call("inspect-setup")).status).toBe(403);
+    expect((await f.call("report", { offset: 0 })).status).toBe(200);
+    expect((await f.call("detail", { id: "a".repeat(64) })).status).toBe(200);
     expect((await f.call("approve-setup", { proposalHandle: old.handle })).status).toBe(403);
     f.target.planMode = false;
     const fresh = await f.inspect();

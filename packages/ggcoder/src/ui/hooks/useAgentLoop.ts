@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { ProgrammaticSetupInspection, guardSetupInspectionTools } from "../../core/programmatic/setup-inspection.js";
+import { prepareTerminalProgrammaticAssessment, type TerminalProgrammaticAssessment } from "./terminal-programmatic-assessment.js";
+import { NotLoggedInError } from "../../core/auth-storage.js";
+import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   guardTerminalTools,
-  INCOMPLETE_ADVISORY_NOTICE,
-  ProgrammaticAdvisoryTools,
-  type ProgrammaticAdvisoryContext,
+  type ProgrammaticAdvisoryTools,
 } from "../../core/programmatic/advisory-tools.js";
 import {
   agentLoop,
@@ -214,8 +214,7 @@ export interface StreamSnapshot {
 
 /** Host-resolved built-in invocation metadata, never inferred from model/prompt text. */
 export interface AgentInvocationOptions {
-  programmaticSetupInspection?: boolean;
-  programmaticAdvisory?: { cwd: string; context: ProgrammaticAdvisoryContext };
+  programmaticAssessment?: TerminalProgrammaticAssessment;
 }
 
 export interface UseAgentLoopReturn {
@@ -357,7 +356,7 @@ export function useAgentLoop(
 
   const abortRef = useRef<AbortController | null>(null);
   const advisoryRef = useRef<ProgrammaticAdvisoryTools | undefined>(undefined);
-  const setupInspectionRef = useRef<ProgrammaticSetupInspection | undefined>(undefined);
+  const assessmentActiveRef = useRef(false);
   const disposedRef = useRef(false);
   const liveToolsRef = useRef(options.tools);
   liveToolsRef.current = options.tools;
@@ -452,15 +451,15 @@ export function useAgentLoop(
   }, [streamingText]);
 
   const abort = useCallback(() => {
-    advisoryRef.current?.close();
-    setupInspectionRef.current?.close();
+    // Assessment tools revoke on this signal; the coordinator must still settle
+    // a host scan that committed before cancellation instead of erasing success.
+    if (!assessmentActiveRef.current) advisoryRef.current?.close();
     abortRef.current?.abort();
   }, []);
 
   const reset = useCallback(() => {
     // Abort any running agent loop first — this kills in-flight subagent processes
-    advisoryRef.current?.close();
-    setupInspectionRef.current?.close();
+    if (!assessmentActiveRef.current) advisoryRef.current?.close();
     abortRef.current?.abort();
     setIsRunning(false);
     setCurrentTurn(0);
@@ -510,13 +509,14 @@ export function useAgentLoop(
       if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
       runOwnedRef.current = true;
       let advisory: ProgrammaticAdvisoryTools | undefined;
-      let setupInspection: ProgrammaticSetupInspection | undefined;
+      let assessmentController: AbortController | undefined;
+      let refreshAssessmentPrompt: (() => string) | undefined;
       /** Run a single user message through the agent loop. Returns true if aborted. */
       const runSingle = async (
         content: UserContent,
         credentialOpts?: { forceRefresh?: boolean; rejectedToken?: string },
       ): Promise<boolean> => {
-        const ac = new AbortController();
+        const ac = assessmentController ?? new AbortController();
         abortRef.current = ac;
         let wasAborted = false;
 
@@ -684,6 +684,7 @@ export function useAgentLoop(
             resolved: options.resolveCredentials ? "yes" : "no",
           });
 
+          ac.signal.throwIfAborted();
           const uaStart = Date.now();
           const userAgent =
             options.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
@@ -703,14 +704,18 @@ export function useAgentLoop(
           log("INFO", "ui", "agent_loop_invoke", {
             sinceRunStartMs: String(Date.now() - runStartRef.current),
           });
+          ac.signal.throwIfAborted();
+          if (refreshAssessmentPrompt) {
+            userMsg.content = refreshAssessmentPrompt();
+            originalRequestRef.current = userContentText(userMsg.content);
+          }
           const generator = agentLoop(messages.current, {
             provider: options.provider,
             model: options.model,
-            tools: setupInspection ? guardSetupInspectionTools(setupInspection, () => liveToolsRef.current)
-              : advisory?.tools ?? guardTerminalTools(
+            tools: advisory?.tools ?? guardTerminalTools(
                 () => liveToolsRef.current,
                 () => advisoryRef.current,
-                () => setupInspectionRef.current !== undefined,
+                () => assessmentActiveRef.current,
               ),
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
@@ -1303,20 +1308,61 @@ export function useAgentLoop(
       }; // end runSingle
 
       try {
-        if (invocation?.programmaticSetupInspection) {
-          setupInspection = new ProgrammaticSetupInspection();
-          setupInspectionRef.current = setupInspection;
-        }
-        if (invocation?.programmaticAdvisory) {
-          const { cwd, context } = invocation.programmaticAdvisory;
-          advisory = new ProgrammaticAdvisoryTools(cwd, context, () => liveToolsRef.current);
-          advisoryRef.current = advisory;
+        if (invocation?.programmaticAssessment) {
+          assessmentActiveRef.current = true;
+          setIsRunning(true);
+          setActivityPhase("waiting");
+          const preparationStart = Date.now();
+          let providerStarted = false;
+          assessmentController = new AbortController();
+          abortRef.current = assessmentController;
+          let assessment: ProgrammaticAssessment;
+          try {
+            const prepared = await prepareTerminalProgrammaticAssessment(
+              invocation.programmaticAssessment, () => liveToolsRef.current, assessmentController.signal,
+            );
+            advisory = prepared.coordinator.scope;
+            advisoryRef.current = advisory;
+            const outcome = await prepared.coordinator.run(assessmentController.signal, async () => {
+              const prompt = await prepared.hostPrompt(textFromUserContent(userContent));
+              refreshAssessmentPrompt = prepared.refreshPrompt;
+              try {
+                providerStarted = true;
+                await runSingle(prompt);
+              } catch (error) {
+                const unavailable = (error instanceof ProviderError || error instanceof NotLoggedInError)
+                  && !textVisibleRef.current && toolsUsedRef.current.size === 0;
+                return { status: unavailable ? "unavailable" : "incomplete" };
+              }
+            });
+            assessment = outcome.assessment;
+          } catch {
+            const { mode } = invocation.programmaticAssessment;
+            const cancelled = assessmentController.signal.aborted;
+            assessment = {
+              version: 1, mode, status: cancelled ? "cancelled" : "incomplete",
+              summary: "Assessment preparation did not complete; no provider run started.",
+              deterministic: mode === "setup" ? { status: "not-run", reason: "setup" }
+                : { status: cancelled ? "cancelled" : "unavailable", reason: "Preparation did not complete; no scan started." },
+              coverage: [], observations: [],
+              limitations: ["Assessment preparation did not complete; no provider run started."],
+            };
+          }
+          const text = `## Needs assessment\n\n${JSON.stringify(assessment)}`;
+          const notice: Message = { role: "assistant", content: text };
+          messages.current.push(notice);
+          onTurnText?.(text, "", 0);
+          onComplete?.([notice]);
+          if (!providerStarted) {
+            if (assessmentController.signal.aborted) onAborted?.();
+            else onDone?.(Date.now() - preparationStart, [], { counts: {}, tokens: 0 });
+          }
         }
         // Run the initial message.
         // On 401, force-refresh the OAuth token and retry once — the provider may
         // have revoked the token server-side before the stored expiry.
         try {
-          await runSingle(userContent);
+          if (!invocation?.programmaticAssessment) await runSingle(userContent);
         } catch (err) {
           if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
             // Pop the user message we pushed — runSingle will re-push it
@@ -1334,20 +1380,14 @@ export function useAgentLoop(
             throw err;
           }
         } finally {
-          setupInspection?.close();
-          setupInspectionRef.current = undefined;
-          setupInspection = undefined;
+          assessmentActiveRef.current = false;
+          assessmentController = undefined;
+          refreshAssessmentPrompt = undefined;
+          abortRef.current = null;
           if (advisory) {
-            const incomplete = !advisory.turn.submitted;
             advisory.close();
             advisoryRef.current = undefined;
             advisory = undefined;
-            if (incomplete) {
-              const notice: Message = { role: "assistant", content: INCOMPLETE_ADVISORY_NOTICE };
-              messages.current.push(notice);
-              onTurnText?.(INCOMPLETE_ADVISORY_NOTICE, "", 0);
-              onComplete?.([notice]);
-            }
           }
         }
 
@@ -1376,10 +1416,12 @@ export function useAgentLoop(
           await runSingle(merged);
         }
       } finally {
-        setupInspection?.close();
-        setupInspectionRef.current = undefined;
+        assessmentActiveRef.current = false;
+        abortRef.current = null;
         advisory?.close();
         advisoryRef.current = undefined;
+        setIsRunning(false);
+        setActivityPhase("idle");
         runOwnedRef.current = false;
       }
     },
@@ -1408,8 +1450,7 @@ export function useAgentLoop(
     disposedRef.current = false;
     return () => {
       disposedRef.current = true;
-      advisoryRef.current?.close();
-      setupInspectionRef.current?.close();
+      if (!assessmentActiveRef.current) advisoryRef.current?.close();
       liveToolsRef.current = [];
       abortRef.current?.abort();
       if (elapsedTimerRef.current) {

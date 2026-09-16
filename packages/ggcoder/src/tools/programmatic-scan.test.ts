@@ -115,9 +115,8 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     expect(command?.prompt).toContain(
       "The host supplies permitted assessment tools for this turn.",
     );
-    expect(command?.prompt.match(/Call `[^`]+`/g)).toEqual(["Call `programmatic_scan`"]);
-    expect(command?.prompt).toContain("exactly once with an empty argument object");
-    expect(command?.prompt).toContain("Report the tool's bounded result separately as Deterministic scan");
+    expect(command?.prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.");
+    expect(command?.prompt).toContain("Report the supplied bounded result separately as Deterministic scan");
     expect(command?.prompt).toContain(
       "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
     );

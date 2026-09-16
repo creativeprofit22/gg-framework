@@ -83,7 +83,7 @@ describe("terminal live custom command resolution", () => {
     await writeCommand(path.join(cwd, ".gg/commands"), builtin.name, "Shadow body");
     const opts = options(`/${builtin.name}`);
     expect(await submitPromptCommand(opts)).toBe(true);
-    expect(opts.runAgent).toHaveBeenCalledWith(builtin.prompt, { programmaticSetupInspection: true });
+    expect(opts.runAgent).toHaveBeenCalledWith(builtin.prompt, { programmaticAssessment: { cwd, mode: "setup", focus: undefined } });
     expect(load).not.toHaveBeenCalled();
     expect(discover).not.toHaveBeenCalled();
     expect(readiness).not.toHaveBeenCalled();
@@ -123,14 +123,9 @@ describe("terminal setup-first submission", () => {
       expect(await submitPromptCommand(approved)).toBe(true);
       expect(approved.runAgent).toHaveBeenCalledOnce();
       const content = String(vi.mocked(approved.runAgent).mock.calls[0]![0]);
-      const advisory = JSON.parse(content.slice(content.lastIndexOf("\n\n{") + 2));
-      expect(vi.mocked(approved.runAgent).mock.calls[0]![1]).toEqual({ programmaticAdvisory: { cwd, context: advisory } });
-      expect(advisory.assessment).toEqual({ version: 1, ...(focus.trim() ? { focus: focus.trim() } : {}) });
-      expect(advisory.intent).toBe(focus.trim() ? "focused-assessment" : "general-assessment");
-      expect(advisory.commands.entries.length).toBeGreaterThan(0);
-      expect(advisory.commands.entries.length).toBeLessThanOrEqual(100);
-      expect(JSON.stringify(advisory.commands).length).toBeLessThanOrEqual(32_000);
-      expect(content).toContain("## Untrusted advisory context");
+      expect(vi.mocked(approved.runAgent).mock.calls[0]![1]).toEqual({ programmaticAssessment: { cwd, mode: "configured", focus: focus.trim() || undefined } });
+      // Evidence/catalog preparation belongs under the run owner, tested through the real hook.
+      expect(content).not.toContain("## Untrusted advisory context");
       if (focus.trim()) expect(content).toContain(`## User Instructions\n\n${focus.trim()}`);
       else expect(content).not.toContain("## User Instructions");
     });
@@ -158,16 +153,16 @@ describe("terminal setup-first submission", () => {
     }
     await expect(fs.stat(path.join(cwd, ".gg/programmatic/profile.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
-  it("sends focus and bounded metadata after approved setup, and refreshes after failure", async () => {
+  it("sends validated host mode and focus after approved setup, and refreshes after failure", async () => {
     const proposal = await buildProgrammaticProfileProposal(cwd);
     expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
     const opts = options("/programmatic café\n日本語");
     vi.mocked(opts.runAgent).mockRejectedValue(new Error("fixture failure after write"));
     expect(await submitPromptCommand(opts)).toBe(true);
     const content = String(vi.mocked(opts.runAgent).mock.calls[0]![0]);
-    expect(content).toContain('"focus":"café\\n日本語"');
-    expect(content).toContain('"commands":{"entries":');
-    expect(content).toContain("empty argument object");
+    expect(vi.mocked(opts.runAgent).mock.calls[0]![1]).toEqual({ programmaticAssessment: { cwd, mode: "configured", focus: "café\n日本語" } });
+    expect(content).toContain("## User Instructions\n\ncafé\n日本語");
+    expect(content).toContain("`programmatic_scan({})` exactly once; do not call it again");
     expect(opts.reloadCustomCommands).toHaveBeenCalledOnce();
   });
   it.each([`/programmatic ${"x".repeat(4001)}`, "/programmatic\n\nReferenced files:\n- private.ts"])("rejects invalid focus or references before running: %j", async (input) => {

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildProgrammaticInventory, normalizeInventoryPath } from "./inventory.js";
+import { buildProgrammaticInventory, normalizeInventoryPath, validateProgrammaticFile, walkProgrammaticPaths } from "./inventory.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -133,6 +133,33 @@ describe("buildProgrammaticInventory", () => {
     await expect(
       buildProgrammaticInventory(root, { limits: { maxFileBytes: 3, maxTotalBytes: 5 } }),
     ).rejects.toThrow("Inventory total bytes limit exceeded (5)");
+  });
+
+  it("shares safe-file validation without relaxing containment or strict fingerprints", async () => {
+    const root = await temporaryDirectory();
+    await writeFixture(root, { WORKFLOW: "first", "unknown.source-type": "text" });
+    await expect(validateProgrammaticFile(root, "../outside")).rejects.toThrow("unreadable or unsafe");
+    await expect(validateProgrammaticFile(root, "WORKFLOW", undefined, 1)).rejects.toThrow("Inventory file size limit exceeded (1)");
+    const before = await buildProgrammaticInventory(root);
+    await writeFixture(root, { WORKFLOW: "second" });
+    const after = await buildProgrammaticInventory(root);
+    expect(after.configurationSnapshot).toEqual(before.configurationSnapshot);
+    expect(after.inventory.entries).not.toEqual(before.inventory.entries);
+  });
+
+  it("cancels the shared walk and allows early iterator cleanup", async () => {
+    const root = await temporaryDirectory();
+    await writeFixture(root, { a: "a", b: "b" });
+    const controller = new AbortController();
+    const walk = walkProgrammaticPaths(root, { signal: controller.signal, gitignoreLines: [] });
+    expect((await walk.next()).done).toBe(false);
+    controller.abort(new Error("cancel walk"));
+    await expect(walk.next()).rejects.toThrow("cancel walk");
+    for await (const entry of walkProgrammaticPaths(root, { gitignoreLines: [] })) {
+      expect(entry.kind).toBe("file");
+      break;
+    }
+    expect((await buildProgrammaticInventory(root)).inventory.entries).toHaveLength(2);
   });
 
   it("normalizes Windows-shaped glob paths without accepting traversal", () => {

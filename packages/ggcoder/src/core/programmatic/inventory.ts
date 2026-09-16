@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Stats } from "node:fs";
+import type { Readable } from "node:stream";
 import type {
   ConfigurationSnapshot,
   InventoryEntryV1,
@@ -204,13 +205,19 @@ function limitError(kind: "file count" | "file size" | "total bytes", limit: num
   return new Error(`Inventory ${kind} limit exceeded (${limit})`);
 }
 
-async function discoverPaths(root: string, maxFiles: number): Promise<string[]> {
+export async function* walkProgrammaticPaths(
+  root: string,
+  options: { signal?: AbortSignal; gitignoreLines?: string[] } = {},
+): AsyncGenerator<{ path: string; kind: "file" | "unsafe" }> {
+  options.signal?.throwIfAborted();
   const fg = await import("fast-glob");
   const ignore = await import("ignore");
-  const matcher = ignore.default().add(await loadGitignore(root));
-  const paths: string[] = [];
-  let stream: AsyncIterable<unknown>;
+  const matcher = ignore.default().add(options.gitignoreLines ?? await loadGitignore(root));
+  let stream: Readable | undefined;
+  const abort = () => stream?.destroy();
+  options.signal?.addEventListener("abort", abort, { once: true });
   try {
+    options.signal?.throwIfAborted();
     stream = fg.default.stream("**/*", {
       cwd: root,
       dot: true,
@@ -221,8 +228,9 @@ async function discoverPaths(root: string, maxFiles: number): Promise<string[]> 
       followSymbolicLinks: false,
       throwErrorOnBrokenSymbolicLink: true,
       unique: true,
-    });
+    }) as Readable;
     for await (const value of stream) {
+      options.signal?.throwIfAborted();
       const entry = value as GlobEntry;
       const repositoryPath = normalizeInventoryPath(entry.path);
       const ignored =
@@ -231,31 +239,38 @@ async function discoverPaths(root: string, maxFiles: number): Promise<string[]> 
         (matcher.ignores(repositoryPath) || matcher.ignores(`${repositoryPath}/`));
       if (ignored) continue;
       if (entry.dirent.isSymbolicLink()) {
-        throw new Error(`Symbolic links are not supported: ${repositoryPath}`);
+        yield { path: repositoryPath, kind: "unsafe" };
+      } else if (entry.dirent.isFile()) {
+        yield { path: repositoryPath, kind: "file" };
       }
-      if (!entry.dirent.isFile()) continue;
-      paths.push(repositoryPath);
-      if (paths.length > maxFiles) throw limitError("file count", maxFiles);
     }
+    options.signal?.throwIfAborted();
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message.startsWith("Symbolic links") || error.message.startsWith("Inventory "))
-    ) {
-      throw error;
-    }
+    options.signal?.throwIfAborted();
     throw new Error("Inventory walk failed", { cause: error });
+  } finally {
+    options.signal?.removeEventListener("abort", abort);
+    stream?.destroy();
+  }
+}
+
+async function discoverPaths(root: string, maxFiles: number): Promise<string[]> {
+  const paths: string[] = [];
+  for await (const entry of walkProgrammaticPaths(root)) {
+    if (entry.kind === "unsafe") throw new Error(`Symbolic links are not supported: ${entry.path}`);
+    paths.push(entry.path);
+    if (paths.length > maxFiles) throw limitError("file count", maxFiles);
   }
   paths.sort();
   return paths;
 }
 
-async function readInventoryEntry(
+export async function validateProgrammaticFile(
   root: string,
   repositoryPath: string,
-  operations: InventoryOperations,
-  maxFileBytes: number,
-): Promise<{ entry: InventoryEntryV1; bytes: number }> {
+  operations: InventoryOperations = localOperations,
+  maxFileBytes = Number.MAX_SAFE_INTEGER,
+): Promise<string> {
   let absolutePath: string;
   try {
     absolutePath = containedPath(root, repositoryPath);
@@ -270,7 +285,16 @@ async function readInventoryEntry(
     if (error instanceof Error && error.message.startsWith("Inventory file size")) throw error;
     throw new Error(`Inventory file is unreadable or unsafe: ${repositoryPath}`, { cause: error });
   }
+  return absolutePath;
+}
 
+async function readInventoryEntry(
+  root: string,
+  repositoryPath: string,
+  operations: InventoryOperations,
+  maxFileBytes: number,
+): Promise<{ entry: InventoryEntryV1; bytes: number }> {
+  const absolutePath = await validateProgrammaticFile(root, repositoryPath, operations, maxFileBytes);
   let bytes: Buffer;
   try {
     bytes = await operations.readFile(absolutePath);

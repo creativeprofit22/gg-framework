@@ -71,6 +71,7 @@ export interface RunProgrammaticScanOptions {
 export type RunProgrammaticScanResult =
   | {
       ok: true;
+      scanCounts?: { enabledCount: number; applicableCount: number };
       changed: boolean;
       recovered: boolean;
       path: typeof PROGRAMMATIC_STATE_PATH;
@@ -1067,6 +1068,7 @@ export async function runProgrammaticScan(
         options.signal?.throwIfAborted();
         return {
           ok: true,
+          scanCounts: { enabledCount: loadedProfile.envelope.profile.scanners.length, applicableCount: new Set(discovery.opportunities.map(({ identity }) => identity.detectorId)).size },
           changed: false,
           recovered: false,
           path: PROGRAMMATIC_STATE_PATH,
@@ -1114,6 +1116,7 @@ export async function runProgrammaticScan(
       }
       return {
         ok: true,
+        scanCounts: { enabledCount: loadedProfile.envelope.profile.scanners.length, applicableCount: new Set(discovery.opportunities.map(({ identity }) => identity.detectorId)).size },
         changed: true,
         recovered,
         path: PROGRAMMATIC_STATE_PATH,

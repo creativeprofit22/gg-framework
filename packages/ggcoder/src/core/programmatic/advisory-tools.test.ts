@@ -73,7 +73,7 @@ it("intersects host registrations, excludes MCP even with a read-only name, and 
   );
   const context = { signal: new AbortController().signal, toolCallId: "held-read" };
   try {
-    expect(scope.tools.map((tool) => tool.name)).toEqual(["read"]);
+    expect(scope.tools.map((tool) => tool.name)).toEqual(["read", "programmatic_advisory_result"]);
     const pending = scope.tools[0]!.execute({}, context);
     await started;
     expect(execute).toHaveBeenCalledOnce();
@@ -83,7 +83,8 @@ it("intersects host registrations, excludes MCP even with a read-only name, and 
     expect(scope.turn.evidence.list()).toEqual([]);
     await expect(scope.tools[0]!.execute({}, context)).rejects.toThrow("read-only advisory scope");
     tools.push(createCommandInformationTool(cwd));
-    expect(scope.tools.some((tool) => tool.name === "programmatic_advisory_result")).toBe(false);
+    expect(scope.tools.some((tool) => tool.name === "programmatic_advisory_result")).toBe(true);
+    await expect(scope.tools[1]!.execute({}, context)).rejects.toThrow("read-only advisory scope");
   } finally {
     release("cleanup");
     scope.close();

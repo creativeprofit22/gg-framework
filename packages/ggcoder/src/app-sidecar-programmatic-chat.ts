@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import type { AgentSession } from "./core/agent-session.js";
+import { isProgrammaticAssessmentEvent, type ProgrammaticAssessment, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { stat } from "node:fs/promises";
 import {
   isProgrammaticChatRequest,
@@ -18,6 +20,30 @@ import {
   runProgrammaticScan,
 } from "./core/programmatic/lifecycle.js";
 import { canonicalJson, sha256 } from "./core/tauri-package/paths.js";
+
+/** Bind the existing session bus to the desktop broadcast surface. Retired
+ * session objects and conversation identities cannot publish current status. */
+export function bindProgrammaticAssessmentEvents(
+  target: AgentSession,
+  currentSession: () => AgentSession,
+  broadcast: (event: "programmatic_assessment", data: ProgrammaticAssessmentEvent) => void,
+): () => void {
+  return target.eventBus.on("programmatic_assessment", (data) => {
+    const session = currentSession();
+    const current = session.getConversationIdentity();
+    if (target !== session || !isProgrammaticAssessmentEvent(data) ||
+      data.conversationId !== current.conversationId || data.sessionId !== current.sessionId) return;
+    broadcast("programmatic_assessment", data);
+  });
+}
+
+export type ProgrammaticChatAssessment = (mode: "setup" | "configured") => ReturnType<AgentSession["assessProgrammatic"]>;
+
+function unavailableAssessment(mode: "setup" | "configured", deterministic: ProgrammaticAssessment["deterministic"]): ProgrammaticAssessment {
+  return { version: 1, mode, status: "unavailable", summary: "Needs assessment unavailable; host settings and deterministic results remain independent.",
+    limitations: ["No current-session assessment provider is available."], observations: [],
+    coverage: [{ scope: "project", status: "uninspected", summary: "Host configuration facts do not establish project understanding." }], deterministic };
+}
 
 export interface ProgrammaticChatTarget {
   identity: string;
@@ -51,6 +77,7 @@ export class AppSidecarProgrammaticChat {
     private readonly release: () => void,
     private readonly implementations = engines,
     private readonly onSettled: () => void = () => {},
+    private readonly assess?: ProgrammaticChatAssessment,
   ) {}
 
   reset(): void {
@@ -68,7 +95,7 @@ export class AppSidecarProgrammaticChat {
     if (!isProgrammaticChatRequest(input))
       return { status: 400, body: { error: "This opportunity request could not be read. Reopen Opportunities and try again." } };
     const { action } = input;
-    const target = this.target();
+    const target = { ...this.target() };
     const fail = (status: number, error: string, reconcile = false) => ({
       status,
       body: {
@@ -89,7 +116,9 @@ export class AppSidecarProgrammaticChat {
     if (this.disposed || !target.codeMode)
       return fail(403, "Opportunities are available only in Code mode.");
     const mutates = ["approve-setup", "scan", "dismiss"].includes(action);
-    if (mutates && target.planMode) return fail(403, "Plan mode only allows review. Turn it off before making changes.");
+    const requiresCodeMode = mutates || action === "inspect-setup";
+    if (requiresCodeMode && target.planMode)
+      return fail(403, "Plan mode only allows viewing existing results and details. Turn it off before reviewing setup or making changes.");
     // Hold the existing run claim through I/O, preventing prompt/reset/configuration races.
     if (target.busy || !this.claim())
       return fail(409, "Wait for the current work to finish, then try again. This request was not added to a waiting list.");
@@ -102,7 +131,7 @@ export class AppSidecarProgrammaticChat {
         now.identity === target.identity &&
         now.cwd === target.cwd &&
         now.codeMode &&
-        (!mutates || !now.planMode)
+        (!requiresCodeMode || !now.planMode)
       );
     };
     let submitted = false;
@@ -130,8 +159,18 @@ export class AppSidecarProgrammaticChat {
           break;
         case "inspect-setup": {
           this.pending = null;
-          const proposal = await this.implementations.inspect(target.cwd);
+          // A settings failure blocks approval, not the session's safe read-only assessment.
+          const proposal = await this.implementations.inspect(target.cwd).catch(() => null);
           if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
+          const assessment = this.assess ? (await this.assess("setup")).assessment
+            : unavailableAssessment("setup", { status: "not-run", reason: "setup" });
+          if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
+          if (!proposal) {
+            const failure = fail(409, "The setup could not be safely reviewed. No settings were saved; approval is unavailable.");
+            const body: ProgrammaticChatResponse = { ...failure.body, assessment };
+            if (!isProgrammaticChatResponse(body)) return failure;
+            return { status: failure.status, body };
+          }
           const handle = sha256(randomBytes(32).toString("hex") + canonicalJson(proposal));
           const projection: ProgrammaticChatProposal = {
             handle: proposal.operation === "current" ? null : handle,
@@ -154,7 +193,7 @@ export class AppSidecarProgrammaticChat {
             exclusions: proposal.exclusions,
             configurationInputs: proposal.configurationInputs,
           };
-          body = { version: 1, action: "inspect-setup", ok: true, proposal: projection };
+          body = { version: 1, action: "inspect-setup", ok: true, proposal: projection, assessment };
           if (!isProgrammaticChatResponse(body))
             return fail(422, "The proposed setup is too large to display safely. It cannot be approved here; no settings were saved.");
           this.pending = proposal.operation === "current" ? null : { identity: target.identity, cwd: target.cwd, handle, proposal };
@@ -179,6 +218,13 @@ export class AppSidecarProgrammaticChat {
         }
         case "scan": {
           submitted = true;
+          if (this.assess) {
+            const outcome = await this.assess("configured");
+            const facts = outcome.scanFacts;
+            const changed = typeof facts === "object" && facts !== null && "changed" in facts && facts.changed === true;
+            body = { version: 1, action: "scan", ok: true, changed, assessment: outcome.assessment };
+            break;
+          }
           const result = await this.implementations.scan(target.cwd);
           if (!result.ok)
             return fail(
@@ -188,7 +234,8 @@ export class AppSidecarProgrammaticChat {
                 : "The checks did not finish. Reload results before trying again.",
               true,
             );
-          body = { version: 1, action: "scan", ok: true, changed: result.changed };
+          body = { version: 1, action: "scan", ok: true, changed: result.changed,
+            assessment: unavailableAssessment("configured", result.scanCounts ? { status: "succeeded", ...result.scanCounts } : { status: "unavailable", reason: "Host scan completed without authoritative enabled/applicable counts." }) };
           break;
         }
         case "dismiss": {

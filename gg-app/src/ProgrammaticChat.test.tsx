@@ -83,6 +83,44 @@ function fixture(overrides: Partial<ProgrammaticChatState> = {}) {
   };
   return { props, ...render(<ProgrammaticChat {...props} />) };
 }
+describe("bounded project assessment (presentation only; no native IPC)", () => {
+  it.each(["completed", "incomplete", "unavailable", "cancelled"] as const)(
+    "separates %s assessment from zero deterministic coverage without execution controls",
+    (status) => {
+      const { container } = fixture({
+        report: null, detail: null, selectedId: null,
+        assessment: {
+          version: 1, mode: "configured", status, summary: "Documentation suggests missing workflow guidance.",
+          limitations: ["Unfamiliar source was not inspected."],
+          coverage: [{ scope: "project", status: "budget-limited", summary: "Only documentation was read." }],
+          observations: [{ basis: "inferred", message: "Transcript-only detailed observation", evidenceSources: ["receipt"] }],
+          deterministic: { status: "succeeded", enabledCount: 0, applicableCount: 0 },
+        },
+      });
+      expect(screen.getByRole("heading", { name: `Project assessment: ${status}` })).toBeTruthy();
+      expect(screen.getByText("Documentation suggests missing workflow guidance.")).toBeTruthy();
+      expect(screen.getByText("Unfamiliar source was not inspected.")).toBeTruthy();
+      expect(screen.getByText(/project: budget-limited/)).toBeTruthy();
+      expect(screen.getByText(/0 enabled checks; 0 applicable checks/)).toBeTruthy();
+      expect(screen.getByText(/No deterministic checks applied/)).toBeTruthy();
+      expect(screen.getByText(/not a clean bill of health/)).toBeTruthy();
+      expect(screen.queryByText("Transcript-only detailed observation")).toBeNull();
+      expect(screen.queryByRole("button", { name: /Run|Review task approval/ })).toBeNull();
+      expect(container.querySelector("a")).toBeNull();
+    },
+  );
+  it.each(["failed", "denied", "cancelled", "unavailable"] as const)(
+    "does not hide %s scanner outcome behind completed advice", (status) => {
+      fixture({ assessment: {
+        version: 1, mode: "configured", status: "completed", summary: "Limited advice is available.",
+        limitations: [], coverage: [], observations: [], deterministic: { status, reason: "Checks did not complete." },
+      } });
+      expect(screen.getByRole("heading", { name: `Deterministic checks: ${status}` })).toBeTruthy();
+      expect(screen.getByText("Checks did not complete.")).toBeTruthy();
+    },
+  );
+});
+
 describe("embedded opportunity review", () => {
   it.each([true, false])(
     "keeps inspection available while another pane owns a run (owner visible: %s)",
@@ -501,6 +539,65 @@ describe("embedded opportunity review", () => {
       snapshot: hash,
     });
   });
+  it("reviews unreadable setup without reviving a historical proposal or execution permissions", () => {
+    const { props, rerender } = fixture({
+      proposalApprovable: true,
+      proposal: {
+        handle: hash, operation: "initial", fingerprint: hash, profileJson: "historical settings",
+        configuration: { status: "missing", currentFingerprint: hash, refreshAvailable: false,
+          baselineUnavailable: false, diagnostic: null, drift: null },
+        routes: [], exclusions: [], configurationInputs: [],
+      },
+    });
+    let state = programmaticChatReducer(props.state, {
+      type: "response", generation: "one", epoch: 0,
+      response: {
+        version: 1, action: "report", ok: true,
+        report: { ...props.state.report!, configuration: {
+          status: "unreadable", currentFingerprint: null, refreshAvailable: false,
+          baselineUnavailable: false, diagnostic: "Saved settings cannot be read.", drift: null,
+        } },
+      },
+    });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    const review = screen.getByRole("button", { name: "Review setup" });
+    expect((review as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(review);
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "inspect-setup" });
+    state = programmaticChatReducer(state, {
+      type: "start", generation: "one", epoch: 1, operation: "inspect-setup",
+    });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect((review as HTMLButtonElement).disabled).toBe(true);
+    const error = "The setup could not be safely reviewed. No settings were saved; approval is unavailable.";
+    state = programmaticChatReducer(state, {
+      type: "response", generation: "one", epoch: 1,
+      response: { version: 1, action: "inspect-setup", ok: false, reconcile: false, error,
+        assessment: { version: 1, mode: "setup", status: "incomplete",
+          summary: "Safe project evidence remains available.", limitations: [], coverage: [], observations: [],
+          deterministic: { status: "not-run", reason: "setup" } },
+      },
+    });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect(screen.getByText("Safe project evidence remains available.")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toBe(error);
+    expect(state.proposal).toBe(props.state.proposal);
+    expect(state.proposalApprovable).toBe(false);
+    for (const name of ["Approve and save setup", "Check for opportunities", "Review task approval"]) {
+      const button = screen.getByRole("button", { name }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+    }
+    expect(props.onAction).toHaveBeenCalledTimes(1);
+    expect(props.onRun).not.toHaveBeenCalled();
+    rerender(<ProgrammaticChat {...props} state={state} busy />);
+    expect((review as HTMLButtonElement).disabled).toBe(true);
+    rerender(<ProgrammaticChat {...props} state={state} planMode />);
+    expect((review as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(review);
+    expect(props.onAction).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it.each(["refresh-required", "unreadable", "missing"] as const)(
     "marks a retained current review historical after a %s report",
     (status) => {
@@ -887,7 +984,19 @@ describe("embedded opportunity review", () => {
     ).toBe(true);
     expect(
       (screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    ).toBe(true);
+    props.onAction.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Review setup" }));
+    expect(props.onAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
+    expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 });
+    fireEvent.click(screen.getByRole("button", { name: /Review app packaging/ }));
+    expect(props.onSelect).toHaveBeenCalledWith(hash);
+    rerender(<ProgrammaticChat {...props} />);
+    const review = screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement;
+    expect(review.disabled).toBe(false);
+    fireEvent.click(review);
+    expect(props.onAction).toHaveBeenLastCalledWith({ version: 1, action: "inspect-setup" });
   });
 
   it("gates stale, missing, loading and uncertain states without dropping the report", () => {

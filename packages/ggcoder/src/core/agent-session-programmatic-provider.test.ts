@@ -17,7 +17,7 @@ import { useFakeHome } from "../test-support/fake-home.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "./programmatic/lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "./programmatic/contracts.js";
-import { ProgrammaticAdvisoryTurn, type AdvisoryEvidence } from "./programmatic/advisory.js";
+import type { ProgrammaticAdvisoryTurn, AdvisoryEvidence } from "./programmatic/advisory.js";
 import { createProgrammaticScanTool } from "../tools/programmatic-scan.js";
 import { DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "../app-sidecar-command-listing.js";
 
@@ -25,6 +25,11 @@ import { DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "../app-sidecar-command-listin
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()), stream: vi.fn(),
 }));
+function hostFacts(messages: Parameters<typeof stream>[0]["messages"]): { setupFacts: Record<string, unknown>; scanFacts: Record<string, unknown> } {
+  const prompt = [...messages].reverse().find((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("Host-owned exact facts"));
+  const content = String(prompt?.content);
+  return JSON.parse(content.split("Host-owned exact facts (not model authority; already collected, do not repeat):\n")[1]!.split("\nReusable host evidence receipts:")[0]!);
+}
 let cwd: string;
 let restore: () => void;
 beforeEach(async () => {
@@ -55,9 +60,9 @@ it.each(["setup", "unsupported", "denied", "approved"] as const)("enforces setup
       results.set(result.toolCallId, String(result.content));
     request++;
     let call: ToolCall | undefined;
-    if (request === 1) call = { type: "tool_call", id: "setup-inspect", name: "programmatic_profile", args: { action: "inspect" } };
-    if (request === 2) {
-      const inspected = JSON.parse(results.get("setup-inspect")!);
+    if (request === 1 && mode !== "setup") call = { type: "tool_call", id: "setup-inspect", name: "programmatic_profile", args: { action: "inspect" } };
+    if (request === (mode === "setup" ? 1 : 2)) {
+      const inspected = mode === "setup" ? hostFacts(params.messages).setupFacts : JSON.parse(results.get("setup-inspect")!);
       generation = { action: "generate", configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile, expected_prior_profile_digest: inspected.expected_prior_profile_digest };
       call = { type: "tool_call", id: "setup-generate", name: "programmatic_profile", args: generation };
@@ -97,6 +102,78 @@ it.each(["setup", "unsupported", "denied", "approved"] as const)("enforces setup
   } finally { await session.dispose(); }
 });
 
+it.each([
+  ["setup", "manifest-free"], ["configured", "manifest-free"],
+  ["setup", "mixed-monorepo"], ["configured", "mixed-monorepo"],
+] as const)("project-agnostic discovery supplies evidence to the %s caller in %s", async (mode, project) => {
+  const observation = "Operators reconcile handwritten stock counts before the weekly dispatch.";
+  await fs.writeFile(path.join(cwd, "WORKFLOW"), observation + "\n");
+  await fs.writeFile(path.join(cwd, "dispatch.unfamiliar"), "compare counts with the paper ledger\n");
+  if (project === "mixed-monorepo") {
+    for (const app of ["desktop-a", "desktop-b"]) {
+      await fs.mkdir(path.join(cwd, "apps", app, "src-tauri"), { recursive: true });
+      await fs.writeFile(path.join(cwd, "apps", app, "package.json"), '{"name":"desktop"}');
+      await fs.writeFile(path.join(cwd, "apps", app, "src-tauri/Cargo.toml"), '[package]\nname="desktop"');
+      await fs.writeFile(path.join(cwd, "apps", app, "src-tauri/tauri.conf.json"), "{}");
+    }
+    await fs.mkdir(path.join(cwd, "services"));
+    await fs.writeFile(path.join(cwd, "services/reconcile.py"), "# reconcile the paper ledger\n");
+  }
+  const proposal = await buildProgrammaticProfileProposal(cwd);
+  expect(proposal.profile.scanners).toHaveLength(project === "manifest-free" ? 0 : 1);
+  if (mode === "configured")
+    expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+  const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
+  const priorProfile = mode === "configured" ? await fs.readFile(profilePath) : undefined;
+  const results = new Map<string, string>();
+  const delivered: string[] = [];
+  let requests = 0;
+  const factsCalls: string[] = [];
+  const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", transient: true,
+    approveToolExecution: async (name) => { factsCalls.push(name); return true; },
+    systemPrompt: "Assess the local project read-only.", mcpEnabled: false,
+    allowedTools: ["find", "read", "programmatic_profile", "programmatic_scan"] });
+  vi.mocked(stream).mockImplementation((params) => new StreamResult((async function* () {
+    yield* []; // This fixture completes without streaming deltas.
+    delivered.push(JSON.stringify(params.messages));
+    for (const message of params.messages) if (message.role === "tool") for (const result of message.content)
+      results.set(result.toolCallId, String(result.content));
+    requests++;
+    const facts = hostFacts(params.messages);
+    results.set("discovery-facts", JSON.stringify(mode === "setup" ? facts.setupFacts : facts.scanFacts));
+    return { message: { role: "assistant", content: "Assessment fixture ended." }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+  })()));
+  try {
+    await session.initialize();
+    const commandsBefore = await fs.readdir(path.join(cwd, ".gg/commands"), { recursive: true });
+    await session.prompt(mode === "setup" ? "/setup-programmatic" : "/programmatic");
+    expect(requests).toBe(1);
+    expect(factsCalls.filter((name) => name !== "find" && name !== "read")).toEqual([mode === "setup" ? "programmatic_profile" : "programmatic_scan"]);
+    expect(factsCalls).toContain("find");
+    expect(factsCalls).toContain("read");
+    expect(results.size).toBe(1);
+    if (mode === "setup") {
+      expect(JSON.parse(results.get("discovery-facts")!)).toMatchObject({
+        configuration_fingerprint: proposal.configurationFingerprint, profile: proposal.profile,
+      });
+      await expect(fs.access(profilePath)).rejects.toThrow();
+      await expect(fs.access(path.join(cwd, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+    } else {
+      expect(await fs.readFile(profilePath)).toEqual(priorProfile);
+      expect(results.get("discovery-facts")).not.toContain("Error:");
+      expect(JSON.parse(results.get("discovery-facts")!)).toMatchObject({ scan_counts: {
+        enabledCount: project === "manifest-free" ? 0 : 1,
+        applicableCount: project === "manifest-free" ? 0 : 1,
+      } });
+    }
+    expect(await fs.readdir(path.join(cwd, ".gg/commands"), { recursive: true })).toEqual(commandsBefore);
+    // Neither caller may equate an empty deterministic profile with absent project evidence.
+    // The marker exists only on disk, not in the prompt or scripted response.
+    expect(delivered.join("\n")).toContain(observation);
+    expect(delivered.join("\n")).toContain("dispatch.unfamiliar");
+  } finally { await session.dispose(); }
+});
+
 it.each(["read", "research_corpus"])("retains real-session %s failure and cancellation outcomes", async (name) => {
   const proposal = await buildProgrammaticProfileProposal(cwd);
   expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
@@ -117,8 +194,10 @@ it.each(["read", "research_corpus"])("retains real-session %s failure and cancel
     });
     const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", transient: true, systemPrompt: "Fixture", mcpEnabled: false,
       additionalTools: [{ name, description: "Outcome fixture", parameters: z.object({}), execute }],
-      approveToolExecution: async (tool) => {
-        if (tool === name && outcome === "before-dispatch") { started(); await held; }
+      approveToolExecution: async (tool, args) => {
+        // Initial evidence now passes the same approval boundary. Hold only the
+        // scripted model call (empty args), whose cancellation must be receipted.
+        if (tool === name && outcome === "before-dispatch" && Object.keys(args as object).length === 0) { started(); await held; }
         return true;
       },
     });
@@ -178,6 +257,7 @@ it.each(["parallel", "sequential"] as const)("credits only post-cap model input 
     expect(pages.every((page) => JSON.stringify(page).length <= 32_000)).toBe(true);
     expect(pages.reduce((size, page) => size + JSON.stringify(page).length, 0)).toBeLessThan(320_000);
     const hostTools: AgentTool[] = [
+      { name: "programmatic_scan", description: "Settled scan fixture", parameters: z.object({}), execute: () => '{"ok":true}' },
       { name: "command_information", description: "Catalog fixture", parameters: z.object({ action: z.literal("list"), offset: z.number() }),
         execute: (args) => JSON.stringify(pages.find((page) => page.offset === (args as { offset: number }).offset)) },
       { name: "read", description: "Source fixture", parameters: z.object({ file_path: z.string() }),
@@ -482,7 +562,8 @@ it.each(["", "  café\n日本語  "])("delivers assessment %j through the real l
     const user = request.messages.find((message) => message.role === "user");
     const text = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content);
     expect(text).toContain("Untrusted advisory context");
-    expect(text).toContain("empty argument object");
+    expect(text).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.");
+    expect(hostFacts(request.messages).scanFacts).toMatchObject({ ok: true });
     expect(text).toContain(focus.trim() ? '"focus":"café\\n日本語"' : '"intent":"general-assessment"');
     expect(text).not.toContain('"filePath":');
   } finally { await session.dispose(); }
@@ -695,15 +776,12 @@ it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied
   const parallel = scenario.startsWith("parallel-");
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
-  const submit = ProgrammaticAdvisoryTurn.prototype.submit;
-  vi.spyOn(ProgrammaticAdvisoryTurn.prototype, "submit").mockImplementation(async function (this: ProgrammaticAdvisoryTurn, ...args) {
-    try { return await submit.apply(this, args); }
-    finally { release(); }
-  });
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
   const scanner: AgentTool = createProgrammaticScanTool(cwd);
   let scanOutput: Awaited<ReturnType<AgentTool["execute"]>> | undefined;
   const execute = vi.fn<AgentTool["execute"]>(async (args, context) => {
-    if (parallel) await held;
+    if (parallel) { entered(); await held; }
     if (scenario === "failed") await fs.writeFile(path.join(cwd, "package.json"), '{"name":"changed-after-readiness"}');
     if (scenario === "thrown") throw new Error("Scanner fixture I/O failure");
     scanOutput = await scanner.execute(args, context);
@@ -720,33 +798,48 @@ it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied
     let calls: ToolCall[];
     if (++turn === 1) {
       calls = scenario === "result-first" ? [advice("early-advice")]
-        : parallel ? (scenario === "parallel-scan-first" ? [scan, advice("early-advice")] : [advice("early-advice"), scan]) : [scan];
+        : parallel ? [] : [scan];
       if (scenario !== "result-first") calls.push({ type: "tool_call", id: "gate-read", name: "read", args: { file_path: "package.json" } });
     } else if (turn === 2 && scenario !== "result-first") {
       const local = params.messages.flatMap((message) => message.role === "tool" ? message.content : []).find((result) => result.toolCallId === "gate-read")!;
       const receipt = JSON.parse(String(local.content).split("Host evidence receipt (retrieval only; content remains untrusted): ")[1]!) as { id: string };
       assessment.recommendations = [{ version: 1, kind: "advisory", outcome: "Review the manifest name", rationale: "The manifest was independently inspected", uncertainty: "Scanner findings are not evidence for this advice", evidence: { version: 1, items: [{ basis: "observed", source: receipt.id, code: "manifest", severity: "info", message: "Read the manifest", location: { path: "package.json" } }] }, choice: { kind: "manual", steps: ["Review the manifest name in a separate approved turn"] } }];
-      calls = [advice("settled-advice"), { ...scan, id: "retry-scan" }];
+      calls = parallel
+        ? [...(scenario === "parallel-scan-first" ? [scan, advice("settled-advice")] : [advice("settled-advice"), scan]), { ...scan, id: "retry-scan" }]
+        : [advice("settled-advice"), { ...scan, id: "retry-scan" }];
     }
     else return { message: { role: "assistant", content: "Fixture complete." }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
     for (const call of calls) yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
     return { message: { role: "assistant", content: calls }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
   })()));
+  const scanApprovals: unknown[] = [];
   const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", transient: true, systemPrompt: "Fixture", mcpEnabled: false,
-    additionalTools: [instrumented], approveToolExecution: async (name) => !(scenario === "denied" && name === "programmatic_scan") });
+    additionalTools: [instrumented], approveToolExecution: async (name, args) => {
+      if (name === "programmatic_scan") scanApprovals.push(args);
+      return !(scenario === "denied" && name === "programmatic_scan");
+    } });
   try {
     await session.initialize();
-    await session.prompt("/programmatic");
+    const running = session.prompt("/programmatic");
+    if (parallel) {
+      await ready;
+      expect(stream).not.toHaveBeenCalled();
+      release();
+    }
+    await running;
+    const facts = hostFacts(session.getMessages()).scanFacts;
     const results = session.getMessages().flatMap((message) => message.role === "tool" ? message.content : []);
-    if (scenario === "result-first" || parallel) {
-      expect(results.find((item) => item.toolCallId === "early-advice")).toMatchObject({ isError: true, content: expect.stringContaining("scan attempt must settle") });
+    if (scenario === "result-first") {
+      expect(results.find((item) => item.toolCallId === "early-advice")).toMatchObject({ content: expect.stringContaining("Recommendations — not started") });
+      expect(results.find((item) => item.toolCallId === "early-advice")?.isError ?? false).toBe(false);
     }
     if (scenario !== "result-first") {
       expect(results.find((item) => item.toolCallId === "retry-scan")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
+      expect(results.find((item) => item.toolCallId === "gate-scan")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
       const result = results.find((item) => item.toolCallId === "settled-advice")!;
       if (scenario === "denied") {
         expect(result).toMatchObject({ isError: true, content: expect.stringContaining("denied or cancelled") });
-        expect(results.find((item) => item.toolCallId === "gate-scan")).toMatchObject({ isError: true, content: expect.stringContaining("not approved") });
+        expect(facts).toBeUndefined();
       } else {
         expect(result.isError ?? false, String(result.content)).toBe(false);
         expect(result.content).toContain("Recommendations — not started");
@@ -756,15 +849,16 @@ it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied
           expect(result.content).toContain("Coverage: limited");
           expect(result.content).toContain("deterministic scan failed");
           if (scenario === "failed") expect(JSON.parse(String(scanOutput))).toMatchObject({ ok: false, error: { code: "stale-configuration" } });
-          else expect(results.find((item) => item.toolCallId === "gate-scan")).toMatchObject({ isError: true, content: expect.stringContaining("Scanner fixture I/O failure") });
+          else expect(facts).toBeUndefined();
         } else expect(JSON.parse(String(scanOutput))).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
-        if (scenario !== "thrown") expect(results.find((item) => item.toolCallId === "gate-scan")!.content).toBe(scanOutput);
+        if (scenario !== "thrown") expect(facts).toEqual(JSON.parse(String(scanOutput)));
       }
     }
-    expect(execute).toHaveBeenCalledTimes(["denied", "result-first"].includes(scenario) ? 0 : 1);
+    expect(scanApprovals).toEqual([{}]);
+    expect(execute).toHaveBeenCalledTimes(scenario === "denied" ? 0 : 1);
     for (const [args] of execute.mock.calls) expect(args).toEqual({});
     const incomplete = session.getMessages().some((message) => typeof message.content === "string" && message.content.includes("Assessment did not submit a validated result"));
-    expect(incomplete).toBe(["denied", "result-first"].includes(scenario));
+    expect(incomplete).toBe(scenario === "denied");
     expect(await fs.readFile(profilePath)).toEqual(baselineProfile);
     expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(baselineHistory);
   } finally { release(); await session.dispose(); }
@@ -833,7 +927,8 @@ it("claims concurrent scans once, preserves completed scan on cancellation and r
     await session.initialize();
     await session.prompt("/programmatic").catch(() => {});
     const results = session.getMessages().flatMap((message) => message.role === "tool" ? message.content : []);
-    expect(results.find((item) => item.toolCallId === "scan-first")?.isError ?? false).toBe(false);
+    expect(hostFacts(session.getMessages()).scanFacts).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
+    expect(results.find((item) => item.toolCallId === "scan-first")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
     expect(results.find((item) => item.toolCallId === "scan-second")?.isError).toBe(true);
     expect(String(results.find((item) => item.toolCallId === "scan-second")?.content)).toContain("one unchanged");
     const state = await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH));
@@ -1122,7 +1217,8 @@ it("cleans up advisory scope at the actual max-turn boundary without losing the 
     expect(stream).toHaveBeenCalledOnce();
     const scan = session.getMessages().flatMap((message) => message.role === "tool" ? message.content : []).find((result) => result.toolCallId === "max-turn-scan");
     expect(scan).toBeDefined();
-    expect(scan!.isError ?? false).toBe(false);
+    expect(hostFacts(session.getMessages()).scanFacts).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
+    expect(scan).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
     expect(session.getMessages().some((message) => typeof message.content === "string" && message.content.includes("Assessment did not submit a validated result"))).toBe(true);
     expect(session.supportsToolCall("programmatic_advisory_result")).toBe(false);
     expect(session.supportsToolCall("read")).toBe(true);
@@ -1293,6 +1389,7 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
   let creationAnswer: { action: "answer"; answers: Record<string, string> } | undefined;
   let creationApproved = false;
   let actionApprovals = 0;
+  const scanApprovals: unknown[] = [];
   const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", systemPrompt: "Scripted connected fixture only", mcpEnabled: false, additionalTools: [corpus],
     reviewCommandCreation: async (request) => {
       await expect(fs.stat(path.join(cwd, commandPath))).rejects.toMatchObject({ code: "ENOENT" });
@@ -1305,6 +1402,7 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
       creationAnswer = { action: "answer", answers: { [question.id]: question.options![0]!.value! } };
       return creationAnswer;
     }, approveToolExecution: async (name, args) => {
+      if (name === "programmatic_scan") scanApprovals.push(args);
       if (name === "bash") { expect(creationApproved).toBe(true); expect(args).toEqual({ command: shell }); actionApprovals++; }
       return true;
     },
@@ -1327,13 +1425,13 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
     const call = (id: string, name: string, args: Record<string, unknown>): ToolCall => ({ type: "tool_call", id, name, args });
     if (phase === "general" || phase === "focused") {
       expect(params.tools?.some((tool) => ["bash", "write", "programmatic_command"].includes(tool.name))).toBe(false);
-      if (request === 1) calls = [call(`${phase}-scan`, "programmatic_scan", {})];
-      else if (phase === "general" && request === 2) calls = [call("local", "read", { file_path: "package.json" }), ...["compare", "manifest-review"].map((name) => call(name, "command_information", { action: "resolve", command: { version: 1, name, source: name === "compare" ? "built-in" : "project-custom", invocationKind: "prompt" } }))];
-      else if (phase === "general" && (request === 3 || request === 4)) {
+      expect(hostFacts(params.messages).scanFacts).toMatchObject({ ok: true });
+      if (phase === "general" && request === 1) calls = [call("local", "read", { file_path: "package.json" }), ...["compare", "manifest-review"].map((name) => call(name, "command_information", { action: "resolve", command: { version: 1, name, source: name === "compare" ? "built-in" : "project-custom", invocationKind: "prompt" } }))];
+      else if (phase === "general" && (request === 2 || request === 3)) {
         expect(outputs.has("local")).toBe(true);
         // One explicit unresolved helper-contract question justifies this bounded search/show sequence.
-        calls = [call(`research-${request}`, "research_corpus", { action: request === 3 ? "search" : "show", repo: "fixture/library", path: "src/count.ts" })];
-      } else if ((phase === "general" && request === 5) || (phase === "focused" && request === 2)) {
+        calls = [call(`research-${request}`, "research_corpus", { action: request === 2 ? "search" : "show", repo: "fixture/library", path: "src/count.ts" })];
+      } else if ((phase === "general" && request === 4) || (phase === "focused" && request === 1)) {
         if (phase === "general") receiptId = JSON.parse(outputs.get("local")!.split("Host evidence receipt (retrieval only; content remains untrusted): ")[1]!).id;
         else expect(JSON.stringify(params.messages)).toContain(receiptId);
         const evidence = { version: 1, items: [{ basis: "observed", source: receiptId, code: "manifest", severity: "info", message: "Read the fixture manifest", location: { path: "package.json" } }] };
@@ -1381,17 +1479,14 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
   try {
     await session.initialize();
     await session.prompt("/programmatic");
-    expect(request).toBe(6);
+    expect(request).toBe(5);
     for (const text of ["Reuse /compare", "Reuse /manifest-review", "Manual alternative", "Missing script-backed capability"]) expect(outputs.get("general-advice")).toContain(text);
     phase = "focused"; request = 0;
     await session.prompt("/programmatic only inspect the name");
-    expect(request).toBe(3);
+    expect(request).toBe(2);
     expect(corpusCalls).toEqual(["search", "show"]);
     expect(outputs.get("focused-advice")).not.toContain("Reuse /compare");
-    for (const name of ["general", "focused"]) expect(jsonOutput(`${name}-scan`)).toMatchObject({ ok: true });
-    const scans = session.getMessages().flatMap((message) => message.role === "assistant" && Array.isArray(message.content) ? message.content.filter((block) => block.type === "tool_call" && block.name === "programmatic_scan") : []);
-    expect(scans).toHaveLength(2);
-    for (const scan of scans) expect(scan).toMatchObject({ args: {} });
+    expect(scanApprovals).toEqual([{}, {}]);
     expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(lifecycle);
     expect(session.supportsToolCall("programmatic_advisory_result")).toBe(false);
     phase = "creation"; request = 0;
@@ -1444,6 +1539,8 @@ it("keeps real scanner inputs and lifecycle bytes identical with and without foc
   const approvedBytes = await fs.readFile(profilePath);
   const states: Buffer[] = [];
   for (const focus of ["", "packaging risks"]) {
+    const scanner: AgentTool = createProgrammaticScanTool(cwd);
+    const execute = vi.fn<AgentTool["execute"]>((args, context) => scanner.execute(args, context));
     let turn = 0;
     vi.mocked(stream).mockImplementation(() => new StreamResult((async function* () {
       turn++;
@@ -1458,10 +1555,12 @@ it("keeps real scanner inputs and lifecycle bytes identical with and without foc
       return { message: { role: "assistant", content: "Bounded scan complete." },
         stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
     })()));
-    const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", transient: true, systemPrompt: "Fixture", mcpEnabled: false });
+    const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", transient: true, systemPrompt: "Fixture", mcpEnabled: false, additionalTools: [{ ...scanner, execute }] });
     try {
       await session.initialize();
       await session.prompt(`/programmatic ${focus}`);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0]![0]).toEqual({});
       expect(turn).toBe(3);
       const calls = session.getMessages().flatMap((message) => message.role === "assistant" && Array.isArray(message.content)
         ? message.content.filter((block) => block.type === "tool_call" && block.name === "programmatic_scan") : []);
@@ -1469,8 +1568,8 @@ it("keeps real scanner inputs and lifecycle bytes identical with and without foc
       const results = session.getMessages().flatMap((message) => message.role === "tool" ? message.content : []);
       const scanResult = results.find((result) => result.toolCallId === "scan");
       expect(scanResult).toBeDefined();
-      expect(scanResult!.isError ?? false).toBe(false);
-      expect(JSON.parse(String(scanResult!.content))).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
+      expect(scanResult).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
+      expect(hostFacts(session.getMessages()).scanFacts).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
       states.push(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH)));
       expect(await fs.readFile(profilePath)).toEqual(approvedBytes);
     } finally { await session.dispose(); }

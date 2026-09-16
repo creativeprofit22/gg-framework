@@ -6,6 +6,7 @@ import {
   type ProgrammaticExecutionEvidence,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
+import { ProgrammaticAssessment } from "./ProgrammaticAssessment";
 import {
   canRunProgrammaticSelection,
   canScanProgrammatic,
@@ -100,7 +101,9 @@ export function ProgrammaticChat({
       configuration.currentFingerprint !== report.configuration?.currentFingerprint);
   const setupBlockedReason =
     configuration && configuration.status !== "current"
-      ? "Review and approve setup before checking for opportunities or starting a task."
+      ? configuration.status === "unreadable"
+        ? "Review setup can inspect this project, but cannot save or repair unreadable settings. Checking for opportunities and starting tasks remain unavailable."
+        : "Review and approve setup before checking for opportunities or starting a task."
       : undefined;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
@@ -141,10 +144,12 @@ export function ProgrammaticChat({
             ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
             : state.notice}
       </p>
+      {state.assessment && <ProgrammaticAssessment assessment={state.assessment} />}
       {planMode && (
         <p>
-          Plan mode lets you review without making changes. Turn it off before saving setup,
-          checking for opportunities, starting work or dismissing an item.
+          Plan mode lets you view existing results and details. Turn it off before starting a new
+          provider-backed setup review, saving setup, checking for opportunities, starting work or
+          dismissing an item.
         </p>
       )}
       {reportAssessmentSuperseded ? (
@@ -221,7 +226,7 @@ export function ProgrammaticChat({
       <div className="programmatic-actions">
         <button
           className="btn btn-ghost btn-sm"
-          disabled={locked || configuration?.status === "unreadable"}
+          disabled={locked || planMode}
           onClick={() => onAction({ version: 1, action: "inspect-setup" })}
         >
           {configuration?.refreshAvailable ? "Review setup refresh" : "Review setup"}

@@ -1,3 +1,5 @@
+import { isProgrammaticAssessment, type ProgrammaticAssessment } from "./programmatic-assessment-contract.js";
+
 /** Browser-safe display projections. Authoritative domain records stay in ggcoder. */
 export const PROGRAMMATIC_CHAT_VERSION = 1 as const;
 export const PROGRAMMATIC_CHAT_PAGE_LIMIT = 50;
@@ -114,8 +116,9 @@ export type ProgrammaticChatResponse =
       snapshot: string | null;
       detail: ProgrammaticChatDetail | null;
     }
-  | { version: 1; action: "inspect-setup"; ok: true; proposal: ProgrammaticChatProposal }
-  | { version: 1; action: "approve-setup" | "scan" | "dismiss"; ok: true; changed: boolean }
+  | { version: 1; action: "inspect-setup"; ok: true; proposal: ProgrammaticChatProposal; assessment?: ProgrammaticAssessment }
+  | { version: 1; action: "scan"; ok: true; changed: boolean; assessment?: ProgrammaticAssessment }
+  | { version: 1; action: "approve-setup" | "dismiss"; ok: true; changed: boolean }
   | {
       version: 1;
       action: ProgrammaticChatAction;
@@ -125,6 +128,8 @@ export type ProgrammaticChatResponse =
       /** Only a pre-consumption setup rejection may preserve this exact handle.
        * Absence on setup failure means reinspection is required, independently of reconcile. */
       approvableProposalHandle?: string;
+      /** Available only on inspect-setup/scan failures; never grants approval. */
+      assessment?: ProgrammaticAssessment;
     };
 
 type Guard = (value: unknown) => boolean;
@@ -378,6 +383,9 @@ export function isProgrammaticChatRequest(value: unknown): value is Programmatic
       return false;
   }
 }
+const setupAssessment: Guard = (value) => isProgrammaticAssessment(value) && value.mode === "setup";
+const configuredAssessment: Guard = (value) => isProgrammaticAssessment(value) && value.mode === "configured";
+
 export function isProgrammaticChatResponse(value: unknown): value is ProgrammaticChatResponse {
   if (typeof value !== "object" || value === null) return false;
   const response = value as { ok?: unknown; action?: unknown };
@@ -389,8 +397,8 @@ export function isProgrammaticChatResponse(value: unknown): value is Programmati
       error: text(PROGRAMMATIC_CHAT_ERROR_LIMIT),
       reconcile: bool,
     }, response.action === "approve-setup" || response.action === "inspect-setup"
-      ? { approvableProposalHandle: hash }
-      : {});
+      ? { approvableProposalHandle: hash, ...(response.action === "inspect-setup" ? { assessment: setupAssessment } : {}) }
+      : response.action === "scan" ? { assessment: configuredAssessment } : {});
   const base = { version: oneOf(1), action, ok: oneOf(true) };
   switch (response.action) {
     case "report":
@@ -398,9 +406,10 @@ export function isProgrammaticChatResponse(value: unknown): value is Programmati
     case "detail":
       return object(value, { ...base, snapshot: nullable(hash), detail: nullable(detail) });
     case "inspect-setup":
-      return object(value, { ...base, proposal });
-    case "approve-setup":
+      return object(value, { ...base, proposal }, { assessment: setupAssessment });
     case "scan":
+      return object(value, { ...base, changed: bool }, { assessment: configuredAssessment });
+    case "approve-setup":
     case "dismiss":
       return object(value, { ...base, changed: bool });
     default:

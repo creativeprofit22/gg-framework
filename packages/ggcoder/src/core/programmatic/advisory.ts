@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { ToolResult } from "@kenkaiiii/gg-ai";
 import { safeRetrievalUrl, type InspectedLocalLocation, type RetrievalResource } from "../../tools/retrieval-metadata.js";
 import type { AdvisoryCommandPage } from "../command-discovery.js";
+import { ProgrammaticSetupInspection, SETUP_ASSESSMENT_TOOLS } from "./setup-inspection.js";
 import {
   programmaticAssessmentResultV1Schema,
   programmaticCommandSnapshotV1Schema,
@@ -185,7 +186,11 @@ export class AdvisoryEvidence {
 }
 
 type ScanSettlement = "succeeded" | "failed" | "denied" | "cancelled";
-type ScanState = "not-started" | "in-flight" | ScanSettlement;
+type ScanState = "not-started" | "in-flight" | "unavailable" | ScanSettlement;
+export interface ProgrammaticAdvisoryPolicy {
+  mode: "setup" | "configured";
+  scanAvailable?: boolean;
+}
 
 /** Turn-local bookkeeping only. Semantic assessment remains in the existing model loop. */
 export class ProgrammaticAdvisoryTurn {
@@ -229,13 +234,33 @@ export class ProgrammaticAdvisoryTurn {
       this.limitations.add(`Tool call ${result.toolCallId.slice(0, 128)}: source delivery was ${result.capped ? "capped" : "unsuccessful"}; complete inspection is not established.`);
     accept(complete);
   }
-  constructor(readonly evidence: AdvisoryEvidence) {}
+  readonly mode: "setup" | "configured";
+  private readonly setup?: ProgrammaticSetupInspection;
+  private accepted?: Assessment;
+  get acceptedResult(): Assessment | undefined { return this.accepted && structuredClone(this.accepted); }
+  get deterministicState(): ScanState { return this.scanState; }
+  allows(tool: string): boolean {
+    return this.active && (this.mode === "setup" ? SETUP_ASSESSMENT_TOOLS.has(tool) : ADVISORY_READ_TOOLS.has(tool));
+  }
+  constructor(readonly evidence: AdvisoryEvidence, policy: ProgrammaticAdvisoryPolicy = { mode: "configured" }) {
+    this.mode = policy.mode;
+    if (this.mode === "setup") this.setup = new ProgrammaticSetupInspection(true);
+    else if (policy.scanAvailable === false) this.markScanUnavailable();
+  }
+  /** Host policy boundary, before a claim only. Never converts denial/failure into a retry. */
+  markScanUnavailable(): void {
+    if (this.active && this.mode === "configured" && this.scanState === "not-started") {
+      this.scanState = "unavailable";
+      this.limitations.add("The deterministic scan tool is unavailable under host policy; no scan was attempted.");
+    }
+  }
   get active(): boolean {
     return !this.closed;
   }
   close(): void {
     if (this.scanState === "in-flight") this.settleScan("cancelled");
     this.closed = true;
+    this.setup?.close();
     for (const cleanup of this.executionCleanups) cleanup();
     this.executionCleanups.clear();
     this.pages.clear();
@@ -243,8 +268,9 @@ export class ProgrammaticAdvisoryTurn {
     this.pendingResults.clear();
   }
   claim(tool: string, args: unknown): void {
-    if (this.closed || !ADVISORY_READ_TOOLS.has(tool))
+    if (!this.allows(tool))
       throw new Error("Tool unavailable in read-only advisory scope.");
+    this.setup?.claimName(tool, args);
     if (tool === "programmatic_scan") {
       if (
         this.scanState !== "not-started" ||
@@ -332,9 +358,10 @@ export class ProgrammaticAdvisoryTurn {
     },
   ): Promise<string> {
     if (this.closed) throw new Error("Advisory scope has ended.");
+    checks.signal.throwIfAborted();
     if (this.submitted || this.submissionPending)
       throw new Error("Only one validated advisory presentation is permitted per turn.");
-    if (this.scanState === "not-started" || this.scanState === "in-flight")
+    if (this.mode === "configured" && (this.scanState === "not-started" || this.scanState === "in-flight"))
       throw new Error(
         "The required deterministic scan attempt must settle before advisory submission.",
       );
@@ -450,6 +477,7 @@ export class ProgrammaticAdvisoryTurn {
         throw new Error(
           "Validated advisory result exceeds 64,000 characters including host limitations.",
         );
+      this.accepted = structuredClone(result);
       this.submitted = true;
       return renderAdvisoryResult(result);
     } finally {

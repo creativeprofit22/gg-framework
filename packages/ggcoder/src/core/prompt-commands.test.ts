@@ -242,8 +242,14 @@ describe("prompt commands", () => {
       "setup-programmatic",
       "programmatic",
     ]);
-    expect(setup?.prompt).toContain("Load the deferred `programmatic_profile`");
-    expect(setup?.prompt).toContain('exactly once with `action: "inspect"`');
+    expect(setup?.prompt).toContain("Assess project needs and workflows");
+    expect(setup?.prompt).toContain("including unfamiliar or manifest-free projects");
+    expect(setup?.prompt).toContain("Samples are not complete coverage");
+    expect(setup?.prompt).toContain("The host already collected exact `programmatic_profile` inspection facts");
+    expect(setup?.prompt).toContain("Do not repeat inspection or discover tools");
+    expect(setup?.prompt).toContain("Submit bounded needs recommendations through `programmatic_advisory_result`");
+    expect(setup?.prompt).toContain("no scan is required or permitted in setup");
+    expect(setup?.prompt).not.toContain("tool_search");
     expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");
@@ -266,9 +272,12 @@ describe("prompt commands", () => {
       expect(prompt).toContain("Recommendations — not started");
       expect(prompt).toContain("not just three executable specialists");
       expect(prompt).toContain("prefer simpler manual work");
-      expect(prompt.match(/Call `programmatic_scan`/g)).toHaveLength(1);
-      expect(prompt).toContain("exactly once with an empty argument object");
-      expect(prompt).toContain("Report the tool's bounded result separately as Deterministic scan");
+      expect(prompt).toContain("Start with project needs and workflow observations, even without manifests or enabled scanners");
+      expect(prompt.match(/`programmatic_scan\(\{\}\)`/g)).toHaveLength(1);
+      expect(prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again");
+      expect(prompt).not.toContain("Call `programmatic_scan`");
+      expect(prompt).toContain("Report the supplied bounded result separately as Deterministic scan");
+      expect(prompt).toContain("A scan error remains an error; never repair setup or replace it with model advice");
       expect(prompt).toContain(
         "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
       );

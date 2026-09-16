@@ -110,7 +110,7 @@ it("passes validated focus and bounded metadata to the agent request without wri
     expect(context.assessment).toEqual({ version: 1, focus: "café\n日本語" });
     expect(context.commands.entries.length).toBeGreaterThan(0);
     expect(context.commands.entries.every((entry: Record<string, unknown>) => !('prompt' in entry))).toBe(true);
-    expect(prompt).toContain("Call `programmatic_scan` exactly once with an empty argument object");
+    expect(prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.");
     expect(await fs.readFile(profilePath)).toEqual(before);
   } finally {
     await session.dispose();
@@ -306,7 +306,7 @@ describe("AgentSession built-in tool tiering", () => {
         session.getMessages().find((message) => message.role === "user")?.content,
       );
       expect(commandPrompt).toContain(
-        "Call `programmatic_scan` exactly once with an empty argument object",
+        "The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.",
       );
       expect(commandPrompt).not.toContain("tool_search");
     } finally {

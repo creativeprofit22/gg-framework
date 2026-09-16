@@ -180,7 +180,9 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
 
     const setup = getPromptCommand("setup-programmatic");
-    expect(setup?.prompt).toContain('exactly once with `action: "inspect"`');
+    expect(setup?.prompt).toContain('The host already collected exact `programmatic_profile` inspection facts.');
+    expect(setup?.prompt).toContain("Do not repeat inspection or discover tools.");
+    expect(setup?.prompt).toContain("no scan is required or permitted in setup.");
     expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");

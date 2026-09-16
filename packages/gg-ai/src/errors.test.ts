@@ -116,6 +116,18 @@ describe("formatError Mythos access", () => {
   });
 });
 
+describe("formatError invalid tool schema", () => {
+  it.each([undefined, 400])("explains schema incompatibility with status %s", (statusCode) => {
+    const message = "Invalid JSON schema: regex lookaround is not supported. Found at $.properties.selection.anyOf[0].properties.command.properties.name.pattern.";
+    const formatted = formatError(new ProviderError("openai", message, { statusCode }));
+    expect(formatted.message).toBe(message);
+    expect(formatted.guidance).toContain("schema compatibility problem");
+    expect(formatted.guidance).toContain("Retrying the same request will not fix it");
+    expect(formatted.guidance).not.toContain("not GG Coder");
+    expect(formatted.guidance).not.toContain("status.openai.com");
+  });
+});
+
 describe("formatError request too large", () => {
   it("routes an Anthropic 413 request_too_large to compact, not a blind retry", () => {
     const f = formatError(

@@ -460,6 +460,13 @@ function providerGuidance(
   if (statusCode === 401 || lower.includes("unauthorized") || lower.includes("invalid api key")) {
     return `Authentication failed with ${name}. Re-authenticate to refresh your credentials.`;
   }
+  if (
+    lower.includes("invalid json schema") ||
+    lower.includes("invalid schema for function") ||
+    lower.includes("invalid_function_parameters")
+  ) {
+    return `${name} rejected a schema sent by GG Coder or a connected tool. This is a schema compatibility problem. Retrying the same request will not fix it — report this error so the schema can be corrected.`;
+  }
   // ChatGPT backend gates new models on the client version GG Coder advertises.
   // The provider's own text says "upgrade the app or CLI", which reads as a
   // user problem; it is really GG Coder that needs updating for this model.

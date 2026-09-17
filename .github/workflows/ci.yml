@@ -268,6 +268,39 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Separate scanner-independent, non-Tauri discovery and candidate review.
+      # Keep serial with the default scenario and other native runs (strict port
+      # 1420); reuse the same dependency-ordered builds and developer launcher.
+      - name: Programmatic discovery native smoke
+        id: programmatic_discovery_smoke
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          TEMP: ${{ runner.temp }}/programmatic-discovery-dev-smoke
+          TMP: ${{ runner.temp }}/programmatic-discovery-dev-smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEMP"
+          node gg-app/scripts/programmatic-execution-dev-smoke.mjs --identity com.ggcoder.local-fork --discovery-only 2>&1 | tee "$TEMP/console.log"
+
+      - name: Upload failed programmatic discovery evidence
+        if: failure() && runner.os == 'Windows' && steps.programmatic_discovery_smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: programmatic-discovery-dev-smoke-${{ github.sha }}
+          # Exact diagnostic filenames only: never fixture HOME/auth/sessions.
+          path: |
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/console.log
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/discovery.json
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/result.json
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/failure.json
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/cleanup.json
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/developer.log
+            ${{ runner.temp }}/programmatic-discovery-dev-smoke/gg-programmatic-execution-*/audit/native-minimized.json
+          if-no-files-found: error
+          retention-days: 7
+
       # Windows-only, and the ONLY job that exercises real installer output.
       # `smoke-sidecar` above proves the bundled runtime loads, but it launches
       # the sidecar directly — it cannot catch what actually breaks for a

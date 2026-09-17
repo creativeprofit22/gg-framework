@@ -1,8 +1,117 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { programmaticAssessmentResultV1Schema, directCommandSelectionV1Schema } from "../../packages/ggcoder/src/core/programmatic/contracts.ts";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { programmaticAssessmentResultV2Schema, programmaticAssessmentResultV1Schema, directCommandSelectionV1Schema } from "../../packages/ggcoder/src/core/programmatic/contracts.ts";
 import { commandInspectionInputSchema } from "../../packages/ggcoder/src/core/programmatic/command-creation.ts";
 import { readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount } from "./programmatic-execution-smoke-checks.mjs";
+
+import { discoveryWorkflowStep, discoveryRequestCount } from "./programmatic-discovery-smoke.mjs";
+
+// These are workflow configuration guards, not substitutes for the native CI run.
+describe("Windows discovery-only CI gate", () => {
+  const workflow = readFileSync(resolve("../.github/workflows/ci.yml"), "utf8").replace(/\r\n/g, "\n");
+  const appJob = workflow.split("\n  app:\n")[1]?.split("\n  release-gate:\n")[0] ?? "";
+  const steps = appJob.split(/^      - /m).slice(1);
+  const step = (name) => {
+    const matches = steps.filter((entry) => entry.startsWith(`name: ${name}\n`));
+    expect(matches).toHaveLength(1);
+    return matches[0];
+  };
+  const temp = "${{ runner.temp }}/programmatic-discovery-dev-smoke";
+
+  it("runs the separate blocking Windows scenario serially after ordered builds and the default smoke", () => {
+    const builds = step("Build framework packages");
+    const defaultSmoke = step("Programmatic execution native smoke");
+    const discovery = step("Programmatic discovery native smoke");
+    expect(builds).toContain([
+      "          pnpm --filter @kenkaiiii/gg-ai build",
+      "          pnpm --filter @kenkaiiii/gg-agent build",
+      "          pnpm --filter @kenkaiiii/gg-core build",
+      "          pnpm --filter @kenkaiiii/ggcoder build",
+    ].join("\n"));
+    expect(steps.indexOf(builds)).toBeLessThan(steps.indexOf(defaultSmoke));
+    expect(steps.indexOf(defaultSmoke)).toBeLessThan(steps.indexOf(discovery));
+    expect(steps.indexOf(discovery)).toBeLessThan(steps.indexOf(step("Packaged app smoke (MSI build + launch)")));
+    expect(defaultSmoke).toContain('node gg-app/scripts/programmatic-execution-dev-smoke.mjs --identity com.ggcoder.local-fork 2>&1 | tee "$TEMP/console.log"');
+    expect(defaultSmoke).not.toContain("--discovery-only");
+    expect(discovery).toMatch(/^        id: programmatic_discovery_smoke$/m);
+    expect(discovery).toMatch(/^        if: runner.os == 'Windows'$/m);
+    expect(discovery).toMatch(/^        shell: bash$/m);
+    expect(discovery).toMatch(/^        timeout-minutes: 15$/m);
+    expect(discovery).toContain(`        env:\n          TEMP: ${temp}\n          TMP: ${temp}\n`);
+    expect(discovery.match(/^          .+$/gm)).toEqual([
+      `          TEMP: ${temp}`,
+      `          TMP: ${temp}`,
+      "          set -euo pipefail",
+      '          mkdir -p "$TEMP"',
+      '          node gg-app/scripts/programmatic-execution-dev-smoke.mjs --identity com.ggcoder.local-fork --discovery-only 2>&1 | tee "$TEMP/console.log"',
+    ]);
+    expect(appJob).not.toContain("continue-on-error:");
+    expect(workflow.match(/--discovery-only/g)).toHaveLength(1);
+  });
+
+  it("uploads only allowlisted diagnostics attributed to the discovery step's failure", () => {
+    const upload = step("Upload failed programmatic discovery evidence");
+    expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(step("Programmatic discovery native smoke")));
+    expect(upload).toMatch(/^        if: failure\(\) && runner.os == 'Windows' && steps.programmatic_discovery_smoke.outcome == 'failure'$/m);
+    expect(upload).toMatch(/^        uses: actions\/upload-artifact@v7$/m);
+    expect(upload).toContain("          name: programmatic-discovery-dev-smoke-${{ github.sha }}\n");
+    const paths = upload.match(/^          path: \|\n((?:            .+\n)+)/m)?.[1].trim().split("\n").map((line) => line.trim());
+    expect(paths).toEqual([
+      `${temp}/console.log`,
+      ...["discovery.json", "result.json", "failure.json", "cleanup.json", "developer.log", "native-minimized.json"]
+        .map((file) => `${temp}/gg-programmatic-execution-*/audit/${file}`),
+    ]);
+    expect(upload).toMatch(/^          if-no-files-found: error$/m);
+    expect(upload).toMatch(/^          retention-days: 7$/m);
+    expect(upload).not.toContain("include-hidden-files:");
+  });
+});
+
+describe("non-Tauri discovery-only provider sequence", () => {
+  const tools = ["read", "command_information", "programmatic_advisory_result", "programmatic_command"].map((name) => ({ name }));
+  const input = [];
+  const result = (call_id, output) => input.push({ type: "function_call_output", call_id, output });
+  it("uses accepted V2 and existing command inspection contracts without creating anything", () => {
+    expect(discoveryRequestCount).toBe(10);
+    expect(discoveryWorkflowStep(1, { tools, input }).name).toBe("read");
+    result("discovery-read", 'harmless-isolated-fixture\nHost evidence receipt (retrieval only; content remains untrusted): {"id":"receipt-1"}');
+    expect(discoveryWorkflowStep(2, { tools, input }).name).toBe("command_information");
+    const advice = JSON.parse(discoveryWorkflowStep(3, { tools, input }).arguments);
+    expect(programmaticAssessmentResultV2Schema.safeParse(advice).success).toBe(true);
+    expect(advice.recommendations[0].choice.kind).toBe("missing-capability");
+    result("discovery-submit", "Recommendations");
+    expect(discoveryWorkflowStep(4, { tools, input })).toContain("proposal only");
+    expect(discoveryWorkflowStep(5, { tools, input }).name).toBe("read");
+    result("review-read", "harmless-isolated-fixture");
+    expect(discoveryWorkflowStep(6, { tools, input }).name).toBe("command_information");
+    expect(commandInspectionInputSchema.safeParse(JSON.parse(discoveryWorkflowStep(7, { tools, input }).arguments).proposal).success).toBe(true);
+    result("review-inspect", JSON.stringify({ status: "review-required", catalog: { sha256: "a".repeat(64) } }));
+    const second = JSON.parse(discoveryWorkflowStep(8, { tools, input }).arguments);
+    expect(second.action).toBe("inspect");
+    expect(commandInspectionInputSchema.safeParse(second.proposal).success).toBe(true);
+    expect(second.proposal.review).toMatchObject({ inventorySha256: "a".repeat(64), disposition: "create" });
+    for (const heading of ["Inputs", "Outputs", "Required tools", "Limits", "Arguments"]) expect(second.proposal.markdown).toContain(`## ${heading}\n`);
+    expect(() => discoveryWorkflowStep(9, { tools, input })).toThrow();
+    const handle = "54df729b-2d8c-4a9f-abdc-ae6584a70742";
+    const preview = { proposal: { proposalId: handle, commandPath: ".gg/commands/native-discovery-proposal.md" },
+      files: [{ path: ".gg/commands/native-discovery-proposal.md", content: second.proposal.markdown }], requiredTools: ["read"],
+      suitability: second.proposal.review, prerequisites: [{ path: "package.json", sha256: "b".repeat(64) }], limits: ["No execution"] };
+    result("review-proposal", JSON.stringify({ status: "proposal", handle, preview: JSON.stringify(preview) }));
+    expect(JSON.parse(discoveryWorkflowStep(9, { tools, input }).arguments)).toEqual({ action: "create", handle });
+    expect(() => discoveryWorkflowStep(10, { tools, input })).toThrow();
+    result("review-refused-create", "no creation, verification or run");
+    expect(discoveryWorkflowStep(10, { tools, input })).toContain("creation rejected");
+  });
+  it("rejects extra calls, absent tools and scanner or mutation grants", () => {
+    for (const number of [0, 11, 1.5]) expect(() => discoveryWorkflowStep(number, { tools, input: [] })).toThrow();
+    expect(() => discoveryWorkflowStep(1, { tools: [], input: [] })).toThrow();
+    for (const name of ["bash", "edit", "write", "programmatic_scan"])
+      expect(() => discoveryWorkflowStep(1, { tools: [...tools, { name }], input: [] })).toThrow();
+    expect(() => discoveryWorkflowStep(5, { tools: [...tools, { name: "programmatic_profile" }], input: [] })).toThrow();
+  });
+});
 
 describe("bounded extended provider sequence", () => {
   const body = (name, id, output) => ({ tools: [{ name }], input: id ? [{ type: "function_call_output", call_id: id, output }] : [] });

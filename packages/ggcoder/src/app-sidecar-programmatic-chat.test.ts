@@ -352,6 +352,14 @@ describe("session-scoped programmatic adapter", () => {
     expect(claim).not.toHaveBeenCalled();
     expect(assess).not.toHaveBeenCalled();
   });
+  it.each(["codeMode", "planMode", "busy"] as const)("denies discovery and candidate review while %s blocks provider work", async (guard) => {
+    const f = await fixture();
+    f.target[guard] = guard !== "codeMode";
+    const expected = guard === "busy" ? 409 : 403;
+    expect((await f.call("discover")).status).toBe(expected);
+    expect((await f.call("review-candidate", { intent: "review-only", source: "current", expectedRevision: 1,
+      assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742", candidateId: "ad5bb9ba-4d86-485a-8d74-613fe59b12df" })).status).toBe(expected);
+  });
   it("rejects extra inputs, chat, busy, plan writes, missing and replaced approval handles", async () => {
     const f = await fixture();
     expect((await f.call("scan", { command: "shell" })).status).toBe(400);

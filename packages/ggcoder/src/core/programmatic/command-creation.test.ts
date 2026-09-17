@@ -59,6 +59,26 @@ async function reviewed(root: string, input = request, extra: Record<string, unk
 }
 
 describe("read-only command proposal inspection", () => {
+  it("issues completion evidence only for the exact current owner proposal", async () => {
+    const root = await fixture();
+    const owner = new CommandCreationReview(root, options);
+    try {
+      const first = await owner.inspect(request, signal());
+      expect(owner.inspectionEvidence(JSON.stringify(first))).toBeUndefined();
+      if (first.status !== "review-required") throw new Error(JSON.stringify(first));
+      const result = await owner.inspect({ ...request, review: { inventorySha256: first.catalog.sha256,
+        disposition: "create", rationale: "Missing fixture-specific instructions" } }, signal());
+      if (result.status !== "proposal") throw new Error(JSON.stringify(result));
+      const evidence = owner.inspectionEvidence(JSON.stringify(result));
+      expect(evidence?.()).toBe(true);
+      for (const altered of [{ ...result, status: "unavailable" }, { ...result, handle: "forged" }, { ...result, preview: "incomplete" }])
+        expect(owner.inspectionEvidence(JSON.stringify(altered))).toBeUndefined();
+      expect(owner.inspectionEvidence("invalid")).toBeUndefined();
+      owner.cancel();
+      expect(evidence?.()).toBe(false);
+      expect(owner.inspectionEvidence(JSON.stringify(result))).toBeUndefined();
+    } finally { owner.dispose(); }
+  });
   it.each(["schedule", "sched"])("reserves desktop command %s before issuing a creation handle", async (name) => {
     const root = await fixture();
     const owner = new CommandCreationReview(root, { ...options, ...DESKTOP_COMMAND_DISCOVERY_OPTIONS });

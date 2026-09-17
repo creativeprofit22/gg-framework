@@ -62,6 +62,7 @@ export interface CreateToolsOptions {
   setupOwner?: () => string;
   assertSetupAllowed?: () => void;
   executeReviewedCommand?: DirectCommandExecutor;
+  /** Permission-filtered persistent inventory for command prerequisites, not a turn execution allowlist. */
   getAvailableToolNames?: () => readonly string[];
   agents?: AgentDefinition[];
   skills?: Skill[];

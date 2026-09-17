@@ -46,7 +46,7 @@ it.each(["setup", "configured"] as const)("publishes bounded host assessment eve
     await session.initialize();
     if (mode === "configured") await configure();
     reply({ type: "tool_call", id: "result", name: "programmatic_advisory_result", args: {
-      version: 1, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
+      version: 2, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
     } });
     await session.prompt(mode === "setup" ? "/setup-programmatic" : "/programmatic");
     expect(events).toHaveLength(2);
@@ -75,7 +75,7 @@ it.each(["completed", "unavailable", "failed", "cancelled"] as const)("slash con
       yield { type: "text_delta", text: "unreachable" };
     })()));
     if (scenario === "completed") reply({ type: "tool_call", id: "result", name: "programmatic_advisory_result", args: {
-      version: 1, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
+      version: 2, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
     } });
     await session.prompt("/programmatic");
     expect(events).toHaveLength(2);
@@ -142,7 +142,7 @@ it.each(["completed", "incomplete", "unavailable", "cancelled", "denied", "scan-
         yield { type: "text_delta", text: "unreachable" };
       })()));
     }
-    if (scenario === "completed") reply({ type: "tool_call", id: "result", name: "programmatic_advisory_result", args: { version: 1, kind: "advisory", coverage: { status: "limited", scope: "Sampled project", reason: "Scripted provider only" }, recommendations: [] } });
+    if (scenario === "completed") reply({ type: "tool_call", id: "result", name: "programmatic_advisory_result", args: { version: 2, kind: "advisory", coverage: { status: "limited", scope: "Sampled project", reason: "Scripted provider only" }, recommendations: [] } });
     const result = await session.assessProgrammatic("configured");
     expect(result.assessment.status).toBe(["completed", "unavailable", "cancelled"].includes(scenario) ? scenario : "incomplete");
     expect(result.assessment.deterministic).toMatchObject(scenario === "denied" ? { status: "denied" } : scenario === "failed" ? { status: "failed" } : scenario === "scan-unavailable" ? { status: "unavailable" } : { status: "succeeded", enabledCount: 0, applicableCount: 0 });
@@ -297,9 +297,16 @@ it("reuses delivered receipts after host scan cancellation before provider entry
         expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ id: receiptId, tool: "read", status: "retrieved" })]));
       }
       call = { type: "tool_call", id: `${phase}-result`, name: "programmatic_advisory_result", args: {
-        version: 1, kind: "advisory", coverage: { status: "limited", scope: "Workflow", reason: "Only one local read" },
-        recommendations: [{ version: 1, kind: "advisory", outcome: "Review the workflow", rationale: "The local workflow was read", uncertainty: "Bounded fixture only",
+        version: 2, kind: "advisory", coverage: { status: "limited", scope: "Workflow", reason: "Only one local read" },
+        recommendations: [{ version: 2, kind: "advisory", outcome: "Review the workflow", rationale: "The local workflow was read", uncertainty: "Bounded fixture only",
           evidence: { version: 1, items: [{ basis: "observed", source: receiptId, code: "workflow", severity: "info", message: "Read the workflow", location: { path: "WORKFLOW" } }] },
+          workflow: {
+            trigger: "A ledger dispatch needs reconciliation", representativeCase: "Review the paper ledger workflow described in WORKFLOW",
+            inputs: ["WORKFLOW"], currentProcess: ["Read the local workflow", "Review ledger reconciliation manually"],
+            output: "A bounded workflow review", successCheck: "Review agrees with the documented workflow",
+            affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read-only review; no ledger changes",
+            repeatability: { basis: "inferred", explanation: "Dispatch reconciliation suggests repeatable work, but frequency is unknown" },
+          }, alternatives: [],
           choice: { kind: "manual", steps: ["Review the workflow in a separate turn"] } }],
       } };
     }

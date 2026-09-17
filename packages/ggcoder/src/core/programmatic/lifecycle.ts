@@ -1,5 +1,8 @@
 import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
-import type { Stats } from "node:fs";
+import {
+  readBoundedCandidate, replaceBoundedFile, ProgrammaticFilePostCommitError as StateFilePostCommitError,
+  type ProgrammaticStorageOperations, type StoredCandidate,
+} from "./storage.js";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import {
   PROGRAMMATIC_CHAT_PAGE_LIMIT,
@@ -52,13 +55,7 @@ export const PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT = 16 * 1024 * 1024;
 const STATE_TEMPORARY_PATH = ".gg/programmatic/.state.tmp";
 const PREVIOUS_STATE_TEMPORARY_PATH = ".gg/programmatic/.state.previous.tmp";
 
-export interface ProgrammaticLifecycleOperations {
-  lstat(filePath: string): Promise<Stats>;
-  readFile(filePath: string): Promise<Buffer>;
-  writeFile(filePath: string, bytes: Uint8Array, options: { flag: "wx" }): Promise<unknown>;
-  rename(from: string, to: string): Promise<unknown>;
-  rm(filePath: string, options: { force: true }): Promise<unknown>;
-}
+export type ProgrammaticLifecycleOperations = ProgrammaticStorageOperations;
 
 export interface RunProgrammaticScanOptions {
   signal?: AbortSignal;
@@ -220,42 +217,13 @@ export function reconcileProgrammaticLifecycle(
   return { state, summary };
 }
 
-type StateCandidate =
-  | { status: "missing" }
-  | { status: "invalid" }
-  | { status: "valid"; state: ProgrammaticLifecycleStateV1; bytes: Buffer };
-
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === "ENOENT";
-}
+type StateCandidate = StoredCandidate<ProgrammaticLifecycleStateV1>;
 
 async function readStateCandidate(
   absolutePath: string,
   operations: ProgrammaticLifecycleOperations,
 ): Promise<StateCandidate> {
-  try {
-    const stat = await operations.lstat(absolutePath);
-    if (
-      stat.isSymbolicLink() || !stat.isFile() ||
-      !Number.isFinite(stat.size) || stat.size < 0 ||
-      stat.size > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT
-    ) return { status: "invalid" };
-    const raw = await operations.readFile(absolutePath);
-    if (raw.length > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) return { status: "invalid" };
-    const state = programmaticLifecycleStateV1Schema.parse(
-      JSON.parse(raw.toString("utf8")) as unknown,
-    );
-    return { status: "valid", state, bytes: Buffer.from(canonicalJson(state), "utf8") };
-  } catch (error) {
-    return isMissing(error) ? { status: "missing" } : { status: "invalid" };
-  }
-}
-
-/** The destination rename completed; notification or cleanup failed afterward. */
-class StateFilePostCommitError extends Error {
-  constructor(readonly repositoryPath: string, cause: unknown) {
-    super("Lifecycle state was persisted, but post-commit processing failed.", { cause });
-  }
+  return readBoundedCandidate(absolutePath, operations, programmaticLifecycleStateV1Schema, PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT);
 }
 
 async function replaceStateFile(
@@ -267,63 +235,15 @@ async function replaceStateFile(
   options: RunProgrammaticScanOptions,
   revalidateCommit: () => Promise<void>,
 ): Promise<void> {
-  options.signal?.throwIfAborted();
-  const destination = containedPath(root, repositoryPath);
-  const temporary = containedPath(root, temporaryRepositoryPath);
-  const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
-  const serialized = canonicalJson(state);
-  if (Buffer.byteLength(serialized, "utf8") > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) {
-    throw new Error("Lifecycle state exceeds the byte limit");
-  }
-  const bytes = Buffer.from(serialized, "utf8");
-  await operations.rm(temporary, { force: true });
-  let committed = false;
-  const failures: unknown[] = [];
-  try {
-    await operations.writeFile(temporary, bytes, { flag: "wx" });
-    const temporaryStat = await operations.lstat(temporary);
-    if (
-      temporaryStat.isSymbolicLink() || !temporaryStat.isFile() ||
-      !Number.isFinite(temporaryStat.size) || temporaryStat.size < 0 ||
-      temporaryStat.size > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT
-    ) throw new Error("Temporary lifecycle state validation failed");
-    const temporaryBytes = await operations.readFile(temporary);
-    if (temporaryBytes.length > PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT) {
-      throw new Error("Temporary lifecycle state exceeds the byte limit");
-    }
-    const validated = programmaticLifecycleStateV1Schema.parse(
-      JSON.parse(temporaryBytes.toString("utf8")) as unknown,
-    );
-    if (!temporaryBytes.equals(bytes) || canonicalJson(validated) !== bytes.toString("utf8")) {
-      throw new Error("Temporary lifecycle state validation failed");
-    }
-    await rejectLinks(root, repositoryPath, true);
-    options.signal?.throwIfAborted();
-    await options.onPreFileMutation?.(repositoryPath);
-    options.signal?.throwIfAborted();
-    await withFileLock(profilePath, async () => {
-      options.signal?.throwIfAborted();
-      await revalidateCommit();
-      options.signal?.throwIfAborted();
-      await operations.rename(temporary, destination);
-      committed = true;
+  await replaceBoundedFile(root, repositoryPath, temporaryRepositoryPath, state, operations, options,
+    programmaticLifecycleStateV1Schema, PROGRAMMATIC_LIFECYCLE_BYTE_LIMIT, async (rename) => {
+      await withFileLock(containedPath(root, PROGRAMMATIC_PROFILE_PATH), async () => {
+        options.signal?.throwIfAborted();
+        await revalidateCommit();
+        options.signal?.throwIfAborted();
+        await rename();
+      });
     });
-    await options.onFileMutated?.(repositoryPath);
-  } catch (error) {
-    failures.push(error);
-  }
-  try {
-    await operations.rm(temporary, { force: true });
-  } catch (error) {
-    failures.push(error);
-  }
-  if (failures.length > 0) {
-    const cause = failures.length === 1
-      ? failures[0]
-      : new AggregateError(failures, "Lifecycle mutation and temporary cleanup failed.");
-    if (committed) throw new StateFilePostCommitError(repositoryPath, cause);
-    throw cause;
-  }
 }
 
 async function loadProfile(
@@ -394,7 +314,7 @@ export async function accessProgrammaticExecutionRecord(
     const profile = await loadProfile(root, operations);
     if (
       profile.status !== "valid" ||
-      profile.envelope.version !== 2 ||
+      profile.envelope.version === 1 ||
       profile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256
     ) {
       throw new Error("Approved configuration is unavailable or changed.");

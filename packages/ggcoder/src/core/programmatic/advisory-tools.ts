@@ -1,10 +1,14 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { discoverCommands } from "../command-discovery.js";
 import { retrievalMetadataSchema } from "../../tools/retrieval-metadata.js";
 import { getMcpToolIdentity, withMcpToolIdentity } from "../mcp/tool-identity.js";
 import { createProgrammaticAdvisoryResultTool } from "../../tools/programmatic-advisory-result.js";
 import { CommandInformationParams } from "../../tools/command-information.js";
 import type { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
-import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
+import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, localLocations, type AdvisoryReceipt, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
+import { repositoryRelativePathSchema } from "./contracts.js";
 
 export type ProgrammaticAdvisoryContext = ReturnType<typeof buildProgrammaticAdvisoryContext>;
 
@@ -17,6 +21,41 @@ export function claimAdvisoryTool(
 ): void {
   if (isMcp) throw new Error("MCP is unavailable in read-only advisory scope.");
   turn.claim(tool.name, args);
+}
+
+/** Classify delivered locations against current discovered owners, never Markdown text.
+ * Canonical identities catch aliases; unresolved identities cannot establish independence.
+ * This is source-purpose provenance, not proof of workflow relevance or prerequisites. */
+async function classifyLocalSources(cwd: string, receipts: AdvisoryReceipt[]): Promise<void> {
+  const paths = [...new Set(receipts.flatMap((receipt) => localLocations(receipt).map((location) => location.path)))];
+  if (!paths.length) return;
+  const purposes = new Map<string, "command-definition" | "independent" | "unknown">();
+  try {
+    // Readiness affects advertised actions, not custom file ownership. Do not run inventory.
+    const discovery = await discoverCommands(cwd, { readReadiness: async () => "missing" });
+    const canonical = (file: string) => process.platform === "win32" ? file.toLowerCase() : file;
+    const root = await fs.realpath(cwd);
+    const owners = discovery.entries.flatMap((entry) => entry.custom ? [entry.custom.filePath] : []);
+    const ownerPaths = new Set(owners.map((owner) => canonical(path.resolve(owner))));
+    const realOwners = await Promise.all(owners.map((owner) => fs.realpath(owner).then(canonical).catch(() => undefined)));
+    const canonicalOwners = new Set(realOwners.filter((owner) => owner !== undefined));
+    await Promise.all(paths.map(async (file) => {
+      if (ownerPaths.has(canonical(path.resolve(cwd, file)))) {
+        purposes.set(file, "command-definition");
+        return;
+      }
+      const real = await fs.realpath(path.resolve(cwd, file)).catch(() => undefined);
+      const local = real && repositoryRelativePathSchema.safeParse(path.relative(root, real).split(path.sep).join("/")).success;
+      purposes.set(file, real && canonicalOwners.has(canonical(real)) ? "command-definition"
+        : local && realOwners.every((owner) => owner !== undefined) ? "independent" : "unknown");
+    }));
+  } catch {
+    // Keep retrieval evidence, but fail closed for independent workflow support.
+  }
+  for (const receipt of receipts) {
+    const inspected = [...new Set(localLocations(receipt).map((location) => location.path))];
+    if (inspected.length) receipt.localSources = inspected.map((file) => ({ path: file, purpose: purposes.get(file) ?? "unknown" }));
+  }
 }
 
 /** Shared receipt path. Neither source bodies nor assessment results are persisted here. */
@@ -46,8 +85,6 @@ export async function executeAdvisoryTool(
     await beforeExecute?.();
     context.signal.throwIfAborted();
     const output = await tool.execute(args, context);
-    settled = true;
-    cleanup?.();
     if (turn && tool.name === "programmatic_scan") {
       let succeeded = false;
       let committed = false;
@@ -117,6 +154,9 @@ export async function executeAdvisoryTool(
         );
       return receipt;
     });
+    await classifyLocalSources(cwd, receipts);
+    if (!turn.active || context.signal.aborted) return output;
+    settled = true;
     turn.stageResult(context.toolCallId, (complete) => {
       for (const receipt of receipts) {
         // A truncated source is at most a lead, never observed local/external evidence.

@@ -6,6 +6,21 @@ import {
   isProgrammaticChatResponse,
 } from "./programmatic-chat-contract.js";
 
+it("allows bounded request correlation only on assessment requests and validates completion receipts", () => {
+  for (const action of ["discover", "inspect-setup", "scan"]) {
+    expect(isProgrammaticChatRequest({ version: 1, action, requestId: "request-1" })).toBe(true);
+    for (const requestId of ["", "bad id", "x".repeat(129), 1])
+      expect(isProgrammaticChatRequest({ version: 1, action, requestId })).toBe(false);
+  }
+  expect(isProgrammaticChatRequest({ version: 1, action: "report", offset: 0, requestId: "request-1" })).toBe(false);
+  const lifecycle = { sessionId: "session", conversationId: "chat", sequence: 1, requestId: "request-1" };
+  const assessment = { version: 1, mode: "setup", status: "completed", summary: "Scoped", limitations: [], coverage: [], observations: [],
+    deterministic: { status: "not-run", reason: "setup" }, lifecycle };
+  expect(isProgrammaticChatResponse({ version: 1, action: "discover", ok: true, assessment })).toBe(true);
+  expect(isProgrammaticChatResponse({ version: 1, action: "discover", ok: true,
+    assessment: { ...assessment, lifecycle: { ...lifecycle, sequence: -1 } } })).toBe(false);
+});
+
 describe("execution result display boundary", () => {
   const item = { basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: "Tool read completed (manifest)." };
   const result = { version: 1, status: "succeeded", summary: "Summary", evidence: { version: 1, items: [item] } };

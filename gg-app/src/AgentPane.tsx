@@ -35,6 +35,7 @@ import {
   programmaticChatReducer,
   canRunProgrammaticSelection,
   canScanProgrammatic,
+  canReviewProgrammaticCandidate,
 } from "./programmatic-chat-state";
 import type {
   ProgrammaticChatRequest,
@@ -2022,7 +2023,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (current && pending) invalidateProgrammatic();
   };
   const performProgrammatic = async (request: ProgrammaticChatRequest): Promise<void> => {
-    if (request.action === "inspect-setup" && stateRef.current?.planMode) return;
+    if (["inspect-setup", "discover", "review-candidate"].includes(request.action) && stateRef.current?.planMode) return;
     const selection = programmaticRef.current;
     if (
       request.action === "approve-setup" &&
@@ -2033,6 +2034,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     )
       return;
     if (request.action === "scan" && !canScanProgrammatic(selection)) return;
+    if (request.action === "review-candidate" && (!canReviewProgrammaticCandidate(selection) || request.source !== "current" ||
+      request.candidateId !== selection.candidateDetail?.candidateId || request.assessmentId !== selection.candidateDetail.assessmentId ||
+      request.expectedRevision !== selection.candidateDetail.revision)) return;
     if (
       request.action === "dismiss" &&
       (selection.detail?.summary.actions?.dismiss.available !== true ||
@@ -2060,9 +2064,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     let pending: ProgrammaticChatRequest | null = request;
     try {
       while (pending && current()) {
-        const active: ProgrammaticChatRequest = pending;
+        const active: ProgrammaticChatRequest = { ...pending };
         const epoch = ++programmaticEpoch.current;
-        dispatchProgrammatic({ type: "start", generation, epoch, operation: active.action });
+        const requestId = active.action === "discover" || active.action === "inspect-setup" || active.action === "scan"
+          ? (active.requestId = crypto.randomUUID()) : undefined;
+        const { sessionId, conversationId } = stateRef.current ?? {};
+        const assessmentRequest = requestId && sessionId && conversationId
+          ? { requestId, sessionId, conversationId } : undefined;
+        dispatchProgrammatic({ type: "start", generation, epoch, operation: active.action, assessmentRequest });
         const response = await client.programmatic(active);
         if (!current()) return;
         dispatchProgrammatic({ type: "response", generation, epoch, response });
@@ -2088,7 +2097,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           generation,
           epoch: programmaticEpoch.current,
           error: "The request failed. Reload results to check what happened before trying again.",
-          reconcile: ["approve-setup", "scan", "dismiss"].includes(request.action),
+          reconcile: ["approve-setup", "scan", "dismiss", "history-apply", "review-candidate"].includes(request.action),
         });
     } finally {
       // The dedicated approval endpoint does not emit a normal agent run_end.
@@ -4764,6 +4773,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       onSelect={(id) => {
                         dispatchProgrammatic({ type: "select", id });
                         void performProgrammatic({ version: 1, action: "detail", id });
+                      }}
+                      onSelectCandidate={(source, id) => {
+                        if (source === "history" && programmaticBusy) return;
+                        dispatchProgrammatic({ type: "select-candidate", source, id });
+                        if (source === "history") void performProgrammatic({ version: 1, action: "history-detail", candidateId: id, offset: 0 });
                       }}
                       onRun={() => void runSelectedProgrammatic()}
                     />

@@ -1,4 +1,5 @@
 import { isValidProgrammaticFocus } from "./slash-command-contract.js";
+import { isDiscoveryProjection, isRecommendationSaveStatus, type DiscoveryProjection, type RecommendationSaveStatus } from "./programmatic-recommendation-contract.js";
 
 /** Display only. Hosts project accepted advisory evidence/recommendations; this is
  * not another model-result schema, receipt validator, or approval payload. */
@@ -16,8 +17,27 @@ export type ProgrammaticAssessmentDeterministicOutcome =
   | { status: "not-run"; reason: "setup" }
   | { status: "unavailable" | "denied" | "cancelled" | "failed"; reason: string }
   | { status: "succeeded"; enabledCount: number; applicableCount: number };
+export interface ProgrammaticAssessmentIdentity {
+  conversationId: string;
+  sessionId: string;
+  sequence: number;
+  /** Correlates a desktop request; never an approval capability. */
+  requestId?: string;
+}
+export const isProgrammaticAssessmentRequestId = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+const identityFields = {
+  conversationId: (id: unknown) => typeof id === "string" && id.length > 0 && id.length <= 256,
+  sessionId: (id: unknown) => typeof id === "string" && id.length > 0 && id.length <= 256,
+  sequence: (seq: unknown) => Number.isSafeInteger(seq) && (seq as number) > 0,
+};
+export function isProgrammaticAssessmentIdentity(value: unknown): value is ProgrammaticAssessmentIdentity {
+  return object(value, identityFields, { requestId: isProgrammaticAssessmentRequestId });
+}
 export interface ProgrammaticAssessment {
   version: 1;
+  /** Host-owned completion receipt, absent on legacy projections. */
+  lifecycle?: ProgrammaticAssessmentIdentity;
   mode: "setup" | "configured";
   focus?: string;
   /** Completion is scoped assessment completion, never a universal clean bill. */
@@ -30,24 +50,25 @@ export interface ProgrammaticAssessment {
    * Receipt references are display attribution, not proof of delivery/authority. */
   observations: { basis: "observed" | "inferred"; message: string; evidenceSources: string[] }[];
   deterministic: ProgrammaticAssessmentDeterministicOutcome;
+  /** Separate from assessment/scanner success; omitted by legacy hosts. */
+  history?: RecommendationSaveStatus;
+  /** Absence means legacy/unavailable candidate detail, not an empty scoped result. */
+  discovery?: DiscoveryProjection;
 }
 
 /** Host-owned display lifecycle. Sequence increases within a session; neither
  * event phase conveys proposal ownership or approval authority. */
-export type ProgrammaticAssessmentEvent = {
-  conversationId: string;
-  sessionId: string;
-  sequence: number;
-} & ({ phase: "started" } | { phase: "completed"; assessment: ProgrammaticAssessment });
+export type ProgrammaticAssessmentEvent = ProgrammaticAssessmentIdentity &
+  ({ phase: "started" } | { phase: "completed"; assessment: ProgrammaticAssessment });
 
 export function isProgrammaticAssessmentEvent(value: unknown): value is ProgrammaticAssessmentEvent {
-  const identity = {
-    conversationId: (id: unknown) => typeof id === "string" && id.length > 0 && id.length <= 256,
-    sessionId: (id: unknown) => typeof id === "string" && id.length > 0 && id.length <= 256,
-    sequence: (seq: unknown) => Number.isSafeInteger(seq) && (seq as number) > 0,
-  };
-  return object(value, { ...identity, phase: oneOf("started") }) ||
-    object(value, { ...identity, phase: oneOf("completed"), assessment: isProgrammaticAssessment });
+  const optional = { requestId: isProgrammaticAssessmentRequestId };
+  if (object(value, { ...identityFields, phase: oneOf("started") }, optional)) return true;
+  if (!object(value, { ...identityFields, phase: oneOf("completed"), assessment: isProgrammaticAssessment }, optional)) return false;
+  const event = value as Extract<ProgrammaticAssessmentEvent, { phase: "completed" }>;
+  const receipt = event.assessment.lifecycle;
+  return !receipt || (receipt.sessionId === event.sessionId && receipt.conversationId === event.conversationId &&
+    receipt.sequence === event.sequence && receipt.requestId === event.requestId);
 }
 
 type Guard = (value: unknown) => boolean;
@@ -97,7 +118,7 @@ export function isProgrammaticAssessment(value: unknown): value is ProgrammaticA
         new Set(sources as string[]).size === (sources as string[]).length,
     })),
     deterministic,
-  }, { focus: (focus) => typeof focus === "string" && isValidProgrammaticFocus(focus) })) return false;
+  }, { lifecycle: isProgrammaticAssessmentIdentity, focus: (focus) => typeof focus === "string" && isValidProgrammaticFocus(focus), history: isRecommendationSaveStatus, discovery: isDiscoveryProjection })) return false;
   const assessment = value as ProgrammaticAssessment;
   return (assessment.mode === "setup") === (assessment.deterministic.status === "not-run");
 }

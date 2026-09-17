@@ -3679,7 +3679,7 @@ describe("AgentPane lifecycle", () => {
     act(() => emit("plan_exit", {}));
     await waitFor(() => expect(review.disabled).toBe(false));
     fireEvent.click(review);
-    await waitFor(() => expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "inspect-setup" }));
+    await waitFor(() => expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "inspect-setup", requestId: expect.any(String) }));
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -3720,7 +3720,7 @@ describe("AgentPane lifecycle", () => {
     fireEvent.click(scan);
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
       { version: 1, action: "report", offset: 0 },
-      { version: 1, action: "inspect-setup" },
+      { version: 1, action: "inspect-setup", requestId: expect.any(String) },
     ]);
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
@@ -3750,7 +3750,8 @@ describe("AgentPane lifecycle", () => {
     const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 2 };
     act(() => emit("run_start", {}));
     act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
-    expect(screen.queryByText("3 enabled checks; 2 applicable checks.")).toBeNull();
+    // Previous assessment stays readable during refresh; completion replaces its counts.
+    expect(screen.getByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
     const assessment = { ...success, status: status === "failed" ? "incomplete" : status,
       summary: "Latest slash assessment", deterministic: { status, reason: "Latest host outcome" } };
     act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment }));
@@ -3773,6 +3774,49 @@ describe("AgentPane lifecycle", () => {
     act(() => emit("run_start", {}));
     act(() => emit("programmatic_assessment", { conversationId: "conversation-1", sessionId: "session-1", sequence: 1, phase: "started" }));
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
+  });
+
+  it.each(["success", "transport-lost"] as const)("settles dropped discovery completion as %s without replay (mocked native IPC)", async (outcome) => {
+    nativeMocks.realMentor = true;
+    const pane = client("discovery-dropped-completion", 8);
+    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), conversationId: "conversation-1", sessionId: "session-1" });
+    const emit = liveEvents(pane);
+    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+    vi.mocked(pane.programmatic).mockClear();
+    vi.mocked(pane.programmatic).mockImplementation(async (request) => request.action === "discover" ? receipt.promise : report);
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    const discover = await screen.findByRole("button", { name: "Discover opportunities" });
+    await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(discover);
+    const request = vi.mocked(pane.programmatic).mock.calls.find(([request]) => request.action === "discover")![0];
+    if (request.action !== "discover") throw new Error("Expected discovery request");
+    expect(request.requestId).toEqual(expect.any(String));
+    const lifecycle = { conversationId: "conversation-1", sessionId: "session-1", sequence: 1, requestId: request.requestId };
+    act(() => emit("programmatic_assessment", { ...lifecycle, phase: "started" }));
+    expect(await screen.findByText(/Discovery is in progress/)).toBeTruthy();
+    // No completed event is delivered. No new provider request is allowed to repair it.
+    if (outcome === "transport-lost") {
+      await act(async () => receipt.reject(new Error("Transport cancelled")));
+      expect(await screen.findByText(/Discovery completion could not be confirmed/)).toBeTruthy();
+    } else {
+      const candidate = { assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742", candidateId: "ad5bb9ba-4d86-485a-8d74-613fe59b12df", revision: 1,
+        choice: "missing-capability" as const, outcome: "Inspect recurring records", rationale: "Repeated", uncertainty: "Scoped", workflow: { trigger: "Change", representativeCase: "Record",
+          inputs: [], currentProcess: [], output: "Report", successCheck: "Find issue", scope: "Project", mutationBoundary: "Read-only",
+          repeatability: { basis: "inferred" as const, explanation: "Recurring" } }, evidence: [], alternatives: [], risks: [], details: [], nextStep: { available: true, reason: "Review only" } };
+      await act(async () => receipt.resolve({ version: 1, action: "discover", ok: true, assessment: {
+        version: 1, mode: "setup", status: "completed", summary: "Recovered discovery", lifecycle,
+        limitations: [], observations: [], coverage: [], deterministic: { status: "not-run", reason: "setup" },
+        discovery: { assessmentId: candidate.assessmentId, candidates: [candidate] },
+      } }));
+      fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
+      expect((screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement).disabled).toBe(false);
+    }
+    expect(screen.queryByText(/Discovery is in progress/)).toBeNull();
+    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(["report", "discover"]);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it.each(["before-run-end", "after-run-end", "after-response"] as const)("keeps exact setup when assessment completion is %s (mocked native IPC)", async (ordering) => {

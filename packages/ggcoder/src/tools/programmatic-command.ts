@@ -59,6 +59,6 @@ export function createProgrammaticCommandTool(cwd: string, options: CommandPubli
       }));
     },
   };
-  return { tool, verification, dispose: () => { review.dispose(); verification.clear(); },
+  return { tool, verification, inspectionEvidence: (text: string) => review.inspectionEvidence(text), dispose: () => { review.dispose(); verification.clear(); },
     cancel: () => { review.cancel(); verification.clear(); } };
 }

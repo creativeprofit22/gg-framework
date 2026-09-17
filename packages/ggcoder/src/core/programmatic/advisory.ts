@@ -6,7 +6,7 @@ import { safeRetrievalUrl, type InspectedLocalLocation, type RetrievalResource }
 import type { AdvisoryCommandPage } from "../command-discovery.js";
 import { ProgrammaticSetupInspection, SETUP_ASSESSMENT_TOOLS } from "./setup-inspection.js";
 import {
-  programmaticAssessmentResultV1Schema,
+  programmaticAssessmentResultV2Schema,
   programmaticCommandSnapshotV1Schema,
   repositoryRelativePathSchema,
 } from "./contracts.js";
@@ -33,7 +33,7 @@ export const ADVISORY_READ_TOOLS = new Set([
   "programmatic_advisory_result",
   "programmatic_scan",
 ]);
-type Assessment = z.infer<typeof programmaticAssessmentResultV1Schema>;
+type Assessment = z.infer<typeof programmaticAssessmentResultV2Schema>;
 type ProgrammaticCommandSnapshotV1 = z.infer<typeof programmaticCommandSnapshotV1Schema>;
 type External = {
   tool: "steroids" | "web";
@@ -48,20 +48,37 @@ export interface AdvisoryReceipt {
   toolCallId: string;
   tool: string;
   status: "retrieved" | "lead" | "failed" | "cancelled";
+  /** Host retrieval time; absent on older retained receipts. */
+  retrievedAt?: string;
   location?: string;
   range?: { startLine: number; endLine: number };
   external?: External;
   /** Complete local source chunks delivered by the host; never parsed from headers. */
   locations?: InspectedLocalLocation[];
+  /** Host-classified owner purpose, not source/model labels or semantic relevance. */
+  localSources?: { path: string; purpose: "command-definition" | "independent" | "unknown" }[];
 }
 
-function localLocations(receipt: AdvisoryReceipt | undefined): { path: string; startLine?: number; endLine?: number }[] {
+/** Exact delivered identity; external receipts currently carry no verified line ranges. */
+export function deliveredExternalReceipt(receipts: AdvisoryReceipt[], citation: {
+  inspectedUrl: string; revision?: string; location?: { path: string; startLine?: number; endLine?: number };
+}): AdvisoryReceipt | undefined {
+  return receipts.find((receipt) => receipt.status === "retrieved" &&
+    receipt.external?.sourceUri === citation.inspectedUrl &&
+    (!citation.revision || receipt.external.revision === citation.revision) &&
+    (!citation.location || (receipt.external.path === citation.location.path &&
+      citation.location.startLine === undefined && citation.location.endLine === undefined)));
+}
+
+export function localLocations(receipt: AdvisoryReceipt | undefined): { path: string; startLine?: number; endLine?: number }[] {
   if (receipt?.status !== "retrieved") return [];
   return receipt.locations ?? (receipt.location ? [{ path: receipt.location, ...receipt.range }] : []);
 }
 
-function hasLocalInspection(receipt: AdvisoryReceipt | undefined): boolean {
-  return localLocations(receipt).length > 0;
+function hasLocalInspection(receipt: AdvisoryReceipt | undefined, cited?: { path: string }): boolean {
+  return localLocations(receipt).some((location) =>
+    (!cited || location.path === cited.path) &&
+    receipt?.localSources?.some((source) => source.path === location.path && source.purpose === "independent"));
 }
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -122,6 +139,7 @@ export class AdvisoryEvidence {
       (tool === "research_corpus" && input.action === "show");
     const receipt: AdvisoryReceipt = {
       id: `receipt-${randomUUID()}`,
+      retrievedAt: new Date().toISOString(),
       toolCallId: toolCallId.slice(0, 128),
       tool,
       status: cancelled
@@ -375,7 +393,7 @@ export class ProgrammaticAdvisoryTurn {
     try {
       if (JSON.stringify(input).length > ADVISORY_LIMITS.resultChars)
         throw new Error("Advisory result exceeds 64,000 characters.");
-      const result = programmaticAssessmentResultV1Schema.parse(input);
+      const result = programmaticAssessmentResultV2Schema.parse(input);
       if (result.recommendations.length > ADVISORY_LIMITS.recommendations)
         throw new Error("At most 10 advisory recommendations are permitted.");
       for (const [offset, page] of this.pages) {
@@ -392,22 +410,14 @@ export class ProgrammaticAdvisoryTurn {
       if (!this.fullCoverage())
         this.limitations.add("Not all current catalog pages were inspected.");
       if (
-        !this.evidence.list().some(hasLocalInspection)
+        !this.evidence.list().some((receipt) => hasLocalInspection(receipt))
       )
         this.limitations.add("Bounded local source evidence was not inspected.");
       for (const recommendation of result.recommendations) {
         for (const item of recommendation.evidence.items) {
           if ("kind" in item) {
             if (
-              !this.evidence
-                .list()
-                .some(
-                  (receipt) =>
-                    receipt.status === "retrieved" &&
-                    receipt.external?.sourceUri === item.inspectedUrl &&
-                    (!item.revision || receipt.external.revision === item.revision) &&
-                    (!item.location || (receipt.external.path === item.location.path && item.location.startLine === undefined)),
-                )
+              !deliveredExternalReceipt(this.evidence.list(), item)
             )
               throw new Error(
                 "External provenance must match an inspected host receipt; search leads and unsupplied revisions are not evidence.",
@@ -430,33 +440,35 @@ export class ProgrammaticAdvisoryTurn {
             throw new Error("Evidence location was not inspected by the referenced tool call.");
         }
         const choice = recommendation.choice;
-        if (choice.kind === "reuse-command" && choice.availability.status === "available") {
-          const snapshot = choice.availability.snapshot;
+        const localSupport = recommendation.evidence.items.some((item) =>
+          !("kind" in item) && item.basis !== "assumed" &&
+          hasLocalInspection(this.evidence.get(item.source), item.location));
+        const commands = [
+          ...(choice.kind === "reuse-command" || choice.kind === "extend-command" ? [choice] : []),
+          ...recommendation.alternatives.filter((option) => option.availability !== undefined),
+        ];
+        if (commands.some((option) => option.availability?.status === "available") && !localSupport)
+          throw new Error("Command suitability requires inspected local prerequisite evidence, not its prompt body alone.");
+        if (["reuse-command", "extend-command", "missing-capability"].includes(choice.kind) && !localSupport)
+          throw new Error("Positive automation recommendations require inspected local workflow evidence, not assumptions, metadata or external examples alone.");
+        if (choice.kind === "extend-command" && choice.availability.status !== "available")
+          throw new Error("Extension requires an inspected base; use needs-more-evidence for an unresolved or unreadable command.");
+        // One delivery/freshness boundary for selected targets and concrete alternatives.
+        // Receipt provenance does not prove the model's explanation of prerequisite relevance.
+        for (const option of commands) {
+          if (option.availability?.status !== "available") continue;
+          const snapshot = option.availability.snapshot;
           if (!this.snapshots.has(fingerprint(snapshot)))
-            throw new Error(
-              "Resolve the exact candidate body before asserting availability; host hashes cannot be supplied by the model.",
-            );
+            throw new Error("Resolve the exact candidate body before asserting availability; host hashes cannot be supplied by the model.");
           const current = await checks.snapshot(snapshot).catch(() => false);
           checks.signal.throwIfAborted();
           if (!current) {
-            choice.availability = {
-              status: "unavailable",
-              command: snapshot.command,
+            option.availability = {
+              status: "unavailable", command: snapshot.command,
               reason: "Command identity/body changed or cannot be safely resolved at submission.",
             };
-            this.limitations.add("A recommended command changed before submission.");
+            this.limitations.add("A recommended or compared command changed before submission.");
           }
-          if (
-            !recommendation.evidence.items.some(
-              (item) =>
-                !("kind" in item) &&
-                item.basis !== "assumed" &&
-                hasLocalInspection(this.evidence.get(item.source)),
-            )
-          )
-            throw new Error(
-              "Command suitability requires inspected local prerequisite evidence, not its prompt body alone.",
-            );
         }
       }
       checks.signal.throwIfAborted();
@@ -502,10 +514,31 @@ export function renderAdvisoryResult(result: Assessment): string {
       `Why: ${recommendation.rationale}`,
       `Uncertainty: ${recommendation.uncertainty}`,
     );
+    const workflow = recommendation.workflow;
+    lines.push(
+      `Trigger: ${workflow.trigger}`,
+      `Representative case: ${workflow.representativeCase}`,
+      `Workflow inputs: ${workflow.inputs.join("; ")}`,
+      `Current process: ${workflow.currentProcess.join("; ")}`,
+      `Workflow output: ${workflow.output}`,
+      `Success check: ${workflow.successCheck}`,
+      `Affected subproject: ${workflow.affectedSubproject.scope === "repository-wide" ? "repository-wide" : workflow.affectedSubproject.path}`,
+      `Mutation boundary: ${workflow.mutationBoundary}`,
+      `Repeatability (${workflow.repeatability.basis}): ${workflow.repeatability.explanation}`,
+    );
     const choice = recommendation.choice;
     if (choice.kind === "manual") lines.push(`Manual alternative: ${choice.steps.join("; ")}`);
-    else if (choice.kind === "missing-capability") {
-      const proposal = choice.proposal;
+    else if (choice.kind === "needs-more-evidence") lines.push(
+      `Needs more evidence: ${choice.missingEvidence.join("; ")}`,
+      `Next inspection steps — not started: ${choice.nextInspectionSteps.join("; ")}`,
+    );
+    if (choice.kind === "missing-capability" || choice.kind === "extend-command") {
+      const proposal = choice.kind === "missing-capability" ? choice.proposal : choice.requirement;
+      if (choice.kind === "extend-command") lines.push(
+        "Extend — proposal only; requires a later explicitly authorized edit/review, not a programmatic_command update.",
+        `Proposed changes: ${choice.proposedChanges.join("; ")}`,
+      );
+      else lines.push("New capability — proposal only.");
       lines.push(
         `Missing ${proposal.capabilityKind} capability — proposal only: ${proposal.desiredOutcome}`,
         `Inputs: ${proposal.inputs.join("; ")}`,
@@ -514,12 +547,23 @@ export function renderAdvisoryResult(result: Assessment): string {
         `Risks: ${proposal.risks.join("; ")}`,
         `Verification needed: ${proposal.verificationExpectations.join("; ")}`,
       );
-    } else
+      if (proposal.capabilityKind === "app-backed")
+        lines.push("Missing app/native/tool functionality remains development work, not a generated working command.");
+    }
+    if (choice.kind === "reuse-command" || choice.kind === "extend-command")
       lines.push(
         choice.availability.status === "available"
-          ? `Reuse /${choice.availability.snapshot.command.name} — prompt available, not started; prompt identity is not a host capability guarantee.`
+          ? `${choice.kind === "reuse-command" ? "Reuse" : "Extension base"} /${choice.availability.snapshot.command.name} — prompt available, not started; prompt identity is not a host capability guarantee.`
           : `Command unavailable /${choice.availability.command.name}: ${choice.availability.reason}`,
       );
+    for (const alternative of recommendation.alternatives) {
+      const availability = alternative.availability;
+      const command = availability?.status === "available" ? availability.snapshot.command : availability?.command;
+      lines.push(`Alternative not selected (${alternative.kind}${command ? ` /${command.name}` : ""}): ${alternative.reasonNotSelected}`);
+      if (availability) lines.push(availability.status === "available"
+        ? "Compared prompt available; identity does not verify prerequisites or behavior."
+        : `Compared command unavailable: ${availability.reason}`);
+    }
     for (const item of recommendation.evidence.items) {
       const location = item.location;
       const details = location ? [`path: ${location.path}`] : [];

@@ -17,6 +17,9 @@ import {
   programmaticAssessmentInputV1Schema,
   programmaticAssessmentResultV1Schema,
   programmaticRecommendationV1Schema,
+  programmaticRecommendationV2Schema,
+  programmaticAssessmentResultV2Schema,
+  programmaticWorkflowV2Schema,
   programmaticCommandReferenceV1Schema,
   programmaticCommandSnapshotV1Schema,
   programmaticCommandAvailabilityV1Schema,
@@ -1297,6 +1300,150 @@ describe("programmatic extension contracts", () => {
   });
 });
 
+describe("needs-first V2 advisory contracts", () => {
+  const workflow = {
+    trigger: "A package changes",
+    representativeCase: "packages/client changes its API",
+    inputs: ["Changed package sources"],
+    currentProcess: ["Review callers manually"],
+    output: "A caller compatibility report",
+    successCheck: "Every caller is accounted for",
+    affectedSubproject: { scope: "subproject", path: "packages/client" },
+    mutationBoundary: "Read-only inspection",
+    repeatability: { basis: "inferred", explanation: "Each API change requires caller review" },
+  };
+  const availability = {
+    status: "available",
+    snapshot: {
+      version: 1,
+      command: { version: 1, name: "check-callers", source: "project-custom", invocationKind: "prompt" },
+      capabilityKind: "prompt-only", ownerSha256: "a".repeat(64), bodySha256: "b".repeat(64), helpers: [],
+    },
+  };
+  const requirement = {
+    version: 1, desiredOutcome: "Review callers", capabilityKind: "prompt-only",
+    inputs: ["Sources"], outputs: ["Report"], prerequisites: ["Readable callers"],
+    risks: ["Dynamic callers may be missed"], verificationExpectations: ["Compare against known callers"],
+  };
+  const choices = [
+    { kind: "reuse-command", availability },
+    { kind: "extend-command", availability, proposedChanges: ["Include generated callers"], requirement },
+    { kind: "missing-capability", proposal: requirement },
+    { kind: "manual", steps: ["Review the single caller"] },
+    { kind: "needs-more-evidence", missingEvidence: ["Caller inventory"], nextInspectionSteps: ["Inspect package exports"] },
+  ];
+  const recommendation = (choice = choices[0]!) => ({
+    version: 2, kind: "advisory", outcome: "Review callers", rationale: "Avoid incompatible changes",
+    uncertainty: "Dynamic callers remain uncertain", evidence: { version: 1, items: [evidenceItem] },
+    workflow, alternatives: [{ kind: choice.kind === "manual" ? "needs-more-evidence" : "manual", reasonNotSelected: "Repeated review warrants a reusable check" }],
+    choice,
+  });
+  const result = (recommendations: unknown[] = []) => ({
+    version: 2, kind: "advisory", recommendations,
+    coverage: { status: "limited", scope: "Client sources", reason: "Dynamic callers not inspected" },
+  });
+
+  it.each(choices)("accepts the $kind choice without changing nested V1 contracts", (choice) => {
+    const value = recommendation(choice);
+    expect(programmaticRecommendationV2Schema.parse(value)).toEqual(value);
+    expect(programmaticAssessmentResultV2Schema.parse(result([value]))).toEqual(result([value]));
+    expect(programmaticRecommendationV1Schema.safeParse(value).success).toBe(false);
+  });
+
+  it.each(Object.keys(workflow))("requires workflow field %s", (field) => {
+    const incomplete: Record<string, unknown> = { ...workflow };
+    delete incomplete[field];
+    expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(), workflow: incomplete }).success).toBe(false);
+  });
+
+  it("requires V2 workflow and alternatives rather than silently enriching V1", () => {
+    const { workflow: _workflow, alternatives: _alternatives, ...legacy } = recommendation(choices[3]);
+    expect(programmaticRecommendationV1Schema.parse({ ...legacy, version: 1 }).version).toBe(1);
+    expect(programmaticRecommendationV2Schema.safeParse(legacy).success).toBe(false);
+    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), version: 1 }).success).toBe(false);
+  });
+
+  it("accepts explicit repository-wide scope and rejects unsafe or ambiguous subprojects", () => {
+    expect(programmaticWorkflowV2Schema.parse({ ...workflow, affectedSubproject: { scope: "repository-wide" } }).affectedSubproject).toEqual({ scope: "repository-wide" });
+    for (const affectedSubproject of [
+      { scope: "subproject" }, { scope: "repository-wide", path: "packages/client" },
+      ...[".", "../client", "/client", "C:/client", "packages\\client"].map((path) => ({ scope: "subproject", path })),
+    ]) expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, affectedSubproject }).success).toBe(false);
+  });
+
+  it("distinguishes supported repeatability from assumptions for every choice", () => {
+    for (const choice of choices) for (const basis of ["observed", "inferred", "assumed"]) {
+      const value = { ...recommendation(choice), workflow: { ...workflow, repeatability: { ...workflow.repeatability, basis } } };
+      expect(programmaticRecommendationV2Schema.safeParse(value).success).toBe(basis !== "assumed" || ["manual", "needs-more-evidence"].includes(choice.kind));
+    }
+    for (const repeatability of [{ basis: "observed" }, { explanation: "Unknown" }, { basis: "reported", explanation: "Unknown" }, { basis: "assumed", explanation: " " }]) {
+      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, repeatability }).success).toBe(false);
+    }
+  });
+
+  it("requires meaningful distinct alternatives only for positive automation", () => {
+    for (const choice of choices) {
+      expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(choice), alternatives: [] }).success).toBe(["manual", "needs-more-evidence"].includes(choice.kind));
+    }
+    for (const alternatives of [
+      [{ kind: "reuse-command", reasonNotSelected: "Same option" }],
+      [{ kind: "manual", reasonNotSelected: "First" }, { kind: "manual", reasonNotSelected: "Duplicate" }],
+      [{ kind: "manual", reasonNotSelected: " " }], [{ kind: "manual" }],
+      [{ kind: "other", reasonNotSelected: "Unknown option" }],
+      [{ kind: "manual", reasonNotSelected: "Not a command", availability }],
+      [{ kind: "extend-command", reasonNotSelected: "Insufficient", availability: { status: "available" } }],
+      Array(5).fill({ kind: "manual", reasonNotSelected: "Too many" }),
+    ]) expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(), alternatives }).success).toBe(false);
+    const alternatives = choices.slice(0, 3).map(({ kind }) => ({ kind, reasonNotSelected: "Does not meet this one-off need", ...(kind === "missing-capability" ? {} : { availability }) }));
+    alternatives.push({ kind: "needs-more-evidence", reasonNotSelected: "Enough evidence for manual review" });
+    expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(choices[3]), alternatives }).success).toBe(true);
+  });
+
+  it("rejects unknown authority fields at every new boundary", () => {
+    const value = recommendation();
+    for (const change of [
+      { approved: true }, { workflow: { ...workflow, tools: ["bash"] } },
+      { workflow: { ...workflow, repeatability: { ...workflow.repeatability, count: 100 } } },
+      { alternatives: [{ ...value.alternatives[0], approved: true }] },
+      ...choices.map((choice) => ({ choice: { ...choice, execute: true } })),
+    ]) expect(programmaticRecommendationV2Schema.safeParse({ ...value, ...change }).success).toBe(false);
+    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), approved: true }).success).toBe(false);
+    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), coverage: { ...result().coverage, complete: true } }).success).toBe(false);
+  });
+
+  it("bounds workflow text and lists plus extension and inspection lists", () => {
+    for (const trigger of ["", " ", "bad\u0000text", "x".repeat(4_001)]) {
+      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, trigger }).success).toBe(false);
+    }
+    expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, trigger: "x".repeat(4_000), inputs: Array(50).fill("Input") }).success).toBe(true);
+    for (const field of ["inputs", "currentProcess"]) for (const list of [[], Array(51).fill("Input")]) {
+      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, [field]: list }).success).toBe(false);
+    }
+    for (const [index, field] of [[1, "proposedChanges"], [4, "missingEvidence"], [4, "nextInspectionSteps"]] as const) {
+      for (const list of [undefined, [], Array(51).fill("Step")]) {
+        expect(programmaticRecommendationV2Schema.safeParse(recommendation({ ...choices[index]!, [field]: list })).success).toBe(false);
+      }
+    }
+  });
+
+  it("permits empty results but enforces ten recommendations and the serialized budget including coverage", () => {
+    expect(programmaticAssessmentResultV2Schema.parse(result())).toEqual(result());
+    expect(programmaticAssessmentResultV2Schema.safeParse(result(Array(10).fill(recommendation()))).success).toBe(true);
+    expect(programmaticAssessmentResultV2Schema.safeParse(result(Array(11).fill(recommendation()))).success).toBe(false);
+    const large = recommendation(choices[3]);
+    large.workflow = { ...workflow, inputs: Array(15).fill("x".repeat(4_000)) };
+    const bounded = result([large]);
+    const padding = 64_000 - JSON.stringify(bounded).length;
+    expect(padding).toBeGreaterThan(0);
+    expect(padding).toBeLessThan(4_000 - bounded.coverage.reason.length);
+    bounded.coverage.reason += "x".repeat(padding);
+    expect(JSON.stringify(bounded).length).toBe(64_000);
+    expect(programmaticAssessmentResultV2Schema.safeParse(bounded).success).toBe(true);
+    bounded.coverage.reason += "x";
+    expect(programmaticAssessmentResultV2Schema.safeParse(bounded).success).toBe(false);
+  });
+});
+
 describe("Phase 1 structural bloat audit", () => {
   const root = fileURLToPath(new URL("../../../../../", import.meta.url));
   const subject = "packages/ggcoder/src/core/programmatic/contracts.ts";
@@ -1589,6 +1736,8 @@ describe("Phase 1 structural bloat audit", () => {
       isProgrammaticReviewCurrent: "pure content/settings and purpose freshness check",
       programmaticAssessmentInputV1Schema: "optional non-authorizing focus",
       programmaticAssessmentResultV1Schema: "bounded advice and explicit coverage",
+      programmaticWorkflowV2Schema: "required needs-first workflow and repeatability contract",
+      programmaticRecommendationV2Schema: "five advisory decisions with bounded alternatives",
       programmaticRecommendationV1Schema: "advisory choices separate from discovery",
       programmaticCommandReferenceV1Schema: "source-aware advisory identity",
       programmaticCommandSnapshotV1Schema: "body/helper content identity",

@@ -40,6 +40,11 @@
       "import": "./dist/project-notes.js",
       "require": "./dist/project-notes.cjs"
     },
+    "./programmatic-recommendation-contract": {
+      "types": "./dist/programmatic-recommendation-contract.d.ts",
+      "import": "./dist/programmatic-recommendation-contract.js",
+      "require": "./dist/programmatic-recommendation-contract.cjs"
+    },
     "./programmatic-assessment-contract": {
       "types": "./dist/programmatic-assessment-contract.d.ts",
       "import": "./dist/programmatic-assessment-contract.js",

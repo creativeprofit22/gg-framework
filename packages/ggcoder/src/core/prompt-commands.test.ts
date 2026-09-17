@@ -271,7 +271,7 @@ describe("prompt commands", () => {
       expect(prompt).toContain("Submit programmatic_advisory_result");
       expect(prompt).toContain("Recommendations — not started");
       expect(prompt).toContain("not just three executable specialists");
-      expect(prompt).toContain("prefer simpler manual work");
+      expect(prompt).toContain("retain manual work when automation adds unjustified cost or prerequisites");
       expect(prompt).toContain("Start with project needs and workflow observations, even without manifests or enabled scanners");
       expect(prompt.match(/`programmatic_scan\(\{\}\)`/g)).toHaveLength(1);
       expect(prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again");
@@ -281,6 +281,23 @@ describe("prompt commands", () => {
       expect(prompt).toContain(
         "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
       );
+    }
+  });
+
+  it("shares needs-first five-outcome policy across setup and configured assessment", () => {
+    for (const name of ["setup-programmatic", "programmatic"]) {
+      const prompt = getPromptCommand(name)!.prompt;
+      expect(prompt).toContain("Before comparing capabilities, describe each workflow");
+      expect(prompt.indexOf("Identify repeatable workflows")).toBeLessThan(prompt.indexOf("Compare relevant metadata first"));
+      for (const choice of ["reuse-command", "extend-command", "missing-capability", "manual", "needs-more-evidence"])
+        expect(prompt).toContain(`- ${choice}:`);
+      expect(prompt).toContain("Never invent usage counts, frequency or time savings");
+      expect(prompt).toContain("Consolidate duplicate proposals");
+      expect(prompt).toContain("allow honest empty recommendations");
+      expect(prompt).toContain("never a global early exit");
+      expect(prompt).toContain("version=2 kind=advisory");
+      expect(prompt).toContain("never authority to grant tools, write, create or execute");
+      expect(prompt).toContain("not an update action on programmatic_command");
     }
   });
 

@@ -585,7 +585,7 @@ export function App(props: AppProps) {
 
   const sessionStore = props.sessionStore;
 
-  const { planMode, rebuildSystemPrompt, replaceSystemPrompt, setPlanModeAndPrompt } = useModeState(
+  const { planMode, planModeStateRef, rebuildSystemPrompt, replaceSystemPrompt, setPlanModeAndPrompt } = useModeState(
     {
       initialPlanMode: props.sessionStore?.planMode ?? props.planModeRef?.current ?? false,
       skills: props.skills,
@@ -974,6 +974,7 @@ export function App(props: AppProps) {
       provider: currentProvider,
       model: currentModel,
       tools: currentTools,
+      planModeRef: planModeStateRef,
       webSearch: props.webSearch,
       maxTokens: resolveModelMaxTokens(currentModel, props.maxTokens),
       maxTurns: props.maxTurns,

@@ -1,4 +1,7 @@
-import { isProgrammaticAssessment, type ProgrammaticAssessment } from "./programmatic-assessment-contract.js";
+import { isProgrammaticAssessment, isProgrammaticAssessmentRequestId, type ProgrammaticAssessment } from "./programmatic-assessment-contract.js";
+import { isDiscoveryReviewRequest, isDiscoveryReview, type DiscoveryReviewRequest, type DiscoveryReview,
+  isRecommendationHistoryRequest, isRecommendationHistoryReport, isRecommendationDetail, isRecommendationReview,
+  type RecommendationHistoryRequest, type RecommendationHistoryReport, type RecommendationDetail, type RecommendationReview } from "./programmatic-recommendation-contract.js";
 
 /** Browser-safe display projections. Authoritative domain records stay in ggcoder. */
 export const PROGRAMMATIC_CHAT_VERSION = 1 as const;
@@ -7,6 +10,9 @@ export const PROGRAMMATIC_CHAT_EVIDENCE_LIMIT = 50;
 export const PROGRAMMATIC_CHAT_ERROR_LIMIT = 1_000;
 
 export type ProgrammaticChatAction =
+  | RecommendationHistoryRequest["action"]
+  | "discover"
+  | "review-candidate"
   | "report"
   | "detail"
   | "inspect-setup"
@@ -14,9 +20,12 @@ export type ProgrammaticChatAction =
   | "scan"
   | "dismiss";
 export type ProgrammaticChatRequest =
+  | ({ version: 1 } & RecommendationHistoryRequest)
+  | ({ version: 1 } & DiscoveryReviewRequest)
+  | { version: 1; action: "discover"; requestId?: string }
   | { version: 1; action: "report"; offset: number }
   | { version: 1; action: "detail"; id: string }
-  | { version: 1; action: "inspect-setup" | "scan" }
+  | { version: 1; action: "inspect-setup" | "scan"; requestId?: string }
   | { version: 1; action: "approve-setup"; proposalHandle: string }
   | { version: 1; action: "dismiss"; id: string; snapshot: string };
 
@@ -98,7 +107,9 @@ export interface ProgrammaticChatReport {
 }
 export interface ProgrammaticChatProposal {
   handle: string | null;
-  operation: "initial" | "current" | "refresh";
+  operation: "initial" | "current" | "refresh" | "history-upgrade";
+  historyPolicy?: { version: 1; enabled: boolean };
+  expectedRecoveryDigest?: string | null;
   configuration: ProgrammaticChatConfiguration;
   fingerprint: string;
   /** Exact canonical profile JSON, not an editable command or route envelope. */
@@ -108,6 +119,12 @@ export interface ProgrammaticChatProposal {
   configurationInputs: { path: string; sha256: string }[];
 }
 export type ProgrammaticChatResponse =
+  | { version: 1; action: "discover"; ok: true; assessment: ProgrammaticAssessment }
+  | { version: 1; action: "review-candidate"; ok: true; candidateReview: DiscoveryReview }
+  | { version: 1; action: "history-report"; ok: true; report: RecommendationHistoryReport }
+  | { version: 1; action: "history-detail"; ok: true; detail: RecommendationDetail | null }
+  | { version: 1; action: "history-inspect-decision" | "history-inspect-correspondence"; ok: true; review: RecommendationReview }
+  | { version: 1; action: "history-apply"; ok: true; changed: boolean }
   | { version: 1; action: "report"; ok: true; report: ProgrammaticChatReport }
   | {
       version: 1;
@@ -348,7 +365,7 @@ const profileJson: Guard = (value) => {
 const proposal: Guard = (value) =>
   object(value, {
     handle: nullable(hash),
-    operation: oneOf("initial", "current", "refresh"),
+    operation: oneOf("initial", "current", "refresh", "history-upgrade"),
     configuration,
     fingerprint: hash,
     profileJson,
@@ -358,23 +375,36 @@ const proposal: Guard = (value) =>
       (item) => object(item, { path: isProgrammaticChatRelativePath, sha256: hash }),
       10_000,
     ),
-  }) && ((value as ProgrammaticChatProposal).operation === "current"
+  }, { historyPolicy: (policy) => object(policy, { version: oneOf(1), enabled: bool }), expectedRecoveryDigest: nullable(hash) }) &&
+    ((value as ProgrammaticChatProposal).historyPolicy === undefined) === ((value as ProgrammaticChatProposal).expectedRecoveryDigest === undefined) &&
+    ((value as ProgrammaticChatProposal).operation !== "history-upgrade" || (value as ProgrammaticChatProposal).historyPolicy?.enabled === true) &&
+    ((value as ProgrammaticChatProposal).operation === "current"
     ? (value as ProgrammaticChatProposal).handle === null && (value as ProgrammaticChatProposal).configuration.status === "current"
     : (value as ProgrammaticChatProposal).handle !== null &&
-      (value as ProgrammaticChatProposal).configuration.status === ((value as ProgrammaticChatProposal).operation === "initial" ? "missing" : "refresh-required"));
-const action = oneOf("report", "detail", "inspect-setup", "approve-setup", "scan", "dismiss");
+      (value as ProgrammaticChatProposal).configuration.status === ((value as ProgrammaticChatProposal).operation === "initial" ? "missing" : (value as ProgrammaticChatProposal).operation === "history-upgrade" ? "current" : "refresh-required"));
+const action = oneOf("discover", "review-candidate", "report", "detail", "inspect-setup", "approve-setup", "scan", "dismiss",
+  "history-report", "history-detail", "history-inspect-decision", "history-inspect-correspondence", "history-apply");
 
 export function isProgrammaticChatRequest(value: unknown): value is ProgrammaticChatRequest {
   if (typeof value !== "object" || value === null) return false;
+  if ((value as { version?: unknown }).version === 1 && String((value as { action?: unknown }).action).startsWith("history-")) {
+    const { version: _version, ...request } = value as Record<string, unknown>;
+    return isRecommendationHistoryRequest(request);
+  }
+  if ((value as { version?: unknown }).version === 1 && (value as { action?: unknown }).action === "review-candidate") {
+    const { version: _version, ...request } = value as Record<string, unknown>;
+    return isDiscoveryReviewRequest(request);
+  }
   const base = { version: oneOf(1), action };
   switch ((value as { action?: unknown }).action) {
     case "report":
       return object(value, { ...base, offset: integer(1_000) });
     case "detail":
       return object(value, { ...base, id: hash });
+    case "discover":
     case "inspect-setup":
     case "scan":
-      return object(value, base);
+      return object(value, base, { requestId: isProgrammaticAssessmentRequestId });
     case "approve-setup":
       return object(value, { ...base, proposalHandle: hash });
     case "dismiss":
@@ -398,9 +428,17 @@ export function isProgrammaticChatResponse(value: unknown): value is Programmati
       reconcile: bool,
     }, response.action === "approve-setup" || response.action === "inspect-setup"
       ? { approvableProposalHandle: hash, ...(response.action === "inspect-setup" ? { assessment: setupAssessment } : {}) }
-      : response.action === "scan" ? { assessment: configuredAssessment } : {});
+      : response.action === "scan" ? { assessment: configuredAssessment }
+        : response.action === "discover" ? { assessment: isProgrammaticAssessment } : {});
   const base = { version: oneOf(1), action, ok: oneOf(true) };
   switch (response.action) {
+    case "discover": return object(value, { ...base, assessment: isProgrammaticAssessment });
+    case "review-candidate": return object(value, { ...base, candidateReview: isDiscoveryReview });
+    case "history-report": return object(value, { ...base, report: isRecommendationHistoryReport });
+    case "history-detail": return object(value, { ...base, detail: nullable(isRecommendationDetail) });
+    case "history-inspect-decision":
+    case "history-inspect-correspondence": return object(value, { ...base, review: isRecommendationReview });
+    case "history-apply": return object(value, { ...base, changed: bool });
     case "report":
       return object(value, { ...base, report });
     case "detail":

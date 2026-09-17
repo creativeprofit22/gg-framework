@@ -33,12 +33,21 @@ export function canScanProgrammatic(state: ProgrammaticChatState): boolean {
   );
 }
 
+export function canReviewProgrammaticCandidate(state: ProgrammaticChatState): boolean {
+  const candidate = state.candidateDetail;
+  return !state.operation && !state.reconcile && !state.assessmentPending && !state.candidateStale &&
+    state.selection?.source === "current" && state.selection.id === candidate?.candidateId && candidate.nextStep.available &&
+    state.discovery?.assessmentId === candidate.assessmentId &&
+    state.discovery.candidates.some((item) => item.candidateId === candidate.candidateId && item.revision === candidate.revision);
+}
+
 export function canRunProgrammaticSelection(state: ProgrammaticChatState): boolean {
   const configuration = programmaticConfiguration(state);
   return (
     !state.operation &&
     !state.reconcile &&
     setupAllowsProgrammaticExecution(state) &&
+    (!state.selection || state.selection.source === "deterministic") &&
     (!configuration || configuration.currentFingerprint === state.report?.fingerprint) &&
     state.report?.status === "current" &&
     state.detailSnapshot === state.report.snapshot &&

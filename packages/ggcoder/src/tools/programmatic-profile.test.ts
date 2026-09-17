@@ -222,7 +222,8 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     });
     expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")).toBe(
       canonicalJson({
-        version: 2,
+        version: 3,
+        historyPolicy: { version: 1, enabled: true },
         configurationFingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
         configurationSnapshot: (await buildProgrammaticInventory(root)).configurationSnapshot,
@@ -321,7 +322,7 @@ describe("profile cancellation", () => {
     const ready = new Promise<void>((resolve) => { entered = resolve; });
     const tool = await reviewedTool(root, {
       onPreFileMutation: async () => { if (when === "paused") { entered(); await held; } },
-      onFileMutated: () => { if (when === "committed") controller.abort(); },
+      onFileMutated: (file) => { if (when === "committed" && path.basename(file) === "profile.json") controller.abort(); },
     });
     if (when === "before") controller.abort();
     const running = tool.execute({ action: "generate", configuration_fingerprint: inspected.configuration_fingerprint,
@@ -331,9 +332,14 @@ describe("profile cancellation", () => {
     expect(JSON.parse(await running as string)).toMatchObject(when === "committed"
       ? { ok: true, changed: true }
       : { changed: false, error: "operation-failed", message: expect.stringMatching(/abort|cancel/i) });
-    if (when === "committed") expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
-    else expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
-    await expectNoTemporaryFiles(root);
+    if (when === "committed") {
+      expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
+      expect(await fs.readFile(path.join(root, ".gg/programmatic/profile.previous.json"), "utf8")).toBe(previousBytes);
+      expect(await fs.readdir(path.join(root, ".gg/programmatic"))).toEqual(["profile.json", "profile.previous.json"]);
+    } else {
+      expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
+      await expectNoTemporaryFiles(root);
+    }
   });
 
   it.each(["before", "paused", "committed"] as const)("preserves the true core persistence outcome when aborted %s commit", async (when) => {

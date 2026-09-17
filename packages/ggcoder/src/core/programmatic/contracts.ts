@@ -146,6 +146,12 @@ export const programmaticProfileEnvelopeV2Schema = z.strictObject({
   configurationSnapshot: configurationSnapshotSchema,
 });
 
+export const recommendationHistoryPolicyV1Schema = z.strictObject({ version: z.literal(1), enabled: z.boolean() });
+export const programmaticProfileEnvelopeV3Schema = programmaticProfileEnvelopeV2Schema.extend({
+  version: z.literal(3), historyPolicy: recommendationHistoryPolicyV1Schema,
+});
+export type ProgrammaticProfileEnvelopeV3 = z.infer<typeof programmaticProfileEnvelopeV3Schema>;
+export type RecommendationHistoryPolicyV1 = z.infer<typeof recommendationHistoryPolicyV1Schema>;
 export type ConfigurationSnapshot = z.infer<typeof configurationSnapshotSchema>;
 export type ProgrammaticProfileEnvelopeV2 = z.infer<typeof programmaticProfileEnvelopeV2Schema>;
 
@@ -477,6 +483,63 @@ export const programmaticAssessmentResultV1Schema = z.strictObject({
     }),
   ]),
 });
+
+const advisoryChoiceKindSchema = z.enum([
+  "reuse-command", "extend-command", "missing-capability", "manual", "needs-more-evidence",
+]);
+export const programmaticWorkflowV2Schema = z.strictObject({
+  trigger: extensionTextSchema,
+  representativeCase: extensionTextSchema,
+  inputs: extensionTextsSchema,
+  currentProcess: extensionTextsSchema,
+  output: extensionTextSchema,
+  successCheck: extensionTextSchema,
+  affectedSubproject: z.discriminatedUnion("scope", [
+    z.strictObject({ scope: z.literal("repository-wide") }),
+    z.strictObject({ scope: z.literal("subproject"), path: extensionPathSchema }),
+  ]),
+  mutationBoundary: extensionTextSchema,
+  repeatability: z.strictObject({
+    basis: z.enum(["observed", "inferred", "assumed"]),
+    explanation: extensionTextSchema,
+  }),
+});
+export const programmaticRecommendationV2Schema = z.strictObject({
+  version: z.literal(2),
+  kind: z.literal("advisory"),
+  outcome: extensionTextSchema,
+  rationale: extensionTextSchema,
+  uncertainty: extensionTextSchema,
+  evidence: advisoryEvidenceSchema,
+  workflow: programmaticWorkflowV2Schema,
+  alternatives: z.array(z.strictObject({
+    kind: advisoryChoiceKindSchema,
+    reasonNotSelected: extensionTextSchema,
+    availability: programmaticCommandAvailabilityV1Schema.optional(),
+  }).refine((value) => !value.availability || value.kind === "reuse-command" || value.kind === "extend-command",
+    "only command alternatives may name a concrete command")).max(4),
+  choice: z.discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("reuse-command"), availability: programmaticCommandAvailabilityV1Schema }),
+    z.strictObject({
+      kind: z.literal("extend-command"), availability: programmaticCommandAvailabilityV1Schema,
+      proposedChanges: extensionTextsSchema, requirement: programmaticMissingCapabilityV1Schema,
+    }),
+    z.strictObject({ kind: z.literal("missing-capability"), proposal: programmaticMissingCapabilityV1Schema }),
+    z.strictObject({ kind: z.literal("manual"), steps: extensionTextsSchema }),
+    z.strictObject({ kind: z.literal("needs-more-evidence"), missingEvidence: extensionTextsSchema, nextInspectionSteps: extensionTextsSchema }),
+  ]),
+}).refine((value) => {
+  const positive = ["reuse-command", "extend-command", "missing-capability"].includes(value.choice.kind);
+  return (!positive || (value.alternatives.length > 0 && value.workflow.repeatability.basis !== "assumed")) &&
+    value.alternatives.every((option) => option.kind !== value.choice.kind) &&
+    new Set(value.alternatives.map((option) => option.kind)).size === value.alternatives.length;
+}, "automation needs supported repeatability and a distinct alternative; options must not duplicate the selected or another option");
+export const programmaticAssessmentResultV2Schema = z.strictObject({
+  version: z.literal(2),
+  kind: z.literal("advisory"),
+  recommendations: z.array(programmaticRecommendationV2Schema).max(10, "At most 10 advisory recommendations are permitted."),
+  coverage: programmaticAssessmentResultV1Schema.shape.coverage,
+}).refine((value) => JSON.stringify(value).length <= 64_000, "advisory result exceeds 64,000 characters");
 
 export const programmaticCreationProposalV1Schema = z
   .strictObject({

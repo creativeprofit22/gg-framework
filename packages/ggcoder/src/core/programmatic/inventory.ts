@@ -7,11 +7,13 @@ import type {
   InventoryEntryV1,
   InventoryV1,
   ProgrammaticProfileEnvelopeV2,
+  ProgrammaticProfileEnvelopeV3,
 } from "./contracts.js";
 import {
   configurationSnapshotSchema,
   inventoryV1Schema,
   programmaticProfileEnvelopeV2Schema,
+  programmaticProfileEnvelopeV3Schema,
   PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT,
   PROGRAMMATIC_CONTRACT_VERSION,
 } from "./contracts.js";
@@ -74,6 +76,15 @@ export const PROGRAMMATIC_INVENTORY_EXCLUSIONS = [
   ".gg/programmatic/profile.json.lock",
   ".gg/programmatic/state.json.lock",
 ] as const;
+
+// Host-owned history/recovery documents are not source/configuration inputs. Do not
+// alter the saved scanner exclusion policy merely to offer an optional history upgrade.
+const HISTORY_MANAGED_FILES = [
+  ".gg/programmatic/profile.previous.json", ".gg/programmatic/.profile.previous.tmp",
+  ".gg/programmatic/recommendations.json", ".gg/programmatic/recommendations.previous.json",
+  ".gg/programmatic/.recommendations.tmp", ".gg/programmatic/.recommendations.previous.tmp",
+  ".gg/programmatic/recommendations.json.lock",
+];
 
 const CONFIG_FILE_NAMES = new Set([
   ".gitignore",
@@ -223,7 +234,7 @@ export async function* walkProgrammaticPaths(
       dot: true,
       objectMode: true,
       onlyFiles: false,
-      ignore: [...PROGRAMMATIC_INVENTORY_EXCLUSIONS],
+      ignore: [...PROGRAMMATIC_INVENTORY_EXCLUSIONS, ...HISTORY_MANAGED_FILES],
       suppressErrors: false,
       followSymbolicLinks: false,
       throwErrorOnBrokenSymbolicLink: true,
@@ -317,6 +328,11 @@ export async function buildProgrammaticInventory(
   const limits = validatedLimits(options.limits);
   const operations = { ...localOperations, ...options.operations };
   const root = await canonicalRepositoryRoot(repositoryRoot);
+  for (const file of HISTORY_MANAGED_FILES) {
+    try { await operations.lstat(containedPath(root, file)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    await rejectLinks(root, file);
+  }
   if (
     options.managedTemporaryPath !== undefined &&
     !/^\.gg\/programmatic\/\.profile-\d+-[a-f0-9-]{36}\.tmp$/.test(options.managedTemporaryPath)
@@ -374,8 +390,9 @@ export function fingerprintConfigurationSnapshot(snapshot: ConfigurationSnapshot
 
 export function validateProfileConfigurationBaseline(
   value: unknown,
-): ProgrammaticProfileEnvelopeV2 {
-  const envelope = programmaticProfileEnvelopeV2Schema.parse(value);
+): ProgrammaticProfileEnvelopeV2 | ProgrammaticProfileEnvelopeV3 {
+  const envelope = (value as { version?: unknown } | null)?.version === 3
+    ? programmaticProfileEnvelopeV3Schema.parse(value) : programmaticProfileEnvelopeV2Schema.parse(value);
   if (
     fingerprintConfigurationSnapshot(envelope.configurationSnapshot).sha256 !==
     envelope.configurationFingerprint.sha256

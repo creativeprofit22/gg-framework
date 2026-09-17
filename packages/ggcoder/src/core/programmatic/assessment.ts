@@ -1,7 +1,11 @@
+import { randomUUID } from "node:crypto";
+import { projectDiscovery, type DiscoveryRecord } from "./discovery-projection.js";
+import { sha256, stableJson } from "../tauri-package/paths.js";
+import { captureRecommendationAssessment, type CapturedRecommendationAssessment } from "./recommendations.js";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProgrammaticAssessment, ProgrammaticAssessmentDeterministicOutcome } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { ProgrammaticAdvisoryTools, type ProgrammaticAdvisoryContext } from "./advisory-tools.js";
-import { renderAdvisoryResult, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
+import { deliveredExternalReceipt, renderAdvisoryResult, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
 
 const text = (value: string) => Array.from(value).filter((character) => {
   const code = character.charCodeAt(0);
@@ -16,6 +20,10 @@ export interface ProgrammaticAssessmentOutcome {
   assessment: ProgrammaticAssessment;
   /** Detailed accepted advice belongs in the transcript, not scanner history or approval payloads. */
   advice?: string;
+  /** Captured before receipt retirement; never included in the display/event projection. */
+  captured?: CapturedRecommendationAssessment;
+  /** Session-local accepted records; never serialized as part of assessment events. */
+  discoveryRecords?: DiscoveryRecord[];
 }
 
 /** One host-selected operation around an existing session turn. No provider, loop,
@@ -36,6 +44,7 @@ export class ProgrammaticAssessmentCoordinator {
   async run(
     signal: AbortSignal,
     runTurn?: (scope: ProgrammaticAdvisoryTools, context: ProgrammaticAdvisoryContext) => Promise<ProgrammaticAssessmentTurnCompletion | void>,
+    host: { id: string; startedAt: string } = { id: randomUUID(), startedAt: new Date().toISOString() },
   ): Promise<ProgrammaticAssessmentOutcome> {
     if (this.started) throw new Error("Assessment operation is once-only.");
     this.started = true;
@@ -60,7 +69,7 @@ export class ProgrammaticAssessmentCoordinator {
     if (accepted) for (const recommendation of accepted.recommendations) {
       for (const item of recommendation.evidence.items) {
         if (item.basis === "assumed") continue;
-        const source = "kind" in item ? turn.evidence.list().find((receipt) => receipt.external?.sourceUri === item.inspectedUrl)?.id : item.source;
+        const source = "kind" in item ? deliveredExternalReceipt(turn.evidence.list(), item)?.id : item.source;
         if (!source || source.length > 100) continue;
         observations.push({ basis: item.basis, message: text("kind" in item ? item.claim : item.message), evidenceSources: [source] });
       }
@@ -80,9 +89,23 @@ export class ProgrammaticAssessmentCoordinator {
       limitations: [...(this.context.evidence?.diagnostics.some((item) => item.code === "permission-denied") ? ["Initial evidence was denied by host permissions; omitted content remains uninspected."] : []), ...turn.limitations, ...(accepted?.coverage.status === "limited" ? [accepted.coverage.reason] : [])].slice(0, 50).map(text),
       coverage: coverage.slice(0, 50), observations: observations.slice(0, 50), deterministic,
     };
+    let discoveryRecords: DiscoveryRecord[] | undefined;
+    if (accepted && status === "completed") {
+      try {
+        const projected = projectDiscovery(host.id, accepted);
+        assessment.discovery = projected.projection;
+        discoveryRecords = projected.records;
+      } catch { assessment.limitations.push("Accepted candidate detail exceeds the bounded display; consult the transcript. No review handoff is available."); }
+    }
     const advice = accepted && status !== "cancelled" ? renderAdvisoryResult(accepted) : undefined;
+    let captured: CapturedRecommendationAssessment | undefined;
+    try {
+      captured = captureRecommendationAssessment(host, assessment, accepted, turn.evidence.list());
+      captured.assessment.catalogSha256 = sha256(stableJson(this.context.commands));
+    }
+    catch { /* Capture/save refusal must not change assessment or scanner success. */ }
     this.scope.close();
-    return { assessment, ...(advice ? { advice } : {}) };
+    return { assessment, ...(advice ? { advice } : {}), ...(captured ? { captured } : {}), ...(discoveryRecords ? { discoveryRecords } : {}) };
   }
   private deterministic(counts?: ProgrammaticAssessmentTurnCompletion["scanCounts"]): ProgrammaticAssessmentDeterministicOutcome {
     const turn = this.scope.turn;

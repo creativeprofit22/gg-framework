@@ -48,6 +48,11 @@ export async function prepareTerminalProgrammaticAssessment(
   return {
     coordinator,
     refreshPrompt,
+    assertHistoryToolCurrent() {
+      signal.throwIfAborted();
+      if (!captured.some((tool) => tool.name === "programmatic_scan" && getTools().includes(tool)))
+        throw new Error("Terminal history save permissions changed.");
+    },
     async hostPrompt(prompt: string): Promise<string> {
       const { turn, tools } = coordinator.scope;
       const name = input.mode === "setup" ? "programmatic_profile" : "programmatic_scan";

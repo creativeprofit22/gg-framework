@@ -25,6 +25,132 @@ beforeEach(async () => {
 });
 afterEach(async () => { restore(); vi.restoreAllMocks(); await fs.rm(cwd, { recursive: true, force: true }); });
 
+it.each(["approve", "reject", "permission", "prerequisite", "no-inspect", "review-required", "invalid", "unavailable", "superseded"] as const)("preserves discovery proposals for later exact creation: %s", async (decision) => {
+  const reviewCreation = vi.fn(async (request) => ({ action: "answer" as const,
+    answers: { [request.questions[0].id]: decision === "reject" ? "reject" : request.questions[0].options[0].value } }));
+  const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", mcpEnabled: false,
+    systemPrompt: "Scripted discovery and read-only review", approveToolExecution: async () => true, reviewCommandCreation: reviewCreation });
+  const claim = new RunClaim();
+  const adapter = new AppSidecarProgrammaticChat(() => ({ cwd, identity: "discovery", codeMode: true, planMode: false, busy: claim.active }),
+    () => claim.claim(), () => claim.release(), undefined, undefined, (mode, assessmentRequestId) => session.assessProgrammatic(mode, undefined, undefined, { assessmentRequestId }), (request) => session.reviewDiscoveryCandidate(request));
+  const requirement = { version: 1, desiredOutcome: "Reconcile ledger", capabilityKind: "script-backed", inputs: ["Ledger"], outputs: ["Report"],
+    prerequisites: ["Readable ledger"], risks: ["Sample only"], verificationExpectations: ["Known mismatch reported"] };
+  const proposal = { name: "reconcile-ledger", requirement,
+    markdown: "---\nname: reconcile-ledger\ndescription: Read ledger\n---\n## Inputs\nWORKFLOW\n## Outputs\nReport\n## Required tools\nbash, read\n## Limits\nRead only; no installs\n## Arguments\nNone\n",
+    helpers: [{ name: "ledger.mjs", content: "console.log('Ledger report');\n", repeatableLogic: "Repeatable ledger reporting" }],
+    requiredTools: ["bash", "read"], prerequisiteFiles: ["WORKFLOW"] };
+  let stage = 0, reviewing = false, creating = false;
+  let handle = "";
+  vi.mocked(stream).mockImplementation((params) => new StreamResult((async function* () {
+    const step = stage++;
+    let calls: ToolCall[] = [];
+    const resultFor = (id: string) => JSON.parse(String(params.messages.flatMap((message) => message.role === "tool" ? message.content : []).find((item) => item.toolCallId === id)?.content));
+    if (creating) {
+      if (step === 0) calls = [{ type: "tool_call", id: "load-command", name: "tool_search", args: { query: "programmatic_command" } }];
+      if (step === 1) calls = [{ type: "tool_call", id: "later-create", name: "programmatic_command", args: { action: "create", handle } }];
+    } else if (step === 0) calls = [
+      { type: "tool_call", id: "read-current", name: "read", args: { file_path: "WORKFLOW" } },
+      { type: "tool_call", id: "catalog-current", name: "command_information", args: { action: "list" } },
+    ];
+    else if (!reviewing && step === 1) {
+      const receipt = JSON.stringify(params.messages).match(/receipt-[a-f0-9-]+/)?.[0];
+      expect(receipt).toBeDefined();
+      calls = [{ type: "tool_call", id: "submit", name: "programmatic_advisory_result", args: { version: 2, kind: "advisory",
+        coverage: { status: "limited", scope: "Ledger", reason: "One example" }, recommendations: [{ version: 2, kind: "advisory",
+          outcome: "Reconcile ledger", rationale: "Repeated reconciliation", uncertainty: "One example", workflow: {
+            trigger: "Ledger changes", representativeCase: "One mismatch", inputs: ["Ledger"], currentProcess: ["Read ledger"], output: "Report",
+            successCheck: "Known mismatch reported", affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read only",
+            repeatability: { basis: "inferred", explanation: "Recurring ledger" } }, choice: { kind: "missing-capability", proposal: requirement },
+          alternatives: [{ kind: "manual", reasonNotSelected: "Repeated work" }], evidence: { version: 1, items: [
+            { basis: "observed", source: receipt, code: "workflow", severity: "info", message: "Ledger workflow", location: { path: "WORKFLOW" } }] } }] } }];
+    } else if (reviewing && step === 1 && decision !== "no-inspect") calls = [{ type: "tool_call", id: "inspect-proposal", name: "programmatic_command", args: {
+      action: "inspect", proposal,
+    } }];
+    else if (reviewing && step === 2 && decision !== "review-required") calls = [{ type: "tool_call", id: "prepared-proposal", name: "programmatic_command", args: {
+      action: "inspect", proposal: { ...proposal, ...(decision === "invalid" ? { markdown: "Missing documentation" } : {}),
+        ...(decision === "unavailable" ? { requiredTools: ["nonexistent-tool"] } : {}), review: { inventorySha256: resultFor("inspect-proposal").catalog.sha256, disposition: "create", rationale: "No existing ledger command" } },
+    } }];
+    else if (reviewing && step === 3 && decision !== "invalid" && decision !== "unavailable") {
+      expect(resultFor("prepared-proposal")).toMatchObject({ status: "proposal" });
+      handle = resultFor("prepared-proposal").handle;
+      calls = [
+        { type: "tool_call", id: "forbidden-create", name: "programmatic_command", args: { action: "create", handle } },
+        { type: "tool_call", id: "forbidden-bash", name: "bash", args: { command: "echo forbidden" } },
+      ];
+      if (decision === "superseded") calls.push({ type: "tool_call", id: "superseded-proposal", name: "programmatic_command", args: {
+        action: "inspect", proposal: { ...proposal, markdown: "Invalid", review: { inventorySha256: resultFor("inspect-proposal").catalog.sha256, disposition: "create", rationale: "Recheck" } },
+      } });
+    }
+    if (calls.length) {
+      for (const call of calls) yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+      return { message: { role: "assistant", content: calls }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
+    }
+    return { message: { role: "assistant", content: "Review only; nothing created." }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+  })()));
+  try {
+    await session.initialize();
+    const result = await adapter.handle({ version: 1, action: "discover", requestId: "discovery-request" });
+    expect(result.status).toBe(200);
+    expect(result.body, JSON.stringify(vi.mocked(stream).mock.calls.at(-1)?.[0].messages).slice(-8_000)).toMatchObject({ action: "discover", ok: true, assessment: { status: "completed", mode: "setup" } });
+    if (!("assessment" in result.body)) throw new Error("Missing assessment");
+    expect(result.body.assessment?.lifecycle).toEqual({ conversationId: session.getConversationIdentity().conversationId, sessionId: session.getConversationIdentity().sessionId, sequence: 1, requestId: "discovery-request" });
+    const candidate = result.body.assessment?.discovery?.candidates[0];
+    expect(candidate?.choice).toBe("missing-capability");
+    if (!candidate) throw new Error("Missing candidate");
+    const request = { version: 1, action: "review-candidate", intent: "review-only", source: "current",
+      assessmentId: candidate.assessmentId, candidateId: candidate.candidateId, expectedRevision: candidate.revision };
+    const callsBefore = vi.mocked(stream).mock.calls.length;
+    expect((await adapter.handle({ ...request, expectedRevision: candidate.revision + 1 })).status).toBe(409);
+    expect(vi.mocked(stream).mock.calls.length).toBe(callsBefore);
+    reviewing = true; stage = 0;
+    const review = await adapter.handle(request);
+    expect(review.status, JSON.stringify(vi.mocked(stream).mock.calls.at(-1)![0].messages).slice(-4000)).toBe(200);
+    const incomplete = ["no-inspect", "review-required", "invalid", "unavailable", "superseded"].includes(decision);
+    expect(review.body).toMatchObject({ candidateReview: { status: incomplete ? "reinspection-required" : "prepared" } });
+    if (incomplete) {
+      expect(reviewCreation).not.toHaveBeenCalled();
+      expect(await fs.readdir(path.join(cwd, ".gg/commands"))).toEqual([]);
+      await expect(fs.stat(path.join(cwd, ".gg/programmatic"))).rejects.toThrow();
+      expect(claim.active).toBe(false);
+      return;
+    }
+    const results = vi.mocked(stream).mock.calls.at(-1)![0].messages.flatMap((message) => message.role === "tool" ? message.content : []);
+    const inspection = results.find((item) => item.toolCallId === "inspect-proposal");
+    expect(inspection?.isError).not.toBe(true);
+    expect(JSON.parse(String(inspection?.content))).toMatchObject({ status: "review-required" });
+    const refused = results.find((item) => item.toolCallId === "forbidden-create");
+    expect(refused?.isError).toBe(true);
+    expect(String(refused?.content)).toContain("no creation, verification or run");
+    expect(await fs.readdir(path.join(cwd, ".gg/commands"))).toEqual([]);
+    await expect(fs.stat(path.join(cwd, ".gg/programmatic"))).rejects.toThrow();
+    expect(claim.active).toBe(false);
+    expect(results.find((item) => item.toolCallId === "forbidden-bash")?.isError).toBe(true);
+    expect(reviewCreation).not.toHaveBeenCalled();
+    if (decision === "permission") session.setToolCapabilityPolicy({ allowedToolNames: ["read", "programmatic_command", "command_information"] });
+    if (decision === "prerequisite") await fs.writeFile(path.join(cwd, "WORKFLOW"), "Changed ledger\n");
+    creating = true; reviewing = false; stage = 0;
+    await session.prompt("Create the exact ledger command proposal now; ask me for exact file approval.");
+    const createdResults = vi.mocked(stream).mock.calls.at(-1)![0].messages.flatMap((message) => message.role === "tool" ? message.content : []);
+    const creation = JSON.parse(String(createdResults.find((item) => item.toolCallId === "later-create")?.content));
+    if (decision === "approve") {
+      expect(creation).toMatchObject({ created: true });
+      expect(await fs.readFile(path.join(cwd, ".gg/commands/reconcile-ledger.md"), "utf8")).toBe(proposal.markdown);
+      expect(await fs.readFile(path.join(cwd, ".gg/commands/.reconcile-ledger-helpers/ledger.mjs"), "utf8")).toBe(proposal.helpers[0].content);
+    } else {
+      expect(creation).toMatchObject({ status: "unavailable", reason: decision === "reject" ? "creation-not-approved" : "stale-proposal-review-again" });
+      expect(await fs.readdir(path.join(cwd, ".gg/commands"))).toEqual([]);
+    }
+    expect(reviewCreation).toHaveBeenCalledTimes(decision === "approve" || decision === "reject" ? 1 : 0);
+    session.setToolCapabilityPolicy(undefined);
+    creating = false;
+    // An incomplete newer assessment invalidates handoff, not merely the UI's buttons.
+    await adapter.handle({ version: 1, action: "discover" });
+    const afterRefresh = vi.mocked(stream).mock.calls.length;
+    expect((await adapter.handle(request)).status).toBe(409);
+    expect(vi.mocked(stream).mock.calls.length).toBe(afterRefresh);
+  } finally { adapter.dispose(); await session.dispose(); }
+});
+
 it.each(["setup", "configured"] as const)("forwards actual slash %s completion through the desktop session binding", async (mode) => {
   const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", mcpEnabled: false,
     allowedTools: ["programmatic_profile", "programmatic_scan", "programmatic_advisory_result"], systemPrompt: "Scripted assessment" });
@@ -35,7 +161,7 @@ it.each(["setup", "configured"] as const)("forwards actual slash %s completion t
     if (!submitted) {
       submitted = true;
       const call: ToolCall = { type: "tool_call", id: "result", name: "programmatic_advisory_result", args: {
-        version: 1, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
+        version: 2, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Scripted provider" }, recommendations: [],
       } };
       yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
       return { message: { role: "assistant", content: [call] }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
@@ -115,7 +241,7 @@ it.each([
     expect(claim.active).toBe(true);
     events.push(event);
   });
-  const assess = vi.fn(async (selected: "setup" | "configured") => { expect(claim.active).toBe(true); return session.assessProgrammatic(selected); });
+  const assess = vi.fn(async (selected: "setup" | "configured", assessmentRequestId?: string) => { expect(claim.active).toBe(true); return session.assessProgrammatic(selected, undefined, undefined, { assessmentRequestId }); });
   const adapter = new AppSidecarProgrammaticChat(() => ({ cwd, identity: "current", codeMode: true, planMode: false, busy: claim.active }),
     () => claim.claim(), release, undefined, settled, assess);
   let submitted = false;
@@ -125,7 +251,7 @@ it.each([
     expect((await adapter.handle({ version: 1, action: "report", offset: 0 })).status).toBe(409);
     if (!submitted) {
       submitted = true;
-      const call: ToolCall = { type: "tool_call", id: "result", name: "programmatic_advisory_result", args: { version: 1, kind: "advisory", coverage: { status: "limited", scope: "Sampled project", reason: "Scripted provider only" }, recommendations: [] } };
+      const call: ToolCall = { type: "tool_call", id: "result", name: "programmatic_advisory_result", args: { version: 2, kind: "advisory", coverage: { status: "limited", scope: "Sampled project", reason: "Scripted provider only" }, recommendations: [] } };
       yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
       return { message: { role: "assistant", content: [call] }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
     }
@@ -133,11 +259,12 @@ it.each([
   })()));
   try {
     await session.initialize();
-    const result = await adapter.handle({ version: 1, action: mode === "setup" ? "inspect-setup" : "scan" });
+    const result = await adapter.handle({ version: 1, action: mode === "setup" ? "inspect-setup" : "scan", requestId: "assessment-request" });
     expect(result.status).toBe(200);
     expect(events).toHaveLength(2);
     expect(events.every(isProgrammaticAssessmentEvent)).toBe(true);
-    expect(events[0]).toMatchObject({ phase: "started", sequence: 1 });
+    expect(events[0]).toMatchObject({ phase: "started", sequence: 1, requestId: "assessment-request" });
+    expect(result.body).toMatchObject({ assessment: { lifecycle: { conversationId: session.getConversationIdentity().conversationId, sessionId: session.getConversationIdentity().sessionId, sequence: 1, requestId: "assessment-request" } } });
     expect(events[1]).toMatchObject({ phase: "completed", sequence: 1,
       assessment: "assessment" in result.body ? result.body.assessment : undefined });
     // Reject authority/detail fields at any depth, not those words in display copy.
@@ -231,7 +358,7 @@ it.each(["current", "stale"] as const)("desktop corrupt settings assess read-onl
     expect(result.body).not.toHaveProperty("approvableProposalHandle");
     if (owner === "current") expect(result.body).toMatchObject({ assessment: { mode: "setup", status: "incomplete", deterministic: { status: "not-run" } } });
     else expect(result.body).not.toHaveProperty("assessment");
-    expect(assess).toHaveBeenCalledExactlyOnceWith("setup");
+    expect(assess).toHaveBeenCalledExactlyOnceWith("setup", undefined);
     expect(vi.mocked(stream)).toHaveBeenCalled();
     expect(providerEvidence.length).toBeGreaterThan(0);
     expect(providerClaims).toEqual(providerEvidence.map(() => true));

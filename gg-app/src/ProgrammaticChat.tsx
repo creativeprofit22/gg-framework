@@ -3,10 +3,10 @@ import {
   PROGRAMMATIC_CHAT_PAGE_LIMIT,
   type ProgrammaticChatRequest,
   type ProgrammaticChatSummary,
-  type ProgrammaticExecutionEvidence,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
 import { ProgrammaticAssessment } from "./ProgrammaticAssessment";
+import { ProgrammaticDiscovery } from "./ProgrammaticDiscovery";
 import {
   canRunProgrammaticSelection,
   canScanProgrammatic,
@@ -15,45 +15,7 @@ import {
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
 
-/** Plain text only: citations are not executable links or rendered Markdown. */
-export function ProgrammaticExecutionEvidenceView({
-  items,
-}: {
-  items: ProgrammaticExecutionEvidence[];
-}) {
-  return (
-    <section className="programmatic-chat" aria-label="Task execution evidence">
-      <h4>Task execution evidence</h4>
-      <ul>
-        {items.map((item, index) => (
-          <li key={index}>
-            <Badge>
-              {item.basis === "observed"
-                ? "Checked directly"
-                : item.basis === "inferred"
-                  ? "Inferred, not confirmed"
-                  : "Assumed, not checked"}
-            </Badge>{" "}
-            {item.severity !== "info" && (
-              <strong>{item.severity === "warning" ? "Warning: " : "Error: "}</strong>
-            )}
-            <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.message}</span>
-            {item.location && (
-              <>
-                {" "}
-                <code>
-                  {item.location.path}
-                  {item.location.startLine ? `:${item.location.startLine}` : ""}
-                  {item.location.endLine ? `–${item.location.endLine}` : ""}
-                </code>
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
+export { ProgrammaticExecutionEvidenceView } from "./ProgrammaticExecutionEvidence";
 
 const stateLabels: Record<ProgrammaticChatSummary["state"], string> = {
   discovered: "Found",
@@ -70,6 +32,7 @@ export function ProgrammaticChat({
   planMode,
   onAction,
   onSelect,
+  onSelectCandidate,
   onRun,
 }: {
   state: ProgrammaticChatState;
@@ -77,6 +40,7 @@ export function ProgrammaticChat({
   planMode: boolean;
   onAction(request: ProgrammaticChatRequest): void;
   onSelect(id: string): void;
+  onSelectCandidate?(source: "current" | "history", id: string): void;
   onRun(): void;
 }): React.ReactElement {
   const headingId = useId();
@@ -91,7 +55,7 @@ export function ProgrammaticChat({
   const locked = busy || state.operation !== null;
   const mutationLocked = locked || planMode || state.reconcile;
   const report = state.report;
-  const selected = state.detail;
+  const selected = state.selection?.source && state.selection.source !== "deterministic" ? null : state.detail;
   const configuration = programmaticConfiguration(state);
   const currentReview = isProgrammaticCurrentReview(state);
   const reportAssessmentSuperseded =
@@ -102,8 +66,8 @@ export function ProgrammaticChat({
   const setupBlockedReason =
     configuration && configuration.status !== "current"
       ? configuration.status === "unreadable"
-        ? "Review setup can inspect this project, but cannot save or repair unreadable settings. Checking for opportunities and starting tasks remain unavailable."
-        : "Review and approve setup before checking for opportunities or starting a task."
+        ? "Review setup can inspect this project, but cannot save or repair unreadable settings. Saved checks and their tasks remain unavailable; discovery is still available."
+        : "Review and approve setup before running saved checks or starting their tasks. Discovery does not require setup."
       : undefined;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
@@ -144,7 +108,10 @@ export function ProgrammaticChat({
             ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
             : state.notice}
       </p>
-      {state.assessment && <ProgrammaticAssessment assessment={state.assessment} />}
+      <ProgrammaticDiscovery state={state} locked={locked} planMode={planMode} onRequest={onAction}
+        onSelect={(source, id) => onSelectCandidate?.(source, id)} />
+      {state.assessment && <ProgrammaticAssessment assessment={state.assessment} previous={state.assessmentRetained} />}
+      <h3>Deterministic checks and setup</h3>
       {planMode && (
         <p>
           Plan mode lets you view existing results and details. Turn it off before starting a new
@@ -275,6 +242,14 @@ export function ProgrammaticChat({
             </p>
           )}
           <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
+          {state.proposal.historyPolicy && <>
+            <p>
+              History: {state.proposal.historyPolicy.enabled ? "enabled" : "disabled"}.
+              {state.proposal.historyPolicy.enabled && " Approval saves future configured assessments automatically—not this setup or old chats. No work is approved or verified."}
+              {state.proposal.operation === "history-upgrade" && " Or leave without approving to keep checks. Restoring prior settings needs separate approval."}
+            </p>
+            <pre aria-label="Exact history policy to save">{JSON.stringify({ historyPolicy: state.proposal.historyPolicy, expectedRecoveryDigest: state.proposal.expectedRecoveryDigest }, null, 2)}</pre>
+          </>}
           <p>
             Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
           </p>
@@ -327,7 +302,9 @@ export function ProgrammaticChat({
             >
               {state.proposal.operation === "refresh"
                 ? "Approve and save refresh"
-                : "Approve and save setup"}
+                : state.proposal.operation === "history-upgrade"
+                  ? "Approve history saving"
+                  : "Approve and save setup"}
             </button>
           )}
         </div>
@@ -340,7 +317,7 @@ export function ProgrammaticChat({
       )}
       {report && report.status !== "setup-required" && report.total === 0 && (
         <p>
-          No opportunities to show. Choose Check for opportunities to run the saved checks and save
+          No deterministic results to show. Choose Check for opportunities to run the saved checks and save
           their results. This does not start any task.
         </p>
       )}
@@ -355,7 +332,7 @@ export function ProgrammaticChat({
                   <li key={row.id}>
                     <button
                       className="btn btn-ghost programmatic-row"
-                      aria-pressed={state.selectedId === row.id}
+                      aria-pressed={(!state.selection || state.selection.source === "deterministic") && state.selectedId === row.id}
                       disabled={locked}
                       onClick={() => onSelect(row.id)}
                     >
@@ -389,7 +366,7 @@ export function ProgrammaticChat({
           <span>
             {report.rows.length > 0
               ? `${report.offset + 1}–${report.offset + report.rows.length} of ${report.total}`
-              : `No opportunities on this page (${report.total} total).`}
+              : `No deterministic results on this page (${report.total} total).`}
           </span>
           <button
             className="btn btn-ghost btn-sm"

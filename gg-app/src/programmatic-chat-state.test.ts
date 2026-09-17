@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isProgrammaticAssessmentEvent, type ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   isProgrammaticChatResponse,
   type ProgrammaticChatConfiguration,
@@ -13,6 +14,64 @@ import {
   programmaticConfiguration,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
+it.each(["saved", "disabled", "setup-not-saved", "unsaved", "acknowledgement-unknown", undefined] as const)(
+  "preserves %s history independently of successful scans and selection", (status) => {
+    const assessmentId = "12345678-1234-4234-8234-123456789abc";
+    const history: ProgrammaticAssessment["history"] = status === undefined ? undefined
+      : status === "saved" ? { status, assessmentId, historyRevision: 1 }
+      : status === "disabled" || status === "setup-not-saved" ? { status }
+      : { status, assessmentId, reason: "History storage unavailable." };
+    const assessment: ProgrammaticAssessment = {
+      version: 1, mode: status === "setup-not-saved" ? "setup" : "configured", status: "completed",
+      summary: "Assessment finished.", limitations: [], coverage: [], observations: [],
+      deterministic: status === "setup-not-saved" ? { status: "not-run", reason: "setup" }
+        : { status: "succeeded", enabledCount: 1, applicableCount: 1 },
+      ...(history ? { history } : {}),
+    };
+    const original = loadedState();
+    const event = { conversationId: "chat", sessionId: "session", sequence: 1,
+      phase: "completed" as const, assessment };
+    expect(isProgrammaticAssessmentEvent(event)).toBe(true);
+    const state = programmaticChatReducer(original, { type: "assessment", generation: "one", event });
+    expect(state.assessment).toBe(assessment);
+    expect(state.report).toBe(original.report);
+    expect(state.detail).toBe(original.detail);
+    expect(state.selectedId).toBe(original.selectedId);
+    expect(state.error).toBeNull();
+    expect(state.reconcile).toBe(false);
+    if (status !== "setup-not-saved") {
+      const receipt = receive(state, { version: 1, action: "scan", ok: true, changed: true, assessment });
+      expect(receipt.assessment).toBe(assessment);
+      expect(receipt.report?.rows).toBe(original.report?.rows);
+      expect(receipt.selectedId).toBe(original.selectedId);
+      expect(receipt.detail).toBe(original.detail);
+      expect(receipt.error).toBeNull();
+    }
+  },
+);
+it("leaves deterministic state untouched by separate history responses", () => {
+  const state = loadedState();
+  for (const updated of [receive(state, { version: 1, action: "history-apply", ok: true, changed: true }),
+    receive(state, { version: 1, action: "history-apply", ok: false, error: "Review expired", reconcile: true })]) {
+    expect(updated.report).toBe(state.report);
+    expect(updated.detail).toBe(state.detail);
+    expect(updated.selectedId).toBe(state.selectedId);
+    expect(updated.operation).toBeNull();
+  }
+  expect(receive(state, { version: 1, action: "history-apply", ok: false, error: "Review expired", reconcile: true })).toMatchObject({ error: "Review expired", reconcile: true });
+});
+it("retains an explicitly reviewed history upgrade through unchanged scanner reports", () => {
+  const reviewed = receive(loadedState(), { version: 1, action: "inspect-setup", ok: true,
+    proposal: { ...proposal, operation: "history-upgrade", configuration: currentConfiguration,
+      profileJson: `${JSON.stringify({ scanners: [], version: 1 }, null, 2)}\n`,
+      fingerprint: currentConfiguration.currentFingerprint!, historyPolicy: { version: 1, enabled: true }, expectedRecoveryDigest: null } });
+  const state = receive(reviewed, { version: 1, action: "report", ok: true,
+    report: { ...loadedState().report!, configuration: currentConfiguration } });
+  expect(state.proposalApprovable).toBe(true);
+  expect(state.selectedId).toBe(reviewed.selectedId);
+  expect(receive(state, { version: 1, action: "report", ok: true, report: { ...loadedState().report!,
+    configuration: { ...currentConfiguration, currentFingerprint: "f".repeat(64) } } }).proposalApprovable).toBe(false);
+});
 it("retains bounded assessment through reports, rejects stale outcomes and clears on reset", () => {
   const assessment = {
     version: 1 as const, mode: "setup" as const, status: "incomplete" as const,
@@ -32,7 +91,7 @@ it("retains bounded assessment through reports, rejects stale outcomes and clear
   expect(programmaticChatReducer(state, { type: "response", generation: "old", epoch: state.epoch, response })).toBe(state);
   expect(programmaticChatReducer(state, { type: "response", generation: "one", epoch: state.epoch - 1, response })).toBe(state);
   expect(programmaticChatReducer(state, { type: "reset", generation: "two" }).assessment).toBeNull();
-  expect(receive(state, response).assessment).toBeNull();
+  expect(receive(state, response).assessment).toBe(assessment);
   const failed = receive(state, {
     version: 1, action: "inspect-setup", ok: false, error: "Cannot propose settings", reconcile: false,
     assessment: { ...assessment, status: "unavailable" },
@@ -62,7 +121,7 @@ it("replaces assessment without changing in-flight setup ownership and rejects r
   expect(programmaticChatReducer(state, { ...completion, generation: "retired" })).toBe(state);
   expect(programmaticChatReducer(state, { ...completion, event: { ...completion.event, sequence: 1 } })).toBe(state);
   state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: { ...identity, sequence: 3, phase: "started" } });
-  expect(state.assessment).toBeNull();
+  expect(state.assessment).toBe(assessment);
   expect(state.proposal).toBe(exactProposal);
 });
 

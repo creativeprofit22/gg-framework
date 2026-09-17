@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { projectDiscovery } from "./discovery-projection.js";
 import { createWebFetchTool } from "../../tools/web-fetch.js";
 import { executeAdvisoryTool } from "./advisory-tools.js";
 
 import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, ADVISORY_LIMITS } from "./advisory.js";
-import { programmaticAssessmentResultV1Schema } from "./contracts.js";
+import { programmaticAssessmentResultV2Schema } from "./contracts.js";
 import { projectAdvisoryCommands, type CommandDiscovery } from "../command-discovery.js";
 
 afterEach(() => {
@@ -15,7 +17,7 @@ afterEach(() => {
 // Contract fixtures, not model-quality evaluation. Scanner equivalence is exercised
 // separately by agent-session-programmatic-provider.test.ts through the real loop.
 export const manualAssessment = {
-  version: 1,
+  version: 2,
   kind: "advisory",
   coverage: {
     status: "limited",
@@ -24,8 +26,20 @@ export const manualAssessment = {
   },
   recommendations: [
     {
-      version: 1,
+      version: 2,
       kind: "advisory",
+      workflow: {
+        trigger: "A configuration review finds an incorrect setting",
+        representativeCase: "Correct the selected project's check configuration",
+        inputs: ["Current configuration", "Expected check behavior"],
+        currentProcess: ["Inspect the setting", "Review the proposed correction", "Verify the check"],
+        output: "A reviewed configuration correction",
+        successCheck: "The check uses the intended setting",
+        affectedSubproject: { scope: "repository-wide" },
+        mutationBoundary: "Advice only; editing requires separate authorization",
+        repeatability: { basis: "inferred", explanation: "Configuration changes can recur, but no usage frequency was measured" },
+      },
+      alternatives: [{ kind: "missing-capability", reasonNotSelected: "A dedicated configuration editor would cost more to maintain than this small correction" }],
       outcome: "Correct one configuration value",
       rationale: "One manual edit costs less than creating automation",
       uncertainty: "Behavior still needs verification",
@@ -313,6 +327,7 @@ describe("host fetch provenance", () => {
     );
     expect(evidence.list()).toEqual([{
       id: expect.stringMatching(/^receipt-/), toolCallId: "fetch", tool: "web_fetch", status: "cancelled",
+      retrievedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
     }]);
     expect([...turn.limitations]).toContain("web_fetch: cancelled.");
   });
@@ -467,6 +482,22 @@ describe("bounded advisory validation", () => {
         '{"revision":"abc123"}',
       ).external,
     ).toBeUndefined();
+  });
+  it("matches external revision and path together and refuses unsupported external lines", async () => {
+    const evidence = new AdvisoryEvidence();
+    for (const [id, revision, path] of [["one", "revision-one", "src/first.ts"], ["two", "revision-two", "src/second.ts"]]) {
+      evidence.retain({ id: id!, toolCallId: id!, tool: "research_corpus", status: "retrieved",
+        external: { tool: "steroids", toolCallId: id!, sourceUri: "https://example.com/repo", revision, path } });
+    }
+    const input = (revision: string, path: string, startLine?: number) => ({ ...manualAssessment, recommendations: [{
+      ...manualAssessment.recommendations[0], evidence: { version: 1, items: [{ kind: "external-reference", basis: "observed",
+        inspectedUrl: "https://example.com/repo", revision, location: { path, ...(startLine ? { startLine } : {}) }, claim: "Inspected external source" }] },
+    }] });
+    const turn = scannedTurn(evidence);
+    await expect(turn.submit(input("revision-two", "src/first.ts"), checks)).rejects.toThrow("External provenance");
+    await expect(turn.submit(input("revision-one", "src/second.ts"), checks)).rejects.toThrow("External provenance");
+    await expect(turn.submit(input("revision-two", "src/second.ts", 3), checks)).rejects.toThrow("External provenance");
+    await expect(turn.submit(input("revision-two", "src/second.ts"), checks)).resolves.toContain("Inspected external source");
   });
   it("bounds receipt retention with oldest eviction and stores no source bodies", () => {
     const evidence = new AdvisoryEvidence();
@@ -703,10 +734,14 @@ describe("advisory evidence presentation", () => {
   });
 
   it("names each unavailable command while retaining its reason", async () => {
-    const output = await scannedTurn(new AdvisoryEvidence()).submit({
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "config", "1\tCheck configuration");
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const output = await scannedTurn(evidence).submit({
       ...manualAssessment,
       recommendations: ["project-check", "Global.Check"].map((name) => ({
         ...manualAssessment.recommendations[0],
+        evidence: { version: 1, items: [{ basis: "observed", source: receipt.id, code: "config", severity: "info", message: "The local configuration identifies the check input" }] },
         choice: { kind: "reuse-command", availability: {
           status: "unavailable",
           command: { version: 1, name, source: "project-custom", invocationKind: "prompt" },
@@ -722,21 +757,196 @@ describe("advisory evidence presentation", () => {
   });
 });
 
+describe("needs-first host submission", () => {
+  const snapshot = {
+    version: 1, command: { version: 1, name: "project-check", source: "project-custom", invocationKind: "prompt" },
+    capabilityKind: "prompt-only", ownerSha256: "a".repeat(64), bodySha256: "b".repeat(64), helpers: [],
+  };
+  const availability = { status: "available", snapshot };
+  const proposal = {
+    version: 1, capabilityKind: "prompt-only", desiredOutcome: "Check configuration across selected packages",
+    inputs: ["Package configuration"], outputs: ["Configuration discrepancy report"],
+    prerequisites: ["Readable package configuration"], risks: ["Package-specific settings may differ"],
+    verificationExpectations: ["Compare reports against known valid and invalid configurations"],
+  };
+  function fixture(kind = "extend-command") {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    const receipt = evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "prerequisite", "1\tConfiguration check inputs");
+    // Contract fixture supplies host classification; real delivery is covered in advisory-tools.test.ts.
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const recommendation = {
+      ...manualAssessment.recommendations[0]!,
+      outcome: "Compare configuration across selected packages",
+      rationale: "A shared comparison can avoid repeating the same package inspection steps",
+      workflow: {
+        ...manualAssessment.recommendations[0]!.workflow,
+        trigger: "A configuration change affects multiple packages",
+        representativeCase: "Compare the root check settings with two selected packages",
+        inputs: ["Root configuration", "Selected package configurations"],
+        currentProcess: ["Read each configuration", "Compare check settings", "Report discrepancies"],
+        output: "A configuration discrepancy report",
+        successCheck: "Known valid and invalid configurations are distinguished without modifying files",
+      },
+      evidence: { version: 1, items: [{ basis: "observed", source: receipt.id, code: "prerequisite", severity: "info", message: "The package configuration supplies the input required by the check workflow" }] },
+      alternatives: [{ kind: "manual", reasonNotSelected: "Repeated package comparisons would duplicate the same inspection steps" }],
+      choice: kind === "extend-command"
+        ? { kind, availability, proposedChanges: ["Accept a selected package list rather than only the root configuration"], requirement: proposal }
+        : kind === "missing-capability" ? { kind, proposal }
+          : { kind: "manual", steps: ["Compare the package settings by hand"] },
+    };
+    const input = { ...manualAssessment, recommendations: [recommendation] };
+    const checks = { snapshot: vi.fn(async () => true), page: async () => ({}), signal: new AbortController().signal };
+    return { evidence, turn, input, recommendation, checks };
+  }
+  function deliver(turn: ProgrammaticAdvisoryTurn) {
+    turn.observeCommand(JSON.stringify({ status: "prompt", snapshot }));
+  }
+
+  it("renders the complete workflow and extension boundaries without starting work", async () => {
+    const { turn, input, checks } = fixture();
+    deliver(turn);
+    const output = await turn.submit(input, checks);
+    const workflow = input.recommendations[0]!.workflow;
+    for (const value of [workflow.trigger, workflow.representativeCase, ...workflow.inputs,
+      ...workflow.currentProcess, workflow.output, workflow.successCheck, workflow.mutationBoundary,
+      workflow.repeatability.explanation]) expect(output).toContain(value);
+    expect(output).toContain("Affected subproject: repository-wide");
+    expect(output).toContain("Repeatability (inferred)");
+    expect(output).toContain("Extend — proposal only");
+    expect(output).toContain("Extension base /project-check — prompt available, not started");
+    expect(output).toContain("Proposed changes: Accept a selected package list");
+    expect(output).toContain("Alternative not selected (manual)");
+    expect(output).toContain("Evidence (observed, receipt-");
+    expect(output).toContain("Uncertainty: Behavior still needs verification");
+  });
+
+  it("keeps app-backed proposals visibly separate from working generated commands", async () => {
+    const { turn, input, checks } = fixture("missing-capability");
+    Object.assign(input.recommendations[0]!.choice, { proposal: { ...proposal, capabilityKind: "app-backed" } });
+    const output = await turn.submit(input, checks);
+    expect(output).toContain("New capability — proposal only");
+    expect(output).toContain("Missing app/native/tool functionality remains development work, not a generated working command");
+  });
+
+  it("renders honest unknowns and bounded next inspection steps", async () => {
+    const { turn, input, checks } = fixture("manual");
+    Object.assign(input.recommendations[0]!, {
+      alternatives: [], evidence: { version: 1, items: [] },
+      choice: { kind: "needs-more-evidence", missingEvidence: ["Local prerequisite support is unknown"], nextInspectionSteps: ["Read the selected package configuration"] },
+    });
+    input.recommendations[0]!.workflow.repeatability = { basis: "assumed", explanation: "Recurrence is unknown" };
+    const output = await turn.submit(input, checks);
+    expect(output).toContain("Needs more evidence: Local prerequisite support is unknown");
+    expect(output).toContain("Next inspection steps — not started: Read the selected package configuration");
+    expect(output).toContain("Repeatability (assumed): Recurrence is unknown");
+  });
+
+  it.each([undefined, "unknown", "command-definition"] as const)("rejects positive advice with %s source-purpose provenance", async (purpose) => {
+    const { evidence, turn, input, checks } = fixture("missing-capability");
+    const receipt = evidence.list()[0]!;
+    receipt.localSources = purpose ? [{ path: "package.json", purpose }] : undefined;
+    await expect(turn.submit(input, checks)).rejects.toThrow("inspected local workflow evidence");
+    expect(turn.acceptedResult).toBeUndefined();
+  });
+
+  it.each(["empty", "assumption", "metadata", "body", "external"])("refuses new automation supported only by %s evidence", async (support) => {
+    const { evidence, turn, input, recommendation, checks } = fixture("missing-capability");
+    recommendation.evidence.items = [];
+    if (support === "assumption") recommendation.evidence.items.push({ basis: "assumed", source: "assumption", code: "need", severity: "info", message: "The workflow might recur" });
+    if (support === "metadata" || support === "body") {
+      const receipt = evidence.observe(process.cwd(), "command_information", { action: support === "body" ? "resolve" : "list" }, support, "Command information");
+      recommendation.evidence.items.push({ basis: "inferred", source: receipt.id, code: "need", severity: "info", message: "Catalog information is not local workflow inspection" });
+    }
+    if (support === "external") {
+      const receipt = evidence.observe(process.cwd(), "research_corpus", { action: "show", repo: "owner/repo", path: "check.ts" }, "external", "Example check");
+      recommendation.evidence.items.push({ basis: "inferred", source: receipt.id, code: "need", severity: "info", message: "An external example does not establish this project's need" });
+    }
+    await expect(turn.submit(input, checks)).rejects.toThrow("inspected local workflow evidence");
+    expect(turn.submitted).toBe(false);
+    expect(turn.acceptedResult).toBeUndefined();
+  });
+
+  it("refuses an initially unavailable extension base", async () => {
+    const { turn, input, checks } = fixture();
+    Object.assign(input.recommendations[0]!.choice, { availability: { status: "unavailable", command: snapshot.command, reason: "Body unreadable" } });
+    await expect(turn.submit(input, checks)).rejects.toThrow("Extension requires an inspected base");
+    expect(checks.snapshot).not.toHaveBeenCalled();
+    expect(turn.submitted).toBe(false);
+  });
+
+  it.each(["base", "alternative"])("requires the exact delivered %s snapshot", async (target) => {
+    const { turn, input, recommendation, checks } = fixture(target === "base" ? "extend-command" : "missing-capability");
+    if (target === "alternative") Object.assign(recommendation, { alternatives: [{ kind: "reuse-command", availability, reasonNotSelected: "The root-only command cannot compare selected packages" }] });
+    await expect(turn.submit(input, checks)).rejects.toThrow("Resolve the exact candidate body");
+    turn.observeCommand(JSON.stringify({ status: "prompt", snapshot: { ...snapshot, bodySha256: "c".repeat(64) } }));
+    await expect(turn.submit(input, checks)).rejects.toThrow("Resolve the exact candidate body");
+    expect(turn.submitted).toBe(false);
+    deliver(turn);
+    await turn.submit(input, checks);
+    expect(checks.snapshot).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(turn.acceptedResult?.recommendations[0]?.choice.kind).toBe(target === "base" ? "extend-command" : "missing-capability");
+  });
+
+  it.each(["base", "reuse", "alternative"])("downgrades stale %s to unavailable and limited without discarding the proposal", async (target) => {
+    const { turn, input, recommendation, checks } = fixture();
+    if (target === "reuse") Object.assign(recommendation, { choice: { kind: "reuse-command", availability } });
+    if (target === "alternative") Object.assign(recommendation, { choice: { kind: "missing-capability", proposal }, alternatives: [{ kind: "reuse-command", availability, reasonNotSelected: "The root-only command cannot compare selected packages" }] });
+    deliver(turn);
+    checks.snapshot.mockResolvedValue(false);
+    await turn.submit(input, checks);
+    const accepted = turn.acceptedResult!;
+    const command = target !== "alternative" ? accepted.recommendations[0]!.choice : accepted.recommendations[0]!.alternatives[0];
+    expect(command).toMatchObject({ availability: { status: "unavailable", command: snapshot.command, reason: expect.stringContaining("changed") } });
+    expect(accepted.coverage).toMatchObject({ status: "limited", reason: expect.stringContaining("compared command changed") });
+    expect(accepted.recommendations[0]!.choice.kind).toBe(target === "base" ? "extend-command" : target === "reuse" ? "reuse-command" : "missing-capability");
+    const display = projectDiscovery(randomUUID(), accepted).projection.candidates[0]!;
+    expect(target === "alternative" ? display.alternatives[0]!.availability : display.availability).toEqual({
+      status: "unavailable", reason: "Command identity/body changed or cannot be safely resolved at submission.",
+    });
+    expect(display.nextStep.available).toBe(true);
+    expect(JSON.stringify(display)).not.toContain("bodySha256");
+  });
+
+  it.each(["manual", "missing-capability"])("requires cited local prerequisites for command alternatives on %s", async (kind) => {
+    const { turn, input, recommendation, checks } = fixture(kind);
+    const local = recommendation.evidence.items;
+    recommendation.evidence.items = [];
+    Object.assign(recommendation, { alternatives: [{ kind: "reuse-command", availability, reasonNotSelected: "The command only checks the root and cannot compare packages" }] });
+    deliver(turn);
+    await expect(turn.submit(input, checks)).rejects.toThrow("inspected local prerequisite evidence");
+    expect(turn.submitted).toBe(false);
+    recommendation.evidence.items = local;
+    await turn.submit(input, checks);
+    expect(turn.acceptedResult?.recommendations[0]?.alternatives[0]).toMatchObject({ availability });
+  });
+
+  it.each(["forged", "authority", "v1"])("rejects %s submissions without consuming the result slot", async (mode) => {
+    const { turn, input, recommendation, checks } = fixture("missing-capability");
+    if (mode === "forged") recommendation.evidence.items[0]!.source = "receipt-invented";
+    if (mode === "authority") Object.assign(recommendation, { executionApproved: true, toolGrants: ["write"] });
+    if (mode === "v1") input.version = 1;
+    await expect(turn.submit(input, checks)).rejects.toThrow(mode === "forged" ? "host receipt ID" : mode === "authority" ? "Unrecognized" : "2");
+    expect(turn.submitted).toBe(false);
+    expect(turn.acceptedResult).toBeUndefined();
+  });
+});
+
 describe("advisory extension regression fixtures", () => {
   it("represents manual work without executable opportunity state", () => {
-    const result = programmaticAssessmentResultV1Schema.parse(manualAssessment);
+    const result = programmaticAssessmentResultV2Schema.parse(manualAssessment);
     expect(result.recommendations[0]!.choice.kind).toBe("manual");
     expect(result).not.toHaveProperty("opportunities");
     expect(result).not.toHaveProperty("configurationFingerprint");
     expect(
-      programmaticAssessmentResultV1Schema.safeParse({ ...manualAssessment, lifecycle: [] })
+      programmaticAssessmentResultV2Schema.safeParse({ ...manualAssessment, lifecycle: [] })
         .success,
     ).toBe(false);
   });
   it.each(["review", "project-check", "Global.Check"])(
     "permits advice for %s outside the specialist runner",
     (name) => {
-      const result = programmaticAssessmentResultV1Schema.parse({
+      const result = programmaticAssessmentResultV2Schema.parse({
         ...manualAssessment,
         recommendations: [
           {
@@ -768,11 +978,12 @@ describe("advisory extension regression fixtures", () => {
   it.each(["prompt-only", "script-backed", "app-backed"])(
     "keeps missing %s functionality a proposal",
     (capabilityKind) => {
-      const result = programmaticAssessmentResultV1Schema.parse({
+      const result = programmaticAssessmentResultV2Schema.parse({
         ...manualAssessment,
         recommendations: [
           {
             ...manualAssessment.recommendations[0],
+            alternatives: [{ kind: "manual", reasonNotSelected: "Repeated status aggregation would require the same error-prone steps" }],
             choice: {
               kind: "missing-capability",
               proposal: {

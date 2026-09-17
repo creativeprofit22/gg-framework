@@ -7,13 +7,12 @@ import type {
   ProgrammaticChatResponse,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 
-import type { ProgrammaticAssessment, ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import type { ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 
-export interface ProgrammaticChatState {
-  assessment: ProgrammaticAssessment | null;
-  assessmentSequence: number;
-  assessmentRequestSequence: number;
-  assessmentPending: boolean;
+import { assessmentEvent, assessmentResponse, assessmentInterrupted, selectCandidate, discoveryResponse, initialDiscoveryChatState, type DiscoveryChatState } from "./programmatic-discovery-state";
+export type { ProgrammaticSelection } from "./programmatic-discovery-state";
+
+export interface ProgrammaticChatState extends DiscoveryChatState {
   generation: string;
   epoch: number;
   report: ProgrammaticChatReport | null;
@@ -32,10 +31,7 @@ export interface ProgrammaticChatState {
 }
 export const initialProgrammaticChatState = (generation: string): ProgrammaticChatState => ({
   generation,
-  assessment: null,
-  assessmentSequence: 0,
-  assessmentRequestSequence: 0,
-  assessmentPending: false,
+  ...initialDiscoveryChatState(),
   epoch: 0,
   report: null,
   configuration: null,
@@ -53,12 +49,14 @@ export const initialProgrammaticChatState = (generation: string): ProgrammaticCh
 export type ProgrammaticChatEvent =
   | { type: "reset"; generation: string }
   | { type: "select"; id: string }
+  | { type: "select-candidate"; source: "current" | "history"; id: string }
   | { type: "assessment"; generation: string; event: ProgrammaticAssessmentEvent }
   | {
       type: "start";
       generation: string;
       epoch: number;
       operation: ProgrammaticChatState["operation"];
+      assessmentRequest?: NonNullable<ProgrammaticChatState["assessmentRequest"]>;
     }
   | { type: "response"; generation: string; epoch: number; response: ProgrammaticChatResponse }
   | { type: "error"; generation: string; epoch: number; error: string; reconcile: boolean }
@@ -69,29 +67,23 @@ export function programmaticChatReducer(
   event: ProgrammaticChatEvent,
 ): ProgrammaticChatState {
   if (event.type === "reset") return initialProgrammaticChatState(event.generation);
+  if (event.type === "select-candidate") return selectCandidate(state, event.source, event.id);
   if (event.type === "select")
     return {
       ...state,
+      selection: { source: "deterministic", id: event.id },
       selectedId: event.id,
       detail: null,
       detailSnapshot: null,
       missingSelection: false,
     };
   if (event.generation !== state.generation) return state;
-  if (event.type === "assessment") {
-    const update = event.event;
-    if (update.sequence < state.assessmentSequence ||
-      (update.sequence === state.assessmentSequence && (!state.assessmentPending || update.phase === "started"))) return state;
-    // Do not touch request epochs, exact proposals, or their approval ownership.
-    return { ...state, assessmentSequence: update.sequence,
-      assessmentPending: update.phase === "started",
-      assessment: update.phase === "completed" ? update.assessment : null };
-  }
+  if (event.type === "assessment") return assessmentEvent(state, event.event);
   if (event.type === "start") {
     if (event.epoch <= state.epoch) return state;
     return { ...state, epoch: event.epoch, operation: event.operation, error: null, notice: "",
-      assessmentRequestSequence: state.assessmentSequence,
-      ...(["inspect-setup", "scan"].includes(event.operation ?? "") ? { assessment: null } : {}) };
+      assessmentRequestSequence: state.assessmentSequence, assessmentRequest: event.assessmentRequest ?? null,
+      ...(["discover", "inspect-setup", "scan"].includes(event.operation ?? "") ? { assessmentRetained: !!state.assessment, discoveryStale: true, candidateStale: !!state.candidateDetail } : {}) };
   }
   if (event.epoch !== state.epoch) return state;
   if (event.type === "error")
@@ -102,6 +94,7 @@ export function programmaticChatReducer(
         state.operation === "approve-setup" || state.operation === "inspect-setup"
           ? false
           : state.proposalApprovable,
+      ...assessmentInterrupted(state),
       error: event.error.slice(0, 1_000),
       reconcile: event.reconcile,
     };
@@ -114,14 +107,13 @@ export function programmaticChatReducer(
         "Task requested. Review the separate approval prompt in this chat before work starts.",
     };
   const response = event.response;
-  // Host events outrank delayed button receipts, without changing exact proposal ownership.
-  const responseAssessment = state.assessmentSequence > state.assessmentRequestSequence
-    ? state.assessment : "assessment" in response ? response.assessment ?? null : null;
+  const responseDisplay = assessmentResponse(state, response);
   if (!response.ok)
     return {
       ...state,
       operation: null,
-      assessment: "assessment" in response ? responseAssessment : state.assessment,
+      ...assessmentInterrupted(state),
+      ...responseDisplay,
       error: response.error,
       reconcile: response.reconcile,
       proposalApprovable:
@@ -133,6 +125,10 @@ export function programmaticChatReducer(
     };
   const base = { ...state, operation: null, error: null };
   switch (response.action) {
+    case "discover": return { ...base, ...responseDisplay, notice: "Discovery returned. Proposals are not approvals." };
+    case "review-candidate": case "history-report": case "history-detail":
+    case "history-inspect-decision": case "history-inspect-correspondence": case "history-apply":
+      return discoveryResponse(base, response);
     case "report":
       return {
         ...base,
@@ -141,12 +137,12 @@ export function programmaticChatReducer(
         proposalApprovable:
           state.proposalApprovable &&
           (!response.report.configuration ||
-            (response.report.configuration.status !== "current" &&
+            ((response.report.configuration.status !== "current" || state.proposal?.operation === "history-upgrade") &&
               response.report.configuration.status !== "unreadable" &&
               response.report.configuration.status === state.proposal?.configuration.status &&
               response.report.configuration.currentFingerprint === state.proposal?.fingerprint)),
         reconcile: false,
-        notice: `${response.report.total} opportunities. ${response.report.reason}`,
+        notice: `${response.report.total} deterministic results. Discovery candidates are separate.`,
       };
     case "detail": {
       if (response.detail && response.detail.summary.id !== state.selectedId) return base;
@@ -160,7 +156,7 @@ export function programmaticChatReducer(
     case "inspect-setup":
       return {
         ...base,
-        assessment: responseAssessment,
+        ...responseDisplay,
         proposal: response.proposal,
         configuration: response.proposal.configuration,
         proposalApprovable:
@@ -182,7 +178,7 @@ export function programmaticChatReducer(
     case "scan":
       return {
         ...base,
-        assessment: responseAssessment,
+        ...responseDisplay,
         notice: "Assessment returned. Loading the saved deterministic results.",
       };
     case "dismiss":
@@ -199,4 +195,5 @@ export {
   isProgrammaticCurrentReview,
   canScanProgrammatic,
   canRunProgrammaticSelection,
+  canReviewProgrammaticCandidate,
 } from "./programmatic-chat-selectors";

@@ -2,6 +2,10 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { prepareTerminalProgrammaticAssessment, type TerminalProgrammaticAssessment } from "./terminal-programmatic-assessment.js";
 import { NotLoggedInError } from "../../core/auth-storage.js";
 import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { randomUUID } from "node:crypto";
+import type { ProgrammaticAssessmentOutcome } from "../../core/programmatic/assessment.js";
+import { captureAssessmentHistoryPolicy, saveAssessmentHistory } from "../../core/programmatic/assessment-history.js";
+import { isPlanModeActive } from "../../core/runtime-mode.js";
 import {
   guardTerminalTools,
   type ProgrammaticAdvisoryTools,
@@ -150,6 +154,8 @@ export interface AgentLoopOptions {
   provider: Provider;
   model: string;
   tools: AgentTool[];
+  /** Live host mode, including transitions while completion is saving history. */
+  planModeRef?: { current: boolean };
   webSearch?: boolean;
   maxTokens: number;
   maxTurns?: number;
@@ -360,6 +366,8 @@ export function useAgentLoop(
   const disposedRef = useRef(false);
   const liveToolsRef = useRef(options.tools);
   liveToolsRef.current = options.tools;
+  const livePlanModeRef = useRef(options.planModeRef);
+  livePlanModeRef.current = options.planModeRef;
   // React state can lag submissions and turns idle before teardown/queue draining ends.
   const runOwnedRef = useRef(false);
   const isBusy = useCallback(() => runOwnedRef.current, []);
@@ -1269,7 +1277,8 @@ export function useAgentLoop(
             wasAborted = true;
           }
           setIsRunning(false);
-          abortRef.current = null;
+          // Assessment completion still owns cancellable history persistence.
+          if (!assessmentActiveRef.current) abortRef.current = null;
           if (elapsedTimerRef.current) {
             clearInterval(elapsedTimerRef.current);
             elapsedTimerRef.current = null;
@@ -1316,16 +1325,23 @@ export function useAgentLoop(
           let providerStarted = false;
           assessmentController = new AbortController();
           abortRef.current = assessmentController;
+          const controller = assessmentController;
+          const host = { id: randomUUID(), startedAt: new Date().toISOString() };
+          const { cwd, mode } = invocation.programmaticAssessment;
+          const historyPolicy = await captureAssessmentHistoryPolicy(cwd, mode);
           let assessment: ProgrammaticAssessment;
+          let outcome: ProgrammaticAssessmentOutcome | undefined;
+          let prepared: Awaited<ReturnType<typeof prepareTerminalProgrammaticAssessment>> | undefined;
           try {
-            const prepared = await prepareTerminalProgrammaticAssessment(
+            prepared = await prepareTerminalProgrammaticAssessment(
               invocation.programmaticAssessment, () => liveToolsRef.current, assessmentController.signal,
             );
             advisory = prepared.coordinator.scope;
             advisoryRef.current = advisory;
-            const outcome = await prepared.coordinator.run(assessmentController.signal, async () => {
-              const prompt = await prepared.hostPrompt(textFromUserContent(userContent));
-              refreshAssessmentPrompt = prepared.refreshPrompt;
+            const active = prepared;
+            outcome = await active.coordinator.run(assessmentController.signal, async () => {
+              const prompt = await active.hostPrompt(textFromUserContent(userContent));
+              refreshAssessmentPrompt = active.refreshPrompt;
               try {
                 providerStarted = true;
                 await runSingle(prompt);
@@ -1334,7 +1350,7 @@ export function useAgentLoop(
                   && !textVisibleRef.current && toolsUsedRef.current.size === 0;
                 return { status: unavailable ? "unavailable" : "incomplete" };
               }
-            });
+            }, host);
             assessment = outcome.assessment;
           } catch {
             const { mode } = invocation.programmaticAssessment;
@@ -1348,6 +1364,15 @@ export function useAgentLoop(
               limitations: ["Assessment preparation did not complete; no provider run started."],
             };
           }
+          assessment.history = await saveAssessmentHistory(cwd, outcome ?? { assessment }, host, historyPolicy, {
+            signal: controller.signal,
+            assertCurrent: () => {
+              if (disposedRef.current || !runOwnedRef.current || !assessmentActiveRef.current ||
+                abortRef.current !== controller || isPlanModeActive(livePlanModeRef.current) || !prepared)
+                throw new Error("Terminal assessment owner or mode changed before history save.");
+              prepared.assertHistoryToolCurrent();
+            },
+          });
           const text = `## Needs assessment\n\n${JSON.stringify(assessment)}`;
           const notice: Message = { role: "assistant", content: text };
           messages.current.push(notice);

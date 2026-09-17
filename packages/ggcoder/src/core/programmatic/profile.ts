@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { replaceBoundedFile } from "./storage.js";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Stats } from "node:fs";
@@ -9,6 +10,8 @@ import type {
   ConfigurationSnapshot,
   ProgrammaticProfileEnvelopeV1,
   ProgrammaticProfileEnvelopeV2,
+  ProgrammaticProfileEnvelopeV3,
+  RecommendationHistoryPolicyV1,
   InventoryEntryV1,
   ProgrammaticProfileV1,
   RouteResolutionV1,
@@ -18,6 +21,7 @@ import {
   PROGRAMMATIC_CONTRACT_VERSION,
   programmaticProfileEnvelopeV1Schema,
   programmaticProfileV1Schema,
+  recommendationHistoryPolicyV1Schema,
 } from "./contracts.js";
 import {
   buildProgrammaticInventory,
@@ -56,7 +60,9 @@ export interface ProgrammaticProfileProposalV1 {
   exclusions: string[];
   configurationInputs: InventoryEntryV1[];
   configurationSnapshot: ConfigurationSnapshot;
-  operation: "initial" | "refresh" | "current";
+  operation: "initial" | "refresh" | "current" | "history-upgrade";
+  historyPolicy?: RecommendationHistoryPolicyV1;
+  expectedRecoveryDigest?: string | null;
   expectedPriorProfileDigest: string | null;
   drift: ConfigurationDrift | null;
   baselineUnavailable: boolean;
@@ -76,6 +82,9 @@ export interface PersistProgrammaticProfileOptions {
   signal?: AbortSignal;
   operations?: Partial<ProgrammaticProfileOperations>;
   expectedPriorProfileDigest?: string | null;
+  /** Present only following review of the exact expanded policy and recovery expectation. */
+  historyPolicy?: RecommendationHistoryPolicyV1;
+  expectedRecoveryDigest?: string | null;
   onPreMutation?: (repositoryPath: string) => Promise<void> | void;
   onCommitted?: (repositoryPath: string) => Promise<void> | void;
   /** Host-owned live authorization check; never supplied by tool arguments. */
@@ -187,8 +196,16 @@ async function buildProfileProposal(
 
 export async function buildProgrammaticProfileProposal(
   repositoryRoot: string,
+  options: { offerHistory?: boolean } = {},
 ): Promise<ProgrammaticProfileProposalV1> {
-  return buildProfileProposal(repositoryRoot, await assessProgrammaticSetup(repositoryRoot));
+  const assessment = await assessProgrammaticSetup(repositoryRoot);
+  const proposal = await buildProfileProposal(repositoryRoot, assessment);
+  if (!options.offerHistory) return proposal;
+  const policy = assessment.stored?.envelope.version === 3 ? assessment.stored.envelope.historyPolicy : { version: 1 as const, enabled: true };
+  const recovery = await readExistingProfile(containedPath(await canonicalRepositoryRoot(repositoryRoot), PROGRAMMATIC_PREVIOUS_PROFILE_PATH), localOperations);
+  if (recovery) validateStoredProfileBytes(recovery);
+  return { ...proposal, historyPolicy: policy, expectedRecoveryDigest: recovery ? sha256(recovery) : null,
+    operation: proposal.operation === "current" && assessment.stored?.envelope.version !== 3 ? "history-upgrade" : proposal.operation };
 }
 
 function isMissing(error: unknown): boolean {
@@ -239,8 +256,15 @@ async function readExistingProfile(
   }
 }
 
+export const PROGRAMMATIC_PREVIOUS_PROFILE_PATH = ".gg/programmatic/profile.previous.json";
+const previousProfileTemporary = ".gg/programmatic/.profile.previous.tmp";
+function validateStoredProfileBytes(bytes: Buffer) {
+  const value: unknown = JSON.parse(bytes.toString("utf8"));
+  return (value as { version?: unknown } | null)?.version === 1
+    ? programmaticProfileEnvelopeV1Schema.parse(value) : validateProfileConfigurationBaseline(value);
+}
 export interface StoredProgrammaticProfile {
-  envelope: ProgrammaticProfileEnvelopeV1 | ProgrammaticProfileEnvelopeV2;
+  envelope: ProgrammaticProfileEnvelopeV1 | ProgrammaticProfileEnvelopeV2 | ProgrammaticProfileEnvelopeV3;
   bytes: Buffer;
 }
 
@@ -267,11 +291,7 @@ export async function loadApprovedProgrammaticProfile(
   );
   if (!bytes) return null;
   await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
-  const value: unknown = JSON.parse(bytes.toString("utf8"));
-  const envelope =
-    (value as { version?: unknown } | null)?.version === 1
-      ? programmaticProfileEnvelopeV1Schema.parse(value)
-      : validateProfileConfigurationBaseline(value);
+  const envelope = validateStoredProfileBytes(bytes);
   return { envelope, bytes };
 }
 
@@ -378,6 +398,9 @@ export async function persistProgrammaticProfile(
   options.signal?.throwIfAborted();
   const fingerprint = configurationFingerprintV1Schema.parse(approvedConfigurationFingerprint);
   const profile = programmaticProfileV1Schema.parse(approvedProfile);
+  const approvedPolicy = options.historyPolicy === undefined ? undefined : recommendationHistoryPolicyV1Schema.parse(options.historyPolicy);
+  if (approvedPolicy && options.expectedRecoveryDigest === undefined) throw new Error("History policy requires an inspected recovery expectation.");
+  if (options.expectedRecoveryDigest != null && !/^[a-f0-9]{64}$/.test(options.expectedRecoveryDigest)) throw new Error("Invalid recovery digest.");
   const expectedPriorDigest = options.expectedPriorProfileDigest ?? null;
   if (expectedPriorDigest !== null && !/^[a-f0-9]{64}$/.test(expectedPriorDigest)) {
     throw new Error("Invalid prior-profile digest");
@@ -410,8 +433,10 @@ export async function persistProgrammaticProfile(
       return staleResult(fingerprint, proposal.configurationFingerprint);
     }
     if (!sameValue(profile, proposal.profile)) return mismatchResult(proposal.profile, profile);
+    const historyPolicy = approvedPolicy ?? (current.stored?.envelope.version === 3 ? current.stored.envelope.historyPolicy : undefined);
     const envelope = validateProfileConfigurationBaseline({
-      version: 2,
+      version: historyPolicy ? 3 : 2,
+      ...(historyPolicy ? { historyPolicy } : {}),
       configurationFingerprint: fingerprint,
       profile,
       configurationSnapshot: proposal.configurationSnapshot,
@@ -427,6 +452,18 @@ export async function persistProgrammaticProfile(
       return result(false);
     if (current.priorProfileDigest !== expectedPriorDigest)
       throw new Error("Stored setup changed since review; review setup again");
+    const upgrading = Boolean(approvedPolicy && current.stored && current.stored.envelope.version !== 3);
+    const recoveryPath = containedPath(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH);
+    const checkRecovery = async () => {
+      await rejectLinks(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH, true);
+      const existing = await readExistingProfile(recoveryPath, operations);
+      if (existing) validateStoredProfileBytes(existing);
+      if ((existing ? sha256(existing) : null) !== options.expectedRecoveryDigest)
+        throw new Error("Profile recovery file changed since review.");
+      if (upgrading && existing && !existing.equals(current.stored!.bytes)) throw new Error("Conflicting profile recovery bytes; refusing to overwrite.");
+      return existing;
+    };
+    if (approvedPolicy) await checkRecovery();
     const bytes = Buffer.from(canonicalJson(envelope), "utf8");
     let committed = false;
     const failures: unknown[] = [];
@@ -461,6 +498,35 @@ export async function persistProgrammaticProfile(
       await validateTemporary();
       await options.validateBeforeCommit?.();
       options.signal?.throwIfAborted();
+      if (approvedPolicy) await checkRecovery();
+      if (upgrading) {
+        const priorBytes = current.stored!.bytes;
+        await rejectLinks(root, previousProfileTemporary, true);
+        await replaceBoundedFile(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH, previousProfileTemporary,
+          current.stored!.envelope, operations, { signal: options.signal,
+            onPreFileMutation: options.onPreMutation, onFileMutated: options.onCommitted },
+          { parse: (value) => validateStoredProfileBytes(Buffer.from(JSON.stringify(value))) },
+          16 * 1024 * 1024, async (publish) => {
+            await checkRecovery();
+            await options.validateBeforeCommit?.();
+            const prior = await readExistingProfile(destination, operations);
+            if (!prior?.equals(priorBytes)) throw new Error("Profile changed before recovery replacement.");
+            await publish();
+          }, "Profile recovery", priorBytes);
+        // No cross-file transaction: old profile remains authoritative until its rename.
+        const recovered = await readExistingProfile(recoveryPath, operations);
+        const prior = await readExistingProfile(destination, operations);
+        if (!recovered?.equals(priorBytes) || !prior?.equals(priorBytes)) throw new Error("Profile or recovery changed before commit.");
+        const afterRecovery = await assess();
+        if (afterRecovery.status === "unreadable" || afterRecovery.priorProfileDigest !== expectedPriorDigest ||
+          !sameValue(fingerprint, afterRecovery.inventory?.inventory.configurationFingerprint))
+          throw new Error("Configuration changed during profile recovery; review again.");
+        await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
+        await rejectLinks(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH);
+        await validateTemporary();
+        await options.validateBeforeCommit?.();
+        options.signal?.throwIfAborted();
+      }
       await operations.rename(temporary, destination);
       committed = true;
       await options.onCommitted?.(PROGRAMMATIC_PROFILE_PATH);
@@ -470,6 +536,9 @@ export async function persistProgrammaticProfile(
     try {
       receipt = await commit();
     } catch (error) {
+      // An injected/filesystem rename can report failure after publishing the destination.
+      const actual = await readExistingProfile(destination, operations).catch(() => null);
+      if (actual?.equals(bytes)) committed = true;
       failures.push(error);
     }
     try {

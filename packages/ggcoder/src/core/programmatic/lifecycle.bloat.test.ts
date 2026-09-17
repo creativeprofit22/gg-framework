@@ -3,12 +3,16 @@ import { describe, expect, it } from "vitest";
 
 describe("A touched-files-only bloat audit confirms lifecycle rules are centralized once and storage does not become a generic database abstraction.", () => {
   it("keeps lifecycle policy singular and file persistence specific", async () => {
-    const [lifecycle, scanTool] = await Promise.all([
+    const [lifecycle, scanTool, storage] = await Promise.all([
       fs.readFile(new URL("./lifecycle.ts", import.meta.url), "utf8"),
       fs.readFile(new URL("../../tools/programmatic-scan.ts", import.meta.url), "utf8"),
+      fs.readFile(new URL("./storage.ts", import.meta.url), "utf8"),
     ]);
-    const operations = lifecycle.match(
-      /export interface ProgrammaticLifecycleOperations \{([\s\S]*?)^\}/m,
+    expect(lifecycle).toContain("export type ProgrammaticLifecycleOperations = ProgrammaticStorageOperations;");
+    expect(lifecycle).toContain("readBoundedCandidate(");
+    expect(lifecycle).toContain("replaceBoundedFile(");
+    const operations = storage.match(
+      /export interface ProgrammaticStorageOperations \{([\s\S]*?)^\}/m,
     )?.[1];
 
     expect(
@@ -26,7 +30,7 @@ describe("A touched-files-only bloat audit confirms lifecycle rules are centrali
       "rename",
       "rm",
     ]);
-    expect(lifecycle).not.toMatch(
+    expect(`${lifecycle}\n${storage}`).not.toMatch(
       /\bclass\s+\w*(?:Database|Repository|Store|Storage)|\b(?:SELECT|INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE|DROP TABLE)\b/i,
     );
   });

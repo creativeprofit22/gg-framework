@@ -32,6 +32,7 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
     expect(profile.match(/function assessProgrammaticSetup\(/g)).toHaveLength(1);
     expect(profile.match(/function persistProgrammaticProfile\(/g)).toHaveLength(1);
     expect(profile.match(/operations\.rename\(/g)).toHaveLength(1);
+    expect(profile.match(/replaceBoundedFile\(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH, previousProfileTemporary,/g)).toHaveLength(1);
     expect(profile).toContain("compareConfigurationSnapshots(");
     expect(lifecycle).toContain("assessProgrammaticSetup(");
     expect(profile).not.toContain("CONFIG_FILE_NAMES");

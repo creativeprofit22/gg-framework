@@ -272,12 +272,15 @@ function setup(
 
 it("accepts only current bounded assessment events and ignores duplicates and retired runs", () => {
   const { hook, deps, getItems } = setup(undefined, { conversationId: "conversation", sessionId: "session" });
-  const identity = { conversationId: "conversation", sessionId: "session", sequence: 2 };
+  const identity = { conversationId: "conversation", sessionId: "session", sequence: 2, requestId: "request-1" };
   const assessment = { version: 1, mode: "setup", status: "unavailable", summary: "Unavailable",
     limitations: [], observations: [], coverage: [], deterministic: { status: "not-run", reason: "setup" } };
   const send = (data: Record<string, unknown>) => act(() => hook.result.current.handleEvent(ev("programmatic_assessment", data)));
   send({ ...identity, phase: "started" });
-  send({ ...identity, phase: "completed", assessment });
+  expect(deps.onProgrammaticAssessment).toHaveBeenLastCalledWith({ ...identity, phase: "started" });
+  send({ ...identity, phase: "completed", assessment: { ...assessment, lifecycle: { ...identity, requestId: "other" } } });
+  expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(1);
+  send({ ...identity, phase: "completed", assessment: { ...assessment, lifecycle: identity } });
   expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(2);
   send({ ...identity, phase: "completed", assessment });
   send({ ...identity, phase: "started" });

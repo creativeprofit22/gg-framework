@@ -10,6 +10,7 @@ import {
   configurationFingerprintV1Schema,
   programmaticLifecycleStateV1Schema,
   programmaticProfileEnvelopeV2Schema,
+  programmaticProfileEnvelopeV3Schema,
 } from "../core/programmatic/contracts.js";
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../core/programmatic/lifecycle.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
@@ -199,13 +200,13 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
   });
 
-  it("keeps an identical current approval a byte-preserving no-op in the lifecycle commit window", async () => {
+  it.each([2, 3] as const)("keeps an identical V%s approval a byte-preserving no-op in the lifecycle commit window", async (version) => {
     const root = await repository();
     await generateProfile(root);
     const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
-    const stored = programmaticProfileEnvelopeV2Schema.parse(
-      JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown,
-    );
+    const current = programmaticProfileEnvelopeV3Schema.parse(JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown);
+    const { historyPolicy: _policy, ...legacy } = current;
+    const stored = version === 3 ? current : programmaticProfileEnvelopeV2Schema.parse({ ...legacy, version: 2 });
     await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
     const proposal = await buildProgrammaticProfileProposal(root);
     let replacementResult: Awaited<ReturnType<typeof persistProgrammaticProfile>> | undefined;

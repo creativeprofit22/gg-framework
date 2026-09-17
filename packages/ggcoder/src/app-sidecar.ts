@@ -4603,7 +4603,7 @@ async function createSession(
         broadcastError("error", "queued prompt failed after opportunity request", error);
       });
     },
-    async (assessmentMode) => {
+    async (assessmentMode, assessmentRequestId) => {
       // The adapter already owns runClaim. Use the current session and its current
       // stop signal inside the ordinary run lifecycle, never a claiming wrapper.
       const owner = session;
@@ -4611,7 +4611,7 @@ async function createSession(
       let failure: unknown;
       await runAgent(assessmentMode === "setup" ? "Review setup" : "Check for opportunities", async () => {
         try {
-          outcome = await owner.assessProgrammatic(assessmentMode);
+          outcome = await owner.assessProgrammatic(assessmentMode, undefined, undefined, { assessmentRequestId });
         } catch (error) {
           failure = error;
           throw error;
@@ -4620,6 +4620,18 @@ async function createSession(
       if (failure) throw failure;
       if (!outcome) throw new Error("The assessment was cancelled before it started.");
       return outcome;
+    },
+    async (request) => {
+      const owner = session;
+      let review: Awaited<ReturnType<AgentSession["reviewDiscoveryCandidate"]>> | undefined;
+      let failure: unknown;
+      await runAgent("Review opportunity", async () => {
+        try { review = await owner.reviewDiscoveryCandidate(request); }
+        catch (error) { failure = error; throw error; }
+      });
+      if (failure) throw failure;
+      if (!review) throw new Error("The review was cancelled before it started.");
+      return review;
     },
   );
   const decisionSummaryService = new AppSidecarDecisionSummaryService(

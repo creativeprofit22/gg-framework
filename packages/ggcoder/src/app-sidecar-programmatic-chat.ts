@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
-import type { AgentSession } from "./core/agent-session.js";
-import { isProgrammaticAssessmentEvent, type ProgrammaticAssessment, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { stat } from "node:fs/promises";
+import { RecommendationHistoryReview } from "./core/programmatic/recommendation-history.js";
+import type { AgentSession } from "./core/agent-session.js";
+import type { DiscoveryReviewRequest, DiscoveryReview } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
+import { isProgrammaticAssessmentEvent, type ProgrammaticAssessment, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
@@ -37,7 +39,7 @@ export function bindProgrammaticAssessmentEvents(
   });
 }
 
-export type ProgrammaticChatAssessment = (mode: "setup" | "configured") => ReturnType<AgentSession["assessProgrammatic"]>;
+export type ProgrammaticChatAssessment = (mode: "setup" | "configured", requestId?: string) => ReturnType<AgentSession["assessProgrammatic"]>;
 
 function unavailableAssessment(mode: "setup" | "configured", deterministic: ProgrammaticAssessment["deterministic"]): ProgrammaticAssessment {
   return { version: 1, mode, status: "unavailable", summary: "Needs assessment unavailable; host settings and deterministic results remain independent.",
@@ -70,6 +72,7 @@ export class AppSidecarProgrammaticChat {
     proposal: ProgrammaticProfileProposalV1;
   } | null = null;
   private epoch = 0;
+  private readonly history = new RecommendationHistoryReview();
   private disposed = false;
   constructor(
     private readonly target: () => ProgrammaticChatTarget,
@@ -78,10 +81,12 @@ export class AppSidecarProgrammaticChat {
     private readonly implementations = engines,
     private readonly onSettled: () => void = () => {},
     private readonly assess?: ProgrammaticChatAssessment,
+    private readonly reviewCandidate?: (request: DiscoveryReviewRequest) => Promise<DiscoveryReview>,
   ) {}
 
   reset(): void {
     this.pending = null;
+    this.history.reset();
     this.epoch++;
   }
   dispose(): void {
@@ -92,10 +97,12 @@ export class AppSidecarProgrammaticChat {
   async handle(
     input: unknown,
   ): Promise<{ status: number; body: ProgrammaticChatResponse | { error: string } }> {
-    if (!isProgrammaticChatRequest(input))
+    if (!isProgrammaticChatRequest(input) || Buffer.byteLength(JSON.stringify(input), "utf8") > 2_048)
       return { status: 400, body: { error: "This opportunity request could not be read. Reopen Opportunities and try again." } };
     const { action } = input;
     const target = { ...this.target() };
+    const owner = JSON.stringify([target.identity, target.cwd]);
+    this.history.setOwner(owner);
     const fail = (status: number, error: string, reconcile = false) => ({
       status,
       body: {
@@ -115,8 +122,8 @@ export class AppSidecarProgrammaticChat {
       this.reset();
     if (this.disposed || !target.codeMode)
       return fail(403, "Opportunities are available only in Code mode.");
-    const mutates = ["approve-setup", "scan", "dismiss"].includes(action);
-    const requiresCodeMode = mutates || action === "inspect-setup";
+    const mutates = ["approve-setup", "scan", "dismiss", "history-inspect-decision", "history-inspect-correspondence", "history-apply"].includes(action);
+    const requiresCodeMode = mutates || action === "inspect-setup" || action === "discover" || action === "review-candidate";
     if (requiresCodeMode && target.planMode)
       return fail(403, "Plan mode only allows viewing existing results and details. Turn it off before reviewing setup or making changes.");
     // Hold the existing run claim through I/O, preventing prompt/reset/configuration races.
@@ -141,6 +148,32 @@ export class AppSidecarProgrammaticChat {
       if (!current()) return fail(409, "The project or chat changed. Reopen Opportunities to load its results.");
       let body: ProgrammaticChatResponse;
       switch (input.action) {
+        case "discover": {
+          const proposal = await this.implementations.inspect(target.cwd, { offerHistory: true }).catch(() => null);
+          if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
+          const mode = proposal?.configuration.status === "current" ? "configured" : "setup";
+          const assessment = this.assess ? (await this.assess(mode, input.requestId)).assessment
+            : unavailableAssessment(mode, mode === "setup" ? { status: "not-run", reason: "setup" } : { status: "unavailable", reason: "Assessment provider unavailable." });
+          if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
+          body = { version: 1, action: "discover", ok: true, assessment };
+          break;
+        }
+        case "review-candidate": {
+          if (!this.reviewCandidate) return fail(409, "Candidate review is unavailable in this host.");
+          const candidateReview = await this.reviewCandidate(input);
+          if (!current()) return fail(409, "The project or chat changed. Review was not retained.");
+          body = { version: 1, action: "review-candidate", ok: true, candidateReview };
+          break;
+        }
+        case "history-report":
+        case "history-detail":
+        case "history-inspect-decision":
+        case "history-inspect-correspondence":
+        case "history-apply": {
+          submitted = input.action === "history-apply";
+          body = await this.history.handle(input, target.cwd, owner, current);
+          break;
+        }
         case "report":
           body = {
             version: 1,
@@ -160,9 +193,9 @@ export class AppSidecarProgrammaticChat {
         case "inspect-setup": {
           this.pending = null;
           // A settings failure blocks approval, not the session's safe read-only assessment.
-          const proposal = await this.implementations.inspect(target.cwd).catch(() => null);
+          const proposal = await this.implementations.inspect(target.cwd, { offerHistory: true }).catch(() => null);
           if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
-          const assessment = this.assess ? (await this.assess("setup")).assessment
+          const assessment = this.assess ? (await this.assess("setup", input.requestId)).assessment
             : unavailableAssessment("setup", { status: "not-run", reason: "setup" });
           if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
           if (!proposal) {
@@ -178,6 +211,7 @@ export class AppSidecarProgrammaticChat {
             configuration: proposal.configuration,
             fingerprint: proposal.configurationFingerprint.sha256,
             profileJson: canonicalJson(proposal.profile),
+            ...(proposal.historyPolicy ? { historyPolicy: proposal.historyPolicy, expectedRecoveryDigest: proposal.expectedRecoveryDigest } : {}),
             routes: proposal.routes.map(({ opportunityId, resolution }) => ({
               id: opportunityId,
               route: {
@@ -209,7 +243,10 @@ export class AppSidecarProgrammaticChat {
             target.cwd,
             pending.proposal.configurationFingerprint,
             pending.proposal.profile,
-            { expectedPriorProfileDigest: pending.proposal.expectedPriorProfileDigest },
+            { expectedPriorProfileDigest: pending.proposal.expectedPriorProfileDigest,
+              historyPolicy: pending.proposal.historyPolicy, expectedRecoveryDigest: pending.proposal.expectedRecoveryDigest,
+              validateBeforeCommit: () => { if (!current()) throw new Error("Setup review owner changed."); },
+            },
           );
           if (!result.ok)
             return fail(409, result.changed ? result.detail : "The project settings changed. Choose Review setup to see the new settings before approving.", true);
@@ -219,7 +256,7 @@ export class AppSidecarProgrammaticChat {
         case "scan": {
           submitted = true;
           if (this.assess) {
-            const outcome = await this.assess("configured");
+            const outcome = await this.assess("configured", input.requestId);
             const facts = outcome.scanFacts;
             const changed = typeof facts === "object" && facts !== null && "changed" in facts && facts.changed === true;
             body = { version: 1, action: "scan", ok: true, changed, assessment: outcome.assessment };

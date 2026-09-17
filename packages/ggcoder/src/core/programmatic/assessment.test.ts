@@ -2,17 +2,51 @@ import { expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { isProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import type { AdvisoryReceipt } from "./advisory.js";
 import { ProgrammaticAssessmentCoordinator } from "./assessment.js";
 import { discoverCommands } from "../command-discovery.js";
 import { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
 
-const result = { version: 1, kind: "advisory", coverage: { status: "complete", scope: "Fixture" }, recommendations: [] };
+const result = { version: 2, kind: "advisory", coverage: { status: "complete", scope: "Fixture" }, recommendations: [] };
 const toolContext = () => ({ signal: new AbortController().signal, toolCallId: "fixture" });
 async function coordinator(mode: "setup" | "configured", tools: AgentTool[] = []) {
   const discovery = await discoverCommands(process.cwd(), { readReadiness: async () => "missing" });
   return new ProgrammaticAssessmentCoordinator(process.cwd(), buildProgrammaticAdvisoryContext({ version: 1 }, discovery), () => tools, { mode });
 }
 const tool = (name: string, output = "{}"): AgentTool => ({ name, description: name, parameters: z.object({}), execute: vi.fn(async () => output) });
+
+it.each(["retrieved", "lead", "failed", "cancelled"] as const)("attributes external evidence to the exact delivered receipt, not the first %s URL match", async (status) => {
+  const owner = await coordinator("setup");
+  const url = "https://example.com/repo", later = "2026-09-16T00:00:01.000Z";
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    const receipt = (id: string, state: AdvisoryReceipt["status"], revision: string, path: string, retrievedAt: string): AdvisoryReceipt => ({
+      id, status: state, tool: "research_corpus", toolCallId: id, retrievedAt,
+      external: { tool: "steroids", toolCallId: id, sourceUri: url, revision, path },
+    });
+    scope.turn.evidence.retain(receipt("first", status, "revision-one", "src/first.ts", "2026-09-16T00:00:00.000Z"));
+    scope.turn.evidence.retain(receipt("other-file", "retrieved", "revision-two", "src/first.ts", later));
+    if (status !== "retrieved") scope.turn.evidence.retain(receipt("not-delivered", status, "revision-two", "src/second.ts", later));
+    scope.turn.evidence.retain(receipt("matched", "retrieved", "revision-two", "src/second.ts", later));
+    const citation = { kind: "external-reference", basis: "observed", inspectedUrl: url, revision: "revision-two", location: { path: "src/second.ts" }, claim: "External source" };
+    const recommendation = { version: 2, kind: "advisory", outcome: "Review source", rationale: "Compare source", uncertainty: "Not verified",
+      workflow: { trigger: "Source changes", representativeCase: "New entry", inputs: ["Source"], currentProcess: ["Read source"], output: "Report",
+        successCheck: "Compare entries", affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read only",
+        repeatability: { basis: "inferred", explanation: "Source changes" } },
+      choice: { kind: "manual", steps: ["Review separately"] }, alternatives: [], evidence: { version: 1, items: [citation, { ...citation, basis: "assumed" }] } };
+    const submit = scope.tools.find((item) => item.name === "programmatic_advisory_result")!;
+    await submit.execute({ ...result, recommendations: [recommendation] }, toolContext());
+  });
+  expect(outcome.assessment.status).toBe("completed");
+  expect(outcome.assessment.observations).toEqual([{ basis: "observed", message: "External source", evidenceSources: ["matched"] }]);
+  expect(outcome.captured?.observations[0]!.evidence[0]).toEqual({ basis: "observed", summary: "External source", retrievedAt: later,
+    status: "delivered", freshness: "not-revalidated", external: { url, revision: "revision-two", location: { path: "src/second.ts" } } });
+  expect(outcome.captured?.observations[0]!.evidence[1]).toMatchObject({ basis: "assumed", status: "lead" });
+  expect(outcome.assessment.discovery?.candidates[0]).toMatchObject({ choice: "manual", nextStep: { available: false },
+    evidence: [{ basis: "observed" }, { basis: "assumed" }] });
+  expect(outcome.discoveryRecords?.[0]?.recommendation.choice.kind).toBe("manual");
+  expect(JSON.stringify(outcome.assessment)).not.toContain("recommendation\":");
+  expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
+});
 
 it("setup intersects local read/catalog/result and exact inspect-only profile; never grants mutation or discovery", async () => {
   const names = ["read", "find", "grep", "ls", "code_search", "code_nav", "command_information", "programmatic_profile", "programmatic_scan", "bash", "write", "edit", "tool_search", "web_fetch", "research_corpus", "programmatic_command_create"];
@@ -40,6 +74,8 @@ it.each(["setup", "configured"] as const)("%s can accept bounded advice without 
   expect(outcome.assessment.status).toBe("completed");
   expect(outcome.assessment.deterministic.status).toBe(mode === "setup" ? "not-run" : "unavailable");
   expect(outcome.advice).toContain("No supported recommendation");
+  expect(outcome.assessment.discovery?.candidates).toEqual([]);
+  expect(outcome.discoveryRecords).toEqual([]);
   expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
 });
 
@@ -115,6 +151,8 @@ it("cancellation stops the operation and closes scope without a callback or retr
   const failed = await coordinator("setup");
   const outcome = await failed.run(new AbortController().signal, async () => { throw new Error("secret"); });
   expect(outcome.assessment.status).toBe("incomplete");
+  expect(outcome.assessment.discovery).toBeUndefined();
+  expect(outcome.discoveryRecords).toBeUndefined();
   expect(JSON.stringify(outcome)).not.toContain("secret");
   expect(failed.scope.turn.active).toBe(false);
 });

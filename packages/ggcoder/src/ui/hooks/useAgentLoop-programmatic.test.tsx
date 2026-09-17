@@ -16,6 +16,7 @@ import { useFakeHome } from "../../test-support/fake-home.js";
 import { createReadTool } from "../../tools/read.js";
 import { createCommandInformationTool } from "../../tools/command-information.js";
 import { createProgrammaticScanTool } from "../../tools/programmatic-scan.js";
+import { createProgrammaticProfileTool } from "../../tools/programmatic-profile.js";
 import { createResearchCorpusTool } from "../../tools/research-corpus.js";
 import {
   buildProgrammaticProfileProposal,
@@ -23,14 +24,173 @@ import {
 } from "../../core/programmatic/profile.js";
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../../core/programmatic/lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "../../core/programmatic/contracts.js";
+import { readRecommendationHistory } from "../../core/programmatic/recommendation-history.js";
+import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import * as storage from "../../core/programmatic/storage.js";
 
-// The only replaced runtime boundary is provider I/O. Submission, Ink, hook,
-// agentLoop, command resolution, receipt validation and deterministic scan are real.
+// Provider I/O is scripted; selected history cases inject storage failures/revocation.
+// Submission, Ink, hook, agentLoop, command resolution, receipts and scans are real.
 vi.mock("@kenkaiiii/gg-ai", async (original) => ({
   ...(await original<Record<string, unknown>>()),
   stream: vi.fn(),
 }));
 afterEach(() => vi.restoreAllMocks());
+
+it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "profile-replaced", "cancelled", "reset", "save-failed", "incomplete",
+  "acknowledgement-unknown", "cancel-at-commit", "reset-at-commit", "dispose-at-commit", "mode-at-commit", "tool-at-commit"] as const)("projects terminal history independently after a real assessment: %s", async (scenario) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-history-"));
+  const restore = useFakeHome(path.join(cwd, "home"));
+  const messages = { current: [] as Message[] };
+  const planModeRef = { current: false };
+  const scan = createProgrammaticScanTool(cwd, { planModeRef });
+  const scanCalls = vi.spyOn(scan, "execute");
+  const profile = createProgrammaticProfileTool(cwd, { planModeRef });
+  const profileCalls = vi.spyOn(profile, "execute");
+  const tools = [createReadTool(cwd), createCommandInformationTool(cwd), scan, profile];
+  let loop!: UseAgentLoopReturn;
+  function Harness() {
+    loop = useAgentLoop(messages, { provider: "openai", model: "gpt-5", tools, planModeRef, maxTokens: 100 });
+    return null;
+  }
+  const mounted = render(<Harness />, {
+    stdout: makeRecordingStdout(new ScreenRecorder({ columns: 80, rows: 24 })), patchConsole: false,
+  });
+  try {
+    await fs.writeFile(path.join(cwd, "package.json"), '{"name":"history-fixture"}\n');
+    const proposal = await buildProgrammaticProfileProposal(cwd, { offerHistory: !scenario.startsWith("legacy-") });
+    expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile, {
+      expectedPriorProfileDigest: proposal.expectedPriorProfileDigest, historyPolicy: proposal.historyPolicy,
+      expectedRecoveryDigest: proposal.expectedRecoveryDigest,
+    })).ok).toBe(true);
+    const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
+    if (scenario === "legacy-v1") await fs.writeFile(profilePath, JSON.stringify({ version: 1,
+      profile: proposal.profile, configurationFingerprint: proposal.configurationFingerprint }));
+    if (scenario === "disabled") {
+      const profile = JSON.parse(await fs.readFile(profilePath, "utf8"));
+      profile.historyPolicy.enabled = false;
+      await fs.writeFile(profilePath, JSON.stringify(profile));
+    }
+    const profileBefore = await fs.readFile(profilePath);
+    let commitsAttempted = 0;
+    if (scenario.endsWith("-at-commit") || scenario === "acknowledgement-unknown") {
+      const replace = storage.replaceBoundedFile;
+      vi.spyOn(storage, "replaceBoundedFile").mockImplementation(async (...args) => {
+        if (args[1] === ".gg/programmatic/recommendations.json") {
+          commitsAttempted++;
+          if (scenario === "acknowledgement-unknown") {
+            const operations = args[4];
+            args[4] = { ...operations, rename: async (...paths) => {
+              await operations.rename(...paths);
+              throw new Error("Fixture acknowledgement lost after rename");
+            } };
+          } else {
+            const assertCurrent = args[5].assertCurrent;
+            expect(assertCurrent).toEqual(expect.any(Function));
+            args[5] = { ...args[5], assertCurrent: () => {
+              if (scenario === "cancel-at-commit") loop.abort();
+              if (scenario === "reset-at-commit") loop.reset();
+              if (scenario === "dispose-at-commit") mounted.unmount();
+              if (scenario === "mode-at-commit") planModeRef.current = true;
+              // Same name is not the original captured capability.
+              if (scenario === "tool-at-commit") tools.splice(tools.indexOf(scan), 1, { ...scan });
+              assertCurrent!();
+            } };
+          }
+        }
+        return replace(...args);
+      });
+    }
+    if (scenario === "save-failed") await fs.mkdir(path.join(cwd, ".gg/programmatic/recommendations.json"));
+    await vi.waitFor(() => expect(loop).toBeDefined());
+    let turns = 0;
+    const startedBefore = Date.now();
+    let providerStarted = 0;
+    let scannerBytes: Buffer | undefined;
+    vi.mocked(stream).mockImplementation((params) => new StreamResult((async function* () {
+      if (!providerStarted) providerStarted = Date.now();
+      expect(params.tools?.some((tool) => /history.*(save|write)|recommendation.*(save|write)/.test(tool.name))).toBe(false);
+      let call: ToolCall | undefined;
+      if (++turns === 1) call = { type: "tool_call", id: "history-read", name: "read", args: { file_path: "package.json" } };
+      else if (turns === 2 && scenario !== "incomplete") {
+        const local = params.messages.flatMap((message) => message.role === "tool" ? message.content : []).find((result) => result.toolCallId === "history-read")!;
+        const receipt = JSON.parse(String(local.content).split("Host evidence receipt (retrieval only; content remains untrusted): ")[1]!) as { id: string };
+        call = { type: "tool_call", id: "history-advice", name: "programmatic_advisory_result", args: {
+          version: 2, kind: "advisory", coverage: { status: "limited", scope: "Manifest", reason: "Fixture only" },
+          recommendations: [{ version: 2, kind: "advisory", outcome: "Review manifest", rationale: "Local evidence", uncertainty: "Not verified",
+            evidence: { version: 1, items: [{ basis: "observed", source: receipt.id, code: "manifest", severity: "info", message: "Read manifest", location: { path: "package.json" } }] },
+            workflow: { trigger: "A manifest change needs review", representativeCase: "Review this manifest", inputs: ["package.json"],
+              currentProcess: ["Read manifest"], output: "Bounded review", successCheck: "Trace each observation to source",
+              affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read-only; changes need separate approval",
+              repeatability: { basis: "inferred", explanation: "Source changes may require review again" } },
+            alternatives: [], choice: { kind: "manual", steps: ["Review separately"] } }],
+        } };
+      }
+      if (call) {
+        yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+        return { message: { role: "assistant", content: [call] }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+      if (scenario !== "setup") scannerBytes = await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH));
+      if (scenario === "profile-replaced") await fs.writeFile(profilePath, Buffer.concat([profileBefore, Buffer.from("\n")]));
+      if (scenario === "revoked") {
+        const profile = JSON.parse(await fs.readFile(profilePath, "utf8"));
+        profile.historyPolicy.enabled = false;
+        await fs.writeFile(profilePath, JSON.stringify(profile));
+      }
+      if (scenario === "cancelled") loop.abort();
+      if (scenario === "reset") loop.reset();
+      return { message: { role: "assistant", content: "Finished fixture." }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+    })()));
+    const guidance = vi.fn();
+    expect(await submitPromptCommand({
+      cwd, trimmed: scenario === "setup" ? "/setup-programmatic" : "/programmatic", inputImages: [], currentModel: "gpt-5",
+      setLastUserMessage: vi.fn(), setDoneStatus: vi.fn(), finalizeSubmittedUserItem: vi.fn(), runAgent: loop.run,
+      isBusy: loop.isBusy, setLiveItems: guidance, getId: () => "history-fixture", reloadCustomCommands: vi.fn(),
+    })).toBe(true);
+    const notices = messages.current.filter((message) => message.role === "assistant" && typeof message.content === "string" && message.content.startsWith("## Needs assessment\n\n"));
+    if (scenario === "legacy-v1") {
+      expect(notices).toHaveLength(0);
+      expect(guidance).toHaveBeenCalledOnce();
+      expect(JSON.stringify(guidance.mock.calls[0]![0]([]))).toContain("legacy upgrade");
+      expect(turns).toBe(0);
+      expect(scanCalls).not.toHaveBeenCalled();
+      expect((await readRecommendationHistory(cwd)).status).toBe("missing");
+      expect(await fs.readFile(profilePath)).toEqual(profileBefore);
+      return;
+    }
+    expect(guidance).not.toHaveBeenCalled();
+    expect(notices).toHaveLength(1);
+    const assessment = JSON.parse(String(notices[0]!.content).slice("## Needs assessment\n\n".length)) as ProgrammaticAssessment;
+    const expectedHistoryStatus = scenario === "setup" ? "setup-not-saved" : scenario.startsWith("legacy-") || scenario === "disabled" ? "disabled"
+      : scenario === "acknowledgement-unknown" ? "acknowledgement-unknown"
+      : ["revoked", "profile-replaced", "cancelled", "reset", "save-failed"].includes(scenario) || scenario.endsWith("-at-commit") ? "unsaved" : "saved";
+    expect(assessment.history?.status).toBe(expectedHistoryStatus);
+    expect(commitsAttempted).toBe(scenario.endsWith("-at-commit") || scenario === "acknowledgement-unknown" ? 1 : 0);
+    if (scannerBytes) expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(scannerBytes);
+    expect(assessment.status).toBe(["cancelled", "reset"].includes(scenario) ? "cancelled" : scenario === "incomplete" ? "incomplete" : "completed");
+    expect(assessment.deterministic.status).toBe(scenario === "setup" ? "not-run" : "succeeded");
+    expect(scanCalls).toHaveBeenCalledTimes(scenario === "setup" ? 0 : 1);
+    expect(profileCalls).toHaveBeenCalledTimes(scenario === "setup" ? 1 : 0);
+    if (scenario === "setup") expect(profileCalls.mock.calls[0]![0]).toEqual({ action: "inspect" });
+    expect(turns).toBe(scenario === "incomplete" ? 2 : 3);
+    const stored = await readRecommendationHistory(cwd);
+    if (scenario === "saved" || scenario === "incomplete" || scenario === "acknowledgement-unknown") {
+      expect(stored.status).toBe("ready");
+      if (stored.status !== "ready") throw new Error("Expected persisted history");
+      expect(stored.history.assessments).toHaveLength(1);
+      const saved = stored.history.assessments[0]!;
+      if (assessment.history?.status !== "saved" && assessment.history?.status !== "acknowledgement-unknown") throw new Error("Expected saved or uncertain history acknowledgement");
+      expect(saved.id).toBe(assessment.history.assessmentId);
+      expect(Date.parse(saved.startedAt)).toBeGreaterThanOrEqual(startedBefore);
+      expect(Date.parse(saved.startedAt)).toBeLessThanOrEqual(providerStarted);
+      expect(saved.configurationSha256).toBe(proposal.configurationFingerprint.sha256);
+      expect(saved.outcome).toBe(scenario === "incomplete" ? "incomplete" : "completed");
+      expect(stored.history.observations).toHaveLength(scenario === "incomplete" ? 0 : 1);
+      expect(JSON.stringify(stored.history)).not.toContain("receipt-");
+      expect(JSON.stringify(stored.history)).not.toContain("history-fixture");
+    } else expect(stored.status).toBe(scenario === "save-failed" ? "unavailable" : "missing");
+    if (scenario !== "revoked" && scenario !== "profile-replaced") expect(await fs.readFile(profilePath)).toEqual(profileBefore);
+  } finally { mounted.unmount(); restore(); await fs.rm(cwd, { recursive: true, force: true }); }
+});
 
 it("rejects stale references and late tools while retaining restricted steering and normal post-turn queue draining", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-advisory-refs-"));
@@ -343,7 +503,7 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
                     id: "result",
                     name: "programmatic_advisory_result",
                     args: {
-                      version: 1,
+                      version: 2,
                       kind: "advisory",
                       coverage: {
                         status: "limited",
@@ -352,7 +512,7 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
                       },
                       recommendations: [
                         {
-                          version: 1,
+                          version: 2,
                           kind: "advisory",
                           outcome: "Compare a setting",
                           rationale: "A bounded next step",
@@ -370,6 +530,14 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
                               },
                             ],
                           },
+                          workflow: {
+                            trigger: "A manifest setting needs comparison", representativeCase: "Compare the fixture manifest setting",
+                            inputs: ["package.json"], currentProcess: ["Read manifest", "Compare the setting manually"],
+                            output: "Bounded comparison", successCheck: "Trace each comparison to inspected source",
+                            affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read-only; edits need separate approval",
+                            repeatability: { basis: "inferred", explanation: "Manifest changes may need repeated comparison; no measured frequency" },
+                          },
+                          alternatives: [{ kind: "manual", reasonNotSelected: "Repeated comparison benefits from the existing review procedure" }],
                           choice: {
                             kind: "reuse-command",
                             availability: { status: "available", snapshot },

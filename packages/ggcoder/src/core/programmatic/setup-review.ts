@@ -45,7 +45,7 @@ export class ProgrammaticSetupReview {
     signal.throwIfAborted();
     if (this.disposed) throw new Error("Setup review is disposed.");
     const identity = await this.identity();
-    const proposal = await buildProgrammaticProfileProposal(this.options.cwd);
+    const proposal = await buildProgrammaticProfileProposal(this.options.cwd, { offerHistory: true });
     const currentIdentity = await this.identity();
     signal.throwIfAborted();
     if (this.disposed || epoch !== this.epoch || owner !== this.options.owner() || identity !== currentIdentity)
@@ -88,11 +88,11 @@ export class ProgrammaticSetupReview {
     const revalidate = async () => {
       assertCurrent();
       if (pending.identity !== await this.identity()) throw new Error("Setup project changed; inspect again.");
-      const current = await buildProgrammaticProfileProposal(this.options.cwd);
+      const current = await buildProgrammaticProfileProposal(this.options.cwd, { offerHistory: true });
       const bound = (proposal: ProgrammaticProfileProposalV1) => ({
         configuration: proposal.configurationFingerprint, profile: proposal.profile,
         prior: proposal.expectedPriorProfileDigest, snapshot: proposal.configurationSnapshot,
-        routes: proposal.routes,
+        routes: proposal.routes, historyPolicy: proposal.historyPolicy, recovery: proposal.expectedRecoveryDigest,
       });
       if (stableJson(bound(current)) !== stableJson(bound(pending.proposal)))
         throw new Error("Setup changed since inspection; inspect and review again.");
@@ -110,11 +110,13 @@ export class ProgrammaticSetupReview {
         profile: pending.proposal.profile,
         expectedPriorProfileDigest: pending.proposal.expectedPriorProfileDigest,
         routes: pending.proposal.routes,
+        historyPolicy: pending.proposal.historyPolicy,
+        expectedRecoveryDigest: pending.proposal.expectedRecoveryDigest,
       }, null, 2);
       if (Buffer.byteLength(preview, "utf8") > 64_000) throw new Error("Setup review is too large; approval is unavailable.");
       const response = await this.options.reviewer({ questions: [{
         id, kind: "choice", question: "Save these exact programmatic settings?",
-        detail: `This saves setup only. It does not scan, create commands, or approve command execution. Configuration and prior-file digests are change guards, not consent.\n\n${preview}`,
+        detail: `This saves setup only. History saving, when shown as enabled below, automatically saves future configured assessments; it does not save this setup assessment or import old transcripts. Existing settings remain usable if you decline the history upgrade. It does not scan, create commands, or approve command execution. Configuration and prior-file digests are change guards, not consent.\n\n${preview}`,
         allowOther: false, options: [
           { label: "Save reviewed setup", value: "save-setup", recommended: true },
           { label: "Do not save", value: "deny" },
@@ -128,6 +130,8 @@ export class ProgrammaticSetupReview {
         pending.proposal.profile, {
           ...persistence, signal: controller.signal,
           expectedPriorProfileDigest: pending.proposal.expectedPriorProfileDigest,
+          historyPolicy: pending.proposal.historyPolicy,
+          expectedRecoveryDigest: pending.proposal.expectedRecoveryDigest,
           onPreMutation: async (file) => { await persistence.onPreMutation?.(file); assertCurrent(); },
           validateBeforeCommit: async () => {
             if (pending.identity !== await this.identity()) throw new Error("Setup project changed before commit.");

@@ -43,7 +43,8 @@ export const commandInspectionInputSchema = z.strictObject({
 type Input = z.infer<typeof commandInspectionInputSchema>;
 export interface CommandInspectionOptions extends CommandDiscoveryOptions {
   localFilesystem?: boolean;
-  /** Host-owned current tool inventory, never accepted from model approval input. */
+  /** Host-owned, permission-filtered persistent inventory, independent of temporary turn
+   * execution restrictions. Never accepted from model approval input; grants no execution. */
   availableTools: () => readonly string[];
 }
 type Catalog = {
@@ -484,6 +485,17 @@ export class CommandCreationReview {
     // not this completed inspection's operation deadline.
     return { status: "proposal", handle: result.value.proposal.proposalId, preview: result.value.preview,
       creationAvailable: !!this.options.reviewCreation && !this.options.planModeRef?.current } as const;
+  }
+
+  /** Host-only completion evidence; handles and complete previews remain owned here. */
+  inspectionEvidence(text: string): (() => boolean) | undefined {
+    const pending = this.pending;
+    if (!pending || this.disposed) return;
+    try {
+      const result = JSON.parse(text);
+      if (result?.status === "proposal" && result.handle === pending.proposal.proposalId && result.preview === pending.preview)
+        return () => !this.disposed && this.pending === pending;
+    } catch { /* Invalid output cannot establish completion. */ }
   }
 
   /** Host-only continuation; an approved proposal is never returned as a tool result. */

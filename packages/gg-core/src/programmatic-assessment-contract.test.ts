@@ -10,6 +10,24 @@ const assessment: ProgrammaticAssessment = {
 };
 
 describe("bounded assessment display contract", () => {
+  it("bounds completion receipts and rejects mismatched event correlation", () => {
+    const lifecycle = { conversationId: "chat", sessionId: "session", sequence: 2, requestId: "request-1" };
+    const completed = { ...assessment, lifecycle };
+    expect(isProgrammaticAssessment(completed)).toBe(true);
+    expect(isProgrammaticAssessmentEvent({ ...lifecycle, phase: "started" })).toBe(true);
+    expect(isProgrammaticAssessmentEvent({ ...lifecycle, phase: "completed", assessment: completed })).toBe(true);
+    for (const patch of [{ sequence: 0 }, { sequence: 1.5 }, { sessionId: "" }, { conversationId: "x".repeat(257) },
+      { requestId: "" }, { requestId: "x".repeat(129) }, { requestId: "bad id" }, { approved: true }])
+      expect(isProgrammaticAssessment({ ...assessment, lifecycle: { ...lifecycle, ...patch } })).toBe(false);
+    for (const patch of [{ sequence: 3 }, { sessionId: "other" }, { conversationId: "other" }, { requestId: "other" }])
+      expect(isProgrammaticAssessmentEvent({ ...lifecycle, ...patch, phase: "completed", assessment: completed })).toBe(false);
+  });
+  it("adds history status without changing legacy assessment or scanner success", () => {
+    expect(isProgrammaticAssessment(assessment)).toBe(true);
+    const history = { status: "unsaved", assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742", reason: "Capacity exceeded" };
+    expect(isProgrammaticAssessment({ ...assessment, history })).toBe(true);
+    expect(isProgrammaticAssessment({ ...assessment, history: { ...history, approved: true } })).toBe(false);
+  });
   it("validates host lifecycle identity and rejects authority or recommendations on events", () => {
     const identity = { conversationId: "chat", sessionId: "session", sequence: 1 };
     const started = { ...identity, phase: "started" };

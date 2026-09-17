@@ -12,6 +12,7 @@ export default defineConfig({
     "src/project-task-contract.ts",
     "src/programmatic-chat-contract.ts",
     "src/programmatic-assessment-contract.ts",
+    "src/programmatic-recommendation-contract.ts",
     "src/project-notes-diagnostics.ts",
     "src/phase-binding-protocol.ts",
     "src/phase-start-protocol.ts",

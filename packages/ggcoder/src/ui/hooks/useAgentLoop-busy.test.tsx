@@ -218,7 +218,7 @@ async function assessmentFixture(run: (fixture: {
 }
 
 const emptyAdvice: ToolCall = { type: "tool_call", id: "advice", name: "programmatic_advisory_result", args: {
-  version: 1, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Bounded scripted provider" }, recommendations: [],
+  version: 2, kind: "advisory", coverage: { status: "limited", scope: "Fixture", reason: "Bounded scripted provider" }, recommendations: [],
 } };
 function scriptAssessment(calls: ToolCall[], inspect?: (params: Parameters<typeof stream>[0]) => void) {
   vi.mocked(stream).mockImplementation((params) => new StreamResult((async function* () {
@@ -388,8 +388,9 @@ it("saves exact setup only in a separate ordinary turn with a separate human rev
       await loop.run("Review saving these exact settings now.");
       expect(review).toHaveBeenCalledOnce();
       expect(JSON.parse(await fs.readFile(path.join(cwd, ".gg/programmatic/profile.json"), "utf8"))).toEqual({
-        version: 2, profile: proposal.profile, configurationFingerprint: proposal.configurationFingerprint,
+        version: 3, profile: proposal.profile, configurationFingerprint: proposal.configurationFingerprint,
         configurationSnapshot: proposal.configurationSnapshot,
+        historyPolicy: { version: 1, enabled: true },
       });
     } finally { reviewed.dispose(); }
   });

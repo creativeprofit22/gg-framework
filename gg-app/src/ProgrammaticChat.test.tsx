@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
 import {
   initialProgrammaticChatState,
@@ -8,6 +9,48 @@ import {
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
 const hash = "a".repeat(64);
+describe.each([false, true])("assessment refresh (transport interrupted: %s)", (interrupted) => {
+it.each(["incomplete", "cancelled", "unavailable", "completed"] as const)("shows delivered %s assessment as current while retaining stale candidate detail", (status) => {
+  const candidate = { assessmentId: "old", candidateId: "candidate", revision: 1,
+    choice: "missing-capability" as const, outcome: "Read records", rationale: "Repeated", uncertainty: "Sample only",
+    workflow: { trigger: "Change", representativeCase: "Record", inputs: [], currentProcess: [], output: "Report",
+      successCheck: "Known issue found", scope: "Repository", mutationBoundary: "Read-only",
+      repeatability: { basis: "inferred" as const, explanation: "Recurring records" } },
+    evidence: [], alternatives: [], risks: [], details: [], nextStep: { available: true, reason: "Review only" } };
+  const assessment: ProgrammaticAssessment = { version: 1, mode: "setup", status: "completed", summary: "Old assessment",
+    limitations: [], coverage: [], observations: [], deterministic: { status: "not-run", reason: "setup" },
+    discovery: { assessmentId: candidate.assessmentId, candidates: [candidate] } };
+  const identity = { sessionId: "session", conversationId: "chat", requestId: "refresh", sequence: 2 };
+  let state = programmaticChatReducer(initialProgrammaticChatState("one"), { type: "assessment", generation: "one",
+    event: { ...identity, sequence: 1, phase: "completed", assessment } });
+  state = programmaticChatReducer(state, { type: "select-candidate", source: "current", id: candidate.candidateId });
+  const { props, rerender } = fixture(state);
+  const show = () => rerender(<ProgrammaticChat {...props} state={state} />);
+  state = programmaticChatReducer(state, { type: "start", generation: "one", epoch: 1, operation: "discover", assessmentRequest: identity });
+  show();
+  expect(screen.getByText(/Previous assessment, retained for reference/)).toBeTruthy();
+  state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: { ...identity, phase: "started" } });
+  show();
+  expect(screen.getByText("Old assessment")).toBeTruthy();
+  expect(screen.getByText(/Previous assessment, retained for reference/)).toBeTruthy();
+  if (interrupted) {
+    state = programmaticChatReducer(state, { type: "error", generation: "one", epoch: 1, error: "Transport lost", reconcile: false });
+    show();
+    expect(screen.getByText(/Previous assessment, retained for reference/)).toBeTruthy();
+  }
+  const current = { ...assessment, status, summary: `Current ${status} assessment`, discovery: undefined };
+  state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: { ...identity, phase: "completed", assessment: current } });
+  state = programmaticChatReducer(state, { type: "response", generation: "one", epoch: 1,
+    response: { version: 1, action: "discover", ok: true, assessment: current } });
+  show();
+  expect(screen.getByRole("heading", { name: `Project assessment: ${status}` })).toBeTruthy();
+  expect(screen.getByText(current.summary)).toBeTruthy();
+  expect(screen.queryByText(/Previous assessment, retained for reference/)).toBeNull();
+  expect(screen.getByText(/Previous or historical evidence/)).toBeTruthy();
+  expect(screen.getByText("Success check: Known issue found")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement).disabled).toBe(true);
+});
+});
 afterEach(cleanup);
 it("renders execution evidence as inert text, not markup or clickable citations", () => {
   const message = "<b>Specialist claim</b> [citation](https://example.invalid)";
@@ -83,7 +126,66 @@ function fixture(overrides: Partial<ProgrammaticChatState> = {}) {
   };
   return { props, ...render(<ProgrammaticChat {...props} />) };
 }
+it("shows exact optional history consent without adding candidate actions", () => {
+  const { props } = fixture({ proposalApprovable: true, proposal: {
+    handle: hash, operation: "history-upgrade", fingerprint: hash, profileJson: '{"version":1,"scanners":[]}',
+    routes: [], exclusions: [], configurationInputs: [], historyPolicy: { version: 1, enabled: true }, expectedRecoveryDigest: null,
+    configuration: { status: "current", currentFingerprint: hash, refreshAvailable: false, baselineUnavailable: false, diagnostic: null, drift: null },
+  } });
+  expect(screen.getByText(/saves future configured assessments automatically/)).toBeTruthy();
+  expect(screen.getByText(/leave without approving/)).toBeTruthy();
+  expect(screen.getByLabelText("Exact history policy to save").textContent).toContain('"enabled": true');
+  fireEvent.click(screen.getByRole("button", { name: "Approve history saving" }));
+  expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "approve-setup", proposalHandle: hash });
+});
+
 describe("bounded project assessment (presentation only; no native IPC)", () => {
+  const assessmentId = "12345678-1234-4234-8234-123456789abc";
+  const reason = "<b>History storage unavailable</b> [details](https://example.invalid)";
+  const cases: { history: ProgrammaticAssessment["history"]; label: string | null }[] = [
+    { history: { status: "saved", assessmentId, historyRevision: 1 }, label: "Recommendation history: saved" },
+    { history: { status: "disabled" }, label: "Recommendation history: saving disabled" },
+    { history: { status: "setup-not-saved" }, label: "Recommendation history: setup assessment not saved" },
+    { history: { status: "unsaved", assessmentId, reason }, label: "Recommendation history: not saved" },
+    { history: { status: "acknowledgement-unknown", assessmentId, reason }, label: "Recommendation history: save acknowledgement unknown" },
+    { history: undefined, label: null },
+  ];
+  it.each(cases)("shows independent history status $history.status without changing deterministic selection", ({ history, label }) => {
+    const { props, rerender } = fixture();
+    const assessment: ProgrammaticAssessment = {
+      version: 1, mode: history?.status === "setup-not-saved" ? "setup" : "configured",
+      status: "completed", summary: "Assessment finished.", limitations: [], coverage: [], observations: [],
+      deterministic: history?.status === "setup-not-saved"
+        ? { status: "not-run", reason: "setup" }
+        : { status: "succeeded", enabledCount: 1, applicableCount: 1 },
+      ...(history ? { history } : {}),
+    };
+    const state = programmaticChatReducer(props.state, { type: "assessment", generation: "one",
+      event: { conversationId: "chat", sessionId: "session", sequence: 1, phase: "completed", assessment } });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect(screen.getByRole("heading", { name: "Project assessment: completed" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: `Deterministic checks: ${assessment.deterministic.status}` })).toBeTruthy();
+    expect(state.report).toBe(props.state.report);
+    expect(state.detail).toBe(props.state.detail);
+    expect(state.selectedId).toBe(hash);
+    expect(screen.getByRole("button", { name: /Review app packaging/ }).getAttribute("aria-pressed")).toBe("true");
+    const section = screen.queryByRole("region", { name: "Recommendation history" });
+    if (label) {
+      expect(section).not.toBeNull();
+      expect(within(section!).getByRole("heading", { name: label })).toBeTruthy();
+      expect(section!.closest("details")).toBeNull();
+      expect(section!.querySelector("button, a, b, script, iframe, img")).toBeNull();
+    } else expect(section).toBeNull();
+    if (history && "reason" in history) {
+      expect(within(section!).getByRole("alert").textContent).toBe(reason);
+    }
+    if (history?.status === "acknowledgement-unknown") {
+      expect(within(section!).getByText("History may already have been saved. Read current history before retrying the save. Do not rerun the assessment or its provider or scanner to retry saving.")).toBeTruthy();
+      expect(section!.textContent).not.toMatch(/rolled back|not saved/i);
+    }
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(props.onRun).not.toHaveBeenCalled();
+  });
   it.each(["completed", "incomplete", "unavailable", "cancelled"] as const)(
     "separates %s assessment from zero deterministic coverage without execution controls",
     (status) => {
@@ -211,7 +313,7 @@ describe("embedded opportunity review", () => {
     };
     rerender(<ProgrammaticChat {...props} state={state} />);
     expect(screen.queryByText("2–1 of 1")).toBeNull();
-    expect(screen.getByText("No opportunities on this page (1 total).")).toBeTruthy();
+    expect(screen.getByText("No deterministic results on this page (1 total).")).toBeTruthy();
     const previous = screen.getByRole("button", { name: "Previous opportunities" });
     expect((previous as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(previous);
@@ -290,7 +392,7 @@ describe("embedded opportunity review", () => {
             .getByRole("button", { name: /Surviving opportunity/ })
             .getAttribute("aria-pressed"),
         ).toBe("false");
-      else expect(screen.getByText(/No opportunities to show/)).toBeTruthy();
+      else expect(screen.getByText(/No deterministic results to show/)).toBeTruthy();
       if (total > 50) {
         expect(screen.getByText("51–51 of 51")).toBeTruthy();
         fireEvent.click(screen.getByRole("button", { name: "Previous opportunities" }));
@@ -937,7 +1039,7 @@ describe("embedded opportunity review", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review setup" }));
     expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "inspect-setup" });
     rerender(<ProgrammaticChat {...props} state={empty} />);
-    expect(screen.getByText(/No opportunities to show/)).toBeTruthy();
+    expect(screen.getByText(/No deterministic results to show/)).toBeTruthy();
     rerender(
       <ProgrammaticChat
         {...props}

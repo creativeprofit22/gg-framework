@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -363,7 +364,7 @@ function tryStartNativeFfmpeg(ffplayBin: string, url: string): ChildProcess | nu
         "audiotoolbox",
         "-",
       ],
-      { detached: false, stdio: ["pipe", "ignore", "ignore"] },
+      { env: withoutQwenRuntimeSecret(), detached: false, stdio: ["pipe", "ignore", "ignore"] },
     );
     if (!child.stdin) {
       terminateChild(child);
@@ -410,7 +411,7 @@ function tryPlayOnWindowsHost(station: RadioStation): ChildProcess | null {
       detached: false,
       stdio: "ignore",
       env: {
-        ...process.env,
+        ...withoutQwenRuntimeSecret(),
         GG_RADIO_URL: station.url,
         GG_RADIO_VOLUME: String(currentVolume / 100),
         WSLENV:
@@ -468,6 +469,7 @@ export function playRadio(stationId: string): PlayResult {
       const child =
         nativeFfmpeg ??
         spawn(bin, playerArgs, {
+          env: withoutQwenRuntimeSecret(),
           // Stay in the sidecar's process group so Rust teardown and the parent
           // watchdog cannot leave audio playing after GG Coder closes.
           detached: false,

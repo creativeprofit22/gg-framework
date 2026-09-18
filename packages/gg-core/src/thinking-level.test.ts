@@ -8,10 +8,31 @@ import {
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
+  clampThinkingLevel,
+  resolveInitialThinkingLevel,
 } from "./thinking-level.js";
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
 
 describe("thinking-level helpers", () => {
+  it("keeps Qwen Cloud GLM 5.3 always on when restoring disabled preferences", () => {
+    const model = "qwen-cloud/glm-5.3";
+    expect(clampThinkingLevel("qwen-cloud", model, undefined)).toBe("high");
+    expect(resolveInitialThinkingLevel("qwen-cloud", model, false, "max")).toBe("high");
+    expect(resolveInitialThinkingLevel("qwen-cloud", model, undefined, undefined)).toBe("high");
+    expect(resolveInitialThinkingLevel("qwen-cloud", model, true, "high")).toBe("high");
+    expect(getNextThinkingLevel("qwen-cloud", model, "max")).toBe("low");
+    expect(resolveInitialThinkingLevel("glm", "glm-5.3", false, "max")).toBeUndefined();
+  });
+
+  it("normalizes Qwen Cloud binary preferences without exposing an effort ladder", () => {
+    const model = "qwen-cloud/qwen3.7-plus";
+    expect(getSupportedThinkingLevels("qwen-cloud", model)).toEqual(["high"]);
+    expect(clampThinkingLevel("qwen-cloud", model, "max")).toBe("high");
+    expect(getNextThinkingLevel("qwen-cloud", model, undefined)).toBe("high");
+    expect(getNextThinkingLevel("qwen-cloud", model, "high")).toBeUndefined();
+    expect(resolveInitialThinkingLevel("qwen-cloud", model, false, "high")).toBeUndefined();
+  });
+
   it("cycles GPT-6 Astra through the full six-rung ladder up to ultra", () => {
     expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
       "low",

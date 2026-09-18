@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { Badge } from "./Badge";
+import { QwenCloudConnectionForm } from "./QwenCloudConnectionForm";
 import {
   authApiKey,
   authOAuthStart,
@@ -41,6 +42,33 @@ interface Props {
  * the provider needs one). Mirrors `ggcoder login`.
  */
 export function ProviderLoginModal({
+  provider,
+  onClose,
+  onChanged,
+  onOpenHfPull,
+}: Props): React.ReactElement {
+  if (provider.value === "qwen-cloud") {
+    return (
+      <Modal
+        title="Connect Qwen Cloud (Token Plan)"
+        onClose={onClose}
+        className="qwen-connection-modal"
+      >
+        <QwenCloudConnectionForm onChanged={onChanged} />
+      </Modal>
+    );
+  }
+  return (
+    <GenericProviderLoginModal
+      provider={provider}
+      onClose={onClose}
+      onChanged={onChanged}
+      onOpenHfPull={onOpenHfPull}
+    />
+  );
+}
+
+function GenericProviderLoginModal({
   provider,
   onClose,
   onChanged,

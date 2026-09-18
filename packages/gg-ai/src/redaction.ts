@@ -58,6 +58,8 @@ export function redactText(text: string, options: RedactionOptions = {}): string
   result = result.replace(/\b(bearer|basic)\s+[A-Za-z0-9+/_.=-]{8,}/gi, `$1 ${REDACTED}`);
   // Cookie headers are security-sensitive as a whole; avoid trying to infer safe cookie names.
   result = result.replace(/\b(cookie|set-cookie)(\s*[:=]\s*)[^\r\n]+/gi, `$1$2${REDACTED}`);
+  // Token Plan keys may have short suffixes; redact even without an env snapshot.
+  result = result.replace(/\bsk-sp-[A-Za-z0-9_-]+/g, REDACTED);
   // JWTs and well-known provider/repository token prefixes.
   result = result.replace(
     /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g,

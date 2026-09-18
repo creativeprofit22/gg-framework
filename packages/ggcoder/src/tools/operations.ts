@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { withoutQwenRuntimeSecret } from "./safe-env.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants as fsConstants, createReadStream, existsSync, type ReadStream } from "node:fs";
 import path from "node:path";
@@ -163,7 +164,7 @@ export const localProcessLifecycle: ProcessLifecycleAdapter = {
   spawn: (command, args, options) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: options.env,
+      env: withoutQwenRuntimeSecret(options.env),
       detached: options.detached,
       stdio: options.stdio as Parameters<typeof spawn>[2] extends { stdio: infer S } ? S : never,
     });

@@ -63,7 +63,7 @@ function toKimiK3Effort(level: ThinkingLevel): KimiK3Effort {
 // - DeepSeek / SiliconFlow: `prompt_cache_hit_tokens`
 // - OpenAI / Zhipu (GLM) / MiniMax / Qwen / Mistral / xAI: standard
 //   `prompt_tokens_details.cached_tokens`
-function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
+export function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
@@ -626,7 +626,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
  * that the streaming path would produce. Emits one large delta per field so
  * the agent loop consumer observes identical behaviour to streaming mode.
  */
-function* synthesizeEventsFromCompletion(
+export function* synthesizeEventsFromCompletion(
   completion: OpenAI.ChatCompletion,
   thinkingEnabled: boolean,
   endpointKey: string,
@@ -679,7 +679,7 @@ function* synthesizeEventsFromCompletion(
 }
 
 /** Convert a non-streaming OpenAI ChatCompletion into our StreamResponse shape. */
-function completionToResponse(
+export function completionToResponse(
   completion: OpenAI.ChatCompletion,
   endpointKey: string,
 ): StreamResponse {

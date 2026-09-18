@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -140,7 +141,7 @@ export function openBrowser(url: string): void {
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
 
-  execFile(cmd, [url], () => {
+  execFile(cmd, [url], { env: withoutQwenRuntimeSecret() }, () => {
     // Ignore errors — user can copy URL manually
   });
 }

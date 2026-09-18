@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -25,6 +26,7 @@ export async function captureVerificationSnapshot(
     const git = async (args: string[]) =>
       (
         await exec("git", args, {
+          env: withoutQwenRuntimeSecret(),
           cwd,
           timeout: Math.max(1, deadline - Date.now()),
           maxBuffer: 2 * 1024 * 1024,

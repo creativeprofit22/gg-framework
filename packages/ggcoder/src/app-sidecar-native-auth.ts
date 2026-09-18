@@ -1,6 +1,12 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 
+export const NATIVE_MANAGED_AUTH_PROVIDERS = new Set(["azure", "qwen-cloud"]);
+
+export function isNativeManagedAuthProvider(provider: string): boolean {
+  return NATIVE_MANAGED_AUTH_PROVIDERS.has(provider);
+}
+
 /** Native release builds clear both flags. This changes auth only, never session roots. */
 export function nativeDevAuthFile(defaultFile: string, env: NodeJS.ProcessEnv = process.env): string {
   if (env.GG_APP_NATIVE_DEBUG_AUTH_ALLOWED !== "1" || !env.GG_APP_DEV_AUTH_FILE) return defaultFile;

@@ -283,6 +283,7 @@ export function createSubAgentTool(
             rl.close();
 
             const canFallback =
+              useProvider !== "qwen-cloud" &&
               model !== parentModel &&
               code !== 0 &&
               !textOutput &&

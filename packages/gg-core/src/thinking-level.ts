@@ -1,4 +1,8 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import {
+  getQwenCloudThinkingLevels,
+  normalizeQwenCloudThinking,
+} from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
@@ -101,6 +105,7 @@ export function getSupportedThinkingLevels(
   provider: Provider,
   model: string,
 ): readonly ThinkingLevel[] {
+  if (provider === "qwen-cloud") return getQwenCloudThinkingLevels(model);
   const modelInfo = getModel(model);
   if (modelInfo && !modelInfo.supportsThinking) return [];
 
@@ -176,6 +181,12 @@ export function getNextThinkingLevel(
   current: ThinkingLevel | undefined,
 ): ThinkingLevel | undefined {
   const supportedLevels = getSupportedThinkingLevels(provider, model);
+  if (provider === "qwen-cloud") {
+    const index = current ? supportedLevels.indexOf(current) : -1;
+    const next = supportedLevels[index + 1];
+    if (!next && normalizeQwenCloudThinking(model, undefined)) return supportedLevels[0];
+    return normalizeQwenCloudThinking(model, next);
+  }
   const shouldCycleLevels =
     isOpenAIGptModel(provider, model) ||
     isAnthropicAdaptiveModel(provider, model) ||
@@ -204,6 +215,7 @@ export function clampThinkingLevel(
   model: string,
   current: ThinkingLevel | undefined,
 ): ThinkingLevel | undefined {
+  if (provider === "qwen-cloud") return normalizeQwenCloudThinking(model, current);
   if (!current || isThinkingLevelSupported(provider, model, current)) return current;
   return getNextThinkingLevel(provider, model, undefined);
 }
@@ -216,6 +228,6 @@ export function resolveInitialThinkingLevel(
   enabled: boolean | undefined,
   savedLevel: ThinkingLevel | undefined,
 ): ThinkingLevel | undefined {
-  if (!enabled) return undefined;
+  if (!enabled) return clampThinkingLevel(provider, model, undefined);
   return clampThinkingLevel(provider, model, savedLevel ?? getMaxThinkingLevel(model));
 }

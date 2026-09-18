@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import { isUnattendedWorker } from "../core/provider-execution-policy.js";
 import { isModelUnavailableError } from "../tools/subagent.js";
 import {
   boundSubAgentOutput,
@@ -167,6 +168,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
     const { fallbackModel: _fallbackModel, childSessionPath, ...sessionOptions } = options;
     const next = new AgentSession({
       ...sessionOptions,
+      unattended: isUnattendedWorker(),
       maxTurns: 50,
       maxTurnExtensions: SUB_AGENT_MAX_TURN_EXTENSIONS,
       transient: false,
@@ -206,6 +208,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
           // below with one bounded summary turn using that same context.
         } else if (
           fallbackModel &&
+          initializeOptions?.provider !== "qwen-cloud" &&
           !controller.signal.aborted &&
           !output &&
           !producedToolCall &&

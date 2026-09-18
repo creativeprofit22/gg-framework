@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { log } from "../core/logger.js";
@@ -188,6 +189,7 @@ function snapshotDescendantsSync(pid: number, options: ProcessTreeKillOptions, m
   try {
     const source = msysPsPath ? msysSnapshotCommand(msysPsPath, options.env) : { file: POSIX_PS_PATH, args: POSIX_PS_ARGUMENTS };
     const result = (options.spawnSync ?? spawnSync)(source.file, source.args, {
+      env: withoutQwenRuntimeSecret(),
       encoding: "utf8",
       timeout: msysPsPath ? options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS : options.posixPsTimeoutMs ?? DEFAULT_POSIX_PS_TIMEOUT_MS,
       maxBuffer: options.posixPsOutputBytes ?? DEFAULT_POSIX_PS_OUTPUT_BYTES,
@@ -216,6 +218,7 @@ async function snapshotDescendantsAsync(
   try {
     const source = msysPsPath ? msysSnapshotCommand(msysPsPath, options.env) : { file: POSIX_PS_PATH, args: POSIX_PS_ARGUMENTS };
     helper = (options.spawn ?? spawn)(source.file, source.args, {
+      env: withoutQwenRuntimeSecret(),
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -458,6 +461,7 @@ export function killProcessTree(
   if (originalProcessExited(target)) return;
   try {
     const result = (options.spawnSync ?? spawnSync)(executable, TASKKILL_TREE_ARGUMENTS(pid), {
+      env: withoutQwenRuntimeSecret(),
       stdio: "ignore",
       windowsHide: true,
       timeout: options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS,
@@ -555,6 +559,7 @@ export async function killProcessTreeAsync(
   let killer: ReturnType<typeof spawn>;
   try {
     killer = (options.spawn ?? spawn)(executable, TASKKILL_TREE_ARGUMENTS(pid), {
+      env: withoutQwenRuntimeSecret(),
       stdio: "ignore",
       windowsHide: true,
     });
@@ -637,6 +642,7 @@ export function reapProcessWrapper(
   const executable = resolveWindowsTaskkillPath(options.env);
   try {
     const result = (options.spawnSync ?? spawnSync)(executable, TASKKILL_PROCESS_ARGUMENTS(pid), {
+      env: withoutQwenRuntimeSecret(),
       stdio: "ignore",
       windowsHide: true,
       timeout: options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS,

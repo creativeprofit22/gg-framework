@@ -2,6 +2,9 @@
 export { stream, localWireModelId } from "./stream.js";
 export { codexRequestProfile } from "./providers/openai-codex-request.js";
 
+// Preparatory provider policy (does not register a provider)
+export * from "./qwen-cloud-policy.js";
+
 // Provider registry
 export { providerRegistry } from "./provider-registry.js";
 export type { ProviderStreamFn, ProviderEntry } from "./provider-registry.js";

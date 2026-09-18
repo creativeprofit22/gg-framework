@@ -4,6 +4,7 @@ import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamAzureOpenAIResponses } from "./providers/azure-openai-responses.js";
 import { streamOpenAI } from "./providers/openai.js";
+import { streamQwenCloud } from "./providers/qwen-cloud.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { streamGemini } from "./providers/gemini.js";
 import { providerRegistry } from "./provider-registry.js";
@@ -38,6 +39,15 @@ const GROK_CLI_PROXY_HOST = "cli-chat-proxy.grok.com";
 const GROK_CLI_VERSION = process.env.GROK_CLI_VERSION ?? "0.2.101";
 
 // ── Register built-in providers ────────────────────────────
+
+providerRegistry.register("qwen-cloud", {
+  // Only this dedicated runtime variable may supply ambient Token Plan auth.
+  stream: (options) =>
+    streamQwenCloud({
+      ...options,
+      apiKey: options.apiKey ?? process.env.QWEN_CLOUD_TOKEN_PLAN_KEY,
+    }),
+});
 
 providerRegistry.register("anthropic", {
   stream: (options) => streamAnthropic(options),

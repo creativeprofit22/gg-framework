@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { assertProviderExecutionAllowed, runUnattended } from "../../core/provider-execution-policy.js";
 import { prepareTerminalProgrammaticAssessment, type TerminalProgrammaticAssessment } from "./terminal-programmatic-assessment.js";
 import { NotLoggedInError } from "../../core/auth-storage.js";
 import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
@@ -220,6 +221,7 @@ export interface StreamSnapshot {
 
 /** Host-resolved built-in invocation metadata, never inferred from model/prompt text. */
 export interface AgentInvocationOptions {
+  unattended?: boolean;
   programmaticAssessment?: TerminalProgrammaticAssessment;
 }
 
@@ -513,6 +515,7 @@ export function useAgentLoop(
 
   const run = useCallback(
     async (userContent: UserContent, invocation?: AgentInvocationOptions) => {
+      assertProviderExecutionAllowed(options.provider, invocation?.unattended);
       if (disposedRef.current) throw new Error("Terminal loop is disposed.");
       if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
       runOwnedRef.current = true;
@@ -520,7 +523,7 @@ export function useAgentLoop(
       let assessmentController: AbortController | undefined;
       let refreshAssessmentPrompt: (() => string) | undefined;
       /** Run a single user message through the agent loop. Returns true if aborted. */
-      const runSingle = async (
+      const runSingleInternal = async (
         content: UserContent,
         credentialOpts?: { forceRefresh?: boolean; rejectedToken?: string },
       ): Promise<boolean> => {
@@ -1314,7 +1317,13 @@ export function useAgentLoop(
           onComplete?.(newMsgs);
         }
         return wasAborted;
-      }; // end runSingle
+      }; // end runSingleInternal
+      // Reconstitute explicit host intent after remounts. Tool execution and child
+      // worker creation inherit this context, but ordinary interactive runs do not.
+      const runSingle: typeof runSingleInternal = (...args) =>
+        invocation?.unattended
+          ? runUnattended(() => runSingleInternal(...args))
+          : runSingleInternal(...args);
 
       try {
         if (invocation?.programmaticAssessment) {

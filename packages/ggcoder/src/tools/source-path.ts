@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { log } from "../core/logger.js";
+import { withoutQwenRuntimeSecret } from "./safe-env.js";
 
 const SOURCE_PATH_TIMEOUT_MS = 120_000;
 const MAX_STDERR_CHARS = 10_000;
@@ -145,7 +146,7 @@ function getBundledOpenSrcBinPath(): string {
 
 function getOpenSrcEnv(): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...withoutQwenRuntimeSecret(),
     TERM: process.env.TERM ?? "dumb",
   };
 }

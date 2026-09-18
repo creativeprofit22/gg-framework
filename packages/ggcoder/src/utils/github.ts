@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 
 /**
@@ -19,13 +20,18 @@ export function parseGitHubSlug(remoteUrl: string): string | null {
 /** The `owner/repo` slug of the cwd's `origin` remote, or null when absent/non-GitHub. */
 export function getGitHubRepoSlug(cwd: string): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 2000 }, (error, stdout) => {
-      if (error) {
-        resolve(null);
-        return;
-      }
-      resolve(parseGitHubSlug(stdout));
-    });
+    execFile(
+      "git",
+      ["remote", "get-url", "origin"],
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
+      (error, stdout) => {
+        if (error) {
+          resolve(null);
+          return;
+        }
+        resolve(parseGitHubSlug(stdout));
+      },
+    );
   });
 }
 
@@ -44,7 +50,7 @@ function ghSearchTotalCount(slug: string, qualifier: string): Promise<number> {
         "--jq",
         ".total_count",
       ],
-      { timeout: 10000 },
+      { env: withoutQwenRuntimeSecret(), timeout: 10000 },
       (error, stdout) => {
         if (error) {
           reject(error);

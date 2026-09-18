@@ -331,8 +331,9 @@ export interface AgentOptions {
   promptCacheKey?: StreamOptions["promptCacheKey"];
   /** Override the User-Agent sent with OAuth-authenticated Anthropic requests. */
   userAgent?: StreamOptions["userAgent"];
-  /** Extra HTTP headers attached to every model request (e.g. Kimi For Coding
-   *  client-identity headers). Merged into the underlying SDK default headers. */
+  /** Extra HTTP headers for the OpenAI-compatible Chat Completions adapter
+   *  (e.g. Kimi For Coding client-identity headers). Forwarded to
+   *  StreamOptions.defaultHeaders with the same provider-specific limitations. */
   defaultHeaders?: StreamOptions["defaultHeaders"];
   /** OpenAI service tier for latency-sensitive first-party API requests. */
   serviceTier?: StreamOptions["serviceTier"];

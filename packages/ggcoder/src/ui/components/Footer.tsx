@@ -1,6 +1,7 @@
 import React from "react";
 import { Text, Box } from "ink";
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { getQwenCloudCapability, getQwenCloudThinkingLabel } from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { getContextWindow, type ContextWindowOptions } from "../../core/model-registry.js";
@@ -125,7 +126,10 @@ const ShimmerLabel: React.FC<{
   );
 };
 
-export function getThinkingFooterLabel(thinkingLevel: ThinkingLevel | undefined): string {
+export function getThinkingFooterLabel(thinkingLevel: ThinkingLevel | undefined, model?: string): string {
+  if (model && getQwenCloudCapability(model)) {
+    return getQwenCloudThinkingLabel(model, thinkingLevel ?? null);
+  }
   return thinkingLevel ? `Thinking ${thinkingLevel}` : "Thinking off";
 }
 
@@ -187,7 +191,7 @@ export function doesFooterFitOnOneLine({
   const displayPath = parts.length > 0 ? parts[parts.length - 1] : cwd;
   const contextPct = getFooterContextPercent(model, tokensIn, contextWindowOptions);
   const modelName = getShortModelName(model);
-  const thinkingText = getThinkingFooterLabel(thinkingLevel);
+  const thinkingText = getThinkingFooterLabel(thinkingLevel, model);
   const planText = planMode ? "Plan on" : "Plan off";
   const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
   const rightLen = getFooterRightLength({
@@ -257,9 +261,9 @@ export function Footer({
     }
   }
 
-  // Thinking labels. Show the actual thinking tier when on (`Thinking xhigh`) so users see what they're
-  // paying for. Off is the only state that stays generic.
-  const thinkingText = getThinkingFooterLabel(thinkingLevel);
+  // Effort models show their tier; binary Qwen models show on/off, not the
+  // internal token used to represent enabled thinking.
+  const thinkingText = getThinkingFooterLabel(thinkingLevel, model);
   const planText = planMode ? "Plan on" : "Plan off";
   const thinkingColor = getThinkingColor(thinkingLevel, theme);
   const reducedMotion = useReducedMotion();

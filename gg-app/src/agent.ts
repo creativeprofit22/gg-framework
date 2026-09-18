@@ -1525,7 +1525,17 @@ export interface AuthMethodGuidance {
   requires?: string;
 }
 
+import type { QwenCloudConnectionStatus } from "@kenkaiiii/gg-core";
+
+export type {
+  QwenCloudConnectionStatus,
+  QwenCloudConnectionResult,
+  QwenCloudConnectionErrorCode,
+} from "@kenkaiiii/gg-core";
+
 export interface AuthProvider {
+  nativeManaged?: boolean;
+  qwenCloudConnection?: QwenCloudConnectionStatus;
   value: string;
   label: string;
   description: string;
@@ -1566,7 +1576,22 @@ export interface AuthProvider {
 export async function authStatus(): Promise<AuthProvider[]> {
   try {
     const res = await invoke<{ providers: AuthProvider[] }>("app_auth_status");
-    return res.providers ?? [];
+    const { qwenCloudConnection } = await import("./qwen-cloud-connection");
+    const qwen = await qwenCloudConnection("status");
+    const connected = qwen.ok && qwen.status.credential === "saved";
+    return [
+      ...(res.providers ?? []).filter((provider) => provider.value !== "qwen-cloud"),
+      {
+        value: "qwen-cloud",
+        label: "Qwen Cloud (Token Plan)",
+        description: "Qwen, GLM and DeepSeek through Qwen Cloud Token Plan",
+        methods: ["apikey"],
+        connected,
+        connectedMethods: connected ? ["apikey"] : [],
+        nativeManaged: true,
+        ...(qwen.ok ? { qwenCloudConnection: qwen.status } : {}),
+      },
+    ];
   } catch (e) {
     await logError(`app_auth_status failed: ${String(e)}`);
     return [];
@@ -1580,6 +1605,7 @@ export async function authStatus(): Promise<AuthProvider[]> {
  * Throws with a user-facing message on error.
  */
 export async function authApiKey(provider: string, key: string, variant?: string): Promise<void> {
+  if (provider === "qwen-cloud") throw new Error("Use the native Qwen Cloud connection form.");
   await invoke("app_auth_apikey", { provider, key, variant });
 }
 
@@ -1653,6 +1679,7 @@ export async function answerAskUser(
  * to disconnect the provider entirely.
  */
 export async function authLogout(provider: string, method?: AuthMethod): Promise<void> {
+  if (provider === "qwen-cloud") throw new Error("Use the native Qwen Cloud connection form.");
   await invoke("app_auth_logout", { provider, method });
 }
 

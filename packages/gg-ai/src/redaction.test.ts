@@ -36,6 +36,18 @@ describe("redactText", () => {
   });
 });
 
+describe("Qwen Token Plan redaction", () => {
+  it("redacts isolated keys and dedicated environment values", () => {
+    const key = "sk-sp-fake-redaction-canary";
+    expect(redactText(`upstream echoed ${key}`)).toBe(`upstream echoed ${REDACTION_MARKER}`);
+    expect(environmentSecrets({ QWEN_CLOUD_TOKEN_PLAN_KEY: key })).toContain(key);
+    expect(redactValue({ QWEN_CLOUD_TOKEN_PLAN_KEY: key, error: key })).toEqual({
+      QWEN_CLOUD_TOKEN_PLAN_KEY: REDACTION_MARKER,
+      error: REDACTION_MARKER,
+    });
+  });
+});
+
 describe("environmentSecrets", () => {
   it("collects only long values under sensitive names", () => {
     expect(

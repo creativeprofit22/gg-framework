@@ -3,6 +3,7 @@ import type { z } from "zod";
 // ── Providers ──────────────────────────────────────────────
 
 export type Provider =
+  | "qwen-cloud"
   | "anthropic"
   | "xiaomi"
   | "openai"
@@ -336,7 +337,9 @@ export interface StreamOptions {
   clearToolUses?: boolean;
   /** Custom fetch implementation. Useful in non-Node environments (e.g. Expo/React Native)
    *  where the default `globalThis.fetch` doesn't support streaming properly.
-   *  Passed directly to the underlying provider SDK. */
+   *  - Passed directly to the underlying provider SDK where supported.
+   *  - Qwen Cloud Token Plan rejects caller-provided fetch implementations because
+   *    it owns a fixed-endpoint, no-redirect transport boundary. */
   fetch?: typeof globalThis.fetch;
   /** Whether the target model supports image input. When false, image content
    *  in user messages and tool_result messages is downgraded to a text placeholder
@@ -358,9 +361,13 @@ export interface StreamOptions {
    *  version should pass it here. Ignored for non-Anthropic providers and for
    *  Anthropic requests using a regular API key. */
   userAgent?: string;
-  /** Extra HTTP headers attached to every model request. Used by providers
-   *  whose endpoint gates on client identity (e.g. Kimi For Coding requires a
-   *  `User-Agent: kimi-code-cli/...` and `X-Msh-*` device headers). Merged
-   *  into the underlying SDK's default headers. */
+  /** Extra HTTP headers merged into SDK default headers by the OpenAI-compatible
+   *  Chat Completions adapter only (e.g. Kimi For Coding client-identity headers).
+   *  - Supported built-in routes: OpenAI without accountId, Xiaomi, GLM, Moonshot
+   *    (including Kimi For Coding), DeepSeek, OpenRouter, Hugging Face, Sakana,
+   *    xAI, and local OpenAI-compatible servers.
+   *  - Not forwarded by Anthropic (including MiniMax), OpenAI Codex OAuth
+   *    (OpenAI with accountId), Gemini Code Assist, or Azure OpenAI Responses.
+   *  Custom providers define their own support for this option. */
   defaultHeaders?: Record<string, string>;
 }

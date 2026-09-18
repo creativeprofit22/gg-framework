@@ -17,6 +17,69 @@ describe("streamOpenAICodex", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([true, false])("preserves the wire request with custom fetch=%s", async (custom) => {
+    const globalFetch = vi.fn<typeof fetch>(() => {
+      throw new Error("Global fetch must not be called");
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      createSseResponse([
+        { type: "response.output_item.added", item: { id: "msg_1", type: "message" } },
+        { type: "response.output_text.delta", item_id: "msg_1", delta: "Hello" },
+        { type: "response.completed", response: { usage: { input_tokens: 7, output_tokens: 2 } } },
+      ]),
+    );
+    vi.stubGlobal("fetch", custom ? globalFetch : fetchMock);
+    const signal = new AbortController().signal;
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-6-astra",
+      apiKey: "test-key",
+      accountId: "test-account",
+      baseUrl: "https://codex.example.test/backend-api/",
+      transportSessionId: "test-session",
+      promptCacheKey: "test-cache",
+      messages: [
+        { role: "system", content: "Be concise" },
+        { role: "user", content: "hi" },
+      ],
+      signal,
+      ...(custom ? { fetch: fetchMock } : {}),
+    });
+    const response = await result.response;
+    const events = [];
+    for await (const event of result) events.push(event);
+    expect(events).toEqual([
+      { type: "text_delta", text: "Hello" },
+      { type: "done", stopReason: "end_turn" },
+    ]);
+    expect(response.message.content).toEqual([{ type: "text", text: "Hello" }]);
+    expect(response.usage).toEqual({ inputTokens: 7, outputTokens: 2 });
+    expect(globalFetch).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://codex.example.test/backend-api/codex/responses");
+    expect(init?.method).toBe("POST");
+    expect(init?.signal).toBe(signal);
+    expect(init?.headers).toMatchObject({
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "chatgpt-account-id": "test-account",
+      session_id: "test-session",
+      "x-client-request-id": "test-session",
+    });
+    expect(JSON.parse(init?.body as string)).toMatchObject({
+      model: "gpt-6-astra",
+      store: false,
+      stream: true,
+      instructions: "Be concise",
+      input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      prompt_cache_key: "test-cache",
+      include: ["reasoning.encrypted_content"],
+    });
+    expect(JSON.parse(init?.body as string)).not.toHaveProperty("max_output_tokens");
+  });
+
   it("maps Fast to OAuth priority and omits the disabled tier", async () => {
     vi.stubGlobal(
       "fetch",
@@ -68,7 +131,11 @@ describe("streamOpenAICodex", () => {
           ),
         )
         .mockResolvedValueOnce(createSseResponse([{ type: "response.completed", response: {} }]));
-      vi.stubGlobal("fetch", fetchMock);
+      const globalFetch = vi.fn(() => {
+        throw new Error("Global fetch must not be called");
+      });
+      vi.stubGlobal("fetch", globalFetch);
+      const signal = new AbortController().signal;
       const messages = [
         {
           role: "assistant" as const,
@@ -99,8 +166,17 @@ describe("streamOpenAICodex", () => {
         model: "gpt-6-astra",
         apiKey: "test",
         messages,
+        fetch: fetchMock,
+        signal,
       });
       await expect(result.response).resolves.toBeDefined();
+      expect(globalFetch).not.toHaveBeenCalled();
+      for (const [url, init] of fetchMock.mock.calls) {
+        expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+        expect(init.signal).toBe(signal);
+        expect(init.method).toBe("POST");
+        expect(init.headers).toEqual(fetchMock.mock.calls[0][1].headers);
+      }
       expect(fetchMock).toHaveBeenCalledTimes(2);
       const first = JSON.parse(fetchMock.mock.calls[0][1].body);
       const second = JSON.parse(fetchMock.mock.calls[1][1].body);

@@ -3,6 +3,7 @@ export type { McpServerRow } from "./mcp-management-contract.js";
 export * from "./referenced-files.js";
 export * from "./model-registry.js";
 export * from "./thinking-level.js";
+export * from "./qwen-cloud-token-plan.js";
 export * from "./local-models.js";
 export * from "./paths.js";
 export * from "./logger.js";

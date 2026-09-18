@@ -24,6 +24,85 @@ describe("streamGemini", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    { custom: true, streaming: true },
+    { custom: true, streaming: false },
+    { custom: false, streaming: true },
+    { custom: false, streaming: false },
+  ])(
+    "preserves the wire request with custom=$custom streaming=$streaming",
+    async ({ custom, streaming }) => {
+      process.env.CODE_ASSIST_ENDPOINT = "https://code-assist.example.test";
+      process.env.CODE_ASSIST_API_VERSION = "v2test";
+      const globalFetch = vi.fn<typeof fetch>(() => {
+        throw new Error("Global fetch must not be called");
+      });
+      const payload = {
+        response: {
+          candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2 },
+        },
+      };
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(
+            streaming ? `data: ${JSON.stringify(payload)}\n\n` : JSON.stringify(payload),
+            { headers: { "content-type": streaming ? "text/event-stream" : "application/json" } },
+          ),
+        );
+      globalThis.fetch = custom ? globalFetch : fetchMock;
+      const signal = new AbortController().signal;
+      const result = streamGemini({
+        provider: "gemini",
+        model: "gemini-3-flash-preview",
+        apiKey: "test-key",
+        projectId: "test-project",
+        promptCacheKey: "test-session",
+        streaming,
+        signal,
+        messages: [
+          { role: "system", content: "Be concise" },
+          { role: "user", content: "hi" },
+        ],
+        ...(custom ? { fetch: fetchMock } : {}),
+      });
+      const response = await result.response;
+      const events = [];
+      for await (const event of result) events.push(event);
+      expect(events).toEqual([
+        { type: "text_delta", text: "Hello" },
+        { type: "done", stopReason: "stop_sequence" },
+      ]);
+      expect(response.message.content).toEqual([{ type: "text", text: "Hello" }]);
+      expect(response.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
+      expect(globalFetch).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url.toString()).toBe(
+        `https://code-assist.example.test/v2test:${streaming ? "streamGenerateContent?alt=sse" : "generateContent"}`,
+      );
+      expect(init?.method).toBe("POST");
+      expect(init?.signal).toBe(signal);
+      expect(init?.headers).toEqual({
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+        "User-Agent": "google-gemini-cli",
+        "X-Goog-Api-Client": "gemini-cli/0.0.0",
+      });
+      expect(JSON.parse(init?.body as string)).toEqual({
+        model: "gemini-3-flash-preview",
+        project: "test-project",
+        user_prompt_id: expect.any(String),
+        request: {
+          systemInstruction: { parts: [{ text: "Be concise" }] },
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          session_id: "test-session",
+        },
+      });
+    },
+  );
+
   it.each(["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash-lite"])(
     "wires %s with tools, output cap, and Ultra clamped to high",
     async (model) => {
@@ -257,38 +336,50 @@ describe("streamGemini", () => {
     expect(url.toString()).toBe("https://code-assist.example.test/v2test:generateContent");
   });
 
-  it("retries non-streaming Code Assist requests on upstream retryable statuses", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            response: {
-              candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      );
-    globalThis.fetch = fetchMock;
+  it.each([429, 499, 503])(
+    "keeps custom fetch on non-streaming retries for HTTP %s",
+    async (status) => {
+      vi.useFakeTimers();
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response("retryable failure", { status }))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              response: {
+                candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      const globalFetch = vi.fn(() => {
+        throw new Error("Global fetch must not be called");
+      });
+      globalThis.fetch = globalFetch;
+      const signal = new AbortController().signal;
 
-    const result = streamGemini({
-      provider: "gemini",
-      model: "gemini-3-flash-preview",
-      projectId: "test-project",
-      apiKey: "access-token",
-      streaming: false,
-      messages: [{ role: "user", content: "hi" }],
-    });
+      const result = streamGemini({
+        provider: "gemini",
+        model: "gemini-3-flash-preview",
+        projectId: "test-project",
+        apiKey: "access-token",
+        streaming: false,
+        fetch: fetchMock,
+        signal,
+        messages: [{ role: "user", content: "hi" }],
+      });
 
-    const responsePromise = result.response;
-    await vi.advanceTimersByTimeAsync(1_000);
-    await responsePromise;
+      const responsePromise = result.response;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await responsePromise;
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
+      expect(globalFetch).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]).toEqual(fetchMock.mock.calls[0]);
+      expect(fetchMock.mock.calls[0][1].signal).toBe(signal);
+    },
+  );
 
   it("surfaces a hard quota exhaustion 429 as a usage-limit error", async () => {
     const body = JSON.stringify({

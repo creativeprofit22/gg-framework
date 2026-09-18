@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -38,7 +39,7 @@ async function api(endpoint: string, signal?: AbortSignal): Promise<unknown> {
   const { stdout } = await exec(
     "gh",
     ["api", "--hostname", "github.com", endpoint, "--paginate", "--slurp"],
-    { timeout: 10_000, maxBuffer: 2 * 1024 * 1024, signal },
+    { env: withoutQwenRuntimeSecret(), timeout: 10_000, maxBuffer: 2 * 1024 * 1024, signal },
   );
   return JSON.parse(stdout);
 }
@@ -99,7 +100,11 @@ export async function getGitHubCI(
 async function context(cwd: string): Promise<{ slug: string; sha: string } | null> {
   const [slug, head] = await Promise.all([
     getGitHubRepoSlug(cwd),
-    exec("git", ["rev-parse", "--verify", "HEAD"], { cwd, timeout: 2000 }).catch(() => null),
+    exec("git", ["rev-parse", "--verify", "HEAD"], {
+      env: withoutQwenRuntimeSecret(),
+      cwd,
+      timeout: 2000,
+    }).catch(() => null),
   ]);
   return slug && head ? { slug, sha: head.stdout.trim() } : null;
 }

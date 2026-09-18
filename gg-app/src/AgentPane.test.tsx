@@ -534,6 +534,33 @@ function client(paneId: string, generation: number): PaneAgentClient {
   return pane;
 }
 
+describe("Qwen Cloud thinking labels", () => {
+  it.each([
+    ["qwen-cloud", "qwen-cloud/qwen3.7-max", "high", "Thinking on"],
+    ["qwen-cloud", "qwen-cloud/qwen3.7-max", null, "Thinking off"],
+    ["qwen-cloud", "qwen-cloud/glm-5.3", null, "Thinking high"],
+    ["qwen-cloud", "qwen-cloud/glm-5.3", "max", "Thinking max"],
+    ["azure", "azure:gpt-test", "high", "Thinking high"],
+  ] as const)("renders %s %s %s as %s", async (provider, model, thinkingLevel, label) => {
+    const pane = client("thinking-pane", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState(model),
+      provider,
+      model,
+      thinkingLevel,
+      supportedThinkingLevels: ["high", "max"],
+    });
+    vi.mocked(pane.cycleThinking).mockResolvedValue({ thinkingLevel: "high", supportedThinkingLevels: ["high", "max"] });
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const button = await screen.findByRole("button", { name: label });
+    expect(button.title).toBe("Cycle reasoning level");
+    fireEvent.click(button);
+    await waitFor(() => expect(pane.cycleThinking).toHaveBeenCalledOnce());
+  });
+});
+
 async function renderKenPromptPane(
   pane: PaneAgentClient,
   running = false,

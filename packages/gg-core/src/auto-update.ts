@@ -72,7 +72,14 @@ function performUpdateInBackground(command: string): void {
     const child = spawn(parts[0]!, parts.slice(1), {
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, npm_config_loglevel: "silent" },
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([name]) => name.toUpperCase() !== "QWEN_CLOUD_TOKEN_PLAN_KEY",
+          ),
+        ),
+        npm_config_loglevel: "silent",
+      },
     });
     child.unref();
   } catch {

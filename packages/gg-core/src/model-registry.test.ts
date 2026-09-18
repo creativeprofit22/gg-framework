@@ -20,6 +20,7 @@ import {
 } from "./model-registry.js";
 
 const PROVIDERS = [
+  "qwen-cloud",
   "anthropic",
   "openai",
   "gemini",

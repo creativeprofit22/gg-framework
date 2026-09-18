@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -86,7 +87,7 @@ function loginShellPath(): Promise<string | null> {
           // zsh can hang on stdin without detaching; matches shell-env's fix.
           detached: true,
           stdio: ["ignore", "pipe", "ignore"],
-          env: { ...process.env, DISABLE_AUTO_UPDATE: "true" },
+          env: { ...withoutQwenRuntimeSecret(), DISABLE_AUTO_UPDATE: "true" },
         },
       );
       let out = "";

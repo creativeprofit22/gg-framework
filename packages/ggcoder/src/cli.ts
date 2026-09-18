@@ -132,6 +132,7 @@ const PROVIDERS = new Set<Provider>([
   "xiaomi",
   "openai",
   "azure",
+  "qwen-cloud",
   "gemini",
   "glm",
   "moonshot",
@@ -1584,6 +1585,19 @@ async function resolveActiveProvider(
     "sakana",
     "xai",
   ];
+  // Qwen is opt-in only: neither fall into it nor silently leave it on missing auth.
+  if (preferred === "qwen-cloud") {
+    if (!(await authStorage.hasProviderAuth(preferred))) {
+      throw new Error("Qwen Cloud requires dedicated Token Plan runtime authentication.");
+    }
+    const savedModelInfo = savedModel ? getModel(savedModel) : undefined;
+    return {
+      provider: preferred,
+      model:
+        savedModelInfo?.provider === preferred ? savedModelInfo.id : getDefaultModel(preferred).id,
+      loggedInProviders: [preferred],
+    };
+  }
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
     if (await authStorage.hasProviderAuth(p)) loggedInProviders.push(p);

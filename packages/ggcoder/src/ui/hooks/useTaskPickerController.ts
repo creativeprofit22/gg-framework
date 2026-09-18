@@ -1,15 +1,17 @@
 import { useCallback, useState } from "react";
+import { assertProviderExecutionAllowed } from "../../core/provider-execution-policy.js";
 import {
   getNextRunnableTask,
   loadTasksSync,
-  markTaskInProgress,
   saveTasksSync,
   type TaskRecord,
 } from "../../core/tasks-store.js";
 
 interface UseTaskPickerControllerOptions {
   displayedCwd: string;
-  onStartTask: (title: string, prompt: string, taskId: string) => void;
+  provider: string;
+  onError: (error: unknown) => void;
+  onStartTask: (title: string, prompt: string, taskId: string, unattended: boolean) => void;
   onRunAllTasksChange: (runAll: boolean) => void;
 }
 
@@ -26,6 +28,8 @@ interface TaskPickerController {
 
 export function useTaskPickerController({
   displayedCwd,
+  provider,
+  onError,
   onStartTask,
   onRunAllTasksChange,
 }: UseTaskPickerControllerOptions): TaskPickerController {
@@ -48,26 +52,31 @@ export function useTaskPickerController({
   const start = useCallback(
     (task: TaskRecord) => {
       setOpen(false);
-      markTaskInProgress(displayedCwd, task.id);
+      onRunAllTasksChange(false);
+      onStartTask(task.title, task.prompt, task.id, false);
       refresh();
-      onStartTask(task.title, task.prompt, task.id);
     },
-    [displayedCwd, onStartTask, refresh],
+    [onRunAllTasksChange, onStartTask, refresh],
   );
 
   const runAll = useCallback(
     (task?: TaskRecord) => {
+      try {
+        assertProviderExecutionAllowed(provider, true);
+      } catch (error) {
+        onError(error);
+        return;
+      }
       setOpen(false);
       onRunAllTasksChange(true);
       const selected = task
         ? { id: task.id, title: task.title, prompt: task.prompt || task.text || task.title }
         : getNextRunnableTask(displayedCwd);
       if (!selected) return;
-      markTaskInProgress(displayedCwd, selected.id);
+      onStartTask(selected.title, selected.prompt, selected.id, true);
       refresh();
-      onStartTask(selected.title, selected.prompt, selected.id);
     },
-    [displayedCwd, onRunAllTasksChange, onStartTask, refresh],
+    [displayedCwd, provider, onError, onRunAllTasksChange, onStartTask, refresh],
   );
 
   const deleteTask = useCallback(

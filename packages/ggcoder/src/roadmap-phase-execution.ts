@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "./tools/safe-env.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -385,7 +386,13 @@ function runGit(cwd: string, args: string[]): Promise<Buffer> {
     execFile(
       "git",
       args,
-      { cwd, encoding: "buffer", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
+      {
+        env: withoutQwenRuntimeSecret(),
+        cwd,
+        encoding: "buffer",
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: GIT_MAX_BUFFER,
+      },
       (error, stdout) => {
         if (error) reject(error);
         else resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));

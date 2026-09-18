@@ -1923,6 +1923,10 @@ select {
      regardless of where it's rendered. */
   text-align: left;
 }
+.modal.qwen-connection-modal {
+  max-height: 90dvh;
+  overflow-y: auto;
+}
 .modal.continuation-confirmation {
   width: min(440px, 90%);
   max-height: 90%;

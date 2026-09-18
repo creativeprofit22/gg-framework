@@ -74,6 +74,14 @@ export interface AuthMethodMeta {
  */
 export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
+    value: "qwen-cloud",
+    label: "Qwen Cloud (Token Plan)",
+    description:
+      "Qwen 3.8 Max, Qwen 3.8 Flash, Qwen 3.7 Max, Qwen 3.7 Plus, Qwen 3.6 Flash · GLM 5.3, GLM 5.2 · DeepSeek V4 Pro, DeepSeek V4 Pro 0813, DeepSeek V4 Flash 0731, DeepSeek V4.1 Flash",
+    // Native-only setup; never offer the generic plaintext key form.
+    methods: [],
+  },
+  {
     value: "anthropic",
     label: "Anthropic",
     description: "Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5",

@@ -186,7 +186,8 @@ async function* runStream(
     compressed: encodedRequest.compressed,
   });
 
-  const response = await fetch(url, {
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const response = await fetchImpl(url, {
     method: "POST",
     headers,
     body: encodedRequest.body,

@@ -14,7 +14,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, execFile };
 });
 
-import { boundedSize, fitsVisualBudget, shrinkToFit } from "./image.js";
+import { boundedSize, compressVideoToFit, fitsVisualBudget, shrinkToFit } from "./image.js";
 
 const PATCH = 28;
 const MAX_PATCHES = 1568;
@@ -32,6 +32,56 @@ function makePng(width: number, height: number): Promise<Buffer> {
     .png()
     .toBuffer();
 }
+
+describe("media subprocess environment", () => {
+  afterEach(() => {
+    mocks.execFileAsync.mockReset();
+    vi.unstubAllEnvs();
+  });
+
+  it("strips the Qwen runtime secret from probe, compression, and image transcode calls", async () => {
+    vi.stubEnv("QWEN_CLOUD_TOKEN_PLAN_KEY", "fake-image-runtime-secret");
+    vi.stubEnv("GG_IMAGE_TEST_ENV", "preserved");
+    const expectedEnv = { ...process.env };
+    delete expectedEnv.QWEN_CLOUD_TOKEN_PLAN_KEY;
+    const signal = new AbortController().signal;
+    mocks.execFileAsync
+      .mockResolvedValueOnce({ stdout: "10\n" })
+      .mockRejectedValueOnce(new Error("fake compression failure"))
+      .mockResolvedValueOnce({ stdout: await makePng(32, 32) });
+
+    await expect(compressVideoToFit("fake-input.mp4", undefined, signal)).resolves.toEqual({
+      ok: false,
+      reason: "ffmpeg compression failed: fake compression failure",
+    });
+    await expect(shrinkToFit(Buffer.from("invalid image"), "image/png")).resolves.toMatchObject({
+      mediaType: "image/png",
+    });
+
+    expect(mocks.execFileAsync.mock.calls.map(([command]) => command)).toEqual([
+      "ffprobe",
+      "ffmpeg",
+      "ffmpeg",
+    ]);
+    for (const [, , options] of mocks.execFileAsync.mock.calls) {
+      expect(options.env).not.toHaveProperty("QWEN_CLOUD_TOKEN_PLAN_KEY");
+      expect(options.env).toEqual(expectedEnv);
+      expect(options.env.GG_IMAGE_TEST_ENV).toBe("preserved");
+    }
+    expect(mocks.execFileAsync.mock.calls[0][2].signal).toBe(signal);
+    expect(mocks.execFileAsync.mock.calls[1][2]).toMatchObject({
+      signal,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    expect(mocks.execFileAsync.mock.calls[2][2]).toMatchObject({
+      encoding: "buffer",
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    expect(process.env.QWEN_CLOUD_TOKEN_PLAN_KEY).toBe("fake-image-runtime-secret");
+  });
+});
 
 describe("boundedSize", () => {
   const cases: Array<{

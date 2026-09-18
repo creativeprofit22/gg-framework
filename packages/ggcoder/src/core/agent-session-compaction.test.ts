@@ -136,6 +136,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   restoreHome?.();
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(tmpProject, { recursive: true, force: true });
@@ -844,6 +845,11 @@ describe("AgentSession mid-turn compaction", () => {
   it.each(providerModels)(
     "$provider uses the same normalized usage formula",
     async ({ provider, model }) => {
+      // Qwen requires its dedicated Token Plan key, not generic stored OAuth auth.
+      // The mocked agent loop below consumes usage without making a provider request.
+      if (provider === "qwen-cloud") {
+        vi.stubEnv("QWEN_CLOUD_TOKEN_PLAN_KEY", "sk-sp-compaction-fixture-only");
+      }
       await writeJson(path.join(tmpHome, ".gg", "settings.json"), {
         autoCompact: true,
         compactThreshold: 0.8,

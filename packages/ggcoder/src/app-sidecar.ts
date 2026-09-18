@@ -1,3 +1,5 @@
+import { withoutQwenRuntimeSecret } from "./tools/safe-env.js";
+import { assertProviderExecutionAllowed, runUnattended } from "./core/provider-execution-policy.js";
 /**
  * gg-app sidecar — bridges the full ggcoder AgentSession to the Tauri webview
  * over plain HTTP + Server-Sent Events (zero browser-side dependencies).
@@ -12,7 +14,7 @@
  * unchanged via AgentSession — this file is only a network seam.
  */
 import http from "node:http";
-import { nativeDevAuthFile } from "./app-sidecar-native-auth.js";
+import { nativeDevAuthFile, isNativeManagedAuthProvider } from "./app-sidecar-native-auth.js";
 import fs from "node:fs/promises";
 import { watch as fsWatch } from "node:fs";
 import os from "node:os";
@@ -405,6 +407,7 @@ const ALL_PROVIDERS: Provider[] = [
   "anthropic",
   "openai",
   "azure",
+  "qwen-cloud",
   "gemini",
   "xai",
   // China
@@ -2592,7 +2595,7 @@ async function createSession(
 
     try {
       const child = spawn("ollama", ["pull", model], {
-        env: { ...process.env, ...(token ? { HF_TOKEN: token } : {}) },
+        env: withoutQwenRuntimeSecret({ ...process.env, ...(token ? { HF_TOKEN: token } : {}) }),
         stdio: ["ignore", "pipe", "pipe"],
       });
       state.child = child;
@@ -4021,7 +4024,9 @@ async function createSession(
     let planReviewIdentity: { checkpointId: string; generation: number } | null = null;
     let outcome: UserTurnOutcome = "review-failed";
     try {
-      outcome = await driveAutopilotCycle({
+      assertProviderExecutionAllowed(session.getState().provider, true);
+      assertProviderExecutionAllowed(kenCurrentModel().provider, true);
+      outcome = await runUnattended(() => driveAutopilotCycle({
         maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
         // An injected run entering plan mode WITHOUT submitting (enter_plan,
@@ -4122,7 +4127,7 @@ async function createSession(
           }
           // autopilot_ignored renders nothing live, so nothing is persisted either.
         },
-      });
+      }));
       return outcome;
     } catch (error) {
       broadcastError("autopilot_error", "autopilot cycle failed", error);
@@ -4277,7 +4282,12 @@ async function createSession(
     try {
       let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
       while (currentId) {
-        const ran = await runTaskById(currentId);
+        // A manually selected single task remains interactive. Run-all is a batch.
+        const taskId = currentId;
+        if (all) assertProviderExecutionAllowed(session.getState().provider, true);
+        const ran = await (all
+          ? runUnattended(() => runTaskById(taskId))
+          : runTaskById(taskId));
         if (!ran || !taskRunAll) break;
         const next = getNextRunnableTask(cwd);
         currentId = next ? next.id : null;
@@ -6778,7 +6788,7 @@ async function createSession(
           return;
         }
         const meta = AUTH_PROVIDERS.find((p) => p.value === provider);
-        if (!meta || !meta.methods.includes("apikey")) {
+        if (isNativeManagedAuthProvider(provider) || key.startsWith("sk-sp-") || !meta || !meta.methods.includes("apikey")) {
           json(res, 400, { error: "provider does not support API key auth" });
           return;
         }

@@ -10,6 +10,11 @@
     "directory": "packages/gg-ai"
   },
   "exports": {
+    "./qwen-cloud-policy": {
+      "types": "./dist/qwen-cloud-policy.d.ts",
+      "import": "./dist/qwen-cloud-policy.js",
+      "require": "./dist/qwen-cloud-policy.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",

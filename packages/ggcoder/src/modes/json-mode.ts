@@ -3,6 +3,7 @@ import { AgentSession } from "../core/agent-session.js";
 import { isAbortError } from "@kenkaiiii/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
+import { isUnattendedWorker } from "../core/provider-execution-policy.js";
 import { SUB_AGENT_MAX_TURN_EXTENSIONS } from "../tools/subagent-shared.js";
 
 export interface JsonModeOptions {
@@ -96,6 +97,7 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const sessionOpts = {
+    unattended: isUnattendedWorker(),
     provider: options.provider,
     model: options.model,
     baseUrl: options.baseUrl,

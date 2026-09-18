@@ -6,6 +6,7 @@ export { NotLoggedInError, readStoredBaseUrlSync } from "@kenkaiiii/gg-core";
 export const AZURE_OPENAI_PROVIDER = "azure";
 
 export interface AzureOpenAIEnvironment {
+  QWEN_CLOUD_TOKEN_PLAN_KEY?: string;
   AZURE_OPENAI_API_KEY?: string;
   AZURE_OPENAI_BASE_URL?: string;
   AZURE_OPENAI_DEPLOYMENT?: string;
@@ -73,7 +74,7 @@ export class AuthStorage extends CoreAuthStorage {
     filePath?: string,
     private readonly environment: AzureOpenAIEnvironment = process.env,
   ) {
-    super(filePath);
+    super(filePath, environment);
   }
 
   override async hasProviderAuth(provider: string): Promise<boolean> {

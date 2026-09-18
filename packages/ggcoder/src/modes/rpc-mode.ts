@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import { UNATTENDED_AGENT_ENV } from "../core/provider-execution-policy.js";
 import { isAbortError } from "@kenkaiiii/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
@@ -104,6 +105,8 @@ export async function runRpcMode(options: RpcModeOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const session = new AgentSession({
+    // RPC also serves user-driven IDEs: pipes alone do not imply unattended work.
+    unattended: process.env[UNATTENDED_AGENT_ENV] === "1",
     provider: options.provider,
     model: options.model,
     cwd: options.cwd,

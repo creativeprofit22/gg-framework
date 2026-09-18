@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 
 export function getGitBranch(cwd: string): Promise<string | null> {
@@ -5,7 +6,7 @@ export function getGitBranch(cwd: string): Promise<string | null> {
     execFile(
       "git",
       ["rev-parse", "--abbrev-ref", "HEAD"],
-      { cwd, timeout: 2000 },
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
       (error, stdout) => {
         if (error) {
           resolve(null);
@@ -23,7 +24,7 @@ export function getGitDirtyFileCount(cwd: string): Promise<number> {
     execFile(
       "git",
       ["status", "--porcelain=v1", "--untracked-files=all"],
-      { cwd, timeout: 2000 },
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
       (error, stdout) => {
         if (error) {
           reject(error);
@@ -45,7 +46,7 @@ export function isGitRepo(cwd: string): Promise<boolean> {
     execFile(
       "git",
       ["rev-parse", "--is-inside-work-tree"],
-      { cwd, timeout: 2000 },
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
       (error, stdout) => {
         resolve(!error && stdout.trim() === "true");
       },

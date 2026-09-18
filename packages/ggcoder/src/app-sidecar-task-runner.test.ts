@@ -10,6 +10,11 @@ import { isWorkflowCommandText } from "./core/autopilot-gate.js";
 import { driveAutopilotCycle, frameAutopilotInjection } from "./core/autopilot-cycle.js";
 import type { AutopilotVerdict } from "./core/autopilot-verdict.js";
 import { AppSidecarPlanGate, planGateConflictCode } from "./app-sidecar-plan-gate.js";
+import {
+  assertProviderExecutionAllowed,
+  runUnattended,
+  QWEN_UNATTENDED_ERROR,
+} from "./core/provider-execution-policy.js";
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof NodeFs>("node:fs");
@@ -39,6 +44,8 @@ async function taskRunnerHarness(enabled = true, cancelledDuringRun = false, opt
   mechanical?: boolean;
   workflow?: boolean;
   queued?: boolean;
+  provider?: "anthropic" | "qwen-cloud";
+  reviewerProvider?: "anthropic" | "qwen-cloud";
 } = {}) {
   const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
   const file = ts.createSourceFile("app-sidecar.ts", source, ts.ScriptTarget.Latest, true);
@@ -104,7 +111,10 @@ async function taskRunnerHarness(enabled = true, cancelledDuringRun = false, opt
   ).outputText;
   const context: vm.Context = vm.createContext({
     running: false, taskRunAll: false, taskTurnActive: false,
+    assertProviderExecutionAllowed, runUnattended,
+    kenCurrentModel: () => ({ provider: options.reviewerProvider ?? options.provider ?? "anthropic" }),
     cwd: "project", session: {
+      getState: () => ({ provider: options.provider ?? "anthropic" }),
       newSession, getAppMarkers: () => [], getPlanMode: () => planMode,
       persistAppMarker: async () => {}, persistAutopilotMarker: async () => {},
       setIdealReviewSuppressed: () => {}, getPersistedTranscriptCount: () => messages.length,
@@ -138,6 +148,37 @@ async function taskRunnerHarness(enabled = true, cancelledDuringRun = false, opt
 }
 
 describe("app sidecar task runner", () => {
+  it("rejects Qwen batch tasks before resetting sessions or running prompts", async () => {
+    const runner = await taskRunnerHarness(false, false, { provider: "qwen-cloud" });
+    await expect(runner.runTasks("first", true)).rejects.toThrow(QWEN_UNATTENDED_ERROR);
+    expect(runner.newSession).not.toHaveBeenCalled();
+    expect(runner.prompt).not.toHaveBeenCalled();
+    expect(runner.getTasks().every((task) => task.status === "pending")).toBe(true);
+  });
+
+  it("keeps a manually selected Qwen task interactive", async () => {
+    const runner = await taskRunnerHarness(false, false, { provider: "qwen-cloud" });
+    await runner.runTasks("first", false);
+    expect(runner.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { provider: "qwen-cloud", reviewerProvider: "anthropic" },
+    { provider: "anthropic", reviewerProvider: "qwen-cloud" },
+  ] as const)(
+    "blocks unattended Autopilot without trying another provider: %o",
+    async (providers) => {
+      const runner = await taskRunnerHarness(true, false, providers);
+      await runner.runTasks("first", false);
+      expect(runner.prompt).toHaveBeenCalledTimes(1); // User's initial turn is allowed.
+      expect(runner.verdict).not.toHaveBeenCalled();
+      expect(runner.context.broadcastError).toHaveBeenCalledWith(
+        "autopilot_error",
+        "autopilot cycle failed",
+        expect.objectContaining({ message: QWEN_UNATTENDED_ERROR }),
+      );
+    },
+  );
   it.each([
     { name: "HUMAN", verdict: { kind: "human", reason: "Choose scope" } },
     { name: "capped", verdict: { kind: "prompt", body: "Fix again" } },

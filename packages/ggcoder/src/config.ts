@@ -63,6 +63,7 @@ const VALID_PROVIDERS = new Set<Provider>([
   "xiaomi",
   "openai",
   "azure",
+  "qwen-cloud",
   "gemini",
   "glm",
   "moonshot",

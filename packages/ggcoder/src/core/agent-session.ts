@@ -1,4 +1,5 @@
 import { nativeDevAuthFile } from "../app-sidecar-native-auth.js";
+import { assertProviderExecutionAllowed, runUnattended } from "./provider-execution-policy.js";
 import { isProgrammaticAssessment, type ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   agentLoop,
@@ -258,6 +259,8 @@ function isTerminalSubAgentState(state: SubAgentState): boolean {
 }
 
 export interface AgentSessionOptions {
+  /** Headless/batch host intent; independent of MCP interactivity and tool permissions. */
+  unattended?: boolean;
   reviewCommandCreation?: CommandCreationReviewer;
   reviewProgrammaticSetup?: CommandCreationReviewer;
   executeReviewedCommand?: DirectCommandExecutor;
@@ -768,6 +771,11 @@ export class AgentSession {
   private currentLeafId: string | null = null;
 
   private opts: AgentSessionOptions;
+
+  private resolveRunCredentials(...args: Parameters<AuthStorage["resolveCredentials"]>) {
+    assertProviderExecutionAllowed(args[0], this.opts.unattended);
+    return this.authStorage.resolveCredentials(...args);
+  }
 
   constructor(options: AgentSessionOptions) {
     this.opts = options;
@@ -2561,7 +2569,7 @@ ${content}
    *  model swaps false negatives for false positives. */
   private async callSemanticLoopJudge(prompt: string, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
-    const creds = await this.authStorage.resolveCredentials(this.provider, {
+    const creds = await this.resolveRunCredentials(this.provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     signal.throwIfAborted();
@@ -2936,6 +2944,13 @@ ${content}
 
   /** Auto-compact if needed, run agent loop with auth retry, and persist messages. */
   private async runLoop(options: { disableTools?: boolean } = {}): Promise<void> {
+    return this.opts.unattended
+      ? runUnattended(() => this.runLoopInternal(options))
+      : this.runLoopInternal(options);
+  }
+
+  private async runLoopInternal(options: { disableTools?: boolean }): Promise<void> {
+    assertProviderExecutionAllowed(this.provider, this.opts.unattended);
     this.refreshSystemPromptTail();
     // One-shot cache-key marker per session so turn_end cacheRead numbers
     // in the log can be traced back to a specific routing namespace —
@@ -2959,7 +2974,7 @@ ${content}
     // Resolve OAuth credentials and run agent loop.
     // On 401, force-refresh the token and retry once — the provider may have
     // revoked the token server-side before the stored expiry (e.g. after a restart).
-    let creds = await this.authStorage.resolveCredentials(this.provider, {
+    let creds = await this.resolveRunCredentials(this.provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     // Cache for sync callers (see field doc) — kept in step with `creds`
@@ -3066,7 +3081,7 @@ ${content}
         // would fail with an authentication error until the user restarted.
         // Static API keys resolve to the same value, so this is a no-op for them.
         resolveCredentials: async () => {
-          const live = await this.authStorage.resolveCredentials(this.provider, {
+          const live = await this.resolveRunCredentials(this.provider, {
             storageKeys: this.currentAuthStorageKeys(),
           });
           this.lastAccountId = live.accountId;
@@ -3312,7 +3327,7 @@ ${content}
           `${dualAuth.oauthLabel} usage limit reached — retrying this turn on the ${dualAuth.apiKeyLabel}`,
           { resetsAt: resetsAt !== undefined ? String(resetsAt) : "unknown" },
         );
-        creds = await this.authStorage.resolveCredentials(this.provider, {
+        creds = await this.resolveRunCredentials(this.provider, {
           storageKeys: this.currentAuthStorageKeys(),
         });
         this.lastAccountId = creds.accountId;
@@ -3337,7 +3352,7 @@ ${content}
         if (await clearInvalidStaticApiKey(err)) throw err;
 
         log("INFO", "auth", "Got 401, force-refreshing token and retrying");
-        creds = await this.authStorage.resolveCredentials(this.provider, {
+        creds = await this.resolveRunCredentials(this.provider, {
           forceRefresh: true,
           storageKeys: this.currentAuthStorageKeys(),
           // Name the token the provider actually rejected (which the per-turn
@@ -3637,7 +3652,7 @@ ${content}
     this.lastCompactionCompacted = false;
     const creds =
       existingCredentials ??
-      (await this.authStorage.resolveCredentials(this.provider, {
+      (await this.resolveRunCredentials(this.provider, {
         storageKeys: this.currentAuthStorageKeys(),
       }));
     const contextWindow = getContextWindow(this.model, {
@@ -5334,7 +5349,7 @@ ${content}
     // Keep credentials and settings on the model selected at click time, even
     // if the user switches models while credential resolution is pending.
     const { provider, model, thinkingLevel, maxTokens, baseUrl } = this;
-    const creds = await this.authStorage.resolveCredentials(provider, {
+    const creds = await this.resolveRunCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     // Cheap, best-effort stack detection from the project root so terminology is
@@ -5672,7 +5687,7 @@ ${content}
     }
     // Auto-compact on load if the restored session exceeds the context window.
     // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
-    const creds = await this.authStorage.resolveCredentials(this.provider, {
+    const creds = await this.resolveRunCredentials(this.provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     // Cache for sync callers (see field doc) so the app-sidecar's footer shows

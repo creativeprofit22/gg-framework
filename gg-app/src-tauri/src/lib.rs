@@ -1,4 +1,6 @@
 mod azure_connection;
+mod qwen_cloud_connection;
+use qwen_cloud_connection::{qwen_cloud_connection_status, qwen_cloud_connection_save, qwen_cloud_connection_remove, qwen_cloud_connection_test};
 mod decisions;
 mod local_patched_update;
 
@@ -5270,6 +5272,18 @@ struct ProviderMeta {
 /// app_auth_apikey). Order is the display order in the login hub.
 const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
+        value: "qwen-cloud",
+        label: "Qwen Cloud (Token Plan)",
+        description: "Qwen 3.8 Max, Qwen 3.8 Flash, Qwen 3.7 Max, Qwen 3.7 Plus, Qwen 3.6 Flash · GLM 5.3, GLM 5.2 · DeepSeek V4 Pro, DeepSeek V4 Pro 0813, DeepSeek V4 Flash 0731, DeepSeek V4.1 Flash",
+        methods: &[],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
+        api_key_label: None,
+        api_key_base_url: None,
+        api_key_variants: &[],
+    },
+    ProviderMeta {
         value: "anthropic",
         label: "Anthropic",
         description: "Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5",
@@ -5487,6 +5501,11 @@ fn app_auth_status(app: tauri::AppHandle) -> serde_json::Value {
     let creds = std::fs::read_to_string(auth_file_path(&app.config().identifier))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    auth_provider_status(creds, qwen_cloud_connection::is_connected())
+}
+
+/// Pure discovery rendering: native Qwen status must never come from auth.json.
+fn auth_provider_status(creds: Option<serde_json::Value>, qwen_connected: bool) -> serde_json::Value {
     let has_key = |key: &str| -> bool {
         creds
             .as_ref()
@@ -5522,7 +5541,9 @@ fn app_auth_status(app: tauri::AppHandle) -> serde_json::Value {
             None => has_key(p.value),
         }
     };
-    let connected = |p: &ProviderMeta| -> bool { has_oauth(p) || has_api_key(p) };
+    let connected = |p: &ProviderMeta| -> bool {
+        if p.value == "qwen-cloud" { qwen_connected } else { has_oauth(p) || has_api_key(p) }
+    };
 
     let now_ms = current_unix_millis();
     let list: Vec<serde_json::Value> = AUTH_PROVIDERS
@@ -5642,6 +5663,20 @@ fn app_auth_status(app: tauri::AppHandle) -> serde_json::Value {
 /// horizon (365d * 100) so refresh logic never treats them as stale.
 const API_KEY_TTL_MS: i64 = 365 * 24 * 60 * 60 * 1000 * 100;
 
+fn guard_generic_apikey(provider: &str, key: &str) -> Result<(), String> {
+    if provider.trim() == "qwen-cloud" || key.trim().starts_with("sk-sp-") {
+        return Err("Use native Qwen Cloud connection setup for Token Plan credentials".into());
+    }
+    Ok(())
+}
+
+fn guard_generic_logout(provider: &str) -> Result<(), String> {
+    if provider.trim() == "qwen-cloud" {
+        return Err("Use native Qwen Cloud connection removal to disconnect".into());
+    }
+    Ok(())
+}
+
 /// Pure: build the OAuthCredentials JSON object for an API key (matches
 /// AuthStorage's shape: accessToken + empty refreshToken + far-future expiry +
 /// optional baseUrl). `now_ms` is injected for testability.
@@ -5668,6 +5703,7 @@ fn apply_apikey(
     now_ms: i64,
     key: &str,
 ) -> Result<String, String> {
+    guard_generic_apikey(provider, key)?;
     let mut root = parse_auth_object(existing)?;
     if let Some(map) = root.as_object_mut() {
         map.insert(
@@ -5693,6 +5729,7 @@ fn apply_logout(
     provider: &str,
     method: Option<&str>,
 ) -> Result<String, String> {
+    guard_generic_logout(provider)?;
     let mut root = parse_auth_object(existing)?;
     let meta = AUTH_PROVIDERS.iter().find(|p| p.value == provider);
     if let Some(map) = root.as_object_mut() {
@@ -5778,6 +5815,7 @@ fn app_auth_apikey(
     key: String,
     variant: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    guard_generic_apikey(&provider, &key)?;
     let key = key.trim();
     if key.is_empty() {
         return Err("API key is required".to_string());
@@ -5803,6 +5841,7 @@ fn app_auth_logout(
     provider: String,
     method: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    guard_generic_logout(&provider)?;
     if let Some(m) = method.as_deref() {
         if m != "oauth" && m != "apikey" {
             return Err(format!("unknown auth method: {m}"));
@@ -9614,6 +9653,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         &mut cmd,
         secure_azure.as_ref(),
     );
+    qwen_cloud_connection::configure_daemon_environment(&mut cmd);
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -10338,6 +10378,15 @@ fn native_log_builder(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    match qwen_cloud_connection::dev_smoke::startup() {
+        Ok(true) => return,
+        Ok(false) => {},
+        Err(_) => {
+            eprintln!("Qwen smoke startup refused: invalid configuration or isolated vault unavailable");
+            std::process::exit(2);
+        }
+    }
     install_panic_diagnostics();
     let logging = native_log_builder(
         cfg!(debug_assertions),
@@ -10489,6 +10538,10 @@ pub fn run() {
             azure_connection_status,
             azure_connection_save,
             azure_connection_remove,
+            qwen_cloud_connection_status,
+            qwen_cloud_connection_save,
+            qwen_cloud_connection_remove,
+            qwen_cloud_connection_test,
             agent_telegram_get,
             agent_telegram_save,
             agent_local,
@@ -12697,6 +12750,7 @@ mod tests {
         assert_eq!(
             values,
             vec![
+                "qwen-cloud",
                 "anthropic",
                 "openai",
                 "gemini",
@@ -12710,6 +12764,44 @@ mod tests {
                 "openrouter",
             ]
         );
+    }
+
+    #[test]
+    fn auth_qwen_discovery_uses_only_native_status() {
+        for native_connected in [false, true] {
+            for creds in [None, Some(serde_json::json!({"qwen-cloud": {"accessToken": "fixture"}}))] {
+                let discovery = auth_provider_status(creds, native_connected);
+                let qwen = discovery["providers"].as_array().unwrap().iter()
+                    .find(|p| p["value"] == "qwen-cloud").unwrap();
+                assert_eq!(qwen["label"], "Qwen Cloud (Token Plan)");
+                assert_eq!(qwen["connected"], native_connected);
+                assert_eq!(qwen["methods"], serde_json::json!([]));
+                assert_eq!(qwen["connectedMethods"], serde_json::json!([]));
+                assert!(qwen.get("activeMethod").is_none());
+            }
+        }
+        assert!(resolve_apikey_target("qwen-cloud", None).is_none());
+    }
+
+    #[test]
+    fn auth_generic_persistence_rejects_qwen_before_parsing() {
+        let expected = "Use native Qwen Cloud connection setup for Token Plan credentials";
+        for provider in AUTH_PROVIDERS.iter().map(|p| p.value).chain(["unknown", "xiaomi-credits"]) {
+            for key in ["sk-sp-fixture", " \t sk-sp-fixture\n", "sk-sp-"] {
+                assert_eq!(guard_generic_apikey(provider, key).unwrap_err(), expected);
+                for existing in [None, Some("not json"), Some("{} ")] {
+                    assert_eq!(apply_apikey(existing, provider, None, 0, key).unwrap_err(), expected);
+                }
+            }
+        }
+        for provider in ["qwen-cloud", " qwen-cloud "] {
+            assert_eq!(apply_apikey(None, provider, None, 0, "ordinary-fixture").unwrap_err(), expected);
+            for method in [None, Some("oauth"), Some("apikey")] {
+                assert_eq!(apply_logout(Some("not json"), provider, method).unwrap_err(),
+                    "Use native Qwen Cloud connection removal to disconnect");
+            }
+            assert!(guard_generic_logout(provider).is_err());
+        }
     }
 
     #[test]

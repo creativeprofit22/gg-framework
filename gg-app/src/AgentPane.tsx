@@ -4,6 +4,7 @@ import {
   continuationInstructionError,
   isPendingAskSnapshot,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { getQwenCloudThinkingLabel } from "@kenkaiiii/gg-core/qwen-cloud-token-plan";
 import {
   createElement,
   memo,
@@ -5246,7 +5247,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
                 (() => {
                   const level = state?.thinkingLevel ?? null;
-                  const label = level ? `Thinking ${level}` : "Thinking off";
+                  const label = state?.provider === "qwen-cloud"
+                    ? getQwenCloudThinkingLabel(state.model, level as Parameters<typeof getQwenCloudThinkingLabel>[1])
+                    : level ? `Thinking ${level}` : "Thinking off";
                   const maxPower = level === "xhigh" || level === "max";
                   return (
                     <>

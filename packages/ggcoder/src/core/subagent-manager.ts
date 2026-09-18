@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -1060,7 +1061,10 @@ export class SubAgentManager {
     if (worker.process.exitCode !== null || worker.process.killed) return;
     try {
       if (process.platform === "win32" && worker.process.pid) {
-        spawn("taskkill", ["/pid", String(worker.process.pid), "/T", "/F"], { stdio: "ignore" });
+        spawn("taskkill", ["/pid", String(worker.process.pid), "/T", "/F"], {
+          stdio: "ignore",
+          env: withoutQwenRuntimeSecret(),
+        });
       } else if (worker.process.pid) {
         process.kill(-worker.process.pid, "SIGTERM");
       } else worker.process.kill("SIGTERM");
@@ -1071,7 +1075,10 @@ export class SubAgentManager {
       if (worker.process.exitCode !== null) return;
       try {
         if (process.platform === "win32" && worker.process.pid) {
-          spawn("taskkill", ["/pid", String(worker.process.pid), "/T", "/F"], { stdio: "ignore" });
+          spawn("taskkill", ["/pid", String(worker.process.pid), "/T", "/F"], {
+            stdio: "ignore",
+            env: withoutQwenRuntimeSecret(),
+          });
         } else if (worker.process.pid) {
           process.kill(-worker.process.pid, "SIGKILL");
         } else worker.process.kill("SIGKILL");

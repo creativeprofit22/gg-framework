@@ -1,4 +1,5 @@
 import type { spawn, spawnSync } from "node:child_process";
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -242,6 +243,7 @@ describe("POSIX process-tree cleanup", () => {
     killProcessTree(10, { platform: "linux", kill, spawnSync: spawnSyncMock });
 
     expect(spawnSyncMock).toHaveBeenCalledWith("/bin/ps", ["-A", "-o", "pid=,ppid="], {
+      env: withoutQwenRuntimeSecret(),
       encoding: "utf8",
       timeout: 150,
       maxBuffer: 256 * 1024,
@@ -659,7 +661,7 @@ describe("killProcessTree on Windows", () => {
     expect(spawnSyncMock).toHaveBeenCalledWith(
       "C:\\TrustedWindows\\System32\\taskkill.exe",
       ["/PID", "4321", "/T", "/F"],
-      { stdio: "ignore", windowsHide: true, timeout: 5_000 },
+      { env: withoutQwenRuntimeSecret(), stdio: "ignore", windowsHide: true, timeout: 5_000 },
     );
     expect(kill).toHaveBeenCalledTimes(1);
   });
@@ -789,7 +791,7 @@ describe("exact-PID wrapper reap", () => {
     expect(spawnSyncMock).toHaveBeenCalledWith(
       "C:\\Windows\\System32\\taskkill.exe",
       ["/PID", "2468", "/F"],
-      { stdio: "ignore", windowsHide: true, timeout: 5_000 },
+      { env: withoutQwenRuntimeSecret(), stdio: "ignore", windowsHide: true, timeout: 5_000 },
     );
   });
 
@@ -827,7 +829,7 @@ describe("killProcessTreeAsync on Windows", () => {
     expect(spawnMock).toHaveBeenCalledWith(
       "C:\\Windows\\System32\\taskkill.exe",
       ["/PID", "4321", "/T", "/F"],
-      { stdio: "ignore", windowsHide: true },
+      { env: withoutQwenRuntimeSecret(), stdio: "ignore", windowsHide: true },
     );
     expect(killer.unref).toHaveBeenCalledOnce();
     await Promise.resolve();

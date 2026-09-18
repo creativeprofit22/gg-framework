@@ -5,7 +5,8 @@ use super::{
 };
 
 #[derive(Default)]
-pub(crate) struct AzureConnectionMutations(tokio::sync::Mutex<()>);
+// Shared by native credential mutations: the daemon reservation is process-wide.
+pub(crate) struct AzureConnectionMutations(pub(crate) tokio::sync::Mutex<()>);
 
 #[tauri::command]
 pub(crate) fn azure_connection_status() -> Result<AzureConnectionStatus, AzureConnectionError> {

@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -167,7 +168,7 @@ export async function compressVideoToFit(
     const { stdout } = await execFileAsync(
       "ffprobe",
       ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", inputPath],
-      { signal },
+      { signal, env: withoutQwenRuntimeSecret() },
     );
     durationSec = Number.parseFloat(stdout.trim());
   } catch (err) {
@@ -216,7 +217,7 @@ export async function compressVideoToFit(
         `${COMPRESS_AUDIO_KBPS}k`,
         outPath,
       ],
-      { signal, maxBuffer: 16 * 1024 * 1024 },
+      { signal, maxBuffer: 16 * 1024 * 1024, env: withoutQwenRuntimeSecret() },
     );
   } catch (err) {
     await fs.unlink(outPath).catch(() => {});
@@ -467,6 +468,7 @@ async function transcodeImageToPngWithFfmpeg(buffer: Buffer): Promise<Buffer> {
         "pipe:1",
       ],
       {
+        env: withoutQwenRuntimeSecret(),
         encoding: "buffer",
         maxBuffer: FFMPEG_IMAGE_MAX_OUTPUT_BYTES,
         timeout: FFMPEG_IMAGE_TIMEOUT_MS,
@@ -738,51 +740,61 @@ export function getClipboardImage(): Promise<ImageAttachment | null> {
 
   return new Promise((resolve) => {
     // Check if clipboard has image data
-    execFile("osascript", ["-e", "clipboard info"], (err, stdout) => {
-      if (err || (!stdout.includes("PNGf") && !stdout.includes("TIFF"))) {
-        resolve(null);
-        return;
-      }
-
-      // Determine format — prefer PNG
-      const isPng = stdout.includes("PNGf");
-      const clipClass = isPng ? "PNGf" : "TIFF";
-      const ext = isPng ? "png" : "tiff";
-      const mediaType = isPng ? "image/png" : "image/tiff";
-
-      // Write clipboard image to temp file, then read as base64
-      const tmpPath = `/tmp/ggcoder-clipboard-${Date.now()}.${ext}`;
-      const writeScript = [
-        `set imgData to the clipboard as «class ${clipClass}»`,
-        `set filePath to POSIX file "${tmpPath}"`,
-        `set fileRef to open for access filePath with write permission`,
-        `write imgData to fileRef`,
-        `close access fileRef`,
-      ].join("\n");
-
-      execFile("osascript", ["-e", writeScript], async (writeErr) => {
-        if (writeErr) {
+    execFile(
+      "osascript",
+      ["-e", "clipboard info"],
+      { env: withoutQwenRuntimeSecret() },
+      (err, stdout) => {
+        if (err || (!stdout.includes("PNGf") && !stdout.includes("TIFF"))) {
           resolve(null);
           return;
         }
-        try {
-          const rawBuffer = await fs.readFile(tmpPath);
-          await fs.unlink(tmpPath).catch(() => {});
-          const { buffer: finalBuffer, mediaType: finalMediaType } = await shrinkToFit(
-            rawBuffer,
-            mediaType,
-          );
-          resolve({
-            kind: "image",
-            fileName: `clipboard.${ext}`,
-            filePath: tmpPath,
-            mediaType: finalMediaType,
-            data: finalBuffer.toString("base64"),
-          });
-        } catch {
-          resolve(null);
-        }
-      });
-    });
+
+        // Determine format — prefer PNG
+        const isPng = stdout.includes("PNGf");
+        const clipClass = isPng ? "PNGf" : "TIFF";
+        const ext = isPng ? "png" : "tiff";
+        const mediaType = isPng ? "image/png" : "image/tiff";
+
+        // Write clipboard image to temp file, then read as base64
+        const tmpPath = `/tmp/ggcoder-clipboard-${Date.now()}.${ext}`;
+        const writeScript = [
+          `set imgData to the clipboard as «class ${clipClass}»`,
+          `set filePath to POSIX file "${tmpPath}"`,
+          `set fileRef to open for access filePath with write permission`,
+          `write imgData to fileRef`,
+          `close access fileRef`,
+        ].join("\n");
+
+        execFile(
+          "osascript",
+          ["-e", writeScript],
+          { env: withoutQwenRuntimeSecret() },
+          async (writeErr) => {
+            if (writeErr) {
+              resolve(null);
+              return;
+            }
+            try {
+              const rawBuffer = await fs.readFile(tmpPath);
+              await fs.unlink(tmpPath).catch(() => {});
+              const { buffer: finalBuffer, mediaType: finalMediaType } = await shrinkToFit(
+                rawBuffer,
+                mediaType,
+              );
+              resolve({
+                kind: "image",
+                fileName: `clipboard.${ext}`,
+                filePath: tmpPath,
+                mediaType: finalMediaType,
+                data: finalBuffer.toString("base64"),
+              });
+            } catch {
+              resolve(null);
+            }
+          },
+        );
+      },
+    );
   });
 }

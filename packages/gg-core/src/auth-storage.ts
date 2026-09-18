@@ -13,6 +13,17 @@ import { log } from "./logger.js";
 
 type AuthData = Record<string, OAuthCredentials>;
 
+export interface RuntimeAuthEnvironment {
+  QWEN_CLOUD_TOKEN_PLAN_KEY?: string;
+}
+
+/** Native-vault injection (or explicit CLI environment), never plaintext auth. */
+function qwenRuntimeCredentials(env: RuntimeAuthEnvironment): OAuthCredentials | undefined {
+  const key = env.QWEN_CLOUD_TOKEN_PLAN_KEY;
+  if (!key || !/^sk-sp-[A-Za-z0-9_-]{1,250}$/.test(key)) return undefined;
+  return { accessToken: key, refreshToken: "", expiresAt: Number.POSITIVE_INFINITY };
+}
+
 /**
  * Storage key for Kimi Code OAuth credentials. Kept distinct from the
  * `moonshot` API-key entry so a user can configure BOTH and we always
@@ -132,6 +143,7 @@ const LOCAL_CREDENTIAL_LIFETIME_MS = 100 * 365 * 24 * 60 * 60 * 1000;
  * so both paths agree on the active endpoint.
  */
 function activeBaseUrlEntry(data: AuthData, provider: string): OAuthCredentials | undefined {
+  if (provider === "qwen-cloud") return undefined;
   const dual = dualAuthProvider(provider);
   if (dual) {
     const oauth = data[dual.oauthKey];
@@ -224,7 +236,10 @@ export class AuthStorage {
   /** Per-provider lock to serialize concurrent refresh calls. */
   private refreshLocks = new Map<string, Promise<OAuthCredentials>>();
 
-  constructor(filePath?: string) {
+  constructor(
+    filePath?: string,
+    private readonly runtimeEnvironment: RuntimeAuthEnvironment = process.env,
+  ) {
     this.filePath = filePath ?? getAppPaths().authFile;
   }
 
@@ -263,6 +278,8 @@ export class AuthStorage {
    * satisfies it.
    */
   async hasProviderAuth(provider: string): Promise<boolean> {
+    if (provider === "qwen-cloud")
+      return qwenRuntimeCredentials(this.runtimeEnvironment) !== undefined;
     await this.ensureFresh();
     const dual = dualAuthProvider(provider);
     if (dual) {
@@ -311,6 +328,7 @@ export class AuthStorage {
    * credential is absent or sidelined (a live OAuth credential is refreshable).
    */
   async isStaticApiKey(provider: string): Promise<boolean> {
+    if (provider === "qwen-cloud") return true;
     await this.ensureFresh();
     const dual = dualAuthProvider(provider);
     const oauthCreds = dual ? this.data[dual.oauthKey] : undefined;
@@ -344,8 +362,7 @@ export class AuthStorage {
     const first = !this.loaded;
     await withFileLock(this.filePath, async () => {
       try {
-        const content = await fs.readFile(this.filePath, "utf-8");
-        this.data = JSON.parse(content) as AuthData;
+        this.data = await readAuthData(this.filePath);
         if (first) {
           log("INFO", "auth", `Loaded credentials from ${this.filePath}`, {
             providers: Object.keys(this.data).join(",") || "(none)",
@@ -452,6 +469,9 @@ export class AuthStorage {
   }
 
   async setCredentials(provider: string, creds: OAuthCredentials): Promise<void> {
+    if (provider === "qwen-cloud" || creds.accessToken.trim().startsWith("sk-sp-")) {
+      throw new Error("Qwen Cloud credentials must be managed natively.");
+    }
     await this.mutateLatest((latest) => {
       latest[provider] = creds;
     });
@@ -529,6 +549,11 @@ export class AuthStorage {
       rejectedToken?: string;
     },
   ): Promise<OAuthCredentials> {
+    if (provider === "qwen-cloud") {
+      const credentials = qwenRuntimeCredentials(this.runtimeEnvironment);
+      if (!credentials) throw new NotLoggedInError(provider);
+      return credentials;
+    }
     // Pick up a rotation performed by another process before serving a cached
     // token. Long-lived processes (the desktop sidecar runs for days) would
     // otherwise keep handing out an access token that a sibling's refresh
@@ -755,7 +780,10 @@ export class AuthStorage {
 async function readAuthData(filePath: string): Promise<AuthData> {
   try {
     const content = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(content) as AuthData;
+    const data = JSON.parse(content) as AuthData;
+    // Ignore legacy or hand-written plaintext Qwen records at every read boundary.
+    delete data["qwen-cloud"];
+    return data;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;

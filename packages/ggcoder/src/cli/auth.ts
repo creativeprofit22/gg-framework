@@ -39,6 +39,27 @@ export async function runLogin(): Promise<void> {
     return;
   }
 
+  const meta = getAuthProvider(provider);
+  // Native-only providers must never reach generic prompts or OAuth dispatch.
+  if (!meta || meta.methods.length === 0) {
+    console.log(
+      chalk.hex("#fbbf24")(
+        meta
+          ? `${meta.label} setup is not supported by ggcoder login. Use the desktop app's native connection service.`
+          : `Terminal login is not supported for ${provider}.`,
+      ),
+    );
+    if (provider === "qwen-cloud") {
+      console.log(
+        chalk.hex("#6b7280")(
+          "The standalone CLI does not read the desktop vault. Its separate runtime environment path uses QWEN_CLOUD_TOKEN_PLAN_KEY; this login command does not store that key.",
+        ),
+      );
+    }
+    closeLogger();
+    return;
+  }
+
   console.log(
     chalk.hex("#60a5fa").bold("\nLogging in to ") +
       chalk.hex("#a78bfa")(displayName(provider)) +
@@ -116,7 +137,7 @@ export async function runLogin(): Promise<void> {
 
     let creds;
     let storageKey: string = provider;
-    if (dual && useOAuth) {
+    if (dual && useOAuth && meta.methods.includes("oauth")) {
       creds = provider === "moonshot" ? await loginKimi(callbacks) : await loginXai(callbacks);
       storageKey = dual.oauthKey;
     } else if (getAuthProvider(provider)?.methods.includes("apikey")) {
@@ -143,13 +164,14 @@ export async function runLogin(): Promise<void> {
       if (provider === "xiaomi" && xiaomiCredits) {
         storageKey = XIAOMI_CREDITS_KEY;
       }
+    } else if (meta.methods.includes("oauth") && provider === "anthropic") {
+      creds = await loginAnthropic(callbacks);
+    } else if (meta.methods.includes("oauth") && provider === "gemini") {
+      creds = await loginGemini(callbacks);
+    } else if (meta.methods.includes("oauth") && provider === "openai") {
+      creds = await loginOpenAI(callbacks);
     } else {
-      creds =
-        provider === "anthropic"
-          ? await loginAnthropic(callbacks)
-          : provider === "gemini"
-            ? await loginGemini(callbacks)
-            : await loginOpenAI(callbacks);
+      throw new Error(`No supported terminal login method for ${meta.label}.`);
     }
 
     await authStorage.setCredentials(storageKey, creds);

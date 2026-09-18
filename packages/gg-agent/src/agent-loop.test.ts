@@ -1114,6 +1114,71 @@ describe("agentLoop", () => {
     expect(events.some((event) => event.type === "agent_done")).toBe(true);
   });
 
+  it("recovers Qwen stalls through the real adapter using the same Token Plan destination", async () => {
+    const real = await vi.importActual<{ stream: typeof stream }>("@kenkaiiii/gg-ai");
+    mockStream.mockImplementation(real.stream);
+    vi.useFakeTimers();
+    const destination =
+      "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions";
+    const requests: { url: unknown; init: RequestInit; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init: RequestInit) => {
+        const body = JSON.parse(init.body as string);
+        requests.push({ url, init, body });
+        if (body.stream) {
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal!.addEventListener(
+              "abort",
+              () => reject(new Error("cancelled fake transport")),
+              { once: true },
+            );
+          });
+        }
+        return Response.json({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "Recovered!",
+                reasoning_content: "kept thinking",
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8 },
+        });
+      }),
+    );
+    try {
+      const pending = collectLoop([{ role: "user", content: "hi" }], {
+        provider: "qwen-cloud",
+        model: "qwen-cloud/glm-5.3",
+        apiKey: "sk-sp-fake-test-only",
+      });
+      for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(50_000);
+      const { events, result } = await pending;
+      expect(requests.map((r) => r.body.stream)).toEqual([true, true, false]);
+      for (const request of requests) {
+        expect(request.url).toBe(destination);
+        expect(request.init.redirect).toBe("error");
+        expect(request.body.model).toBe("glm-5.3");
+        expect(request.body).not.toHaveProperty("enable_thinking");
+      }
+      expect(requests[0].init.signal!.aborted).toBe(true);
+      expect(requests[1].init.signal!.aborted).toBe(true);
+      expect(requests[2].body).not.toHaveProperty("stream_options");
+      expect(events.some((e) => e.type === "error")).toBe(false);
+      expect(events.some((e) => e.type === "agent_done")).toBe(true);
+      expect(result.totalTurns).toBe(1);
+      expect(JSON.stringify(result)).toContain("Recovered!");
+      expect(JSON.stringify(result)).toContain("kept thinking");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
   it("flips to non-streaming fallback after repeated stream stalls", async () => {
     vi.useFakeTimers();
 

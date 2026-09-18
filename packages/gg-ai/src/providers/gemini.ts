@@ -613,7 +613,8 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions): Promise<Response> {
   try {
-    const response = await fetch(plan.url, {
+    const fetchImpl = options.fetch ?? globalThis.fetch;
+    const response = await fetchImpl(plan.url, {
       method: "POST",
       headers: plan.headers,
       body: JSON.stringify(plan.body),

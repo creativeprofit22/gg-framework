@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -359,7 +360,10 @@ function probeSandboxSupport(settingsPath: string): Promise<SandboxSupport> {
           // the one probe run has to ask for it. Only on Linux, which is the
           // only platform that degrades this way, and the output is parsed and
           // discarded here rather than shown.
-          ...(process.platform === "linux" ? { env: { ...process.env, SRT_DEBUG: "1" } } : {}),
+          env: {
+            ...withoutQwenRuntimeSecret(),
+            ...(process.platform === "linux" ? { SRT_DEBUG: "1" } : {}),
+          },
         },
       );
     } catch (error) {

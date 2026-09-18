@@ -140,6 +140,7 @@ export interface SessionStore {
    */
   pendingAction?: {
     prompt: string;
+    unattended?: boolean;
     infoText?: string;
     /** Structured event for the post-resetUI banner — renders as a styled
      *  plan_event item instead of the bland info row. */
@@ -184,6 +185,7 @@ export interface ResetUIOptions {
   /** Action to fire on the new mount (info banner + agent prompt). */
   pendingAction?: {
     prompt: string;
+    unattended?: boolean;
     infoText?: string;
     /** Structured event for the post-resetUI banner — renders as a styled
      *  plan_event item instead of the bland info row. */

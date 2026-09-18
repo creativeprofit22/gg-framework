@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { withoutQwenRuntimeSecret } from "./safe-env.js";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { z } from "zod";
@@ -414,7 +415,11 @@ export function detectExternalScanner(): Promise<string | undefined> {
       // windowsHide: a bare spawn pops a console window on Windows. `grep` is
       // one of the most-called tools, so without it a search session strobes
       // the user's screen. No-op on other platforms.
-      child = spawn("rg", ["--version"], { stdio: "ignore", windowsHide: true });
+      child = spawn("rg", ["--version"], {
+        stdio: "ignore",
+        windowsHide: true,
+        env: withoutQwenRuntimeSecret(),
+      });
     } catch {
       resolve(undefined);
       return;
@@ -487,7 +492,11 @@ async function runExternalScan(req: ExternalScanRequest): Promise<string[] | und
     (resolve) => {
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn("rg", args, { cwd: req.dir, windowsHide: true });
+        child = spawn("rg", args, {
+          cwd: req.dir,
+          windowsHide: true,
+          env: withoutQwenRuntimeSecret(),
+        });
       } catch {
         resolve(undefined);
         return;

@@ -13,6 +13,7 @@ import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 
 export interface SteroidsStatus {
   /** A `steroids` binary was found. */
@@ -36,7 +37,7 @@ const PROBE_CACHE_MS = 30_000;
 /** Opts the CLI out of its own self-upgrade check on every invocation. Read
     per call so the PATH enrichment done at startup is picked up. */
 export function steroidsEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, STEROIDS_NO_UPGRADE: "1" };
+  return { ...withoutQwenRuntimeSecret(), STEROIDS_NO_UPGRADE: "1" };
 }
 
 const BIN_NAME = process.platform === "win32" ? "steroids.exe" : "steroids";

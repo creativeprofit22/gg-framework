@@ -4,6 +4,12 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { formatSidecarError } from "./app-sidecar-error.js";
 import { RunClaim } from "./core/run-claim.js";
+import {
+  assertProviderExecutionAllowed,
+  isUnattendedExecution,
+  QWEN_UNATTENDED_ERROR,
+  runUnattended,
+} from "./core/provider-execution-policy.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionMutationCoordinator, isAppSidecarSessionBusy, appSidecarSessionBusyConflictBody } from "./app-sidecar-session-mutation.js";
@@ -14,7 +20,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function harness() {
+async function harness(provider = "anthropic") {
   const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
   const file = ts.createSourceFile("sidecar.ts", source, ts.ScriptTarget.Latest, true);
   let route = "";
@@ -51,12 +57,13 @@ async function harness() {
     sessionMutations: new AppSidecarSessionMutationCoordinator(),
     reloadCoordinator: new AppSidecarReloadCoordinator(),
     isAppSidecarSessionBusy, appSidecarSessionBusyConflictBody,
+    assertProviderExecutionAllowed, runUnattended,
     planGateConflict: () => null,
     readBody: async (req: { body: string }) => req.body,
     json: (res: { resolve: (value: number) => void }, status: number) => res.resolve(status),
     log: vi.fn(), cwd: "project", formatSidecarError,
     desktopGuidance: (text: string) => text, sidecarErrorSecrets: [], captureSidecarError: vi.fn(),
-    session: { newSession, getQueuedCount: () => 0, getPlanMode: () => false,
+    session: { newSession, getState: () => ({ provider }), getQueuedCount: () => 0, getPlanMode: () => false,
       getAppMarkers: () => [], persistAppMarker: async () => {} },
     loadTasksSync: () => tasks.map((status, index) => ({ id: String(index), title: String(index), prompt: String(index), status })),
     isManuallyRunnableTaskStatus: (status: string) => status === "pending" || status === "blocked",
@@ -90,6 +97,55 @@ async function harness() {
 }
 
 describe("task route admission", () => {
+  it("rejects Qwen Run All before task setup but permits a manually selected task", async () => {
+    const h = await harness("qwen-cloud");
+    const before = h.snapshot();
+    expect(await h.request(true)).toBe(202);
+    await h.draining.promise;
+    await h.settled();
+    expect(h.snapshot()).toEqual(before);
+    expect(h.runTaskById).not.toHaveBeenCalled();
+    expect(h.newSession).not.toHaveBeenCalled();
+    expect(
+      h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error"),
+    ).toHaveLength(1);
+    expect(
+      h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "tasks_run_done"),
+    ).toHaveLength(1);
+    expect(
+      h.context.captureSidecarError.mock.calls
+        .flat()
+        .some(
+          (value: unknown) => value instanceof Error && value.message === QWEN_UNATTENDED_ERROR,
+        ),
+    ).toBe(true);
+
+    expect(await h.request()).toBe(202);
+    h.reset.resolve();
+    h.review.resolve();
+    await h.settled();
+    expect(h.runTaskById).toHaveBeenCalledTimes(1);
+    expect(h.snapshot().tasks).toEqual(["done", "pending"]);
+  });
+
+  it.each([false, true])(
+    "propagates real unattended execution intent only for Run All (all=%s)",
+    async (all) => {
+      const h = await harness();
+      const intents: boolean[] = [];
+      h.context.runUserTurn = async () => {
+        await Promise.resolve();
+        intents.push(isUnattendedExecution());
+        return "failed";
+      };
+      expect(await h.request(all)).toBe(202);
+      h.reset.resolve();
+      await h.draining.promise;
+      await h.settled();
+      expect(intents).toEqual([all]);
+      expect(isUnattendedExecution()).toBe(false);
+    },
+  );
   it.each([
     ["session", false], ["session", true],
     ["persistence", false], ["persistence", true],

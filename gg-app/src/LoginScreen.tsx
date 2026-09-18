@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { theme } from "./theme";
 import { authStatus, subscribe, type AuthProvider, type SidecarEvent } from "./agent";
 import { Badge } from "./Badge";
@@ -21,6 +21,8 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
   const [providers, setProviders] = useState<AuthProvider[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<AuthProvider | null>(null);
+  const mounted = useRef(false);
+  const statusRequest = useRef(0);
   const [localOpen, setLocalOpen] = useState(false);
   // Swapped in place (never stacked) so Escape closes exactly one modal.
   const [hfOpen, setHfOpen] = useState(false);
@@ -31,31 +33,32 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    const list = await authStatus();
-    setProviders(list);
-    setLoading(false);
-    // Keep the open modal's `connected` flag in sync after a change.
-    setActive((cur) => (cur ? (list.find((p) => p.value === cur.value) ?? cur) : cur));
+    if (!mounted.current) return;
+    // Initial, event and mutation reads share one epoch: only the latest may win.
+    const request = ++statusRequest.current;
+    try {
+      const list = await authStatus();
+      if (!mounted.current || request !== statusRequest.current) return;
+      setProviders(list);
+      // Keep the open modal's metadata in sync after a change.
+      setActive((cur) => (cur ? (list.find((p) => p.value === cur.value) ?? cur) : cur));
+    } catch {
+      // Retain the last known metadata when a status read fails.
+    } finally {
+      if (mounted.current && request === statusRequest.current) setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    mounted.current = true;
     // Auth status is read natively (Rust) — no sidecar wait, so the list renders
     // immediately even while the agent is still booting or has crashed.
-    void authStatus()
-      .then((list) => {
-        if (!cancelled) {
-          setProviders(list);
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
+    void refresh();
     return () => {
-      cancelled = true;
+      mounted.current = false;
+      statusRequest.current += 1;
     };
-  }, []);
+  }, [refresh]);
 
   // ~/.gg/auth.json is shared by every window, so connecting or disconnecting
   // anywhere changes what THIS screen should show. `auth_change` covers both

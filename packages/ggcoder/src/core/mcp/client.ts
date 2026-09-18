@@ -1,5 +1,6 @@
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { normalizeMcpArguments } from "./normalize-arguments.js";
+import { withoutQwenRuntimeSecret } from "../../tools/safe-env.js";
 import {
   Client,
   OAuthError,
@@ -639,7 +640,7 @@ export class MCPClientManager {
       transport = new StdioClientTransport({
         command: resolved.command,
         args: resolved.args,
-        env: { ...process.env, ...config.env } as Record<string, string>,
+        env: withoutQwenRuntimeSecret({ ...process.env, ...config.env }) as Record<string, string>,
         cwd: os.homedir(),
         stderr: "pipe",
       });

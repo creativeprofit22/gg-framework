@@ -39,7 +39,7 @@ export async function withRealSidecar<T>(run: (fixture: {
     events: RealSidecarEvent[];
     waitFor: (type: string, count?: number) => Promise<RealSidecarEvent>;
   }>;
-}) => Promise<T>, options: { parkQuestion?: boolean; queueDrain?: "steering" | "stranded" } = {}): Promise<T> {
+}) => Promise<T>, options: { parkQuestion?: boolean; queueDrain?: "steering" | "stranded"; qwenRuntimeKey?: string } = {}): Promise<T> {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-real-sidecar-"));
   let child: ChildProcess | undefined;
   let closed: Promise<void> | undefined;
@@ -69,6 +69,7 @@ export async function withRealSidecar<T>(run: (fixture: {
       GG_DISABLE_TELEMETRY: "1", GG_APP_ORPHAN_CHECK_MS: "0",
       GG_FIXTURE_PARK_QUESTION: options.parkQuestion ? "1" : "0",
       GG_FIXTURE_QUEUE_DRAIN: options.queueDrain ?? "",
+      QWEN_CLOUD_TOKEN_PLAN_KEY: options.qwenRuntimeKey ?? "",
     });
     // Keep filesystem URLs out of Vite's browser asset URL transform in the UI harness.
     const moduleUrl = import.meta.url;

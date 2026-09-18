@@ -3,6 +3,7 @@ import { Box, useStdout } from "ink";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useChatLayoutMeasurements } from "./hooks/useChatLayoutMeasurements.js";
 import { useTaskPickerController } from "./hooks/useTaskPickerController.js";
+import { admitTerminalTask } from "./task-execution.js";
 import { useModeState } from "./hooks/useModeState.js";
 import { useSessionPersistence } from "./hooks/useSessionPersistence.js";
 import { useContextCompaction } from "./hooks/useContextCompaction.js";
@@ -95,7 +96,7 @@ import {
   splitAssistantStreamingText,
   estimateRenderedRows,
 } from "./utils/assistant-stream-split.js";
-import { getNextRunnableTask, markTaskInProgress } from "../core/tasks-store.js";
+import { getNextRunnableTask } from "../core/tasks-store.js";
 import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
@@ -109,7 +110,9 @@ import {
 import type { LspManager } from "../core/lsp/manager.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
-import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
+import { getNextThinkingLevel } from "./thinking-level.js";
+import { useThinkingLevel } from "./hooks/useThinkingLevel.js";
+import { getThinkingFooterLabel } from "./components/Footer.js";
 import {
   getDoneFlushDecision,
   shouldTopSpaceAfterPrintedAgentBoundary,
@@ -298,6 +301,7 @@ export interface AppProps {
     sessionPath?: string;
     pendingAction?: {
       prompt: string;
+      unattended?: boolean;
       infoText?: string;
       planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
     };
@@ -332,6 +336,7 @@ export interface AppProps {
     planAutoExpand?: boolean;
     pendingAction?: {
       prompt: string;
+      unattended?: boolean;
       infoText?: string;
       planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
     };
@@ -477,7 +482,7 @@ export function App(props: AppProps) {
   const agentRunningRef = useRef(false);
   const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
   const runAllTasksRef = useRef(props.sessionStore?.runAllTasks ?? false);
-  const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
+  const startTaskRef = useRef<(title: string, prompt: string, taskId: string, unattended: boolean) => void>(() => {});
   const cwdRef = useRef(props.cwd);
   // The project root is fixed for the session's lifetime, so this never changes.
   const displayedCwd = props.cwd;
@@ -485,11 +490,6 @@ export function App(props: AppProps) {
   const [rewindCheckpoints, setRewindCheckpoints] = useState<CheckpointInfo[] | null>(null);
   // Monotonic user-turn counter keying per-turn checkpoints.
   const rewindTurnRef = useRef(0);
-  const taskPicker = useTaskPickerController({
-    displayedCwd,
-    onStartTask: (title, prompt, taskId) => startTaskRef.current(title, prompt, taskId),
-    onRunAllTasksChange: setRunAllTasks,
-  });
   const [doneStatus, setDoneStatus] = useState<DoneStatus | null>(
     props.sessionStore?.doneStatus ?? null,
   );
@@ -499,12 +499,24 @@ export function App(props: AppProps) {
   useTerminalTitle({ isRunning: titleRunning, cwd: displayedCwd, gitBranch });
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
+  const taskPicker = useTaskPickerController({
+    displayedCwd,
+    provider: currentProvider,
+    onError: (error) => setLiveItems((prev) => [...prev, toErrorItem(error, getId())]),
+    onStartTask: (title, prompt, taskId, unattended) =>
+      startTaskRef.current(title, prompt, taskId, unattended),
+    onRunAllTasksChange: (enabled) => {
+      runAllTasksRef.current = enabled;
+      if (props.sessionStore) props.sessionStore.runAllTasks = enabled;
+      setRunAllTasks(enabled);
+    },
+  });
   const currentProviderRef = useRef(props.provider);
   const currentModelRef = useRef(props.model);
   const [currentTools, setCurrentTools] = useState(props.tools);
   const currentToolsRef = useRef(props.tools);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | undefined>(props.thinking);
-  const thinkingLevelRef = useRef<ThinkingLevel | undefined>(props.thinking);
+  const [thinkingLevel, setThinkingLevel] = useThinkingLevel(currentProvider, currentModel, props.thinking);
+  const thinkingLevelRef = useRef<ThinkingLevel | undefined>(thinkingLevel);
   currentModelRef.current = currentModel;
   thinkingLevelRef.current = thinkingLevel;
   const [renderMarkdown, setRenderMarkdown] = useState(true);
@@ -642,11 +654,6 @@ export function App(props: AppProps) {
   useEffect(() => {
     onRuntimeStateChange?.({ provider: currentProvider });
   }, [currentProvider, onRuntimeStateChange]);
-  useEffect(() => {
-    if (thinkingLevel && !isThinkingLevelSupported(currentProvider, currentModel, thinkingLevel)) {
-      setThinkingLevel(getNextThinkingLevel(currentProvider, currentModel, undefined));
-    }
-  }, [currentProvider, currentModel, thinkingLevel]);
 
   useEffect(() => {
     onRuntimeStateChange?.({
@@ -1690,11 +1697,11 @@ export function App(props: AppProps) {
           // Run-all: auto-start the next runnable task after a short delay.
           if (runAllTasksRef.current) {
             setTimeout(() => {
+              if (!runAllTasksRef.current) return;
               const cwd = cwdRef.current;
               const next = getNextRunnableTask(cwd);
               if (next) {
-                markTaskInProgress(cwd, next.id);
-                startTaskRef.current(next.title, next.prompt, next.id);
+                startTaskRef.current(next.title, next.prompt, next.id, true);
               } else {
                 setRunAllTasks(false);
                 log("INFO", "tasks", "Run-all complete — no more runnable tasks");
@@ -1930,7 +1937,12 @@ export function App(props: AppProps) {
         { kind: "info", text: action.infoText as string, id: getId() },
       ]);
     }
-    void agentLoop.run(action.prompt).catch((err: unknown) => {
+    void agentLoop.run(action.prompt, { unattended: action.unattended }).catch((err: unknown) => {
+      if (action.unattended) {
+        runAllTasksRef.current = false;
+        if (sessionStore) sessionStore.runAllTasks = false;
+        setRunAllTasks(false);
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       log("ERROR", "error", errMsg);
       if (agentLoop.isRunning) {
@@ -2258,7 +2270,9 @@ export function App(props: AppProps) {
   const handleToggleThinking = useCallback(() => {
     setThinkingLevel((prev) => {
       const next = getNextThinkingLevel(currentProvider, currentModel, prev);
-      log("INFO", "thinking", next ? `Thinking ${next}` : "Thinking disabled");
+      log("INFO", "thinking", currentProvider === "qwen-cloud"
+        ? getThinkingFooterLabel(next, currentModel)
+        : next ? `Thinking ${next}` : "Thinking disabled");
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
         void sm.load().then(async () => {
@@ -2567,7 +2581,16 @@ export function App(props: AppProps) {
   // picker (Enter = start one, r = run all) and the run-all auto-advance in
   // onDone can invoke it from stale closures.
   const startTask = useCallback(
-    (title: string, prompt: string, taskId: string) => {
+    (title: string, prompt: string, taskId: string, unattended: boolean) => {
+      try {
+        admitTerminalTask(currentProvider, cwdRef.current, taskId, unattended);
+      } catch (error) {
+        runAllTasksRef.current = false;
+        if (props.sessionStore) props.sessionStore.runAllTasks = false;
+        setRunAllTasks(false);
+        setLiveItems((prev) => [...prev, toErrorItem(error, getId())]);
+        return;
+      }
       const taskCwd = cwdRef.current;
       const shortId = taskId.slice(0, 8);
       const completionHint =
@@ -2602,7 +2625,7 @@ export function App(props: AppProps) {
             messages: newMessages,
             history: [{ kind: "banner", id: "banner" }, taskItem],
             sessionPath: newSessionPath,
-            pendingAction: { prompt: fullPrompt },
+            pendingAction: { prompt: fullPrompt, unattended },
           });
         })();
         return;
@@ -2628,7 +2651,7 @@ export function App(props: AppProps) {
             await props.subAgentManager?.resetParentSession(session.id);
             log("INFO", "tasks", "New session for task", { path: session.path });
           }
-          await agentLoop.run(fullPrompt);
+          await agentLoop.run(fullPrompt, { unattended });
         } catch (err) {
           if (agentLoop.isRunning) agentLoop.reset();
           setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);

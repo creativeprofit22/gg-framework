@@ -10,6 +10,11 @@
     "directory": "packages/gg-core"
   },
   "exports": {
+    "./qwen-cloud-token-plan": {
+      "types": "./dist/qwen-cloud-token-plan.d.ts",
+      "import": "./dist/qwen-cloud-token-plan.js",
+      "require": "./dist/qwen-cloud-token-plan.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",

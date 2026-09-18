@@ -1,4 +1,11 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import {
+  QWEN_CLOUD_MODEL_CAPABILITIES,
+  QWEN_CLOUD_DEFAULT_MODEL_ID,
+  QWEN_CLOUD_FAST_MODEL_ID,
+  QWEN_CLOUD_SUMMARY_MODEL_ID,
+  getQwenCloudThinkingLevels,
+} from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 
@@ -71,6 +78,20 @@ export interface ModelInfo {
 // Provider display order — mirrors `PROVIDERS` in ui/login.tsx so the
 // /model selector and login selector sort models identically.
 export const MODELS: ModelInfo[] = [
+  ...QWEN_CLOUD_MODEL_CAPABILITIES.map((model): ModelInfo => ({
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    modelIdentity: model.apiModelId,
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxOutputTokens,
+    supportsThinking: true,
+    supportsImages: model.supportsImages,
+    supportsVideo: false,
+    // Relative selection hint, not a monetary price or remaining Credits estimate.
+    costTier: model.id === QWEN_CLOUD_FAST_MODEL_ID ? "low" : "high",
+    maxThinkingLevel: getQwenCloudThinkingLevels(model.id).at(-1)!,
+  })),
   // ── Anthropic ──────────────────────────────────────────
   // NOTE: Claude Mythos 5 (`claude-mythos-5`) is kept commented out — it's a
   // Project Glasswing (limited, invitation-only) model unavailable to most
@@ -703,6 +724,7 @@ export function getVideoByteLimit(modelId: string): number | undefined {
 }
 
 export function getDefaultModel(provider: Provider): ModelInfo {
+  if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_DEFAULT_MODEL_ID)!;
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-6-astra")!;
   if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite")!;
@@ -838,6 +860,7 @@ export function getDefaultThinkingLevel(
  * - Moonshot: use the current model (no cheap alternative registered)
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
+  if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_SUMMARY_MODEL_ID)!;
   if (provider === "anthropic") {
     return MODELS.find((m) => m.id === "claude-sonnet-5")!;
   }
@@ -866,6 +889,7 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
  * crash or a cross-provider jump to a login the user may not have.
  */
 export function getFastModel(provider: Provider, currentModelId: string): ModelInfo {
+  if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_FAST_MODEL_ID)!;
   const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
   return low ?? getModel(currentModelId) ?? getDefaultModel(provider);
 }

@@ -4,6 +4,8 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
 import { getFastModel } from "../core/model-registry.js";
 import { truncateTail } from "./truncate.js";
+import { getTrustedAgentEnv } from "./safe-env.js";
+import { isUnattendedExecution, UNATTENDED_AGENT_ENV } from "../core/provider-execution-policy.js";
 
 export const SUB_AGENT_MAX_TURNS = 50;
 /**
@@ -110,7 +112,11 @@ export function currentSubAgentDepth(env: NodeJS.ProcessEnv = process.env): numb
 }
 
 export function childSubAgentEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return { ...env, [SUB_AGENT_DEPTH_ENV]: String(currentSubAgentDepth(env) + 1) };
+  return {
+    ...getTrustedAgentEnv(env),
+    [SUB_AGENT_DEPTH_ENV]: String(currentSubAgentDepth(env) + 1),
+    ...(isUnattendedExecution() ? { [UNATTENDED_AGENT_ENV]: "1" } : {}),
+  };
 }
 
 export function resolveSubAgentCliEntry(): string {

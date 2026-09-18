@@ -47,6 +47,12 @@ function unavailableAssessment(mode: "setup" | "configured", deterministic: Prog
     coverage: [{ scope: "project", status: "uninspected", summary: "Host configuration facts do not establish project understanding." }], deterministic };
 }
 
+/** A review appends transcript leaves under the held run claim; those leaves are
+ * revisions, not owners. Resets/session changes still invalidate this identity. */
+export function programmaticChatIdentity({ conversationId, sessionId }: ReturnType<AgentSession["getConversationIdentity"]>): string {
+  return JSON.stringify({ conversationId, sessionId });
+}
+
 export interface ProgrammaticChatTarget {
   identity: string;
   cwd: string;

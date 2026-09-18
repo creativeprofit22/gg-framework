@@ -197,7 +197,7 @@ import {
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
-import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents } from "./app-sidecar-programmatic-chat.js";
+import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   handleAppSidecarProgrammaticExecution,
@@ -4513,7 +4513,7 @@ async function createSession(
   });
   const programmaticChat = new AppSidecarProgrammaticChat(
     () => ({
-      identity: JSON.stringify(session.getConversationIdentity()),
+      identity: programmaticChatIdentity(session.getConversationIdentity()),
       cwd,
       codeMode: mode === "code",
       planMode: session.getPlanMode(),

@@ -41,7 +41,7 @@ export function ProgrammaticDiscovery({ state, locked, planMode, onRequest, onSe
     {state.assessmentPending && <p>Discovery is in progress. Previous evidence remains below for reference only.</p>}
     {state.assessmentUncertain && <p>Discovery completion could not be confirmed. Previous evidence is for reference only. No work was retried. Once this chat is idle, you can explicitly discover again.</p>}
     {state.discoveryStale && current && <p>Previous discovery results. They are not current review authority.</p>}
-    {current && !current.candidates.length && !state.discoveryStale && <p>No worthwhile need was identified within the inspected scope. This is not a project-wide health check.</p>}
+    {current && !current.candidates.length && !state.discoveryStale && <p>No recommendations were returned. See assessment coverage and limitations below; an empty result alone does not establish that no worthwhile needs exist. This is not a project-wide health check.</p>}
     {!current && state.assessment && <p>Candidate detail is unavailable for this assessment. This does not mean no useful needs exist.</p>}
     {!!current?.candidates.length && <section aria-label="Discovered candidates">
       <h3>Discovered candidates</h3>
@@ -54,6 +54,9 @@ export function ProgrammaticDiscovery({ state, locked, planMode, onRequest, onSe
     </section>}
     {historical && <section aria-label="Selected history record">
       <h3>Saved recommendation</h3>
+      {state.historyDetailStale && <><p role="status">This saved recommendation may be out of date. Its recorded decision and observation count are from an earlier read.</p>
+        <button className="btn btn-ghost btn-sm" disabled={locked}
+          onClick={() => onRequest({ version: 1, action: "history-detail", candidateId: historical.id, offset: state.historyDetail?.offset ?? 0 })}>Reload selected history (read-only)</button></>}
       <HistoryStatus item={historical} />
       {historical.canonicalId && <><p>This record is retained for its history. View the earlier candidate for its recorded decision; decisions are not copied between records.</p>
         <button className="btn btn-ghost btn-sm" disabled={locked}
@@ -86,7 +89,8 @@ export function ProgrammaticDiscovery({ state, locked, planMode, onRequest, onSe
     </section>}
     <details><summary>Browse recommendation history</summary>
       <p>Saved proposals are historical evidence, not permission to create, edit or execute.</p>
-      <button className="btn btn-ghost btn-sm" disabled={locked} onClick={() => onRequest({ version: 1, action: "history-report", offset: 0 })}>Load history</button>
+      {state.historyReportStale && <p role="status">This history list may be out of date. Candidate counts and recorded decisions are from an earlier read. Reloading only reads saved history; it does not rerun discovery or retry a save.</p>}
+      <button className="btn btn-ghost btn-sm" disabled={locked} onClick={() => onRequest({ version: 1, action: "history-report", offset: history?.offset ?? 0 })}>{state.historyReportStale ? "Reload history (read-only)" : "Load history"}</button>
       {history && <><p>History: {history.status}. {history.total} saved candidates. {history.warning}</p>
         <ul>{history.candidates.map((item) => <li key={item.id}><button className="btn btn-ghost btn-sm" disabled={locked}
           aria-pressed={state.selection?.source === "history" && state.selection.id === item.id}

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { assertDiscoveryHandoff, readDiscoverySummary } from "./programmatic-discovery-observer.mjs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { programmaticAssessmentResultV2Schema, programmaticAssessmentResultV1Schema, directCommandSelectionV1Schema } from "../../packages/ggcoder/src/core/programmatic/contracts.ts";
@@ -7,6 +8,42 @@ import { commandInspectionInputSchema } from "../../packages/ggcoder/src/core/pr
 import { readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount } from "./programmatic-discovery-smoke.mjs";
+
+it.each(["prepared", "reinspection-required"])("requires native %s handoff and the exact selected-pane summary", (status) => {
+  const review = { status, candidate: { candidateId: "candidate" }, summary: `Host ${status} result` };
+  const response = { action: "review-candidate", ok: true, candidateReview: review };
+  const proof = {
+    host: { target: { identity: "owner" }, now: { identity: "owner" }, epoch: 0, currentEpoch: 0, candidateReview: review },
+    http: { status: 200, body: response },
+    trace: [
+      { boundary: "ipc", response },
+      { boundary: "pane", response, current: true, generation: "pane:2", epoch: 10 },
+      { boundary: "reducer", response, generation: "pane:2", epoch: 10, candidateStale: false,
+        selection: { source: "current", id: "candidate" }, candidateDetail: review.candidate },
+    ],
+    summary: { status, summary: review.summary, count: 1 },
+  };
+  expect(() => assertDiscoveryHandoff(proof)).not.toThrow();
+  for (const mutate of [
+    (p) => { p.http.status = 409; },
+    (p) => { p.trace.pop(); },
+    (p) => { p.trace[1].epoch++; },
+    (p) => { p.trace[1].current = false; },
+    (p) => { p.trace[2].selection.id = "other"; },
+    (p) => { p.summary.summary = "Assumed outcome"; },
+    (p) => { p.host.currentEpoch++; },
+  ]) {
+    const altered = structuredClone(proof); mutate(altered);
+    expect(() => assertDiscoveryHandoff(altered)).toThrow();
+  }
+  document.body.innerHTML = '<p></p><section aria-label="Selected opportunity"></section>';
+  document.querySelector("p").textContent = review.summary;
+  expect(readDiscoverySummary(document, review)).toBeNull(); // Transcript text alone is insufficient.
+  const paragraph = document.createElement("p"); paragraph.textContent = review.summary;
+  document.querySelector("section").append(paragraph);
+  expect(readDiscoverySummary(document, review)).toEqual(proof.summary);
+  document.body.innerHTML = "";
+});
 
 // These are workflow configuration guards, not substitutes for the native CI run.
 describe("Windows discovery-only CI gate", () => {

@@ -3,7 +3,14 @@ import type * as FsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AskUserRequest } from "../core/ask-user.js";
+import { agentLoop } from "@kenkaiiii/gg-agent";
+import { stream, StreamResult, type ToolCall } from "@kenkaiiii/gg-ai";
+import { ASK_USER_TIMEOUT_MS, createAskUserBridge, type AskUserPrompt, type AskUserRequest } from "../core/ask-user.js";
+import { commandCreationReviewer } from "../core/programmatic/command-creation.js";
+
+vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()), stream: vi.fn(),
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FsPromises>();
@@ -124,6 +131,8 @@ async function expectNoTemporaryFiles(root: string): Promise<void> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
@@ -370,6 +379,98 @@ describe("profile cancellation", () => {
 });
 
 describe("host setup authorization", () => {
+  it.each(["approve", "reject", "timeout", "caller-cancel"] as const)("keeps real agent-loop setup review within the host allowance: %s", async (answer) => {
+    const root = await repository();
+    let ready!: (question: AskUserPrompt) => void;
+    const questionReady = new Promise<AskUserPrompt>((resolve) => { ready = resolve; });
+    const onTimeout = vi.fn();
+    const bridge = createAskUserBridge({ broadcast: ready, onTimeout });
+    const onPreFileMutation = vi.fn();
+    const onFileMutated = vi.fn();
+    const tool = createProgrammaticProfileTool(root, {
+      reviewer: commandCreationReviewer(bridge), onPreFileMutation, onFileMutated,
+    });
+    const proposal = await execute(tool, { action: "inspect" }) as unknown as InspectOutput;
+    const args = { action: "generate" as const, configuration_fingerprint: proposal.configuration_fingerprint,
+      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const deadlines: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      deadlines.push(ms);
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("Controlled deadline", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    let requests = 0;
+    vi.mocked(stream).mockImplementation(() => new StreamResult((async function* () {
+      if (++requests === 1) {
+        const call: ToolCall = { type: "tool_call", id: "guarded-setup", name: tool.name, args };
+        yield { type: "toolcall_done", id: call.id, name: call.name, args };
+        return { message: { role: "assistant", content: [call] }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+      return { message: { role: "assistant", content: "Done" }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+    })()));
+    // Caller cancellation may close the event stream before tool_call_end is delivered.
+    // Observe and await the real tool too, so no-write assertions run after it finishes.
+    const execution = vi.spyOn(tool, "execute");
+    const caller = new AbortController();
+    let finished = false;
+    let result: unknown;
+    const running = (async () => {
+      for await (const event of agentLoop([{ role: "user", content: "Fixture" }], {
+        provider: "anthropic", model: "fixture", tools: [tool], signal: caller.signal,
+      })) {
+        expect(event.type).not.toBe("error");
+        if (event.type === "tool_call_end") {
+          expect(event.isError).toBe(false);
+          result = JSON.parse(event.result);
+        }
+      }
+      finished = true;
+    })();
+    try {
+      const question = await questionReady;
+      await vi.advanceTimersByTimeAsync(300_001);
+      expect(bridge.pendingCount).toBe(1);
+      expect(finished).toBe(false);
+      expect(deadlines).toEqual([ASK_USER_TIMEOUT_MS + 30_000]);
+      expect(onPreFileMutation).not.toHaveBeenCalled();
+      await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({ code: "ENOENT" });
+      await vi.advanceTimersByTimeAsync(ASK_USER_TIMEOUT_MS - 300_001 - 1);
+      expect(bridge.pendingCount).toBe(1);
+      if (answer === "timeout") await vi.advanceTimersByTimeAsync(1);
+      else if (answer === "caller-cancel") caller.abort();
+      else expect(bridge.settle(question.id, { action: "answer", answers: {
+        [question.questions[0]!.id]: answer === "approve" ? "save-setup" : "deny",
+      } })).toBe(true);
+      await running;
+      expect(execution).toHaveBeenCalledTimes(1);
+      const toolResult = JSON.parse(String(await execution.mock.results[0]!.value));
+      if (answer === "caller-cancel") expect(result).toBeUndefined();
+      else expect(result).toEqual(toolResult);
+      expect(bridge.pendingCount).toBe(0);
+      expect(onTimeout).toHaveBeenCalledTimes(answer === "timeout" ? 1 : 0);
+      if (answer === "approve") {
+        expect(result).toMatchObject({ ok: true, changed: true });
+        expect(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")))
+          .toMatchObject({ configurationFingerprint: proposal.configuration_fingerprint, profile: proposal.profile });
+        expect(onPreFileMutation).toHaveBeenCalledTimes(1);
+        expect(onFileMutated).toHaveBeenCalledTimes(1);
+      } else {
+        expect(toolResult).toMatchObject({ changed: false, error: answer === "caller-cancel" ? "operation-failed" : "setup-approval-denied" });
+        expect(onPreFileMutation).not.toHaveBeenCalled();
+        expect(onFileMutated).not.toHaveBeenCalled();
+        await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      expect(bridge.settle(question.id, { action: "answer", answers: { [question.questions[0]!.id]: "save-setup" } })).toBe(false);
+      expect(await execute(tool, args)).toMatchObject({ changed: false, error: expect.stringContaining("setup-proposal-unavailable") });
+    } finally {
+      tool.dispose();
+      bridge.cancelAll();
+      await running.catch(() => {});
+    }
+  });
+
   it("fails closed without a reviewer even after inspection", async () => {
     const root = await repository();
     const tool = createProgrammaticProfileTool(root);

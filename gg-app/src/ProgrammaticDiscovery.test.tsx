@@ -1,13 +1,48 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { DiscoveryCandidate, RecommendationSummary } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { isRecommendationDetail, isRecommendationHistoryReport, type DiscoveryCandidate, type RecommendationSummary } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 import { initialProgrammaticChatState, programmaticChatReducer, type ProgrammaticChatState } from "./programmatic-chat-state";
 import { ProgrammaticChat } from "./ProgrammaticChat";
-import { discoveryResponse } from "./programmatic-discovery-state";
+import { assessmentDisplay, discoveryResponse } from "./programmatic-discovery-state";
+import { isProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { emptyDiscoveryAssessment } from "./programmatic-empty-discovery.fixture";
 import { recommendationHistoryFixture } from "../scripts/recommendation-history-fixture.mjs";
 
 afterEach(cleanup);
+it.each(["saved", "acknowledgement-unknown"] as const)("qualifies cached history after %s and reloads only read-only views", (status) => {
+  const { detail } = recommendationHistoryFixture();
+  const props = fixture();
+  const report = { version: 1 as const, status: "ready" as const, revision: detail.historyRevision, offset: 0, total: 1, candidates: [detail.candidate] };
+  expect(isRecommendationDetail(detail)).toBe(true);
+  expect(isRecommendationHistoryReport(report)).toBe(true);
+  const loaded = { ...props.state, historyReport: report, historyDetail: detail,
+    selection: { source: "history" as const, id: detail.candidate.id }, candidateDetail: detail.discovery ?? null, candidateStale: true };
+  const state = programmaticChatReducer(loaded, { type: "assessment", generation: "one", event: {
+    sessionId: "session", conversationId: "chat", sequence: 1, phase: "completed", assessment: {
+      version: 1, mode: "configured", status: "completed", summary: "Assessment completed", limitations: [], observations: [], coverage: [],
+      deterministic: { status: "succeeded", enabledCount: 1, applicableCount: 1 },
+      history: status === "saved" ? { status, assessmentId: candidate.assessmentId, historyRevision: detail.historyRevision + 1 }
+        : { status, assessmentId: candidate.assessmentId, reason: "Save acknowledgement lost" },
+    },
+  } });
+  const view = render(<ProgrammaticChat {...props} state={state} />);
+  fireEvent.click(screen.getByText("Browse recommendation history"));
+  expect(screen.getByText(/This history list may be out of date/)).toBeTruthy();
+  expect(screen.getByText(/This saved recommendation may be out of date/)).toBeTruthy();
+  expect(props.onAction).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Reload history (read-only)" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reload selected history (read-only)" }));
+  expect(props.onAction.mock.calls.map(([request]) => request)).toEqual([
+    { version: 1, action: "history-report", offset: 0 },
+    { version: 1, action: "history-detail", candidateId: detail.candidate.id, offset: detail.offset },
+  ]);
+  expect(props.onRun).not.toHaveBeenCalled();
+  expect(props.onSelectCandidate).not.toHaveBeenCalled();
+  view.rerender(<ProgrammaticChat {...props} state={state} busy />);
+  expect((screen.getByRole("button", { name: "Reload history (read-only)" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Reload selected history (read-only)" }) as HTMLButtonElement).disabled).toBe(true);
+});
 it.each(["dismissed", "completed"] as const)("browses real correspondence to an off-page %s candidate without granting authority", (decision) => {
   const { detail, canonical } = recommendationHistoryFixture(decision);
   const canonicalId = canonical.candidate.id;
@@ -108,6 +143,26 @@ function fixture(item = candidate) {
   const state = { ...initialProgrammaticChatState("one"), assessment, discovery: assessment.discovery };
   return { state, busy: false, planMode: false, onAction: vi.fn(), onSelect: vi.fn(), onSelectCandidate: vi.fn(), onRun: vi.fn() };
 }
+it.each(["prepared", "reinspection-required"] as const)("retains and renders the returned %s summary through the response reducer", (status) => {
+  const props = fixture();
+  const selected = programmaticChatReducer(props.state, { type: "select-candidate", source: "current", id: candidate.candidateId });
+  const started = programmaticChatReducer(selected, { type: "start", generation: selected.generation, epoch: selected.epoch, operation: "review-candidate" });
+  const candidateReview = { status, candidate, summary: `Host returned ${status}: <b>read only</b>.` };
+  const response = { version: 1 as const, action: "review-candidate" as const, ok: true as const, candidateReview };
+  const action = { type: "response" as const, generation: started.generation, epoch: started.epoch, response };
+  expect(programmaticChatReducer(started, { ...action, epoch: started.epoch - 1 })).toBe(started);
+  expect(programmaticChatReducer(started, { ...action, generation: "retired-pane" })).toBe(started);
+  const settled = programmaticChatReducer(started, action);
+  expect(settled.candidateReview).toEqual(candidateReview);
+  expect(settled.selection).toEqual(selected.selection);
+  render(<ProgrammaticChat {...props} state={settled} />);
+  expect(within(screen.getByRole("region", { name: "Selected opportunity" })).getByText(candidateReview.summary)).toBeTruthy();
+  expect(screen.queryByText("Different host result")).toBeNull();
+  expect(document.querySelector('[aria-label="Selected opportunity"] b')).toBeNull();
+  expect(props.onAction).not.toHaveBeenCalled();
+  expect(props.onRun).not.toHaveBeenCalled();
+});
+
 it("discovers without scanner setup, selects without submitting, and reviews only with a second explicit action", async () => {
   const props = fixture();
   const view = render(<ProgrammaticChat {...props} />);
@@ -190,11 +245,44 @@ it.each([undefined, { status: "reinspection-required" as const, reason: "Histori
   expect(props.onAction).not.toHaveBeenCalled();
   expect(props.onRun).not.toHaveBeenCalled();
 });
+it.each([false, true])("shows neutral empty results with visible host evidence (inspected=%s)", (inspected) => {
+  const props = fixture();
+  const assessment = emptyDiscoveryAssessment(inspected);
+  expect(isProgrammaticAssessment(assessment)).toBe(true);
+  const state = { ...props.state, ...assessmentDisplay(props.state, assessment) };
+  render(<ProgrammaticChat {...props} state={state} />);
+  expect(screen.getByText(/No recommendations were returned/)).toBeTruthy();
+  expect(screen.queryByText(/No worthwhile need was identified/)).toBeNull();
+  const coverage = screen.getByText("Assessment coverage and limits").closest("details");
+  expect(coverage?.open).toBe(true);
+  expect(within(coverage!).getByText(`project: ${assessment.coverage[1].status} — ${assessment.coverage[1].summary}`)).toBeTruthy();
+  expect(screen.getByText(assessment.limitations[0])).toBeTruthy();
+  expect(props.onAction).not.toHaveBeenCalled();
+  expect(props.onRun).not.toHaveBeenCalled();
+});
+it.each(["incomplete", "cancelled", "refreshing"] as const)("does not present retained empty results as current after %s", (status) => {
+  const props = fixture();
+  const assessment = emptyDiscoveryAssessment(true);
+  expect(isProgrammaticAssessment(assessment)).toBe(true);
+  const current = { ...props.state, ...assessmentDisplay(props.state, assessment) };
+  const interrupted = { ...assessment };
+  delete interrupted.discovery;
+  const state = status === "refreshing"
+    ? programmaticChatReducer(current, { type: "assessment", generation: "one", event: {
+      sessionId: "session", conversationId: "chat", sequence: 1, phase: "started" } })
+    : { ...current, ...assessmentDisplay(current, { ...interrupted, status }) };
+  expect(isProgrammaticAssessment(state.assessment)).toBe(true);
+  render(<ProgrammaticChat {...props} state={state} />);
+  expect(screen.queryByText(/No recommendations were returned/)).toBeNull();
+  expect(screen.queryByText(/No worthwhile need was identified/)).toBeNull();
+  expect(screen.getByText(/Previous discovery results/)).toBeTruthy();
+  expect(screen.getByText(`Project assessment: ${status === "refreshing" ? "completed" : status}`)).toBeTruthy();
+});
 it("does not confuse empty completed discovery with legacy detail or disabled native support", () => {
   const props = fixture();
   const empty = { ...props.state, discovery: { ...props.state.discovery, candidates: [] } };
   const { rerender } = render(<ProgrammaticChat {...props} state={empty} />);
-  expect(screen.getByText(/No worthwhile need was identified within the inspected scope/)).toBeTruthy();
+  expect(screen.getByText(/No recommendations were returned/)).toBeTruthy();
   rerender(<ProgrammaticChat {...props} state={{ ...props.state, discovery: null }} />);
   expect(screen.getByText(/Candidate detail is unavailable/)).toBeTruthy();
   const unsupported = fixture({ ...candidate, nextStep: { available: false, reason: "Requires application development" } });

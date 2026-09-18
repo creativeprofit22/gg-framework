@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync, readdirSync, realpathSync } from "node:fs";
 import http from "node:http";
+import { assertDiscoveryHandoff } from "./programmatic-discovery-observer.mjs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -224,12 +225,20 @@ async function run() {
     for (const key of Object.keys(env)) if (/(?:API_KEY|ACCESS_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIALS|^AZURE_|^HOMEDRIVE$|^HOMEPATH$)/i.test(key)) delete env[key];
     Object.assign(env, { GG_SIDECAR_PATH: fileURLToPath(import.meta.url), GG_PROGRAMMATIC_EXECUTION_FIXTURE_MODE: "sidecar",
       GG_PROGRAMMATIC_EXECUTION_FIXTURE_PROVIDER: providerUrl,
-      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1" } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
+      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1", GG_PROGRAMMATIC_DISCOVERY_AUDIT: paths.audit } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
       GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
       COREPACK_HOME: process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node/corepack"), COREPACK_DEFAULT_TO_LATEST: "0",
       CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
       RUSTUP_HOME: process.env.RUSTUP_HOME ?? join(process.env.USERPROFILE ?? "", ".rustup") });
     console.log(`Fixture evidence: ${paths.audit}`);
+    if (discoveryOnly) json(join(paths.audit, "discovery-source.json"), Object.fromEntries([
+      "packages/ggcoder/src/core/agent-session.ts", "packages/ggcoder/src/app-sidecar-programmatic-chat.ts",
+      "packages/ggcoder/src/app-sidecar.ts", "packages/ggcoder/dist/app-sidecar-programmatic-chat.js",
+      "packages/ggcoder/dist/app-sidecar.js", "gg-app/src-tauri/src/lib.rs", "gg-app/src/agent.ts",
+      "gg-app/src/AgentPane.tsx", "gg-app/src/programmatic-chat-state.ts", "gg-app/src/programmatic-discovery-state.ts",
+      "gg-app/src/ProgrammaticDiscovery.tsx", "gg-app/scripts/programmatic-discovery-smoke.mjs",
+      "gg-app/scripts/programmatic-discovery-observer.mjs", "gg-app/scripts/programmatic-execution-dev-smoke.mjs",
+    ].map((file) => [file, createHash("sha256").update(readFileSync(join(workspace, file))).digest("hex")])));
     logFd = openSync(join(paths.audit, "developer.log"), "a");
     if (reuseBuiltDev) {
       const frontend = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm exec vite --host 127.0.0.1 --port ${new URL(frontendOrigin).port}`], { cwd: app, env, windowsHide: true, stdio: ["ignore", logFd, logFd] });
@@ -279,6 +288,9 @@ async function run() {
         name === "settings.json" || name.startsWith("commands/") || name.startsWith("programmatic/")));
       const protectedBefore = protectedSnapshot();
       const result = await runDiscoverySmoke({ client, click, waitFor, requests, input, observe: observeMinimized });
+      assertDiscoveryHandoff({ ...result,
+        host: JSON.parse(readFileSync(join(paths.audit, "discovery-host.json"), "utf8")),
+        http: JSON.parse(readFileSync(join(paths.audit, "discovery-http.json"), "utf8")) });
       assert.equal(providerFailure, undefined);
       assert.deepEqual(snapshot(paths.project), baseline, "Discovery/review changes no project, command, settings or lifecycle files");
       const protectedAfter = protectedSnapshot();
@@ -549,6 +561,7 @@ async function run() {
       workspaceLayout: await client.evaluate('localStorage.getItem("gg-workspace-layout-recursive:main")'),
       rejectedWorkspaceLayout: await client.evaluate('localStorage.getItem("gg-workspace-layout-recursive-rejected:main")'),
       text: String(await client.evaluate('document.body.innerText')).slice(0, 8192),
+      discoveryTrace: discoveryOnly ? await client.evaluate('window.fixtureDiscoveryTrace ?? []') : undefined,
       buttons: await client.evaluate('Array.from(document.querySelectorAll("button")).slice(0,32).map(b=>({text:b.textContent.slice(0,256),disabled:b.disabled}))'),
     } : {},
     beforeCleanup: async () => { await observeMinimized?.("before-cleanup"); },
@@ -604,6 +617,26 @@ if (mode === "sidecar") {
     // Mock only the provider transport; preserve the real Azure configuration validator.
     return realFetch(url, init);
   };
+  if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY === "1") {
+    const adapterUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/app-sidecar-programmatic-chat.js")).href;
+    registerHooks({ load(target, context, nextLoad) {
+      const loaded = nextLoad(target, context);
+      if (target !== adapterUrl) return loaded;
+      const source = String(loaded.source);
+      const needle = "const candidateReview = await this.reviewCandidate(input);";
+      assert.equal(source.split(needle).length - 1, 1);
+      return { ...loaded, source: `import { writeFileSync as writeReviewTrace } from "node:fs";\n` + source.replace(needle,
+        needle + `\nwriteReviewTrace(${JSON.stringify(join(process.env.GG_PROGRAMMATIC_DISCOVERY_AUDIT, "discovery-host.json"))}, JSON.stringify({ target, now: this.target(), epoch, currentEpoch: this.epoch, candidateReview }, null, 2));`) };
+    } });
+    const end = http.ServerResponse.prototype.end;
+    http.ServerResponse.prototype.end = function (chunk, ...args) {
+      if (this.req?.url === "/programmatic" && typeof chunk === "string" && chunk.length < 100_000) {
+        const body = JSON.parse(chunk);
+        if (body.action === "review-candidate") json(join(process.env.GG_PROGRAMMATIC_DISCOVERY_AUDIT, "discovery-http.json"), { status: this.statusCode, body });
+      }
+      return end.call(this, chunk, ...args);
+    };
+  }
   if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY !== "1") {
   const detectorUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/opportunities.js")).href;
   const original = readFileSync(fileURLToPath(detectorUrl), "utf8");

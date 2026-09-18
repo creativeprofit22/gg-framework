@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { ASK_USER_TIMEOUT_MS } from "../core/ask-user.js";
 import {
   configurationFingerprintV1Schema,
   programmaticProfileV1Schema,
@@ -53,6 +54,8 @@ export function createProgrammaticProfileTool(
       "validated proposal after separate approval. Uses one fixed repository path and never runs scanners, specialists, or commands.",
     parameters: ProgrammaticProfileParams,
     executionMode: "sequential",
+    // Match ask_user: the question owner expires review before the tool deadline.
+    timeoutMs: ASK_USER_TIMEOUT_MS + 30_000,
     async execute(input, context) {
       if (options.localFilesystem === false) {
         return stableJson({

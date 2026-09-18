@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { observeDiscoveryHandoff, readDiscoverySummary } from "./programmatic-discovery-observer.mjs";
 
 export const discoveryOutcome = "NATIVE DISCOVERY: reconcile fixture records";
 export const discoveryRequestCount = 10;
@@ -105,8 +106,19 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
     assert.ok(input.evidence.accessibility.some((node) => node.name === "Review a new capability"));
     await input.resize(1280, 900);
   }
+  const stopObserving = await observeDiscoveryHandoff(client);
   await click("Review a new capability");
   await waitFor("review settled", () => client.evaluate(`document.body.innerText.includes('NATIVE DISCOVERY REVIEW SETTLED') && Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Discover opportunities' && !b.disabled)`));
+  const trace = await waitFor("native review response", async () => {
+    const entries = await client.evaluate("window.fixtureDiscoveryTrace");
+    return entries.some((entry) => entry.boundary === "ipc") && entries;
+  });
+  const response = trace.find((entry) => entry.boundary === "ipc").response;
+  assert.equal(response.ok, true, JSON.stringify(response));
+  const review = response.candidateReview;
+  const summary = await waitFor("host review summary in selected opportunity", () => client.evaluate(`(${readDiscoverySummary.toString()})(document, ${JSON.stringify(review)})`));
+  assert.equal(summary.count, 1);
+  await stopObserving();
   assert.equal(requests.length, discoveryRequestCount);
   assert.equal(await client.evaluate(`document.querySelector('[aria-label="Selected opportunity"]')?.textContent.includes(${JSON.stringify(discoveryOutcome)})`), true);
   assert.equal(await client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Setup is read-only; deterministic checks were not run.')`), true);
@@ -117,5 +129,5 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
   await observe?.("discovery-reviewed");
   return { passed: true, requests: requests.length, discoveryOnly: true, nativeInputSmoke: !!input, minimized: false,
     real: ["native developer webview", "Rust proxy", "session-owned discovery and review", "canonical command inspection", "permission-denied creation"],
-    mocked: ["local scripted Azure Responses provider", "MCP disabled"], selectedContextPreserved: true, detectorPatched: false };
+    mocked: ["local scripted Azure Responses provider", "MCP disabled"], selectedContextPreserved: true, detectorPatched: false, trace, summary };
 }

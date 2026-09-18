@@ -1,7 +1,36 @@
 import { expect, it } from "vitest";
-import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-import type { DiscoveryCandidate } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
-import { initialProgrammaticChatState, programmaticChatReducer, canReviewProgrammaticCandidate, canRunProgrammaticSelection } from "./programmatic-chat-state";
+import { isProgrammaticAssessment, isProgrammaticAssessmentEvent, type ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { isRecommendationDetail, isRecommendationHistoryReport, type DiscoveryCandidate } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
+import { isProgrammaticChatResponse, type ProgrammaticChatResponse } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { initialProgrammaticChatState, programmaticChatReducer, canReviewProgrammaticCandidate, canRunProgrammaticSelection, type ProgrammaticChatState } from "./programmatic-chat-state";
+
+import { emptyDiscoveryAssessment } from "./programmatic-empty-discovery.fixture";
+
+it.each([false, true])("keeps evidence coverage independent from completed empty freshness (inspected=%s)", (inspected) => {
+  const value = emptyDiscoveryAssessment(inspected);
+  expect(isProgrammaticAssessment(value)).toBe(true);
+  const state = programmaticChatReducer(initialProgrammaticChatState("one"), completion(value, 1));
+  expect(state.discoveryStale).toBe(false);
+  expect(state.discovery?.candidates).toEqual([]);
+  expect(state.assessment?.coverage).toEqual(value.coverage);
+  expect(state.assessment?.limitations).toEqual(value.limitations);
+  expect(canReviewProgrammaticCandidate(state)).toBe(false);
+  const started = programmaticChatReducer(state, { type: "assessment", generation: "one", event: {
+    conversationId: "chat", sessionId: "session", sequence: 2, phase: "started" } });
+  expect(started.discovery).toBe(state.discovery);
+  expect(started.discoveryStale).toBe(true);
+  expect(started.assessmentRetained).toBe(true);
+  for (const status of ["incomplete", "cancelled"] as const) {
+    const interrupted = { ...value, status };
+    delete interrupted.discovery;
+    expect(isProgrammaticAssessment(interrupted)).toBe(true);
+    const settled = programmaticChatReducer(started, completion(interrupted, 2));
+    expect(settled.assessment).toBe(interrupted);
+    expect(settled.discovery).toBe(state.discovery);
+    expect(settled.discoveryStale).toBe(true);
+    expect(canReviewProgrammaticCandidate(settled)).toBe(false);
+  }
+});
 
 const candidate: DiscoveryCandidate = { assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742", candidateId: "ad5bb9ba-4d86-485a-8d74-613fe59b12df", revision: 1,
   choice: "missing-capability", outcome: "Read records", rationale: "Repeated", uncertainty: "Sample only", workflow: { trigger: "Change", representativeCase: "Record",
@@ -72,7 +101,126 @@ it("does not revive previous evidence from a delayed response while a newer asse
   expect(state.candidateStale).toBe(true);
   expect(canReviewProgrammaticCandidate(state)).toBe(false);
 });
+function loadedHistory() {
+  const summary = { id: candidate.candidateId, revision: 1, outcome: "Saved need", decision: "open" as const,
+    ambiguity: "none" as const, observationCount: 1 };
+  const historyReport = { version: 1 as const, status: "ready" as const, revision: 1, offset: 0, total: 1, candidates: [summary] };
+  const historyDetail = { version: 1 as const, historyRevision: 1, candidate: summary, offset: 0, total: 0, records: [] };
+  expect(isRecommendationHistoryReport(historyReport)).toBe(true);
+  expect(isRecommendationDetail(historyDetail)).toBe(true);
+  return { ...initialProgrammaticChatState("one"), historyReport, historyDetail,
+    selection: { source: "history" as const, id: summary.id }, candidateStale: true };
+}
 const request = { requestId: "request-1", conversationId: "chat", sessionId: "session" };
+const savedAssessment = (history: ProgrammaticAssessment["history"]): ProgrammaticAssessment => ({
+  version: 1, mode: "configured", status: "completed", summary: "Assessment completed", limitations: [], coverage: [], observations: [],
+  deterministic: { status: "succeeded", enabledCount: 1, applicableCount: 1 }, lifecycle: { ...request, sequence: 2 },
+  ...(history ? { history } : {}),
+});
+function historyCompletion(state: ProgrammaticChatState, value: ProgrammaticAssessment, path: "event" | "response") {
+  const event = { ...request, sequence: 2, phase: "completed" as const, assessment: value };
+  expect(isProgrammaticAssessmentEvent(event)).toBe(true);
+  const response = { version: 1 as const, action: "discover" as const, ok: true as const, assessment: value };
+  expect(isProgrammaticChatResponse(response)).toBe(true);
+  return programmaticChatReducer(state, path === "event" ? { type: "assessment", generation: "one", event }
+    : { type: "response", generation: "one", epoch: state.epoch, response });
+}
+it.each(["event", "response"] as const)("invalidates loaded report and selected detail through %s completion", (path) => {
+  const loaded = loadedHistory();
+  const state = programmaticChatReducer(loaded, { type: "start", generation: "one", epoch: 1,
+    operation: "discover", assessmentRequest: request });
+  const result = historyCompletion(state, savedAssessment({ status: "saved", assessmentId: candidate.assessmentId, historyRevision: 2 }), path);
+  expect(result.historyReportStale).toBe(true);
+  expect(result.historyDetailStale).toBe(true);
+  expect(result.historyReport).toBe(loaded.historyReport);
+  expect(result.historyDetail).toBe(loaded.historyDetail);
+  expect(result.selection).toBe(loaded.selection);
+  expect(canReviewProgrammaticCandidate(result)).toBe(false);
+  expect(canRunProgrammaticSelection(result)).toBe(false);
+});
+it("rejects stale and foreign completions without changing history freshness", () => {
+  const loaded = loadedHistory();
+  const state = { ...loaded, assessmentSequence: 3, assessmentIdentity: { ...request, sequence: 3 }, assessmentRequest: request,
+    assessmentRequestSequence: 2, epoch: 2, operation: "discover" as const };
+  const value = savedAssessment({ status: "saved", assessmentId: candidate.assessmentId, historyRevision: 9 });
+  for (const patch of [{ sequence: 2 }, { sequence: 4, sessionId: "foreign" }, { sequence: 4, conversationId: "foreign" }]) {
+    const identity = { ...request, ...patch };
+    const event = { ...identity, phase: "completed" as const, assessment: { ...value, lifecycle: identity } };
+    expect(isProgrammaticAssessmentEvent(event)).toBe(true);
+    expect(programmaticChatReducer(state, { type: "assessment", generation: "one", event })).toBe(state);
+  }
+  const response = { version: 1 as const, action: "discover" as const, ok: true as const, assessment: value };
+  expect(isProgrammaticChatResponse(response)).toBe(true);
+  for (const patch of [{ epoch: 1 }, { generation: "retired" }]) {
+    expect(programmaticChatReducer(state, { type: "response", generation: "one", epoch: 2, response, ...patch })).toBe(state);
+  }
+  const foreign = programmaticChatReducer(state, { type: "response", generation: "one", epoch: 2,
+    response: { ...response, assessment: { ...value, lifecycle: { ...request, sessionId: "foreign", sequence: 4 } } } });
+  expect(foreign.historyReportStale).toBe(false);
+  expect(foreign.historyDetailStale).toBe(false);
+  expect(foreign.historyRevision).toBe(0);
+});
+it.each([0, 1])("does not invalidate history for same/older revision %i", (historyRevision) => {
+  const result = historyCompletion(loadedHistory(), savedAssessment({ status: "saved", assessmentId: candidate.assessmentId, historyRevision }), "event");
+  expect(result.historyReportStale).toBe(false);
+  expect(result.historyDetailStale).toBe(false);
+});
+it.each([undefined, "disabled", "unsaved", "acknowledgement-unknown"] as const)("handles %s history saving conservatively", (status) => {
+  const history: ProgrammaticAssessment["history"] = status === undefined ? undefined : status === "disabled" ? { status }
+    : { status, assessmentId: candidate.assessmentId, reason: "Save not acknowledged" };
+  const result = historyCompletion(loadedHistory(), savedAssessment(history), "event");
+  expect(result.historyReportStale).toBe(status === "acknowledgement-unknown");
+  expect(result.historyDetailStale).toBe(status === "acknowledgement-unknown");
+  expect(result.operation).toBeNull();
+});
+function readHistory(state: ReturnType<typeof initialProgrammaticChatState>, response: ProgrammaticChatResponse) {
+  expect(isProgrammaticChatResponse(response)).toBe(true);
+  const epoch = state.epoch + 1;
+  const started = programmaticChatReducer(state, { type: "start", generation: "one", epoch, operation: response.action });
+  return programmaticChatReducer(started, { type: "response", generation: "one", epoch, response });
+}
+it("clears each stale view only on a fresh read at the acknowledged revision", () => {
+  const loaded = loadedHistory();
+  let state = historyCompletion(loaded, savedAssessment({ status: "saved", assessmentId: candidate.assessmentId, historyRevision: 2 }), "event");
+  state = readHistory(state, { version: 1, ok: true, action: "history-report", report: loaded.historyReport });
+  expect(state.historyReportStale).toBe(true);
+  state = readHistory(state, { version: 1, ok: true, action: "history-report", report: { ...loaded.historyReport, revision: 2 } });
+  expect(state.historyReportStale).toBe(false);
+  expect(state.historyDetailStale).toBe(true);
+  state = readHistory(state, { version: 1, ok: true, action: "history-detail", detail: { ...loaded.historyDetail, historyRevision: 2 } });
+  expect(state.historyDetailStale).toBe(false);
+  expect(state.candidateStale).toBe(true);
+  expect(state.selection).toBe(loaded.selection);
+});
+it("retains stale detail on unavailable reads and ignores another selection's detail", () => {
+  const loaded = loadedHistory();
+  let state = historyCompletion(loaded, savedAssessment({ status: "saved", assessmentId: candidate.assessmentId, historyRevision: 2 }), "event");
+  state = readHistory(state, { version: 1, ok: true, action: "history-detail", detail: null });
+  expect(state.historyDetail).toBe(loaded.historyDetail);
+  expect(state.historyDetailStale).toBe(true);
+  state = programmaticChatReducer(state, { type: "select-candidate", source: "history", id: candidate.assessmentId });
+  state = readHistory(state, { version: 1, ok: true, action: "history-detail", detail: { ...loaded.historyDetail, historyRevision: 2 } });
+  expect(state.historyDetail).toBe(loaded.historyDetail);
+  expect(state.historyDetailStale).toBe(true);
+  expect(state.selection?.id).toBe(candidate.assessmentId);
+  const reset = programmaticChatReducer(state, { type: "reset", generation: "two" });
+  expect(reset.historyReport).toBeNull();
+  expect(reset.historyDetail).toBeNull();
+  expect(reset.historyRevision).toBe(0);
+  expect(reset.historyReportStale).toBe(false);
+  expect(reset.historyDetailStale).toBe(false);
+});
+it.each([true, false])("does not let an in-flight read settle an uncertain save (already loaded: %s)", (alreadyLoaded) => {
+  const loaded = loadedHistory();
+  const started = { ...loaded, historyReport: alreadyLoaded ? loaded.historyReport : null, epoch: 1, operation: "history-report" as const };
+  let state = historyCompletion(started, savedAssessment({ status: "acknowledgement-unknown", assessmentId: candidate.assessmentId, reason: "Unknown" }), "event");
+  const response = { version: 1 as const, ok: true as const, action: "history-report" as const, report: loaded.historyReport };
+  state = programmaticChatReducer(state, { type: "response", generation: "one", epoch: 1, response });
+  expect(state.historyReportStale).toBe(true);
+  state = readHistory(state, response);
+  expect(state.historyReportStale).toBe(false);
+  expect(state.historyDetailStale).toBe(true);
+});
 it("recovers a successful current receipt when its completed event was dropped", () => {
   let state = programmaticChatReducer(selected(), { type: "start", generation: "one", epoch: 1, operation: "discover", assessmentRequest: request });
   state = programmaticChatReducer(state, { type: "assessment", generation: "one", event: {

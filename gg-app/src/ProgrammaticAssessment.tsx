@@ -28,7 +28,7 @@ export function ProgrammaticAssessment({ assessment, previous = false }: { asses
         </ul>
       )}
       {assessment.coverage.length > 0 && (
-        <details>
+        <details open={assessment.discovery?.candidates.length === 0}>
           <summary>Assessment coverage and limits</summary>
           <ul>
             {assessment.coverage.map((item, index) => (

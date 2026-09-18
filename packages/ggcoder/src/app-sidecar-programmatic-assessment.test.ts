@@ -9,7 +9,7 @@ import { RunClaim } from "./core/run-claim.js";
 import { isProgrammaticAssessmentEvent, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { canonicalJson } from "./core/tauri-package/paths.js";
 import { useFakeHome } from "./test-support/fake-home.js";
-import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents } from "./app-sidecar-programmatic-chat.js";
+import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./core/programmatic/profile.js";
 
 // Real session/tool loop and filesystem owners; only network provider streaming is scripted.
@@ -25,13 +25,21 @@ beforeEach(async () => {
 });
 afterEach(async () => { restore(); vi.restoreAllMocks(); await fs.rm(cwd, { recursive: true, force: true }); });
 
+it("distinguishes conversation/session owners without treating appended transcript leaves as owners", () => {
+  const identity = { conversationId: "conversation", sessionId: "session", leafId: "before" };
+  const owner = programmaticChatIdentity(identity);
+  expect(programmaticChatIdentity({ ...identity, leafId: "after" })).toBe(owner);
+  expect(programmaticChatIdentity({ ...identity, conversationId: "new-conversation" })).not.toBe(owner);
+  expect(programmaticChatIdentity({ ...identity, sessionId: "new-session" })).not.toBe(owner);
+});
+
 it.each(["approve", "reject", "permission", "prerequisite", "no-inspect", "review-required", "invalid", "unavailable", "superseded"] as const)("preserves discovery proposals for later exact creation: %s", async (decision) => {
   const reviewCreation = vi.fn(async (request) => ({ action: "answer" as const,
     answers: { [request.questions[0].id]: decision === "reject" ? "reject" : request.questions[0].options[0].value } }));
   const session = new AgentSession({ cwd, provider: "anthropic", model: "claude-sonnet-5", mcpEnabled: false,
     systemPrompt: "Scripted discovery and read-only review", approveToolExecution: async () => true, reviewCommandCreation: reviewCreation });
   const claim = new RunClaim();
-  const adapter = new AppSidecarProgrammaticChat(() => ({ cwd, identity: "discovery", codeMode: true, planMode: false, busy: claim.active }),
+  const adapter = new AppSidecarProgrammaticChat(() => ({ cwd, identity: programmaticChatIdentity(session.getConversationIdentity()), codeMode: true, planMode: false, busy: claim.active }),
     () => claim.claim(), () => claim.release(), undefined, undefined, (mode, assessmentRequestId) => session.assessProgrammatic(mode, undefined, undefined, { assessmentRequestId }), (request) => session.reviewDiscoveryCandidate(request));
   const requirement = { version: 1, desiredOutcome: "Reconcile ledger", capabilityKind: "script-backed", inputs: ["Ledger"], outputs: ["Report"],
     prerequisites: ["Readable ledger"], risks: ["Sample only"], verificationExpectations: ["Known mismatch reported"] };
@@ -103,10 +111,15 @@ it.each(["approve", "reject", "permission", "prerequisite", "no-inspect", "revie
     expect((await adapter.handle({ ...request, expectedRevision: candidate.revision + 1 })).status).toBe(409);
     expect(vi.mocked(stream).mock.calls.length).toBe(callsBefore);
     reviewing = true; stage = 0;
+    const identityBefore = session.getConversationIdentity();
     const review = await adapter.handle(request);
+    const identityAfter = session.getConversationIdentity();
+    expect(identityAfter.leafId).not.toBe(identityBefore.leafId);
+    expect(programmaticChatIdentity(identityAfter)).toBe(programmaticChatIdentity(identityBefore));
     expect(review.status, JSON.stringify(vi.mocked(stream).mock.calls.at(-1)![0].messages).slice(-4000)).toBe(200);
     const incomplete = ["no-inspect", "review-required", "invalid", "unavailable", "superseded"].includes(decision);
-    expect(review.body).toMatchObject({ candidateReview: { status: incomplete ? "reinspection-required" : "prepared" } });
+    expect(review.body).toMatchObject({ candidateReview: { status: incomplete ? "reinspection-required" : "prepared",
+      candidate, summary: expect.stringContaining(incomplete ? "No actionable proposal is available" : "No command was created or run") } });
     if (incomplete) {
       expect(reviewCreation).not.toHaveBeenCalled();
       expect(await fs.readdir(path.join(cwd, ".gg/commands"))).toEqual([]);

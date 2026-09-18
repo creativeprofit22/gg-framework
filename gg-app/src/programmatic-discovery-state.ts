@@ -16,20 +16,30 @@ export interface DiscoveryChatState {
   assessmentRequest: { requestId: string; sessionId: string; conversationId: string } | null;
   selection: ProgrammaticSelection | null;
   discovery: DiscoveryProjection | null;
+  /** Freshness only; a completed empty projection does not establish evidence sufficiency or a no-op verdict. */
   discoveryStale: boolean;
   candidateDetail: DiscoveryCandidate | null;
   candidateStale: boolean;
   candidateReview: DiscoveryReview | null;
   historyReport: RecommendationHistoryReport | null;
   historyDetail: RecommendationDetail | null;
+  historyReportStale: boolean;
+  historyDetailStale: boolean;
+  /** Highest accepted save receipt; display freshness only, never approval authority. */
+  historyRevision: number;
+  /** Reads already in flight cannot reconcile a later uncertain save. */
+  historyInvalidatedEpoch: number;
 }
 export const initialDiscoveryChatState = (): DiscoveryChatState => ({
   assessment: null, assessmentSequence: 0, assessmentRequestSequence: 0, assessmentPending: false,
   assessmentUncertain: false, assessmentRetained: false, assessmentIdentity: null, assessmentRequest: null,
   selection: null, discovery: null, discoveryStale: false, candidateDetail: null, candidateStale: false,
   candidateReview: null, historyReport: null, historyDetail: null,
+  historyReportStale: false, historyDetailStale: false, historyRevision: 0, historyInvalidatedEpoch: -1,
 });
 export function assessmentEvent(state: ProgrammaticChatState, update: ProgrammaticAssessmentEvent): ProgrammaticChatState {
+  const owner = state.assessmentRequest ?? state.assessmentIdentity;
+  if (owner && !sameOwner(owner, update)) return state;
   if (update.sequence < state.assessmentSequence ||
     (update.sequence === state.assessmentSequence && ((!state.assessmentPending && !state.assessmentUncertain) || update.phase === "started"))) return state;
   // Do not touch request epochs, exact proposals, or their approval ownership.
@@ -64,8 +74,15 @@ export function assessmentResponse(state: ProgrammaticChatState, response: Progr
 /** Called only after the existing reducer's generation/sequence/epoch guards. */
 export function assessmentDisplay(state: ProgrammaticChatState, assessment: ProgrammaticAssessment | null): Partial<ProgrammaticChatState> {
   const latest = assessment?.discovery;
+  const history = assessment?.history;
+  const historyRevision = Math.max(state.historyRevision, history?.status === "saved" ? history.historyRevision : 0);
+  const uncertain = history?.status === "acknowledgement-unknown";
+  const historyReportStale = state.historyReportStale || !!state.historyReport && (uncertain || state.historyReport.revision < historyRevision);
+  const historyDetailStale = state.historyDetailStale || !!state.historyDetail && (uncertain || state.historyDetail.historyRevision < historyRevision);
   const selected = state.selection?.source === "current" ? latest?.candidates.find((candidate) => candidate.candidateId === state.selection?.id) : undefined;
   return {
+    historyRevision, historyReportStale, historyDetailStale,
+    historyInvalidatedEpoch: uncertain ? state.epoch : state.historyInvalidatedEpoch,
     assessment: assessment ?? state.assessment,
     assessmentRetained: assessment ? false : state.assessmentRetained,
     discovery: latest ?? state.discovery,
@@ -91,10 +108,15 @@ export function discoveryResponse(state: ProgrammaticChatState, response: Discov
         candidate.revision !== state.candidateDetail.revision || state.candidateStale) return state;
       return { ...state, candidateReview: response.candidateReview, notice: response.candidateReview.summary };
     }
-    case "history-report": return { ...state, historyReport: response.report };
+    case "history-report": return { ...state, historyReport: response.report,
+      historyReportStale: response.report.revision < state.historyRevision || state.epoch <= state.historyInvalidatedEpoch ||
+        state.historyReportStale && !["ready", "recovered"].includes(response.report.status) };
     case "history-detail": {
       if (state.selection?.source !== "history" || (response.detail && state.selection.id !== response.detail.candidate.id)) return state;
-      return { ...state, historyDetail: response.detail, candidateDetail: response.detail?.discovery ?? state.candidateDetail, candidateStale: true,
+      return { ...state, historyDetail: response.detail ?? state.historyDetail,
+        historyDetailStale: !response.detail || response.detail.historyRevision < state.historyRevision ||
+          state.epoch <= state.historyInvalidatedEpoch,
+        candidateDetail: response.detail?.discovery ?? state.candidateDetail, candidateStale: true,
         notice: response.detail ? "Historical proposal. Fresh inspection is required before review." : "This historical candidate is unavailable; previous detail is retained." };
     }
     case "history-inspect-decision": case "history-inspect-correspondence":

@@ -88,9 +88,11 @@ describe("McpModal lifecycle guidance", () => {
     render(<McpModal onClose={vi.fn()} />);
     await screen.findByText("No MCP’s configured.");
 
-    expect(screen.getByText(
-      "Adding or removing servers here automatically refreshes MCP in this conversation. Tools are available only when the server connects and trust requirements are met. Other open conversations are not automatically refreshed.",
-    )).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Adding or removing servers here automatically refreshes MCP in this conversation. Tools are available only when the server connects and trust requirements are met. Other open conversations are not automatically refreshed.",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByText(/next app restart/i)).toBeNull();
   });
 });
@@ -99,19 +101,26 @@ describe("McpModal server status", () => {
   it.each([
     ["trust-blocked", "Project server blocked. Add or re-add it in this project to trust it."],
     ["connection-failed", "Could not connect. Check the server settings and availability."],
-  ] as const)("shows readable %s guidance without raw diagnostics", async (failureReason, message) => {
-    listMcpServersMock.mockResolvedValue([{
-      ...connectedRow,
-      ok: false,
-      toolCount: 0,
-      failureReason,
-      error: "Connection failed: Authorization: Bearer fixture-private-value",
-    }]);
-    render(<McpModal onClose={vi.fn()} />);
-    expect((await screen.findByText(message)).closest(".mcp-item")?.textContent).toContain("example");
-    expect(document.body.textContent).not.toContain("fixture-private-value");
-    expect(document.body.innerHTML).not.toContain("Authorization:");
-  });
+  ] as const)(
+    "shows readable %s guidance without raw diagnostics",
+    async (failureReason, message) => {
+      listMcpServersMock.mockResolvedValue([
+        {
+          ...connectedRow,
+          ok: false,
+          toolCount: 0,
+          failureReason,
+          error: "Connection failed: Authorization: Bearer fixture-private-value",
+        },
+      ]);
+      render(<McpModal onClose={vi.fn()} />);
+      expect((await screen.findByText(message)).closest(".mcp-item")?.textContent).toContain(
+        "example",
+      );
+      expect(document.body.textContent).not.toContain("fixture-private-value");
+      expect(document.body.innerHTML).not.toContain("Authorization:");
+    },
+  );
   it.each([
     ["connected", { ...connectedRow, failureReason: "connection-failed" as const }],
     ["auth", { ...authRow, failureReason: "connection-failed" as const }],
@@ -120,34 +129,50 @@ describe("McpModal server status", () => {
     listMcpServersMock.mockResolvedValue([{ ...row, error: "private diagnostic" }]);
     render(<McpModal onClose={vi.fn()} />);
     await screen.findByText("example");
-    expect(screen.queryByText(/Could not connect|Project server blocked|private diagnostic/)).toBeNull();
+    expect(
+      screen.queryByText(/Could not connect|Project server blocked|private diagnostic/),
+    ).toBeNull();
   });
 
   it("shows safe generic guidance for legacy and sanitized connection errors", async () => {
-    listMcpServersMock.mockResolvedValue([{
-      ...connectedRow, ok: false, error: "Connection failed: [REDACTED]",
-    }]);
+    listMcpServersMock.mockResolvedValue([
+      {
+        ...connectedRow,
+        ok: false,
+        error: "Connection failed: [REDACTED]",
+      },
+    ]);
     render(<McpModal onClose={vi.fn()} />);
-    expect(await screen.findByText("Could not connect. Check the server settings and availability.")).toBeTruthy();
+    expect(
+      await screen.findByText("Could not connect. Check the server settings and availability."),
+    ).toBeTruthy();
     expect(document.body.textContent).not.toContain("[REDACTED]");
   });
 
-  it.each([false, true])("shows disabled servers neutrally (requiresAuth: %s)", async (requiresAuth) => {
-    listMcpServersMock.mockResolvedValue([{ ...authRow, enabled: false, requiresAuth }]);
-    render(<McpModal onClose={vi.fn()} />);
+  it.each([false, true])(
+    "shows disabled servers neutrally (requiresAuth: %s)",
+    async (requiresAuth) => {
+      listMcpServersMock.mockResolvedValue([{ ...authRow, enabled: false, requiresAuth }]);
+      render(<McpModal onClose={vi.fn()} />);
 
-    expect(await screen.findByText("Disabled")).toBeTruthy();
-    expect(screen.queryByText("Requires login")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
-    expect(document.querySelector(".lucide-circle-x")).toBeNull();
-    expect(loginMcpServerMock).not.toHaveBeenCalled();
-    expect(document.querySelector(".lucide-circle-minus")).not.toBeNull();
-  });
+      expect(await screen.findByText("Disabled")).toBeTruthy();
+      expect(screen.queryByText("Requires login")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+      expect(document.querySelector(".lucide-circle-x")).toBeNull();
+      expect(loginMcpServerMock).not.toHaveBeenCalled();
+      expect(document.querySelector(".lucide-circle-minus")).not.toBeNull();
+    },
+  );
 
   it.each([
     ["connected", connectedRow, ".lucide-circle-check", "2 tools"],
     ["auth-required", authRow, ".lucide-lock", "Requires login"],
-    ["failed", { ...connectedRow, ok: false, toolCount: 0, error: "Connection refused" }, ".lucide-circle-x", null],
+    [
+      "failed",
+      { ...connectedRow, ok: false, toolCount: 0, error: "Connection refused" },
+      ".lucide-circle-x",
+      null,
+    ],
   ] as const)("preserves %s presentation", async (_label, row, icon, text) => {
     listMcpServersMock.mockResolvedValue([row]);
     render(<McpModal onClose={vi.fn()} />);

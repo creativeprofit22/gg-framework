@@ -271,7 +271,13 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
               <span
                 className="mcp-dot"
                 style={{
-                  color: !s.enabled ? theme.textMuted : s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
+                  color: !s.enabled
+                    ? theme.textMuted
+                    : s.ok
+                      ? theme.success
+                      : s.requiresAuth
+                        ? theme.warning
+                        : theme.error,
                 }}
               >
                 {!s.enabled ? (
@@ -289,7 +295,10 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
                   {s.name}
                 </div>
                 {s.enabled && !s.ok && !s.requiresAuth && (
-                  <div className="mcp-meta" style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                  <div
+                    className="mcp-meta"
+                    style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}
+                  >
                     {/* Raw s.error is diagnostic-only, even after transport redaction. */}
                     {s.failureReason === "trust-blocked"
                       ? "Project server blocked. Add or re-add it in this project to trust it."
@@ -388,9 +397,9 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
       )}
 
       <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
-        Adding or removing servers here automatically refreshes MCP in this conversation.
-        Tools are available only when the server connects and trust requirements are met.
-        Other open conversations are not automatically refreshed.
+        Adding or removing servers here automatically refreshes MCP in this conversation. Tools are
+        available only when the server connects and trust requirements are met. Other open
+        conversations are not automatically refreshed.
       </div>
 
       <div className="modal-actions">

@@ -219,15 +219,19 @@ for (const entry of ["modal", "hub"] as const) {
         vi.mocked(invoke)
           .mockResolvedValueOnce({ ok: false, code: "reload-failed" })
           .mockResolvedValueOnce({ ok: false, code: "vault-unavailable" });
-        fireEvent.click(screen.getByRole("button", {
-          name: action === "save" ? "Save key" : "Remove connection",
-        }));
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: action === "save" ? "Save key" : "Remove connection",
+          }),
+        );
         await screen.findByText("Native connection unavailable");
         expect(field.value).toBe("");
         expect(screen.getByRole("alert").textContent).toBe(
           "The connection changed, but models could not refresh. Restart the app before using Qwen Cloud.",
         );
-        expect((screen.getByRole("button", { name: "Save key" }) as HTMLButtonElement).disabled).toBe(true);
+        expect(
+          (screen.getByRole("button", { name: "Save key" }) as HTMLButtonElement).disabled,
+        ).toBe(true);
         expect(screen.queryByRole("button", { name: "Remove connection" })).toBeNull();
         expect(document.body.textContent).not.toContain(fakeKey);
         expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
@@ -235,7 +239,10 @@ for (const entry of ["modal", "hub"] as const) {
           `qwen_cloud_connection_${action}`,
           "qwen_cloud_connection_status",
         ]);
-        expect(vi.mocked(invoke).mock.calls[2]).toEqual(["qwen_cloud_connection_status", undefined]);
+        expect(vi.mocked(invoke).mock.calls[2]).toEqual([
+          "qwen_cloud_connection_status",
+          undefined,
+        ]);
         if (entry === "modal") expect(onChanged).toHaveBeenCalledTimes(1);
         expect(screen.queryByText("Key saved locally — not remotely tested.")).toBeNull();
         expect(screen.queryByText("Qwen Cloud connection removed.")).toBeNull();

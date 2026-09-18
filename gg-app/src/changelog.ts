@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.65.1",
+    date: "2026-09-16",
+    items: [
+      "Get the answer without digging through a checklist. I rewrote how `GG Coder` replies so you get a clear takeaway first, followed by a natural explanation that fits your question or coding task.",
+      "Changed your mind about a queued message? I fixed `queue cancellation` so older updates stay out of your way and cancelling one of two identical messages removes the right one. Your chat stays in step with what is actually waiting to run.",
+    ],
+  },
+  {
     version: "0.65.0",
     date: "2026-09-15",
     items: [

@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import { isProgrammaticExecutionResult } from "@kenkaiiii/gg-core/programmatic-chat-contract";
-import { isProgrammaticAssessmentEvent, type ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import {
+  isProgrammaticAssessmentEvent,
+  type ProgrammaticAssessmentEvent,
+} from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   parseContextProfileEligibility,
   listCommands as listPrimaryCommands,
@@ -284,10 +287,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Retain acknowledged IDs through receipt delivery, even when enqueue and
   // drain both precede the HTTP response. Unknown IDs still await their SSE ack.
-  const acknowledgedQueueRef = useRef<Map<string, boolean>>(new Map());
+  const acknowledgedQueueRef = useRef<Map<string, boolean | "cancelled">>(new Map());
   // Transcript id of the active sub-agent group for this run (null until the
   // first subagent spawns). The per-agent map keeps late async lifecycle events
   // attached to their original transcript group after a newer run starts.
+
   const subagentGroupIdRef = useRef<number | null>(null);
   const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
   const liveToolByIdRef = useRef<Map<string, LiveToolEntry>>(new Map());
@@ -475,14 +479,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       receipt: PromptSubmissionResult,
       hideQueued = false,
     ) => {
+      const queueState = receipt.queued
+        ? acknowledgedQueueRef.current.get(receipt.queueId)
+        : undefined;
+      if (queueState === "cancelled" && receipt.queued) {
+        // Retain cancellation only until its in-flight submission receipt arrives.
+        acknowledgedQueueRef.current.delete(receipt.queueId);
+      }
       setItems((previous) => {
+        if (queueState === "cancelled") return previous.filter((row) => row.id !== item.id);
         const accepted = {
           ...item,
           queueId: receipt.queueId,
-          queued:
-            receipt.queued &&
-            !hideQueued &&
-            (acknowledgedQueueRef.current.get(receipt.queueId) ?? true),
+          queued: receipt.queued && !hideQueued && (queueState ?? true),
         };
         return previous.some((row) => row.id === item.id)
           ? previous.map((row) => (row.id === item.id ? accepted : row))
@@ -516,8 +525,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   }, [setItems]);
 
   useEffect(() => {
+    const acknowledgedQueue = acknowledgedQueueRef.current;
     return () => {
       if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
+      acknowledgedQueue.clear();
     };
   }, []);
 
@@ -659,7 +670,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setIsThinking(false);
   }, [setThinkingAccumMs, setThinkingStartTs, setIsThinking]);
 
-  const assessmentEventRef = useRef<{ generation?: string; event: ProgrammaticAssessmentEvent } | null>(null);
+  const assessmentEventRef = useRef<{
+    generation?: string;
+    event: ProgrammaticAssessmentEvent;
+  } | null>(null);
   const handleEvent = useCallback(
     (e: SidecarEvent) => {
       // Ken (mentor) events are owned by the useKenMentor hook; delegate and
@@ -675,13 +689,24 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       if (e.type === "programmatic_assessment") {
         const event = e.data;
         const current = stateRef.current;
-        if (!isProgrammaticAssessmentEvent(event) ||
-          event.sessionId !== current?.sessionId || event.conversationId !== current?.conversationId) return;
-        const previous = assessmentEventRef.current?.generation === programmaticGeneration
-          ? assessmentEventRef.current?.event : undefined;
-        if (previous?.sessionId === event.sessionId && previous.conversationId === event.conversationId &&
-          (event.sequence < previous.sequence || (event.sequence === previous.sequence &&
-            (previous.phase === "completed" || event.phase === "started")))) return;
+        if (
+          !isProgrammaticAssessmentEvent(event) ||
+          event.sessionId !== current?.sessionId ||
+          event.conversationId !== current?.conversationId
+        )
+          return;
+        const previous =
+          assessmentEventRef.current?.generation === programmaticGeneration
+            ? assessmentEventRef.current?.event
+            : undefined;
+        if (
+          previous?.sessionId === event.sessionId &&
+          previous.conversationId === event.conversationId &&
+          (event.sequence < previous.sequence ||
+            (event.sequence === previous.sequence &&
+              (previous.phase === "completed" || event.phase === "started")))
+        )
+          return;
         assessmentEventRef.current = { generation: programmaticGeneration, event };
         onProgrammaticAssessment?.(event);
         return;
@@ -1432,20 +1457,43 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const list = Array.isArray(d.messages) ? (d.messages as QueuedMessage[]) : [];
           setQueuedMessages(list);
           const pendingIds = new Set(list.map((message) => message.id));
-          for (const id of acknowledgedQueueRef.current.keys()) {
-            acknowledgedQueueRef.current.set(id, pendingIds.has(id));
+          for (const [id, state] of acknowledgedQueueRef.current) {
+            if (state !== "cancelled") acknowledgedQueueRef.current.set(id, pendingIds.has(id));
           }
-          for (const id of pendingIds) acknowledgedQueueRef.current.set(id, true);
-          setItems((previous) =>
-            previous.map((item) =>
-              item.kind === "user" &&
-              item.queued &&
-              item.queueId &&
-              acknowledgedQueueRef.current.get(item.queueId) === false
-                ? { ...item, queued: false, promoted: true }
-                : item,
-            ),
-          );
+          for (const id of pendingIds) {
+            if (acknowledgedQueueRef.current.get(id) !== "cancelled")
+              acknowledgedQueueRef.current.set(id, true);
+          }
+          const cancelledId = typeof d.cancelledId === "string" ? d.cancelledId : undefined;
+          if (cancelledId && acknowledgedQueueRef.current.has(cancelledId)) {
+            acknowledgedQueueRef.current.set(cancelledId, "cancelled");
+          }
+          setItems((previous) => {
+            if (
+              cancelledId &&
+              previous.some((item) => item.kind === "user" && item.queueId === cancelledId)
+            ) {
+              // The receipt already arrived; no cancellation tombstone is needed.
+              acknowledgedQueueRef.current.delete(cancelledId);
+            }
+            return previous
+              .filter(
+                (item) =>
+                  !(
+                    item.kind === "user" &&
+                    item.queueId === cancelledId &&
+                    cancelledId !== undefined
+                  ),
+              )
+              .map((item) =>
+                item.kind === "user" &&
+                item.queued &&
+                item.queueId &&
+                acknowledgedQueueRef.current.get(item.queueId) === false
+                  ? { ...item, queued: false, promoted: true }
+                  : item,
+              );
+          });
           schedulePromotionEnd();
           break;
         }

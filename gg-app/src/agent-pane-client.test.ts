@@ -80,6 +80,21 @@ describe("pane agent client", () => {
     });
   });
 
+  it.each([true, false, undefined])(
+    "returns only the scoped cancellation verdict %s",
+    async (cancelled) => {
+      const client = createPaneAgentClient("right");
+      invoke.mockResolvedValue({ cancelled, queued: [{ id: "stale", text: "old" }] });
+      await expect(client.cancelQueued("q1")).resolves.toBe(cancelled === true);
+      expect(invoke).toHaveBeenCalledWith("agent_cancel_queued", { paneId: "right", id: "q1" });
+    },
+  );
+
+  it("returns null on scoped cancellation transport failure", async () => {
+    invoke.mockRejectedValue(new Error("unavailable"));
+    await expect(createPaneAgentClient("right").cancelQueued("q1")).resolves.toBeNull();
+  });
+
   it("scopes programmatic actions, validates receipts and rejects stale generations", async () => {
     const client = createPaneAgentClient("right");
     const request = { version: 1 as const, action: "scan" as const };

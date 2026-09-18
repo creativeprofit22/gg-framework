@@ -55,7 +55,8 @@ export function ProgrammaticChat({
   const locked = busy || state.operation !== null;
   const mutationLocked = locked || planMode || state.reconcile;
   const report = state.report;
-  const selected = state.selection?.source && state.selection.source !== "deterministic" ? null : state.detail;
+  const selected =
+    state.selection?.source && state.selection.source !== "deterministic" ? null : state.detail;
   const configuration = programmaticConfiguration(state);
   const currentReview = isProgrammaticCurrentReview(state);
   const reportAssessmentSuperseded =
@@ -108,9 +109,16 @@ export function ProgrammaticChat({
             ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
             : state.notice}
       </p>
-      <ProgrammaticDiscovery state={state} locked={locked} planMode={planMode} onRequest={onAction}
-        onSelect={(source, id) => onSelectCandidate?.(source, id)} />
-      {state.assessment && <ProgrammaticAssessment assessment={state.assessment} previous={state.assessmentRetained} />}
+      <ProgrammaticDiscovery
+        state={state}
+        locked={locked}
+        planMode={planMode}
+        onRequest={onAction}
+        onSelect={(source, id) => onSelectCandidate?.(source, id)}
+      />
+      {state.assessment && (
+        <ProgrammaticAssessment assessment={state.assessment} previous={state.assessmentRetained} />
+      )}
       <h3>Deterministic checks and setup</h3>
       {planMode && (
         <p>
@@ -242,14 +250,27 @@ export function ProgrammaticChat({
             </p>
           )}
           <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
-          {state.proposal.historyPolicy && <>
-            <p>
-              History: {state.proposal.historyPolicy.enabled ? "enabled" : "disabled"}.
-              {state.proposal.historyPolicy.enabled && " Approval saves future configured assessments automatically—not this setup or old chats. No work is approved or verified."}
-              {state.proposal.operation === "history-upgrade" && " Or leave without approving to keep checks. Restoring prior settings needs separate approval."}
-            </p>
-            <pre aria-label="Exact history policy to save">{JSON.stringify({ historyPolicy: state.proposal.historyPolicy, expectedRecoveryDigest: state.proposal.expectedRecoveryDigest }, null, 2)}</pre>
-          </>}
+          {state.proposal.historyPolicy && (
+            <>
+              <p>
+                History: {state.proposal.historyPolicy.enabled ? "enabled" : "disabled"}.
+                {state.proposal.historyPolicy.enabled &&
+                  " Approval saves future configured assessments automatically—not this setup or old chats. No work is approved or verified."}
+                {state.proposal.operation === "history-upgrade" &&
+                  " Or leave without approving to keep checks. Restoring prior settings needs separate approval."}
+              </p>
+              <pre aria-label="Exact history policy to save">
+                {JSON.stringify(
+                  {
+                    historyPolicy: state.proposal.historyPolicy,
+                    expectedRecoveryDigest: state.proposal.expectedRecoveryDigest,
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+            </>
+          )}
           <p>
             Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
           </p>
@@ -317,8 +338,8 @@ export function ProgrammaticChat({
       )}
       {report && report.status !== "setup-required" && report.total === 0 && (
         <p>
-          No deterministic results to show. Choose Check for opportunities to run the saved checks and save
-          their results. This does not start any task.
+          No deterministic results to show. Choose Check for opportunities to run the saved checks
+          and save their results. This does not start any task.
         </p>
       )}
       {groups.map(({ title, matches }) => {
@@ -332,7 +353,10 @@ export function ProgrammaticChat({
                   <li key={row.id}>
                     <button
                       className="btn btn-ghost programmatic-row"
-                      aria-pressed={(!state.selection || state.selection.source === "deterministic") && state.selectedId === row.id}
+                      aria-pressed={
+                        (!state.selection || state.selection.source === "deterministic") &&
+                        state.selectedId === row.id
+                      }
                       disabled={locked}
                       onClick={() => onSelect(row.id)}
                     >

@@ -20,7 +20,13 @@ vi.mock("./provider-logos", () => ({ providerLogo: () => null }));
 
 // Observe the hub's modal metadata and callback without invoking native auth.
 vi.mock("./ProviderLoginModal", () => ({
-  ProviderLoginModal: ({ provider, onChanged }: { provider: AuthProvider; onChanged: () => void }) => (
+  ProviderLoginModal: ({
+    provider,
+    onChanged,
+  }: {
+    provider: AuthProvider;
+    onChanged: () => void;
+  }) => (
     <div role="dialog">
       <output data-testid="active-provider">{JSON.stringify(provider)}</output>
       <button onClick={onChanged}>Refresh after change</button>
@@ -42,8 +48,12 @@ function qwenProviders(connected: boolean): AuthProvider[] {
   return [
     ...providers(["anthropic"]),
     {
-      value: "qwen-cloud", label: "Qwen Cloud (Token Plan)", description: "Token Plan",
-      methods: ["apikey"], connected, connectedMethods: connected ? ["apikey"] : [],
+      value: "qwen-cloud",
+      label: "Qwen Cloud (Token Plan)",
+      description: "Token Plan",
+      methods: ["apikey"],
+      connected,
+      connectedMethods: connected ? ["apikey"] : [],
       nativeManaged: true,
     },
   ];
@@ -53,8 +63,12 @@ function expectQwen(connected: boolean) {
   const tile = screen.getByRole("button", { name: /Qwen Cloud/ });
   expect(within(tile).queryByLabelText("Connected") !== null).toBe(connected);
   expect(screen.getByText(`${connected ? 2 : 1} connected`)).toBeTruthy();
-  expect(within(screen.getByRole("button", { name: /Anthropic/ })).getByLabelText("Connected")).toBeTruthy();
-  expect(within(screen.getByRole("button", { name: /xAI/ })).queryByLabelText("Connected")).toBeNull();
+  expect(
+    within(screen.getByRole("button", { name: /Anthropic/ })).getByLabelText("Connected"),
+  ).toBeTruthy();
+  expect(
+    within(screen.getByRole("button", { name: /xAI/ })).queryByLabelText("Connected"),
+  ).toBeNull();
 }
 
 function expectActive(connected: boolean) {
@@ -85,26 +99,31 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("LoginScreen cross-window auth", () => {
-  it.each([false, true])("ignores an older initial reply after Qwen connected=%s", async (connected) => {
-    const initial = deferredStatus();
-    const newer = deferredStatus();
-    vi.mocked(authStatus).mockReturnValueOnce(initial.promise).mockReturnValueOnce(newer.promise);
-    render(<LoginScreen onClose={vi.fn()} />);
-    await emit("auth_change", { provider: "qwen-cloud" });
-    await act(async () => newer.resolve(qwenProviders(connected)));
-    expectQwen(connected);
-    fireEvent.click(screen.getByRole("button", { name: /Qwen Cloud/ }));
-    expectActive(connected);
-    await act(async () => initial.resolve(qwenProviders(!connected)));
-    expectQwen(connected);
-    expectActive(connected);
-  });
+  it.each([false, true])(
+    "ignores an older initial reply after Qwen connected=%s",
+    async (connected) => {
+      const initial = deferredStatus();
+      const newer = deferredStatus();
+      vi.mocked(authStatus).mockReturnValueOnce(initial.promise).mockReturnValueOnce(newer.promise);
+      render(<LoginScreen onClose={vi.fn()} />);
+      await emit("auth_change", { provider: "qwen-cloud" });
+      await act(async () => newer.resolve(qwenProviders(connected)));
+      expectQwen(connected);
+      fireEvent.click(screen.getByRole("button", { name: /Qwen Cloud/ }));
+      expectActive(connected);
+      await act(async () => initial.resolve(qwenProviders(!connected)));
+      expectQwen(connected);
+      expectActive(connected);
+    },
+  );
 
   it.each(["event/event", "event/callback", "callback/event"])(
     "shares latest-request ordering across %s refreshes and modal metadata",
     async (order) => {
       vi.mocked(authStatus).mockResolvedValue(qwenProviders(false));
-      await act(async () => { render(<LoginScreen onClose={vi.fn()} />); });
+      await act(async () => {
+        render(<LoginScreen onClose={vi.fn()} />);
+      });
       fireEvent.click(screen.getByRole("button", { name: /Qwen Cloud/ }));
       const older = deferredStatus();
       const newer = deferredStatus();
@@ -123,21 +142,24 @@ describe("LoginScreen cross-window auth", () => {
     },
   );
 
-  it.each(["resolve", "reject"] as const)("keeps loading when an obsolete initial read %ss", async (settle) => {
-    const initial = deferredStatus();
-    const newer = deferredStatus();
-    vi.mocked(authStatus).mockReturnValueOnce(initial.promise).mockReturnValueOnce(newer.promise);
-    render(<LoginScreen onClose={vi.fn()} />);
-    await emit("auth_change", { provider: "qwen-cloud" });
-    await act(async () => {
-      if (settle === "resolve") initial.resolve(qwenProviders(true));
-      else initial.reject(new Error("Synthetic status failure"));
-    });
-    expect(screen.getByText("checking providers…")).toBeTruthy();
-    expect(screen.queryByText(/\d connected/)).toBeNull();
-    await act(async () => newer.resolve(qwenProviders(false)));
-    expectQwen(false);
-  });
+  it.each(["resolve", "reject"] as const)(
+    "keeps loading when an obsolete initial read %ss",
+    async (settle) => {
+      const initial = deferredStatus();
+      const newer = deferredStatus();
+      vi.mocked(authStatus).mockReturnValueOnce(initial.promise).mockReturnValueOnce(newer.promise);
+      render(<LoginScreen onClose={vi.fn()} />);
+      await emit("auth_change", { provider: "qwen-cloud" });
+      await act(async () => {
+        if (settle === "resolve") initial.resolve(qwenProviders(true));
+        else initial.reject(new Error("Synthetic status failure"));
+      });
+      expect(screen.getByText("checking providers…")).toBeTruthy();
+      expect(screen.queryByText(/\d connected/)).toBeNull();
+      await act(async () => newer.resolve(qwenProviders(false)));
+      expectQwen(false);
+    },
+  );
 
   it("ends loading when the latest read fails and ignores older success", async () => {
     const initial = deferredStatus();
@@ -156,8 +178,15 @@ describe("LoginScreen cross-window auth", () => {
     const obsolete = deferredStatus();
     const current = deferredStatus();
     const pending = deferredStatus();
-    vi.mocked(authStatus).mockReturnValueOnce(obsolete.promise).mockReturnValueOnce(current.promise).mockReturnValueOnce(pending.promise);
-    const view = render(<StrictMode><LoginScreen onClose={vi.fn()} /></StrictMode>);
+    vi.mocked(authStatus)
+      .mockReturnValueOnce(obsolete.promise)
+      .mockReturnValueOnce(current.promise)
+      .mockReturnValueOnce(pending.promise);
+    const view = render(
+      <StrictMode>
+        <LoginScreen onClose={vi.fn()} />
+      </StrictMode>,
+    );
     expect(listeners.size).toBe(1);
     await act(async () => current.resolve(qwenProviders(false)));
     await act(async () => obsolete.resolve(qwenProviders(true)));

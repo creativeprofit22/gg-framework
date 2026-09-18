@@ -6378,10 +6378,14 @@ async function createSession(
         }
         // `false` means it already drained into the run between render and
         // click. That is a race, not an error, so report it as a normal result
-        // and let the client reconcile from the fresh list.
+        // and let the client reconcile through the ordered event stream.
         const cancelled = session.cancelQueuedMessage(id);
         const queued = session.listQueuedMessages();
-        broadcast("queued", { count: queued.length, messages: queued });
+        broadcast("queued", {
+          count: queued.length,
+          messages: queued,
+          ...(cancelled ? { cancelledId: id } : {}),
+        });
         json(res, 200, { cancelled, queued });
       });
       return;

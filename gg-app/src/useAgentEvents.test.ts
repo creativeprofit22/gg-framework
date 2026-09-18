@@ -234,8 +234,8 @@ function setup(
     ) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
-    setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
-    setQueuedMessages: noop as unknown as AgentEventsDeps["setQueuedMessages"],
+    setQueuedCount: vi.fn<AgentEventsDeps["setQueuedCount"]>(),
+    setQueuedMessages: vi.fn<AgentEventsDeps["setQueuedMessages"]>(),
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
     setModels,
@@ -271,14 +271,35 @@ function setup(
 }
 
 it("accepts only current bounded assessment events and ignores duplicates and retired runs", () => {
-  const { hook, deps, getItems } = setup(undefined, { conversationId: "conversation", sessionId: "session" });
-  const identity = { conversationId: "conversation", sessionId: "session", sequence: 2, requestId: "request-1" };
-  const assessment = { version: 1, mode: "setup", status: "unavailable", summary: "Unavailable",
-    limitations: [], observations: [], coverage: [], deterministic: { status: "not-run", reason: "setup" } };
-  const send = (data: Record<string, unknown>) => act(() => hook.result.current.handleEvent(ev("programmatic_assessment", data)));
+  const { hook, deps, getItems } = setup(undefined, {
+    conversationId: "conversation",
+    sessionId: "session",
+  });
+  const identity = {
+    conversationId: "conversation",
+    sessionId: "session",
+    sequence: 2,
+    requestId: "request-1",
+  };
+  const assessment = {
+    version: 1,
+    mode: "setup",
+    status: "unavailable",
+    summary: "Unavailable",
+    limitations: [],
+    observations: [],
+    coverage: [],
+    deterministic: { status: "not-run", reason: "setup" },
+  };
+  const send = (data: Record<string, unknown>) =>
+    act(() => hook.result.current.handleEvent(ev("programmatic_assessment", data)));
   send({ ...identity, phase: "started" });
   expect(deps.onProgrammaticAssessment).toHaveBeenLastCalledWith({ ...identity, phase: "started" });
-  send({ ...identity, phase: "completed", assessment: { ...assessment, lifecycle: { ...identity, requestId: "other" } } });
+  send({
+    ...identity,
+    phase: "completed",
+    assessment: { ...assessment, lifecycle: { ...identity, requestId: "other" } },
+  });
   expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(1);
   send({ ...identity, phase: "completed", assessment: { ...assessment, lifecycle: identity } });
   expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(2);
@@ -288,7 +309,12 @@ it("accepts only current bounded assessment events and ignores duplicates and re
   send({ ...identity, sequence: 3, sessionId: "retired", phase: "completed", assessment });
   send({ ...identity, sequence: 3, conversationId: "retired", phase: "completed", assessment });
   send({ ...identity, sequence: 3, phase: "completed", assessment, proposalHandle: "untrusted" });
-  send({ ...identity, sequence: 3, phase: "completed", assessment: { ...assessment, approval: true } });
+  send({
+    ...identity,
+    sequence: 3,
+    phase: "completed",
+    assessment: { ...assessment, approval: true },
+  });
   expect(deps.onProgrammaticAssessment).toHaveBeenCalledTimes(2);
   expect(deps.onProgrammaticActivity).not.toHaveBeenCalled();
   expect(getItems()).toEqual([]);
@@ -798,6 +824,79 @@ describe("useAgentEvents", () => {
   });
 
   describe("queued pill lifecycle", () => {
+    it.each(["q1", "q2"])(
+      "keeps exact metadata with reversed late receipts when cancelling %s",
+      (cancelledId) => {
+        const { hook, getItems } = setup();
+        const rows = [
+          { kind: "user" as const, id: 101, text: "same", files: ["src/a.ts"] },
+          { kind: "user" as const, id: 102, text: "same", kenSent: true },
+        ];
+        const messages = [
+          { id: "q1", text: "same" },
+          { id: "q2", text: "same" },
+        ];
+        act(() => {
+          hook.result.current.handleEvent(ev("queued", { count: 2, messages }));
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 1,
+              messages: messages.filter((m) => m.id !== cancelledId),
+              cancelledId,
+            }),
+          );
+          for (const index of [1, 0])
+            hook.result.current.acceptSubmission(rows[index]!, {
+              queued: true,
+              count: 2,
+              queueId: messages[index]!.id,
+            });
+          hook.result.current.handleEvent(
+            ev("queued", {
+              count: 1,
+              messages: messages.filter((m) => m.id !== cancelledId),
+              cancelledId,
+            }),
+          );
+        });
+        const survivor = cancelledId === "q1" ? 1 : 0;
+        expect(getItems()).toEqual([
+          { ...rows[survivor], queueId: messages[survivor]!.id, queued: true },
+        ]);
+      },
+    );
+
+    it("isolates coincident IDs across hook sessions and clears cancellation on accepted reset", () => {
+      const a = setup();
+      const b = setup();
+      act(() => {
+        for (const pane of [a, b]) {
+          pane.hook.result.current.acceptSubmission(
+            { kind: "user", id: 101, text: "same" },
+            { queued: true, count: 1, queueId: "q1" },
+          );
+          pane.hook.result.current.handleEvent(
+            ev("queued", { count: 1, messages: [{ id: "q1", text: "same" }] }),
+          );
+        }
+        a.hook.result.current.handleEvent(
+          ev("queued", { count: 0, messages: [], cancelledId: "q1" }),
+        );
+      });
+      expect(a.getItems()).toEqual([]);
+      expect(b.getItems()).toEqual([expect.objectContaining({ queueId: "q1", queued: true })]);
+      act(() => {
+        a.hook.result.current.handleEvent(ev("session_reset"));
+        a.hook.result.current.acceptSubmission(
+          { kind: "user", id: 102, text: "replacement" },
+          { queued: true, count: 1, queueId: "q1" },
+        );
+      });
+      expect(a.getItems()).toEqual([
+        expect.objectContaining({ text: "replacement", queueId: "q1", queued: true }),
+      ]);
+    });
+
     it.each([false, true])(
       "correlates references and duplicate receipts after drain, run ended=%s",
       (ended) => {
@@ -857,6 +956,96 @@ describe("useAgentEvents", () => {
       });
       expect(getItems()).toEqual([
         expect.objectContaining({ queued: false, promoted: true, files: ["src/a.ts"] }),
+      ]);
+    });
+
+    it("removes the cancelled duplicate, not the identical message still pending", () => {
+      const { hook, getItems, pushUserItem } = setup();
+      pushUserItem("same", true, "a");
+      pushUserItem("same", true, "b");
+      const firstId = getItems()[0]!.id;
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "same" },
+              { id: "b", text: "same" },
+            ],
+          }),
+        ),
+      );
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "same" }],
+            cancelledId: "b",
+          }),
+        ),
+      );
+      expect(getItems()).toEqual([
+        expect.objectContaining({ id: firstId, text: "same", queued: true }),
+      ]);
+    });
+
+    it("keeps newer enqueues and drains after cancellation, including repeated cancellation events", () => {
+      const { hook, getItems, pushUserItem, deps } = setup();
+      pushUserItem("cancel me", true);
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "cancel me" }],
+          }),
+        ),
+      );
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 0,
+            messages: [],
+            cancelledId: "a",
+          }),
+        ),
+      );
+      expect(getItems()).toEqual([]);
+      pushUserItem("newer", true, "b");
+      const pending = [{ id: "b", text: "newer" }];
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 1, messages: pending })));
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: pending,
+            cancelledId: "a",
+          }),
+        ),
+      );
+      expect(deps.setQueuedMessages).toHaveBeenLastCalledWith(pending);
+      expect(getItems()).toEqual([expect.objectContaining({ text: "newer", queued: true })]);
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      expect(deps.setQueuedCount).toHaveBeenLastCalledWith(0);
+      expect(deps.setQueuedMessages).toHaveBeenLastCalledWith([]);
+      expect(getItems()).toEqual([expect.objectContaining({ text: "newer", queued: false })]);
+    });
+
+    it("preserves consumed input when cancellation loses the race", () => {
+      const { hook, getItems, pushUserItem } = setup();
+      pushUserItem("already running", true);
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "already running" }],
+          }),
+        ),
+      );
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      // Failed cancellation broadcasts the current list without a cancelled id.
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      expect(getItems()).toEqual([
+        expect.objectContaining({ text: "already running", queued: false }),
       ]);
     });
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {

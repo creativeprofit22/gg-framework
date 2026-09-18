@@ -114,12 +114,8 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("## Research & Verification");
     expect(prompt).not.toContain("## Code Quality");
     expect(prompt).toContain("Woops I just farted!");
-    expect(prompt).toContain("never repeat, never force, never explain");
-    // The one-approach rule must carve out command flows that ship their own
-    // A/B/C option list, or the model second-guesses those prompts.
-    expect(prompt).toContain(
-      "ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.",
-    );
+    expect(prompt).toContain("Give ONE recommended approach");
+    expect(prompt).toContain("unless a command's flow defines its own options");
     // The ask has exactly one channel, and the routing rule is about WHETHER a
     // question exists, not how important it is. This prompt has no `ask_user`,
     // so the ask falls back to a dedicated markdown blockquote (rendered with a
@@ -216,8 +212,8 @@ describe("buildSystemPrompt", () => {
   });
 
   it.each([
-    [[], "0d220eced121241baf7d2ff313207e50c89bd9f368304e89e10ded6a219f8f81"],
-    [["ask_user"], "a309e5fe5d85945fb2ce1e5dc4e6f64eec1212ad7f39c150dd0c42f7a643e1b8"],
+    [[], "ec199ed87e565afc051f0ad55f3102ccbb314791bdf203cfa94bb285f7bb68d2"],
+    [["ask_user"], "5304c952de101a0c143fa9f3cbfd755b0e75272037ae576be7a084bb8d2c89f0"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -226,6 +222,8 @@ describe("buildSystemPrompt", () => {
       const talk = prompt
         .slice(sectionIndex(prompt, "## How to Talk"), sectionIndex(prompt, "## How to Work"))
         .trimEnd();
+      expect(talk).toContain("Distinguish implemented, tested, committed, and released");
+      expect(talk).toContain("Match certainty to evidence");
       expect(createHash("sha256").update(talk).digest("hex")).toBe(hash);
     },
   );
@@ -369,7 +367,6 @@ describe("buildSystemPrompt", () => {
       // the user has to act on it, and then it carries its stake in the same
       // breath. Everything else is described by behavior, not by name.
       "**Plain words by default.**",
-      "only when the user must act on it",
       "say what it does, not what it's called",
       "Read relevant files before changing them",
       "Re-read after formatters or other disk mutations",

@@ -9,7 +9,15 @@ import type {
 
 import type { ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 
-import { assessmentEvent, assessmentResponse, assessmentInterrupted, selectCandidate, discoveryResponse, initialDiscoveryChatState, type DiscoveryChatState } from "./programmatic-discovery-state";
+import {
+  assessmentEvent,
+  assessmentResponse,
+  assessmentInterrupted,
+  selectCandidate,
+  discoveryResponse,
+  initialDiscoveryChatState,
+  type DiscoveryChatState,
+} from "./programmatic-discovery-state";
 export type { ProgrammaticSelection } from "./programmatic-discovery-state";
 
 export interface ProgrammaticChatState extends DiscoveryChatState {
@@ -81,9 +89,22 @@ export function programmaticChatReducer(
   if (event.type === "assessment") return assessmentEvent(state, event.event);
   if (event.type === "start") {
     if (event.epoch <= state.epoch) return state;
-    return { ...state, epoch: event.epoch, operation: event.operation, error: null, notice: "",
-      assessmentRequestSequence: state.assessmentSequence, assessmentRequest: event.assessmentRequest ?? null,
-      ...(["discover", "inspect-setup", "scan"].includes(event.operation ?? "") ? { assessmentRetained: !!state.assessment, discoveryStale: true, candidateStale: !!state.candidateDetail } : {}) };
+    return {
+      ...state,
+      epoch: event.epoch,
+      operation: event.operation,
+      error: null,
+      notice: "",
+      assessmentRequestSequence: state.assessmentSequence,
+      assessmentRequest: event.assessmentRequest ?? null,
+      ...(["discover", "inspect-setup", "scan"].includes(event.operation ?? "")
+        ? {
+            assessmentRetained: !!state.assessment,
+            discoveryStale: true,
+            candidateStale: !!state.candidateDetail,
+          }
+        : {}),
+    };
   }
   if (event.epoch !== state.epoch) return state;
   if (event.type === "error")
@@ -125,9 +146,18 @@ export function programmaticChatReducer(
     };
   const base = { ...state, operation: null, error: null };
   switch (response.action) {
-    case "discover": return { ...base, ...responseDisplay, notice: "Discovery returned. Proposals are not approvals." };
-    case "review-candidate": case "history-report": case "history-detail":
-    case "history-inspect-decision": case "history-inspect-correspondence": case "history-apply":
+    case "discover":
+      return {
+        ...base,
+        ...responseDisplay,
+        notice: "Discovery returned. Proposals are not approvals.",
+      };
+    case "review-candidate":
+    case "history-report":
+    case "history-detail":
+    case "history-inspect-decision":
+    case "history-inspect-correspondence":
+    case "history-apply":
       return discoveryResponse(base, response);
     case "report":
       return {
@@ -137,7 +167,8 @@ export function programmaticChatReducer(
         proposalApprovable:
           state.proposalApprovable &&
           (!response.report.configuration ||
-            ((response.report.configuration.status !== "current" || state.proposal?.operation === "history-upgrade") &&
+            ((response.report.configuration.status !== "current" ||
+              state.proposal?.operation === "history-upgrade") &&
               response.report.configuration.status !== "unreadable" &&
               response.report.configuration.status === state.proposal?.configuration.status &&
               response.report.configuration.currentFingerprint === state.proposal?.fingerprint)),

@@ -11,7 +11,13 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import { addMcpServer, createPaneAgentClient, listMcpServers, loginMcpServer, removeMcpServer } from "./agent";
+import {
+  addMcpServer,
+  createPaneAgentClient,
+  listMcpServers,
+  loginMcpServer,
+  removeMcpServer,
+} from "./agent";
 
 const ready = { ready: true, error: null, generation: 1, sessionId: "session-1" };
 
@@ -33,9 +39,20 @@ beforeEach(() => {
 
 describe.each([
   ["primary", "primary", listMcpServers],
-  ["pane-bound", "mcp-fixture-pane", (cwd?: string) => createPaneAgentClient("mcp-fixture-pane").listMcpServers(cwd)],
+  [
+    "pane-bound",
+    "mcp-fixture-pane",
+    (cwd?: string) => createPaneAgentClient("mcp-fixture-pane").listMcpServers(cwd),
+  ],
 ] as const)("%s MCP status decoding", (_label, paneId, list) => {
-  const base = { name: "fixture", scope: "global", kind: "http", summary: "https://fixture.invalid/mcp", ok: false, toolCount: 0 };
+  const base = {
+    name: "fixture",
+    scope: "global",
+    kind: "http",
+    summary: "https://fixture.invalid/mcp",
+    ok: false,
+    toolCount: 0,
+  };
 
   it("preserves all four statuses and targets the correct pane", async () => {
     const servers = [
@@ -49,16 +66,28 @@ describe.each([
     expect(mocks.invoke).toHaveBeenCalledWith("agent_mcp_list", { paneId, cwd: "fixture-project" });
   });
 
-  it.each(["trust-blocked", "connection-failed"])("retains the safe %s display discriminator", async (failureReason) => {
-    const row = { ...base, scope: "project", enabled: true, failureReason, error: "Connection failed: [REDACTED]" };
-    respondToMcp("agent_mcp_list", { servers: [row] });
-    await expect(list()).resolves.toEqual([row]);
-  });
+  it.each(["trust-blocked", "connection-failed"])(
+    "retains the safe %s display discriminator",
+    async (failureReason) => {
+      const row = {
+        ...base,
+        scope: "project",
+        enabled: true,
+        failureReason,
+        error: "Connection failed: [REDACTED]",
+      };
+      respondToMcp("agent_mcp_list", { servers: [row] });
+      await expect(list()).resolves.toEqual([row]);
+    },
+  );
 
-  it.each(["arbitrary diagnostic", null, 42])("rejects invalid failure reasons %s", async (failureReason) => {
-    respondToMcp("agent_mcp_list", { servers: [{ ...base, failureReason }] });
-    await expect(list()).rejects.toThrow("Could not load MCP servers");
-  });
+  it.each(["arbitrary diagnostic", null, 42])(
+    "rejects invalid failure reasons %s",
+    async (failureReason) => {
+      respondToMcp("agent_mcp_list", { servers: [{ ...base, failureReason }] });
+      await expect(list()).rejects.toThrow("Could not load MCP servers");
+    },
+  );
 
   it("accepts older daemon rows without enabled", async () => {
     respondToMcp("agent_mcp_list", { servers: [base] });

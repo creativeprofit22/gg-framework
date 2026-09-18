@@ -1930,18 +1930,17 @@ export interface QueuedMessage {
 /**
  * Cancel one pending queued message by id.
  *
- * Returns the remaining queue, or null if the call itself failed. A `cancelled:
- * false` from the sidecar is NOT a failure: it means the agent consumed the
- * message between the row rendering and the click landing, so the caller should
- * simply reconcile to the returned list.
+ * Returns the explicit cancellation verdict, or null on transport failure.
+ * Queue state is owned exclusively by ordered sidecar events: the HTTP response
+ * may arrive after newer enqueue/drain events and must never replace their state.
  */
-export async function cancelQueued(id: string): Promise<QueuedMessage[] | null> {
+export async function cancelQueued(id: string): Promise<boolean | null> {
   try {
     const res = await invoke<{ cancelled?: boolean; queued?: QueuedMessage[] }>(
       "agent_cancel_queued",
       { id },
     );
-    return res.queued ?? [];
+    return res.cancelled === true;
   } catch (e) {
     await logError(`agent_cancel_queued failed: ${String(e)}`);
     return null;
@@ -3174,7 +3173,7 @@ export interface PaneAgentClient extends NotesClient {
     feedback: string,
   ): Promise<PlanRevisionResult>;
   listHistory(): Promise<HistoryEntry[]>;
-  cancelQueued(id: string): Promise<QueuedMessage[] | null>;
+  cancelQueued(id: string): Promise<boolean | null>;
   exportTranscriptName(): Promise<string | null>;
   saveTranscript(path: string): Promise<{ path: string; bytes: number }>;
   authOAuthStart(provider: string): Promise<void>;
@@ -3615,8 +3614,8 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     async cancelQueued(id) {
       try {
-        const response = await call<{ queued?: QueuedMessage[] }>("agent_cancel_queued", { id });
-        return response.queued ?? [];
+        const response = await call<{ cancelled?: boolean }>("agent_cancel_queued", { id });
+        return response.cancelled === true;
       } catch {
         return null;
       }

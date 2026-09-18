@@ -550,7 +550,10 @@ describe("Qwen Cloud thinking labels", () => {
       thinkingLevel,
       supportedThinkingLevels: ["high", "max"],
     });
-    vi.mocked(pane.cycleThinking).mockResolvedValue({ thinkingLevel: "high", supportedThinkingLevels: ["high", "max"] });
+    vi.mocked(pane.cycleThinking).mockResolvedValue({
+      thinkingLevel: "high",
+      supportedThinkingLevels: ["high", "max"],
+    });
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
@@ -1238,6 +1241,38 @@ describe("completed verification task (mocked native transport)", () => {
         (await screen.findByText(completedVerificationTask.finalAnswer)).closest(".assistant-msg"),
       ).not.toBeNull();
       expect(screen.getByText("Update sample window")).toBeTruthy();
+    },
+  );
+});
+
+describe("queued cancellation ordering (mocked native transport)", () => {
+  it.each([false, true])(
+    "ignores a delayed cancellation snapshot after newer events (reset=%s)",
+    async (reset) => {
+      nativeMocks.realMentor = true;
+      const pane = client("queue-cancel", 1);
+      const emit = liveEvents(pane);
+      const pending = deferred<boolean | null>();
+      pane.cancelQueued = vi.fn(() => pending.promise);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running: true,
+        runState: "running",
+      });
+      render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+      act(() => emit("queued", { count: 1, messages: [{ id: "q1", text: "older" }] }));
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel queued message" }));
+      expect(pane.cancelQueued).toHaveBeenCalledWith("q1");
+      act(() => {
+        if (reset) emit("session_reset", {});
+        emit("queued", { count: 1, messages: [{ id: "q2", text: "newer" }] });
+      });
+      // Deliberately retain the legacy payload: even this stale response must never own UI state.
+      await act(async () => pending.resolve([] as unknown as boolean));
+      expect(screen.getByTitle("newer")).toBeTruthy();
+      expect(document.querySelector(".queued-bar.leaving")).toBeNull();
+      expect(screen.queryByTitle("older")).toBeNull();
     },
   );
 });
@@ -3684,13 +3719,19 @@ describe("AgentPane lifecycle", () => {
   it("blocks setup assessment in Plan mode but keeps report and detail access (mocked native IPC)", async () => {
     nativeMocks.realMentor = true;
     const pane = client("plan-setup-assessment", 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), planMode: true });
+    vi.mocked(pane.getState).mockResolvedValue({ ...(await pane.getState()), planMode: true });
     const emit = liveEvents(pane);
     render(<AgentPane client={pane} target={target} />);
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    const review = await screen.findByRole("button", { name: "Review setup" }) as HTMLButtonElement;
-    await waitFor(() => expect((screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled).toBe(false));
+    const review = (await screen.findByRole("button", {
+      name: "Review setup",
+    })) as HTMLButtonElement;
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
     expect(review.disabled).toBe(true);
     vi.mocked(pane.programmatic).mockClear();
     fireEvent.click(review);
@@ -3698,15 +3739,31 @@ describe("AgentPane lifecycle", () => {
     await act(async () => programmaticView.onAction?.({ version: 1, action: "inspect-setup" }));
     expect(pane.programmatic).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
-    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "report", offset: 0 }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() =>
+      expect(pane.programmatic).toHaveBeenCalledExactlyOnceWith({
+        version: 1,
+        action: "report",
+        offset: 0,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
     const id = "a".repeat(64);
     await act(async () => programmaticView.onSelect?.(id));
     expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "detail", id });
     act(() => emit("plan_exit", {}));
     await waitFor(() => expect(review.disabled).toBe(false));
     fireEvent.click(review);
-    await waitFor(() => expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "inspect-setup", requestId: expect.any(String) }));
+    await waitFor(() =>
+      expect(pane.programmatic).toHaveBeenLastCalledWith({
+        version: 1,
+        action: "inspect-setup",
+        requestId: expect.any(String),
+      }),
+    );
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -3715,20 +3772,43 @@ describe("AgentPane lifecycle", () => {
     const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
     if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
     vi.mocked(pane.programmatic).mockClear();
-    const error = "The setup could not be safely reviewed. No settings were saved; approval is unavailable.";
+    const error =
+      "The setup could not be safely reviewed. No settings were saved; approval is unavailable.";
     vi.mocked(pane.programmatic).mockImplementation(async (request) => {
-      if (request.action === "inspect-setup") return {
-        version: 1, action: "inspect-setup", ok: false, reconcile: false, error,
-        assessment: { version: 1, mode: "setup", status: "incomplete",
-          summary: "Read-only project evidence despite unreadable settings.",
-          limitations: ["Settings cannot be proposed or saved."], coverage: [], observations: [],
-          deterministic: { status: "not-run", reason: "setup" } },
+      if (request.action === "inspect-setup")
+        return {
+          version: 1,
+          action: "inspect-setup",
+          ok: false,
+          reconcile: false,
+          error,
+          assessment: {
+            version: 1,
+            mode: "setup",
+            status: "incomplete",
+            summary: "Read-only project evidence despite unreadable settings.",
+            limitations: ["Settings cannot be proposed or saved."],
+            coverage: [],
+            observations: [],
+            deterministic: { status: "not-run", reason: "setup" },
+          },
+        };
+      return {
+        ...report,
+        report: {
+          ...report.report,
+          status: "stale",
+          configuration: {
+            status: "unreadable",
+            currentFingerprint: null,
+            refreshAvailable: false,
+            baselineUnavailable: false,
+            diagnostic: "Saved settings cannot be read.",
+            drift: null,
+          },
+          scan: { available: false, reason: "Unreadable settings block scanning." },
+        },
       };
-      return { ...report, report: { ...report.report, status: "stale",
-        configuration: { status: "unreadable", currentFingerprint: null, refreshAvailable: false,
-          baselineUnavailable: false, diagnostic: "Saved settings cannot be read.", drift: null },
-        scan: { available: false, reason: "Unreadable settings block scanning." },
-      } };
     });
     render(<AgentPane client={pane} target={target} />);
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
@@ -3737,12 +3817,16 @@ describe("AgentPane lifecycle", () => {
     const review = screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement;
     expect(review.disabled).toBe(false);
     fireEvent.click(review);
-    expect(await screen.findByText("Read-only project evidence despite unreadable settings.")).toBeTruthy();
+    expect(
+      await screen.findByText("Read-only project evidence despite unreadable settings."),
+    ).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toBe(error);
     expect(screen.getByText("Settings cannot be proposed or saved.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Approve and save/ })).toBeNull();
     expect(screen.queryByLabelText("Exact settings to save")).toBeNull();
-    const scan = screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement;
+    const scan = screen.getByRole("button", {
+      name: "Check for opportunities",
+    }) as HTMLButtonElement;
     expect(scan.disabled).toBe(true);
     fireEvent.click(scan);
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
@@ -3752,155 +3836,319 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it.each(["unavailable", "failed", "cancelled"] as const)("supersedes button success with slash %s status and counts (mocked native IPC)", async (status) => {
-    nativeMocks.realMentor = true;
-    const pane = client(`assessment-${status}`, 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), conversationId: "conversation-1", sessionId: "session-1" });
-    const emit = liveEvents(pane);
-    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
-    const success = { version: 1 as const, mode: "configured" as const, status: "completed" as const,
-      summary: "Previous button assessment", limitations: [], observations: [], coverage: [],
-      deterministic: { status: "succeeded" as const, enabledCount: 3, applicableCount: 2 } };
-    if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
-    report.report.scan = { available: true, reason: "Ready" };
-    report.report.status = "current";
-    vi.mocked(pane.programmatic).mockImplementation(async (request) => request.action === "scan" ? {
-      version: 1, action: "scan", ok: true, changed: false, assessment: success,
-    } : report);
-    render(<AgentPane client={pane} target={target} />);
-    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    const check = await screen.findByRole("button", { name: "Check for opportunities" });
-    await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(check);
-    expect(await screen.findByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
-    const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 2 };
-    act(() => emit("run_start", {}));
-    act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
-    // Previous assessment stays readable during refresh; completion replaces its counts.
-    expect(screen.getByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
-    const assessment = { ...success, status: status === "failed" ? "incomplete" : status,
-      summary: "Latest slash assessment", deterministic: { status, reason: "Latest host outcome" } };
-    act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment }));
-    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
-    expect(await screen.findByRole("heading", { name: `Project assessment: ${assessment.status}` })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: `Deterministic checks: ${status}` })).toBeTruthy();
-    act(() => emit("programmatic_assessment", { ...identity, sequence: 3, sessionId: "retired", phase: "completed", assessment: success }));
-    act(() => emit("programmatic_assessment", { ...identity, sequence: 1, phase: "completed", assessment: success }));
-    expect(screen.queryByText("3 enabled checks; 2 applicable checks.")).toBeNull();
-  });
+  it.each(["unavailable", "failed", "cancelled"] as const)(
+    "supersedes button success with slash %s status and counts (mocked native IPC)",
+    async (status) => {
+      nativeMocks.realMentor = true;
+      const pane = client(`assessment-${status}`, 8);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...(await pane.getState()),
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+      });
+      const emit = liveEvents(pane);
+      const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+      const success = {
+        version: 1 as const,
+        mode: "configured" as const,
+        status: "completed" as const,
+        summary: "Previous button assessment",
+        limitations: [],
+        observations: [],
+        coverage: [],
+        deterministic: { status: "succeeded" as const, enabledCount: 3, applicableCount: 2 },
+      };
+      if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
+      report.report.scan = { available: true, reason: "Ready" };
+      report.report.status = "current";
+      vi.mocked(pane.programmatic).mockImplementation(async (request) =>
+        request.action === "scan"
+          ? {
+              version: 1,
+              action: "scan",
+              ok: true,
+              changed: false,
+              assessment: success,
+            }
+          : report,
+      );
+      render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      const check = await screen.findByRole("button", { name: "Check for opportunities" });
+      await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(check);
+      expect(await screen.findByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
+      const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 2 };
+      act(() => emit("run_start", {}));
+      act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
+      // Previous assessment stays readable during refresh; completion replaces its counts.
+      expect(screen.getByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
+      const assessment = {
+        ...success,
+        status: status === "failed" ? "incomplete" : status,
+        summary: "Latest slash assessment",
+        deterministic: { status, reason: "Latest host outcome" },
+      };
+      act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment }));
+      act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+      expect(
+        await screen.findByRole("heading", { name: `Project assessment: ${assessment.status}` }),
+      ).toBeTruthy();
+      expect(screen.getByRole("heading", { name: `Deterministic checks: ${status}` })).toBeTruthy();
+      act(() =>
+        emit("programmatic_assessment", {
+          ...identity,
+          sequence: 3,
+          sessionId: "retired",
+          phase: "completed",
+          assessment: success,
+        }),
+      );
+      act(() =>
+        emit("programmatic_assessment", {
+          ...identity,
+          sequence: 1,
+          phase: "completed",
+          assessment: success,
+        }),
+      );
+      expect(screen.queryByText("3 enabled checks; 2 applicable checks.")).toBeNull();
+    },
+  );
 
   it("surfaces a fresh slash assessment without tool activity (mocked native IPC)", async () => {
     nativeMocks.realMentor = true;
     const pane = client("fresh-assessment", 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), conversationId: "conversation-1", sessionId: "session-1" });
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...(await pane.getState()),
+      conversationId: "conversation-1",
+      sessionId: "session-1",
+    });
     const emit = liveEvents(pane);
     render(<AgentPane client={pane} target={target} />);
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     expect(screen.queryByRole("heading", { name: "Opportunities" })).toBeNull();
     act(() => emit("run_start", {}));
-    act(() => emit("programmatic_assessment", { conversationId: "conversation-1", sessionId: "session-1", sequence: 1, phase: "started" }));
+    act(() =>
+      emit("programmatic_assessment", {
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+        sequence: 1,
+        phase: "started",
+      }),
+    );
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
   });
 
-  it.each(["success", "transport-lost"] as const)("settles dropped discovery completion as %s without replay (mocked native IPC)", async (outcome) => {
-    nativeMocks.realMentor = true;
-    const pane = client("discovery-dropped-completion", 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), conversationId: "conversation-1", sessionId: "session-1" });
-    const emit = liveEvents(pane);
-    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
-    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
-    vi.mocked(pane.programmatic).mockClear();
-    vi.mocked(pane.programmatic).mockImplementation(async (request) => request.action === "discover" ? receipt.promise : report);
-    render(<AgentPane client={pane} target={target} />);
-    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    const discover = await screen.findByRole("button", { name: "Discover opportunities" });
-    await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(discover);
-    const request = vi.mocked(pane.programmatic).mock.calls.find(([request]) => request.action === "discover")![0];
-    if (request.action !== "discover") throw new Error("Expected discovery request");
-    expect(request.requestId).toEqual(expect.any(String));
-    const lifecycle = { conversationId: "conversation-1", sessionId: "session-1", sequence: 1, requestId: request.requestId };
-    act(() => emit("programmatic_assessment", { ...lifecycle, phase: "started" }));
-    expect(await screen.findByText(/Discovery is in progress/)).toBeTruthy();
-    // No completed event is delivered. No new provider request is allowed to repair it.
-    if (outcome === "transport-lost") {
-      await act(async () => receipt.reject(new Error("Transport cancelled")));
-      expect(await screen.findByText(/Discovery completion could not be confirmed/)).toBeTruthy();
-    } else {
-      const candidate = { assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742", candidateId: "ad5bb9ba-4d86-485a-8d74-613fe59b12df", revision: 1,
-        choice: "missing-capability" as const, outcome: "Inspect recurring records", rationale: "Repeated", uncertainty: "Scoped", workflow: { trigger: "Change", representativeCase: "Record",
-          inputs: [], currentProcess: [], output: "Report", successCheck: "Find issue", scope: "Project", mutationBoundary: "Read-only",
-          repeatability: { basis: "inferred" as const, explanation: "Recurring" } }, evidence: [], alternatives: [], risks: [], details: [], nextStep: { available: true, reason: "Review only" } };
-      await act(async () => receipt.resolve({ version: 1, action: "discover", ok: true, assessment: {
-        version: 1, mode: "setup", status: "completed", summary: "Recovered discovery", lifecycle,
-        limitations: [], observations: [], coverage: [], deterministic: { status: "not-run", reason: "setup" },
-        discovery: { assessmentId: candidate.assessmentId, candidates: [candidate] },
-      } }));
-      fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
-      expect((screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement).disabled).toBe(false);
-    }
-    expect(screen.queryByText(/Discovery is in progress/)).toBeNull();
-    expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(["report", "discover"]);
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-  });
+  it.each(["success", "transport-lost"] as const)(
+    "settles dropped discovery completion as %s without replay (mocked native IPC)",
+    async (outcome) => {
+      nativeMocks.realMentor = true;
+      const pane = client("discovery-dropped-completion", 8);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...(await pane.getState()),
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+      });
+      const emit = liveEvents(pane);
+      const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+      const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+      vi.mocked(pane.programmatic).mockClear();
+      vi.mocked(pane.programmatic).mockImplementation(async (request) =>
+        request.action === "discover" ? receipt.promise : report,
+      );
+      render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      const discover = await screen.findByRole("button", { name: "Discover opportunities" });
+      await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(discover);
+      const request = vi
+        .mocked(pane.programmatic)
+        .mock.calls.find(([request]) => request.action === "discover")![0];
+      if (request.action !== "discover") throw new Error("Expected discovery request");
+      expect(request.requestId).toEqual(expect.any(String));
+      const lifecycle = {
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+        sequence: 1,
+        requestId: request.requestId,
+      };
+      act(() => emit("programmatic_assessment", { ...lifecycle, phase: "started" }));
+      expect(await screen.findByText(/Discovery is in progress/)).toBeTruthy();
+      // No completed event is delivered. No new provider request is allowed to repair it.
+      if (outcome === "transport-lost") {
+        await act(async () => receipt.reject(new Error("Transport cancelled")));
+        expect(await screen.findByText(/Discovery completion could not be confirmed/)).toBeTruthy();
+      } else {
+        const candidate = {
+          assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742",
+          candidateId: "ad5bb9ba-4d86-485a-8d74-613fe59b12df",
+          revision: 1,
+          choice: "missing-capability" as const,
+          outcome: "Inspect recurring records",
+          rationale: "Repeated",
+          uncertainty: "Scoped",
+          workflow: {
+            trigger: "Change",
+            representativeCase: "Record",
+            inputs: [],
+            currentProcess: [],
+            output: "Report",
+            successCheck: "Find issue",
+            scope: "Project",
+            mutationBoundary: "Read-only",
+            repeatability: { basis: "inferred" as const, explanation: "Recurring" },
+          },
+          evidence: [],
+          alternatives: [],
+          risks: [],
+          details: [],
+          nextStep: { available: true, reason: "Review only" },
+        };
+        await act(async () =>
+          receipt.resolve({
+            version: 1,
+            action: "discover",
+            ok: true,
+            assessment: {
+              version: 1,
+              mode: "setup",
+              status: "completed",
+              summary: "Recovered discovery",
+              lifecycle,
+              limitations: [],
+              observations: [],
+              coverage: [],
+              deterministic: { status: "not-run", reason: "setup" },
+              discovery: { assessmentId: candidate.assessmentId, candidates: [candidate] },
+            },
+          }),
+        );
+        fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
+        expect(
+          (screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement)
+            .disabled,
+        ).toBe(false);
+      }
+      expect(screen.queryByText(/Discovery is in progress/)).toBeNull();
+      expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual([
+        "report",
+        "discover",
+      ]);
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each(["before-run-end", "after-run-end", "after-response"] as const)("keeps exact setup when assessment completion is %s (mocked native IPC)", async (ordering) => {
-    nativeMocks.realMentor = true;
-    const pane = client("assessment-setup-race", 8);
-    vi.mocked(pane.getState).mockResolvedValue({ ...await pane.getState(), conversationId: "conversation-1", sessionId: "session-1" });
-    const emit = liveEvents(pane);
-    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
-    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
-    vi.mocked(pane.programmatic).mockClear();
-    vi.mocked(pane.programmatic).mockImplementation(async (request) =>
-      request.action === "inspect-setup" ? receipt.promise : report);
-    render(<AgentPane client={pane} target={target} />);
-    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    const review = await screen.findByRole("button", { name: "Review setup" });
-    await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(review);
-    act(() => emit("run_start", {}));
-    const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 1 };
-    const eventAssessment = { version: 1, mode: "setup", status: "unavailable", summary: "Event status only",
-      limitations: [], coverage: [], observations: [], deterministic: { status: "not-run", reason: "setup" } };
-    act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
-    const complete = () => act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment: eventAssessment }));
-    if (ordering === "before-run-end") complete();
-    act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
-    if (ordering === "after-run-end") complete();
-    act(() => emit("agent_done", {}));
-    act(() => emit("ready", { running: false, runState: "idle", conversationId: "conversation-1", sessionId: "session-1" }));
-    expect(pane.programmatic).toHaveBeenCalledTimes(2);
-    const hash = "a".repeat(64);
-    await act(async () => receipt.resolve({
-      version: 1, action: "inspect-setup", ok: true,
-      assessment: {
-        version: 1, mode: "setup", status: "unavailable", summary: "Model unavailable; settings can still be reviewed.",
-        limitations: ["No model assessment was completed."], coverage: [], observations: [],
+  it.each(["before-run-end", "after-run-end", "after-response"] as const)(
+    "keeps exact setup when assessment completion is %s (mocked native IPC)",
+    async (ordering) => {
+      nativeMocks.realMentor = true;
+      const pane = client("assessment-setup-race", 8);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...(await pane.getState()),
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+      });
+      const emit = liveEvents(pane);
+      const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+      const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+      vi.mocked(pane.programmatic).mockClear();
+      vi.mocked(pane.programmatic).mockImplementation(async (request) =>
+        request.action === "inspect-setup" ? receipt.promise : report,
+      );
+      render(<AgentPane client={pane} target={target} />);
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      const review = await screen.findByRole("button", { name: "Review setup" });
+      await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(review);
+      act(() => emit("run_start", {}));
+      const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 1 };
+      const eventAssessment = {
+        version: 1,
+        mode: "setup",
+        status: "unavailable",
+        summary: "Event status only",
+        limitations: [],
+        coverage: [],
+        observations: [],
         deterministic: { status: "not-run", reason: "setup" },
-      },
-      proposal: {
-        handle: hash, operation: "initial", fingerprint: hash, profileJson: "exact reviewed settings",
-        configuration: { status: "missing", currentFingerprint: hash, refreshAvailable: false,
-          baselineUnavailable: false, diagnostic: null, drift: null },
-        routes: [], exclusions: [], configurationInputs: [],
-      },
-    }));
-    if (ordering === "after-response") complete();
-    // Duplicate delivery cannot invalidate the exact response or claim approval.
-    complete();
-    expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Project assessment: unavailable" })).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement).disabled).toBe(false);
-    const expectedCalls = ordering === "after-response" ? 3 : 2;
-    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls));
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
-    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls + 1));
-  });
+      };
+      act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
+      const complete = () =>
+        act(() =>
+          emit("programmatic_assessment", {
+            ...identity,
+            phase: "completed",
+            assessment: eventAssessment,
+          }),
+        );
+      if (ordering === "before-run-end") complete();
+      act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
+      if (ordering === "after-run-end") complete();
+      act(() => emit("agent_done", {}));
+      act(() =>
+        emit("ready", {
+          running: false,
+          runState: "idle",
+          conversationId: "conversation-1",
+          sessionId: "session-1",
+        }),
+      );
+      expect(pane.programmatic).toHaveBeenCalledTimes(2);
+      const hash = "a".repeat(64);
+      await act(async () =>
+        receipt.resolve({
+          version: 1,
+          action: "inspect-setup",
+          ok: true,
+          assessment: {
+            version: 1,
+            mode: "setup",
+            status: "unavailable",
+            summary: "Model unavailable; settings can still be reviewed.",
+            limitations: ["No model assessment was completed."],
+            coverage: [],
+            observations: [],
+            deterministic: { status: "not-run", reason: "setup" },
+          },
+          proposal: {
+            handle: hash,
+            operation: "initial",
+            fingerprint: hash,
+            profileJson: "exact reviewed settings",
+            configuration: {
+              status: "missing",
+              currentFingerprint: hash,
+              refreshAvailable: false,
+              baselineUnavailable: false,
+              diagnostic: null,
+              drift: null,
+            },
+            routes: [],
+            exclusions: [],
+            configurationInputs: [],
+          },
+        }),
+      );
+      if (ordering === "after-response") complete();
+      // Duplicate delivery cannot invalidate the exact response or claim approval.
+      complete();
+      expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Project assessment: unavailable" })).toBeTruthy();
+      expect(
+        (screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      const expectedCalls = ordering === "after-response" ? 3 : 2;
+      await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls));
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
+      await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls + 1));
+    },
+  );
 
   it("opens one code-only opportunity section without changing the composer draft", async () => {
     const pane = client("pane-opportunities", 8);

@@ -5,6 +5,35 @@ import { withRealSidecar } from "./test-support/real-sidecar.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./core/programmatic/profile.js";
 import { queuedPromptMetadataRoundTrip, queuedSegments } from "./test-support/queued-prompt-metadata.js";
 
+it("emits an exact cancellation ID only for success and preserves the consumed duplicate", async () => {
+  await withRealSidecar(async ({ project, manager, open, request, subscribe, generation }) => {
+    const saved = await manager.create(project, "openai", "gpt-5", { openAICodexContextProfile: "stable" });
+    const pane = await open(saved.path);
+    const stream = await subscribe(pane);
+    expect((await request("/prompt", pane, { text: "held" })).status).toBe(202);
+    await generation.started;
+    for (const meta of [{ kenSent: true }, { enhancements: queuedSegments }]) {
+      expect((await request("/prompt", pane, { text: "same", meta })).status).toBe(202);
+    }
+    await stream.waitFor("queued", 2);
+    expect(await (await request("/queued/cancel", pane, { id: "q1" })).json()).toMatchObject({ cancelled: true });
+    const cancelled = await stream.waitFor("queued", 3);
+    expect(cancelled.data).toMatchObject({ cancelledId: "q1", count: 1, messages: [{ id: "q2", text: "same" }] });
+    expect(await (await request("/queued/cancel", pane, { id: "q1" })).json()).toMatchObject({ cancelled: false });
+    expect((await stream.waitFor("queued", 4)).data).not.toHaveProperty("cancelledId");
+    generation.release();
+    await stream.waitFor("run_end");
+    const before = stream.events.filter(event => event.type === "queued").length;
+    expect(await (await request("/queued/cancel", pane, { id: "q2" })).json()).toMatchObject({ cancelled: false });
+    expect((await stream.waitFor("queued", before + 1)).data).not.toHaveProperty("cancelledId");
+    const reopened = await open(saved.path);
+    const history = await (await request("/history", reopened)).json();
+    expect(history.history.filter((row: { role: string; text: string }) => row.role === "user" && row.text === "same")).toEqual([
+      expect.objectContaining({ text: "same", enhancements: queuedSegments }),
+    ]);
+  }, { queueDrain: "steering" });
+}, 60_000);
+
 it.each([
   ["steering", false], ["stranded", false], ["steering", true], ["stranded", true],
 ] as const)("restores exact queued display hints through %s after cancellation (attachment=%s)", async (mode, withAttachment) => {

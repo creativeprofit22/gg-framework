@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.60.3
+
+### Patch Changes
+
+- Make replies easier to scan with message-aware takeaways and natural explanations, and fix queued-message cancellation races and duplicate message removal in GG App.
+  - @kenkaiiii/gg-ai@5.60.3
+  - @kenkaiiii/gg-agent@5.60.3
+  - @kenkaiiii/gg-core@5.60.3
+
 ## 5.60.2
 
 ### Patch Changes

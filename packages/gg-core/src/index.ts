@@ -1,4 +1,5 @@
 // @kenkaiiii/gg-core — provider-agnostic, UI-free shared foundation.
+export type { McpServerRow } from "./mcp-management-contract.js";
 export * from "./referenced-files.js";
 export * from "./model-registry.js";
 export * from "./thinking-level.js";

@@ -79,6 +79,78 @@ afterEach(async () => {
 });
 
 describe("SharedMcpClientPool", () => {
+  it("honours the dedicated server opt-out without changing default eligibility", () => {
+    const createManager = vi.fn();
+    const pool = new SharedMcpClientPool(createManager);
+    pools.push(pool);
+
+    expect(pool.canShare(config)).toBe(true);
+    expect(pool.canShare({ ...config, shared: true })).toBe(true);
+    expect(pool.canShare({ ...config, shared: false })).toBe(false);
+    expect(pool.canShare({ ...config, name: "ordinary", shared: true })).toBe(false);
+    expect(() => pool.acquire({ ...config, shared: false }, {})).toThrow("not shareable");
+    expect(createManager).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [1000, 10000],
+    [undefined, 30000],
+    [undefined, 60000],
+    [30000, undefined],
+    [60000, undefined],
+  ])("isolates timeout policies %s and %s across sharing and reload", async (left, right) => {
+    const connected: Array<number | undefined> = [];
+    const disposed: number[] = [];
+    const pool = new SharedMcpClientPool(() => {
+      const id = connected.length;
+      return {
+        connectAll: async ([target]: MCPServerConfig[]) => {
+          connected.push(target!.timeout);
+          return [];
+        },
+        dispose: async () => { disposed.push(id); },
+      } as unknown as MCPClientManager;
+    });
+    pools.push(pool);
+    const leftConfig = { ...config, ...(left === undefined ? {} : { timeout: left }) };
+    const rightConfig = { ...config, ...(right === undefined ? {} : { timeout: right }) };
+    const first = pool.acquire(leftConfig, {});
+    const same = pool.acquire({ ...leftConfig }, {});
+    const other = pool.acquire(rightConfig, {});
+    await Promise.all([first.tools, same.tools, other.tools]);
+
+    expect(connected).toEqual([left, right]);
+    expect(first.manager).toBe(same.manager);
+    expect(first.tools).toBe(same.tools);
+    expect(first.manager).not.toBe(other.manager);
+    expect(first.tools).not.toBe(other.tools);
+
+    await first.release();
+    expect(disposed).toEqual([]);
+    // Reload with the other timeout without disturbing the remaining old lease.
+    const reloaded = pool.acquire({ ...rightConfig }, {});
+    expect(reloaded.manager).toBe(other.manager);
+    expect(reloaded.tools).toBe(other.tools);
+    await same.release();
+    expect(disposed).toEqual([0]);
+
+    const replacement = pool.acquire(leftConfig, {});
+    await replacement.tools;
+    expect(replacement.manager).not.toBe(first.manager);
+    await first.release();
+    await other.release();
+    expect(disposed).toEqual([0]);
+    await reloaded.release();
+    expect(disposed).toEqual([0, 1]);
+    const replacementSibling = pool.acquire(leftConfig, {});
+    expect(replacementSibling.manager).toBe(replacement.manager);
+    await replacement.release();
+    expect(disposed).toEqual([0, 1]);
+    await replacementSibling.release();
+    expect(disposed).toEqual([0, 1, 2]);
+    expect(connected).toEqual([left, right, left]);
+  });
+
   it("shares one process across concurrent session leases and shuts it down exactly once", async () => {
     const state: FakeManagerState = { connectCount: 0, disposeCount: 0 };
     const pool = createProcessBackedPool(state);

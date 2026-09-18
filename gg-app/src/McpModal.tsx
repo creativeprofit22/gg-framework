@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, XCircle, Lock } from "lucide-react";
+import { CheckCircle2, XCircle, Lock, CircleMinus } from "lucide-react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { ListSkeleton } from "./Skeleton";
@@ -271,10 +271,12 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
               <span
                 className="mcp-dot"
                 style={{
-                  color: s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
+                  color: !s.enabled ? theme.textMuted : s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
                 }}
               >
-                {s.ok ? (
+                {!s.enabled ? (
+                  <CircleMinus size={15} />
+                ) : s.ok ? (
                   <CheckCircle2 size={15} />
                 ) : s.requiresAuth ? (
                   <Lock size={14} />
@@ -282,10 +284,24 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
                   <XCircle size={15} />
                 )}
               </span>
-              <span className="mcp-name" style={{ color: theme.text }} title={s.summary}>
-                {s.name}
-              </span>
-              {s.ok ? (
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
+                  {s.name}
+                </div>
+                {s.enabled && !s.ok && !s.requiresAuth && (
+                  <div className="mcp-meta" style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                    {/* Raw s.error is diagnostic-only, even after transport redaction. */}
+                    {s.failureReason === "trust-blocked"
+                      ? "Project server blocked. Add or re-add it in this project to trust it."
+                      : "Could not connect. Check the server settings and availability."}
+                  </div>
+                )}
+              </div>
+              {!s.enabled ? (
+                <span className="mcp-meta" style={{ color: theme.textMuted }}>
+                  Disabled
+                </span>
+              ) : s.ok ? (
                 <span className="mcp-meta" style={{ color: theme.textDim }}>
                   {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
                 </span>
@@ -294,7 +310,7 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
                   Requires login
                 </span>
               ) : null}
-              {s.requiresAuth && !s.ok && (
+              {s.enabled && s.requiresAuth && !s.ok && (
                 <button
                   className="modal-btn primary"
                   style={{ padding: "2px 12px", fontSize: 12 }}
@@ -372,7 +388,9 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
       )}
 
       <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
-        New servers load on next app restart.
+        Adding or removing servers here automatically refreshes MCP in this conversation.
+        Tools are available only when the server connects and trust requirements are met.
+        Other open conversations are not automatically refreshed.
       </div>
 
       <div className="modal-actions">

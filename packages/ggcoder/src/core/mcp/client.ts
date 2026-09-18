@@ -1,4 +1,5 @@
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { normalizeMcpArguments } from "./normalize-arguments.js";
 import {
   Client,
   OAuthError,
@@ -761,7 +762,10 @@ export class MCPClientManager {
 
           try {
             const result = await connectedServer.client.callTool(
-              { name: identity.toolName, arguments: args as Record<string, unknown> },
+              {
+                name: identity.toolName,
+                arguments: normalizeMcpArguments(args, tool.inputSchema) as Record<string, unknown>,
+              },
               { timeout: config.timeout ?? 60_000 },
             );
             if (!("content" in result) || !Array.isArray(result.content)) {

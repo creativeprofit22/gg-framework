@@ -182,7 +182,7 @@ export class McpCatalogCache {
 
   /**
    * Cached tools for the given configs, skipping any server whose config hash
-   * changed or whose entry has aged out. Servers with no usable entry are
+   * changed or whose entry has aged out. Disabled servers and those with no usable entry are
    * simply absent from the result.
    */
   async entriesFor(configs: readonly MCPServerConfig[]): Promise<Map<string, CachedServerEntry>> {
@@ -190,6 +190,7 @@ export class McpCatalogCache {
     const fresh = new Map<string, CachedServerEntry>();
     const now = Date.now();
     for (const config of configs) {
+      if (config.enabled === false) continue;
       const entry = all.servers[config.name];
       if (!entry) continue;
       if (entry.configHash !== hashServerConfig(config)) continue;

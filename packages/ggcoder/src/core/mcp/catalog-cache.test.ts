@@ -91,6 +91,18 @@ describe("McpCatalogCache", () => {
     expect(JSON.parse(await fs.readFile(file, "utf-8"))).toMatchObject({ version: 2 });
   });
 
+  it("hides fresh disabled entries without discarding metadata needed on re-enable", async () => {
+    const cache = new McpCatalogCache(file);
+    await cache.save(server, [{ toolName: "search", description: "cached search" }], "legacy");
+    const saved = await fs.readFile(file, "utf-8");
+
+    expect((await cache.entriesFor([{ ...server, enabled: false }])).size).toBe(0);
+    expect(await fs.readFile(file, "utf-8")).toBe(saved);
+    expect((await cache.entriesFor([{ ...server, enabled: true }])).get(server.name)?.tools)
+      .toEqual([{ toolName: "search", description: "cached search" }]);
+    expect(await cache.protocolEraFor(server)).toBe("legacy");
+  });
+
   it("invalidates an entry when the server config changes", async () => {
     const cache = new McpCatalogCache(file);
     await cache.save(server, [{ toolName: "search", description: "x" }]);

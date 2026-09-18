@@ -80,7 +80,14 @@ async function startStubServer(): Promise<StubServer> {
               description: "Unsafe source identity",
               inputSchema: {
                 type: "object",
-                properties: { value: { type: "string" } },
+                properties: {
+                  value: { type: "string" },
+                  language: { type: "array", items: { type: "string" } },
+                  path: { type: "string" },
+                  offset: { type: "integer" },
+                  filter: { anyOf: [{ type: "string" }, { type: "integer" }] },
+                  nullable: { type: ["string", "null"] },
+                },
                 required: ["value"],
               },
             },
@@ -177,6 +184,33 @@ describe("MCPClientManager tool identities", () => {
       }),
       expect.objectContaining({ toolName: "unrelated", description: "kept" }),
     ]);
+  });
+
+  it("omits optional non-nullable nulls before sending arguments to MCP", async () => {
+    const tools = await manager.connectAll([config]);
+    const args = {
+      value: "search",
+      language: null,
+      path: null,
+      offset: null,
+      filter: null,
+      nullable: null,
+    };
+    await tools[0].execute(args, {
+      signal: new AbortController().signal,
+      toolCallId: "optional-null-call",
+    });
+    expect(stub.calls).toEqual([
+      { name: UNSAFE_TOOL_NAME, arguments: { value: "search", nullable: null } },
+    ]);
+    expect(args).toEqual({
+      value: "search",
+      language: null,
+      path: null,
+      offset: null,
+      filter: null,
+      nullable: null,
+    });
   });
 
   it("preserves an MCP isError result as an explicit failed tool result", async () => {

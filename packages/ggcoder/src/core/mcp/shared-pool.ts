@@ -140,7 +140,10 @@ export class SharedMcpPool {
   private keyFor(config: MCPServerConfig, opts: SharedAcquireOptions): string {
     const era = opts.modernProtocol ? "modern" : "legacy";
     const prompting = opts.onElicit ? "interactive" : "headless";
-    return `${config.name}\u0000${hashServerConfig(config)}\u0000${era}\u0000${prompting}`;
+    // Timeout affects connection/call policy, not the catalog's tool schema hash.
+    // Omitted uses different connect/call defaults, so keep it distinct from any value.
+    const timeout = config.timeout === undefined ? "default" : String(config.timeout);
+    return `${config.name}\u0000${hashServerConfig(config)}\u0000${era}\u0000${prompting}\u0000${timeout}`;
   }
 
   /**

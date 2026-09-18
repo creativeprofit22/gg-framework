@@ -2808,20 +2808,8 @@ export function isMcpAuthDoneEvent(event: SidecarEvent): event is McpAuthDoneEve
   );
 }
 
-/** One configured MCP server joined with its live connection status. */
-export interface McpServerRow {
-  name: string;
-  scope: "global" | "project";
-  ok: boolean;
-  toolCount: number;
-  error?: string;
-  /** "http" for http/sse transports, "stdio" for spawned processes. */
-  kind: "stdio" | "http";
-  /** Transport summary for display (URL or command+args). */
-  summary: string;
-  /** True when the server returned 401 and needs an interactive OAuth login. */
-  requiresAuth?: boolean;
-}
+import type { McpServerRow } from "@kenkaiiii/gg-core";
+export type { McpServerRow } from "@kenkaiiii/gg-core";
 
 /** Outcome of adding an MCP server from a pasted command line. */
 export interface AddMcpResult {
@@ -2851,13 +2839,21 @@ function mcpManagementError(action: McpManagementAction, cause: unknown): Error 
   );
 }
 
-function isMcpServerRow(value: unknown): value is McpServerRow {
+type LegacyMcpServerRow = Omit<McpServerRow, "enabled"> & { enabled?: boolean };
+
+function isMcpServerRow(value: unknown): value is LegacyMcpServerRow {
   if (typeof value !== "object" || value === null) return false;
   const row = value as Partial<McpServerRow>;
   return (
     typeof row.name === "string" &&
     (row.scope === "global" || row.scope === "project") &&
     typeof row.ok === "boolean" &&
+    (row.enabled === undefined || typeof row.enabled === "boolean") &&
+    (row.error === undefined || typeof row.error === "string") &&
+    (row.failureReason === undefined ||
+      row.failureReason === "trust-blocked" ||
+      row.failureReason === "connection-failed") &&
+    (row.requiresAuth === undefined || typeof row.requiresAuth === "boolean") &&
     typeof row.toolCount === "number" &&
     Number.isSafeInteger(row.toolCount) &&
     row.toolCount >= 0 &&
@@ -2876,7 +2872,11 @@ function decodeMcpServerRows(response: unknown): McpServerRow[] {
   ) {
     throw new TypeError("Malformed MCP server-list response");
   }
-  return (response as { servers: McpServerRow[] }).servers;
+  // Older daemons omit enabled; preserve their existing status presentation.
+  return (response as { servers: LegacyMcpServerRow[] }).servers.map((row) => ({
+    ...row,
+    enabled: row.enabled ?? true,
+  }));
 }
 
 /** List configured MCP servers with live connection status + tool counts.

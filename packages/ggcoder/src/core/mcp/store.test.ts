@@ -25,6 +25,7 @@ import {
   removeServer,
   getServer,
   fromStoredEntry,
+  toStoredEntry,
   globalMcpPath,
   projectMcpPath,
 } from "./store.js";
@@ -78,6 +79,49 @@ function blockNextAtomicConfigCommit(): {
   return { started, contenderStarted, release };
 }
 describe("mcp store", () => {
+  for (const shared of [false, true, undefined]) {
+    const sharing = shared === undefined ? {} : { shared };
+
+    it(`round-trips shared=${shared} through both converters`, () => {
+      const config = { name: "stateful", command: "local-fixture", ...sharing };
+      const stored = { type: "stdio" as const, command: "local-fixture", ...sharing };
+      expect(toStoredEntry(config)).toStrictEqual(stored);
+      expect(fromStoredEntry(config.name, stored)).toStrictEqual(config);
+    });
+
+    for (const scope of ["global", "project"] as const) {
+      it(`preserves shared=${shared} in ${scope} persistence and loading`, async () => {
+        const config = {
+          name: "stateful",
+          command: "local-fixture",
+          args: ["--fixture"],
+          env: { FIXTURE: "test" },
+          enabled: false,
+          timeout: 1234,
+          ...sharing,
+        };
+        await expect(addServer(config, scope, tmpProject)).resolves.toEqual({ ok: true });
+        const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
+        const raw = JSON.parse(await fs.readFile(file, "utf-8"));
+        expect(raw.mcpServers.stateful).toStrictEqual(toStoredEntry(config));
+        expect(raw.mcpServers.stateful.shared).toBe(shared);
+        expect(Object.hasOwn(raw.mcpServers.stateful, "shared")).toBe(shared !== undefined);
+        await expect(loadServers(tmpProject)).resolves.toStrictEqual([{ config, scope }]);
+      });
+    }
+  }
+
+  for (const scope of ["global", "project"] as const) {
+    it.each(["false", 0, null, {}, []].map((value) => [value]))(`rejects malformed shared=%j in ${scope} scope`, async (shared) => {
+      const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, JSON.stringify({
+        mcpServers: { stateful: { command: "local-fixture", shared } },
+      }));
+      await expect(loadServers(tmpProject)).rejects.toThrow(/MCP config.+is malformed/);
+    });
+  }
+
   it("round-trips an http server in global scope", async () => {
     const res = await addServer(
       { name: "notion", url: "https://mcp.notion.com/mcp" },

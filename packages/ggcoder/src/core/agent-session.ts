@@ -1196,6 +1196,9 @@ export class AgentSession {
       if (this.opts.allowedTools && mcpWhitelist) {
         servers = servers.filter((s) => mcpWhitelist.includes(s.name));
       }
+      // Disabled servers must neither acquire shared leases nor publish cached
+      // tools. Keep their cache metadata intact so re-enabling can reuse it.
+      servers = servers.filter((server) => server.enabled !== false);
       const pool = this.opts.sharedMcpPool;
       const sharedServers = pool ? servers.filter((server) => pool.canShare(server)) : [];
       const privateServers = pool ? servers.filter((server) => !pool.canShare(server)) : servers;

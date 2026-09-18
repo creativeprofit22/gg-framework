@@ -39,7 +39,7 @@ export class SharedMcpClientPool {
   ) {}
 
   canShare(config: MCPServerConfig): boolean {
-    return config.name === "kencode-search";
+    return config.name === "kencode-search" && config.shared !== false;
   }
 
   acquire(

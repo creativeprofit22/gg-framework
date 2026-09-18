@@ -422,6 +422,101 @@ describe("AgentSession MCP identity boundary", () => {
     }
   }, 20_000);
 
+  it.each(["private-server", "kencode-search"])(
+    "excludes fresh disabled %s cache at background startup and reload, then supports re-enable",
+    async (serverName) => {
+      const { AgentSession } = await import("./agent-session.js");
+      const { McpCatalogCache } = await import("./mcp/catalog-cache.js");
+      const { SharedMcpClientPool } = await import("./mcp/shared-client-pool.js");
+      const { getAllMcpServers, MCPClientManager } = await import("./mcp/index.js");
+      const actual = await vi.importActual<typeof McpModule>("./mcp/index.js");
+      const config = { name: serverName, command: "isolated-test-server", enabled: false };
+      const identity = createMcpToolIdentity(serverName, "needle");
+      const cache = new McpCatalogCache();
+      await cache.save(config, [{ toolName: "needle", description: "needle cached capability" }]);
+      vi.mocked(getAllMcpServers).mockImplementation(async () => [{ ...config }]);
+
+      // Keep real manager eligibility/settlement and real pool routing. Replace
+      // only transport creation: this fixture must never launch a user server.
+      const connectTransport = vi.fn(async () => [mcpTool(identity)]);
+      const waits: ReturnType<typeof vi.spyOn>[] = [];
+      const connections: ReturnType<typeof vi.spyOn>[] = [];
+      const createManager = () => {
+        const manager = new actual.MCPClientManager();
+        const transport = manager as unknown as {
+          connectServer: typeof connectTransport;
+          connectShared: typeof connectTransport;
+        };
+        vi.spyOn(transport, "connectServer").mockImplementation(connectTransport);
+        vi.spyOn(transport, "connectShared").mockImplementation(connectTransport);
+        waits.push(vi.spyOn(manager, "whenConnected"));
+        connections.push(vi.spyOn(manager, "connectAll"));
+        return manager;
+      };
+      const pool = new SharedMcpClientPool(createManager);
+      const acquire = vi.spyOn(pool, "acquire");
+      for (let i = 0; i < 4; i++) {
+        vi.mocked(MCPClientManager).mockImplementationOnce(function FixtureManager() {
+          return createManager();
+        });
+      }
+      const connect = vi.spyOn(
+        AgentSession.prototype as unknown as { connectMcpServers(): Promise<void> },
+        "connectMcpServers",
+      );
+      const session = await createSession({
+        mcpEnabled: true,
+        backgroundMcpConnect: true,
+        sharedMcpPool: pool,
+      });
+      try {
+        await connect.mock.results[0]!.value;
+        const internals = harness(session);
+        const assertAbsent = async () => {
+          expect(internals.mcpCatalog?.names() ?? []).not.toContain(identity.providerName);
+          expect(internals.tools.map((tool) => tool.name)).not.toContain(identity.providerName);
+          expect(internals.registeredTools.has(identity.providerName)).toBe(false);
+          expect(internals.liveMcpTools.has(identity.providerName)).toBe(false);
+          const search = internals.registeredTools.get("tool_search");
+          if (search) {
+            expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT)))
+              .not.toContain(identity.providerName);
+          }
+          for (const wait of waits) expect(wait).not.toHaveBeenCalled();
+        };
+        await assertAbsent();
+        await session.reloadMcpServers();
+        await assertAbsent();
+        expect(acquire).not.toHaveBeenCalled();
+        expect(connectTransport).not.toHaveBeenCalled();
+        for (const connection of connections) expect(connection).toHaveBeenCalledWith([]);
+
+        config.enabled = true;
+        await session.reloadMcpServers();
+        expect(connectTransport).toHaveBeenCalledOnce();
+        expect(acquire).toHaveBeenCalledTimes(serverName === "kencode-search" ? 1 : 0);
+        const search = internals.registeredTools.get("tool_search")!;
+        expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT)))
+          .toContain(identity.providerName);
+        const promoted = internals.registeredTools.get(identity.providerName)!;
+        await expect(promoted.execute({}, TOOL_CONTEXT)).resolves.toBe("needle");
+
+        config.enabled = false;
+        await session.reloadMcpServers();
+        await assertAbsent();
+        expect(connectTransport).toHaveBeenCalledOnce();
+        await expect(promoted.execute({}, TOOL_CONTEXT)).rejects.toThrow("no longer registered");
+        expect((await cache.entriesFor([{ ...config, enabled: true }])).has(serverName)).toBe(true);
+      } finally {
+        await session.dispose();
+        await pool.dispose();
+        connect.mockRestore();
+        vi.mocked(getAllMcpServers).mockResolvedValue([]);
+      }
+    },
+    20_000,
+  );
+
   it("authorizes opaque aliases from metadata, never by parsing provider names", async () => {
     const session = await createSession({
       allowedTools: ["read"],

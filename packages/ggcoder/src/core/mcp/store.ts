@@ -18,7 +18,7 @@ export type MCPScope = "global" | "project";
 /**
  * On-disk entry shape. Accepts both Claude's `.mcp.json` fields
  * (`type`, `url`, `headers`, `command`, `args`, `env`, `timeout`) and our
- * extra (`enabled`) so configs are portable in both directions.
+ * extras (`enabled`, `shared`) so configs are portable in both directions.
  */
 const StoredServerEntrySchema = z
   .object({
@@ -30,6 +30,7 @@ const StoredServerEntrySchema = z
     env: z.record(z.string(), z.string()).optional(),
     timeout: z.number().optional(),
     enabled: z.boolean().optional(),
+    shared: z.boolean().optional(),
   })
   .passthrough();
 
@@ -131,6 +132,7 @@ export function fromStoredEntry(name: string, entry: StoredServerEntry): MCPServ
   }
   if (typeof entry.timeout === "number") config.timeout = entry.timeout;
   if (typeof entry.enabled === "boolean") config.enabled = entry.enabled;
+  if (typeof entry.shared === "boolean") config.shared = entry.shared;
   return config;
 }
 
@@ -149,6 +151,7 @@ export function toStoredEntry(config: MCPServerConfig): StoredServerEntry {
   }
   if (typeof config.timeout === "number") entry.timeout = config.timeout;
   if (typeof config.enabled === "boolean") entry.enabled = config.enabled;
+  if (typeof config.shared === "boolean") entry.shared = config.shared;
   return entry;
 }
 

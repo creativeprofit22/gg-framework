@@ -336,6 +336,64 @@ describe("SharedMcpPool refcounting", () => {
     });
   });
 
+  it.each([
+    [1000, 10000],
+    [undefined, 30000],
+    [undefined, 60000],
+    [30000, undefined],
+    [60000, undefined],
+  ])("isolates timeout policies %s and %s across sharing and reload", async (left, right) => {
+    const pool = newPool();
+    const connected: Array<number | undefined> = [];
+    const disposed: number[] = [];
+    const factory = (): SharedConnector => {
+      const id = connected.length;
+      return {
+        connect: async (target) => {
+          connected.push(target.timeout);
+          return { name: target.name, ok: true, toolCount: 0, tools: [] };
+        },
+        dispose: async () => { disposed.push(id); },
+      };
+    };
+    const leftConfig = { ...config, ...(left === undefined ? {} : { timeout: left }) };
+    const rightConfig = { ...config, ...(right === undefined ? {} : { timeout: right }) };
+    const [first, same, other] = await Promise.all([
+      pool.acquire(leftConfig, factory),
+      pool.acquire({ ...leftConfig }, factory),
+      pool.acquire(rightConfig, factory),
+    ]);
+
+    expect(connected).toEqual([left, right]);
+    expect(first.result).toBe(same.result);
+    expect(first.result).not.toBe(other.result);
+    expect(pool.refCount(leftConfig)).toBe(2);
+    expect(pool.refCount(rightConfig)).toBe(1);
+
+    await first.release();
+    expect(disposed).toEqual([]);
+    // Reload the departing pane with the other timeout while its sibling stays put.
+    const reloaded = await pool.acquire({ ...rightConfig }, factory);
+    expect(reloaded.result).toBe(other.result);
+    await same.release();
+    expect(disposed).toEqual([0]);
+    expect(pool.refCount(rightConfig)).toBe(2);
+
+    const replacement = await pool.acquire(leftConfig, factory);
+    expect(replacement.result).not.toBe(first.result);
+    await first.release(); // stale release must not affect either live partition
+    expect(pool.refCount(leftConfig)).toBe(1);
+    await other.release();
+    expect(disposed).toEqual([0]);
+    await reloaded.release();
+    expect(disposed).toEqual([0, 1]);
+    expect(pool.refCount(leftConfig)).toBe(1);
+    await replacement.release();
+    expect(disposed).toEqual([0, 1, 2]);
+    expect(connected).toEqual([left, right, left]);
+    expect(pool.size).toBe(0);
+  });
+
   it("keeps distinct configs and protocol eras in separate entries", async () => {
     const pool = newPool();
     const log: string[] = [];

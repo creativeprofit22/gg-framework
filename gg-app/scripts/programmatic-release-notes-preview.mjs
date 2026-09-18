@@ -8,7 +8,7 @@ import { initScript, responses, requireVisualFixtureUrl } from "./capture-screen
 // Browser-only verification. Native window APIs and Decisions IPC are mocked;
 // records below are actual retained workflow evidence, not synthetic verification.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const output = resolve(root, ".gg/screenshots/upstream-0650");
+const output = resolve(root, ".gg/screenshots/upstream-0651-20260918");
 const baseUrl = requireVisualFixtureUrl(
   process.env.GG_RELEASE_PREVIEW_URL ?? "http://127.0.0.1:1436/",
 );
@@ -16,6 +16,7 @@ const readJson = async (path) => JSON.parse(await readFile(resolve(root, path), 
 const notes = await readJson("gg-app/src/local-release-notes.json");
 const app = await readJson("gg-app/package.json");
 const recordPaths = [
+  ".gg/local-fixes/backups/2026-09-18T06-06-35-463Z/decisions.json",
   ".gg/local-fixes/backups/2026-09-15T14-59-43-648Z/decisions.json",
   ".gg/local-fixes/backups/2026-09-08T04-18-39-833Z/decisions.json",
 ];
@@ -26,7 +27,10 @@ for (const record of records) {
   assert.ok(Array.from(record.summary.text).length >= 40);
   assert.ok(Array.from(record.summary.text).length <= 500);
 }
-assert.equal(records[0].evidence.merge, "2db5dd33ff77c7b7d4f35c4fc4f3105def3731c5");
+assert.equal(records[0].evidence.merge, "f7ee6cf420150a3e465efa0ce6d513ede0534614");
+assert.equal(records[0].evidence.upstreamParent, "c533dde20271a73c2632bc4afb0ece71393a668a");
+assert.equal(records[0].verification.installer, null);
+assert.equal(app.version, "0.65.1");
 assert.equal(records[0].verification.checks, "passed");
 const plain = (text) => text.replaceAll("`", "");
 const browser = await chromium.launch({
@@ -93,7 +97,10 @@ try {
       await summary.scrollIntoViewIfNeeded();
       await assertLayout();
       await page.screenshot({
-        path: resolve(output, `decisions-${index === 0 ? "latest" : "history"}-${width}.png`),
+        path: resolve(
+          output,
+          `decisions-${index === 0 ? "latest" : `history-${index}`}-${width}.png`,
+        ),
       });
     }
     results.push({

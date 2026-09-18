@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
@@ -155,7 +156,7 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-09-15-upstream-0650-reviewed-commands",
+      id: "local-2026-09-18-upstream-0651-queues-and-discovery",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),
@@ -163,7 +164,12 @@ describe("What's New feeds", () => {
   });
 
   it("preserves the prior shipped Local Fork identities and dates", () => {
-    expect(LOCAL_CHANGELOG[1]).toEqual({
+    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-15-upstream-0650-reviewed-commands");
+    expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-15");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[1])).digest("hex")).toBe(
+      "a953bb81124c0be2a98786440c2ca3aedf241ae9bdf56d0f9455c54d3f8b3a0a",
+    );
+    expect(LOCAL_CHANGELOG[2]).toEqual({
       id: "local-2026-09-12-upstream-0634-reviews-and-replies",
       label: "Upstream 0.63.4, with reviews that stay in reach",
       date: "2026-09-12",
@@ -179,20 +185,20 @@ describe("What's New feeds", () => {
         "Know an image limit before chasing another retry. `Flare` and `Sunburst` explain that `transparent backgrounds` are unavailable through your ChatGPT connection, rather than switching models or silently substituting an opaque image.",
       ],
     });
-    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
-    expect(LOCAL_CHANGELOG[2].label).toBe(
+    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
+    expect(LOCAL_CHANGELOG[3].label).toBe(
       "Upstream 0.63.0, with clearer prompts and image results",
     );
-    expect(LOCAL_CHANGELOG[2].date).toBe("2026-09-09");
-    expect(LOCAL_CHANGELOG[2].items).toHaveLength(8);
-    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
-    expect(LOCAL_CHANGELOG[3].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
-    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-07");
-    expect(LOCAL_CHANGELOG[3].items).toHaveLength(5);
-    expect(LOCAL_CHANGELOG[4].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
-    expect(LOCAL_CHANGELOG[4].label).toBe("Upstream 0.62.0, still your Local Fork");
-    expect(LOCAL_CHANGELOG[4].date).toBe("2026-09-06");
-    expect(LOCAL_CHANGELOG[4].items).toHaveLength(14);
+    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-09");
+    expect(LOCAL_CHANGELOG[3].items).toHaveLength(8);
+    expect(LOCAL_CHANGELOG[4].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
+    expect(LOCAL_CHANGELOG[4].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
+    expect(LOCAL_CHANGELOG[4].date).toBe("2026-09-07");
+    expect(LOCAL_CHANGELOG[4].items).toHaveLength(5);
+    expect(LOCAL_CHANGELOG[5].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
+    expect(LOCAL_CHANGELOG[5].label).toBe("Upstream 0.62.0, still your Local Fork");
+    expect(LOCAL_CHANGELOG[5].date).toBe("2026-09-06");
+    expect(LOCAL_CHANGELOG[5].items).toHaveLength(14);
   });
 
   it.each([

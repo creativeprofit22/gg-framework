@@ -321,6 +321,7 @@ describe("configuration drift reconciliation", () => {
     await writeFile(path.join(root, "package.json"), '{"name":"drift"}\n');
     const stale = await readProgrammaticChatReport(root);
     expect(stale.scan.available).toBe(false);
+    expect(stale.reason).toBe("Project settings changed. Choose Review setup before checking for opportunities or starting a task.");
     expect((await readProgrammaticChatDetail(root, first.opportunity.identity.id)).detail?.summary.state).toBe(terminal);
     await approveProfile(root);
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
@@ -349,6 +350,7 @@ describe("configuration drift reconciliation", () => {
     await writeFile(profilePath, JSON.stringify({ ...profile, version: 1 }));
     const report = await readProgrammaticChatReport(root);
     expect(report).toMatchObject({ status: "stale", scan: { available: false } });
+    expect(report.reason).toBe("Saved setup uses an older format, so earlier file settings cannot be compared. Choose Review setup.");
     expect(report.rows).toHaveLength(1);
     expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
     await expect(accessProgrammaticExecutionRecord(root, state.records[0]!.opportunity.identity.id, state.configurationFingerprint))

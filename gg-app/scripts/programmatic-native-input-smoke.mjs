@@ -5,6 +5,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { processTreeSnapshot, readProcessTable } from "./workspace-shell-evidence.mjs";
+import { smokeLabels, smokeButton, revealSmokeTarget } from "./programmatic-execution-smoke-checks.mjs";
 const exec = promisify(execFile);
 
 export async function createNativeInputSmoke(client, rootPid, audit, waitFor) {
@@ -38,6 +39,10 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
   };
   const focus = async (expression, label, backwards = false) => {
     await waitFor(`keyboard target ${label}`, () => client.evaluate(`Boolean(${expression}) && !(${expression}).disabled`));
+    await revealSmokeTarget(client, expression, async (summary) => {
+      await focus(summary, `${label}: open disclosure`);
+      await key("Enter", "Enter", 13);
+    });
     backwards = backwards || await client.evaluate(`Boolean(document.activeElement.compareDocumentPosition(${expression}) & Node.DOCUMENT_POSITION_PRECEDING)`);
     let steps = 0;
     const trace = [];
@@ -60,7 +65,7 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
     assert.equal(observation.hit, true, `Focused control not obscured: ${label}`);
     return observation;
   };
-  const button = (label) => `Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`;
+  const button = smokeButton;
   const activate = async (expression, label, space = false) => {
     await focus(expression, label);
     await capture(`focus-${evidence.focus.length}`);
@@ -82,7 +87,7 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
     evidence.layouts.push(result); save();
     assert.ok(result.section.scroll <= result.section.client + 1, `${name}: opportunity horizontal overflow`);
     assert.ok(result.document.scroll <= result.document.client + 1, `${name}: document horizontal overflow`);
-    for (const label of ["Review setup", "Refresh results", "Check for opportunities"]) await focus(button(label), `${name}: ${label}`);
+    for (const label of [smokeLabels.currentSetup, "Refresh results", smokeLabels.scan]) await focus(button(label), `${name}: ${label}`);
     await focus("document.querySelector('.programmatic-detail summary')", `${name}: evidence`);
     await capture(name);
   };

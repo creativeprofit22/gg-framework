@@ -502,85 +502,63 @@ export class ProgrammaticAdvisoryTurn {
 export function renderAdvisoryResult(result: Assessment): string {
   const lines = [
     "## Recommendations — not started",
-    "Advice only: availability and suitability do not authorize execution.",
-    "Retrieval provenance does not verify claims; external URLs are source attribution, not proof of live URL fetching.",
-    `Coverage: ${result.coverage.status} — ${result.coverage.scope}${result.coverage.status === "limited" ? `. ${result.coverage.reason}` : ""}`,
+    "Advice only. Running or editing anything requires separate approval.",
+    `Checked: ${result.coverage.scope}`,
   ];
+  if (result.coverage.status === "limited") lines.push(`Limits: ${result.coverage.reason}`);
   if (!result.recommendations.length)
-    lines.push("No supported recommendation from this bounded assessment.");
+    lines.push("No supported recommendation was found in the inspected scope.");
   for (const [index, recommendation] of result.recommendations.entries()) {
+    const { workflow, choice } = recommendation;
     lines.push(
       `\n${index + 1}. ${recommendation.outcome}`,
       `Why: ${recommendation.rationale}`,
       `Uncertainty: ${recommendation.uncertainty}`,
+      `Scope: ${workflow.affectedSubproject.scope === "repository-wide" ? "repository-wide" : workflow.affectedSubproject.path}`,
+      `Proposed change boundary: ${workflow.mutationBoundary}`,
     );
-    const workflow = recommendation.workflow;
-    lines.push(
-      `Trigger: ${workflow.trigger}`,
-      `Representative case: ${workflow.representativeCase}`,
-      `Workflow inputs: ${workflow.inputs.join("; ")}`,
-      `Current process: ${workflow.currentProcess.join("; ")}`,
-      `Workflow output: ${workflow.output}`,
-      `Success check: ${workflow.successCheck}`,
-      `Affected subproject: ${workflow.affectedSubproject.scope === "repository-wide" ? "repository-wide" : workflow.affectedSubproject.path}`,
-      `Mutation boundary: ${workflow.mutationBoundary}`,
-      `Repeatability (${workflow.repeatability.basis}): ${workflow.repeatability.explanation}`,
-    );
-    const choice = recommendation.choice;
-    if (choice.kind === "manual") lines.push(`Manual alternative: ${choice.steps.join("; ")}`);
+    if (choice.kind === "manual") lines.push(`Next: follow these manual steps — ${choice.steps.join("; ")}`);
     else if (choice.kind === "needs-more-evidence") lines.push(
-      `Needs more evidence: ${choice.missingEvidence.join("; ")}`,
-      `Next inspection steps — not started: ${choice.nextInspectionSteps.join("; ")}`,
+      `Missing evidence: ${choice.missingEvidence.join("; ")}`,
+      `Next: inspect without making changes — ${choice.nextInspectionSteps.join("; ")}`,
     );
     if (choice.kind === "missing-capability" || choice.kind === "extend-command") {
       const proposal = choice.kind === "missing-capability" ? choice.proposal : choice.requirement;
-      if (choice.kind === "extend-command") lines.push(
-        "Extend — proposal only; requires a later explicitly authorized edit/review, not a programmatic_command update.",
-        `Proposed changes: ${choice.proposedChanges.join("; ")}`,
-      );
-      else lines.push("New capability — proposal only.");
+      lines.push(`Proposal only: ${proposal.desiredOutcome}`);
+      if (choice.kind === "extend-command") lines.push(`Proposed changes: ${choice.proposedChanges.join("; ")}`);
       lines.push(
-        `Missing ${proposal.capabilityKind} capability — proposal only: ${proposal.desiredOutcome}`,
         `Inputs: ${proposal.inputs.join("; ")}`,
         `Outputs: ${proposal.outputs.join("; ")}`,
         `Prerequisites: ${proposal.prerequisites.join("; ")}`,
         `Risks: ${proposal.risks.join("; ")}`,
         `Verification needed: ${proposal.verificationExpectations.join("; ")}`,
+        proposal.capabilityKind === "app-backed"
+          ? "Next: plan application development. A prompt alone cannot provide this functionality."
+          : choice.kind === "extend-command"
+            ? "Next: review the base command and proposed changes. Editing requires separate approval."
+            : "Next: review the proposal before creating a command; verify it before running it.",
       );
-      if (proposal.capabilityKind === "app-backed")
-        lines.push("Missing app/native/tool functionality remains development work, not a generated working command.");
     }
-    if (choice.kind === "reuse-command" || choice.kind === "extend-command")
-      lines.push(
-        choice.availability.status === "available"
-          ? `${choice.kind === "reuse-command" ? "Reuse" : "Extension base"} /${choice.availability.snapshot.command.name} — prompt available, not started; prompt identity is not a host capability guarantee.`
-          : `Command unavailable /${choice.availability.command.name}: ${choice.availability.reason}`,
-      );
-    for (const alternative of recommendation.alternatives) {
-      const availability = alternative.availability;
-      const command = availability?.status === "available" ? availability.snapshot.command : availability?.command;
-      lines.push(`Alternative not selected (${alternative.kind}${command ? ` /${command.name}` : ""}): ${alternative.reasonNotSelected}`);
-      if (availability) lines.push(availability.status === "available"
-        ? "Compared prompt available; identity does not verify prerequisites or behavior."
-        : `Compared command unavailable: ${availability.reason}`);
+    if (choice.kind === "reuse-command" || choice.kind === "extend-command") {
+      const availability = choice.availability;
+      lines.push(availability.status === "available"
+        ? `/${availability.snapshot.command.name}: ${availability.snapshot.command.invocationKind === "workspace-action" ? "workspace action" : "prompt"} available, not started. This does not guarantee the required tools or behavior.`
+        : `/${availability.command.name} unavailable: ${availability.reason}`);
+      if (availability.status === "unavailable")
+        lines.push("Next: recheck the command and project prerequisites before proceeding.");
+      else if (availability.snapshot.capabilityKind === "app-backed")
+        lines.push("Next: review the required application integration. This proposal cannot run it.");
+      else if (choice.kind === "reuse-command")
+        lines.push("Next: review the current command, prerequisites and scope before approving a run.");
     }
     for (const item of recommendation.evidence.items) {
-      const location = item.location;
-      const details = location ? [`path: ${location.path}`] : [];
-      if (location?.startLine !== undefined)
-        details.push(
-          location.endLine !== undefined
-            ? `lines: ${location.startLine}-${location.endLine}`
-            : `line: ${location.startLine}`,
-        );
-      if ("kind" in item && item.revision !== undefined)
-        details.push(`revision: ${item.revision}`);
-      const suffix = details.length ? `, ${details.join(", ")}` : "";
-      lines.push(
-        "kind" in item
-          ? `External evidence (${item.basis}, ${item.inspectedUrl}${suffix}): ${item.claim}`
-          : `Evidence (${item.basis}, ${item.source}${suffix}): ${item.message}`,
-      );
+      if (!("kind" in item) && item.severity !== "info")
+        lines.push(`Reported limit (${item.basis}): ${item.message}`);
+    }
+    // Keep known restrictions, not a routine report of unselected alternatives.
+    for (const alternative of recommendation.alternatives) {
+      if (alternative.availability?.status === "unavailable")
+        lines.push(`/${alternative.availability.command.name} unavailable: ${alternative.availability.reason}`);
     }
   }
   return safeText(lines.join("\n"));

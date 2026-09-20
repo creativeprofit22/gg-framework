@@ -283,7 +283,7 @@ it.each([
     // Reject authority/detail fields at any depth, not those words in display copy.
     expect(JSON.stringify(events)).not.toMatch(/"(?:proposalHandle|profileJson|recommendations|setupFacts|scanFacts)"\s*:/);
     expect(result.body).toMatchObject({ ok: true, assessment: { mode, status: "completed", deterministic: mode === "setup" ? { status: "not-run" } : { status: "succeeded", enabledCount: count, applicableCount: count } } });
-    expect(result.body).toMatchObject({ assessment: { summary: expect.stringContaining("not a universal clean bill of health") } });
+    expect(result.body).toMatchObject({ assessment: { summary: "Assessment finished. These are suggestions, not a complete project check. No recommended task has been started." } });
     expect(assess).toHaveBeenCalledOnce();
     expect(calls.filter((name) => !["find", "read", "programmatic_advisory_result"].includes(name))).toEqual([mode === "setup" ? "programmatic_profile" : "programmatic_scan"]);
     expect(calls).toContain("find");

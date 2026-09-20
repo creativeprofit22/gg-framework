@@ -4543,7 +4543,7 @@ async function createSession(
       const owner = session;
       let outcome: Awaited<ReturnType<AgentSession["assessProgrammatic"]>> | undefined;
       let failure: unknown;
-      await runAgent(assessmentMode === "setup" ? "Review setup" : "Check for opportunities", async () => {
+      await runAgent(assessmentMode === "setup" ? "Review setup" : "Run project checks", async () => {
         try {
           outcome = await owner.assessProgrammatic(assessmentMode, undefined, undefined, { assessmentRequestId });
         } catch (error) {

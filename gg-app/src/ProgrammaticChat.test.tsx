@@ -9,6 +9,17 @@ import {
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
 const hash = "a".repeat(64);
+const assessmentLabels = { completed: "Finished", incomplete: "Incomplete", cancelled: "Cancelled", unavailable: "Unavailable" };
+const checkLabels = { succeeded: "Finished", "not-run": "Not run", failed: "Failed", denied: "Not allowed", cancelled: "Cancelled", unavailable: "Unavailable" };
+function openSavedResults() {
+  const summary = screen.queryByText(/Browse saved check results \(\d+\)/);
+  if (summary && !summary.closest("details")!.open) fireEvent.click(summary);
+}
+function openAssessmentDetails() {
+  const region = screen.getByRole("region", { name: "Project assessment" });
+  const summary = within(region).getByText("Details");
+  if (!summary.closest("details")!.open) fireEvent.click(summary);
+}
 describe.each([false, true])("assessment refresh (transport interrupted: %s)", (interrupted) => {
   it.each(["incomplete", "cancelled", "unavailable", "completed"] as const)(
     "shows delivered %s assessment as current while retaining stale candidate detail",
@@ -113,13 +124,13 @@ describe.each([false, true])("assessment refresh (transport interrupted: %s)", (
         response: { version: 1, action: "discover", ok: true, assessment: current },
       });
       show();
-      expect(screen.getByRole("heading", { name: `Project assessment: ${status}` })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: `Project assessment: ${assessmentLabels[status]}` })).toBeTruthy();
       expect(screen.getByText(current.summary)).toBeTruthy();
       expect(screen.queryByText(/Previous assessment, retained for reference/)).toBeNull();
-      expect(screen.getByText(/Previous or historical evidence/)).toBeTruthy();
+      expect(screen.getByText(/This suggestion is from an earlier check/)).toBeTruthy();
       expect(screen.getByText("Success check: Known issue found")).toBeTruthy();
       expect(
-        (screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement)
+        (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement)
           .disabled,
       ).toBe(true);
     },
@@ -200,6 +211,15 @@ function fixture(overrides: Partial<ProgrammaticChatState> = {}) {
   };
   return { props, ...render(<ProgrammaticChat {...props} />) };
 }
+it("keeps current setup compact and opens settings without saving or scanning", () => {
+  const { props } = fixture({ configuration: { status: "current", currentFingerprint: hash, refreshAvailable: false, baselineUnavailable: false, diagnostic: null, drift: null } });
+  expect(screen.queryByText("Choose which project checks to save. Discovery is available separately, without setup.")).toBeNull();
+  expect(props.onAction).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Change settings" }));
+  expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "inspect-setup" });
+  expect(props.onRun).not.toHaveBeenCalled();
+});
+
 it("shows exact optional history consent without adding candidate actions", () => {
   const { props } = fixture({
     proposalApprovable: true,
@@ -255,7 +275,7 @@ describe("bounded project assessment (presentation only; no native IPC)", () => 
     },
     {
       history: { status: "acknowledgement-unknown", assessmentId, reason },
-      label: "Recommendation history: save acknowledgement unknown",
+      label: "Recommendation history: save not confirmed",
     },
     { history: undefined, label: null },
   ];
@@ -289,10 +309,12 @@ describe("bounded project assessment (presentation only; no native IPC)", () => 
         },
       });
       rerender(<ProgrammaticChat {...props} state={state} />);
-      expect(screen.getByRole("heading", { name: "Project assessment: completed" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Project assessment: Finished" })).toBeTruthy();
+      openAssessmentDetails();
+      openSavedResults();
       expect(
         screen.getByRole("heading", {
-          name: `Deterministic checks: ${assessment.deterministic.status}`,
+          name: `Saved checks: ${checkLabels[assessment.deterministic.status]}`,
         }),
       ).toBeTruthy();
       expect(state.report).toBe(props.state.report);
@@ -305,16 +327,16 @@ describe("bounded project assessment (presentation only; no native IPC)", () => 
       if (label) {
         expect(section).not.toBeNull();
         expect(within(section!).getByRole("heading", { name: label })).toBeTruthy();
-        expect(section!.closest("details")).toBeNull();
+        expect(section!.closest("details")!.open).toBe(true);
         expect(section!.querySelector("button, a, b, script, iframe, img")).toBeNull();
       } else expect(section).toBeNull();
       if (history && "reason" in history) {
-        expect(within(section!).getByRole("alert").textContent).toBe(reason);
+        expect(within(section!).getByText(reason).textContent).toBe(reason);
       }
       if (history?.status === "acknowledgement-unknown") {
         expect(
-          within(section!).getByText(
-            "History may already have been saved. Read current history before retrying the save. Do not rerun the assessment or its provider or scanner to retry saving.",
+          screen.getByText(
+            "History may already have been saved, but this could not be confirmed. Read current history before retrying the save. Do not rerun the assessment or its checks just to save history.",
           ),
         ).toBeTruthy();
         expect(section!.textContent).not.toMatch(/rolled back|not saved/i);
@@ -349,16 +371,19 @@ describe("bounded project assessment (presentation only; no native IPC)", () => 
           deterministic: { status: "succeeded", enabledCount: 0, applicableCount: 0 },
         },
       });
-      expect(screen.getByRole("heading", { name: `Project assessment: ${status}` })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: `Project assessment: ${assessmentLabels[status]}` })).toBeTruthy();
       expect(screen.getByText("Documentation suggests missing workflow guidance.")).toBeTruthy();
       expect(screen.getByText("Unfamiliar source was not inspected.")).toBeTruthy();
-      expect(screen.getByText(/project: budget-limited/)).toBeTruthy();
+      openAssessmentDetails();
+      expect(screen.getByText(/Project: Only partly checked/)).toBeTruthy();
       expect(screen.getByText(/0 enabled checks; 0 applicable checks/)).toBeTruthy();
-      expect(screen.getByText(/No deterministic checks applied/)).toBeTruthy();
-      expect(screen.getByText(/not a clean bill of health/)).toBeTruthy();
+      expect(screen.getByText(/No saved checks applied/)).toBeTruthy();
+      expect(screen.getByText("Unfamiliar source was not inspected.").closest("details")).toBeNull();
+      expect(screen.queryByText(/not a clean bill of health/)).toBeNull();
       expect(screen.queryByText("Transcript-only detailed observation")).toBeNull();
       expect(screen.queryByRole("button", { name: /Run|Review task approval/ })).toBeNull();
-      expect(container.querySelector("a")).toBeNull();
+      expect(screen.queryByRole("navigation", { name: "Opportunity sections" })).toBeNull();
+      expect(container.querySelectorAll("a")).toHaveLength(0);
     },
   );
   it.each(["failed", "denied", "cancelled", "unavailable"] as const)(
@@ -376,7 +401,8 @@ describe("bounded project assessment (presentation only; no native IPC)", () => 
           deterministic: { status, reason: "Checks did not complete." },
         },
       });
-      expect(screen.getByRole("heading", { name: `Deterministic checks: ${status}` })).toBeTruthy();
+      openAssessmentDetails();
+      expect(screen.getByRole("heading", { name: `Saved checks: ${checkLabels[status]}` })).toBeTruthy();
       expect(screen.getByText("Checks did not complete.")).toBeTruthy();
     },
   );
@@ -406,7 +432,7 @@ describe("embedded opportunity review", () => {
       };
       const state = { ...props.state, report, detail: { ...props.state.detail!, summary } };
       rerender(<ProgrammaticChat {...props} state={state} />);
-      for (const name of ["Review task approval", "Dismiss this item", "Check for opportunities"]) {
+      for (const name of ["Review task approval", "Dismiss this item", "Run project checks"]) {
         const button = screen.getByRole("button", { name }) as HTMLButtonElement;
         expect(button.disabled).toBe(true);
         expect(button.title).toBe(blocked.reason);
@@ -414,6 +440,7 @@ describe("embedded opportunity review", () => {
       }
       expect(props.onRun).not.toHaveBeenCalled();
       expect(props.onAction).not.toHaveBeenCalled();
+      openSavedResults();
       for (const name of [
         "Review setup",
         "Refresh results",
@@ -421,7 +448,8 @@ describe("embedded opportunity review", () => {
         /Review app packaging/,
       ])
         expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(false);
-      fireEvent.click(screen.getByRole("button", { name: /Review app packaging/ }));
+      openSavedResults();
+    fireEvent.click(screen.getByRole("button", { name: /Review app packaging/ }));
       expect(props.onSelect).toHaveBeenCalledWith(hash);
       fireEvent.click(screen.getByText("Why this was suggested and how to check it"));
       expect(screen.getByText("Manifest exists")).toBeTruthy();
@@ -454,7 +482,7 @@ describe("embedded opportunity review", () => {
         },
       });
       rerender(<ProgrammaticChat {...props} state={fresh} />);
-      for (const name of ["Review task approval", "Dismiss this item", "Check for opportunities"])
+      for (const name of ["Review task approval", "Dismiss this item", "Run project checks"])
         expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(false);
     },
   );
@@ -545,13 +573,14 @@ describe("embedded opportunity review", () => {
       rerender(<ProgrammaticChat {...props} state={state} />);
       expect(state.selectedId).toBe(hash);
       expect(screen.getByText(/none was selected for you/)).toBeTruthy();
+      openSavedResults();
       if (total)
         expect(
           screen
             .getByRole("button", { name: /Surviving opportunity/ })
             .getAttribute("aria-pressed"),
         ).toBe("false");
-      else expect(screen.getByText(/No deterministic results to show/)).toBeTruthy();
+      else expect(screen.getByText(/No saved check results yet/)).toBeTruthy();
       if (total > 50) {
         expect(screen.getByText("51–51 of 51")).toBeTruthy();
         fireEvent.click(screen.getByRole("button", { name: "Previous opportunities" }));
@@ -581,7 +610,7 @@ describe("embedded opportunity review", () => {
       },
     };
     rerender(<ProgrammaticChat {...props} state={stale} />);
-    fireEvent.click(screen.getByRole("button", { name: "Check for opportunities" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run project checks" }));
     expect(props.onAction).not.toHaveBeenCalled();
     const approved = {
       ...stale,
@@ -592,13 +621,12 @@ describe("embedded opportunity review", () => {
     };
     rerender(<ProgrammaticChat {...props} state={approved} />);
     expect(
-      (screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Run project checks" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(
       (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled,
     ).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Check for opportunities" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run project checks" }));
     expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "scan" });
     for (const locks of [
       { busy: true },
@@ -608,8 +636,7 @@ describe("embedded opportunity review", () => {
     ]) {
       rerender(<ProgrammaticChat {...props} state={approved} {...locks} />);
       expect(
-        (screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement)
-          .disabled,
+        (screen.getByRole("button", { name: "Run project checks" }) as HTMLButtonElement).disabled,
       ).toBe(true);
     }
   });
@@ -665,6 +692,7 @@ describe("embedded opportunity review", () => {
   });
   it("keeps selection separate from run, exposes evidence and one-record dismissal", () => {
     const { props } = fixture();
+    openSavedResults();
     fireEvent.click(screen.getByRole("button", { name: /Review app packaging/ }));
     expect(props.onSelect).toHaveBeenCalledWith(hash);
     expect(props.onRun).not.toHaveBeenCalled();
@@ -707,8 +735,7 @@ describe("embedded opportunity review", () => {
     expect(screen.getByText("Why setup needs a refresh")).toBeTruthy();
     expect(screen.getByText("package.json")).toBeTruthy();
     expect(
-      (screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Run project checks" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Review setup refresh" }));
     expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "inspect-setup" });
@@ -778,7 +805,7 @@ describe("embedded opportunity review", () => {
       },
     });
     rerender(<ProgrammaticChat {...props} state={state} />);
-    for (const name of ["Check for opportunities", "Review task approval"]) {
+    for (const name of ["Run project checks", "Review task approval"]) {
       const button = screen.getByRole("button", { name }) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
       fireEvent.click(button);
@@ -881,14 +908,14 @@ describe("embedded opportunity review", () => {
     });
     rerender(<ProgrammaticChat {...props} state={state} />);
     expect(screen.getByText("Safe project evidence remains available.")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe(error);
+    expect(screen.getByRole("alert").textContent).toBe("This request did not finish. You can retry it when the current work has stopped.");
+    const errorDetails = screen.getByText("Error details");
+    expect(errorDetails.closest("details")!.open).toBe(false);
+    fireEvent.click(errorDetails);
+    expect(screen.getByText(error)).toBeTruthy();
     expect(state.proposal).toBe(props.state.proposal);
     expect(state.proposalApprovable).toBe(false);
-    for (const name of [
-      "Approve and save setup",
-      "Check for opportunities",
-      "Review task approval",
-    ]) {
+    for (const name of ["Approve and save setup", "Run project checks", "Review task approval"]) {
       const button = screen.getByRole("button", { name }) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
       fireEvent.click(button);
@@ -984,12 +1011,12 @@ describe("embedded opportunity review", () => {
       expect(screen.getByLabelText("Exact settings to save").textContent).toBe(
         "previous exact settings",
       );
-      expect(screen.getByText("Selected opportunity")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Review app packaging" })).toBeTruthy();
       if (status === "refresh-required")
         expect(screen.getByText("package.json").parentElement?.textContent).toBe(
           "modified: package.json",
         );
-      for (const name of ["Check for opportunities", "Review task approval"])
+      for (const name of ["Run project checks", "Review task approval"])
         expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
       expect(
         (screen.getByRole("button", { name: "Dismiss this item" }) as HTMLButtonElement).disabled,
@@ -1010,16 +1037,38 @@ describe("embedded opportunity review", () => {
       expect(screen.getByRole("heading", { name: "Saved setup is current" })).toBeTruthy();
       expect(screen.queryByText("Why setup needs a refresh")).toBeNull();
       expect(screen.queryByText("Cannot read package.json")).toBeNull();
-      expect(screen.getByText(/Refresh results to update task availability/)).toBeTruthy();
+      expect(within(screen.getByRole("region", { name: "Saved check results" })).getByText(/Refresh results to update task availability/)).toBeTruthy();
       expect(
-        (screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement).disabled,
+        (screen.getByRole("button", { name: "Change settings" }) as HTMLButtonElement).disabled,
       ).toBe(false);
       expect(
-        (screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement)
-          .disabled,
+        (screen.getByRole("button", { name: "Run project checks" }) as HTMLButtonElement).disabled,
       ).toBe(true);
     },
   );
+  it("keeps current setup compact and maps Change settings to inspection only", () => {
+    const { props, rerender } = fixture();
+    const state: ProgrammaticChatState = {
+      ...props.state,
+      report: { ...props.state.report!, configuration: {
+        status: "current", currentFingerprint: hash, refreshAvailable: false,
+        baselineUnavailable: false, diagnostic: null, drift: null,
+      } },
+    };
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    const setup = screen.getByRole("region", { name: "Saved checks setup" });
+    expect(within(setup).getByText("Saved check settings are up to date.")).toBeTruthy();
+    expect(within(setup).queryByText(/Choose which project checks to save/)).toBeNull();
+    expect(within(setup).queryByRole("button", { name: /Approve/ })).toBeNull();
+    const results = screen.getByRole("region", { name: "Saved check results" });
+    expect(results.compareDocumentPosition(setup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(props.onRun).not.toHaveBeenCalled();
+    fireEvent.click(within(setup).getByRole("button", { name: "Change settings" }));
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "inspect-setup" });
+    expect(props.onRun).not.toHaveBeenCalled();
+  });
+
   it("displays current saved settings without an approval button", () => {
     fixture({
       proposalApprovable: false,
@@ -1044,6 +1093,69 @@ describe("embedded opportunity review", () => {
     expect(screen.getByText("Saved setup is current")).toBeTruthy();
     expect(screen.getByText("saved settings")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Approve and save/ })).toBeNull();
+  });
+  it("separates discovery, saved checks and refresh without starting a task", () => {
+    const { props } = fixture();
+    const discovery = screen.getByRole("region", { name: "Discovery" });
+    const checks = screen.getByRole("region", { name: "Saved check results" });
+    expect(screen.queryByRole("navigation", { name: "Opportunity sections" })).toBeNull();
+    expect(checks.compareDocumentPosition(discovery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(props.onAction).not.toHaveBeenCalled();
+    fireEvent.click(within(discovery).getByRole("button", { name: "Find tasks to automate" }));
+    fireEvent.click(within(checks).getByRole("button", { name: "Run project checks" }));
+    fireEvent.click(within(checks).getByRole("button", { name: "Refresh results" }));
+    expect(props.onAction.mock.calls).toEqual([
+      [{ version: 1, action: "discover" }],
+      [{ version: 1, action: "scan" }],
+      [{ version: 1, action: "report", offset: 0 }],
+    ]);
+    expect(props.onRun).not.toHaveBeenCalled();
+  });
+  it("can close a review without saving, retaining results and requiring inspection to reopen", () => {
+    const proposal = {
+      handle: hash,
+      fingerprint: hash,
+      profileJson: "exact unsaved settings",
+      operation: "initial" as const,
+      configuration: {
+        status: "missing" as const,
+        currentFingerprint: hash,
+        refreshAvailable: false,
+        baselineUnavailable: false,
+        diagnostic: null,
+        drift: null,
+      },
+      routes: [],
+      exclusions: [],
+      configurationInputs: [],
+    };
+    const { props, rerender } = fixture({ proposal, proposalApprovable: true });
+    const technical = screen
+      .getByText("Technical details: exact settings, history policy and checked files")
+      .closest("details")!;
+    expect(technical.open).toBe(false);
+    expect(within(technical).getByLabelText("Exact settings to save").textContent).toBe(
+      proposal.profileJson,
+    );
+    const close = screen.getByRole("button", { name: "Close review without saving" });
+    close.focus();
+    fireEvent.click(close);
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(props.onRun).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Approve and save setup" })).toBeNull();
+    openSavedResults();
+    expect(
+      screen.getByRole("button", { name: /Review app packaging/ }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Opportunities" }));
+    rerender(<ProgrammaticChat {...props} state={{ ...props.state, proposalApprovable: false }} />);
+    expect(screen.queryByRole("button", { name: "Approve and save setup" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Review setup" }));
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "inspect-setup" });
+    expect(
+      (screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
   it("displays exact proposal and requires its separate approval", () => {
     const { props, rerender } = fixture({
@@ -1142,7 +1254,9 @@ describe("embedded opportunity review", () => {
       expect(screen.getByLabelText("Exact settings to save").textContent).toBe(
         proposal.profileJson,
       );
-      fireEvent.click(screen.getByText("What is skipped and which files were checked"));
+      fireEvent.click(
+        screen.getByText("Technical details: exact settings, history policy and checked files"),
+      );
       expect(screen.getByText("node_modules/**")).toBeTruthy();
       expect(screen.getByText("package.json")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Review setup" }));
@@ -1241,11 +1355,15 @@ describe("embedded opportunity review", () => {
         state={{ ...empty, report: { ...empty.report, status: "setup-required" } }}
       />,
     );
-    expect(screen.getByText(/Start with Review setup/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Nothing is saved until you approve. You can still discover opportunities below.",
+      ),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Review setup" }));
     expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "inspect-setup" });
     rerender(<ProgrammaticChat {...props} state={empty} />);
-    expect(screen.getByText(/No deterministic results to show/)).toBeTruthy();
+    expect(screen.getByText(/No saved check results yet/)).toBeTruthy();
     rerender(
       <ProgrammaticChat
         {...props}
@@ -1260,8 +1378,7 @@ describe("embedded opportunity review", () => {
       />,
     );
     expect(
-      (screen.getByRole("button", { name: "Check for opportunities" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Run project checks" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
       (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled,
@@ -1298,6 +1415,7 @@ describe("embedded opportunity review", () => {
     expect(props.onAction).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
     expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 });
+    openSavedResults();
     fireEvent.click(screen.getByRole("button", { name: /Review app packaging/ }));
     expect(props.onSelect).toHaveBeenCalledWith(hash);
     rerender(<ProgrammaticChat {...props} />);
@@ -1312,11 +1430,22 @@ describe("embedded opportunity review", () => {
     expect(
       (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement).disabled,
     ).toBe(true);
-    expect(screen.getByRole("alert").textContent).toBe("Unknown acknowledgement");
-    fireEvent.click(screen.getByRole("button", { name: "Retry loading results" }));
+    expect(screen.getByRole("alert").textContent).toBe("We couldn't confirm whether this was saved. Check the saved results before trying again.");
+    const errorDetails = screen.getByText("Error details");
+    expect(errorDetails.closest("details")!.open).toBe(false);
+    fireEvent.click(errorDetails);
+    expect(screen.getByText("Unknown acknowledgement")).toBeTruthy();
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(props.onRun).not.toHaveBeenCalled();
+    const recovery = screen.getByRole("button", { name: "Retry loading results" });
+    expect(recovery.closest(".programmatic-stage")).toBeNull();
+    expect(recovery.closest("details")).toBeNull();
+    fireEvent.click(recovery);
     expect(props.onAction).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 });
     rerender(<ProgrammaticChat {...props} state={{ ...props.state, operation: "scan" }} />);
     expect(screen.getByRole("status").textContent).toBe("Working…");
+    expect((screen.getByRole("button", { name: "Retry loading results" }) as HTMLButtonElement).disabled).toBe(true);
+    openSavedResults();
     expect(screen.getByRole("button", { name: /Review app packaging/ })).toBeTruthy();
     rerender(
       <ProgrammaticChat

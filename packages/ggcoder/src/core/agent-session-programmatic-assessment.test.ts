@@ -89,6 +89,43 @@ it.each(["completed", "unavailable", "failed", "cancelled"] as const)("slash con
   } finally { await session.dispose(); }
 });
 
+it.each([31, 50])("enforces complete discovery review with %i items in each detail list", async (count) => {
+  const session = new AgentSession({ ...base(), transient: false, allowedTools: undefined });
+  const finalStep = "Check approval before exporting customer records";
+  try {
+    await session.initialize();
+    reply({ type: "tool_call", id: "result", name: "programmatic_advisory_result", args: {
+      version: 2, kind: "advisory", coverage: { status: "limited", scope: "Workflow", reason: "More evidence needed" },
+      recommendations: [{ version: 2, kind: "advisory", outcome: "Inspect records", rationale: "Missing context", uncertainty: "Not inspected",
+        evidence: { version: 1, items: [] }, alternatives: [],
+        workflow: { trigger: "Record changes", representativeCase: "One record", inputs: ["Records"], currentProcess: ["Manual review"], output: "Report",
+          successCheck: "Errors reported", affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read only",
+          repeatability: { basis: "assumed", explanation: "Frequency unknown" } },
+        choice: { kind: "needs-more-evidence", missingEvidence: Array.from({ length: count }, (_, i) => `Evidence ${i}`),
+          nextInspectionSteps: [...Array.from({ length: count - 1 }, (_, i) => `Inspection ${i}`), finalStep] } }],
+    } });
+    const outcome = await session.assessProgrammatic("setup");
+    expect(outcome.assessment.status).toBe("completed");
+    expect(outcome.captured?.observations[0]!.choice).toMatchObject({ nextInspectionSteps: expect.arrayContaining([finalStep]) });
+    vi.mocked(stream).mockClear();
+    const candidate = outcome.assessment.discovery?.candidates[0];
+    if (count === 50) {
+      expect(candidate).toBeUndefined();
+      expect(outcome.discoveryRecords).toBeUndefined();
+      expect(outcome.assessment.limitations).toContainEqual(expect.stringContaining("narrower focus"));
+      await expect(session.reviewDiscoveryCandidate({ action: "review-candidate", intent: "review-only", source: "current", candidateId: "00000000-0000-4000-8000-000000000001",
+        assessmentId: outcome.captured!.assessment.id, expectedRevision: 1 })).rejects.toThrow("Candidate evidence");
+      expect(stream).not.toHaveBeenCalled();
+    } else {
+      expect(candidate!.details).toHaveLength(62);
+      expect(candidate!.details.at(-1)).toBe(finalStep);
+      await session.reviewDiscoveryCandidate({ action: "review-candidate", intent: "review-only", source: "current", candidateId: candidate!.candidateId, assessmentId: candidate!.assessmentId, expectedRevision: 1 });
+      expect(deliveredPrompt()).toContain(finalStep);
+      expect(deliveredPrompt()).toContain(JSON.stringify(candidate));
+    }
+  } finally { await session.dispose(); }
+});
+
 function deliveredPrompt() {
   return [...vi.mocked(stream).mock.calls[0]![0].messages].reverse().find((message) => message.role === "user")!.content as string;
 }
@@ -184,7 +221,7 @@ it.each(["setup", "configured"] as const)("retains bounded evidence and strict i
       expect.objectContaining({ scope: "project", status: "budget-limited" }),
       expect.objectContaining({ scope: "project", status: "uninspected" }),
     ]));
-    expect(result.assessment.summary).toContain("incomplete");
+    expect(result.assessment.summary).toBe("Assessment did not finish. Saved check results and settings are separate from these suggestions.");
     if (mode === "setup") {
       expect(result.setupFacts).not.toHaveProperty("profile");
       await expect(fs.access(path.join(cwd, ".gg/programmatic/state.json"))).rejects.toThrow();
@@ -249,8 +286,8 @@ it.each(["allowed-tools", "approval", "unavailable", "capability", "approval-rev
     expect(deliveredPrompt().includes(secret)).toBe(permitted);
     if (!permitted) {
       expect(JSON.stringify(vi.mocked(stream).mock.calls)).not.toContain(secret);
-      expect(result.assessment.limitations).toContain("Initial evidence was denied by host permissions; omitted content remains uninspected.");
-      expect(result.assessment.coverage).toContainEqual(expect.objectContaining({ status: "uninspected", summary: expect.stringContaining("permission-denied") }));
+      expect(result.assessment.limitations).toContain("Permission was denied for the initial inspection. The omitted content was not checked.");
+      expect(result.assessment.coverage).toContainEqual(expect.objectContaining({ status: "uninspected", summary: expect.stringContaining("Permission to inspect some content was denied") }));
     }
     if (["allowed-tools", "unavailable", "capability", "find-denied"].includes(scenario)) expect(approval.mock.calls.some(([name]) => name === "read")).toBe(false);
   } finally { await session.dispose(); }

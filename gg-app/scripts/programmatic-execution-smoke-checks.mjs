@@ -1,5 +1,54 @@
 import assert from "node:assert/strict";
 
+// Shared by native drivers and rendered-component contract tests.
+export const smokeLabels = {
+  setup: "Review setup", currentSetup: "Change settings", scan: "Run project checks",
+  discover: "Find tasks to automate", rediscover: "Check again", review: "Review this task",
+};
+export const smokeButton = (label) => `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)})`;
+
+// Return the outermost closed ancestor, never the target summary's own disclosure.
+export function closedSmokeDisclosure(target) {
+  if (!target) throw new Error("Smoke target missing");
+  const closed = [];
+  for (let node = target.parentElement; node; node = node.parentElement) {
+    if (node.tagName === "DETAILS" && !node.open && !node.querySelector(":scope > summary")?.contains(target)) closed.push(node);
+  }
+  return closed.at(-1)?.querySelector(":scope > summary") ?? null;
+}
+export const smokeDisclosure = (target) => `(${closedSmokeDisclosure.toString()})(${target})`;
+export async function revealSmokeTarget(client, target, activate = async (summary) => client.evaluate(`(${summary}).click()`)) {
+  const summary = smokeDisclosure(target);
+  for (let depth = 0; await client.evaluate(`!!(${summary})`); depth++) {
+    assert.ok(depth < 8, "Bounded disclosure nesting");
+    await activate(summary);
+    assert.equal(await client.evaluate(`(${target}) != null`), true);
+  }
+}
+
+export const assessmentRequestCount = 2;
+export function assessmentWorkflowStep(mode, number, body, callId = `assessment-${mode}`) {
+  assert.ok(["setup", "configured"].includes(mode));
+  assert.ok(Number.isInteger(number) && number >= 1 && number <= assessmentRequestCount, "No extra assessment continuation");
+  const tools = body.tools ?? [];
+  for (const name of ["bash", "edit", "write", "programmatic_command", ...(mode === "setup" ? ["programmatic_scan"] : [])])
+    assert.ok(!tools.some((tool) => tool.name === name), `Assessment must not offer ${name}`);
+  if (number === 1) {
+    const text = JSON.stringify(body.input);
+    assert.ok(text.includes("Host-owned exact facts"));
+    assert.ok(text.includes(mode === "setup" ? "setupFacts" : "scanFacts"));
+    assert.ok(tools.some((tool) => tool.name === "programmatic_advisory_result"));
+    return { type: "function_call", id: `fc_${callId}`, call_id: callId, name: "programmatic_advisory_result",
+      arguments: JSON.stringify({ version: 2, kind: "advisory", recommendations: [], coverage: {
+        status: "limited", scope: "Isolated native wiring fixture", reason: "Scripted assessment; no model-quality claim.",
+      } }) };
+  }
+  const outputs = (body.input ?? []).filter((item) => item.type === "function_call_output" && item.call_id === callId);
+  assert.equal(outputs.length, 1, "Exactly one accepted assessment result");
+  assert.match(String(outputs[0].output), /Recommendations/);
+  return `NATIVE ${mode.toUpperCase()} ASSESSMENT SETTLED`;
+}
+
 export const extendedCommandName = "native-fixture-review";
 export const extendedCommandMarkdown = "## Inputs\npackage.json\n## Outputs\nObserved fixture name\n## Required tools\nread\n## Limits\nRead-only; no shell, installation or provider calls\n## Arguments\nOptional focus\nNATIVE EXTENDED CANONICAL PROMPT: read package.json and report its name.\n";
 export const extendedRequestCount = 18;

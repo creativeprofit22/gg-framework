@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeLabels, smokeButton, revealSmokeTarget } from "./programmatic-execution-smoke-checks.mjs";
 import { observeDiscoveryHandoff, readDiscoverySummary } from "./programmatic-discovery-observer.mjs";
 
 export const discoveryOutcome = "NATIVE DISCOVERY: reconcile fixture records";
@@ -71,7 +72,7 @@ export function discoveryWorkflowStep(number, body) {
 /** Uses the existing real native launcher and pane. Provider transport alone is scripted. */
 export async function runDiscoverySmoke({ client, click, waitFor, requests, input, observe }) {
   await click("Opportunities");
-  await click("Discover opportunities");
+  await click(smokeLabels.discover);
   await waitFor("discovery candidate", () => client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()===${JSON.stringify(discoveryOutcome)})`));
   assert.equal(requests.length, 4);
   await click(discoveryOutcome);
@@ -88,6 +89,8 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       assert.ok(measured.scroll <= measured.client + 1 && measured.documentScroll <= measured.documentClient + 1, `${name}: no horizontal overflow`);
       await input.capture(name);
     };
+    await input.activate("document.querySelector('[aria-label=\"Selected opportunity\"] summary')", "Open task details");
+    assert.equal(await client.evaluate(`document.querySelector('[aria-label="Selected opportunity"] details').open`), true);
     await layout("discovery-desktop");
     await input.zoom(2); await layout("discovery-200-percent"); await input.zoom(1);
     await input.resize(600, 640); await layout("discovery-native-narrow");
@@ -103,12 +106,16 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       .slice(0, 120).map((node) => ({ role: node.role.value, name: node.name?.value }));
     input.evidence.screenReader = "Native WebView accessibility tree sampled; spoken screen-reader output not tested";
     input.save();
-    assert.ok(input.evidence.accessibility.some((node) => node.name === "Review a new capability"));
+    assert.ok(input.evidence.accessibility.some((node) => node.name === smokeLabels.review));
     await input.resize(1280, 900);
   }
   const stopObserving = await observeDiscoveryHandoff(client);
-  await click("Review a new capability");
-  await waitFor("review settled", () => client.evaluate(`document.body.innerText.includes('NATIVE DISCOVERY REVIEW SETTLED') && Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Discover opportunities' && !b.disabled)`));
+  await click(smokeLabels.review);
+  await waitFor("review settled", () => client.evaluate(`document.body.innerText.includes('NATIVE DISCOVERY REVIEW SETTLED') && !!(${smokeButton(smokeLabels.review)}) && !(${smokeButton(smokeLabels.review)}).disabled`));
+  // Find more tasks is collapsed once suggestions exist. Reveal before keyboard/AX checks.
+  await revealSmokeTarget(client, smokeButton(smokeLabels.discover), input
+    ? (summary) => input.activate(summary, "Open find more tasks") : undefined);
+  assert.equal(await client.evaluate(`!(${smokeButton(smokeLabels.discover)}).disabled`), true);
   const trace = await waitFor("native review response", async () => {
     const entries = await client.evaluate("window.fixtureDiscoveryTrace");
     return entries.some((entry) => entry.boundary === "ipc") && entries;

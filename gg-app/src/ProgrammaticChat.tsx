@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import {
   PROGRAMMATIC_CHAT_PAGE_LIMIT,
   type ProgrammaticChatRequest,
@@ -7,6 +7,7 @@ import {
 import { Badge } from "./Badge";
 import { ProgrammaticAssessment } from "./ProgrammaticAssessment";
 import { ProgrammaticDiscovery } from "./ProgrammaticDiscovery";
+import { ProgrammaticSetup } from "./ProgrammaticSetup";
 import {
   canRunProgrammaticSelection,
   canScanProgrammatic,
@@ -47,7 +48,18 @@ export function ProgrammaticChat({
   const root = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const focused = useRef<HTMLElement | null>(null);
+  const focusSelection = useRef(false);
+  // Closing a review changes presentation only, never the retained proposal or its authority.
+  const [closedProposal, setClosedProposal] = useState<ProgrammaticChatState["proposal"]>(null);
+  const showProposal = !!state.proposal && closedProposal !== state.proposal;
   useLayoutEffect(() => {
+    if (focusSelection.current && (state.detail || state.candidateDetail)) {
+      const target = root.current?.querySelector<HTMLElement>("[data-programmatic-selection]");
+      if (target) {
+        target.focus();
+        focusSelection.current = false;
+      }
+    }
     if (focused.current && !focused.current.isConnected && document.activeElement === document.body)
       heading.current?.focus();
     if (focused.current && !focused.current.isConnected) focused.current = null;
@@ -86,292 +98,141 @@ export function ProgrammaticChat({
     },
     { title: "No longer found", matches: (row) => row.presence === "disappeared" },
   ];
-  return (
-    <section
-      className="programmatic-chat"
-      ref={root}
-      aria-labelledby={headingId}
-      onFocusCapture={(event) => {
-        focused.current = event.target as HTMLElement;
-      }}
-      onBlurCapture={(event) => {
-        const next = event.relatedTarget;
-        if (!(next instanceof Node) || !root.current?.contains(next)) focused.current = null;
-      }}
+  const reloadResults = (
+    <button
+      className="btn btn-ghost btn-sm"
+      disabled={locked}
+      onClick={() => onAction({ version: 1, action: "report", offset: report?.offset ?? 0 })}
     >
-      <h2 id={headingId} ref={heading} tabIndex={-1}>
-        Opportunities
-      </h2>
-      <p role="status" aria-live="polite" aria-atomic="true">
-        {state.operation
-          ? `${state.operation === "report" || state.operation === "detail" ? "Loading" : "Working"}…`
-          : busy
-            ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
-            : state.notice}
-      </p>
+      {state.error ? "Retry loading results" : "Refresh results"}
+    </button>
+  );
+  const setupStage = (
+    <ProgrammaticSetup
+      key="setup"
+      id={`${headingId}-setup`}
+      configuration={configuration}
+      report={report}
+      proposal={state.proposal}
+      showProposal={showProposal}
+      currentReview={currentReview}
+      reportAssessmentSuperseded={reportAssessmentSuperseded}
+      setupBlockedReason={setupBlockedReason}
+      inspectDisabled={locked || planMode}
+      approveDisabled={mutationLocked || !state.proposalApprovable}
+      closeDisabled={locked}
+      proposalApprovable={state.proposalApprovable}
+      onInspect={() => {
+        setClosedProposal(null);
+        onAction({ version: 1, action: "inspect-setup" });
+      }}
+      onApprove={() => {
+        if (state.proposal?.handle)
+          onAction({
+            version: 1,
+            action: "approve-setup",
+            proposalHandle: state.proposal.handle,
+          });
+      }}
+      onClose={() => setClosedProposal(state.proposal)}
+    />
+  );
+  const discoveryStage = (
+    <section
+      key="discovery"
+      id={`${headingId}-discovery`}
+      className="programmatic-stage"
+      aria-label="Discovery"
+    >
       <ProgrammaticDiscovery
         state={state}
         locked={locked}
         planMode={planMode}
         onRequest={onAction}
-        onSelect={(source, id) => onSelectCandidate?.(source, id)}
+        onSelect={(source, id) => {
+          focusSelection.current = true;
+          onSelectCandidate?.(source, id);
+        }}
       />
       {state.assessment && (
         <ProgrammaticAssessment assessment={state.assessment} previous={state.assessmentRetained} />
       )}
-      <h3>Deterministic checks and setup</h3>
-      {planMode && (
-        <p>
-          Plan mode lets you view existing results and details. Turn it off before starting a new
-          provider-backed setup review, saving setup, checking for opportunities, starting work or
-          dismissing an item.
-        </p>
-      )}
-      {reportAssessmentSuperseded ? (
+    </section>
+  );
+  const resultsStage = (
+    <section
+      key="results"
+      id={`${headingId}-results`}
+      className="programmatic-stage"
+      aria-label="Saved check results"
+    >
+      <h3>Saved check results</h3>
+      {reportAssessmentSuperseded && (
         <p>
           These results predate the latest setup review. Refresh results to update task
           availability.
         </p>
-      ) : (
-        <>
-          {report && <p>{report.reason}</p>}
-          {report && !report.scan.available && <p>{report.scan.reason}</p>}
-        </>
       )}
-      {setupBlockedReason && <p>{setupBlockedReason}</p>}
-      {report?.status === "stale" && (
-        <p>
-          Older results remain available below. Saving setup does not update these results; run
-          Check for opportunities afterward.
-        </p>
-      )}
-      {configuration?.diagnostic && <p>{configuration.diagnostic}</p>}
-      {configuration?.status === "refresh-required" && (
-        <details>
-          <summary>Why setup needs a refresh</summary>
-          {configuration.baselineUnavailable && (
-            <p>
-              Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable; review
-              all current inputs in the setup below.
-            </p>
-          )}
-          {configuration.drift && (
-            <>
-              <ul>
-                {configuration.drift.files.map((file) => (
-                  <li key={file.path}>
-                    {file.kind}: <code>{file.path}</code>
-                  </li>
-                ))}
-              </ul>
-              {configuration.drift.policy && (
-                <p>
-                  Configuration policy: {configuration.drift.policy.before} →{" "}
-                  {configuration.drift.policy.after}
-                </p>
-              )}
-              {configuration.drift.schema && (
-                <p>
-                  Scanner settings schema: {configuration.drift.schema.before} →{" "}
-                  {configuration.drift.schema.after}
-                </p>
-              )}
-              {configuration.drift.exclusions && (
-                <>
-                  <p>Skipped-item rules changed.</p>
-                  <p>Previously: {configuration.drift.exclusions.before.join(", ") || "None"}</p>
-                  <p>Now: {configuration.drift.exclusions.after.join(", ") || "None"}</p>
-                </>
-              )}
-            </>
-          )}
-          <p>
-            Any byte change in a recognized configuration file needs review, including cosmetic
-            manifest edits.
-          </p>
-        </details>
-      )}
-      {state.error && <p role="alert">{state.error}</p>}
-      {state.reconcile && (
-        <p>
-          Reload the results to check what was saved before trying again. This action will not retry
-          automatically.
-        </p>
-      )}
+      {report && ["stale", "recovered"].includes(report.status) && <p>{report.reason}</p>}
+      {report && !report.scan.available && <p>{setupBlockedReason ?? report.scan.reason}</p>}
+      <p>Run the checks you approved for this project. Refresh only reloads saved results.</p>
       <div className="programmatic-actions">
-        <button
-          className="btn btn-ghost btn-sm"
-          disabled={locked || planMode}
-          onClick={() => onAction({ version: 1, action: "inspect-setup" })}
-        >
-          {configuration?.refreshAvailable ? "Review setup refresh" : "Review setup"}
-        </button>
-        <button
-          className="btn btn-ghost btn-sm"
-          disabled={locked}
-          onClick={() => onAction({ version: 1, action: "report", offset: report?.offset ?? 0 })}
-        >
-          {state.error ? "Retry loading results" : "Refresh results"}
-        </button>
         {report && report.status !== "setup-required" && (
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-primary btn-sm"
             disabled={mutationLocked || !canScanProgrammatic(state)}
             title={setupBlockedReason ?? report.scan?.reason}
             onClick={() => onAction({ version: 1, action: "scan" })}
           >
-            Check for opportunities
+            Run project checks
           </button>
         )}
+        {!state.error && reloadResults}
       </div>
-      {state.proposal && (
-        <div className="programmatic-proposal">
-          <h3>
-            {state.proposal.operation === "current"
-              ? currentReview
-                ? "Saved setup is current"
-                : "Previous setup review"
-              : "Review what to enable"}
-          </h3>
-          {state.proposal.operation === "current" ? (
-            currentReview ? (
-              <p>No regeneration or approval is needed. Source changes only need a rescan.</p>
-            ) : (
-              <p>
-                This review has been superseded by a newer setup assessment. These older settings
-                are shown for reference only.
-              </p>
-            )
-          ) : (
-            <p>
-              Find repeatable tasks GG can help with. Reviewing setup changes no files. Approve and
-              save setup writes the check settings shown below to this project. It does not start
-              the work; each task needs a separate approval.
-            </p>
-          )}
-          <pre aria-label="Exact settings to save">{state.proposal.profileJson}</pre>
-          {state.proposal.historyPolicy && (
-            <>
-              <p>
-                History: {state.proposal.historyPolicy.enabled ? "enabled" : "disabled"}.
-                {state.proposal.historyPolicy.enabled &&
-                  " Approval saves future configured assessments automatically—not this setup or old chats. No work is approved or verified."}
-                {state.proposal.operation === "history-upgrade" &&
-                  " Or leave without approving to keep checks. Restoring prior settings needs separate approval."}
-              </p>
-              <pre aria-label="Exact history policy to save">
-                {JSON.stringify(
-                  {
-                    historyPolicy: state.proposal.historyPolicy,
-                    expectedRecoveryDigest: state.proposal.expectedRecoveryDigest,
-                  },
-                  null,
-                  2,
-                )}
-              </pre>
-            </>
-          )}
-          <p>
-            Settings version (used to detect changes): <code>{state.proposal.fingerprint}</code>
-          </p>
-          <h4>Tasks and the tools that handle them</h4>
-          <ul>
-            {state.proposal.routes.map(({ id, route }) => (
-              <li key={id}>
-                {route.command ?? "Unavailable"}: {route.reason}
-                {route.machineLocal && " This task tool must be installed on the computer you use."}
-              </li>
-            ))}
-          </ul>
-          <details>
-            <summary>What is skipped and which files were checked</summary>
-            <h4>Skipped items</h4>
-            <ul>
-              {state.proposal.exclusions.map((item, index) => (
-                <li key={index}>
-                  <code>{item}</code>
-                </li>
-              ))}
-            </ul>
-            <h4>Files checked and their versions</h4>
-            <ul>
-              {state.proposal.configurationInputs.map((item) => (
-                <li key={item.path}>
-                  <code>{item.path}</code>: <code>{item.sha256}</code>
-                </li>
-              ))}
-            </ul>
-          </details>
-          {!state.proposalApprovable && state.proposal.operation !== "current" && (
-            <p>
-              Choose Review setup again before approving. These older settings are shown for
-              reference only.
-            </p>
-          )}
-          {state.proposal.handle && (
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={mutationLocked || !state.proposalApprovable}
-              onClick={() => {
-                if (state.proposal?.handle)
-                  onAction({
-                    version: 1,
-                    action: "approve-setup",
-                    proposalHandle: state.proposal.handle,
-                  });
-              }}
-            >
-              {state.proposal.operation === "refresh"
-                ? "Approve and save refresh"
-                : state.proposal.operation === "history-upgrade"
-                  ? "Approve history saving"
-                  : "Approve and save setup"}
-            </button>
-          )}
-        </div>
-      )}
-      {report?.status === "setup-required" && (
-        <p>
-          Start with Review setup to see which repeatable tasks GG can help with. Nothing is saved
-          until you approve.
-        </p>
-      )}
+      {report?.status === "setup-required" && <p>Save setup above to enable these checks.</p>}
       {report && report.status !== "setup-required" && report.total === 0 && (
         <p>
-          No deterministic results to show. Choose Check for opportunities to run the saved checks
-          and save their results. This does not start any task.
+          No saved check results yet. Choose Run project checks to run your approved checks and save
+          their results. This does not start any task.
         </p>
       )}
-      {groups.map(({ title, matches }) => {
-        const rows = report?.rows.filter(matches) ?? [];
-        return (
-          rows.length > 0 && (
-            <div key={title}>
-              <h3>{title}</h3>
-              <ul className="programmatic-list">
-                {rows.map((row) => (
-                  <li key={row.id}>
-                    <button
-                      className="btn btn-ghost programmatic-row"
-                      aria-pressed={
-                        (!state.selection || state.selection.source === "deterministic") &&
-                        state.selectedId === row.id
-                      }
-                      disabled={locked}
-                      onClick={() => onSelect(row.id)}
-                    >
-                      <span>{row.expectedOutput}</span>
-                      <Badge>{stateLabels[row.state]}</Badge>
-                      {row.presence === "disappeared" && <Badge>No longer found</Badge>}
-                    </button>
-                    <p>{row.route.reason}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )
-        );
-      })}
+      {!!report?.rows.length && (
+        <details key={selected?.summary.id ?? "unselected"} open={!selected}>
+          <summary>Browse saved check results ({report.total})</summary>
+          {groups.map(({ title, matches }) => {
+            const rows = report?.rows.filter(matches) ?? [];
+            return (
+              rows.length > 0 && (
+                <div key={title}>
+                  <h3>{title}</h3>
+                  <ul className="programmatic-list">
+                    {rows.map((row) => (
+                      <li key={row.id}>
+                        <button
+                          className="btn btn-ghost programmatic-row"
+                          aria-pressed={
+                            (!state.selection || state.selection.source === "deterministic") &&
+                            state.selectedId === row.id
+                          }
+                          disabled={locked}
+                          onClick={() => {
+                            focusSelection.current = true;
+                            onSelect(row.id);
+                          }}
+                        >
+                          <span>{row.expectedOutput}</span>
+                          <Badge>{stateLabels[row.state]}</Badge>
+                          {row.presence === "disappeared" && <Badge>No longer found</Badge>}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            );
+          })}
+        </details>
+      )}
       {report && (report.offset > 0 || report.total > PROGRAMMATIC_CHAT_PAGE_LIMIT) && (
         <nav className="programmatic-actions" aria-label="Opportunity pages">
           <button
@@ -415,8 +276,9 @@ export function ProgrammaticChat({
       )}
       {selected && (
         <div className="programmatic-detail">
-          <h3>Selected opportunity</h3>
-          <p>{selected.summary.expectedOutput}</p>
+          <h3 tabIndex={-1} data-programmatic-selection>
+            {selected.summary.expectedOutput}
+          </h3>
           <p>
             <Badge>{stateLabels[selected.summary.state]}</Badge>{" "}
             {selected.summary.presence === "disappeared" && "No longer found; cannot start."}
@@ -441,7 +303,17 @@ export function ProgrammaticChat({
               ))}
             </ul>
           ) : (
-            <p>This task only reads information; it does not change project files.</p>
+            <p>No project file changes are listed. Review the task's scope before approving it.</p>
+          )}
+          {!!selected.risks.length && (
+            <>
+              <h4>Risks to consider</h4>
+              <ul>
+                {selected.risks.map((risk, index) => (
+                  <li key={index}>{risk}</li>
+                ))}
+              </ul>
+            </>
           )}
           <div className="programmatic-actions">
             <button
@@ -473,18 +345,13 @@ export function ProgrammaticChat({
               Dismiss this item
             </button>
           </div>
+
           <details>
             <summary>Why this was suggested and how to check it</summary>
             <h4>What was found</h4>
             <p>{selected.trigger}</p>
             <h4>How success should be checked</h4>
             <p>{selected.verification}</p>
-            <h4>Risks</h4>
-            <ul>
-              {selected.risks.map((risk, index) => (
-                <li key={index}>{risk}</li>
-              ))}
-            </ul>
             <h4>Evidence</h4>
             <ul>
               {selected.evidence.map((item, index) => (
@@ -513,6 +380,66 @@ export function ProgrammaticChat({
           </details>
         </div>
       )}
+    </section>
+  );
+  const hasSuggestions = !!state.discovery || !!state.assessment || !!state.candidateDetail;
+  const resultsFirst = !!selected || (!hasSuggestions && !!report?.total);
+  const setupFirst =
+    showProposal || (!hasSuggestions && !report?.total && configuration?.status !== "current");
+  return (
+    <section
+      className="programmatic-chat"
+      ref={root}
+      aria-labelledby={headingId}
+      onFocusCapture={(event) => {
+        focused.current = event.target as HTMLElement;
+      }}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget;
+        if (!(next instanceof Node) || !root.current?.contains(next)) focused.current = null;
+      }}
+    >
+      <h2 id={headingId} ref={heading} tabIndex={-1}>
+        Opportunities
+      </h2>
+      <p role="status" aria-live="polite" aria-atomic="true">
+        {state.operation
+          ? `${state.operation === "report" || state.operation === "detail" ? "Loading" : "Working"}…`
+          : busy
+            ? "Work is in progress. Follow the approval prompts or stop the run in this chat."
+            : state.notice}
+      </p>
+      {planMode && (
+        <p>
+          Leave plan mode before requesting new suggestions, saving settings or running checks. You
+          can still browse saved results.
+        </p>
+      )}
+      {state.error && (
+        <>
+          <p role="alert">
+            {state.reconcile
+              ? "We couldn't confirm whether this was saved. Check the saved results before trying again."
+              : "This request did not finish. You can retry it when the current work has stopped."}
+          </p>
+          <div className="programmatic-actions">{reloadResults}</div>
+          <details>
+            <summary>Error details</summary>
+            <p>{state.error}</p>
+          </details>
+        </>
+      )}
+      {state.reconcile && !state.error && (
+        <p>
+          Reload the results to check what was saved before trying again. This action will not retry
+          automatically.
+        </p>
+      )}
+      {setupFirst
+        ? [setupStage, discoveryStage, resultsStage]
+        : resultsFirst
+          ? [resultsStage, discoveryStage, setupStage]
+          : [discoveryStage, resultsStage, setupStage]}
     </section>
   );
 }

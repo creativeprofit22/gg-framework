@@ -4,6 +4,8 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { isProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import type { AdvisoryReceipt } from "./advisory.js";
 import { ProgrammaticAssessmentCoordinator } from "./assessment.js";
+import { programmaticAssessmentResultV2Schema } from "./contracts.js";
+import { emptyRecommendationHistory, reconcileRecommendations, recommendationDetail } from "./recommendations.js";
 import { discoverCommands } from "../command-discovery.js";
 import { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
 
@@ -48,6 +50,51 @@ it.each(["retrieved", "lead", "failed", "cancelled"] as const)("attributes exter
   expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
 });
 
+it("retains all 50 prerequisites and 50 changes independently of rejected display and history projection", async () => {
+  const owner = await coordinator("setup");
+  const finalChange = "Require explicit approval before exporting customer records";
+  const snapshot = { version: 1, command: { version: 1, name: "check-records", source: "project-custom", invocationKind: "prompt" },
+    capabilityKind: "prompt-only", ownerSha256: "a".repeat(64), bodySha256: "b".repeat(64), helpers: [] };
+  const accepted = programmaticAssessmentResultV2Schema.parse({ ...result, recommendations: [{ version: 2, kind: "advisory",
+    outcome: "Check records", rationale: "Repeated workflow", uncertainty: "Sample only",
+    workflow: { trigger: "Records change", representativeCase: "Record", inputs: ["WORKFLOW"], currentProcess: ["Read records"], output: "Report",
+      successCheck: "Invalid records reported", affectedSubproject: { scope: "repository-wide" }, mutationBoundary: "Read only",
+      repeatability: { basis: "inferred", explanation: "Repeated records" } },
+    evidence: { version: 1, items: [{ basis: "observed", source: "local", code: "workflow", severity: "info", message: "Read workflow", location: { path: "WORKFLOW" } }] },
+    alternatives: [{ kind: "manual", reasonNotSelected: "Repeated work" }],
+    choice: { kind: "extend-command", availability: { status: "available", snapshot },
+      requirement: { version: 1, desiredOutcome: "Check records", capabilityKind: "prompt-only", inputs: ["Records"], outputs: ["Report"], risks: ["Sample only"],
+        prerequisites: Array.from({ length: 50 }, (_, i) => `Prerequisite ${i}`), verificationExpectations: ["Invalid records reported"] },
+      proposedChanges: [...Array.from({ length: 49 }, (_, i) => `Change ${i}`), finalChange] } }] });
+  const before = structuredClone(accepted);
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    scope.turn.evidence.retain({ id: "local", status: "retrieved", tool: "read", toolCallId: "local", retrievedAt: new Date().toISOString(), location: "WORKFLOW", localSources: [{ path: "WORKFLOW", purpose: "independent" }] });
+    scope.turn.observeCommand(JSON.stringify({ status: "prompt", snapshot }));
+    for (let i = 0; i < 50; i++) scope.turn.limitations.add(`Limitation ${i}`);
+    await scope.turn.submit(accepted, { snapshot: async () => true, page: async () => ({}), signal: new AbortController().signal });
+    expect(scope.turn.acceptedResult?.recommendations).toEqual(before.recommendations);
+  });
+  expect(accepted).toEqual(before);
+  expect(outcome.assessment.status).toBe("completed");
+  expect(outcome.assessment.discovery).toBeUndefined();
+  expect(outcome.discoveryRecords).toBeUndefined();
+  expect(outcome.assessment.limitations[0]).toContain("Discover opportunities again with a narrower focus");
+  expect(outcome.assessment.limitations).toHaveLength(50);
+  expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
+  const captured = outcome.captured!;
+  const choice = captured.observations[0]!.choice;
+  expect(choice.kind).toBe("extend-command");
+  if (choice.kind !== "extend-command") throw new Error("Missing captured extension");
+  expect(choice.requirement).toEqual(before.recommendations[0]!.choice.kind === "extend-command" ? before.recommendations[0]!.choice.requirement : undefined);
+  expect(choice.proposedChanges).toHaveLength(50);
+  expect(choice.proposedChanges.at(-1)).toBe(finalChange);
+  const { history } = reconcileRecommendations(emptyRecommendationHistory(), captured);
+  const detail = recommendationDetail(history, history.candidates[0]!.id, 0)!;
+  expect(detail.discovery).toBeUndefined();
+  expect(detail.records[0]!.displayJson).toContain(finalChange);
+  expect(history.observations[0]!.choice).toEqual(choice);
+});
+
 it("setup intersects local read/catalog/result and exact inspect-only profile; never grants mutation or discovery", async () => {
   const names = ["read", "find", "grep", "ls", "code_search", "code_nav", "command_information", "programmatic_profile", "programmatic_scan", "bash", "write", "edit", "tool_search", "web_fetch", "research_corpus", "programmatic_command_create"];
   const owner = await coordinator("setup", names.map((name) => tool(name)));
@@ -72,6 +119,7 @@ it.each(["setup", "configured"] as const)("%s can accept bounded advice without 
     await submit.execute(result, toolContext());
   });
   expect(outcome.assessment.status).toBe("completed");
+  expect(outcome.assessment.summary).toBe("Assessment finished. These are suggestions, not a complete project check. No recommended task has been started.");
   expect(outcome.assessment.deterministic.status).toBe(mode === "setup" ? "not-run" : "unavailable");
   expect(outcome.advice).toContain("No supported recommendation");
   expect(outcome.assessment.discovery?.candidates).toEqual([]);
@@ -98,6 +146,11 @@ it.each(["succeeded", "failed", "denied", "cancelled"] as const)("projects indep
     return { scanCounts: { enabledCount: 0, applicableCount: 0 } };
   });
   expect(outcome.assessment.deterministic.status).toBe(state);
+  if (state !== "succeeded") expect(outcome.assessment.deterministic).toEqual({ status: state, reason: {
+    failed: "Saved checks failed. No retry was attempted.",
+    denied: "Permission to run saved checks was denied. No retry was attempted.",
+    cancelled: "Saved checks were cancelled. No retry was attempted.",
+  }[state] });
   expect(outcome.assessment.status).toBe(state === "cancelled" ? "cancelled" : state === "denied" ? "incomplete" : "completed");
   expect(scan.execute).toHaveBeenCalledTimes(state === "denied" || state === "cancelled" ? 0 : 1);
   expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
@@ -151,6 +204,7 @@ it("cancellation stops the operation and closes scope without a callback or retr
   const failed = await coordinator("setup");
   const outcome = await failed.run(new AbortController().signal, async () => { throw new Error("secret"); });
   expect(outcome.assessment.status).toBe("incomplete");
+  expect(outcome.assessment.summary).toBe("Assessment did not finish. Saved check results and settings are separate from these suggestions.");
   expect(outcome.assessment.discovery).toBeUndefined();
   expect(outcome.discoveryRecords).toBeUndefined();
   expect(JSON.stringify(outcome)).not.toContain("secret");

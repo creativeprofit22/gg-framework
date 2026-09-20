@@ -12,6 +12,7 @@ import { appendReferencedFiles } from "@kenkaiiii/gg-core";
 import { AuthStorage } from "./auth-storage.js";
 import { agentLoop, type AgentTool } from "@kenkaiiii/gg-agent";
 import { ProgrammaticAdvisoryTools } from "./programmatic/advisory-tools.js";
+import { ProgrammaticAdvisoryTurn } from "./programmatic/advisory.js";
 import { discoverCommands, type AdvisoryCommandPage } from "./command-discovery.js";
 import { executeDirectCommand } from "./programmatic/execution.js";
 import { useFakeHome } from "../test-support/fake-home.js";
@@ -20,7 +21,7 @@ import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./
 import { readRecommendationHistory } from "./programmatic/recommendation-history.js";
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "./programmatic/lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "./programmatic/contracts.js";
-import type { ProgrammaticAdvisoryTurn, AdvisoryEvidence } from "./programmatic/advisory.js";
+import type { AdvisoryEvidence } from "./programmatic/advisory.js";
 import { createProgrammaticScanTool } from "../tools/programmatic-scan.js";
 import { DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "../app-sidecar-command-listing.js";
 
@@ -290,7 +291,8 @@ it.each(["parallel", "sequential"] as const)("credits only post-cap model input 
         const result = results.find((result) => result.toolCallId === "advice")!;
         expect(result.isError, String(result.content)).not.toBe(true);
         presentation = String(result.content);
-        expect(presentation).toContain(`Coverage: ${cap === "uncapped" ? "complete" : "limited"}`);
+        expect(scope.turn.acceptedResult?.coverage.status).toBe(cap === "uncapped" ? "complete" : "limited");
+        expect(presentation).toContain("Checked: All fixture catalog pages and source");
         if (cap !== "uncapped") {
           expect(presentation).toContain("source delivery was capped");
           expect(presentation).toContain("Catalog page at offset 100 was not completely delivered");
@@ -395,6 +397,7 @@ function reviewWorkflow(subject = "manifest configuration", inputs = ["package.j
 const manualReviewAlternative = [{ kind: "manual", reasonNotSelected: "Repeating the same source checks by hand loses the consistency of a reusable review procedure" }];
 
 it.each(["setup", "configured"] as const)("connects needs-first decisions to inspected automation in %s mode", async (mode) => {
+  const submissions = vi.spyOn(ProgrammaticAdvisoryTurn.prototype, "submit");
   const bodies = automatedBodies;
   await fs.mkdir(path.join(cwd, "operations"));
   await fs.mkdir(path.join(cwd, ".gg/commands"), { recursive: true });
@@ -485,18 +488,25 @@ it.each(["setup", "configured"] as const)("connects needs-first decisions to ins
     await session.prompt(mode === "setup" ? "/setup-programmatic" : "/programmatic");
     expect(request).toBe(4);
     expect(presentation).toContain("Recommendations — not started");
-    expect(presentation).toContain("Coverage: limited");
-    expect(presentation.match(/Reuse \/stock-review/g)).toHaveLength(1);
-    expect(presentation.match(/New capability — proposal only/g)).toHaveLength(1);
-    for (const text of ["Extension base /depot-review", "Group discrepancies by depot and add regional totals", "Regional depot totals", "Propose expired consent records for human review", "Manual alternative:", "Needs more evidence:", "Affected subproject: operations"]) expect(presentation).toContain(text);
+    expect(presentation).toContain("Limits: ");
+    expect(presentation.match(/\/stock-review: prompt available, not started\./g)).toHaveLength(1);
+    expect(presentation.match(/Proposal only: Propose expired consent records for human review/g)).toHaveLength(1);
+    for (const text of ["/depot-review: prompt available, not started.", "Proposed changes: Group discrepancies by depot and add regional totals", "Proposal only: Regional depot totals", "Next: follow these manual steps — Review and correct the heading in a separately authorized turn", "Missing evidence: A concrete forecast example and recurrence evidence", "Next: inspect without making changes — Ask the operator for an example before selecting automation", "Scope: operations", "Prerequisites: Local CSV files and separately authorized review", "Risks: Incorrect interpretation of records", "Next: review the base command and proposed changes. Editing requires separate approval.", "Next: review the proposal before creating a command; verify it before running it."]) expect(presentation).toContain(text);
     const advice = submitted! as { recommendations: { outcome: string; rationale: string; workflow: ReturnType<typeof reviewWorkflow>; alternatives: { reasonNotSelected: string }[]; evidence: { items: { source: string }[] } }[] };
     expect(advice.recommendations).toHaveLength(5); // This fixture's five needs, not a product minimum.
-    for (const recommendation of advice.recommendations) {
-      expect(presentation).toContain(recommendation.rationale);
-      for (const field of ["trigger", "representativeCase", "output", "successCheck", "mutationBoundary"] as const) expect(presentation).toContain(recommendation.workflow[field]);
-      for (const text of [...recommendation.workflow.inputs, ...recommendation.workflow.currentProcess]) expect(presentation).toContain(text);
-      for (const alternative of recommendation.alternatives) expect(presentation).toContain(alternative.reasonNotSelected);
-      for (const item of recommendation.evidence.items) expect(presentation).toContain(item.source);
+    const accepted = (submissions.mock.contexts.at(-1)! as ProgrammaticAdvisoryTurn).acceptedResult!;
+    expect(accepted.recommendations).toHaveLength(5);
+    for (const [index, recommendation] of advice.recommendations.entries()) {
+      expect(presentation).toContain(recommendation.outcome);
+      expect(presentation).toContain(`Why: ${recommendation.rationale}`);
+      expect(presentation).toContain("Uncertainty: Scripted assessment claim; prerequisites were read, no command was executed");
+      expect(presentation).toContain(`Proposed change boundary: ${recommendation.workflow.mutationBoundary}`);
+      // Detailed workflow, alternatives and receipts remain in the accepted record, not the summary.
+      expect(accepted.recommendations[index]).toMatchObject({
+        workflow: recommendation.workflow,
+        alternatives: recommendation.alternatives,
+        evidence: recommendation.evidence,
+      });
     }
     expect(forbidden).not.toHaveBeenCalled();
     for (const tools of visibleTools) for (const name of ["bash", "write", "edit", "programmatic_command", "fixture_mutation"]) expect(tools).not.toContain(name);
@@ -550,7 +560,7 @@ it("uses real code_search chunks for available-command advice without a read cal
     } else {
       const accepted = results.find((result) => result.toolCallId === "advice-4")!;
       expect(accepted.isError, String(accepted.content)).not.toBe(true);
-      expect(String(accepted.content)).toContain("Reuse /handlers");
+      expect(String(accepted.content)).toContain("/handlers: prompt available, not started.");
       expect(String(accepted.content)).not.toContain("Bounded local source evidence was not inspected");
     }
     for (const call of calls) yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
@@ -691,7 +701,7 @@ it.each(["fresh", "preserve", "same", "failed-create", "failed-parent", "restore
       if (retiresEvidence) {
         expect(results[2]).toMatchObject({ id: "no-source-advice", error: false });
         expect(results[2]!.text).toContain("Bounded local source evidence was not inspected");
-        expect(results[2]!.text).toContain("Coverage: limited");
+        expect(results[2]!.text).toContain("Limits: ");
       } else {
         expect(results[1]!.text).not.toContain("Bounded local source evidence was not inspected");
       }
@@ -883,7 +893,14 @@ it.each([
     expect(result, JSON.stringify(results)).toBeDefined();
     expect(result.isError ?? false, String(result.content)).toBe(false);
     expect(String(result.content)).toContain("Recommendations — not started");
-    expect(String(result.content)).toContain(choice === "empty" ? "No supported recommendation" : choice === "missing-app" ? "Missing app-backed capability" : ["manual", "research"].includes(choice) ? "Manual alternative" : `Reuse /${choice}`);
+    expect(String(result.content)).toContain(choice === "empty" ? "No supported recommendation was found in the inspected scope." : choice === "missing-app" ? "Proposal only: Show deployment status" : ["manual", "research"].includes(choice) ? "Next: follow these manual steps — Review one setting in a separate approved turn" : `/${choice}: prompt available, not started.`);
+    if (choice !== "empty") {
+      for (const text of ["Inspect a relevant project setting", "Why: Fixture selects a bounded next step", "Uncertainty: This is a model-authored fixture claim, not verification", "Scope: repository-wide", "Proposed change boundary: Inspection only; changes require separate approval"]) expect(String(result.content)).toContain(text);
+    }
+    if (reuse) expect(String(result.content)).toContain("Next: review the current command, prerequisites and scope before approving a run.");
+    if (choice === "missing-app") {
+      for (const text of ["Inputs: Selected project", "Outputs: Status report", "Prerequisites: Separate implementation approval", "Risks: Does not exist yet", "Verification needed: Exercise real app integration", "Next: plan application development. A prompt alone cannot provide this functionality."]) expect(String(result.content)).toContain(text);
+    }
     const presentation = String(result.content);
     expect(session.getMessages().filter((message) => message.role === "assistant" && message.content === presentation)).toHaveLength(1);
     expect(published.filter((text) => text === presentation)).toHaveLength(1);
@@ -958,6 +975,7 @@ it.each(["cancel-before", "dispose-before", "cancel-after", "dispose-after", "re
 });
 
 it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied", "failed", "thrown", "success"])("gates %s advice on host scan settlement through the real session", async (scenario) => {
+  const submissions = vi.spyOn(ProgrammaticAdvisoryTurn.prototype, "submit");
   await fs.writeFile(path.join(cwd, "package.json"), '{"name":"fixture"}');
   const proposal = await buildProgrammaticProfileProposal(cwd);
   expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
@@ -1035,10 +1053,13 @@ it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied
       } else {
         expect(result.isError ?? false, String(result.content)).toBe(false);
         expect(result.content).toContain("Recommendations — not started");
-        expect(result.content).toContain("Manual alternative");
-        expect(result.content).toContain("Read the manifest");
+        expect(result.content).toContain("Next: follow these manual steps — Review the manifest name in a separate approved turn");
+        expect(result.content).toContain("Why: The manifest was independently inspected");
+        expect((submissions.mock.contexts.at(-1)! as ProgrammaticAdvisoryTurn).acceptedResult?.recommendations[0]?.evidence.items).toEqual([
+          expect.objectContaining({ basis: "observed", code: "manifest", severity: "info", message: "Read the manifest", location: { path: "package.json" } }),
+        ]);
         if (scenario === "failed" || scenario === "thrown") {
-          expect(result.content).toContain("Coverage: limited");
+          expect(result.content).toContain("Limits: ");
           expect(result.content).toContain("deterministic scan failed");
           if (scenario === "failed") expect(JSON.parse(String(scanOutput))).toMatchObject({ ok: false, error: { code: "stale-configuration" } });
           else expect(facts).toBeUndefined();
@@ -1672,12 +1693,12 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
     await session.initialize();
     await session.prompt("/programmatic");
     expect(request).toBe(5);
-    for (const text of ["Reuse /compare", "Reuse /manifest-review", "Manual alternative", "Missing script-backed capability"]) expect(outputs.get("general-advice")).toContain(text);
+    for (const text of ["/compare: prompt available, not started.", "/manifest-review: prompt available, not started.", "Next: follow these manual steps — Inspect the fixture name without creating a command", "Proposal only: Check fixture count", "Prerequisites: Installed Node", "Risks: Shell action needs separate permission", "Next: review the proposal before creating a command; verify it before running it."]) expect(outputs.get("general-advice")).toContain(text);
     phase = "focused"; request = 0;
     await session.prompt("/programmatic only inspect the name");
     expect(request).toBe(2);
     expect(corpusCalls).toEqual(["search", "show"]);
-    expect(outputs.get("focused-advice")).not.toContain("Reuse /compare");
+    expect(outputs.get("focused-advice")).not.toContain("/compare: prompt available, not started.");
     expect(scanApprovals).toEqual([{}, {}]);
     expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(lifecycle);
     expect(session.supportsToolCall("programmatic_advisory_result")).toBe(false);

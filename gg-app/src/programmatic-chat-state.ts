@@ -150,7 +150,7 @@ export function programmaticChatReducer(
       return {
         ...base,
         ...responseDisplay,
-        notice: "Discovery returned. Proposals are not approvals.",
+        notice: "Suggestions received. No suggested task has been started.",
       };
     case "review-candidate":
     case "history-report":
@@ -173,7 +173,7 @@ export function programmaticChatReducer(
               response.report.configuration.status === state.proposal?.configuration.status &&
               response.report.configuration.currentFingerprint === state.proposal?.fingerprint)),
         reconcile: false,
-        notice: `${response.report.total} deterministic results. Discovery candidates are separate.`,
+        notice: `${response.report.total} saved check results. AI suggestions are shown separately.`,
       };
     case "detail": {
       if (response.detail && response.detail.summary.id !== state.selectedId) return base;
@@ -194,7 +194,7 @@ export function programmaticChatReducer(
           response.proposal.handle !== null && response.proposal.operation !== "current",
         notice:
           response.proposal.operation === "current"
-            ? "Saved setup is current. No regeneration or approval is needed."
+            ? "Saved settings are up to date. Nothing needs to be saved."
             : response.proposal.operation === "refresh"
               ? "Setup refresh is ready to review. No files have been changed."
               : "Setup is ready to review. No files have been changed.",
@@ -204,13 +204,13 @@ export function programmaticChatReducer(
         ...base,
         proposal: null,
         proposalApprovable: false,
-        notice: "Setup saved. Choose Check for opportunities to run the saved checks.",
+        notice: "Setup saved. Choose Run project checks when you are ready.",
       };
     case "scan":
       return {
         ...base,
         ...responseDisplay,
-        notice: "Assessment returned. Loading the saved deterministic results.",
+        notice: "Loading saved check results.",
       };
     case "dismiss":
       return {

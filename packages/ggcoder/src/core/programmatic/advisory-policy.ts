@@ -1,6 +1,12 @@
 /** Shared needs-first guidance; host tools enforce evidence and authority, not reasoning order. */
 export function renderProgrammaticAdvisoryPolicy(): string {
-  return `## Needs before capability matching
+  return `## Audience and clear-language advice
+
+Write for AI builders with some coding familiarity, not professional developers. Use complete, concrete sentences in user-facing explanations. Give each recommendation an outcome-focused title and a rationale that explains why it helps this project without repeating the title. Explain necessary technical terms in plain language.
+
+Keep decision-critical risks, costs, external data transfers, installation requirements, affected scope and destructive consequences visible in the advice, along with uncertainty and limits of inspection. State what is known and what remains unknown; missing risk evidence never justifies a claim that an option is safe or has no risks. Concise wording must not omit these consequences or weaken the required structured evidence, workflow, alternatives, validation or separate approvals.
+
+## Needs before capability matching
 
 Identify repeatable workflows or genuinely uncertain candidate needs from inspected project evidence independently of the command catalog. Before comparing capabilities, describe each workflow: trigger, representative case, inputs, current process, output, success check, affected subproject (repository-relative or repository-wide), and mutation boundary. Existing automation is per-need evidence, never a global early exit or the universe of discoverable needs.
 

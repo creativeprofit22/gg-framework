@@ -10,7 +10,7 @@ export interface DiscoveryRecord {
   /** Accepted domain data stays in the backend; never include this in events. */
   recommendation: Accepted["recommendations"][number];
 }
-const unavailable = { available: false, reason: "Historical evidence requires a fresh scoped inspection; prior receipts and approvals are not restored." };
+const unavailable = { available: false, reason: "Check this saved suggestion again before using it. Earlier inspections and approvals cannot be reused." };
 
 function sharedDetails(value: DiscoveryRecord["recommendation"] | RecommendationObservationV1) {
   const { outcome, rationale, uncertainty, choice, alternatives } = value;
@@ -26,23 +26,24 @@ type CommandChoice = Extract<Accepted["recommendations"][number]["choice"], { ki
 type HistoricalCommand = Extract<RecommendationObservationV1["choice"], { kind: "reuse-command" }>;
 function commandAvailability(value: { availability?: CommandChoice["availability"]; reference?: HistoricalCommand["reference"] }): DiscoveryCandidate["availability"] {
   if (value.availability) return value.availability.status === "available"
-    ? { status: "available", reason: "Command was available at assessment submission; execution requires separate review and approval." }
+    ? { status: "available", reason: "The command was available when assessed. Review and approval are still needed before running it." }
     : { status: "unavailable", reason: value.availability.reason };
   if (value.reference) return value.reference.reportedAvailability === "unavailable" && value.reference.unavailableReason
     ? { status: "unavailable", reason: value.reference.unavailableReason }
-    : { status: "reinspection-required", reason: "Historical command availability has not been revalidated. Fresh read-only inspection is required." };
+    : { status: "reinspection-required", reason: "This saved command has not been checked again. Inspect it without making changes before using it." };
   return undefined;
 }
+/** Preserve every detail; the shared display guards reject over-budget candidates rather than truncating review input. */
 function details(choice: DiscoveryRecord["recommendation"]["choice"] | RecommendationObservationV1["choice"]): Pick<DiscoveryCandidate, "details" | "risks" | "nextStep" | "availability"> {
   switch (choice.kind) {
-    case "manual": return { details: choice.steps, risks: [], nextStep: { available: false, reason: "Manual steps only; no execution action is offered." } };
-    case "needs-more-evidence": return { details: [...choice.missingEvidence, ...choice.nextInspectionSteps].slice(0, 64), risks: [],
-      nextStep: { available: true, reason: "Request scoped read-only inspection under current permissions." } };
-    case "missing-capability": return { details: [choice.proposal.desiredOutcome, ...choice.proposal.inputs, ...choice.proposal.outputs,
-      ...choice.proposal.prerequisites, ...choice.proposal.verificationExpectations].slice(0, 64), risks: choice.proposal.risks,
+    case "manual": return { details: choice.steps, risks: [], nextStep: { available: false, reason: "Follow the manual steps. There is no automatic run for this suggestion." } };
+    case "needs-more-evidence": return { details: [...choice.missingEvidence, ...choice.nextInspectionSteps], risks: [],
+      nextStep: { available: true, reason: "Inspect the missing evidence without making changes, using your current permissions." } };
+    case "missing-capability": return { details: [choice.proposal.desiredOutcome, ...choice.proposal.prerequisites,
+      ...choice.proposal.inputs, ...choice.proposal.outputs, ...choice.proposal.verificationExpectations], risks: choice.proposal.risks,
       nextStep: choice.proposal.capabilityKind === "app-backed"
-        ? { available: false, reason: "Requires application development; a prompt cannot provide this native capability." }
-        : { available: true, reason: "Prepare an inspect-only proposal. Creation, verification and execution require separate review and approval." } };
+        ? { available: false, reason: "Requires application development. A prompt alone cannot provide this functionality." }
+        : { available: true, reason: "Review a proposal without making changes. Creating, checking and running it each need separate review and approval." } };
     case "reuse-command":
     case "extend-command": {
       const availability = "availability" in choice ? choice.availability : undefined;
@@ -50,11 +51,11 @@ function details(choice: DiscoveryRecord["recommendation"]["choice"] | Recommend
         : availability?.status === "unavailable" ? availability.command : "reference" in choice ? choice.reference.command : undefined;
       const command = reference ? `${reference.source}: /${reference.name}` : "Command requires fresh inspection";
       const appBacked = availability?.status === "available" && availability.snapshot.capabilityKind === "app-backed";
-      return { availability: commandAvailability(choice), details: [command, ...(choice.kind === "extend-command" ? choice.proposedChanges : [])],
+      return { availability: commandAvailability(choice), details: [command, ...(choice.kind === "extend-command" ? [...choice.requirement.prerequisites, ...choice.proposedChanges] : [])],
         risks: choice.kind === "extend-command" ? choice.requirement.risks : [],
-        nextStep: appBacked ? { available: false, reason: "Application-backed capability requires supported native integration; this proposal cannot execute it." }
-          : availability?.status !== "available" ? { available: true, reason: "Request scoped read-only reinspection of the command and project evidence; no execution is authorized." }
-          : { available: true, reason: choice.kind === "reuse-command" ? "Review the current canonical command and scope; execution remains separately approved."
+        nextStep: appBacked ? { available: false, reason: "Requires supported application integration. This proposal cannot run it." }
+          : availability?.status !== "available" ? { available: true, reason: "Recheck the command and project prerequisites without making changes. Nothing is approved to run." }
+          : { available: true, reason: choice.kind === "reuse-command" ? "Review the current command and scope. Running it requires separate approval."
             : "Review the base command and proposed changes; opening review does not edit or overwrite it." } };
     }
   }

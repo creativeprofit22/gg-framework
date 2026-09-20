@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { assertProviderExecutionAllowed, runUnattended } from "../../core/provider-execution-policy.js";
 import { prepareTerminalProgrammaticAssessment, type TerminalProgrammaticAssessment } from "./terminal-programmatic-assessment.js";
+import { renderTerminalProgrammaticAssessment } from "./terminal-programmatic-presentation.js";
 import { NotLoggedInError } from "../../core/auth-storage.js";
 import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { randomUUID } from "node:crypto";
@@ -1331,6 +1332,7 @@ export function useAgentLoop(
           setIsRunning(true);
           setActivityPhase("waiting");
           const preparationStart = Date.now();
+          const assessmentMessageStart = messages.current.length;
           let providerStarted = false;
           assessmentController = new AbortController();
           abortRef.current = assessmentController;
@@ -1382,7 +1384,9 @@ export function useAgentLoop(
               prepared.assertHistoryToolCurrent();
             },
           });
-          const text = `## Needs assessment\n\n${JSON.stringify(assessment)}`;
+          const text = renderTerminalProgrammaticAssessment(
+            outcome ?? { assessment }, messages.current.slice(assessmentMessageStart),
+          );
           const notice: Message = { role: "assistant", content: text };
           messages.current.push(notice);
           onTurnText?.(text, "", 0);

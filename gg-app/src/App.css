@@ -112,6 +112,24 @@
   color: var(--text-secondary);
   overflow-wrap: anywhere;
   margin-block: 16px;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.programmatic-stage {
+  border-block-start: 1px solid var(--border-strong);
+  padding-block: 16px;
+}
+.programmatic-stage:first-of-type {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+.programmatic-chat [data-programmatic-selection] {
+  scroll-margin-block: 16px;
+}
+.programmatic-stage > h3:first-child {
+  margin-block-start: 0;
+  font-size: 1.05em;
 }
 .programmatic-chat h2,
 .programmatic-chat h3,
@@ -132,12 +150,14 @@
 .programmatic-chat pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: inherit;
+  font: 12px/1.5 var(--mono);
   background: var(--surface-1);
+  border-radius: var(--radius-button);
   padding: 12px;
 }
 .programmatic-chat code {
-  font-size: inherit;
+  font-family: var(--mono);
+  font-size: 0.9em;
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -165,6 +185,9 @@
   justify-content: flex-start;
   text-align: start;
   flex-wrap: wrap;
+  border-radius: var(--radius-button);
+  padding: 12px;
+  gap: 8px;
 }
 .programmatic-row[aria-pressed="true"] {
   border-color: var(--primary);
@@ -185,6 +208,12 @@
 .programmatic-chat :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 3px;
+}
+@media (pointer: coarse) {
+  .programmatic-chat .btn,
+  .programmatic-chat summary {
+    min-height: 44px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .programmatic-chat * {

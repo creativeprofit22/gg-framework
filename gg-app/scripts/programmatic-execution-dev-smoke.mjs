@@ -13,7 +13,7 @@ import { connectToDevWebview, createIsolatedProfile, reserveHeldTcpPort, sanitiz
 import { readProcessTable, processTreeSnapshot } from "./workspace-shell-evidence.mjs";
 import { runSmokeLifecycle, validateNativeSmokeEvidence, trackOwnedProcess, waitForLiveProcess } from "./programmatic-smoke-lifecycle.mjs";
 import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
-import { readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
+import { smokeLabels, smokeButton, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount, runDiscoverySmoke } from "./programmatic-discovery-smoke.mjs";
 
@@ -178,6 +178,8 @@ async function run() {
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false);
     const baseline = snapshot(paths.project);
     const requests = [];
+    const assessments = [];
+    let pendingAssessment;
     let providerFailure;
     server = http.createServer(async (request, response) => {
       try {
@@ -188,31 +190,41 @@ async function run() {
         let size = 0;
         for await (const chunk of request) { size += chunk.length; assert.ok(size < 1_000_000); chunks.push(chunk); }
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        assert.ok(requests.length < (discoveryOnly ? discoveryRequestCount : extendedWorkflow ? extendedRequestCount : 3), "No automatic specialist rerun or unexpected continuation");
-        requests.push(body);
         let events;
-        if (discoveryOnly || (extendedWorkflow && requests.length > 3)) {
-          const step = discoveryOnly ? discoveryWorkflowStep(requests.length, body) : extendedWorkflowStep(requests.length, body);
+        if (pendingAssessment) {
+          pendingAssessment.requests.push(body);
+          const step = assessmentWorkflowStep(pendingAssessment.mode, pendingAssessment.requests.length, body, pendingAssessment.callId);
           events = typeof step === "string" ? [{ type: "response.output_text.delta", delta: step }] : [
             { type: "response.output_item.added", output_index: 0, item: step },
             { type: "response.function_call_arguments.done", output_index: 0, item_id: step.id, arguments: step.arguments },
             { type: "response.output_item.done", output_index: 0, item: step },
           ];
-        } else if (requests.length < 3) {
-          const first = requests.length === 1;
-          const item = { type: "function_call", id: first ? "fc_read" : "fc_complete", call_id: first ? "fixture-read" : "fixture-complete",
-            name: first ? "read" : "programmatic_result",
-            arguments: JSON.stringify(first ? { file_path: "package.json" } : { summary: completion, successCondition: fixture.condition, toolCallIds: ["fixture-read"] }) };
-          events = [{ type: "response.output_item.added", output_index: 0, item },
-            { type: "response.function_call_arguments.done", output_index: 0, item_id: item.id, arguments: item.arguments },
-            { type: "response.output_item.done", output_index: 0, item }];
-        } else events = [{ type: "response.output_text.delta", delta: "Harmless specialist finished." }];
+        } else {
+          assert.ok(requests.length < (discoveryOnly ? discoveryRequestCount : extendedWorkflow ? extendedRequestCount : 3), "No automatic specialist rerun or unexpected continuation");
+          requests.push(body);
+          if (discoveryOnly || (extendedWorkflow && requests.length > 3)) {
+            const step = discoveryOnly ? discoveryWorkflowStep(requests.length, body) : extendedWorkflowStep(requests.length, body);
+            events = typeof step === "string" ? [{ type: "response.output_text.delta", delta: step }] : [
+              { type: "response.output_item.added", output_index: 0, item: step },
+              { type: "response.function_call_arguments.done", output_index: 0, item_id: step.id, arguments: step.arguments },
+              { type: "response.output_item.done", output_index: 0, item: step },
+            ];
+          } else if (requests.length < 3) {
+            const first = requests.length === 1;
+            const item = { type: "function_call", id: first ? "fc_read" : "fc_complete", call_id: first ? "fixture-read" : "fixture-complete",
+              name: first ? "read" : "programmatic_result",
+              arguments: JSON.stringify(first ? { file_path: "package.json" } : { summary: completion, successCondition: fixture.condition, toolCallIds: ["fixture-read"] }) };
+            events = [{ type: "response.output_item.added", output_index: 0, item },
+              { type: "response.function_call_arguments.done", output_index: 0, item_id: item.id, arguments: item.arguments },
+              { type: "response.output_item.done", output_index: 0, item }];
+          } else events = [{ type: "response.output_text.delta", delta: "Harmless specialist finished." }];
+        }
         events.push({ type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 4 } } });
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
       } catch (error) {
         providerFailure ??= error;
-        json(join(paths.audit, "provider-failure.json"), { request: requests.length, error: String(providerFailure) });
+        json(join(paths.audit, "provider-failure.json"), { request: requests.length, assessment: pendingAssessment?.mode, assessmentRequest: pendingAssessment?.requests.length, error: String(providerFailure) });
         response.writeHead(400); response.end("Fixture rejected request");
       }
     });
@@ -276,12 +288,48 @@ async function run() {
     const transcriptsBefore = transcriptSnapshot();
     const hostTranscripts = Object.keys(transcriptsBefore).filter((name) => JSON.parse(readFileSync(join(sessionsDir, name), "utf8").split("\n")[0]).id === parentState.sessionId);
     assert.equal(hostTranscripts.length, 1, "Exactly one transcript belongs to the active host session");
-    await client.evaluate(`import("/src/agent.ts").then(m => { window.fixtureEvents=[]; window.fixtureUnsubscribe=m.subscribe(e=>{ if (["ask_user","text_delta","done"].includes(e.type) && window.fixtureEvents.length < 100) window.fixtureEvents.push(e); }); return true; })`);
+    const subscribeEvents = () => client.evaluate(`import("/src/agent.ts").then(m => { window.fixtureUnsubscribe?.(); window.fixtureEvents=[]; window.fixtureUnsubscribe=m.subscribe(e=>{ if (["ask_user","text_delta","done"].includes(e.type) && window.fixtureEvents.length < 100) window.fixtureEvents.push(e); }); return true; })`);
+    await subscribeEvents();
     const input = visual ? await createNativeInputSmoke(client, native.pid, paths.audit, waitFor) : null;
     const click = async (label) => {
       if (input) return input.activate(input.button(label), label, label === "Approve and save setup");
-      await waitFor(`rendered ${label}`, () => client.evaluate(`Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`));
-      await client.evaluate(`Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled).click()`);
+      const target = smokeButton(label);
+      await waitFor(`rendered ${label}`, () => client.evaluate(`!!(${target}) && !(${target}).disabled`));
+      await revealSmokeTarget(client, target);
+      assert.equal(await client.evaluate(`(${target}).getClientRects().length > 0`), true, `Visible button ${label}`);
+      await client.evaluate(`(${target}).click()`);
+    };
+    let assessmentMessageDelta = 0;
+    const assess = async (assessmentMode, label) => {
+      assert.equal(pendingAssessment, undefined);
+      const specialistCount = requests.length;
+      const before = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      const eventOffset = await client.evaluate(`window.fixtureEvents.length`);
+      const entry = { mode: assessmentMode, callId: `assessment-${assessmentMode}-${assessments.length + 1}`, requests: [] };
+      pendingAssessment = entry;
+      await click(label);
+      await waitFor(`${assessmentMode} assessment settled`, async () => {
+        if (providerFailure) throw providerFailure;
+        const state = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+        // A successful initial review may replace Review setup with Change settings.
+        const ready = assessmentMode === "setup" ? "Close review without saving" : smokeLabels.scan;
+        return entry.requests.length === assessmentRequestCount && !state.running &&
+          await client.evaluate(`!!(${smokeButton(ready)}) && !(${smokeButton(ready)}).disabled`);
+      });
+      assert.equal(providerFailure, undefined);
+      assert.equal(entry.requests.length, assessmentRequestCount);
+      assert.equal(requests.length, specialistCount, "Assessment does not invoke a specialist");
+      const after = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      assert.equal(after.sessionId, before.sessionId);
+      assert.equal(after.provider, before.provider);
+      assert.equal(after.model, before.model);
+      entry.messageDelta = after.messageCount - before.messageCount;
+      assessmentMessageDelta += entry.messageDelta;
+      entry.events = await client.evaluate(`window.fixtureEvents.splice(${eventOffset})`);
+      assert.ok(!entry.events.some((event) => event.type === "ask_user" || event.data?.text?.includes("[research]")), "Assessment cannot request task approval or run a specialist");
+      assessments.push(entry);
+      pendingAssessment = undefined;
+      json(join(paths.audit, "assessment-requests.json"), assessments);
     };
     if (discoveryOnly) {
       const protectedSnapshot = () => Object.fromEntries(Object.entries(snapshot(agentDir)).filter(([name]) =>
@@ -305,21 +353,26 @@ async function run() {
       return { ...result, changedProjectFiles: [], childTranscript: false };
     }
     await click("Opportunities");
-    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Start with Review setup")`));
-    await click("Review setup");
+    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Nothing is saved until you approve.")`));
+    await assess("setup", smokeLabels.setup);
     await waitFor("exact proposal", () => client.evaluate(`document.querySelector('[aria-label="Exact settings to save"]')?.textContent.includes('"research"')`));
-    assert.equal(requests.length, 0, "No provider dispatch during setup inspection");
+    assert.equal(requests.length, 0, "No specialist dispatch during setup assessment");
+    assert.equal(assessments.length, 1, "Exactly one explicit setup assessment");
+    assert.equal(existsSync(fixture.statePath), false, "Setup assessment cannot scan implicitly");
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false, "Inspection must not write approval");
     await click("Approve and save setup");
     await waitFor("approved profile", () => existsSync(join(paths.project, ".gg/programmatic/profile.json")));
-    await click("Check for opportunities");
+    await assess("configured", smokeLabels.scan);
     await waitFor("persisted scan", () => existsSync(fixture.statePath));
     const scanned = JSON.parse(readFileSync(fixture.statePath, "utf8"));
     assert.equal(scanned.records.length, 1);
     Object.assign(fixture, { id: scanned.records[0].opportunity.identity.id, fingerprint: scanned.configurationFingerprint.sha256, condition: scanned.records[0].opportunity.verification });
     await waitFor("selectable opportunity", () => client.evaluate(`!!document.querySelector('.programmatic-row:not(:disabled)')`));
     if (input) await input.activate("document.querySelector('.programmatic-row:not(:disabled)')", "Select opportunity", true);
-    else await client.evaluate(`document.querySelector('.programmatic-row:not(:disabled)').click()`);
+    else {
+      await revealSmokeTarget(client, "document.querySelector('.programmatic-row:not(:disabled)')");
+      await client.evaluate(`document.querySelector('.programmatic-row:not(:disabled)').click()`);
+    }
     await observeMinimized?.("approved-scanned-selected");
     const reconcileDrift = async () => {
       const terminalLabel = driftOnly ? "Dismissed" : "Completed";
@@ -331,26 +384,26 @@ async function run() {
       json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture", description: "one exact configuration drift" });
       await click("Refresh results");
       await waitFor("exact rendered drift", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('modified: package.json')`));
-      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).find(b=>b.textContent.trim()==='Check for opportunities').disabled`), true);
+      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).find(b=>b.textContent.trim()===${JSON.stringify(smokeLabels.scan)}).disabled`), true);
       assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Review task approval' && !b.disabled)`), false);
       assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes(${JSON.stringify(terminalLabel)})`), true);
       assert.deepEqual(readFileSync(profilePath), previousProfile);
       assert.deepEqual(readFileSync(fixture.statePath), previousState);
       await observeMinimized?.(driftOnly ? "dismissed-exact-drift" : "completed-exact-drift");
-      await click("Review setup refresh");
+      await assess("setup", "Review setup refresh");
       await waitFor("refresh proposal", () => client.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Approve and save refresh' && !b.disabled)`));
       assert.deepEqual(readFileSync(profilePath), previousProfile, "Review cannot write setup");
       await click("Approve and save refresh");
       await waitFor("new approved fingerprint", () => JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
       assert.deepEqual(readFileSync(fixture.statePath), previousState, "Approval must not scan or reset lifecycle");
       await observeMinimized?.("refresh-approved-before-rescan");
-      await click("Check for opportunities");
+      await assess("configured", smokeLabels.scan);
       await waitFor("reconciled fingerprint", () => JSON.parse(readFileSync(fixture.statePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
       await waitFor("retained terminal selection", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes(${JSON.stringify(terminalLabel)}) && document.querySelector('.programmatic-detail')?.textContent.includes(${JSON.stringify(terminalLabel)})`));
       const refreshed = JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0];
       assert.deepEqual(refreshed.opportunity.identity, terminal.opportunity.identity);
       assert.deepEqual(refreshed.lifecycle, terminal.lifecycle);
-      assert.equal(requests.length, driftOnly ? 0 : 3, "Drift workflow never dispatches a provider or specialist");
+      assert.equal(requests.length, driftOnly ? 0 : 3, "Drift assessments never dispatch a specialist");
       assert.equal(providerFailure, undefined);
       json(join(paths.audit, "drift.json"), { changedInput: "package.json", identity: fixture.id,
         previousFingerprint: fixture.fingerprint, fingerprint: JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256,
@@ -404,7 +457,7 @@ async function run() {
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].lifecycle.state, "completed");
     await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`));
     await observeMinimized?.("read-only-task-completed");
-    await click("Check for opportunities");
+    await assess("configured", smokeLabels.scan);
     await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Completed') && document.querySelector('.programmatic-detail')?.textContent.includes('Completed') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].opportunity.identity.id, fixture.id);
     assert.equal(requests.length, 3, "Rescan must not dispatch another specialist");
@@ -442,7 +495,7 @@ async function run() {
       assert.equal(hash(readFileSync(previousPath)), previousHash);
       assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`), true);
       await observeMinimized?.("recovered-inspection");
-      await click("Check for opportunities");
+      await assess("configured", smokeLabels.scan);
       await waitFor("explicit recovery scan", () => {
         try { return programmaticLifecycleStateV1Schema.safeParse(JSON.parse(readFileSync(fixture.statePath, "utf8"))).success; } catch { return false; }
       });
@@ -527,13 +580,20 @@ async function run() {
       await client.send("Page.reload");
       await waitFor("restored extension history", () => client.evaluate(`document.body.innerText.includes('NATIVE EXTENDED ADVICE') && document.body.innerText.includes('NATIVE CREATION SETTLED') && document.body.innerText.includes('NATIVE RUN SETTLED')`));
       assert.equal(requests.length, extendedRequestCount, "Reload cannot replay creation or execution");
+      await subscribeEvents();
       await click("Opportunities");
-      await click("Check for opportunities");
+      await assess("configured", smokeLabels.scan);
       await waitFor("retained terminal history after extension", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Completed')`));
       assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
       json(join(paths.audit, "extended-workflow.json"), { passed: true, creationId, executionId, requests: requests.length, history: "native renderer reload, same daemon/session; not daemon restart", verification: "canonical loading only; deterministic helper checks are backend evidence", profilePreserved: true, lifecyclePreserved: true });
       if (input) { input.evidence.passed = true; input.save(); }
     }
+    assert.deepEqual(assessments.map((entry) => ({ mode: entry.mode, requests: entry.requests.length })),
+      ["setup", "configured", ...(driftOnly ? [] : ["configured"]),
+        ...(driftOnly || integratedRecovery ? ["setup", "configured"] : []),
+        ...(integratedRecovery ? ["configured"] : []), ...(extendedWorkflow ? ["configured"] : [])]
+        .map((assessmentMode) => ({ mode: assessmentMode, requests: assessmentRequestCount })),
+      "Only explicitly requested setup/configured assessments reach the provider");
     const after = snapshot(paths.project);
     const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]);
     assert.deepEqual(changes.sort(), [...(extendedWorkflow ? [`.gg/commands/${extendedCommandName}.md`] : []), ".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...(driftOnly || integratedRecovery ? ["package.json"] : [])].sort());
@@ -542,7 +602,7 @@ async function run() {
     assert.equal(finalParent.model, parentState.model);
     assert.equal(finalParent.sessionId, parentState.sessionId);
     if (extendedWorkflow) assert.ok(finalParent.messageCount > parentState.messageCount, "Only explicit parent turns extend its transcript");
-    else assert.equal(finalParent.messageCount, parentState.messageCount);
+    else assert.equal(finalParent.messageCount, parentState.messageCount + assessmentMessageDelta, "Only explicit assessments may extend the parent transcript");
     // Startup/reload may create an empty earlier host session. Prove the task adds no child
     // transcript and leaves every non-active host transcript byte-for-byte unchanged.
     const transcriptsAfter = transcriptSnapshot();
@@ -552,7 +612,7 @@ async function run() {
     if (driftOnly) assert.deepEqual(events, [], "No task approval, execution output or completion events");
     else assert.ok(events.some((event) => event.type === "text_delta" && event.data.text.includes("[research] read")));
     const parentIsolation = { before: { provider: parentState.provider, model: parentState.model, sessionId: parentState.sessionId, messageCount: parentState.messageCount }, after: { provider: finalParent.provider, model: finalParent.model, sessionId: finalParent.sessionId, messageCount: finalParent.messageCount } };
-    return { passed: true, parentIsolation, driftOnly, integratedRecovery, extendedWorkflow, minimized: false, nativeInputSmoke: visual, real: [driftOnly ? "rendered initial approval, scan, dismissal, exact drift inspection, separate refresh approval and rescan" : "rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", ...(driftOnly ? [] : ["Node dispatcher", "AgentSession", "read tool"]), "lifecycle storage", ...(integratedRecovery ? ["completed-history drift and approved refresh", "previous-state inspection without writes, then explicit recovery scan"] : [])], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, changedProjectFiles: changes, childTranscript: false };
+    return { passed: true, parentIsolation, driftOnly, integratedRecovery, extendedWorkflow, minimized: false, nativeInputSmoke: visual, real: [driftOnly ? "rendered initial approval, scan, dismissal, exact drift inspection, separate refresh approval and rescan" : "rendered setup, separate approval, scan, selection, run approval and rescan", "native action/prompt/question/event proxy", "fresh profile approval validation", ...(driftOnly ? [] : ["Node dispatcher", "AgentSession", "read tool"]), "lifecycle storage", ...(integratedRecovery ? ["completed-history drift and approved refresh", "previous-state inspection without writes, then explicit recovery scan"] : [])], mocked: ["staged detector route only: setup-tauri-package to research", "local Azure Responses provider fixture", "MCP disabled; no server approved"], requests: requests.length, assessmentRequests: assessments.map((entry) => ({ mode: entry.mode, requests: entry.requests.length, messageDelta: entry.messageDelta })), changedProjectFiles: changes, childTranscript: false };
   }
   const result = await runSmokeLifecycle({
     audit,

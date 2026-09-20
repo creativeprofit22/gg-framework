@@ -5,6 +5,8 @@ import {
   type DiscoveryChoice,
   type DiscoveryCandidate,
   type RecommendationSummary,
+  type RecommendationHistoryReport,
+  type DiscoveryReview,
 } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 import {
   canReviewProgrammaticCandidate,
@@ -12,10 +14,10 @@ import {
 } from "./programmatic-chat-state";
 
 const labels: Record<DiscoveryChoice, string> = {
-  "reuse-command": "Review existing automation",
-  "extend-command": "Review an extension",
-  "missing-capability": "Review a new capability",
-  "needs-more-evidence": "Inspect missing evidence",
+  "reuse-command": "An existing command may handle this task",
+  "extend-command": "An existing command would need changes",
+  "missing-capability": "New automation would need to be built",
+  "needs-more-evidence": "More information is needed before choosing automation",
   manual: "Keep this manual",
 };
 const isCommand = (item: DiscoveryCandidate) =>
@@ -23,8 +25,27 @@ const isCommand = (item: DiscoveryCandidate) =>
 const reviewLabel = (item: DiscoveryCandidate) =>
   isCommand(item) && item.availability?.status !== "available"
     ? "Reinspect command (read-only)"
-    : labels[item.choice];
-const availabilityLabel = (status: string | undefined) =>
+    : "Review this task";
+const decisionLabels: Record<RecommendationSummary["decision"], string> = {
+  open: "Still open",
+  dismissed: "Dismissed",
+  completed: "Marked complete",
+};
+const historyLabels: Record<RecommendationHistoryReport["status"], string> = {
+  disabled: "History saving is off",
+  missing: "No saved history found",
+  ready: "Saved history loaded",
+  recovered: "History recovered; some records may be missing",
+  unavailable: "Saved history could not be loaded",
+};
+const reviewStatusLabels: Record<DiscoveryReview["status"], string> = {
+  prepared: "Review prepared. Nothing has been created, changed or run.",
+  "reinspection-required": "The command needs a fresh inspection before review can continue.",
+  unsupported: "A review cannot be prepared for this suggestion.",
+};
+const availabilityLabel = (
+  status: NonNullable<DiscoveryCandidate["availability"]>["status"] | undefined,
+) =>
   status === "available"
     ? "Available at assessment"
     : status === "unavailable"
@@ -35,7 +56,7 @@ function HistoryStatus({ item }: { item: RecommendationSummary }) {
     <span>Linked to an earlier candidate · Not a separate outstanding need</span>
   ) : (
     <>
-      <span>Recorded decision: {item.decision}</span>
+      <span>Recorded decision: {decisionLabels[item.decision]}</span>
       {item.ambiguity === "exact-workflow-duplicate" && (
         <p>Possible duplicate · Same workflow; relationship not confirmed</p>
       )}
@@ -65,29 +86,43 @@ export function ProgrammaticDiscovery({
       ? state.historyDetail.candidate
       : null;
   const reason = state.candidateStale
-    ? "Previous or historical evidence. Discover opportunities again before preparing an actionable review."
+    ? "This suggestion is from an earlier check. Check again before reviewing it as a current task."
     : planMode
-      ? "Leave plan mode before requesting provider-backed review."
+      ? "Leave plan mode before asking AI to review this task."
       : locked
         ? "Wait for current work to finish or stop it in this chat."
         : state.reconcile
-          ? "Refresh results to reconcile the previous response before requesting another review."
-          : candidate?.nextStep.reason;
+          ? "Refresh results to confirm the previous response before requesting another review."
+          : candidate?.nextStep.available
+            ? "Review only: this does not create, change or run automation."
+            : "This suggestion is not ready for review.";
   return (
     <>
-      <div className="programmatic-actions">
-        <button
-          className="btn btn-ghost btn-sm"
-          disabled={locked || planMode || state.reconcile}
-          onClick={() => onRequest({ version: 1, action: "discover" })}
-        >
-          Discover opportunities
-        </button>
-      </div>
-      <p>
-        Inspect repeatable project needs without configuring checks first. Proposals are not
-        approvals; discovery does not create or run a command.
-      </p>
+      <details
+        open={
+          !current?.candidates.length ||
+          state.discoveryStale ||
+          state.assessmentPending ||
+          state.assessmentUncertain
+        }
+      >
+        <summary>
+          {current?.candidates.length ? "Find more tasks" : "Find tasks to automate"}
+        </summary>
+        <div className="programmatic-actions">
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={locked || planMode || state.reconcile}
+            onClick={() => onRequest({ version: 1, action: "discover" })}
+          >
+            {state.discoveryStale && current ? "Check again" : "Find tasks to automate"}
+          </button>
+        </div>
+        <p>
+          Ask AI to find repeatable project work and suggest automation. This uses your selected
+          provider, needs no saved checks, and does not create or run a command.
+        </p>
+      </details>
       {state.assessmentPending && (
         <p>Discovery is in progress. Previous evidence remains below for reference only.</p>
       )}
@@ -98,13 +133,12 @@ export function ProgrammaticDiscovery({
         </p>
       )}
       {state.discoveryStale && current && (
-        <p>Previous discovery results. They are not current review authority.</p>
+        <p>These suggestions are from an earlier check. Check again before reviewing a task.</p>
       )}
       {current && !current.candidates.length && !state.discoveryStale && (
         <p>
-          No recommendations were returned. See assessment coverage and limitations below; an empty
-          result alone does not establish that no worthwhile needs exist. This is not a project-wide
-          health check.
+          No tasks were suggested from the information checked. This was not a complete project
+          check; review the limits below.
         </p>
       )}
       {!current && state.assessment && (
@@ -115,33 +149,39 @@ export function ProgrammaticDiscovery({
       )}
       {!!current?.candidates.length && (
         <section aria-label="Discovered candidates">
-          <h3>Discovered candidates</h3>
-          {!state.discoveryStale &&
-            !state.assessmentPending &&
-            !state.assessmentUncertain &&
-            current.candidates.every(
-              (item) =>
-                item.choice === "reuse-command" && item.availability?.status === "available",
-            ) && <p>The identified needs have existing automation to review.</p>}
-          <ul className="programmatic-list">
-            {current.candidates.map((item) => (
-              <li key={item.candidateId}>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  aria-pressed={
-                    state.selection?.source === "current" && state.selection.id === item.candidateId
-                  }
-                  onClick={() => onSelect("current", item.candidateId)}
-                >
-                  {item.outcome}
-                </button>
-                <span>
-                  {reviewLabel(item)} · Proposal
-                  {isCommand(item) ? ` · ${availabilityLabel(item.availability?.status)}` : ""}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <h3>Suggested tasks</h3>
+          <details key={candidate?.candidateId ?? "unselected"} open={!candidate}>
+            <summary>Browse suggested tasks ({current.candidates.length})</summary>
+            {!state.discoveryStale &&
+              !state.assessmentPending &&
+              !state.assessmentUncertain &&
+              current.candidates.every(
+                (item) =>
+                  item.choice === "reuse-command" && item.availability?.status === "available",
+              ) && <p>The identified needs have existing automation to review.</p>}
+            <ul className="programmatic-list">
+              {current.candidates.map((item) => (
+                <li key={item.candidateId}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    aria-pressed={
+                      state.selection?.source === "current" &&
+                      state.selection.id === item.candidateId
+                    }
+                    onClick={() => onSelect("current", item.candidateId)}
+                  >
+                    {item.outcome}
+                  </button>
+                  {candidate?.candidateId !== item.candidateId && (
+                    <span>
+                      {labels[item.choice]} · Proposal
+                      {isCommand(item) ? ` · ${availabilityLabel(item.availability?.status)}` : ""}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
         </section>
       )}
       {historical && (
@@ -194,12 +234,14 @@ export function ProgrammaticDiscovery({
       )}
       {candidate && (
         <section aria-label="Selected opportunity">
-          <h3>{candidate.outcome}</h3>
+          <h3 tabIndex={-1} data-programmatic-selection>
+            {candidate.outcome}
+          </h3>
           <p>
-            {reviewLabel(candidate)} ·{" "}
-            {state.selection?.source === "history" ? "Historical proposal" : "Proposal"}
+            {labels[candidate.choice]}
+            {state.selection?.source === "history" && " (saved suggestion)"}
           </p>
-          {isCommand(candidate) && (
+          {isCommand(candidate) && candidate.availability?.status !== "available" && (
             <>
               <p>{availabilityLabel(candidate.availability?.status)}</p>
               <p>
@@ -211,11 +253,39 @@ export function ProgrammaticDiscovery({
           <p>{candidate.rationale}</p>
           <p>Uncertainty: {candidate.uncertainty}</p>
           <p>Scope: {candidate.workflow.scope}</p>
-          <p>Expected output: {candidate.workflow.output}</p>
-          <p>Success check: {candidate.workflow.successCheck}</p>
-          <p>Changes allowed: {candidate.workflow.mutationBoundary}</p>
+          <p>Proposed changes, not permission: {candidate.workflow.mutationBoundary}</p>
+          {!candidate.nextStep.available && <p>Review limitation: {candidate.nextStep.reason}</p>}
+          <h4>Risks</h4>
+          {candidate.risks.length ? (
+            <ul>
+              {candidate.risks.map((text, index) => (
+                <li key={index}>{text}</li>
+              ))}
+            </ul>
+          ) : (
+            <p>No risks were listed. This does not establish that the task is safe.</p>
+          )}
+          {!!candidate.details.length && (
+            <>
+              <h4>Requirements and considerations</h4>
+              <ul>
+                {candidate.details.map((text, index) => (
+                  <li key={index}>{text}</li>
+                ))}
+              </ul>
+            </>
+          )}
           <details>
-            <summary>Workflow, evidence, risks and alternatives</summary>
+            <summary>Details</summary>
+            {isCommand(candidate) && candidate.availability?.status === "available" && (
+              <p>{candidate.availability.reason}</p>
+            )}
+            <p>Expected output: {candidate.workflow.output}</p>
+            <p>Success check: {candidate.workflow.successCheck}</p>
+            {candidate.nextStep.available && (
+              <p>Recorded review reason: {candidate.nextStep.reason}</p>
+            )}
+            {state.candidateReview && <p>{state.candidateReview.summary}</p>}
             <p>Trigger: {candidate.workflow.trigger}</p>
             <p>Example: {candidate.workflow.representativeCase}</p>
             <p>
@@ -236,22 +306,6 @@ export function ProgrammaticDiscovery({
                 <li key={index}>
                   {item.basis}: {item.message} ({item.source})
                 </li>
-              ))}
-            </ul>
-            <h4>Risks</h4>
-            {candidate.risks.length ? (
-              <ul>
-                {candidate.risks.map((text, index) => (
-                  <li key={index}>{text}</li>
-                ))}
-              </ul>
-            ) : (
-              <p>No risks listed by this proposal; this is not a guarantee.</p>
-            )}
-            <h4>Proposal detail</h4>
-            <ul>
-              {candidate.details.map((text, index) => (
-                <li key={index}>{text}</li>
               ))}
             </ul>
             <h4>Alternatives</h4>
@@ -290,7 +344,8 @@ export function ProgrammaticDiscovery({
               {reviewLabel(candidate)}
             </button>
           )}
-          {state.candidateReview && <p>{state.candidateReview.summary}</p>}
+
+          {state.candidateReview && <p>{reviewStatusLabels[state.candidateReview.status]}</p>}
         </section>
       )}
       <details>
@@ -315,7 +370,7 @@ export function ProgrammaticDiscovery({
         {history && (
           <>
             <p>
-              History: {history.status}. {history.total} saved candidates. {history.warning}
+              {historyLabels[history.status]}. {history.total} saved suggestions. {history.warning}
             </p>
             <ul>
               {history.candidates.map((item) => (

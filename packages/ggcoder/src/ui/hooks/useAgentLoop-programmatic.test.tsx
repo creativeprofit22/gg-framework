@@ -25,7 +25,8 @@ import {
 import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../../core/programmatic/lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "../../core/programmatic/contracts.js";
 import { readRecommendationHistory } from "../../core/programmatic/recommendation-history.js";
-import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { ProgrammaticAssessmentCoordinator, type ProgrammaticAssessmentOutcome } from "../../core/programmatic/assessment.js";
+import { renderTerminalProgrammaticAssessment } from "./terminal-programmatic-presentation.js";
 import * as storage from "../../core/programmatic/storage.js";
 
 // Provider I/O is scripted; selected history cases inject storage failures/revocation.
@@ -36,8 +37,50 @@ vi.mock("@kenkaiiii/gg-ai", async (original) => ({
 }));
 afterEach(() => vi.restoreAllMocks());
 
-it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "profile-replaced", "cancelled", "reset", "save-failed", "incomplete",
+it.each(["unavailable", "denied", "cancelled", "failed"] as const)("retains material %s scan and history limits without emitting the projection", (status) => {
+  const outcome: ProgrammaticAssessmentOutcome = { assessment: {
+    version: 1, mode: "configured", status: "unavailable", summary: "Assessment is unavailable.",
+    deterministic: { status, reason: `Saved checks ${status}. No retry was attempted.` },
+    history: { status: "acknowledgement-unknown", assessmentId: "private-history-id", reason: "The save acknowledgement was lost. Check history before saving again." },
+    coverage: [{ scope: "project", status: "unreadable", summary: "Some files could not be read safely." }],
+    observations: [{ basis: "observed", message: "An observation", evidenceSources: ["private-receipt-id"] }],
+    limitations: ["Permission was denied; omitted content was not checked."],
+  } };
+  const before = structuredClone(outcome);
+  const text = renderTerminalProgrammaticAssessment(outcome, []);
+  expect(text).toContain("Assessment is unavailable.");
+  expect(text).toContain(`Saved checks ${status}. No retry was attempted.`);
+  expect(text).toContain("save could not be confirmed; it may have succeeded.");
+  expect(text).toContain("Check history before saving again.");
+  expect(text).toContain("Permission was denied; omitted content was not checked.");
+  expect(text).toContain("Some files could not be read safely.");
+  expect(text).toContain("No retry or recommended work was started");
+  expect(text).not.toMatch(/private-|"version"|"observations"/);
+  expect(outcome).toEqual(before);
+});
+
+it("bounds oversized accepted display text without hiding scan/history failure or claiming full coverage", () => {
+  const outcome: ProgrammaticAssessmentOutcome = { assessment: {
+    version: 1, mode: "configured", status: "incomplete", summary: "Assessment did not finish.",
+    deterministic: { status: "failed", reason: "Saved checks failed. No retry was attempted." },
+    history: { status: "unsaved", assessmentId: "private-history-id", reason: "Saving was denied." },
+    coverage: [], observations: [], limitations: Array.from({ length: 50 }, (_, index) => `${index}: ${"limit ".repeat(660)}`),
+  }, advice: "Accepted advice\u001b\u0007\n" + "detail ".repeat(10_000) };
+  const before = structuredClone(outcome);
+  const text = renderTerminalProgrammaticAssessment(outcome, []);
+  expect(text.length).toBeLessThan(10_000);
+  expect(text).not.toMatch(/[\u001b\u0007]/);
+  expect(text).toContain("Saved checks failed. No retry was attempted.");
+  expect(text).toContain("assessment was not saved. Saving was denied.");
+  expect(text).toContain("44 additional inspection limits");
+  expect(text).toContain("some detail or caveats are omitted");
+  expect(text).toContain("this summary is not approval");
+  expect(outcome).toEqual(before);
+});
+
+it.each(["saved", "report-rendered", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "profile-replaced", "cancelled", "reset", "save-failed", "incomplete",
   "acknowledgement-unknown", "cancel-at-commit", "reset-at-commit", "dispose-at-commit", "mode-at-commit", "tool-at-commit"] as const)("projects terminal history independently after a real assessment: %s", async (scenario) => {
+  const assessed = vi.spyOn(ProgrammaticAssessmentCoordinator.prototype, "run");
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-history-"));
   const restore = useFakeHome(path.join(cwd, "home"));
   const messages = { current: [] as Message[] };
@@ -48,8 +91,9 @@ it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "pro
   const profileCalls = vi.spyOn(profile, "execute");
   const tools = [createReadTool(cwd), createCommandInformationTool(cwd), scan, profile];
   let loop!: UseAgentLoopReturn;
+  const onTurnText = vi.fn();
   function Harness() {
-    loop = useAgentLoop(messages, { provider: "openai", model: "gpt-5", tools, planModeRef, maxTokens: 100 });
+    loop = useAgentLoop(messages, { provider: "openai", model: "gpt-5", tools, planModeRef, maxTokens: 100 }, { onTurnText });
     return null;
   }
   const mounted = render(<Harness />, {
@@ -138,7 +182,11 @@ it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "pro
       }
       if (scenario === "cancelled") loop.abort();
       if (scenario === "reset") loop.reset();
-      return { message: { role: "assistant", content: "Finished fixture." }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+      const content = scenario === "report-rendered"
+        ? String(params.messages.flatMap((message) => message.role === "tool" ? message.content : []).find((result) => result.toolCallId === "history-advice")!.content)
+        : "Finished fixture.";
+      yield { type: "text_delta", text: content };
+      return { message: { role: "assistant", content }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
     })()));
     const guidance = vi.fn();
     expect(await submitPromptCommand({
@@ -159,7 +207,30 @@ it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "pro
     }
     expect(guidance).not.toHaveBeenCalled();
     expect(notices).toHaveLength(1);
-    const assessment = JSON.parse(String(notices[0]!.content).slice("## Needs assessment\n\n".length)) as ProgrammaticAssessment;
+    expect(assessed).toHaveBeenCalledOnce();
+    const outcome = await assessed.mock.results[0]!.value as ProgrammaticAssessmentOutcome;
+    const { assessment } = outcome;
+    const presentation = String(notices[0]!.content);
+    expect(presentation).not.toContain(JSON.stringify(assessment));
+    expect(presentation).not.toMatch(/"(?:discovery|evidenceSources|candidateId|assessmentId|version)":/);
+    expect(presentation.length).toBeLessThan(4_000);
+    expect(presentation).toContain("Limits:");
+    expect(presentation).toContain("Next:");
+    if (scenario === "acknowledgement-unknown") {
+      expect(presentation).toContain("save could not be confirmed; it may have succeeded.");
+      expect(presentation).toContain(assessment.history && "reason" in assessment.history ? assessment.history.reason : "missing reason");
+    }
+    if (scenario === "save-failed") expect(presentation).toContain("assessment was not saved.");
+    if (assessment.status === "completed") {
+      expect(outcome.captured).toBeDefined();
+      expect(assessment.discovery?.candidates[0]?.outcome).toBe("Review manifest");
+      const rendered = onTurnText.mock.calls.map(([text]) => text).join("\n");
+      expect(rendered.match(/1\. Review manifest/g)).toHaveLength(1);
+      expect(rendered).toContain("Uncertainty: Not verified");
+      expect(rendered).toContain("Next: follow these manual steps — Review separately");
+      if (scenario === "report-rendered") expect(presentation).not.toContain("1. Review manifest");
+      else expect(presentation).toContain("1. Review manifest");
+    }
     const expectedHistoryStatus = scenario === "setup" ? "setup-not-saved" : scenario.startsWith("legacy-") || scenario === "disabled" ? "disabled"
       : scenario === "acknowledgement-unknown" ? "acknowledgement-unknown"
       : ["revoked", "profile-replaced", "cancelled", "reset", "save-failed"].includes(scenario) || scenario.endsWith("-at-commit") ? "unsaved" : "saved";
@@ -168,12 +239,15 @@ it.each(["saved", "legacy-v1", "legacy-v2", "disabled", "setup", "revoked", "pro
     if (scannerBytes) expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(scannerBytes);
     expect(assessment.status).toBe(["cancelled", "reset"].includes(scenario) ? "cancelled" : scenario === "incomplete" ? "incomplete" : "completed");
     expect(assessment.deterministic.status).toBe(scenario === "setup" ? "not-run" : "succeeded");
+    expect(presentation).toContain(scenario === "setup"
+      ? "setup inspection only; no saved checks were run or settings changed."
+      : "Checks: none of the 0 enabled checks applied. This is not a passing project check.");
     expect(scanCalls).toHaveBeenCalledTimes(scenario === "setup" ? 0 : 1);
     expect(profileCalls).toHaveBeenCalledTimes(scenario === "setup" ? 1 : 0);
     if (scenario === "setup") expect(profileCalls.mock.calls[0]![0]).toEqual({ action: "inspect" });
     expect(turns).toBe(scenario === "incomplete" ? 2 : 3);
     const stored = await readRecommendationHistory(cwd);
-    if (scenario === "saved" || scenario === "incomplete" || scenario === "acknowledgement-unknown") {
+    if (scenario === "saved" || scenario === "report-rendered" || scenario === "incomplete" || scenario === "acknowledgement-unknown") {
       expect(stored.status).toBe("ready");
       if (stored.status !== "ready") throw new Error("Expected persisted history");
       expect(stored.history.assessments).toHaveLength(1);
@@ -341,6 +415,7 @@ it("rejects stale references and late tools while retaining restricted steering 
 it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
   "contains a terminal advisory through %s and preserves scan-only lifecycle bytes",
   async (ending) => {
+    const assessed = vi.spyOn(ProgrammaticAssessmentCoordinator.prototype, "run");
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-programmatic-loop-"));
     const restore = useFakeHome(path.join(cwd, "home"));
     const messages = { current: [] as Message[] };
@@ -586,7 +661,14 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
         message.role === "assistant" && typeof message.content === "string" &&
         message.content.startsWith("## Needs assessment\n\n"));
       expect(notice).toBeDefined();
-      const assessment = JSON.parse(String(notice!.content).slice("## Needs assessment\n\n".length));
+      expect(assessed).toHaveBeenCalledOnce();
+      const outcome = await assessed.mock.results[0]!.value as ProgrammaticAssessmentOutcome;
+      const { assessment } = outcome;
+      expect(String(notice!.content)).not.toContain(JSON.stringify(assessment));
+      expect(String(notice!.content)).not.toMatch(/"(?:discovery|evidenceSources|candidateId|assessmentId|version)":/);
+      expect(String(notice!.content)).toContain(ending === "plan"
+        ? "Saved checks failed. No retry was attempted."
+        : "Checks: saved check run finished; 1 of 1 enabled checks applied. This is not a complete project check.");
       expect(assessment.status).toBe(["abort", "reset", "disposal"].includes(ending)
         ? "cancelled" : ["result", "plan"].includes(ending) ? "completed" : "incomplete");
       expect(assessment.deterministic).toMatchObject({ status: ending === "plan" ? "failed" : "succeeded" });
@@ -613,7 +695,7 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
       }
       if (ending === "result" || ending === "plan") {
         expect(String(results.find((item) => item.toolCallId === "result")?.content)).toContain(
-          "Reuse /compare",
+          "/compare: prompt available, not started. This does not guarantee the required tools or behavior.",
         );
         for (const name of blockedNames)
           expect(results.find((item) => item.toolCallId === `denied-${name}`)?.isError).toBe(true);
@@ -622,7 +704,11 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
         );
       } else {
         expect(assessment.status).not.toBe("completed");
-        expect(assessment.summary).toContain(`Needs assessment ${assessment.status}`);
+        expect(assessment.summary).toBe(assessment.status === "cancelled"
+          ? "Assessment cancelled. Any saved check results and settings are unchanged by cancellation."
+          : "Assessment did not finish. Saved check results and settings are separate from these suggestions.");
+        expect(String(notice!.content)).toContain(assessment.summary);
+        expect(String(notice!.content)).toContain("No retry or recommended work was started");
       }
       expect(mutation).not.toHaveBeenCalled();
       expect(await fs.readFile(statePath)).toEqual(baseline);

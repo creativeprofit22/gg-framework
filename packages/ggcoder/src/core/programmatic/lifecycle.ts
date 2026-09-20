@@ -601,17 +601,17 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
       ) {
         status = state.recovered ? "recovered" : "current";
         reason = state.recovered
-          ? "Showing older saved results. Choose Check for opportunities to get current results."
+          ? "Showing older saved results. Choose Run project checks to get current results."
           : "Saved check settings match the project.";
       } else
         reason =
-          "Saved settings match the project, but these results are older. Choose Check for opportunities before starting a task.";
+          "Saved settings match the project, but these results are older. Choose Run project checks before starting a task.";
     } catch {
       status = "stale";
       reason = assessment.status === "unreadable" ? assessment.diagnostic!
         : assessment.baselineUnavailable
-          ? "Saved setup needs a schema upgrade. Its prior per-file baseline is unavailable. Choose Review setup."
-          : "Project settings changed. Choose Review setup refresh before checking for opportunities or starting a task.";
+          ? "Saved setup uses an older format, so earlier file settings cannot be compared. Choose Review setup."
+          : "Project settings changed. Choose Review setup before checking for opportunities or starting a task.";
     }
   }
   return {
@@ -625,7 +625,7 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
     scan: {
       available: scanAvailable && conflictReason === null,
       reason: conflictReason ?? (scanAvailable
-        ? "Check for opportunities runs the saved checks and saves results. It does not start any task."
+        ? "Run project checks updates the saved results. It does not start any task."
         : "Review and approve setup before checking for opportunities."),
     },
     snapshot: loaded ? sha256(loaded.bytes) : sha256(canonicalJson(null)),

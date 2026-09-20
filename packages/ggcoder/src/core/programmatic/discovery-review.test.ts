@@ -1,13 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import type { DiscoveryCandidate } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
-import { DiscoveryReviewBoundary } from "./discovery-review.js";
+import { DiscoveryReviewBoundary, discoveryReviewPrompt } from "./discovery-review.js";
 
 const requirement = { version: 1 as const, desiredOutcome: "Check records", capabilityKind: "prompt-only" as const, inputs: [], outputs: [], prerequisites: [], risks: [], verificationExpectations: [] };
 const candidate: DiscoveryCandidate = { assessmentId: randomUUID(), candidateId: randomUUID(), revision: 1, choice: "missing-capability", outcome: "Check records",
   rationale: "Repeated work", uncertainty: "One sample", workflow: { trigger: "Change", representativeCase: "Record", inputs: [], currentProcess: [], output: "Report",
     successCheck: "Known issue reported", scope: "Repository", mutationBoundary: "Read-only", repeatability: { basis: "inferred", explanation: "Repeated records" } },
   evidence: [], alternatives: [], risks: [], details: [], nextStep: { available: true, reason: "Review only" } };
+it("refuses over-budget or unavailable prompt input and preserves complete bounded details", () => {
+  const finalChange = "Require explicit approval before exporting customer records";
+  const details = [...Array.from({ length: 100 }, (_, i) => `Detail ${i}`), finalChange];
+  expect(() => discoveryReviewPrompt({ ...candidate, details })).toThrow("unavailable for bounded review");
+  expect(details).toHaveLength(101);
+  expect(details.at(-1)).toBe(finalChange);
+  expect(() => discoveryReviewPrompt({ ...candidate, nextStep: { available: false, reason: "Fresh discovery required" } })).toThrow();
+  const bounded = { ...candidate, details: [...details.slice(0, 63), finalChange] };
+  expect(discoveryReviewPrompt(bounded)).toContain(JSON.stringify(bounded));
+});
+
 const boundary = () => new DiscoveryReviewBoundary(candidate, new Set(["WORKFLOW"]), { kind: "missing-capability", proposal: requirement });
 function inspect(review: DiscoveryReviewBoundary) {
   review.observe(process.cwd(), "read", { file_path: "WORKFLOW" }, "1\tRecords", "local");

@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { render, cleanup } from "@testing-library/react";
+import { ProgrammaticChat } from "../src/ProgrammaticChat";
+import { initialProgrammaticChatState } from "../src/programmatic-chat-state";
+import { smokeLabels, smokeButton, closedSmokeDisclosure, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount } from "./programmatic-execution-smoke-checks.mjs";
 import { assertDiscoveryHandoff, readDiscoverySummary } from "./programmatic-discovery-observer.mjs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -43,6 +48,75 @@ it.each(["prepared", "reinspection-required"])("requires native %s handoff and t
   document.querySelector("section").append(paragraph);
   expect(readDiscoverySummary(document, review)).toEqual(proof.summary);
   document.body.innerHTML = "";
+});
+
+it("native selectors match actual setup, current, discovery and stale UI; disclosures open before use", async () => {
+  const onAction = vi.fn();
+  const state = initialProgrammaticChatState("native-contract");
+  const props = { state, busy: false, planMode: false, onAction, onSelect: vi.fn(), onRun: vi.fn() };
+  const view = render(createElement(ProgrammaticChat, props));
+  const evaluate = (expression) => Function("document", `return (${expression})`)(document);
+  const client = { evaluate: async (expression) => evaluate(expression) };
+  const button = (label) => { const target = evaluate(smokeButton(label)); expect(target, label).toBeTruthy(); return target; };
+  try {
+    expect(button(smokeLabels.setup).disabled).toBe(false);
+    expect(button(smokeLabels.discover).disabled).toBe(false);
+    const candidate = { assessmentId: "assessment", candidateId: "candidate", revision: 1,
+      choice: "missing-capability", outcome: "Fixture task", rationale: "Repeated", uncertainty: "Fixture only",
+      workflow: { trigger: "Change", representativeCase: "Manifest", inputs: [], currentProcess: [], output: "Report", successCheck: "Read", scope: "Repository", mutationBoundary: "Read only", repeatability: { basis: "inferred", explanation: "Recurring" } },
+      evidence: [], alternatives: [], risks: [], details: [], nextStep: { available: true, reason: "Review only" } };
+    Object.assign(state, { configuration: { status: "current", currentFingerprint: "a".repeat(64), refreshAvailable: false, baselineUnavailable: false, diagnostic: null, drift: null },
+      report: { status: "current", reason: "Current", scan: { available: true, reason: "Approved" }, rows: [], total: 0, offset: 0 },
+      discovery: { assessmentId: "assessment", candidates: [candidate] }, candidateDetail: candidate,
+      selection: { source: "current", id: "candidate" } });
+    view.rerender(createElement(ProgrammaticChat, { ...props, state: { ...state } }));
+    expect(evaluate(smokeButton(smokeLabels.setup))).toBeUndefined();
+    expect(button(smokeLabels.currentSetup).disabled).toBe(false);
+    expect(button(smokeLabels.scan).disabled).toBe(false);
+    expect(button(smokeLabels.review).disabled).toBe(false);
+    for (const label of [smokeLabels.discover, "Fixture task", "Load history"]) {
+      expect(closedSmokeDisclosure(button(label))).toBeTruthy();
+      await revealSmokeTarget(client, smokeButton(label));
+      expect(closedSmokeDisclosure(button(label))).toBeNull();
+    }
+    const details = document.querySelector('[aria-label="Selected opportunity"] details');
+    expect(details.open).toBe(false);
+    details.querySelector("summary").click();
+    expect(details.open).toBe(true);
+    expect(onAction).not.toHaveBeenCalled(); // Disclosure work is presentation only.
+    view.rerender(createElement(ProgrammaticChat, { ...props, state: { ...state, discoveryStale: true, candidateStale: true } }));
+    expect(button(smokeLabels.rediscover).disabled).toBe(false);
+    expect(button(smokeLabels.review).disabled).toBe(true);
+  } finally { cleanup(); }
+});
+
+it("all native drivers use the rendered-contract selectors and disclosure helpers", () => {
+  for (const file of ["programmatic-discovery-smoke.mjs", "programmatic-execution-dev-smoke.mjs", "programmatic-native-input-smoke.mjs"]) {
+    const source = readFileSync(resolve("scripts", file), "utf8");
+    expect(source).toContain("smokeLabels");
+    expect(source).toContain("revealSmokeTarget");
+    expect(source).not.toMatch(/Run saved checks|Discover opportunities|Review a new capability/);
+  }
+  const input = readFileSync(resolve("scripts/programmatic-native-input-smoke.mjs"), "utf8");
+  expect(input).toContain("smokeLabels.currentSetup");
+  expect(input).toContain('await key("Enter", "Enter", 13)');
+});
+
+it.each(["setup", "configured"])("models bounded %s provider assessments without specialist calls", (mode) => {
+  const body = { input: [{ content: `Host-owned exact facts ${mode === "setup" ? "setupFacts" : "scanFacts"}` }], tools: [{ name: "programmatic_advisory_result" }] };
+  const step = assessmentWorkflowStep(mode, 1, body);
+  expect(programmaticAssessmentResultV2Schema.safeParse(JSON.parse(step.arguments)).success).toBe(true);
+  expect(JSON.parse(step.arguments).recommendations).toEqual([]);
+  expect(assessmentWorkflowStep(mode, assessmentRequestCount, { input: [{ type: "function_call_output", call_id: step.call_id, output: "## Recommendations — not started" }] })).toContain("ASSESSMENT SETTLED");
+  expect(() => assessmentWorkflowStep(mode, 1, { ...body, tools: [...body.tools, { name: "bash" }] })).toThrow();
+  expect(() => assessmentWorkflowStep(mode, 2, { input: [] })).toThrow();
+  expect(() => assessmentWorkflowStep(mode, 3, body)).toThrow();
+  const next = assessmentWorkflowStep(mode, 1, body, `assessment-${mode}-2`);
+  expect(next.call_id).not.toBe(step.call_id);
+  expect(assessmentWorkflowStep(mode, 2, { input: [
+    { type: "function_call_output", call_id: step.call_id, output: "Old Recommendations" },
+    { type: "function_call_output", call_id: next.call_id, output: "Current Recommendations" },
+  ] }, next.call_id)).toContain("ASSESSMENT SETTLED");
 });
 
 // These are workflow configuration guards, not substitutes for the native CI run.

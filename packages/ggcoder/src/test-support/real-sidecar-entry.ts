@@ -41,4 +41,15 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
   },
 });
 
+// Seed only the disposable home supplied by withRealSidecar, never a user's store.
+if (process.env.GG_FIXTURE_PROGRESS_XP) {
+  const { updateProgress } = await import("../core/progress/store.js");
+  const xp = Number(process.env.GG_FIXTURE_PROGRESS_XP);
+  if (!Number.isFinite(xp) || xp < 0) throw new Error("Invalid fixture XP");
+  await updateProgress(async (file) => {
+    file.xp = xp;
+    return { file, levelledUp: false };
+  });
+}
+
 await import("../app-sidecar.js");

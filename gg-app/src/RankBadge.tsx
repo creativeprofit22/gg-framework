@@ -15,7 +15,12 @@ export function RankBadge({
   celebrateNonce,
 }: RankBadgeProps): React.ReactElement | null {
   if (!snapshot) return null;
-  const title = `${snapshot.rankName} — Level ${snapshot.level} · ${snapshot.xpIntoLevel}/${snapshot.xpForLevel} XP to next`;
+  const atMaxLevel = snapshot.maxLevel !== undefined && snapshot.level >= snapshot.maxLevel;
+  // Legacy producers do not identify their cap; never guess from a denominator sentinel.
+  const progress = snapshot.maxLevel === undefined || atMaxLevel
+    ? `${atMaxLevel ? "Maximum level · " : ""}${new Intl.NumberFormat().format(snapshot.xp)} lifetime XP`
+    : `${snapshot.xpIntoLevel}/${snapshot.xpForLevel} XP to next`;
+  const title = `${snapshot.rankName} — Level ${snapshot.level} · ${progress}`;
   const cls = className ? `rank-badge ${className}` : "rank-badge";
   return (
     <button

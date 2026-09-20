@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LEVEL, levelForXp, rankForLevel, rankLadder, xpForLevel } from "./ranks.js";
+import { MAX_LEVEL, buildSnapshot, levelForXp, rankForLevel, rankLadder, xpForLevel } from "./ranks.js";
+import { createEmptyProgress } from "./store.js";
+
+describe("buildSnapshot cap metadata", () => {
+  it.each([-1, 0, 100])("preserves earned XP and storage at cap + %i XP", (extra) => {
+    const file = createEmptyProgress(new Date("2026-07-01T12:00:00Z"));
+    file.xp = xpForLevel(MAX_LEVEL) + extra;
+    const before = structuredClone(file);
+    const snapshot = buildSnapshot(file);
+    expect(snapshot.maxLevel).toBe(MAX_LEVEL);
+    expect(snapshot.level).toBe(extra < 0 ? MAX_LEVEL - 1 : MAX_LEVEL);
+    expect(snapshot.xp).toBe(file.xp);
+    expect(snapshot.percent).toBe(extra < 0 ? 99 : 100);
+    expect(snapshot.xpIntoLevel).toBe(extra < 0 ? 3560 : extra);
+    expect(snapshot.xpForLevel).toBe(extra < 0 ? 3561 : 1);
+    expect(file).toEqual(before);
+    expect(file).not.toHaveProperty("maxLevel");
+  });
+});
 
 describe("xpForLevel", () => {
   it("matches the 100 × N^1.6 curve up to the level-50 knee", () => {

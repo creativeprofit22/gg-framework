@@ -20,6 +20,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./progress-contract": {
+      "types": "./dist/progress-contract.d.ts",
+      "import": "./dist/progress-contract.js",
+      "require": "./dist/progress-contract.cjs"
+    },
     "./referenced-files": {
       "types": "./dist/referenced-files.d.ts",
       "import": "./dist/referenced-files.js",

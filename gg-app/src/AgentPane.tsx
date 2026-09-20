@@ -784,7 +784,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // compact transcript markers + a "Ken reviewing…" flag. Separate hook, same
   // shared setItems/nextId pattern as useKenMentor.
   const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
-  const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
+  const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress(client);
   const [showScorecard, setShowScorecard] = useState(false);
   const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
   const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
@@ -1379,15 +1379,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   useEffect(() => {
     if (!levelUp || !levelUpNonce) return;
-    toast(`Rank up! → ${levelUp.rankName}`, "success", 5200);
-    // Rank-up visuals show everywhere; the sound only plays in the earning window.
+    toast(
+      levelUp.rankChanged ? `Rank up! → ${levelUp.rankName}` : `Level up! → Level ${levelUp.to}`,
+      "success",
+      5200,
+    );
+    // Level/rank visuals show everywhere; sound only plays in the earning window.
     if (levelUpOrigin) playSound("levelUp");
     setRankCelebrateNonce(levelUpNonce);
     const clearRank = window.setTimeout(() => setRankCelebrateNonce(null), 2400);
 
-    const crossedTier = Math.floor((levelUp.from - 1) / 5) !== Math.floor((levelUp.to - 1) / 5);
     let clearConfetti = 0;
-    if (crossedTier) {
+    setConfettiNonce(null);
+    if (levelUp.tierChanged) {
       setConfettiNonce(levelUpNonce);
       clearConfetti = window.setTimeout(() => setConfettiNonce(null), 1900);
     }

@@ -12,8 +12,11 @@ import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-ch
 import type { PaneEventEnvelope } from "./pane-routing";
 import type * as MentorModule from "./useKenMentor";
 import type * as EventsModule from "./useAgentEvents";
+import type * as ProgressModule from "./useProgress";
 import type * as ToastModule from "./toast";
 import { Toaster } from "./Toaster";
+import { progressTransition } from "./test-fixtures/progress-transition";
+import { playSound } from "./sounds";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
@@ -52,6 +55,7 @@ const nativeMocks = vi.hoisted(() => ({
   kenStateRef: null as null | { current: AgentModule.AgentState | null },
   kenRunning: false,
   realMentor: false,
+  realProgress: false,
   toast: vi.fn(),
   appUpdate: {
     phase: "idle",
@@ -138,9 +142,14 @@ vi.mock("./useKenMentor", async (importOriginal) => {
     },
   };
 });
-vi.mock("./useProgress", () => ({
-  useProgress: () => ({ snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false }),
-}));
+vi.mock("./useProgress", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProgressModule>();
+  return {
+    useProgress: (client: PaneAgentClient) => nativeMocks.realProgress
+      ? actual.useProgress(client)
+      : { snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false },
+  };
+});
 vi.mock("./useAgentEvents", async (importOriginal) => {
   const actual = await importOriginal<typeof EventsModule>();
   return {
@@ -533,6 +542,61 @@ function client(paneId: string, generation: number): PaneAgentClient {
   paneEvents(pane);
   return pane;
 }
+
+describe("authoritative progress celebrations", () => {
+  afterEach(() => { nativeMocks.realProgress = false; });
+
+  it.each([
+    [55, 56, false, false, false],
+    [60, 61, true, false, false],
+    [100, 101, true, true, false],
+    [55, 151, true, true, false],
+    [100, 101, true, true, true],
+  ])("resolves %i → %i (rank=%s tier=%s reduced=%s)", async (from, to, rank, tier, reduced) => {
+    nativeMocks.realProgress = true;
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      matches: reduced, media, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    const pane = client("rank-events", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("test"));
+    const initial = { ...progressTransition(from, from), levelUp: null, eventNonce: null };
+    vi.mocked(pane.getProgress).mockResolvedValue(initial);
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.getProgress).toHaveBeenCalled());
+    await act(async () => {});
+    nativeMocks.toast.mockClear();
+    vi.mocked(playSound).mockClear();
+    const event = { ...progressTransition(from, to), origin: false };
+    act(() => paneEvents(pane)({ type: "progress", data: event }));
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      rank ? `Rank up! → ${event.rankName}` : `Level up! → Level ${to}`, "success", 5200,
+    );
+    expect(Boolean(container.querySelector(".confetti-canvas"))).toBe(tier && !reduced);
+    expect(playSound).not.toHaveBeenCalled();
+    expect(container.querySelector(".rank-badge-celebrate")).toBeTruthy();
+    act(() => paneEvents(pane)({ type: "progress", data: { ...event, origin: true } }));
+    act(() => paneEvents(pane)({ type: "progress", data: { ...event, ladder: [], levelUp: null, eventNonce: null } }));
+    expect(nativeMocks.toast).toHaveBeenCalledTimes(1);
+    expect(playSound).not.toHaveBeenCalled();
+  });
+
+  it("uses level-only feedback without legacy ladder data and retains origin audio", async () => {
+    nativeMocks.realProgress = true;
+    const pane = client("legacy-rank-events", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("test"));
+    vi.mocked(pane.getProgress).mockResolvedValue({ ...progressTransition(55, 55), levelUp: null });
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await act(async () => {});
+    nativeMocks.toast.mockClear();
+    vi.mocked(playSound).mockClear();
+    act(() => paneEvents(pane)({ type: "progress", data: {
+      ...progressTransition(55, 101), ladder: [], origin: true,
+    } }));
+    expect(nativeMocks.toast).toHaveBeenCalledWith("Level up! → Level 101", "success", 5200);
+    expect(container.querySelector(".confetti-canvas")).toBeNull();
+    expect(playSound).toHaveBeenCalledWith("levelUp");
+  });
+});
 
 describe("Qwen Cloud thinking labels", () => {
   it.each([
@@ -3820,12 +3884,16 @@ describe("AgentPane lifecycle", () => {
     expect(
       await screen.findByText("Read-only project evidence despite unreadable settings."),
     ).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe(error);
+    expect(screen.getByRole("alert").textContent).toBe("This request did not finish. You can retry it when the current work has stopped.");
+    const errorDetails = screen.getByText("Error details");
+    expect(errorDetails.closest("details")!.open).toBe(false);
+    fireEvent.click(errorDetails);
+    expect(screen.getByText(error)).toBeTruthy();
     expect(screen.getByText("Settings cannot be proposed or saved.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Approve and save/ })).toBeNull();
     expect(screen.queryByLabelText("Exact settings to save")).toBeNull();
     const scan = screen.getByRole("button", {
-      name: "Check for opportunities",
+      name: "Run project checks",
     }) as HTMLButtonElement;
     expect(scan.disabled).toBe(true);
     fireEvent.click(scan);
@@ -3875,7 +3943,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      const check = await screen.findByRole("button", { name: "Check for opportunities" });
+      const check = await screen.findByRole("button", { name: "Run project checks" });
       await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(check);
       expect(await screen.findByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
@@ -3893,9 +3961,11 @@ describe("AgentPane lifecycle", () => {
       act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment }));
       act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
       expect(
-        await screen.findByRole("heading", { name: `Project assessment: ${assessment.status}` }),
+        await screen.findByRole("heading", { name: `Project assessment: ${status === "failed" ? "Incomplete" : status === "cancelled" ? "Cancelled" : "Unavailable"}` }),
       ).toBeTruthy();
-      expect(screen.getByRole("heading", { name: `Deterministic checks: ${status}` })).toBeTruthy();
+      const details = within(screen.getByRole("region", { name: "Project assessment" })).getByText("Details");
+      if (!details.closest("details")!.open) fireEvent.click(details);
+      expect(screen.getByRole("heading", { name: `Saved checks: ${status === "failed" ? "Failed" : status === "cancelled" ? "Cancelled" : "Unavailable"}` })).toBeTruthy();
       act(() =>
         emit("programmatic_assessment", {
           ...identity,
@@ -3942,7 +4012,7 @@ describe("AgentPane lifecycle", () => {
   });
 
   it.each(["success", "transport-lost"] as const)(
-    "settles dropped discovery completion as %s without replay (mocked native IPC)",
+    "programmatic discovery settles dropped completion as %s without replay and maps explicit review (mocked native IPC)",
     async (outcome) => {
       nativeMocks.realMentor = true;
       const pane = client("discovery-dropped-completion", 8);
@@ -3961,7 +4031,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      const discover = await screen.findByRole("button", { name: "Discover opportunities" });
+      const discover = await screen.findByRole("button", { name: "Find tasks to automate" });
       await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(discover);
       const request = vi
@@ -4028,15 +4098,30 @@ describe("AgentPane lifecycle", () => {
         );
         fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
         expect(
-          (screen.getByRole("button", { name: "Review a new capability" }) as HTMLButtonElement)
+          (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement)
             .disabled,
         ).toBe(false);
+        expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
+        expect(document.activeElement).toBe(document.querySelector("[data-programmatic-selection]"));
+        expect(screen.getByText("Browse suggested tasks (1)").closest("details")!.open).toBe(false);
+        expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(["report", "discover"]);
+        vi.mocked(pane.programmatic).mockResolvedValueOnce({
+          version: 1, action: "review-candidate", ok: true,
+          candidateReview: { status: "prepared", candidate, summary: "Review prepared without execution" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
+        await waitFor(() => expect(pane.programmatic).toHaveBeenLastCalledWith({
+          version: 1, action: "review-candidate", intent: "review-only", source: "current",
+          assessmentId: candidate.assessmentId, candidateId: candidate.candidateId,
+          expectedRevision: candidate.revision,
+        }));
+        expect(await screen.findByText("Review prepared. Nothing has been created, changed or run.")).toBeTruthy();
+        expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
       }
       expect(screen.queryByText(/Discovery is in progress/)).toBeNull();
-      expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual([
-        "report",
-        "discover",
-      ]);
+      expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(
+        outcome === "success" ? ["report", "discover", "review-candidate"] : ["report", "discover"],
+      );
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
@@ -4137,7 +4222,7 @@ describe("AgentPane lifecycle", () => {
       // Duplicate delivery cannot invalidate the exact response or claim approval.
       complete();
       expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
-      expect(screen.getByRole("heading", { name: "Project assessment: unavailable" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Project assessment: Unavailable" })).toBeTruthy();
       expect(
         (screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement)
           .disabled,

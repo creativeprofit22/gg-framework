@@ -287,6 +287,7 @@ export function buildSnapshot(file: ProgressFile): ProgressSnapshot {
   const into = Math.max(0, file.xp - floor);
   return {
     level,
+    maxLevel: MAX_LEVEL,
     rankName: rank.name,
     tier: rank.tier,
     tierName: rank.tierName,

@@ -767,51 +767,17 @@ export async function getState(): Promise<AgentState> {
 
 // ── Progress (Ranks) ─────────────────────────────────────────────────────
 
-/** One named rank of the 1000-level ladder, as computed by the sidecar.
- *  Ranks span 10 levels above level 50, so `level` is the rank's first level. */
-export interface RankLadderEntry {
-  level: number;
-  name: string;
-  tier: number;
-  tierName: string;
-  effectId: string;
-  xpRequired: number;
-}
-
-export interface LevelUpEvent {
-  from: number;
-  to: number;
-  rankName: string;
-}
-
-/** XP/rank snapshot — fully computed sidecar-side; the webview renders it verbatim. */
-export interface ProgressSnapshot {
-  level: number;
-  rankName: string;
-  tier: number;
-  tierName: string;
-  tierGlyph: string;
-  effectId: string;
-  xp: number;
-  xpIntoLevel: number;
-  xpForLevel: number;
-  percent: number;
-  streak: { current: number; best: number };
-  totals: { prompts: number; commits: number; linesShipped: number; projects: number };
-  xpBySource: { prompts: number; commits: number; streakBonus: number };
-  memberSince: string;
-  ladder: RankLadderEntry[];
-  levelUp: LevelUpEvent | null;
-  eventNonce: string | null;
-  /** True only on the frame sent to the window whose run earned the XP —
-   *  gates window-local feedback (sounds, XP chips). Absent on GET /progress. */
-  origin?: boolean;
-}
+import { parseProgressSnapshot, type ProgressSnapshot } from "@kenkaiiii/gg-core/progress-contract";
+export type {
+  ProgressSnapshot,
+  RankLadderEntry,
+  LevelUpEvent,
+} from "@kenkaiiii/gg-core/progress-contract";
 
 /** Fetch the current XP/rank snapshot (initial paint; live updates ride `progress` frames). */
 export async function getProgress(): Promise<ProgressSnapshot> {
   await waitForReady();
-  return invoke<ProgressSnapshot>("agent_progress", { paneId: "primary" });
+  return parseProgressSnapshot(await invoke<unknown>("agent_progress", { paneId: "primary" }));
 }
 
 export type SubscriptionUsageProvider = "anthropic" | "openai" | "moonshot";
@@ -3504,7 +3470,7 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     getProgress: async () => {
       await ready();
-      return call("agent_progress");
+      return parseProgressSnapshot(await call<unknown>("agent_progress"));
     },
     getSubscriptionUsage: async (provider) => {
       await ready();

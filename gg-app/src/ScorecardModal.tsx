@@ -102,6 +102,8 @@ function statRow(label: string, value: number, ladder: number[] | number, suffix
 
 /** RPG character-card scorecard: rank header, level + XP bar, stat bars. */
 export function ScorecardModal({ snapshot, onClose }: ScorecardModalProps): React.ReactElement {
+  const atMaxLevel = snapshot.maxLevel !== undefined && snapshot.level >= snapshot.maxLevel;
+  const percent = atMaxLevel ? 100 : snapshot.percent;
   const stats: StatRow[] = [
     statRow("Streak", snapshot.streak.current, STREAK_MILESTONES, "d"),
     statRow("Prompts", snapshot.totals.prompts, 100),
@@ -125,11 +127,18 @@ export function ScorecardModal({ snapshot, onClose }: ScorecardModalProps): Reac
             <div className="scorecard-level-row">
               <span>Level</span>
               <span>
-                {fmt(snapshot.xpIntoLevel)} / {fmt(snapshot.xpForLevel)} XP · {snapshot.percent}%
+                {atMaxLevel
+                  ? "Maximum level · 100%"
+                  : snapshot.maxLevel === undefined
+                    ? `${snapshot.percent}%`
+                    : `${fmt(snapshot.xpIntoLevel)} / ${fmt(snapshot.xpForLevel)} XP · ${snapshot.percent}%`}
               </span>
             </div>
             <div className="scorecard-bar" aria-hidden="true">
-              <span style={{ width: `${snapshot.percent}%` }} />
+              <span style={{ width: `${percent}%` }} />
+            </div>
+            <div className="scorecard-level-row">
+              <span>{fmt(snapshot.xp)} lifetime XP</span>
             </div>
           </div>
         </div>

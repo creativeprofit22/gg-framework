@@ -3467,7 +3467,61 @@ async fn agent_delete_jiwa(
     Ok(body)
 }
 
-/// Proxy: current XP/rank progress snapshot (Ranks system).
+// Decode separately so HTTP failures can never become successful progress data.
+fn decode_progress_response(
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::from_slice::<serde_json::Value>(bytes);
+    if !status.is_success() {
+        let detail = body.as_ref().ok().and_then(|value| {
+            value.get("message").and_then(|v| v.as_str())
+                .or_else(|| value.get("error").and_then(|v| v.as_str()))
+        }).unwrap_or_else(|| status.canonical_reason().unwrap_or("sidecar request failed"));
+        return Err(format!(
+            "Progress request failed (HTTP {}): {}. Try again after restarting the app.",
+            status.as_u16(), detail
+        ));
+    }
+    body.map_err(|_| "Progress is unavailable: the daemon returned invalid JSON. Try again after restarting the app.".to_string())
+}
+
+#[cfg(test)]
+mod progress_response_tests {
+    use super::decode_progress_response;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn progress_response_rejects_http_errors() {
+        for (code, detail) in [(401, "unauthorized"), (403, "forbidden"), (500, "internal error")] {
+            let body = serde_json::json!({"error": detail}).to_string();
+            let error = decode_progress_response(StatusCode::from_u16(code).unwrap(), body.as_bytes()).unwrap_err();
+            assert!(error.contains(&format!("HTTP {}", code)));
+            assert!(error.contains(detail));
+            assert!(error.contains("restarting the app"));
+        }
+    }
+
+    #[test]
+    fn progress_response_prefers_message_and_retains_status_for_non_json_errors() {
+        let error = decode_progress_response(StatusCode::FORBIDDEN, br#"{"message":"access denied","error":"fallback"}"#).unwrap_err();
+        assert!(error.contains("access denied"));
+        assert!(!error.contains("fallback"));
+        let error = decode_progress_response(StatusCode::INTERNAL_SERVER_ERROR, b"not json").unwrap_err();
+        assert!(error.contains("HTTP 500"));
+        assert!(error.contains("Internal Server Error"));
+    }
+
+    #[test]
+    fn progress_response_rejects_invalid_json_and_recovers() {
+        assert!(decode_progress_response(StatusCode::OK, b"not json").unwrap_err().contains("invalid JSON"));
+        // Shape validation is owned by the shared frontend contract, not duplicated in Rust.
+        let body = serde_json::json!({"level": 1, "streak": {"current": 0, "best": 0}});
+        assert_eq!(decode_progress_response(StatusCode::OK, body.to_string().as_bytes()).unwrap(), body);
+    }
+}
+
+/// Proxy: daemon-global progress; Home must work without a project session.
 #[tauri::command]
 async fn agent_progress(
     webview: WebviewWindow,
@@ -3480,9 +3534,9 @@ async fn agent_progress(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = res.status();
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    decode_progress_response(status, &bytes)
 }
 
 /// Proxy: the active provider's subscription quota snapshot. Account-wide, so

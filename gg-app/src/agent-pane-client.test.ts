@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { buildSnapshot } from "../../packages/ggcoder/src/core/progress/ranks";
+import { createEmptyProgress } from "../../packages/ggcoder/src/core/progress/store";
 
 const { invoke, listeners } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -47,6 +49,8 @@ describe("pane agent client", () => {
         return { kenProvider: "openai", kenModel: "gpt", kenModelOverride: false };
       if (command === "agent_prompt") return { queued: false, count: 0 };
       if (command === "agent_history") return { history: [] };
+      if (command === "agent_progress")
+        return buildSnapshot(createEmptyProgress(new Date("2026-07-01T12:00:00Z")));
       if (command === "agent_autopilot_set") return { autopilot: true };
       if (command === "agent_enhance_prompt") {
         return {

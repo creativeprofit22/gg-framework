@@ -1,0 +1,20 @@
+/* Original deliberately has no matching experimental selectors. */
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-size="15"] :is(.assistant-text, .user-msg:not(.command)) { font-size: 15px; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-size="16"] :is(.assistant-text, .user-msg:not(.command)) { font-size: 16px; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-tracking="normal"] :is(.assistant-text, .user-msg:not(.command)) { letter-spacing: normal; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-paragraphs="roomy"] .assistant-text p { margin-block: 0.7em; }
+@container (min-width: 900px) {
+  #root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-cap="on"] .assistant-text { max-inline-size: 74ch; }
+}
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-streaming="crisp"] .markdown .md-word { animation: none; filter: none; opacity: 1; }
+/* Reuse the existing muted token for three baseline 3.37:1 text findings. */
+#root[data-chat-preview="reading"] :is(.chat-head-cwd, .title-usage-reset, .statusrow:not(.running)) { color: var(--text-muted) !important; }
+/* Controls live outside the measured workspace; no permanent geometry change. */
+[data-chat-preview-controls] { position: fixed; z-index: 99999; inset-block-start: 0; inset-inline-start: 50%; transform: translateX(-50%); color: #f2f3f7; background: #1c1e23; border: 1px solid #9a9ba5; border-radius: 8px; font: 13px/1.5 var(--font-ui, sans-serif); max-inline-size: calc(100vw - 24px); }
+[data-chat-preview-controls] summary { cursor: pointer; padding: 6px 12px; min-block-size: 24px; }
+[data-chat-preview-controls] .preview-settings { display: grid; gap: 10px; padding: 12px; max-block-size: 70vh; overflow: auto; inline-size: min(360px, calc(100vw - 50px)); }
+[data-chat-preview-controls] label { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+[data-chat-preview-controls] :is(select, button) { color: #f2f3f7; background: #24262c; border: 1px solid #9a9ba5; padding: 6px 12px; min-block-size: 30px; font: inherit; border-radius: 4px; }
+[data-chat-preview-controls] :is(select, button, summary):focus-visible { outline: 2px solid #b0b6ff; outline-offset: 2px; }
+[data-chat-preview-controls] :is(select, button):hover { background: #343640; }
+[data-chat-preview-controls][hidden] { display: none; }

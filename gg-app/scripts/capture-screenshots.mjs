@@ -360,8 +360,22 @@ export function initScript(payload) {
   const paneId = "primary";
   const sessionId = responses.agent_state?.sessionId;
   const callbacks = new Map();
-  // event name → set of callback ids registered through `plugin:event|listen`.
-  const eventHandlers = new Map();
+  // Listener IDs and callback IDs are distinct in Tauri v2.
+  const eventHandlers = new Map(); // event name → set of listener IDs
+  const listeners = new Map(); // listener ID → { event, handler }
+  const unregisterListener = (event, eventId) => {
+    const entry = listeners.get(eventId);
+    if (!entry || entry.event !== event) return;
+    listeners.delete(eventId);
+    const ids = eventHandlers.get(event);
+    ids?.delete(eventId);
+    if (!ids?.size) eventHandlers.delete(event);
+    // Use the current hook so fixture adapters release their callback copies too.
+    window.__TAURI_INTERNALS__.unregisterCallback(entry.handler);
+  };
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener };
+  window.__ggListenerStats = () => ({ callbacks: callbacks.size, listeners: listeners.size,
+    events: eventHandlers.size, dispatch: [...eventHandlers.values()].reduce((sum, ids) => sum + ids.size, 0) });
   let nextId = 1;
   window.__TAURI_INTERNALS__ = {
     metadata: {
@@ -383,11 +397,17 @@ export function initScript(payload) {
       if (cmd === "plugin:event|listen") {
         const name = args?.event;
         const handler = args?.handler;
+        const eventId = nextId++;
         if (typeof name === "string" && typeof handler === "number") {
           if (!eventHandlers.has(name)) eventHandlers.set(name, new Set());
-          eventHandlers.get(name).add(handler);
+          eventHandlers.get(name).add(eventId);
+          listeners.set(eventId, { event: name, handler });
         }
-        return Promise.resolve(nextId++);
+        return Promise.resolve(eventId);
+      }
+      if (cmd === "plugin:event|unlisten") {
+        unregisterListener(args?.event, args?.eventId);
+        return Promise.resolve(null);
       }
       if (cmd.startsWith("plugin:event|")) return Promise.resolve(null);
       if (cmd.startsWith("plugin:log|")) return Promise.resolve(null);
@@ -413,7 +433,7 @@ export function initScript(payload) {
     const ids = eventHandlers.get("agent-event");
     if (!ids) return 0;
     for (const id of ids) {
-      callbacks.get(id)?.({
+      callbacks.get(listeners.get(id)?.handler)?.({
         event: "agent-event",
         id,
         payload: { paneId, sessionId, type, data: data ?? {} },

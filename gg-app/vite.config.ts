@@ -101,8 +101,13 @@ export function rejectBrowserNodeBuiltins(): Plugin {
 }
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
-  plugins: [react()],
+export default defineConfig(async ({ command }) => ({
+  plugins: [
+    react(),
+    ...(command === "serve" && process.env.GG_CHAT_DESIGN_PREVIEW === "1"
+      ? [(await import("./scripts/chat-design-preview/vite-plugin.mjs")).chatDesignPreviewPlugin()]
+      : []),
+  ],
   define: { ...buildEnvDefines(), ...whatsNewHeadDefines },
   build: { manifest: true }, // Lets CI budget initial JS separately from lazy chunks.
 

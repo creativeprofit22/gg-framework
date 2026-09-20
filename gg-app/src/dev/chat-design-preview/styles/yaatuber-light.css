@@ -1,0 +1,86 @@
+/* Local selected-trait adaptation, not copied onboarding assets or proportions. */
+#root[data-chat-preview="light"] {
+  --bg: #fcfbfd;
+  --surface-1: #f4f3f7;
+  --surface-2: #e8e7ef;
+  --surface-3: #dddae7;
+  --border: rgba(24, 24, 35, 0.16);
+  --border-strong: rgba(24, 24, 35, 0.38);
+  --text: #20202a;
+  --text-secondary: #41404d;
+  --text-muted: #575462;
+  --text-dim: #625e6b;
+  --primary: #454ca0;
+  --primary-hi: #363d8a;
+  --on-primary: #ffffff;
+  --secondary: #454ca0;
+  --success: #24643b;
+  --warning: #75520c;
+  --error: #a52a26;
+  --info: #126663;
+  --ken: #126663;
+  --glow: #b8b2db;
+  --user-text: #20202a;
+  --user-bg: #e7e5ee;
+  color: var(--text);
+  color-scheme: light;
+}
+#root[data-chat-preview="light"] .workspace-grid {
+  background-color: #fcfbfd;
+  background-image:
+    radial-gradient(85% 70% at 50% 48%, rgba(255,255,255,.96), transparent 75%),
+    radial-gradient(70% 60% at 0% 0%, rgba(239,202,225,.48), transparent 72%),
+    radial-gradient(70% 60% at 100% 0%, rgba(216,206,243,.52), transparent 72%),
+    radial-gradient(70% 60% at 8% 100%, rgba(250,222,201,.48), transparent 72%),
+    radial-gradient(70% 60% at 100% 100%, rgba(202,224,243,.48), transparent 72%);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.85), 0 12px 32px rgba(40,32,70,.12);
+}
+/* Override the existing inline theme.background only inside this preview. */
+#root[data-chat-preview="light"] .app { background: transparent !important; }
+#root[data-chat-preview="light"] .app::before { opacity: 0.08; }
+#root[data-chat-preview="light"] .assistant-text { color: var(--text); }
+#root[data-chat-preview="light"] .user-msg:where(:not(.user-ken-sent, .user-ken, .ask-answered-bubble, .queued, .promoted, .command)) { color: #244c78; background: #e9f1fb; border-color: #93aac7; }
+#root[data-chat-preview="light"] .statusrow { color: var(--text-secondary) !important; }
+#root[data-chat-preview="light"] .statusrow-icon { color: var(--primary) !important; }
+#root[data-chat-preview="light"] .statusrow:not(.running) .statusrow-left > span:nth-child(2) { color: var(--success) !important; }
+#root[data-chat-preview="light"] .ken-msg .assistant-text { color: var(--ken); }
+#root[data-chat-preview="light"] .assistant-dot { color: var(--primary) !important; }
+#root[data-chat-preview="light"] .ken-msg .assistant-dot { color: var(--ken) !important; }
+/* Keep the existing terminal animation dark; surrounding work surfaces are light. */
+#root[data-chat-preview="light"] .wake-screen {
+  --bg: #141519; --surface-1: #141519; --surface-2: #1c1e23; --surface-3: #24262c;
+  --text: #f2f3f7; --text-secondary: #c8c9d2; --text-muted: #9a9ba5; --text-dim: #9a9ba5; --user-text: #f2f3f7;
+  --primary: #b0b6ff; --on-primary: #0c0e26; --ken: #62e8d8;
+  --secondary: #b0b6ff; --info: #62e8d8; --success: #7fe89a; --warning: #f0cf63; --error: #ff6b60;
+  --border: rgba(255,255,255,.12); --border-strong: rgba(255,255,255,.25);
+  color: var(--text); background-color: #141519; color-scheme: dark;
+}
+#root[data-chat-preview="light"] .markdown :not(pre) > code { color: #242331; background: #e8e6ef; }
+#root[data-chat-preview="light"] :is(.chat-head, .footer, .toolbar, .activity-bar, .livetoolpanel, .statusrow.running) {
+  color: var(--text-secondary); background-color: #efedf3;
+}
+#root[data-chat-preview="light"] .inputwrap {
+  background: #f6f5f9; box-shadow: 0 2px 6px rgba(40,32,70,.06);
+}
+/* These existing controls use inline dark-theme colors, rather than CSS tokens. */
+#root[data-chat-preview="light"] :is(.model-label, .model-picker, .model-button) { color: var(--text-secondary) !important; }
+#root[data-chat-preview="light"] .model-anchor:last-child :is(.model-label, .model-picker, .model-button) { color: var(--ken) !important; }
+#root[data-chat-preview="light"] .thinking-toggle { color: var(--primary) !important; }
+#root[data-chat-preview="light"] .livetoolpanel .tool-line > span { color: var(--text-secondary) !important; }
+#root[data-chat-preview="light"] .livetoolpanel .tool-dot { color: var(--primary) !important; }
+#root[data-chat-preview="light"] .livetoolpanel :is(.tool-dot, .tool-line > span)[style*="176, 182, 255"] { color: var(--primary) !important; }
+#root[data-chat-preview="light"] .livetoolpanel :is(.tool-dot, .tool-line > span)[style*="127, 232, 154"] { color: var(--success) !important; }
+#root[data-chat-preview="light"] .livetoolpanel :is(.tool-dot, .tool-line > span)[style*="255, 107, 96"] { color: var(--error) !important; }
+#root[data-chat-preview="light"] .livetoolpanel .tool-line > span[style*="98, 232, 216"] { color: var(--info) !important; }
+#root[data-chat-preview="light"] .livetoolpanel .tool-line > span[style*="99, 100, 110"] { color: var(--text-muted) !important; }
+#root[data-chat-preview="light"] .input::placeholder { color: var(--text-muted); opacity: 1; }
+#root[data-chat-preview="light"] .ctx-meter[style*="127, 232, 154"] { color: var(--success) !important; }
+#root[data-chat-preview="light"] .ctx-meter[style*="240, 207, 99"] { color: var(--warning) !important; }
+#root[data-chat-preview="light"] .ctx-meter[style*="255, 107, 96"] { color: var(--error) !important; }
+#root[data-chat-preview="light"] .statusrow.running .statusrow-left { color: var(--text-secondary) !important; }
+#root[data-chat-preview="light"] .statusrow.running .cancel:not(:disabled) { color: var(--error) !important; }
+#root[data-chat-preview="light"] .statusrow.running .statusrow-left span[style*="color:"] { color: var(--text-muted) !important; }
+#root[data-chat-preview="light"] .statusrow.running .shimmer-text { --shimmer-base: var(--text-muted) !important; --shimmer-bright: var(--primary) !important; }
+#root[data-chat-preview="light"] .markdown a { color: #39428c; }
+#root[data-chat-preview="light"] .user-ken-sent .command-shimmer { color: var(--ken) !important; }
+#root[data-chat-preview="light"] .line.error > div:first-child { color: var(--error) !important; }

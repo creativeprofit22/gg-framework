@@ -1,0 +1,6 @@
+/* Decorative diamond/ring motifs, no essential state or accessible text. */
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-markers="on"] .assistant-dot { position: relative; visibility: hidden; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-markers="on"] .assistant-dot::before { content: ""; visibility: visible; position: absolute; inset-inline-start: 1px; inset-block-start: 8px; inline-size: 7px; block-size: 7px; border: 1.5px solid var(--primary); transform: rotate(45deg); }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-markers="on"] .ken-msg .assistant-dot::before { border-radius: 50%; border-color: var(--ken); transform: none; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-markers="on"] .user-msg:not(.command) { position: relative; }
+#root[data-chat-preview]:not([data-chat-preview="original"])[data-preview-markers="on"] .user-msg:not(.command)::before { content: ""; position: absolute; inset-inline-start: -14px; inset-block-start: 11px; inline-size: 7px; block-size: 7px; border-radius: 50%; border: 1.5px solid var(--text-secondary); pointer-events: none; }

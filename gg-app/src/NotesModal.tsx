@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Modal } from "./Modal";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
@@ -139,7 +139,16 @@ function countLabel(count: number, noun: string): string {
   return `${count} ${activeCountLabel(count, noun)}`;
 }
 
-export function NotesModal({
+export function NotesModal(props: Props): React.ReactElement {
+  return (
+    <Modal title="Your notes" onClose={props.onClose} className="notes-modal">
+      <NotesModalContent {...props} />
+    </Modal>
+  );
+}
+
+/** The editor is deferred; its modal shell and focus containment stay synchronous. */
+export function NotesModalContent({
   value,
   onChange,
   currentFocus,
@@ -199,7 +208,6 @@ export function NotesModal({
   onReconciliationSuccess,
   onChangeHandoff,
   onHandoffPresented,
-  onClose,
 }: Props): React.ReactElement {
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
@@ -212,6 +220,14 @@ export function NotesModal({
   const [activeTab, setActiveTab] = useState<NotesTab>(
     initialRoadmapPhaseId ? "roadmap" : "overview",
   );
+  useLayoutEffect(() => {
+    const tab = tabRefs.current[initialRoadmapPhaseId ? "roadmap" : "overview"];
+    const dialog = tab?.closest("[role='dialog']");
+    // Restore the existing initial-tab focus after loading, without stealing it
+    // from another dialog that may have opened in the meantime.
+    if (dialog?.contains(document.activeElement)) tab?.focus();
+  }, [initialRoadmapPhaseId]);
+
   const [showArchived, setShowArchived] = useState(false);
   const [referenceCreateRequest, setReferenceCreateRequest] = useState(0);
   const archivedTasks = tasks.filter((task) => task.archivedAt !== null);
@@ -243,247 +259,245 @@ export function NotesModal({
   );
 
   return (
-    <Modal title="Your notes" onClose={onClose} className="notes-modal">
-      <div className="notes-shell">
-        <div className="notes-shell-status">{persistenceStatus}</div>
-        <div className="notes-tabs-scroll">
-          <div
-            className="notes-tabs"
-            role="tablist"
-            aria-label="Notes sections"
-            aria-orientation="horizontal"
-          >
-            {NOTES_TABS.map((tab) => {
-              const selected = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  ref={(element) => {
-                    tabRefs.current[tab.id] = element;
-                  }}
-                  id={`notes-tab-${tab.id}`}
-                  type="button"
-                  role="tab"
-                  aria-selected={selected}
-                  aria-controls={`notes-panel-${tab.id}`}
-                  tabIndex={selected ? 0 : -1}
-                  onClick={() => selectTab(tab.id)}
-                  onKeyDown={(event) => onTabKeyDown(event, tab.id)}
-                >
-                  <span>{tab.label}</span>
-                  {tab.id === "roadmap" && activePhaseCount > 0 && (
-                    <span className="notes-tab-count" aria-hidden="true">
-                      {activePhaseCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+    <div className="notes-shell">
+      <div className="notes-shell-status">{persistenceStatus}</div>
+      <div className="notes-tabs-scroll">
+        <div
+          className="notes-tabs"
+          role="tablist"
+          aria-label="Notes sections"
+          aria-orientation="horizontal"
+        >
+          {NOTES_TABS.map((tab) => {
+            const selected = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                ref={(element) => {
+                  tabRefs.current[tab.id] = element;
+                }}
+                id={`notes-tab-${tab.id}`}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                aria-controls={`notes-panel-${tab.id}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => selectTab(tab.id)}
+                onKeyDown={(event) => onTabKeyDown(event, tab.id)}
+              >
+                <span>{tab.label}</span>
+                {tab.id === "roadmap" && activePhaseCount > 0 && (
+                  <span className="notes-tab-count" aria-hidden="true">
+                    {activePhaseCount}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="notes-panels">
+        <div
+          id="notes-panel-overview"
+          className="notes-panel"
+          role="tabpanel"
+          aria-labelledby="notes-tab-overview"
+          hidden={activeTab !== "overview"}
+        >
+          <div className="notes-panel-rail">
+            {hasRoadmapSummary && (
+              <aside className="notes-roadmap-summary" aria-label="Roadmap summary">
+                <strong>Roadmap</strong>
+                {activePhaseCount > 0 && <span>{countLabel(activePhaseCount, "phase")}</span>}
+                {activeReminderCount > 0 && (
+                  <span>{countLabel(activeReminderCount, "reminder")}</span>
+                )}
+              </aside>
+            )}
+
+            <section className="notes-section" aria-labelledby="notes-now-heading">
+              <h2 id="notes-now-heading">Now</h2>
+              <NotesCurrentFocus
+                value={currentFocus}
+                inputRef={currentFocusInputRef}
+                onChange={onChangeCurrentFocus}
+              />
+            </section>
+
+            <section className="notes-section" aria-labelledby="notes-next-heading">
+              <h2 id="notes-next-heading">Next</h2>
+              <NotesTaskList
+                tasks={tasks}
+                addInputRef={addInputRef}
+                onCreateTask={onCreateTask}
+                onEditTask={onEditTask}
+                onToggleTask={onToggleTask}
+                onMoveTask={onMoveTask}
+                onArchiveTask={onArchiveTask}
+              />
+            </section>
+
+            <section className="notes-section" aria-labelledby="notes-handoff-heading">
+              <h2 id="notes-handoff-heading">Handoff</h2>
+              <NotesHandoff
+                value={handoff}
+                updatedAt={handoffUpdatedAt}
+                unread={handoffUnread}
+                visible={activeTab === "overview"}
+                onChange={onChangeHandoff}
+                onPresented={onHandoffPresented}
+              />
+            </section>
           </div>
         </div>
 
-        <div className="notes-panels">
-          <div
-            id="notes-panel-overview"
-            className="notes-panel"
-            role="tabpanel"
-            aria-labelledby="notes-tab-overview"
-            hidden={activeTab !== "overview"}
-          >
-            <div className="notes-panel-rail">
-              {hasRoadmapSummary && (
-                <aside className="notes-roadmap-summary" aria-label="Roadmap summary">
-                  <strong>Roadmap</strong>
-                  {activePhaseCount > 0 && <span>{countLabel(activePhaseCount, "phase")}</span>}
-                  {activeReminderCount > 0 && (
-                    <span>{countLabel(activeReminderCount, "reminder")}</span>
-                  )}
-                </aside>
-              )}
-
-              <section className="notes-section" aria-labelledby="notes-now-heading">
-                <h2 id="notes-now-heading">Now</h2>
-                <NotesCurrentFocus
-                  value={currentFocus}
-                  inputRef={currentFocusInputRef}
-                  onChange={onChangeCurrentFocus}
-                />
-              </section>
-
-              <section className="notes-section" aria-labelledby="notes-next-heading">
-                <h2 id="notes-next-heading">Next</h2>
-                <NotesTaskList
-                  tasks={tasks}
-                  addInputRef={addInputRef}
-                  onCreateTask={onCreateTask}
-                  onEditTask={onEditTask}
-                  onToggleTask={onToggleTask}
-                  onMoveTask={onMoveTask}
-                  onArchiveTask={onArchiveTask}
-                />
-              </section>
-
-              <section className="notes-section" aria-labelledby="notes-handoff-heading">
-                <h2 id="notes-handoff-heading">Handoff</h2>
-                <NotesHandoff
-                  value={handoff}
-                  updatedAt={handoffUpdatedAt}
-                  unread={handoffUnread}
-                  visible={activeTab === "overview"}
-                  onChange={onChangeHandoff}
-                  onPresented={onHandoffPresented}
-                />
-              </section>
-            </div>
+        <div
+          id="notes-panel-roadmap"
+          className="notes-panel"
+          role="tabpanel"
+          aria-labelledby="notes-tab-roadmap"
+          hidden={activeTab !== "roadmap"}
+        >
+          <div className="notes-panel-rail notes-roadmap-rail">
+            <section
+              className="notes-section notes-roadmap-section"
+              aria-labelledby="notes-roadmap-heading"
+            >
+              <NotesRoadmap
+                phases={phases}
+                references={references}
+                authorityReady={authorityReady}
+                expectedRevision={expectedRevision}
+                expectedProjectKey={expectedProjectKey}
+                initialSelectedPhaseId={initialRoadmapPhaseId}
+                openSource={openSource}
+                onCreatePhase={onCreatePhase}
+                onEditPhase={onEditPhase}
+                onMovePhase={onMovePhase}
+                onChangePhaseStatus={onChangePhaseStatus}
+                onArchivePhase={onArchivePhase}
+                onLinkReferenceToPhase={onLinkReferenceToPhase}
+                onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                onAcceptReferenceProposal={onAcceptReferenceProposal}
+                onRejectReferenceProposal={onRejectReferenceProposal}
+                onResolveRoadmapBlocker={onResolveRoadmapBlocker}
+                onResumeAutomaticStatus={onResumeAutomaticStatus}
+                onResumeAutomaticReferences={onResumeAutomaticReferences}
+                onScheduleReminder={onScheduleReminder}
+                onSnoozeReminder={onSnoozeReminder}
+                onDismissReminder={onDismissReminder}
+                onStartPhase={onStartPhase}
+                onGetStorageDiagnostics={onGetStorageDiagnostics}
+                onRebindPhase={onRebindPhase}
+                onMutatePhaseLease={onMutatePhaseLease}
+                onReconcilePhaseExecution={onReconcilePhaseExecution}
+                onStartNextPhase={onStartNextPhase}
+                commands={commands}
+                onRunCommand={onRunCommand}
+                onCancelPhase={onCancelPhase}
+                onResumePhase={onResumePhase}
+                startUnavailableReason={phaseStartUnavailableReason}
+                actionDisabled={phaseActionDisabled}
+                onActionSuccess={onPhaseActionSuccess}
+                onReconciliationSuccess={onReconciliationSuccess}
+                onCreateReference={() => {
+                  selectTab("reference");
+                  setReferenceCreateRequest((request) => request + 1);
+                }}
+              />
+            </section>
           </div>
+        </div>
 
-          <div
-            id="notes-panel-roadmap"
-            className="notes-panel"
-            role="tabpanel"
-            aria-labelledby="notes-tab-roadmap"
-            hidden={activeTab !== "roadmap"}
-          >
-            <div className="notes-panel-rail notes-roadmap-rail">
-              <section
-                className="notes-section notes-roadmap-section"
-                aria-labelledby="notes-roadmap-heading"
-              >
-                <NotesRoadmap
-                  phases={phases}
-                  references={references}
-                  authorityReady={authorityReady}
-                  expectedRevision={expectedRevision}
-                  expectedProjectKey={expectedProjectKey}
-                  initialSelectedPhaseId={initialRoadmapPhaseId}
-                  openSource={openSource}
-                  onCreatePhase={onCreatePhase}
-                  onEditPhase={onEditPhase}
-                  onMovePhase={onMovePhase}
-                  onChangePhaseStatus={onChangePhaseStatus}
-                  onArchivePhase={onArchivePhase}
-                  onLinkReferenceToPhase={onLinkReferenceToPhase}
-                  onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
-                  onAcceptReferenceProposal={onAcceptReferenceProposal}
-                  onRejectReferenceProposal={onRejectReferenceProposal}
-                  onResolveRoadmapBlocker={onResolveRoadmapBlocker}
-                  onResumeAutomaticStatus={onResumeAutomaticStatus}
-                  onResumeAutomaticReferences={onResumeAutomaticReferences}
-                  onScheduleReminder={onScheduleReminder}
-                  onSnoozeReminder={onSnoozeReminder}
-                  onDismissReminder={onDismissReminder}
-                  onStartPhase={onStartPhase}
-                  onGetStorageDiagnostics={onGetStorageDiagnostics}
-                  onRebindPhase={onRebindPhase}
-                  onMutatePhaseLease={onMutatePhaseLease}
-                  onReconcilePhaseExecution={onReconcilePhaseExecution}
-                  onStartNextPhase={onStartNextPhase}
-                  commands={commands}
-                  onRunCommand={onRunCommand}
-                  onCancelPhase={onCancelPhase}
-                  onResumePhase={onResumePhase}
-                  startUnavailableReason={phaseStartUnavailableReason}
-                  actionDisabled={phaseActionDisabled}
-                  onActionSuccess={onPhaseActionSuccess}
-                  onReconciliationSuccess={onReconciliationSuccess}
-                  onCreateReference={() => {
-                    selectTab("reference");
-                    setReferenceCreateRequest((request) => request + 1);
-                  }}
+        <div
+          id="notes-panel-reference"
+          className="notes-panel"
+          role="tabpanel"
+          aria-labelledby="notes-tab-reference"
+          hidden={activeTab !== "reference"}
+        >
+          <div className="notes-panel-rail">
+            <section
+              className="notes-section notes-reference-section"
+              aria-labelledby="notes-reference-heading"
+            >
+              <h2 id="notes-reference-heading">Reference</h2>
+              <div className="notes-field">
+                <label htmlFor="notes-reference">Reference notes</label>
+                <textarea
+                  id="notes-reference"
+                  value={value}
+                  onChange={(event) => onChange(event.target.value)}
+                  spellCheck={true}
                 />
-              </section>
-            </div>
+              </div>
+              <NotesReferences
+                references={references}
+                phases={phases}
+                onCreateReference={onCreateReference}
+                onEditReference={onEditReference}
+                onDeleteReference={onDeleteReference}
+                onLinkReferenceToPhase={onLinkReferenceToPhase}
+                onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                openSource={openSource}
+                createRequest={referenceCreateRequest}
+              />
+            </section>
           </div>
+        </div>
 
-          <div
-            id="notes-panel-reference"
-            className="notes-panel"
-            role="tabpanel"
-            aria-labelledby="notes-tab-reference"
-            hidden={activeTab !== "reference"}
-          >
-            <div className="notes-panel-rail">
-              <section
-                className="notes-section notes-reference-section"
-                aria-labelledby="notes-reference-heading"
+        <div
+          id="notes-panel-archive"
+          className="notes-panel"
+          role="tabpanel"
+          aria-labelledby="notes-tab-archive"
+          hidden={activeTab !== "archive"}
+        >
+          <div className="notes-panel-rail">
+            <section
+              className="notes-section notes-archive"
+              aria-labelledby="notes-archive-heading"
+            >
+              <h2 id="notes-archive-heading">Done / Archive</h2>
+              <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} />
+              <h3 className="notes-archive-task-heading">Notes tasks</h3>
+              <button
+                type="button"
+                className="notes-archive-toggle"
+                aria-expanded={showArchived}
+                aria-controls="notes-archive-list"
+                onClick={() => setShowArchived((visible) => !visible)}
               >
-                <h2 id="notes-reference-heading">Reference</h2>
-                <div className="notes-field">
-                  <label htmlFor="notes-reference">Reference notes</label>
-                  <textarea
-                    id="notes-reference"
-                    value={value}
-                    onChange={(event) => onChange(event.target.value)}
-                    spellCheck={true}
-                  />
-                </div>
-                <NotesReferences
-                  references={references}
-                  phases={phases}
-                  onCreateReference={onCreateReference}
-                  onEditReference={onEditReference}
-                  onDeleteReference={onDeleteReference}
-                  onLinkReferenceToPhase={onLinkReferenceToPhase}
-                  onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
-                  openSource={openSource}
-                  createRequest={referenceCreateRequest}
-                />
-              </section>
-            </div>
-          </div>
-
-          <div
-            id="notes-panel-archive"
-            className="notes-panel"
-            role="tabpanel"
-            aria-labelledby="notes-tab-archive"
-            hidden={activeTab !== "archive"}
-          >
-            <div className="notes-panel-rail">
-              <section
-                className="notes-section notes-archive"
-                aria-labelledby="notes-archive-heading"
-              >
-                <h2 id="notes-archive-heading">Done / Archive</h2>
-                <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} />
-                <h3 className="notes-archive-task-heading">Notes tasks</h3>
-                <button
-                  type="button"
-                  className="notes-archive-toggle"
-                  aria-expanded={showArchived}
-                  aria-controls="notes-archive-list"
-                  onClick={() => setShowArchived((visible) => !visible)}
-                >
-                  {showArchived ? "Hide" : "Show"} archived tasks ({archivedTasks.length})
-                </button>
-                <div id="notes-archive-list" className="notes-task-list" hidden={!showArchived}>
-                  {showArchived && (
-                    <>
-                      {archivedTasks.length === 0 && (
-                        <p className="notes-empty">No archived tasks.</p>
-                      )}
-                      {archivedTasks.map((task) => (
-                        <div className="notes-task-row notes-archived-task" key={task.id}>
-                          <span>{task.text}</span>
-                          <div className="notes-task-actions">
-                            <button
-                              type="button"
-                              aria-label={`Restore task: ${task.text}`}
-                              onClick={() => onRestoreTask(task.id)}
-                            >
-                              Restore
-                            </button>
-                          </div>
+                {showArchived ? "Hide" : "Show"} archived tasks ({archivedTasks.length})
+              </button>
+              <div id="notes-archive-list" className="notes-task-list" hidden={!showArchived}>
+                {showArchived && (
+                  <>
+                    {archivedTasks.length === 0 && (
+                      <p className="notes-empty">No archived tasks.</p>
+                    )}
+                    {archivedTasks.map((task) => (
+                      <div className="notes-task-row notes-archived-task" key={task.id}>
+                        <span>{task.text}</span>
+                        <div className="notes-task-actions">
+                          <button
+                            type="button"
+                            aria-label={`Restore task: ${task.text}`}
+                            onClick={() => onRestoreTask(task.id)}
+                          >
+                            Restore
+                          </button>
                         </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-              </section>
-            </div>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            </section>
           </div>
         </div>
       </div>
-    </Modal>
+    </div>
   );
 }

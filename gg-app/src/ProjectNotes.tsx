@@ -3,7 +3,7 @@ import type { SlashCommand } from "./agent";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
-import { NotesModal } from "./NotesModal";
+import { DeferredNotesModal } from "./DeferredNotesModal";
 import { RoadmapReminderAlert } from "./RoadmapReminderAlert";
 import type { OpenReferenceUrl } from "./notes-open-source";
 import { NotesStatusBadge, notesStatusLabel } from "./NotesStatusBadge";
@@ -358,7 +358,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
       {showNotes &&
         modalProjectIdentity === activeProjectIdentity &&
         createPortal(
-          <NotesModal
+          <DeferredNotesModal
             value={value}
             onChange={onChange}
             currentFocus={notesDocument.currentFocus}

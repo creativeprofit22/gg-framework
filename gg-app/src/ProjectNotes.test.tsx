@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import { dateToLocalInputValue } from "./roadmap-reminders";
+import * as notesLoader from "./notes-modal-loader";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
@@ -361,8 +362,11 @@ function store(cwd: string, document: NotesDocumentV3): void {
   localStorage.setItem(legacyNotesKey(cwd), document.reference);
 }
 
-function selectNotesTab(name: "Overview" | "Roadmap" | "Reference" | "Archive"): void {
-  fireEvent.click(screen.getByRole("tab", { name }));
+async function selectNotesTab(
+  name: "Overview" | "Roadmap" | "Reference" | "Archive",
+): Promise<void> {
+  const tab = screen.queryByRole("tab", { name }) ?? (await screen.findByRole("tab", { name }));
+  fireEvent.click(tab);
 }
 
 function selectPhaseView(name: "Overview" | "Completion" | "References" | "Activity" | "More") {
@@ -377,7 +381,7 @@ function selectPhaseView(name: "Overview" | "Completion" | "References" | "Activ
 
 async function openRoadmapPhase(title: string): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-  selectNotesTab("Roadmap");
+  await selectNotesTab("Roadmap");
   fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${title}` }));
 }
 
@@ -589,6 +593,109 @@ afterEach(() => {
   tauriMocks.invoke.mockReset();
   tauriMocks.logError.mockReset();
   vi.clearAllMocks();
+});
+
+describe("ProjectNotes deferred editor", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function delayedEditor() {
+    let resolve!: (content: Awaited<ReturnType<typeof notesLoader.loadNotesModalContent>>) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<Awaited<ReturnType<typeof notesLoader.loadNotesModalContent>>>(
+      (yes, no) => {
+        resolve = yes;
+        reject = no;
+      },
+    );
+    vi.spyOn(notesLoader, "loadedNotesModalContent").mockReturnValue(null);
+    const load = vi
+      .spyOn(notesLoader, "loadNotesModalContent")
+      .mockImplementationOnce(() => promise);
+    return { resolve, reject, load };
+  }
+
+  it("keeps startup eager, contains loading focus, then focuses the real editor and returns focus on Escape", async () => {
+    const pending = delayedEditor();
+    const client = new FakeProjectNotesClient("/work/lazy");
+    client.seed(client.cwd, notes("loaded reference"));
+    render(<ProjectNotes cwd={client.cwd} client={client} />);
+    const trigger = await screen.findByRole("button", { name: "Notes" });
+    expect(client.getNotesCalls).toBeGreaterThan(0);
+    expect(pending.load).not.toHaveBeenCalled();
+    trigger.focus();
+    fireEvent.click(trigger);
+    const shell = screen.getByRole("dialog", { name: "Your notes" });
+    expect(screen.getByText("Loading Notes…")).toBeTruthy();
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(close);
+    const { NotesModalContent } = await import("./NotesModal");
+    await act(async () => pending.resolve(NotesModalContent));
+    expect(screen.getByRole("dialog", { name: "Your notes" })).toBe(shell);
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Overview" }));
+    await selectNotesTab("Reference");
+    expect(screen.getByDisplayValue("loaded reference")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it.each(["Escape", "Close"])(
+    "can cancel with %s before loading finishes without reopening",
+    async (action) => {
+      const pending = delayedEditor();
+      const client = new FakeProjectNotesClient("/work/lazy-close");
+      client.seed(client.cwd, notes("not reopened"));
+      render(<ProjectNotes cwd={client.cwd} client={client} />);
+      const trigger = await screen.findByRole("button", { name: "Notes" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      if (action === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+      else fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(document.activeElement).toBe(trigger);
+      const { NotesModalContent } = await import("./NotesModal");
+      await act(async () => pending.resolve(NotesModalContent));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    },
+  );
+
+  it("keeps an import failure local and retries without remounting the modal", async () => {
+    const pending = delayedEditor();
+    const client = new FakeProjectNotesClient("/work/lazy-retry");
+    client.seed(client.cwd, notes("retry content"));
+    render(<ProjectNotes cwd={client.cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    const shell = screen.getByRole("dialog");
+    await act(async () => pending.reject(new Error("chunk unavailable")));
+    expect(screen.getByRole("alert").textContent).toContain("Couldn’t load Notes");
+    expect(screen.queryByText("chunk unavailable")).toBeNull();
+    const retry = screen.getByRole("button", { name: "Try again" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(shell.contains(document.activeElement)).toBe(true);
+    const overview = await screen.findByRole("tab", { name: "Overview" });
+    expect(document.activeElement).toBe(overview);
+    expect(screen.getByRole("dialog")).toBe(shell);
+    expect(pending.load).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards a pending editor when the active project changes", async () => {
+    const pending = delayedEditor();
+    const client = new FakeProjectNotesClient("/work/lazy-old");
+    client.seed(client.cwd, notes("old project"));
+    client.seed("/work/lazy-new", notes("new project"));
+    const view = render(<ProjectNotes cwd={client.cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    view.rerender(<ProjectNotes cwd="/work/lazy-new" client={client} />);
+    const { NotesModalContent } = await import("./NotesModal");
+    await act(async () => pending.resolve(NotesModalContent));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByDisplayValue("old project")).toBeNull();
+  });
 });
 
 describe("ProjectNotes", () => {
@@ -1080,6 +1187,7 @@ describe("ProjectNotes", () => {
   });
 
   it("updates a mounted Roadmap row and detail when a future reminder becomes due", async () => {
+    await notesLoader.loadNotesModalContent();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
     const cwd = "/work/mounted-reminder-boundary";
@@ -1095,7 +1203,7 @@ describe("ProjectNotes", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${selected.title}` }));
     selectPhaseView("More");
 
@@ -1206,7 +1314,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Notes, 1 reminder due" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase in-app-evidence" }));
     expect(screen.getByText("An in-app reminder was requested in Supah Coder.")).toBeTruthy();
   });
@@ -1244,7 +1352,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Notes, 1 reminder due" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase native-evidence" }));
     expect(screen.getByText("A private native notification was requested.")).toBeTruthy();
   });
@@ -1265,7 +1373,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} paneFocused={false} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 reminder due" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase denied" }));
     expect(
       screen.getByText("Native notification permission was denied. Use the in-app actions here."),
@@ -1343,7 +1451,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
 
     const list = screen.getByRole("list", { name: "Roadmap phases" });
     expect(list.children).toHaveLength(2);
@@ -1425,13 +1533,13 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Phase start-card" }));
     await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("start-card"));
     expect(screen.queryByRole("dialog")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Resume phase: Phase resume-card" }));
     await waitFor(() =>
       expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("resume-card", resumable.session),
@@ -1439,7 +1547,7 @@ describe("ProjectNotes", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase review-card" }));
     expect(phaseDetail("Phase review-card")).not.toBeNull();
   });
@@ -1479,7 +1587,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const incoming = notes("reference");
     incoming.handoff = { text: "Continue from the new state", updatedAt: NOW, readAt: null };
 
@@ -1491,7 +1599,7 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("button", { name: "Notes, unread Handoff" })).toBeTruthy();
     expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.handoff.readAt).toBeNull();
 
-    selectNotesTab("Overview");
+    await selectNotesTab("Overview");
     await waitFor(() =>
       expect(
         client.snapshots.get(canonicalProjectKey(cwd))?.document.handoff.readAt,
@@ -1520,7 +1628,7 @@ describe("ProjectNotes", () => {
     expect(summary.textContent).toContain("1 active reminder");
     expect(screen.getByRole("tab", { name: "Roadmap" }).textContent).toBe("Roadmap2");
 
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(4);
     expect(screen.getByRole("button", { name: "Start phase: Phase planning" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review phase: Phase review" })).toBeTruthy();
@@ -1587,7 +1695,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Roadmap reporting" }));
     selectPhaseView("Activity");
 
@@ -1780,7 +1888,7 @@ describe("ProjectNotes", () => {
       render(<ProjectNotes cwd={cwd} client={client} />);
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-      selectNotesTab("Roadmap");
+      await selectNotesTab("Roadmap");
       fireEvent.click(
         screen.getByRole("button", {
           name: `${status === "done" ? "Review" : "Inspect"} phase: Compatible Done history`,
@@ -1834,7 +1942,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed reconciliation" }));
     selectPhaseView("Activity");
 
@@ -1917,7 +2025,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
 
     const advancement = screen.getByRole("region", { name: "Ready for Ship the integration" });
     expect(advancement.textContent).toContain("Completed foundation is Done");
@@ -1925,13 +2033,13 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("button", { name: "Run /compare" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Run /trace" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Run /parity" })).toBeNull();
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     const restore = screen.getByRole("button", { name: "Restore phase: Phase archived" });
     expect((restore as HTMLButtonElement).disabled).toBe(true);
     expect(restore.title).toBe(
       "Restoring this phase would replace the target protected by a pending phase advancement.",
     );
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Run /compare" }));
     expect(onRunCommand).toHaveBeenCalledExactlyOnceWith("/Diff");
     expect(screen.getByRole("button", { name: "Start next phase" })).toBeTruthy();
@@ -1977,7 +2085,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed foundation" }));
     selectPhaseView("Activity");
     const activity = screen.getByText("Next phase bound automatically.").closest("li");
@@ -2031,7 +2139,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const recovery = screen.getByRole("region", { name: "Resolve target for Reviewed target" });
     expect(recovery.textContent).toContain(
       "Reviewed target is no longer an unbound automatic candidate.",
@@ -2040,13 +2148,13 @@ describe("ProjectNotes", () => {
       (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     const restore = screen.getByRole("button", { name: "Restore phase: Reviewed target" });
     expect((restore as HTMLButtonElement).disabled).toBe(false);
     await act(async () => {
       fireEvent.click(restore);
     });
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     await screen.findByRole("region", { name: "Ready for Reviewed target" });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
@@ -2068,7 +2176,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} onStartPhase={onStartPhase} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
 
     expect(screen.queryByRole("button", { name: "Start next phase" })).toBeNull();
     expect(onStartPhase).not.toHaveBeenCalled();
@@ -2432,7 +2540,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Start contract" }));
     expect(onStartPhase).not.toHaveBeenCalled();
     selectPhaseView("References");
@@ -2499,7 +2607,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Start in code" }));
     const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
@@ -2562,7 +2670,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Recover phase" }));
     const phaseViews = screen.getByRole("tablist", { name: "Recover phase views" });
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("Overview");
@@ -2614,7 +2722,7 @@ describe("ProjectNotes", () => {
       render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-      selectNotesTab("Roadmap");
+      await selectNotesTab("Roadmap");
       const visibleAction = status === "not-started" ? "Recover" : "Retry";
       fireEvent.click(
         screen.getByRole("button", { name: `${visibleAction} phase: ${statusLabel} recovery` }),
@@ -2644,7 +2752,7 @@ describe("ProjectNotes", () => {
     });
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const row = screen
       .getByRole("button", { name: "Inspect phase: Prompt draft" })
       .closest(".notes-roadmap-row");
@@ -2665,7 +2773,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.queryByText("Saved prompt")).toBeNull();
     expect(document.querySelectorAll(".notes-phase-saved-prompt-marker")).toHaveLength(0);
   });
@@ -2688,7 +2796,7 @@ describe("ProjectNotes", () => {
 
     render(<ProjectNotes cwd={cwd} client={client} />);
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const row = screen
       .getByRole("button", { name: "Inspect phase: Durable prompt" })
       .closest(".notes-roadmap-row");
@@ -2728,7 +2836,7 @@ describe("ProjectNotes", () => {
     expect(savedPhase.reminder).toEqual(reminderBeforeSave);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const phaseButton = screen.getByRole("button", { name: "Inspect phase: Phase target" });
     expect(
       phaseButton.closest(".notes-roadmap-row")?.querySelector(".notes-phase-saved-prompt-marker")
@@ -2755,7 +2863,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.queryByText("Needs reconciliation:")).toBeNull();
     expect(
       (screen.getByRole("button", { name: `Resume phase: ${selected.title}` }) as HTMLButtonElement)
@@ -2873,7 +2981,7 @@ describe("ProjectNotes", () => {
       );
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-      selectNotesTab("Roadmap");
+      await selectNotesTab("Roadmap");
       const rowAction = screen.getByRole("button", {
         name: `${expectedAction} phase: ${selected.title}`,
       }) as HTMLButtonElement;
@@ -2928,7 +3036,7 @@ describe("ProjectNotes", () => {
       );
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-      selectNotesTab("Roadmap");
+      await selectNotesTab("Roadmap");
       const rowAction = screen.getByRole("button", {
         name: `Review phase: ${selected.title}`,
       }) as HTMLButtonElement;
@@ -2956,7 +3064,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const inspectButton = screen.getByRole("button", {
       name: "Inspect phase: Blocked deployment",
     });
@@ -3059,7 +3167,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const expectedRows = [
       ["Not started phase", "Ready", "Planning", "Start"],
       ["Planning phase", "Working", "Planning", "Start"],
@@ -3143,7 +3251,7 @@ describe("ProjectNotes", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     const retry = screen.getByRole("button", { name: "Retry phase: Retry implementation" });
     expect(
       screen.getAllByRole("button", { name: "Retry phase: Retry implementation" }),
@@ -3162,7 +3270,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.queryByText("Selected phase")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Only phase" }));
     expect(phaseDetail("Only phase")).not.toBeNull();
@@ -3203,7 +3311,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} onCancelPhase={onCancelPhase} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.getByRole("button", { name: "Start phase: Alpha" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Resume phase: Beta" })).toBeTruthy();
 
@@ -3280,14 +3388,14 @@ describe("ProjectNotes", () => {
       ),
     );
 
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     fireEvent.click(screen.getByRole("button", { name: "Restore phase: Beta" }));
     await waitFor(() =>
       expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.archivedAt).toBe(
         null,
       ),
     );
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     expect(screen.queryByText("Selected phase")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
     expect(screen.getByText("Selected phase")).toBeTruthy();
@@ -3362,7 +3470,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} openSource={openSource} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
       "Free-form reference stays here",
     );
@@ -3483,7 +3591,7 @@ describe("ProjectNotes", () => {
       render(<ProjectNotes cwd={cwd} client={client} />);
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-      selectNotesTab("Reference");
+      await selectNotesTab("Reference");
       fireEvent.click(screen.getByRole("button", { name: "New reference" }));
       fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
         target: { value: url },
@@ -3520,7 +3628,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3544,7 +3652,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} openSource={openSource} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3599,7 +3707,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3639,7 +3747,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3674,7 +3782,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Phase alpha" }));
     selectPhaseView("References");
     client.beforeNextSave = () => client.seed(cwd, { ...initial, phases: [] }, 2);
@@ -3699,7 +3807,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3736,7 +3844,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.click(
       screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
     );
@@ -3779,13 +3887,13 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Empty context phase" }));
     selectPhaseView("References");
     expect(screen.getByRole("heading", { name: "Attached references" })).toBeTruthy();
     expect(screen.getAllByRole("checkbox", { name: /Evidence from/ })).toHaveLength(50);
 
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect(screen.getByText("50 references")).toBeTruthy();
     expect(screen.getByRole("heading", { name: /alpha\/frontend/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: /beta\/sidecar/ })).toBeTruthy();
@@ -3794,7 +3902,7 @@ describe("ProjectNotes", () => {
 
     const empty = { ...populated, references: [] };
     act(() => client.publish(cwd, empty, 2));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
     selectPhaseView("References");
     fireEvent.click(screen.getByRole("button", { name: "Create a reference" }));
     expect(screen.getByRole("tab", { name: "Reference" }).getAttribute("aria-selected")).toBe(
@@ -3819,7 +3927,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Roadmap");
+    await selectNotesTab("Roadmap");
 
     const list = screen.getByRole("list", { name: "Roadmap phases" });
     expect(list.children).toHaveLength(50);
@@ -3843,11 +3951,11 @@ describe("ProjectNotes", () => {
       target: { value: "Uncommitted task edit" },
     });
 
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     const archiveToggle = screen.getByRole("button", { name: "Show archived tasks (0)" });
     fireEvent.click(archiveToggle);
     expect(archiveToggle.getAttribute("aria-expanded")).toBe("true");
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
 
     const updated = { ...original, reference: "authoritative reference", updatedAt: NOW };
     act(() => client.publish(cwd, updated, 2));
@@ -3860,11 +3968,11 @@ describe("ProjectNotes", () => {
       "true",
     );
 
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     expect(
       screen.getByRole("button", { name: "Hide archived tasks (0)" }).getAttribute("aria-expanded"),
     ).toBe("true");
-    selectNotesTab("Overview");
+    await selectNotesTab("Overview");
     expect((screen.getByLabelText("Add a Notes task") as HTMLInputElement).value).toBe(
       "Draft survives navigation",
     );
@@ -3915,7 +4023,7 @@ describe("ProjectNotes", () => {
       ).not.toBeNull(),
     );
 
-    selectNotesTab("Archive");
+    await selectNotesTab("Archive");
     fireEvent.click(screen.getByRole("button", { name: "Show archived tasks (1)" }));
     fireEvent.click(screen.getByRole("button", { name: "Restore task: Edited task" }));
     await waitFor(() =>
@@ -3937,7 +4045,7 @@ describe("ProjectNotes", () => {
     expect((screen.getByLabelText("Current focus") as HTMLInputElement).value).toBe(
       "Focus sidecar reference",
     );
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     fireEvent.change(screen.getByLabelText("Reference notes"), {
       target: { value: "updated reference" },
     });
@@ -3984,7 +4092,7 @@ describe("ProjectNotes", () => {
     const view = render(<ProjectNotes cwd={cwdA} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
       "project A",
     );
@@ -3999,7 +4107,7 @@ describe("ProjectNotes", () => {
     expect((screen.getByLabelText("Current focus") as HTMLInputElement).value).toBe(
       "Focus project B",
     );
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
 
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
       "project B",
@@ -4019,7 +4127,7 @@ describe("ProjectNotes", () => {
 
     render(<ProjectNotes cwd={cwd} client={client} />);
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
       "  migrated\nbytes 😀\n",
     );
@@ -4040,7 +4148,7 @@ describe("ProjectNotes", () => {
 
     const trigger = await screen.findByRole("button", { name: "Notes, 3 unfinished tasks" });
     fireEvent.click(trigger);
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe("latest");
   });
 
@@ -4061,7 +4169,7 @@ describe("ProjectNotes", () => {
     expect(storageStatus.getAttribute("role")).toBe("alert");
     expect(storageStatus.textContent).toContain("Project Notes are unreadable");
     expect(storageStatus.textContent).toContain("local fallback");
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     await waitFor(() =>
       expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
         "local recovery copy",
@@ -4084,7 +4192,7 @@ describe("ProjectNotes", () => {
     );
     expect(storageStatus.textContent).toContain("local fallback");
     expect(storageStatus.textContent).not.toContain("private");
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
       "recoverable local notes",
     );
@@ -4101,7 +4209,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    selectNotesTab("Reference");
+    await selectNotesTab("Reference");
     const reference = screen.getByLabelText("Reference notes") as HTMLTextAreaElement;
     await waitFor(() => expect(reference.value).toBe("saved reference"));
     fireEvent.change(reference, { target: { value: "optimistic edit" } });

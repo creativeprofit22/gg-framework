@@ -7,6 +7,7 @@ import { useCallback, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFailed, vi } from "vitest";
 import type * as AgentModule from "./agent";
+import type { PaneSwapViewState } from "./usePaneSwapViewState";
 import type * as ProgrammaticChatModule from "./ProgrammaticChat";
 import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import type { PaneEventEnvelope } from "./pane-routing";
@@ -2480,6 +2481,53 @@ describe("AgentPane automatic update footer banner", () => {
     render(<AgentPane client={officialPane} target={target} />);
 
     expect(await screen.findByRole("button", { name: /just updated/u })).toBeTruthy();
+  });
+});
+
+describe("AgentPane swap reading anchors", () => {
+  it.each(["ken", "autopilot"] as const)("retains an unpinned long %s paragraph in both width directions among tool/message rows", async (kind) => {
+    const pane = client("pane-reading-anchor", 1);
+    const prose = "Reading this long paragraph should survive either width exchange. ".repeat(80);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "assistant", text: "", mcpToolFailure: { name: "mcp__fixture__tool", result: "Earlier tool failure" } },
+      { role: "assistant", text: prose, ...(kind === "ken" ? { ken: true } : { autopilot: { phase: "human" as const, reason: prose } }) },
+      { role: "assistant", text: "Later normal message" },
+    ]);
+    let view: PaneSwapViewState | null = null;
+    render(<AgentPane client={pane} target={target} registerSwapViewState={(_id, next) => { view = next; }} />);
+    await screen.findByText("Later normal message");
+    await waitFor(() => expect(document.querySelector(".ken-msg p")?.textContent).toBe(prose.trim()));
+    const scroll = document.querySelector<HTMLDivElement>(".transcript")!;
+    const row = scroll.querySelector<HTMLElement>(".ken-msg")!;
+    const text = row.querySelector("p")!.firstChild!;
+    Object.defineProperties(scroll, { scrollHeight: { configurable: true, value: 5000 }, clientHeight: { configurable: true, value: 200 } });
+    vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 200, width: 400, height: 200 } as DOMRect);
+    let columns = 40;
+    for (const el of scroll.children) {
+      vi.spyOn(el, "getBoundingClientRect").mockImplementation(() => el === row
+        ? ({ top: 100 - scroll.scrollTop, bottom: 4000 - scroll.scrollTop, width: columns * 8, height: 3900 } as DOMRect)
+        : ({ top: el === scroll.firstElementChild ? -200 : 4000, bottom: el === scroll.firstElementChild ? -100 : 4100, width: 400, height: 100 } as DOMRect));
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: true, value: function(this: Range) {
+      if (this.startContainer !== text) return { top: -200, bottom: -100, width: 8, height: 100 };
+      const top = 100 + Math.floor(this.startOffset / columns) * 20 - scroll.scrollTop;
+      const bottom = 100 + (Math.floor(Math.max(this.startOffset, this.endOffset - 1) / columns) + 1) * 20 - scroll.scrollTop;
+      return { top, bottom, width: 8, height: bottom - top };
+    } });
+    try {
+      scroll.scrollTop = 300; fireEvent.scroll(scroll);
+      const narrow = view!.capture(); columns = 20; act(narrow);
+      expect(scroll.scrollTop).toBe(500);
+      const wide = view!.capture(); columns = 40; act(wide);
+      expect(scroll.scrollTop).toBe(300);
+      const missing = view!.capture(); row.remove(); scroll.scrollTop = 700; act(missing);
+      expect(scroll.scrollTop).toBe(300);
+    } finally {
+      if (descriptor) Object.defineProperty(Range.prototype, "getBoundingClientRect", descriptor);
+      else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+    }
   });
 });
 

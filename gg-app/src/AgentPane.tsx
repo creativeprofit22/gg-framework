@@ -22,6 +22,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
+import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
 import { ActionMetal } from "./ActionMetal";
 import { MetalButton } from "./MetalButton";
 import {
@@ -596,6 +597,8 @@ export interface AgentPaneProps {
   workspaceOwnsSessionLifecycle?: boolean;
   reclaimNativeSession?: boolean;
   registerInput?: (paneId: string, actions: PaneInputActions | null) => void;
+  registerSwapViewState?: RegisterPaneSwapViewState;
+  preserveWorkspaceFocus?: () => boolean;
   target?: PaneSessionTarget | null;
   generation?: number | null;
   onGenerationChange?: (generation: number) => void;
@@ -1307,6 +1310,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // even while the agent keeps streaming — and scrolling back to the bottom
   // re-pins. Default true so a fresh transcript follows the newest output.
   const stickToBottomRef = useRef(true);
+  const { ignoreRestoredScroll } = usePaneSwapViewState({
+    paneId, scrollRef, inputRef, stickToBottomRef, register: props.registerSwapViewState,
+  });
 
   // Pin to the bottom. Images (screenshots / attachments) load asynchronously
   // and grow the content after this fires, so it's also called from each image's
@@ -1327,10 +1333,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // simply keeps the pin set — no need to distinguish it from a user scroll.
   const onTranscriptScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || ignoreRestoredScroll()) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom <= 48;
-  }, []);
+  }, [ignoreRestoredScroll]);
 
   // Native drag leave/drop can be lost when the pointer exits the webview.
   useEffect(() => {
@@ -1746,8 +1752,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, [ownsWindowGlobals]);
 
   useEffect(() => {
-    if (props.focused) inputRef.current?.focus();
-  }, [props.focused]);
+    if (props.focused && !props.preserveWorkspaceFocus?.()) inputRef.current?.focus();
+  }, [props.focused, props.preserveWorkspaceFocus]);
 
   const registerSessionResetOperationWaiter = useCallback((operationId: string) => {
     if (observedSessionResetOperationsRef.current.delete(operationId)) {
@@ -5606,7 +5612,7 @@ const TranscriptRow = memo(function TranscriptRow({
         // Coder" in Ken's color (like a slash command shows `/name`), not the
         // full prompt body. The full body still went to GG Coder.
         return (
-          <div className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}>
+          <div data-swap-row={item.id} className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}>
             {item.queued && <span className="queued-pill">queued</span>}
             <span className="command-shimmer" style={{ color: theme.ken }}>
               Sent to {PRODUCT_DISPLAY_NAME}
@@ -5619,7 +5625,7 @@ const TranscriptRow = memo(function TranscriptRow({
         // phrase) with a highlight + shimmer sweep. The full expanded prompt
         // was sent to the agent. Labels read as prose, so drop the mono font.
         return (
-          <div className={`user-msg command${item.label ? " labelled" : ""}`}>
+          <div data-swap-row={item.id} className={`user-msg command${item.label ? " labelled" : ""}`}>
             <span className="command-shimmer" style={{ color: theme.commandColor }}>
               {item.label ?? item.text}
             </span>
@@ -5628,6 +5634,7 @@ const TranscriptRow = memo(function TranscriptRow({
       }
       return (
         <div
+          data-swap-row={item.id}
           className={`user-msg${item.queued ? " queued" : ""}${item.promoted ? " promoted" : ""}${item.ken ? " user-ken" : ""}`}
         >
           {(item.queued || item.promoted) && (
@@ -5669,14 +5676,14 @@ const TranscriptRow = memo(function TranscriptRow({
         <>
           {segments.map((seg, i) =>
             seg.kind === "done" ? (
-              <div key={i} className="plan-step-done">
+              <div key={i} className="plan-step-done" data-swap-row={`${item.id}-${i}`}>
                 <span className="plan-step-check" aria-hidden="true">
                   {"\u2713"}
                 </span>
                 <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
               </div>
             ) : (
-              <div key={i} className="assistant-msg">
+              <div key={i} className="assistant-msg" data-swap-row={`${item.id}-${i}`}>
                 <span className="assistant-dot" style={{ color: theme.primary }}>
                   {DOT}
                 </span>
@@ -5695,7 +5702,7 @@ const TranscriptRow = memo(function TranscriptRow({
       // No badge, no byline. The Markdown component special-cases ```prompt
       // fences into a "Send to GG Coder" button.
       return (
-        <div className="assistant-msg ken-msg">
+        <div className="assistant-msg ken-msg" data-swap-row={item.id}>
           <span className="assistant-dot" style={{ color: theme.ken }}>
             {DOT}
           </span>
@@ -5729,7 +5736,7 @@ const TranscriptRow = memo(function TranscriptRow({
           .join("\n\n"),
       };
       return (
-        <div className="assistant-msg ken-msg">
+        <div className="assistant-msg ken-msg" data-swap-row={item.id}>
           <span className="assistant-dot" style={{ color: theme.ken }}>
             {DOT}
           </span>
@@ -5743,14 +5750,14 @@ const TranscriptRow = memo(function TranscriptRow({
       return <ProgrammaticExecutionEvidenceView items={item.items} />;
     case "info":
       return (
-        <div className="line info" style={{ color: theme.textDim }}>
+        <div className="line info" data-swap-row={item.id} style={{ color: theme.textDim }}>
           {item.text}
         </div>
       );
     case "mcp_tool_failure": {
       const label = item.displayName ?? item.name.replace(/^mcp__/, "").replace("__", " / ");
       return (
-        <div className="line error" role="status" aria-label={`Failed MCP tool: ${label}`}>
+        <div className="line error" data-swap-row={item.id} role="status" aria-label={`Failed MCP tool: ${label}`}>
           <div style={{ color: theme.error, fontWeight: 600 }}>Failed</div>
           <div style={{ color: theme.text }}>{label}</div>
           <div style={{ color: theme.textDim, whiteSpace: "pre-wrap" }}>{item.result}</div>
@@ -5765,7 +5772,7 @@ const TranscriptRow = memo(function TranscriptRow({
       const headline = item.headline ?? item.text ?? "";
       const showMessage = item.message && item.message !== headline;
       return (
-        <div className="line error">
+        <div className="line error" data-swap-row={item.id}>
           <div style={{ color: theme.error, fontWeight: 600 }}>{headline}</div>
           {showMessage && <div style={{ color: theme.textDim }}>{item.message}</div>}
           {item.guidance && <div style={{ color: theme.textDim }}>{item.guidance}</div>}
@@ -5783,7 +5790,7 @@ const TranscriptRow = memo(function TranscriptRow({
             ? "Hook engaged. Re-checking the changes made after verification."
             : defaultText;
       return (
-        <div className="assistant-msg">
+        <div className="assistant-msg" data-swap-row={item.id}>
           <span className="assistant-dot" style={{ color }}>
             {DOT}
           </span>
@@ -5797,7 +5804,7 @@ const TranscriptRow = memo(function TranscriptRow({
     }
     case "images":
       return (
-        <div className="img-grid">
+        <div className="img-grid" data-swap-row={item.id}>
           {item.images.map((img, i) => {
             const openImage = (): void => {
               if (img.path) void openProjectPath(img.path, paneId);
@@ -5834,7 +5841,7 @@ const TranscriptRow = memo(function TranscriptRow({
       );
     case "generating_image":
       return (
-        <div className="img-grid">
+        <div className="img-grid" data-swap-row={item.id}>
           <div className="img-gen-placeholder">
             <Skeleton width={200} height={200} radius={12} />
             <span className="img-gen-label">
@@ -5860,7 +5867,7 @@ const TranscriptRow = memo(function TranscriptRow({
       );
     case "task":
       return (
-        <div className="line task-row">
+        <div className="line task-row" data-swap-row={item.id}>
           <span className="task-row-glyph" style={{ color: theme.primary }}>
             {"\u25B8 "}
           </span>

@@ -39,6 +39,8 @@ import { ConfirmModal } from "./ConfirmModal";
 import { Toaster } from "./Toaster";
 import { toast } from "./toast";
 import { WorkspaceNode } from "./WorkspaceNode";
+import { useWorkspacePaneSwaps, PANE_SWAP_HELP_ID } from "./useWorkspacePaneSwaps";
+import { swapWorkspacePanes, type WorkspaceSize } from "./workspace-swaps";
 
 const KEYBOARD_RESIZE_STEP = 5;
 const MIN_PANE_SIZE_PX = 280;
@@ -228,6 +230,7 @@ function ReadyWorkspaceShell({
   const closingPaneIdsRef = useRef(new Set<WorkspacePaneId>());
   const nativeDragPaneRef = useRef<WorkspacePaneId | null>(null);
   const layoutRef = useRef(layout);
+  const gridRef = useRef<HTMLDivElement>(null);
   const activePaneDragRef = useRef<ActivePaneDrag | null>(null);
   const dragGenerationRef = useRef(0);
   const paneToFocusAfterMoveRef = useRef<WorkspacePaneId | null>(null);
@@ -338,10 +341,28 @@ function ReadyWorkspaceShell({
     saveWorkspaceLayout(localStorage, windowLabel, layout);
   }, [layout, leafIds, snapshots]);
 
+  const focusPane = useCallback((paneId: WorkspacePaneId): void => {
+    const next = focusWorkspacePane(layoutRef.current, paneId);
+    layoutRef.current = next;
+    setLayout(next);
+  }, []);
+
+  const commitSwap = useCallback((side: string, middle: string, size: WorkspaceSize) => {
+    if (activePaneDragRef.current || closingPaneIdsRef.current.has(side) || closingPaneIdsRef.current.has(middle)) return null;
+    const current = layoutRef.current;
+    const next = swapWorkspacePanes(current, side, middle, size);
+    if (next === current) return null;
+    layoutRef.current = next;
+    setLayout(next);
+    return next;
+  }, []);
+  const swapLabel = useCallback((id: string) => snapshots[id]?.sessionTitle?.trim() || `Conversation ${id}`, [snapshots]);
+  const swaps = useWorkspacePaneSwaps({ layout, layoutRef, gridRef, closingPaneIdsRef, commit: commitSwap, focusPane, label: swapLabel });
+  const preserveSwapFocus = swaps.preserveFocus;
   useEffect(() => {
     const scheduledPaneId = layout.focusedPaneId;
     requestAnimationFrame(() => {
-      if (layoutRef.current.focusedPaneId !== scheduledPaneId) return;
+      if (layoutRef.current.focusedPaneId !== scheduledPaneId || preserveSwapFocus()) return;
       if (paneToFocusAfterMoveRef.current === scheduledPaneId) {
         paneToFocusAfterMoveRef.current = null;
         focusPaneDragHandle(scheduledPaneId);
@@ -350,13 +371,7 @@ function ReadyWorkspaceShell({
       if (document.activeElement instanceof HTMLSelectElement) return;
       focusPaneInput(scheduledPaneId);
     });
-  }, [focusPaneDragHandle, focusPaneInput, layout.focusedPaneId, leafIds]);
-
-  const focusPane = useCallback((paneId: WorkspacePaneId): void => {
-    const next = focusWorkspacePane(layoutRef.current, paneId);
-    layoutRef.current = next;
-    setLayout(next);
-  }, []);
+  }, [focusPaneDragHandle, focusPaneInput, layout.focusedPaneId, leafIds, preserveSwapFocus]);
 
   const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
     if (!workspaceLayoutLeafIds(layoutRef.current.root).includes(snapshot.paneId)) return;
@@ -525,7 +540,7 @@ function ReadyWorkspaceShell({
   }, [cancelPaneDrag, focusPane, focusPaneInput, leafIds]);
 
   useEffect(() => {
-    const onPointerCancel = (): void => cancelPaneDrag();
+    // HTML drag initiation emits pointercancel; resize cancellation is separate.
     const onOutsideDrop = (event: DragEvent): void => {
       if (
         activePaneDragRef.current &&
@@ -536,10 +551,8 @@ function ReadyWorkspaceShell({
         cancelPaneDrag();
       }
     };
-    window.addEventListener("pointercancel", onPointerCancel);
     window.addEventListener("drop", onOutsideDrop);
     return () => {
-      window.removeEventListener("pointercancel", onPointerCancel);
       window.removeEventListener("drop", onOutsideDrop);
     };
   }, [cancelPaneDrag]);
@@ -768,9 +781,12 @@ function ReadyWorkspaceShell({
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {copyAnnouncement}
       </div>
-      <div className="workspace-grid" data-pane-count={leafIds.length}>
+      <p id={PANE_SWAP_HELP_ID} className="visually-hidden">{swaps.help}</p>
+      <div className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{swaps.announcement}</div>
+      <div className="workspace-grid" data-pane-count={leafIds.length} ref={gridRef} tabIndex={-1} aria-label="Conversation workspace">
         <WorkspaceNode
           node={layout.root}
+          swaps={swaps}
           focusedPaneId={layout.focusedPaneId}
           panes={layout.panes}
           windowFocused={windowFocused}

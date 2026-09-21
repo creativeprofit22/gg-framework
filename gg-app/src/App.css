@@ -8231,7 +8231,8 @@ select {
   pointer-events: auto;
 }
 .pane-drop-overlay-inert .pane-drop-zone {
-  cursor: not-allowed;
+  /* Do not cover the source handle during the browser's drag initiation. */
+  pointer-events: none;
 }
 .pane-drop-zone-left,
 .pane-drop-zone-right {
@@ -8325,6 +8326,110 @@ select {
 .workspace-pane-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+/* Optional pairwise movement uses the existing pane action surface. */
+.workspace-pane-slot {
+  container-type: inline-size;
+  container-name: conversation-pane;
+}
+@container conversation-pane (max-width: 200px) {
+  .workspace-pane-body:has(~ .workspace-pane-actions .pane-swap-button) {
+    padding-top: 92px;
+  }
+}
+.workspace-pane-actions:has(.pane-swap-button) {
+  max-width: calc(100% - 46px);
+  min-width: 35px;
+  min-height: 32px;
+  padding-right: 35px;
+  flex-wrap: wrap;
+}
+.workspace-pane-actions .pane-swap-button {
+  /* Focusing a pane reveals other controls without moving this click target. */
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  touch-action: manipulation;
+  transition: color var(--t-fast), border-color var(--t-fast), background-color var(--t-fast);
+}
+.workspace-pane-slot:hover .pane-swap-button,
+.workspace-pane-slot:focus-within .pane-swap-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+.workspace-pane-actions:has([data-pane-swap-direction]) {
+  min-width: 70px;
+  padding-right: 70px;
+}
+.workspace-pane-actions .pane-swap-button[data-pane-swap-direction] {
+  opacity: 1;
+  pointer-events: auto;
+}
+.workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] { right: 35px; }
+@container conversation-pane (max-width: 200px) {
+  .workspace-pane-actions:has([data-pane-swap-direction]) {
+    top: 37px;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    min-width: 0;
+    padding-right: 0;
+    padding-top: 35px;
+  }
+  .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) { padding-top: 128px; }
+}
+.workspace-pane-actions .pane-swap-button:focus-visible,
+.workspace-pane-actions .pane-swap-button[data-swap-keyboard-focus]:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.workspace-pane-actions .pane-swap-button:active {
+  background: var(--surface-3);
+}
+.workspace-pane-slot:focus-visible,
+.workspace-pane-slot[data-swap-keyboard-focus]:focus,
+.workspace-grid[data-swap-keyboard-focus]:focus,
+.workspace-grid:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+@media (hover: none), (pointer: coarse) {
+  .workspace-pane-actions:has(.pane-swap-button) {
+    min-width: 47px;
+    min-height: 44px;
+    padding-right: 47px;
+  }
+  .workspace-pane-actions .pane-swap-button {
+    opacity: 1;
+    pointer-events: auto;
+    width: 44px;
+    height: 44px;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .workspace-pane-actions:has([data-pane-swap-direction]) { min-width: 94px; padding-right: 94px; }
+  .workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] { right: 47px; }
+  @container conversation-pane (max-width: 200px) {
+    .workspace-pane-actions:has([data-pane-swap-direction]) { min-width: 0; padding-right: 0; padding-top: 47px; }
+    .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) { padding-top: 144px; }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-pane-actions .pane-swap-button { transition: none; }
+}
+@media (forced-colors: active) {
+  .workspace-pane-actions .pane-swap-button[data-swap-keyboard-focus]:focus,
+  .workspace-pane-slot[data-swap-keyboard-focus]:focus,
+  .workspace-grid[data-swap-keyboard-focus]:focus,
+  .workspace-pane-actions .pane-swap-button:focus-visible,
+  .workspace-pane-slot:focus-visible,
+  .workspace-grid:focus-visible { outline-color: Highlight; }
 }
 .workspace-pane-close {
   position: absolute;

@@ -39,6 +39,11 @@
 #root[data-chat-preview="light"] .app { background: transparent !important; }
 #root[data-chat-preview="light"] .app::before { opacity: 0.08; }
 #root[data-chat-preview="light"] .assistant-text { color: var(--text); }
+/* Share the assistant's text rail: 16px marker + 6px gap, minus the
+   bubble's existing 12px padding + 1px border. Keep its distinctive wrapper. */
+#root[data-chat-preview="light"] .user-msg {
+  margin-inline: 9px auto;
+}
 #root[data-chat-preview="light"] .user-msg:where(:not(.user-ken-sent, .user-ken, .ask-answered-bubble, .queued, .promoted, .command)) { color: #244c78; background: #e9f1fb; border-color: #93aac7; }
 #root[data-chat-preview="light"] .statusrow { color: var(--text-secondary) !important; }
 #root[data-chat-preview="light"] .statusrow-icon { color: var(--primary) !important; }

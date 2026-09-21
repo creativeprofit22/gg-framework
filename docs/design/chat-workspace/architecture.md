@@ -1,6 +1,6 @@
 # Preview architecture
 
-Status: preview modules and bounded verification implemented; production/native acceptance remains separate. This document describes the isolated experiment, not production integration.
+Current integration is described in [Native appearance](native-appearance.md): a document-root preference owner, semantic colors, native synchronization and existing reading-anchor reuse now serve normal app startup and What's New. Preview controls still remain transient and isolated. The sections below preserve the earlier experiment's architecture and approval boundaries; their no-production-change statements describe that historical delivery, not the later approved integration.
 
 ## Source boundaries
 
@@ -57,4 +57,4 @@ Existing dirty `App.css` changes inspected in this session concern Programmatic 
 
 ## Later integration
 
-Browser mocks cannot verify native sessions, IPC security, daemon streaming, WebView2 behavior or assistive technology. Selecting a candidate requires a separate integration decision before component seams, persistent controls, installed builds or releases are changed.
+The separate native-appearance plan was approved and implemented, including saved controls and scoped actual Rust/WebView2 checks. Browser mocks still do not prove native behavior or assistive-technology support. See the current native handoff for verified scope and remaining acceptance gaps; installed builds and releases remain separate.

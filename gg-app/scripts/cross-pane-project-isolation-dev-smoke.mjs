@@ -184,7 +184,15 @@ function createFixtureServer({ auditFile, launchToken }) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
-        const history = process.env.GG_LOCAL_LINK_FIXTURE === "1" ? [
+        const readingText = Array.from({ length: 100 }, (_, index) => `Sentence ${index}: the reader keeps this exact place while a long paragraph wraps across unequal pane widths.`).join(" ");
+        const history = process.env.GG_PANE_READING_FIXTURE === "1" ? [
+          { role: "user", text: "Reading-position fixture" },
+          { role: "assistant", text: "", mcpToolFailure: { name: "mcp__fixture__tool", result: "Tool evidence before the mentor paragraph." } },
+          { role: "assistant", text: readingText, ken: true },
+          { role: "assistant", text: "", error: { scope: "error", headline: "Fixture error", message: readingText } },
+          { role: "assistant", text: "", autopilot: { phase: "human", reason: readingText } },
+          { role: "assistant", text: "Later normal assistant message.\n\n" + readingText },
+        ] : process.env.GG_LOCAL_LINK_FIXTURE === "1" ? [
           { role: "assistant", text: "[Pane file](same.txt)" },
           { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", path: "same.txt" }] },
         ] : [];
@@ -252,7 +260,12 @@ function parseArguments(args) {
   return { identity: values[1] };
 }
 
-export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false }) {
+export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false, readingAnchors = false, reuseDevServer = false, visual = false, beforeNativeStart, verifyWorkspace, onCleanup, appearanceTheme = process.env.GG_APPEARANCE_SMOKE_THEME }) {
+  if (appearanceTheme !== undefined && appearanceTheme !== "dark" && appearanceTheme !== "light") throw new Error("Appearance smoke theme must be dark or light");
+  if (appearanceTheme) {
+    if (!reuseDevServer) throw new Error("Appearance checks require the verified normal-app server");
+    await (await import("./appearance-dev.mjs")).verifyNormalServer();
+  }
   if (process.platform !== "win32") throw new Error("Cross-pane developer smoke requires Windows");
   if (identity !== localForkIdentity)
     throw new Error("Only the Local Fork identity may run this smoke");
@@ -275,6 +288,22 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
   writeFileSync(join(agentDir, "gg-app.json"), `${JSON.stringify({ projectsRoot }, null, 2)}\n`);
   const auditFile = join(paths.audit, "cross-pane-project-isolation.jsonl");
   const devLog = join(paths.audit, "tauri-dev.log");
+  let devConfig = "src-tauri/tauri.local.conf.json";
+  if (reuseDevServer) {
+    // Reuse only this checkout's current Vite source; never stop someone else's server.
+    for (const source of ["AgentPane.tsx", "usePaneSwapViewState.ts", "useWorkspacePaneSwaps.ts"]) {
+      const response = await fetch(`http://localhost:1420/src/${source}`, { signal: AbortSignal.timeout(5000) });
+      const module = await response.text();
+      const match = module.match(/sourceMappingURL=data:application\/json;base64,([^\s]+)/);
+      const map = match ? JSON.parse(Buffer.from(match[1], "base64").toString("utf8")) : null;
+      if (!response.ok || !map?.sourcesContent?.includes(readFileSync(join(appDir, "src", source), "utf8"))) {
+        throw new Error(`Existing dev server does not serve current ${source}`);
+      }
+    }
+    const config = JSON.parse(readFileSync(join(appDir, devConfig), "utf8"));
+    devConfig = join(paths.audit, "reuse-dev-server.json");
+    writeFileSync(devConfig, JSON.stringify({ ...config, build: { beforeDevCommand: "" } }));
+  }
   const portReservation = await reserveHeldTcpPort();
   const cdpPort = portReservation.port;
   await portReservation.release();
@@ -283,13 +312,16 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     [fixtureMode]: "sidecar",
     GG_CROSS_PANE_FIXTURE_AUDIT: auditFile,
     GG_LOCAL_LINK_FIXTURE: localLinks ? "1" : "0",
+    GG_PANE_READING_FIXTURE: readingAnchors ? "1" : "0",
     GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort),
     GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1",
-    GG_APP_DEV_SMOKE_WINDOW: "minimized",
+    GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
     GG_APP_CWD: projectA,
     COREPACK_HOME:
       process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node", "corepack"),
     COREPACK_DEFAULT_TO_LATEST: "0",
+    COREPACK_ENABLE_NETWORK: "0",
+    CARGO_NET_OFFLINE: "true",
     CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
     RUSTUP_HOME: process.env.RUSTUP_HOME ?? join(process.env.USERPROFILE ?? "", ".rustup"),
   });
@@ -299,9 +331,13 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
   let processIdentities = [];
   let failure;
   try {
+    // A finite prebuild must settle before spawning Tauri or starting readiness clocks.
+    if (beforeNativeStart) await beforeNativeStart(environment, JSON.parse(readFileSync(resolve(appDir, devConfig), "utf8")));
     child = spawn(
-      process.env.ComSpec ?? "cmd.exe",
-      ["/d", "/s", "/c", "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json"],
+      reuseDevServer ? process.execPath : (process.env.ComSpec ?? "cmd.exe"),
+      reuseDevServer
+        ? [join(appDir, "node_modules/@tauri-apps/cli/tauri.js"), "dev", "--config", devConfig]
+        : ["/d", "/s", "/c", "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json"],
       { cwd: appDir, env: environment, windowsHide: true, stdio: ["ignore", logFd, logFd] },
     );
     await new Promise((resolveSpawn, rejectSpawn) => {
@@ -311,7 +347,10 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     if (!Number.isInteger(child.pid)) throw new Error("Tauri dev did not expose a process id");
     await waitFor(
       "fixture sidecar",
-      () => readAudit(auditFile).find((entry) => entry.action === "fixture-listening"),
+      () => {
+        if (child.exitCode !== null) throw new Error(`Tauri dev exited ${child.exitCode}`);
+        return readAudit(auditFile).find((entry) => entry.action === "fixture-listening");
+      },
       { timeoutMs: 300_000 },
     );
     client = await connectToDevWebview(cdpPort, waitFor, (target) =>
@@ -327,6 +366,9 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     await waitFor("initial workspace", () =>
       client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`),
     );
+    if (appearanceTheme) {
+      await client.evaluate(`localStorage.setItem('gg-app:appearance:v1', JSON.stringify({ theme: ${JSON.stringify(appearanceTheme)} })); true`);
+    }
     await client.evaluate(`(() => {
       localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({
         version: 9,
@@ -482,12 +524,14 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     ) {
       throw new Error("Pane-targeted event bridges were not established for A and C");
     }
+    await verifyWorkspace?.({ client, cdpPort, paths, projectA, projectB, projectC, readAudit: () => readAudit(auditFile) });
     process.stdout.write(
       `CROSS-PANE PROJECT ISOLATION DEV SMOKE PASS: ${JSON.stringify({ primary: initialSessions.a, secondary: sessionC.sessionId })}\n`,
     );
   } catch (error) {
     failure = error;
   } finally {
+    const cleanup = { status: "running", observedProcesses: 0, survivors: [] };
     try {
       client?.close();
       if (Number.isInteger(child?.pid)) {
@@ -497,11 +541,16 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
       const survivors = processIdentities.length
         ? survivingProcessIds(processIdentities, await readProcessTable())
         : [];
+      cleanup.observedProcesses = processIdentities.length;
+      cleanup.survivors = survivors;
       if (survivors.length)
         throw new Error(`Fixture processes survived cleanup: ${survivors.join(", ")}`);
+      cleanup.status = "passed";
     } catch (cleanupError) {
+      cleanup.status = "failed";
       failure ??= cleanupError;
     }
+    onCleanup?.(cleanup);
     closeSync(logFd);
     if (!failure) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }

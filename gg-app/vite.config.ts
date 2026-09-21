@@ -104,6 +104,9 @@ export function rejectBrowserNodeBuiltins(): Plugin {
 export default defineConfig(async ({ command }) => ({
   plugins: [
     react(),
+    ...(command === "serve"
+      ? [(await import("./scripts/appearance-dev-identity.mjs")).appearanceDevIdentityPlugin()]
+      : []),
     ...(command === "serve" && process.env.GG_CHAT_DESIGN_PREVIEW === "1"
       ? [(await import("./scripts/chat-design-preview/vite-plugin.mjs")).chatDesignPreviewPlugin()]
       : []),

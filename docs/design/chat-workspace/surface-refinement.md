@@ -1,5 +1,7 @@
 # Light surfaces and code comparison
 
+Current follow-up: [native appearance](native-appearance.md) ports the accepted Light direction into normal semantic roles and saved settings. Light code is the production Light treatment; charcoal remains preview-only. The paragraphs below preserve the earlier browser experiment and its evidence, not the current integration status.
+
 The user liked the Light direction, then authorized refining its remaining black bands and comparing code treatments. This is still browser-only. Source-inspired status, the retained failed reference gate, and the separate native-integration boundary are unchanged.
 
 ## Implemented

@@ -1,6 +1,6 @@
 # Chat workspace comparison
 
-Status: browser-preview implementation, bounded verification and evidence handoff complete. **Accepted preview direction: Light, Light code, pearl rank badge, light scorecard and contained Autopilot switch. Production integration remains unapproved.** Light is explicitly source-inspired, not fidelity-verified, under the user's degraded-evidence decision. Accessibility/conformance limits remain documented. Nothing here changes the installed app.
+Status: the separately approved **native Light and saved reading preferences are integrated in app source**, with scoped Windows developer-native evidence. Dark remains the default. Use the [native appearance workflow and verification limits](native-appearance.md) for current review. Light remains source-inspired, not fidelity-verified. The full acceptance matrix is not certified complete, and the installed app has not changed.
 
 ## Goal
 
@@ -8,6 +8,7 @@ Compare the actual GG Coder workspace with independently selectable reading adju
 
 ## Modules
 
+- [Native appearance, developer launch and current evidence](native-appearance.md)
 - [Architecture and isolation](architecture.md)
 - [Reference ledger](references.md)
 - [Validation and comfort protocol](validation.md)
@@ -15,9 +16,15 @@ Compare the actual GG Coder workspace with independently selectable reading adju
 - [Light-surface and code refinement](surface-refinement.md)
 - [Latest rank badge, scorecard and Autopilot refinement](rank-controls.md)
 
+## Separate pane-swap implementation
+
+- [Optional chat-pane swaps into the middle](optional-middle-swaps.md) — user intent and scope, separate from Light-preview/message-alignment work.
+- [Middle-swaps implementation specification](middle-swaps-spec.md) — approved interaction contract and source implementation, independent of Light/message-alignment work. General rearrangement is retained.
+- [Pane-swap verification and remaining gaps](middle-swaps-verification.md) — passing scoped tests, real-component synthetic browser checks, the resolved browser-drag stall, retained historical test failures, and native/accessibility limits. This is not an installed-app or release claim.
+
 These documents are not ignored by Git, but have not been committed. Local design memory, approved plan, reference extracts, screenshots, and raw probe evidence live under ignored `.gg/` and do not accompany a clone automatically. Do not force-add proprietary extracts or heavy evidence.
 
-## Current execution boundary
+## Historical preview execution boundary
 
 The user separately approved restarting the existing server and fixing two unsupported button-query options in `ProgrammaticDiscovery.test.tsx`. The identified old Vite process was stopped; the preview server is running on port 1420. Other application changes were preserved. The approved local style-pack and historical design-context pointers were updated to this handoff.
 
@@ -74,4 +81,4 @@ Local six-pane screenshot evidence at 2560×1400, DPR 1, app zoom 1, after the s
 
 These links require this local evidence directory. Random existing idle phrases/effect timing can differ; the representative reply and test sequence are the same. Images are not a replacement for the live comfort comparison.
 
-Current preference: source-inspired Light with Light code. Continue reviewing the refinements in the browser; any native integration still requires a separate plan and approval.
+Current preference: opt-in source-inspired Light with Light code, while production defaults remain Dark/current reading. Native integration was separately approved and implemented; the visible developer app is now the primary review surface. The comparison links above remain historical, transient experiments.

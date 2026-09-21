@@ -1,5 +1,11 @@
 # Validation
 
+## Native appearance follow-up, 2026-09-21
+
+The later approved integration has [its own source/native verification ledger](native-appearance.md#verification-and-retained-failures). It includes actual normal-entry Tauri/Rust IPC, isolated real-daemon review, same-origin native window synchronization, controlled fixture checks, bounded debugging lifecycle regressions, and retained broad-suite timeouts. This does not turn the earlier browser-only results into native proof or erase their failed fidelity/accessibility gates. The full native acceptance matrix still has explicit gaps.
+
+## Historical preview validation
+
 **Current scope: browser-preview verification is complete with documented limits, not production or accessibility-conformance approval.** Final type check/build, 186 targeted tests, 33 layout/capture cases and 18 state/recovery cases passed. The Light pixel gate still fails; the user explicitly approved source-inspired, non-fidelity-verified comparison. Canonical accessibility/affordance reports remain nonzero and are triaged below.
 
 Latest follow-ups: [Light surface/code refinement](surface-refinement.md) and [rank/scorecard/Autopilot refinement](rank-controls.md) record the subsequently authorized changes and their newer checks. Counts and screenshots below describe the original preview delivery; do not treat them as a fresh run of the whole matrix after every refinement.

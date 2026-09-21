@@ -5,46 +5,67 @@ import { join } from "node:path";
 export const PHASE25_TOAST_TITLE = "Roadmap reminder due";
 export const PHASE25_TOAST_BODY = "Open GG Coder to review it.";
 
-class DevCdpClient {
-  constructor(socket) {
+export class DevCdpClient {
+  constructor(socket, { requestTimeoutMs = 15000 } = {}) {
     this.socket = socket;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.closed = false;
     this.nextId = 1;
     this.pending = new Map();
     socket.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data));
+      let message;
+      try { message = JSON.parse(String(event.data)); }
+      catch { this.fail(new Error("invalid dev fixture debugging response")); return; }
+      if (message.method === "Inspector.detached" || message.method === "Inspector.targetCrashed") {
+        this.fail(new Error("dev fixture debugging target detached"));
+        return;
+      }
       if (!message.id) return;
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(message.error.message));
       else pending.resolve(message.result);
     });
-    socket.addEventListener("close", () => {
-      for (const pending of this.pending.values()) {
-        pending.reject(new Error("dev fixture debugging connection closed"));
-      }
-      this.pending.clear();
-    });
+    socket.addEventListener("close", () => this.fail(new Error("dev fixture debugging connection closed")));
+    socket.addEventListener("error", () => this.fail(new Error("dev fixture debugging connection failed")));
+  }
+
+  fail(error) {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    this.socket.close();
   }
 
   static async connect(webSocketUrl) {
     const socket = new WebSocket(webSocketUrl);
     await new Promise((resolveOpen, reject) => {
-      socket.addEventListener("open", resolveOpen, { once: true });
-      socket.addEventListener(
-        "error",
-        () => reject(new Error("could not connect to the dev fixture")),
-        { once: true },
-      );
+      const timer = setTimeout(() => {
+        socket.close();
+        reject(new Error("dev fixture debugging connection timed out"));
+      }, 10000);
+      socket.addEventListener("open", () => { clearTimeout(timer); resolveOpen(); }, { once: true });
+      socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("could not connect to the dev fixture")); }, { once: true });
     });
     return new DevCdpClient(socket);
   }
 
   send(method, params = {}) {
+    if (this.closed) return Promise.reject(new Error("dev fixture debugging connection closed"));
     const id = this.nextId++;
     return new Promise((resolveSend, reject) => {
-      this.pending.set(id, { resolve: resolveSend, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      const timer = setTimeout(() => {
+        this.fail(new Error(`dev fixture debugging request timed out: ${method}`));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: resolveSend, reject, timer });
+      try { this.socket.send(JSON.stringify({ id, method, params })); }
+      catch (error) { this.fail(error); }
     });
   }
 
@@ -63,7 +84,7 @@ class DevCdpClient {
   }
 
   close() {
-    this.socket.close();
+    this.fail(new Error("dev fixture debugging connection closed"));
   }
 }
 
@@ -274,7 +295,7 @@ export async function connectToDevWebview(
   acceptTarget = (candidate) => !String(candidate.url).startsWith("devtools://"),
 ) {
   const target = await waitFor("dev fixture debugging target", async () => {
-    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) return null;
     const targets = await response.json();
     return targets.find(

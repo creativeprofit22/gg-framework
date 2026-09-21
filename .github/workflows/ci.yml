@@ -234,6 +234,73 @@ jobs:
         timeout-minutes: 15
         run: pnpm --filter gg-app smoke:cross-pane-project-isolation-dev
 
+      # Serial developer fixture: owns strict port 1420, reuses the Rust cache,
+      # and cleans up its own process tree on success and assertion failure.
+      - name: Pane swaps native smoke
+        id: pane_swaps_smoke
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          TEMP: ${{ runner.temp }}/pane-swaps-dev-smoke
+          TMP: ${{ runner.temp }}/pane-swaps-dev-smoke
+          GG_PANE_SWAPS_EVIDENCE: ${{ runner.temp }}/pane-swaps-evidence
+          CARGO_NET_OFFLINE: 'true'
+          COREPACK_ENABLE_NETWORK: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEMP" "$GG_PANE_SWAPS_EVIDENCE"
+          node gg-app/scripts/pane-swaps-dev-smoke.mjs
+
+      - name: Upload failed pane swaps evidence
+        if: failure() && runner.os == 'Windows' && steps.pane_swaps_smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pane-swaps-dev-smoke-${{ github.sha }}
+          # Sanitized verdict (including cleanup) and credential-free fixture
+          # screenshots only. Never upload TEMP profiles or raw developer logs.
+          path: |
+            ${{ runner.temp }}/pane-swaps-evidence/result.json
+            ${{ runner.temp }}/pane-swaps-evidence/native-workspace.png
+            ${{ runner.temp }}/pane-swaps-evidence/native-failure.png
+            ${{ runner.temp }}/pane-swaps-evidence/native-center-1280.png
+            ${{ runner.temp }}/pane-swaps-evidence/native-center-390.png
+          if-no-files-found: error
+          retention-days: 7
+
+      # Serial: shares strict port 1420 and the existing WebView2/CDP driver.
+      # The fixture awaits finite offline Cargo compilation BEFORE its separate
+      # 300-second native readiness budget; allow cold compilation at job level.
+      - name: Appearance native smoke
+        id: appearance_smoke
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}/appearance-dev-smoke
+          TMP: ${{ runner.temp }}/appearance-dev-smoke
+          CARGO_NET_OFFLINE: 'true'
+          COREPACK_ENABLE_NETWORK: '0'
+          UIMAXXXING_EYES_NO_INSTALL: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEMP"
+          pnpm --filter gg-app smoke:appearance
+
+      - name: Upload failed appearance evidence
+        if: failure() && runner.os == 'Windows' && steps.appearance_smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: appearance-dev-smoke-${{ github.sha }}
+          # Only controlled fixture verdicts/PNGs, never visible-session records,
+          # nested server profiles, credentials, or raw developer logs.
+          include-hidden-files: true
+          path: |
+            .gg/eyes/out/appearance-native/fixture-*/result.json
+            .gg/eyes/out/appearance-native/fixture-*/*.png
+          if-no-files-found: error
+          retention-days: 7
+
       # Serial with the other native smokes: Vite owns fixed port 1420 and
       # strictPort rejects an existing listener. Reuse the Rust cache above;
       # the fixture builds the current developer target, never a packaged app.

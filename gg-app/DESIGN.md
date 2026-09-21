@@ -1,5 +1,28 @@
 # GG App Interface Design
 
+## Native appearance and reading preferences (2026-09-21)
+
+**Surface/job:** preserve the dense native coding workspace and its one-to-six-pane/unequal-split workflow while allowing independent theme/readability choices. The established user workflow is supported; broader audience/access needs and long-term comfort remain unestablished. This is not a redesign or eye-strain treatment claim.
+
+**Direction:** optional source-inspired Light with a pale control/composer surface, soft workspace wash, light code, pearl rank badge, light scorecard and contained Autopilot switch. Preserve Geist, the existing icon system, ranks, humor and effects. The coding wake screen stays intentionally dark. Default Dark/current reading is retained; the shared modal close glyph received a measured contrast correction.
+
+**Defaults:** Dark; 15px prose; current letter and paragraph spacing; no wide-pane cap; current identity treatment; current streamed-word reveal. Six reading choices remain independent of theme. Reset affects only appearance. No persisted Original/Reading comparison mode or charcoal-code experiment.
+
+**Reuse map:** `appearance.ts` owns validated origin-local preferences and root application; `appearance.css` owns theme/reading roles; existing `theme.ts` exports resolve semantic aliases with valid alpha composition. `AppearanceSettings` uses labeled native selects and the existing modal focus/scroll model. `usePaneSwapViewState` captures/restores reading anchors and selections across preference reflow without remounting panes. `ActionMetal` uses its installed library's Light palette. `appearance-native.ts` serializes the existing window API setters; portals and What's New inherit root roles.
+
+| State | Contract / current evidence |
+| --- | --- |
+| Dark/default | Existing compact reading retained; scoped native checks passed |
+| Light/default or changed reading | Independent saved fields, same pane/session hosts; scoped native smoke passed |
+| Corrupt/denied storage | Validated defaults or session-only choice with visible warning; unit tests |
+| Other native window / What's New | Saved initialization and live same-origin updates; native review |
+| Reflow / unequal panes | Existing glyph/composer/selection restoration; native fixture tests |
+| Narrow / 200% / keyboard | Stacked new controls, modal scroll/focus retained; component and native evidence separately labeled |
+| Reduced motion / forced colors | Existing effect fallback and scoped controls checked; exhaustive coverage unverified |
+| OS cold start / install / macOS | Unverified; no flash-free or release claim |
+
+Implementation details, launch commands, measured contrast, retained test failures, state coverage and remaining acceptance gaps are in [native appearance](../docs/design/chat-workspace/native-appearance.md). The full accessibility/native acceptance matrix is not certified complete. Existing historical sections below remain scoped to their original work.
+
 ## Phase 17: Compact Notes Shell
 
 ### Design read

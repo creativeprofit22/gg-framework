@@ -1,5 +1,4 @@
 import {
-  copyFileSync,
   existsSync,
   readdirSync,
   realpathSync,
@@ -11,6 +10,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { copyFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -277,7 +277,7 @@ function installedPackageRoot(name, fromManifest) {
   }
 }
 
-function createInstalledPruneFixture() {
+async function createInstalledPruneFixture() {
   const root = mkdtempSync(join(tmpdir(), "gg-installed-prune-"));
   temporaryDirectories.push(root);
   const nodeModules = join(root, "node_modules");
@@ -291,6 +291,7 @@ function createInstalledPruneFixture() {
     ["@anthropic-ai/sandbox-runtime"],
   ];
   const copiedFiles = [];
+  const writes = [];
   for (const [name, parent] of packages) {
     const source = installedPackageRoot(
       name,
@@ -316,20 +317,28 @@ function createInstalledPruneFixture() {
               /^(ort\.node\.min\.(js|mjs)|transformers\.node\.mjs|cli\.js)$/.test(entry.name)) ||
             path === join("vendor", "java-proxy-agent", "srt-proxy-agent.jar")
           ) {
-            copyFileSync(from, to);
+            writes.push(() => copyFile(from, to));
             copiedFiles.push({ from, to });
-          } else writeFileSync(to, "");
+          } else writes.push(() => writeFile(to, ""));
         }
       }
     };
     visit();
   }
+  // Keep the complete installed layout and real retained bytes, but avoid
+  // serializing 1,000+ independent disk writes on Windows. Settle each bounded
+  // batch before propagating an error so cleanup never races outstanding I/O.
+  for (let offset = 0; offset < writes.length; offset += 16) {
+    const results = await Promise.allSettled(writes.slice(offset, offset + 16).map((write) => write()));
+    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (errors.length) throw new AggregateError(errors, "Installed prune fixture writes failed");
+  }
   return { nodeModules, copiedFiles };
 }
 
 describe("allowlisted package payload pruning", () => {
-  it("accepts current installed layouts and preserves copied runtime/license bytes", () => {
-    const { nodeModules, copiedFiles } = createInstalledPruneFixture();
+  it("accepts current installed layouts and preserves copied runtime/license bytes", async () => {
+    const { nodeModules, copiedFiles } = await createInstalledPruneFixture();
     pruneAllowlistedPackagePayloads(nodeModules, { platform: "win32", arch: "x64" });
     for (const { from, to } of copiedFiles) {
       expect(readFileSync(to).equals(readFileSync(from))).toBe(true);

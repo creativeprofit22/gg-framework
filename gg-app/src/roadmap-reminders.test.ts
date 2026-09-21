@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { invoke, pluginLogError } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -23,18 +23,11 @@ import type {
   ReminderReserveOutcome,
 } from "./notes-types";
 
-const originalTimezone = process.env.TZ;
-
 beforeEach(() => {
-  process.env.TZ = "America/New_York";
   invoke.mockReset();
   pluginLogError.mockReset();
   pluginLogError.mockResolvedValue(undefined);
   resetReminderPermissionCacheForTests();
-});
-
-afterEach(() => {
-  process.env.TZ = originalTimezone;
 });
 
 function reservation(occurrenceKey = "occurrence-1"): ReminderReserveOutcome {
@@ -152,6 +145,9 @@ describe("Roadmap reminder preset calculations", () => {
   });
 
   it("converts valid local wall time to UTC and rejects empty, past, overflow, and DST-gap values", () => {
+    // Verify the actual Date timezone, not only the worker's environment copy.
+    expect(new Date(2026, 0, 1).getTimezoneOffset()).toBe(300);
+    expect(new Date(2026, 6, 1).getTimezoneOffset()).toBe(240);
     const now = new Date(2026, 2, 7, 12);
     const valid = localDateTimeToIso("2026-03-08T09:00", now);
     expect(valid).toBe(new Date(2026, 2, 8, 9).toISOString());

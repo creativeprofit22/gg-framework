@@ -16,6 +16,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { stream, StreamResult, type Message, type ToolCall } from "@kenkaiiii/gg-ai";
 import { useAgentLoop, type UseAgentLoopReturn } from "./useAgentLoop.js";
+import * as terminalPresentation from "./terminal-programmatic-presentation.js";
 import { submitPromptCommand } from "../submit-prompt-command.js";
 import { ScreenRecorder, makeRecordingStdout } from "../testing/screen-recorder.js";
 import { useFakeHome } from "../../test-support/fake-home.js";
@@ -192,6 +193,8 @@ async function assessmentFixture(run: (fixture: {
   profile: ReturnType<typeof createProgrammaticProfileTool>; scan: AgentTool;
   submit: (command: string) => Promise<boolean>; rerender: (options: Partial<AgentLoopOptions>) => void;
 }) => Promise<void>) {
+  // Observe the real renderer boundary without replacing its implementation.
+  vi.spyOn(terminalPresentation, "renderTerminalProgrammaticAssessment");
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-assessment-"));
   const restore = useFakeHome(path.join(cwd, "home"));
   const profile = createProgrammaticProfileTool(cwd);
@@ -233,7 +236,11 @@ function scriptAssessment(calls: ToolCall[], inspect?: (params: Parameters<typeo
 }
 function assessmentSummary(messages: Message[]) {
   const result = [...messages].reverse().find((message) => message.role === "assistant" && typeof message.content === "string" && message.content.startsWith("## Needs assessment\n\n"));
-  return JSON.parse((result!.content as string).slice("## Needs assessment\n\n".length));
+  const rendered = vi.mocked(terminalPresentation.renderTerminalProgrammaticAssessment);
+  expect(rendered).toHaveBeenCalled();
+  expect(result?.content).toBe(rendered.mock.results.at(-1)?.value);
+  expect(result?.content).toContain("Limits:");
+  return rendered.mock.lastCall![0].assessment;
 }
 
 it.each((["setup", "configured"] as const).flatMap((mode) => [" \t\r\n ", "packaging", "  café\n日本語\r\n\tpackaging  "].map((focus) => ({ mode, focus }))))("prepares manifest-free $mode with focus $focus, exact facts and bounded evidence", async ({ mode, focus }) => {
@@ -351,7 +358,7 @@ it("rechecks bounded evidence after credentials and refuses replaced read regist
     expect(JSON.stringify(vi.mocked(stream).mock.calls)).not.toContain("revoked-evidence-marker");
     expect(replacement.execute).not.toHaveBeenCalled();
     expect(JSON.stringify(messages.current)).toContain("Tool unavailable in read-only advisory scope");
-    expect(assessmentSummary(messages.current).limitations).toContain("Initial evidence was denied by host permissions; omitted content remains uninspected.");
+    expect(assessmentSummary(messages.current).limitations).toContain("Permission was denied for the initial inspection. The omitted content was not checked.");
   });
 });
 

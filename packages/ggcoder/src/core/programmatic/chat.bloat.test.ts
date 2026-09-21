@@ -98,6 +98,11 @@ describe("embedded chat touched-files bloat guard", () => {
       read("../../../../../gg-app/src-tauri/src/lib.rs"),
       read("../../../../../gg-app/src/ProgrammaticAssessment.tsx"),
     ]);
+    const setupProjection = await read("../../app-sidecar-programmatic-projection.ts");
+    expect(adapter).toContain("projectProgrammaticSetup(proposal, handle)");
+    expect(Buffer.byteLength(setupProjection)).toBeLessThan(2_000);
+    expect(setupProjection).not.toMatch(/from ["']node:|\b(?:fetch|writeFile|rename|spawn|exec|persistProgrammaticProfile)\s*\(/);
+    expect(setupProjection).toContain("proposal.routes.map");
     expect(adapter).toContain("buildProgrammaticProfileProposal");
     expect(adapter).toContain("persistProgrammaticProfile");
     expect(adapter).not.toMatch(/\b(?:writeFile|rename|buildProgrammaticInventory|discoverProgrammaticOpportunities)\s*\(/);

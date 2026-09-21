@@ -108,17 +108,22 @@ async function assess(fixture: EvaluationFixture, mode: "setup" | "configured", 
     const response = await session.assessProgrammatic(mode);
     expect(turn).toBe(4);
     expect(response.assessment.status).toBe("completed");
-    expect(presentation).toContain("Coverage: limited");
+    expect(response.captured?.assessment.reportedCoverage).toMatchObject({ status: "limited", scope: fixture.coverage });
+    expect(presentation).toContain("Limits:");
+    expect(presentation).toContain("Advice only. Running or editing anything requires separate approval.");
     expect(presentation).toContain(fixture.coverage);
     for (const need of fixture.needs) {
-      for (const text of [need.outcome, need.rationale, need.trigger, need.successCheck, ...need.sources.filter((file) => !(unreadable && file === "inspect.sh"))]) expect(presentation).toContain(text);
-      if (need.scope) expect(presentation).toContain(`Affected subproject: ${need.scope}`);
+      for (const text of [need.outcome, need.rationale]) expect(presentation).toContain(text);
+      if (need.scope) expect(presentation).toContain(`Scope: ${need.scope}`);
     }
     const advice = submitted! as { recommendations: { evidence: { items: { source: string; location: { path: string } }[] }; choice: { kind: string }; alternatives: unknown[] }[] };
+    // Full workflow, success checks, paths, alternatives and receipt provenance
+    // remain exact in accepted data, not raw internals recited in display copy.
+    expect(response.discoveryRecords?.map((record) => record.recommendation)).toEqual(advice.recommendations);
     expect(advice.recommendations.map((need) => need.choice.kind)).toEqual(fixture.needs.map((need) => need.kind));
     advice.recommendations.forEach((need, index) => {
       expect(need.evidence.items.map((item) => item.location.path)).toEqual(fixture.needs[index]!.sources.filter((file) => !(unreadable && file === "inspect.sh")));
-      for (const item of need.evidence.items) expect(presentation).toContain(item.source);
+      for (const item of need.evidence.items) expect(presentation).not.toContain(item.source);
       if (!["manual", "needs-more-evidence"].includes(need.choice.kind)) expect(need.alternatives.length).toBeGreaterThan(0);
     });
     for (const tools of visible) for (const name of ["write", "edit", "bash", "programmatic_command", "subagent", "spawn_agent"]) expect(tools).not.toContain(name);

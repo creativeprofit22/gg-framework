@@ -192,7 +192,8 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     expect(setup?.prompt).toContain('The host already collected exact `programmatic_profile` inspection facts.');
     expect(setup?.prompt).toContain("Do not repeat inspection or discover tools.");
     expect(setup?.prompt).toContain("no scan is required or permitted in setup.");
-    expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
+    expect(setup?.prompt).toContain("Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review");
+    expect(setup?.prompt).toContain("do not recite these raw details in the setup transcript");
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");
     expect(setup?.prompt).not.toContain('action: "generate"');

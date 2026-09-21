@@ -10,7 +10,8 @@ export interface DiscoveryRecord {
   /** Accepted domain data stays in the backend; never include this in events. */
   recommendation: Accepted["recommendations"][number];
 }
-const unavailable = { available: false, reason: "Check this saved suggestion again before using it. Earlier inspections and approvals cannot be reused." };
+function step(available: boolean, reason: string) { return { available, reason }; }
+const unavailable = step(false, "Check this saved suggestion again before using it. Earlier inspections and approvals cannot be reused.");
 
 function sharedDetails(value: DiscoveryRecord["recommendation"] | RecommendationObservationV1) {
   const { outcome, rationale, uncertainty, choice, alternatives } = value;
@@ -33,17 +34,17 @@ function commandAvailability(value: { availability?: CommandChoice["availability
     : { status: "reinspection-required", reason: "This saved command has not been checked again. Inspect it without making changes before using it." };
   return undefined;
 }
-/** Preserve every detail; the shared display guards reject over-budget candidates rather than truncating review input. */
+/** Display guards reject oversized candidates; never truncate review input. */
 function details(choice: DiscoveryRecord["recommendation"]["choice"] | RecommendationObservationV1["choice"]): Pick<DiscoveryCandidate, "details" | "risks" | "nextStep" | "availability"> {
   switch (choice.kind) {
-    case "manual": return { details: choice.steps, risks: [], nextStep: { available: false, reason: "Follow the manual steps. There is no automatic run for this suggestion." } };
+    case "manual": return { details: choice.steps, risks: [], nextStep: step(false, "Follow the manual steps. There is no automatic run for this suggestion.") };
     case "needs-more-evidence": return { details: [...choice.missingEvidence, ...choice.nextInspectionSteps], risks: [],
-      nextStep: { available: true, reason: "Inspect the missing evidence without making changes, using your current permissions." } };
+      nextStep: step(true, "Inspect the missing evidence without making changes, using your current permissions.") };
     case "missing-capability": return { details: [choice.proposal.desiredOutcome, ...choice.proposal.prerequisites,
       ...choice.proposal.inputs, ...choice.proposal.outputs, ...choice.proposal.verificationExpectations], risks: choice.proposal.risks,
       nextStep: choice.proposal.capabilityKind === "app-backed"
-        ? { available: false, reason: "Requires application development. A prompt alone cannot provide this functionality." }
-        : { available: true, reason: "Review a proposal without making changes. Creating, checking and running it each need separate review and approval." } };
+        ? step(false, "Requires application development. A prompt alone cannot provide this functionality.")
+        : step(true, "Review a proposal without making changes. Creating, checking and running it each need separate review and approval.") };
     case "reuse-command":
     case "extend-command": {
       const availability = "availability" in choice ? choice.availability : undefined;
@@ -53,10 +54,10 @@ function details(choice: DiscoveryRecord["recommendation"]["choice"] | Recommend
       const appBacked = availability?.status === "available" && availability.snapshot.capabilityKind === "app-backed";
       return { availability: commandAvailability(choice), details: [command, ...(choice.kind === "extend-command" ? [...choice.requirement.prerequisites, ...choice.proposedChanges] : [])],
         risks: choice.kind === "extend-command" ? choice.requirement.risks : [],
-        nextStep: appBacked ? { available: false, reason: "Requires supported application integration. This proposal cannot run it." }
-          : availability?.status !== "available" ? { available: true, reason: "Recheck the command and project prerequisites without making changes. Nothing is approved to run." }
-          : { available: true, reason: choice.kind === "reuse-command" ? "Review the current command and scope. Running it requires separate approval."
-            : "Review the base command and proposed changes; opening review does not edit or overwrite it." } };
+        nextStep: appBacked ? step(false, "Requires supported application integration. This proposal cannot run it.")
+          : availability?.status !== "available" ? step(true, "Recheck the command and project prerequisites without making changes. Nothing is approved to run.")
+          : step(true, choice.kind === "reuse-command" ? "Review the current command and scope. Running it requires separate approval."
+            : "Review the base command and proposed changes; opening review does not edit or overwrite it.") };
     }
   }
 }

@@ -8,7 +8,6 @@ import {
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
   type ProgrammaticChatResponse,
-  type ProgrammaticChatProposal,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   buildProgrammaticProfileProposal,
@@ -22,6 +21,7 @@ import {
   runProgrammaticScan,
 } from "./core/programmatic/lifecycle.js";
 import { canonicalJson, sha256 } from "./core/tauri-package/paths.js";
+import { projectProgrammaticSetup } from "./app-sidecar-programmatic-projection.js";
 
 /** Bind the existing session bus to the desktop broadcast surface. Retired
  * session objects and conversation identities cannot publish current status. */
@@ -211,28 +211,7 @@ export class AppSidecarProgrammaticChat {
             return { status: failure.status, body };
           }
           const handle = sha256(randomBytes(32).toString("hex") + canonicalJson(proposal));
-          const projection: ProgrammaticChatProposal = {
-            handle: proposal.operation === "current" ? null : handle,
-            operation: proposal.operation,
-            configuration: proposal.configuration,
-            fingerprint: proposal.configurationFingerprint.sha256,
-            profileJson: canonicalJson(proposal.profile),
-            ...(proposal.historyPolicy ? { historyPolicy: proposal.historyPolicy, expectedRecoveryDigest: proposal.expectedRecoveryDigest } : {}),
-            routes: proposal.routes.map(({ opportunityId, resolution }) => ({
-              id: opportunityId,
-              route: {
-                available: resolution.status === "routable",
-                command:
-                  resolution.status === "routable"
-                    ? resolution.specialistCommand
-                    : (resolution.candidateCommand ?? null),
-                reason: resolution.reason,
-                machineLocal: resolution.availability.portability === "machine-local",
-              },
-            })),
-            exclusions: proposal.exclusions,
-            configurationInputs: proposal.configurationInputs,
-          };
+          const projection = projectProgrammaticSetup(proposal, handle);
           body = { version: 1, action: "inspect-setup", ok: true, proposal: projection, assessment };
           if (!isProgrammaticChatResponse(body))
             return fail(422, "The proposed setup is too large to display safely. It cannot be approved here; no settings were saved.");

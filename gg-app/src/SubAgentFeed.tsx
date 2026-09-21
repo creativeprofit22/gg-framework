@@ -81,7 +81,7 @@ export function SubAgentFeed({ agents, aborted = false }: Props): React.ReactEle
       : `${agents.length} ${noun} done`;
 
   return (
-    <div className="subagents">
+    <div className="subagents" data-swap-row="">
       <div className="subagents-head">
         <span className="tool-dot" style={{ color: headerColor }}>
           {DOT}

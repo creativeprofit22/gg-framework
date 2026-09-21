@@ -4556,7 +4556,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     <div
       className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}`}
       data-glow={glowState}
-      style={{ background: theme.background, ...glowStyle }}
+      style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
       onDragEnter={handleWindowDragEnter}
       onDragOver={handleWindowDragOver}

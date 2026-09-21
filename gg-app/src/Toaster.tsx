@@ -81,8 +81,8 @@ export function Toaster(): React.ReactElement {
               className="toast-icon"
               style={{
                 color,
-                borderColor: `${color}55`,
-                background: `${color}1a`,
+                borderColor: `color-mix(in srgb, ${color} 33.3333%, transparent)`,
+                background: `color-mix(in srgb, ${color} 10.1961%, transparent)`,
                 display: "inline-flex",
               }}
             >

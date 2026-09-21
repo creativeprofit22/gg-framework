@@ -303,7 +303,7 @@ export function AskBand({
 
   if (cancelled && !done) {
     return (
-      <div className="ask-band is-closed">
+      <div className="ask-band is-closed" data-swap-row="">
         <span className="ask-closed">
           This question was cancelled, so it no longer needs an answer.
         </span>
@@ -327,7 +327,7 @@ export function AskBand({
       .filter(Boolean)
       .join(" · ");
     return (
-      <div className="ask-band is-done">
+      <div className="ask-band is-done" data-swap-row="">
         <AnsweredLine text={text} />
       </div>
     );
@@ -338,7 +338,7 @@ export function AskBand({
   const numbered = questions.length > 1;
 
   return (
-    <div className="ask-band" ref={bandRef} role="group" aria-label="GG Coder needs your answer">
+    <div className="ask-band" data-swap-row="" ref={bandRef} role="group" aria-label="GG Coder needs your answer">
       {questions.map((q, i) => (
         <Question
           key={q.id}

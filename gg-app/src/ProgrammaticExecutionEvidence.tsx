@@ -8,7 +8,7 @@ export function ProgrammaticExecutionEvidenceView({
   items: ProgrammaticExecutionEvidence[];
 }) {
   return (
-    <section className="programmatic-chat" aria-label="Task execution evidence">
+    <section className="programmatic-chat" data-swap-row="" aria-label="Task execution evidence">
       <h4>Task execution evidence</h4>
       <ul>
         {items.map((item, index) => (

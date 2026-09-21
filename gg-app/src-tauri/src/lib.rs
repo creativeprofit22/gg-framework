@@ -1,3 +1,5 @@
+#[cfg(all(debug_assertions, target_os = "windows"))]
+mod appearance_background_probe;
 mod azure_connection;
 mod qwen_cloud_connection;
 use qwen_cloud_connection::{qwen_cloud_connection_status, qwen_cloud_connection_save, qwen_cloud_connection_remove, qwen_cloud_connection_test};
@@ -7163,6 +7165,26 @@ fn phase26_macos_smoke_enabled() -> bool {
     )
 }
 
+// Every WebView sharing the isolated developer profile must use identical
+// browser arguments. A different environment makes WebView2 reject the second
+// window with 0x8007139F. Normal release windows receive no debugging arguments.
+#[cfg(target_os = "windows")]
+fn smoke_browser_args() -> Result<Option<String>, String> {
+    if !cfg!(feature = "native-smoke") && !phase25_dev_fixture_enabled() {
+        return Ok(None);
+    }
+    let port_variable = if cfg!(feature = "native-smoke") {
+        "GG_APP_NATIVE_SMOKE_CDP_PORT"
+    } else {
+        "GG_PHASE25_DEV_FIXTURE_CDP_PORT"
+    };
+    let cdp_port = std::env::var(port_variable)
+        .map_err(|_| format!("{port_variable} is required"))?
+        .parse::<u16>()
+        .map_err(|_| format!("{port_variable} must be a TCP port"))?;
+    Ok(Some(format!("--remote-debugging-port={cdp_port}")))
+}
+
 fn build_app_window_with_visibility(
     app: &tauri::AppHandle,
     label: &str,
@@ -7176,17 +7198,7 @@ fn build_app_window_with_visibility(
         .background_color(APP_BG)
         .visible(visible);
     #[cfg(target_os = "windows")]
-    if cfg!(feature = "native-smoke") || phase25_dev_fixture_enabled() {
-        let port_variable = if cfg!(feature = "native-smoke") {
-            "GG_APP_NATIVE_SMOKE_CDP_PORT"
-        } else {
-            "GG_PHASE25_DEV_FIXTURE_CDP_PORT"
-        };
-        let cdp_port = std::env::var(port_variable)
-            .map_err(|_| format!("{port_variable} is required"))?
-            .parse::<u16>()
-            .map_err(|_| format!("{port_variable} must be a TCP port"))?;
-        let browser_args = format!("--remote-debugging-port={cdp_port}");
+    if let Some(browser_args) = smoke_browser_args()? {
         builder = builder.additional_browser_args(&browser_args);
     }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
@@ -7632,7 +7644,7 @@ async fn open_whatsnew_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
         return Ok(());
     }
-    let win = WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         &app,
         "whatsnew",
         WebviewUrl::App("index.html?whatsnew=1".into()),
@@ -7646,9 +7658,13 @@ async fn open_whatsnew_window(app: tauri::AppHandle) -> Result<(), String> {
     .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
+    .center();
+    #[cfg(target_os = "windows")]
+    let builder = match smoke_browser_args()? {
+        Some(browser_args) => builder.additional_browser_args(&browser_args),
+        None => builder,
+    };
+    let win = builder.build().map_err(|e| e.to_string())?;
     let _ = win.set_focus();
     Ok(())
 }
@@ -10490,6 +10506,8 @@ pub fn run() {
         .manage(LocalPatchedUpdate::default())
         .manage(http_client)
         .invoke_handler(tauri::generate_handler![
+            #[cfg(all(debug_assertions, target_os = "windows"))]
+            appearance_background_probe::appearance_background_probe,
             sidecar_port,
             agent_pane_status,
             agent_pane_create,

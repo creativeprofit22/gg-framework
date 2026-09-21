@@ -2001,7 +2001,7 @@ select {
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-muted);
   cursor: pointer;
   font-family: var(--sans);
   font-size: 20px;
@@ -3883,9 +3883,9 @@ select {
 }
 /* Sent prompts get their own identity without changing the composer or special states. */
 .user-msg:where(:not(.user-ken-sent, .user-ken, .ask-answered-bubble, .queued, .promoted)) {
-  color: #bfdbfe;
-  background: #172b46;
-  border-color: #36577d;
+  color: var(--sent-user-text);
+  background: var(--sent-user-bg);
+  border-color: var(--sent-user-border);
 }
 
 /* "Sent to GG Coder" bubble (from a Ken prompt-block button): same faint Ken
@@ -4188,7 +4188,7 @@ select {
 .markdown pre {
   margin: 0;
   padding: 12px 36px 12px 14px;
-  background: #0b0d11;
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   color: var(--text-secondary);

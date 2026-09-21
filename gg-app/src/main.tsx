@@ -4,11 +4,26 @@ import { error as logError, attachConsole } from "@tauri-apps/plugin-log";
 import App from "./App";
 import { ZoomController } from "./ZoomController";
 import { WhatsNewModal } from "./WhatsNewModal";
+import { Toaster } from "./Toaster";
 // Experimental: webcam gaze → window focus. Disabled for now; re-enable by
 // uncommenting this import + the <GazeController /> mount below (and the
 // <GazeButton /> in App.tsx). The full implementation lives in src/gaze/.
 // import { GazeController } from "./GazeController";
 import { tagPlatform } from "./platform";
+import { appearance } from "./appearance";
+import { startNativeAppearance } from "./appearance-native";
+import "./App.css";
+import "./appearance.css";
+
+// Apply saved document-wide preferences before either React entry renders.
+const stopAppearance = appearance.start();
+const stopNativeAppearance = startNativeAppearance();
+const stopAppearanceServices = () => { stopNativeAppearance(); stopAppearance(); };
+window.addEventListener("pagehide", stopAppearanceServices, { once: true });
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  window.removeEventListener("pagehide", stopAppearanceServices);
+  stopAppearanceServices();
+});
 
 // Release history belongs to the notes window, not every workspace's startup.
 const WhatsNewWindow = lazy(() =>
@@ -49,9 +64,13 @@ if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
   // corners show through instead of sitting on a hard rectangular window edge.
   document.documentElement.classList.add("whatsnew-root");
   root.render(
-    <Suspense fallback={null}>
-      <WhatsNewWindow />
-    </Suspense>,
+    <>
+      <Suspense fallback={null}>
+        <WhatsNewWindow />
+      </Suspense>
+      {/* Subscribe immediately, even while the release history is loading. */}
+      <Toaster />
+    </>,
   );
 } else {
   // No StrictMode: its intentional double-invocation of effects and state

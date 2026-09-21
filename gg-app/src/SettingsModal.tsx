@@ -16,6 +16,7 @@ import { formatBuildIdentity } from "./build-info";
 import { AzureConnectionSettings } from "./AzureConnectionSettings";
 import { MemesButton } from "./MemesButton";
 import { GgUiButton } from "./GgUiButton";
+import { AppearanceSettings } from "./AppearanceSettings";
 
 interface Props {
   onClose: () => void;
@@ -122,6 +123,7 @@ export function SettingsModal({
           {"Browse\u2026"}
         </button>
       </div>
+      <AppearanceSettings />
       <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
       {buildIdentity && (
         <div className="modal-build-identity" style={{ color: theme.textDim }}>

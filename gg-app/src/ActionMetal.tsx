@@ -1,5 +1,8 @@
 import { lazy, Suspense, useSyncExternalStore } from "react";
 import { useGgUiEnabled } from "./gg-ui";
+import { appearance } from "./appearance";
+
+const getTheme = () => appearance.getSnapshot().preferences.theme;
 
 // Keep the shader in its own chunk; inactive/static controls never request it.
 const MetalFx = lazy(() => import("metal-fx").then((module) => ({ default: module.MetalFx })));
@@ -27,6 +30,7 @@ export function ActionMetal({
   variant?: "circle" | "button";
 }): React.ReactElement | null {
   const ggUiEnabled = useGgUiEnabled();
+  const theme = useSyncExternalStore(appearance.subscribe, getTheme);
   const staticAppearance = useSyncExternalStore(
     subscribeStaticAppearance,
     prefersStaticAppearance,
@@ -40,7 +44,7 @@ export function ActionMetal({
         className="action-metal"
         preset="chromatic"
         variant={variant}
-        theme="dark"
+        theme={theme}
         strength={0.81}
         innerShadow
         normalizeHostStyles={false}

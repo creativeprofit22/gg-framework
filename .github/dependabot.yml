@@ -9,15 +9,11 @@ updates:
       actions:
         patterns: ["*"]
 
-  # pnpm workspace — directories mirror pnpm-workspace.yaml globs so per-package
-  # manifests get updates too (the shared root pnpm-lock.yaml is regenerated
-  # with each PR).
+  # Update the pnpm workspace from its root so package manifests and the shared
+  # lockfile stay in sync. pnpm-workspace.yaml supplies the member directories;
+  # Dependabot does not support updates from workspace subdirectories.
   - package-ecosystem: npm
-    directories:
-      - /
-      - /packages/*
-      - /experiments/*
-      - /gg-app
+    directory: /
     schedule:
       interval: weekly
     groups:

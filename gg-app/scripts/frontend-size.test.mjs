@@ -58,18 +58,44 @@ function runGate() {
   );
 }
 
-describe("frontend initial-JavaScript budget", () => {
+describe("bundle-size enforcement", () => {
   it("counts shared static chunks once, handles cycles, and excludes lazy notes", () => {
     const result = runGate();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("34.2KB");
   });
 
-  it("fails if the deferred history becomes eager again", () => {
+  it("fails CI on eager bundle growth", () => {
     manifest["index.html"].imports.push("notes");
     const result = runGate();
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("FAIL");
+    expect(result.stdout).toContain("+96.7KB");
+    expect(result.stderr).toContain("Size gate failed");
+  });
+
+  it.each(["dist:ggcoder", "sidecar"])("fails CI on %s growth", (artifact) => {
+    const target = artifact === "dist:ggcoder"
+      ? path.join(root, "packages/ggcoder/dist/index.js")
+      : path.join(root, "gg-app/src-tauri/sidecar/app-sidecar.mjs");
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, Buffer.alloc(200_000));
+    if (artifact === "sidecar") {
+      mkdirSync(path.join(root, "gg-app/src-tauri/sidecar/skills"));
+    }
+    writeFileSync(
+      path.join(root, "bench/baseline/sizes.json"),
+      JSON.stringify({ artifacts: { [artifact]: { bytes: 35_000 } } }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, "bench/size-gate.mjs"), "--only", artifact],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("FAIL");
+    expect(result.stdout).toContain("+161.1KB");
+    expect(result.stderr).toContain("Size gate failed");
   });
 
   it("fails for an incomplete build instead of reporting a smaller bundle", () => {

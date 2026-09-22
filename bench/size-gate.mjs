@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// size-gate — deterministic bundle-size regression gate (fx-pattern CI ratchet).
+// size-gate — enforce bundle-size budgets.
 // Artifacts:
 //   dist:ggcoder — total bytes of packages/ggcoder/dist (the shipped CLI).
 //   frontend:initial — entry JS + static imports, excluding on-demand chunks.
@@ -12,8 +12,7 @@
 //   node bench/size-gate.mjs                 # check all artifacts against baseline
 //   node bench/size-gate.mjs --only sidecar  # check one artifact
 //   node bench/size-gate.mjs --update        # re-baseline after an intentional change
-// Fail rule: current > baseline + max(2%, 100KB; 10KB for initial frontend JS).
-// Shrinks pass and print a hint.
+// Fail on growth above baseline + max(2%, 100KB; 10KB for initial frontend JS).
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -91,19 +90,19 @@ for (const [name, measure] of Object.entries(ARTIFACTS)) {
   baseline.artifacts[name] = { bytes, recorded_at: new Date().toISOString() };
 
   if (!entry) {
-    rows.push([name, "—", fmt(bytes), "new baseline"]);
+    rows.push([name, "—", fmt(bytes), "—", "no baseline"]);
     continue;
   }
   const absoluteTolerance = name === "frontend:initial" ? 10 * 1024 : TOLERANCE.absoluteBytes;
   const allowed = entry.bytes + Math.max(entry.bytes * TOLERANCE.relative, absoluteTolerance);
   const delta = bytes - entry.bytes;
-  const verdict = bytes > allowed ? "FAIL" : delta < 0 ? "ok (ratchet down available)" : "ok";
-  if (bytes > allowed) failed = true;
-  rows.push([name, fmt(entry.bytes), fmt(bytes), verdict]);
+  const verdict = bytes > allowed ? "FAIL" : delta < 0 ? "smaller" : "ok";
+  if (bytes > allowed && !update) failed = true;
+  rows.push([name, fmt(entry.bytes), fmt(bytes), `${delta >= 0 ? "+" : ""}${fmt(delta)}`, verdict]);
 }
 
-const widths = [12, 12, 12, 28];
-const header = ["artifact", "baseline", "current", "verdict"];
+const widths = [18, 12, 12, 12, 28];
+const header = ["artifact", "baseline", "current", "change", "note"];
 console.log(
   rows
     .map((row) => row.map((cell, i) => String(cell).padEnd(widths[i])).join(" "))
@@ -111,13 +110,12 @@ console.log(
     .replace(/^/, `${header.map((cell, i) => cell.padEnd(widths[i])).join(" ")}\n`),
 );
 
+if (failed) {
+  console.error("\nSize gate failed. Check growth or missing build artifacts; do not rebaseline to bypass a regression.");
+  process.exit(1);
+}
+
 if (update) {
   await writeFile(BASELINE_PATH, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
   console.log(`\nBaseline updated: ${path.relative(REPO_ROOT, BASELINE_PATH)}`);
-} else if (failed) {
-  console.error(
-    "\nSize budget exceeded. If the growth is intentional, re-baseline with:\n" +
-      "  node bench/size-gate.mjs --update",
-  );
-  process.exit(1);
 }

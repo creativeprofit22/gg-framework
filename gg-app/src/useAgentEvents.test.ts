@@ -164,6 +164,7 @@ function setup(
   initialState: Partial<AgentState> = {},
   onSessionReset?: AgentEventsDeps["onSessionReset"],
   onRoadmapPhaseDraftChange?: AgentEventsDeps["onRoadmapPhaseDraftChange"],
+  handleAutopilotEvent: (e: SidecarEvent) => boolean = () => false,
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -214,7 +215,8 @@ function setup(
     setItems: setItems as AgentEventsDeps["setItems"],
     nextId,
     handleKenEvent,
-    handleAutopilotEvent: () => false,
+    handleAutopilotEvent,
+    handleActivityEvent: vi.fn(),
     setState,
     setTasks: noop as unknown as AgentEventsDeps["setTasks"],
     setProjectTasks: noop as unknown as AgentEventsDeps["setProjectTasks"],
@@ -519,6 +521,18 @@ describe("useAgentEvents", () => {
     deps.setState(null);
     act(() => hook.result.current.handleEvent(ev("autopilot", { autopilot: true })));
     expect(deps.stateRef.current).toBeNull();
+  });
+  it("updates task activity before an autopilot delegate consumes its event", () => {
+    const { hook, deps } = setup(
+      () => false,
+      {},
+      undefined,
+      undefined,
+      () => true,
+    );
+    const review = ev("autopilot_review_start");
+    act(() => hook.result.current.handleEvent(review));
+    expect(deps.handleActivityEvent).toHaveBeenCalledWith(review);
   });
 
   it("shows Unverified instead of completion and does not finish an approved plan", () => {

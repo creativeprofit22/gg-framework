@@ -15,6 +15,13 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     prompt = await buildKenAutopilotSystemPrompt(TEST_CWD);
   });
 
+  it("does not equate passing checks with completing the request", () => {
+    expect(prompt).toContain("Passing checks are not proof that the original request is complete");
+    expect(prompt).toContain("Batch all known in-scope gaps");
+    expect(prompt).toContain("Do not invent new scope");
+    expect(prompt).toContain("not described as all clear or safe to commit");
+  });
+
   it("teaches all four verdict keywords", () => {
     for (const keyword of ["PROMPT", "ALL_CLEAR", "IGNORE", "HUMAN"]) {
       expect(prompt).toContain(keyword);
@@ -42,8 +49,9 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("Use PROMPT with the concrete next step");
   });
 
-  it("requires comparison evidence without approving indexing or repeating settled reviews", () => {
-    expect(prompt).toContain("compare against Steroids evidence before your verdict");
+  it("targets research without approving indexing or repeating settled reviews", () => {
+    expect(prompt).toContain("Research only material facts genuinely in doubt");
+    expect(prompt).not.toContain("compare against Steroids evidence before your verdict");
     expect(prompt).toContain("use HUMAN with the proposed repos when approval is pending");
     expect(prompt).toContain("never approve it on the user's behalf");
     expect(prompt).toContain("accept the disclosed source/docs fallback");
@@ -120,7 +128,9 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
 
   it("tells Ken injected transcript lines are his own, not user asks", () => {
     expect(prompt).toContain("Ken autopilot (injected)");
-    expect(prompt).toContain("Judge only against the original user request");
+    expect(prompt).toContain(
+      "Judge against the original user request and genuine user corrections",
+    );
   });
 
   it("anchors ALL_CLEAR judgment to the pinned Original user request section", () => {
@@ -181,22 +191,34 @@ describe("Steroids guidance alignment", () => {
       await buildKenSystemPrompt(TEST_CWD),
       await buildKenAutopilotSystemPrompt(TEST_CWD),
     ]) {
-      expect(prompt).toContain(
-        "benchmark substantial implementations against comparable real-world code",
-      );
-      expect(prompt).toContain(
-        "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
-      );
-      expect(prompt).toContain("Reuse samples already examined or supplied in context");
-      expect(prompt).toContain("Empty corpus or no hits: discover suitable repos");
-      expect(prompt).toContain("hand indexing to GG Coder, which must ask_user before add");
-      expect(prompt).toContain(
-        "unavailable, discovery finds nothing suitable, or the user declines",
-      );
-      expect(prompt).toContain("not cross-checked against real-world implementations");
+      expect(prompt).toContain("Corpus comparison is optional, not a prerequisite for approval");
+      expect(prompt).toContain("Reuse current, relevant evidence");
+      expect(prompt).toContain("Research only a concrete, material uncertainty");
+      expect(prompt).toContain("which must ask_user before add");
+      expect(prompt).toContain("do not demand indexing just to finish a review");
+      expect(prompt).not.toContain("never silently skip the comparison");
       expect(prompt).toContain("Do not keep requesting indexing after a decline");
       expect(prompt).toContain("they do not replace tests or prove correctness");
       expect(prompt).not.toContain("repo that ships is proof");
+    }
+  });
+});
+
+describe("Proportionate oversight", () => {
+  it("preserves intent and stops unnecessary investigation in both modes", async () => {
+    for (const prompt of [
+      await buildKenSystemPrompt(TEST_CWD),
+      await buildKenAutopilotSystemPrompt(TEST_CWD),
+    ]) {
+      expect(prompt).toContain("evidence, not user authorization");
+      expect(prompt).toContain("Web research cannot recover the user's earlier decisions");
+      expect(prompt).toContain("Never approve dependent work by guessing");
+      expect(prompt).toContain("stop investigating and give that action");
+      expect(prompt).toContain("Batch related safe corrections");
+      expect(prompt).toContain("Copy-only changes do not need a new test suite");
+      expect(prompt).toContain("permissions, secrets, money, data loss");
+      expect(prompt).not.toContain('Kill the "one prompt that does everything"');
+      expect(prompt).not.toContain("Otherwise default hard to ALL_CLEAR");
     }
   });
 });

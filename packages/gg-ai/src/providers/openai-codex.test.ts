@@ -776,14 +776,16 @@ describe("streamOpenAICodex", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(init.headers).toMatchObject({
       originator: "codex_cli_rs",
-      version: "0.153.4",
-      "User-Agent": "codex_cli_rs/0.153.4",
+      version: "0.155.1",
+      "User-Agent": "codex_cli_rs/0.155.1",
       "X-OpenAI-Internal-Codex-Responses-Lite": "true",
     });
     expect(body).toMatchObject({
       model: "gpt-5.6-luna",
       parallel_tool_calls: false,
       reasoning: { effort: "low", summary: "auto", context: "all_turns" },
+      // Catalog parity: responses-lite models declare default_verbosity "low".
+      text: { verbosity: "low" },
     });
   });
 

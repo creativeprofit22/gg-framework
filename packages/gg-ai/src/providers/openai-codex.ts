@@ -33,6 +33,7 @@ import {
 } from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
+
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
 // hit the backend's finite Envoy retry buffer.
@@ -156,6 +157,7 @@ async function* runStream(
     body.temperature = options.temperature;
   }
   body.reasoning = profile.reasoning;
+  if (profile.text) body.text = profile.text;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

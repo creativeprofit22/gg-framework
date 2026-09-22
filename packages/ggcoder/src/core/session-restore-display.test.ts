@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { messagesToHistoryItems } from "../cli.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { DISPLAY_ITEM_CUSTOM_KIND, SessionManager, type SessionEntry } from "./session-manager.js";
 import { getRestoredMessagesForDisplay } from "./session-compaction.js";
 
@@ -69,6 +70,16 @@ describe("continued session replay display filtering", () => {
       expect(replayHistory(persisted)).toMatchObject([
         { kind: "user", text: `/${command.name} ship the feature` },
       ]);
+    }
+  });
+
+  it("restores current invocation guidance as the original command, not prompt boilerplate", () => {
+    for (const command of PROMPT_COMMANDS) {
+      expect(
+        replayHistory([
+          { role: "user", content: expandPromptCommand(command.prompt, "login only") },
+        ]),
+      ).toMatchObject([{ kind: "user", text: `/${command.name} login only` }]);
     }
   });
 

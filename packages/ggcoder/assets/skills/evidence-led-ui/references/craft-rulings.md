@@ -50,7 +50,9 @@ Test by drawing vertical guides through navigation, header, main, repeated secti
 
 A select, dropdown, or combobox chevron is part of the control anatomy, not decoration pasted onto its edge. Give every trailing icon a deliberate `inset-inline-end` that follows the control's horizontal-padding token. Reserve `padding-inline-end` for the outer inset, icon width, and a readable gap so labels, selected values, placeholders, loading indicators, clear buttons, and long or localized content never collide with it. An icon at `right: 0`, touching the border, or squeezed into an unreserved text area is a craft failure.
 
-Keep the icon optically centered and preserve the full control hit area. For a decorative custom chevron over a native select, avoid stacking it over the browser indicator and ensure the overlay does not create a dead pointer zone. Use logical inline properties and verify RTL rather than hard-coding right-side geometry.
+Keep the icon optically centered and preserve the full control hit area. Native select text padding does not reliably reposition the browser-drawn arrow. Choose one path: retain native appearance and verify it on supported platforms, or reuse a shared native-select wrapper with `appearance: none` and one decorative custom chevron. Do not build a custom ARIA select merely to move an arrow.
+
+For the custom-arrow path, the wrapper owns positioning, the select reserves `padding-inline-end`, and the icon has its own `inset-inline-end`, `pointer-events: none`, and assistive-technology hiding. Reserve at least inset + icon width + text gap using shared tokens; 40px is not a universal requirement. Remove the native indicator only with a visible replacement, including in forced-colors mode. Check that exactly one arrow renders and clicking directly on it still opens the select. Use logical inline properties and verify RTL rather than hard-coding right-side geometry.
 
 Test every control size with the longest plausible value, 200% text zoom, narrow width, RTL, disabled/error/loading states, and both native and custom rendering paths. The trailing inset should visually belong to the same spacing rhythm as the leading content inset.
 
@@ -83,11 +85,37 @@ Default motion behavior:
 
 ### No sticky pointer focus
 
-Pointer focus must not masquerade as a persistent selected, active, or error state. Clicking or tapping a control, native select, combobox, card, or focusable container must not leave a focus ring, highlighted border, shadow, background, or ancestor `:focus-within` treatment stuck after activation, popup dismissal, or a click elsewhere. A genuine selected, expanded, validation, or drag state may persist, but it must use its own semantics and styling rather than an accidental focus treatment.
+DOM focus can legitimately remain after a click or native popup dismissal. Having focus and painting a focus indicator are separate decisions. Text-entry controls may legitimately match `:focus-visible` after pointer activation; user/browser preferences may also require visible focus. Do not treat these as stale-ring bugs. Genuine selected, expanded, validation, and drag states must retain their own semantics and styling.
 
-Prefer `:focus-visible` where it behaves correctly. For native controls or browser quirks that expose focus-visible after pointer activation, track the input modality locally and suppress only the pointer-originated focus treatment. Never solve this with a global `outline: none`, by hiding all focus, or by blurring controls in a way that breaks keyboard operation; keyboard-originated focus must remain immediate, visible, correctly ordered, and restored after overlays.
+#### Diagnose the painted layer first
 
-Test mouse and touch activation separately from Tab and Shift+Tab. Include opening and dismissing native dropdowns, selecting an option, clicking non-focusable blank space, clicking the next control, closing overlays, and switching back to keyboard navigation. No pointer-only highlight may remain after its interaction context ends.
+Reproduce the exact interaction sequence. Inspect the active element, `:focus`, `:focus-visible`, ancestor `:focus-within`, state attributes/classes, and computed styles on the control, wrapper, and `::before`/`::after`. Trace outlines, borders, box shadows (including ring utilities), backgrounds, and glass reflections to their winning rules. Record which layer draws the unwanted edge and which event leaves it visible. A screenshot cannot distinguish these causes.
+
+Fix that owner and inspect its callers. One shared primitive or utility owns the focus indicator and its width, offset, and color tokens. Do not add a second editor-local ring, blanket ancestor highlight, specificity escalation, or `!important` patch over the shared rule. Keep material decoration and selection separate from focus. Reuse the established restrained indicator, but never force a universal hairline at the expense of visibility, contrast, forced colors, or platform requirements. Verify the combined painted result, not outline width alone.
+
+#### Modality without keyboard regressions
+
+Prefer native `:focus-visible` and existing accessible primitives. Add or change custom modality handling only for a reproduced supported-browser defect; use one shared policy, not per-control document listeners.
+
+- Pointer interaction may hide only the inappropriate pointer-originated treatment; it must not blur the control or clear real selection.
+- Tab and Shift+Tab reveal focus immediately. Composite widgets must also reveal focus when their supported navigation keys move it. Preserve keyboard and assistive-technology focus return after overlays and programmatic moves.
+- Do not equate every `keydown` with navigation. Space, Enter, typing, modifier-only keys, and global shortcuts must not blindly resurrect a stale ring on the last pointer-focused control. Nor should they blindly clear an existing keyboard indicator. Keep activation and text-entry behavior intact; if a key opens a menu or moves focus, the destination still needs appropriate focus feedback.
+- Never fix rings using blanket `outline: none`, a Tab-only global accessibility policy, prevented native key behavior, or forced blur.
+
+#### Required interaction regression matrix
+
+For changes to focus, control edges, or dropdown anatomy, run applicable rows in a real browser. Add regressions to existing browser tests where available; otherwise record manual steps and results. Do not invent a new test suite just for this check.
+
+| Sequence or state | Required result |
+|---|---|
+| Pointer open → choose option or dismiss → Space/Enter or an unrelated shortcut → Tab → click blank space | No custom stale ring is resurrected merely by a keydown; native activation still works; Tab immediately reveals the correct focus target; pointer cleanup preserves genuine states. Test selection and dismissal separately. |
+| Tab/Shift+Tab → activate → Escape/close → resume navigation | Visible focus throughout keyboard use, correct return target, no trap; supported arrow-key navigation also works. |
+| Pointer into text input → type; keyboard into input → type | Caret, editing, and appropriate visible focus remain intact. |
+| Selected/expanded/error control inside a glass wrapper, with and without keyboard focus | Each state remains correct; no duplicate local/shared ring or unintended container-wide edge. Inspect computed styles and rendered output. |
+| Every affected shared-control variant, long value, narrow width, 200% text zoom, RTL | One chevron; measured inset and reserved text area do not collide; arrow hit area works. |
+| Supported browser/webview, themes, forced colors, and touch where applicable | Focus and chevron remain visible and operable; record unavailable combinations as unverified. Native popup behavior needs native interaction, not just a programmatic value change. |
+
+Report the reproduced cause, shared owner changed, tested sequences and browser/platform, and any remaining uncertainty. An initial-state screenshot, class-name assertion, or source review alone does not establish that interaction regressions passed.
 
 Reuse existing motion tokens first. If none exist, begin with these restrained bands, then tune by component size and distance:
 
@@ -182,6 +210,19 @@ Do not generate em dashes in user-facing UI copy unless the user explicitly requ
 
 Prefer a period, comma, colon, parentheses, or a rewritten sentence. Preserve exact quoted or legal source text. This is a product voice ruling, not a claim that em dashes are inaccessible.
 
+### Copy must earn its space
+
+Apply this to new UI and changed components, regardless of product, platform, or visual style. Sufficient information at the right moment is the goal, not maximum brevity.
+
+- **Labels first:** Start with clear labels, controls, and relevant status. Do not automatically fill components with subtitles, descriptions, helper paragraphs, or footer notes simply because a slot exists.
+- **Justify supporting text:** Include it only to resolve ambiguity, prevent a likely mistake, explain a meaningful consequence, or help recovery. Ask: “Does this text add information needed here that the interface does not already communicate?” Remove it if not.
+- **One fact, one place:** Do not restate headings, labels, actions, status, or nearby explanations in supporting prose. Repeat only when a separate decision context genuinely requires it; accessible names and necessary instructions must remain complete.
+- **Right information, right moment:** Show state-specific guidance in that state. Make optional setup details and troubleshooting available through discoverable, accessible contextual help. Complete states through behavior and timely feedback, not permanent paragraphs explaining every possible outcome.
+- **Essential guidance stays visible:** Keep necessary instructions, safety warnings, costs, consent, and irreversible consequences visible at the point of decision before action. Do not hide them in tooltips or disclosures merely to simplify the screen. Preserve required legal and supplied exact wording.
+- **Familiar words:** Describe what people can do and what happens. Use implementation details only when the audience needs them for the task; accuracy alone does not justify their presence.
+- **Remove before compressing:** Reduce redundant content before shrinking text, squeezing spacing or hit targets, truncating necessary information, or accepting avoidable scrolling. There is no universal word limit, sentence limit, or ban on scrolling; substantive content, localization, and accessibility may require more space.
+- **Verify in context:** Inspect the rendered screen at its intended window sizes and relevant states, including text scaling. Check repeated meaning, reading effort, and whether supporting copy delays reaching the task, not merely whether everything fits. Check that removing or relocating text has not made the next action or its consequences ambiguous. Source review alone leaves the rendered check unverified.
+
 ## Final craft check
 
 Before calling UI work complete, verify:
@@ -197,4 +238,5 @@ Before calling UI work complete, verify:
 - all text and meaningful non-text contrast is measured;
 - no soft semantic tint-on-tint treatment was introduced without an explicit user request or required existing-system match;
 - repeated navigation/actions remain consistent across sections and pages;
+- supporting copy adds necessary information at the right moment, without redundant descriptions or avoidable scrolling; essential instructions and consequences remain visible;
 - generated UI copy contains no em dashes unless explicitly allowed.

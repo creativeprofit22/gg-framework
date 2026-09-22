@@ -90,7 +90,7 @@ import {
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
 import { KenActivityBar } from "./KenActivityBar";
-import { AutopilotReviewBar } from "./AutopilotReviewBar";
+import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
 import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEvents";
@@ -1023,6 +1023,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [showPicker, setShowPicker] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
+  const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
   // New-session confirmation modal + in-flight guard.
   const [confirmNewSession, setConfirmNewSession] = useState(false);
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
@@ -1992,6 +1993,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       handleKenEvent,
       hydrateKen,
       handleAutopilotEvent,
+      handleActivityEvent,
       setState,
       setTasks,
       setProjectTasks,
@@ -4834,9 +4836,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       </div>
 
       <div className="liveregion">
-        {workspaceMode === "code" && autopilotReviewing && (
-          <AutopilotReviewBar onCancel={requestCancel} />
-        )}
         {workspaceMode === "code" && kenRunning && (
           <KenActivityBar
             runStartTs={kenRunStartTs}
@@ -4848,12 +4847,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           />
         )}
         {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-        {/* Ken's bar (chat OR autopilot review) REPLACES the main bar while the
-            build is idle — otherwise the idle "Ready for work" line stacks under
-            Ken's spinner. When the build is also running, both bars show. */}
-        {(workspaceMode === "chat" || running || (!kenRunning && !autopilotReviewing)) && (
+        {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
+        {(workspaceMode === "chat" || running || autopilotReviewing || !kenRunning) && (
           <ActivityBar
             running={running}
+            activity={activity}
             cancelling={cancelling}
             tokens={tokens}
             doneStatus={doneStatus}

@@ -3,6 +3,18 @@ import type { ImageAttachment } from "../utils/image.js";
 import { buildUserContentWithAttachments, routePromptCommandInput } from "./prompt-routing.js";
 
 describe("prompt-template slash commands with attachments", () => {
+  it("applies invocation guidance and literal substitution to custom commands", () => {
+    const route = routePromptCommandInput(
+      "/custom login $&",
+      [],
+      [{ name: "custom", prompt: "Review [$ARGUMENTS]." }],
+    );
+    expect(route?.fullPrompt).toContain("## Command Template\n\nReview [login $&].");
+    expect(route?.fullPrompt).toContain(
+      "Explicit user choices override conflicting template defaults",
+    );
+    expect(route?.fullPrompt).toContain("## User Instructions\n\nlogin $&");
+  });
   it("routes /expand input to a wrapper containing user args", () => {
     const route = routePromptCommandInput("/expand do X");
 

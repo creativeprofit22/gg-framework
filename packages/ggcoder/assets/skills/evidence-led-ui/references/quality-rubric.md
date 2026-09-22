@@ -29,10 +29,10 @@ Maximum: **24 points**. Ship broad UI work only at **20/24 or higher**, with no 
 ## 2. Information hierarchy
 
 - **0:** Primary action or reading order is ambiguous.
-- **1:** A primary path exists, but multiple elements compete at the same level.
-- **2:** First glance, second glance, and action sequence are deliberate; subordinate content remains available without competing.
+- **1:** A primary path exists, but elements compete, supporting copy repeats what the interface already communicates, or unjustified descriptions add reading effort or avoidable scrolling.
+- **2:** First glance, second glance, and action sequence are deliberate; supporting copy adds information needed at this moment, optional detail remains accessible without competing, and essential instructions and consequences remain visible before action.
 
-**Test:** At 50% zoom or with a blurred screenshot, identify the first three attention stops.
+**Test:** At 50% zoom or with a blurred screenshot, identify the first three attention stops. Then read the rendered UI at its intended size and relevant states. For each description, ask: “Does this text add information needed here that the interface does not already communicate?” Remove unjustified repetition or move optional detail to contextual help. Redundant or unjustified descriptions block a score of 2. Do not achieve brevity by hiding required guidance, shrinking text or targets, or forbidding necessary scrolling.
 
 ## 3. Composition
 

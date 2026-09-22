@@ -5,6 +5,7 @@ import {
   registerRuntimeModels,
 } from "./model-registry.js";
 import {
+  clampThinkingForPlanMode,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
@@ -280,5 +281,15 @@ describe("local models", () => {
 
   it("offers nothing for an unknown local id (never discovered)", () => {
     expect(getSupportedThinkingLevels("local", "local/ollama/ghost")).toEqual([]);
+  });
+
+  it("caps plan-mode thinking at medium, mirroring the Codex plan preset", () => {
+    expect(clampThinkingForPlanMode("ultra")).toBe("medium");
+    expect(clampThinkingForPlanMode("max")).toBe("medium");
+    expect(clampThinkingForPlanMode("xhigh")).toBe("medium");
+    expect(clampThinkingForPlanMode("high")).toBe("medium");
+    expect(clampThinkingForPlanMode("medium")).toBe("medium");
+    expect(clampThinkingForPlanMode("low")).toBe("low");
+    expect(clampThinkingForPlanMode(undefined)).toBeUndefined();
   });
 });

@@ -674,10 +674,39 @@ const SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH = 128;
 /** Session-owned harness evidence; transcript compaction cannot rewrite this ledger. */
 export class SessionVerificationEvidenceLedger {
   private generation = 0;
+  private run = 0;
+  private runChanged = false;
+  private runChecked = false;
   private readonly entries = new Map<
     string,
-    { generation: number; evidence: RoadmapShellEvidence }
+    { generation: number; run: number; evidence: RoadmapShellEvidence }
   >();
+
+  get runId(): number {
+    return this.run;
+  }
+
+  beginRun(): void {
+    this.run += 1;
+    this.runChanged = false;
+    this.runChecked = false;
+  }
+
+  runActivity(): { changed: boolean; checked: boolean; evidence: VerificationEvidence[] } {
+    const evidence: VerificationEvidence[] = [];
+    for (const entry of this.entries.values()) {
+      if (entry.run !== this.run) continue;
+      const classification = classifyVerificationCommand(entry.evidence.command);
+      if (!classification.candidate) continue;
+      const current = entry.generation === this.generation;
+      evidence.push({
+        command: entry.evidence.command,
+        status: !current || !classification.accepted ? "rejected" : entry.evidence.status === "unclassified" ? "unavailable" : entry.evidence.status,
+        reason: !current ? "Superseded by a later workspace mutation" : !classification.accepted ? classification.reason : entry.evidence.reason,
+      });
+    }
+    return { changed: this.runChanged, checked: this.runChecked, evidence };
+  }
 
   get revision(): number {
     return this.generation;
@@ -686,14 +715,23 @@ export class SessionVerificationEvidenceLedger {
   recordToolResult(input: {
     /** Captured by the host at tool start, never from model arguments. */
     evidenceRevision?: number;
+    /** Host-owned run identity, captured alongside the source revision. */
+    evidenceRun?: number;
     name: string;
     args: Record<string, unknown>;
     isError: boolean;
     details?: unknown;
     workspace?: NotesWorkspaceSnapshotV1;
   }): void {
-    if (isWorkspaceMutation(input)) this.generation += 1;
+    const run = input.evidenceRun ?? this.run;
+    if (isWorkspaceMutation(input)) {
+      this.generation += 1;
+      if (run === this.run) this.runChanged = true;
+    }
     if (input.name !== "bash") return;
+    if (run === this.run && classifyVerificationCommand(String(input.args.command ?? "")).candidate) {
+      this.runChecked = true;
+    }
 
     const details = input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined;
     const diagnostics = details?.bashDiagnostics;
@@ -799,6 +837,7 @@ export class SessionVerificationEvidenceLedger {
     if (existing) return;
     this.entries.set(executionId, {
       generation: input.evidenceRevision ?? this.generation,
+      run,
       evidence,
     });
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
@@ -821,6 +860,7 @@ export class SessionVerificationEvidenceLedger {
 
   clear(): void {
     this.generation = 0;
+    this.beginRun();
     this.entries.clear();
   }
 }

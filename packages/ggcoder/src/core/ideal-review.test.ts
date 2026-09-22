@@ -15,6 +15,15 @@ import {
 const allFilesExist = () => true;
 
 describe("Ideal review implementation comparison", () => {
+  it("requires a requirements-based completion decision, not just green checks", () => {
+    const { content } = buildIdealReviewMessage(["behavior changed"]);
+    expect(content).toContain("each requirement in the original request");
+    expect(content).toContain("cancellation, retry, and handoff paths");
+    expect(content).toContain("Passing tests alone do not establish that the request is complete");
+    expect(content).toContain("Do not expand this into unrelated improvements");
+    expect(content).toContain("lead with the incomplete outcome");
+  });
+
   it("benchmarks substantial work and preserves approval and honest fallback rules", () => {
     const { content } = buildIdealReviewMessage(["120 changed lines"]);
     expect(content).toContain("For substantial implementations, use Steroids");

@@ -3,7 +3,7 @@ import {
   getQwenCloudThinkingLevels,
   normalizeQwenCloudThinking,
 } from "@kenkaiiii/gg-ai/qwen-cloud-policy";
-import { getMaxThinkingLevel, getModel } from "./model-registry.js";
+import { getDefaultThinkingLevel, getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
 // GPT-5.6 and GPT-6 share the six-rung Codex ladder (low → ultra); older GPT
@@ -229,5 +229,34 @@ export function resolveInitialThinkingLevel(
   savedLevel: ThinkingLevel | undefined,
 ): ThinkingLevel | undefined {
   if (!enabled) return clampThinkingLevel(provider, model, undefined);
-  return clampThinkingLevel(provider, model, savedLevel ?? getMaxThinkingLevel(model));
+  return clampThinkingLevel(provider, model, savedLevel ?? getDefaultThinkingLevel(model));
+}
+
+/**
+ * Reasoning effort ceiling applied while plan mode is active. Mirrors the
+ * Codex CLI's `plan_mode_reasoning_effort` preset (currently `medium`):
+ * plan mode is read-only exploration, and deep-reasoning models left at
+ * high/xhigh/max spend enormous thinking budgets re-deriving context they
+ * could not have acted on anyway.
+ */
+export const PLAN_MODE_THINKING_CAP: ThinkingLevel = "medium";
+
+const THINKING_LADDER: readonly ThinkingLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+
+/** Clamp a thinking level down to the plan-mode cap. Pass-through for
+ * `undefined` (thinking off) and already-low levels. */
+export function clampThinkingForPlanMode(
+  level: ThinkingLevel | undefined,
+): ThinkingLevel | undefined {
+  if (!level) return level;
+  return THINKING_LADDER.indexOf(level) > THINKING_LADDER.indexOf(PLAN_MODE_THINKING_CAP)
+    ? PLAN_MODE_THINKING_CAP
+    : level;
 }

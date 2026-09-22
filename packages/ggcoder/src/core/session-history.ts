@@ -7,6 +7,7 @@ import type {
   KenTurnPayload,
 } from "./session-manager.js";
 import { STEERING_PREFIX, NOTIFICATION_PREFIX } from "./steering.js";
+import { matchPromptCommand } from "./prompt-command-expansion.js";
 import { AUTOPILOT_INJECTION_PREAMBLE } from "./autopilot-cycle.js";
 
 export type HistoryMessageVisibility = "transcript" | "hidden" | "summary";
@@ -440,10 +441,6 @@ export function restoreUserRow(
 // A `/name` command is expanded before it reaches the model, so the persisted
 // user message is the FULL template body — not the short chip the user saw.
 
-/** Separator AgentSession.prompt() inserts between a command's prompt body and
- *  the user's trailing args. Must stay in sync with the expansion there. */
-const COMMAND_ARGS_SEP = "\n\n## User Instructions\n\n";
-
 /**
  * Reverse a prompt-template command's expansion by matching the restored body
  * against the known templates.
@@ -458,15 +455,11 @@ export function detectPromptCommand(
   text: string,
   candidates: ReadonlyArray<{ name: string; prompt: string }>,
 ): string | null {
-  for (const c of candidates) {
-    if (!c.prompt) continue;
-    const body = c.name === "programmatic" && text.startsWith(c.prompt)
+  for (const command of candidates) {
+    const body = command.name === "programmatic" && text.startsWith(command.prompt)
       ? stripProgrammaticAdvisoryContext(text) : text;
-    if (body === c.prompt) return `/${c.name}`;
-    if (body.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
-      const args = body.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
-      return args ? `/${c.name} ${args}` : `/${c.name}`;
-    }
+    const match = matchPromptCommand(body, [command]);
+    if (match) return `/${match.command.name}${match.args ? ` ${match.args}` : ""}`;
   }
   return null;
 }

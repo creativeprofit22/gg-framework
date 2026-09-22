@@ -23,5 +23,8 @@ describe("desktop verification settlement", () => {
     expect(settlement).not.toContain("notesRepository.recordImplementationCheckpoint");
     expect(source).toContain('broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state))');
     expect(settlement).toContain("if (!(cancelled && !ownsGeneration))");
+    expect(settlement).toContain("session.getRunVerificationActivity()");
+    expect(settlement).toContain("session.getVerificationEvidence()");
+    expect(settlement).toMatch(/reviewPending:\s*!cancelled\s*&&\s*runSucceeded/);
   });
 });

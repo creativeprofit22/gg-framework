@@ -8558,6 +8558,26 @@ fn start_event_bridge(
                     log::error!("failed to connect to event stream for {label}/{pane_id}: {e}");
                 }
             }
+            // Do not leave a stale working/success label while the stream is down,
+            // and never deliver an old session's disconnect to its replacement.
+            {
+                let state: State<Windows> = app.state();
+                let registry = state.map.lock().unwrap();
+                if !resolve_owned_pane(&registry, &label, &pane_id).is_some_and(|pane| {
+                    pane.generation == generation
+                        && pane.session_id.as_deref() == Some(&session_id)
+                }) {
+                    return;
+                }
+                let value = serde_json::json!({ "type": "connection_lost", "data": {} });
+                if let Some(trusted) = trusted_event_envelope(&pane_id, &session_id, &value) {
+                    let _ = app.emit_to(
+                        EventTarget::webview_window(label.clone()),
+                        "agent-event",
+                        trusted,
+                    );
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
     });

@@ -11,6 +11,7 @@ import {
   type TurnToolCall,
 } from "./autopilot-gate.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 
 // Synthetic: no shipped prompt command has an alias, so alias matching needs a
 // fixture to exercise it. Real commands are covered by the PROMPT_COMMANDS
@@ -63,6 +64,11 @@ describe("isWorkflowCommandText", () => {
 });
 
 describe("matchExpandedCommand", () => {
+  it("recognizes the current expansion without treating guidance as user arguments", () => {
+    const command = { name: "custom", prompt: "Review [$ARGUMENTS]." };
+    const text = expandPromptCommand(command.prompt, "login only");
+    expect(matchExpandedCommand(text, [command])).toEqual({ command, args: "login only" });
+  });
   it("matches an exact template body", () => {
     const m = matchExpandedCommand("Compare the code you just created…", COMMANDS);
     expect(m?.command.name).toBe("compare");
@@ -76,9 +82,8 @@ describe("matchExpandedCommand", () => {
     expect(m?.args).toBe("only the auth module");
   });
 
-  it("uses the exact separator AgentSession.prompt() inserts", () => {
-    // Lockstep guard: if agent-session.ts ever changes its expansion format,
-    // this literal must change with it or digest labeling silently breaks.
+  it("retains the legacy separator for older saved sessions", () => {
+    // Old sessions must remain recognizable after the prompt format changes.
     expect(USER_INSTRUCTIONS_HEADER).toBe("\n\n## User Instructions\n\n");
   });
 

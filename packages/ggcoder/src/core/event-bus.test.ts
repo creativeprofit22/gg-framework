@@ -70,6 +70,21 @@ describe("EventBus tool-call presentation identity", () => {
 });
 
 describe("EventBus.forwardAgentEvent", () => {
+  it("carries engine retry metadata through the real event bus", () => {
+    const bus = new EventBus();
+    const seen: unknown[] = [];
+    bus.on("retry", (data) => seen.push(data));
+    const retry = {
+      reason: "rate_limit" as const,
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1000,
+      silent: false,
+    };
+    bus.forwardAgentEvent({ type: "retry", ...retry });
+    expect(seen).toEqual([retry]);
+  });
+
   it("carries invalidArgAttempt through to listeners", () => {
     const bus = new EventBus();
     const seen: (number | undefined)[] = [];

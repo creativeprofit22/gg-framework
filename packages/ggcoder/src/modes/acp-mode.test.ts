@@ -1005,6 +1005,44 @@ describe("ACP mode over stdio", () => {
     ]);
   });
 
+  it("forwards tool images over stdio live and when restoring saved conversations", async () => {
+    client = new AcpClient();
+    const sessionId = await client.handshake();
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "show tool images" }] },
+    });
+    const live = updatesOfKind(await client.until(3), "tool_call_update");
+    const data =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=";
+    const expected = ["screenshot", "generate_image", "read"].map((name) => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: `image-${name}`,
+      status: "completed",
+      content: [
+        { type: "content", content: { type: "text", text: "Picture ready" } },
+        { type: "content", content: { type: "image", mimeType: "image/png", data } },
+      ],
+    }));
+    expect(live).toEqual(expected);
+    const saved = (await client.list(90, tmpProject)).find(
+      (session) => session.title === "tool image history",
+    );
+    expect(saved).toBeDefined();
+    const beforeReplay = client.received().length;
+    client.send({
+      jsonrpc: "2.0",
+      id: 91,
+      method: "session/load",
+      params: { sessionId: saved!.sessionId, cwd: tmpProject, mcpServers: [] },
+    });
+    const replay = (await client.until(91)).slice(beforeReplay);
+    expect(updatesOfKind(replay, "tool_call_update")).toEqual(expected);
+    expect(replay.at(-1)!.id).toBe(91);
+  });
+
   it("sends file edits as a real diff instead of the tool's prose", async () => {
     client = new AcpClient();
     const sessionId = await client.handshake();

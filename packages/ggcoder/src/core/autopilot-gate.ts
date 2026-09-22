@@ -30,6 +30,7 @@
  * sidecar (which runs `main()` at import time).
  */
 import { isReadOnlyCommand } from "../tools/read-only-bash.js";
+import { matchPromptCommand, LEGACY_COMMAND_ARGS_SEPARATOR } from "./prompt-command-expansion.js";
 
 /** A workflow (prompt-template) command: built-in PROMPT_COMMANDS or a custom
  *  `.gg/commands/*.md` entry. `prompt` is the full template body the command
@@ -40,10 +41,8 @@ export interface WorkflowCommandSpec {
   prompt: string;
 }
 
-/** The exact separator AgentSession.prompt() inserts between a command's
- *  template and the user's extra args (see agent-session.ts prompt expansion).
- *  Must stay byte-identical or expanded-command detection silently breaks. */
-export const USER_INSTRUCTIONS_HEADER = "\n\n## User Instructions\n\n";
+/** Retained for legacy transcript expansion compatibility. */
+export const USER_INSTRUCTIONS_HEADER = LEGACY_COMMAND_ARGS_SEPARATOR;
 
 /** Extract the `/name` token from raw input, or null when it isn't a slash
  *  invocation. */
@@ -83,16 +82,7 @@ export function matchExpandedCommand(
   text: string,
   commands: readonly WorkflowCommandSpec[],
 ): { command: WorkflowCommandSpec; args: string | null } | null {
-  for (const command of commands) {
-    if (!command.prompt) continue;
-    if (text === command.prompt) return { command, args: null };
-    const prefix = command.prompt + USER_INSTRUCTIONS_HEADER;
-    if (text.startsWith(prefix)) {
-      const args = text.slice(prefix.length).trim();
-      return { command, args: args.length > 0 ? args : null };
-    }
-  }
-  return null;
+  return matchPromptCommand(text, commands);
 }
 
 /** Count assistant messages — the "did this run produce reviewable work"

@@ -906,13 +906,13 @@ describe("toOpenAITools strict sampling", () => {
       },
     ];
     const [first] = toOpenAITools(tools, { strict: true });
-    const wire = (first as { function: { strict?: boolean; parameters: Record<string, any> } })
-      .function;
+    if (first?.type !== "function") throw new Error("Expected a function tool");
+    const wire = first.function;
     expect(wire.strict).toBe(true);
     const params = wire.parameters;
-    expect(params.required).toEqual(["filePath", "offset"]);
-    expect(params.additionalProperties).toBe(false);
-    expect(params.properties.offset).toEqual({
+    expect(params).toHaveProperty("required", ["filePath", "offset"]);
+    expect(params).toHaveProperty("additionalProperties", false);
+    expect(params).toHaveProperty("properties.offset", {
       anyOf: [{ type: "number" }, { type: "null" }],
     });
   });

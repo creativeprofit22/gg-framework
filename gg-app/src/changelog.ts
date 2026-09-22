@@ -22,6 +22,51 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.66.4",
+    date: "2026-09-21",
+    items: [
+      "Less clutter, more care in the interfaces your agent builds. I tightened the `UI skill` to cut repetitive descriptions, reuse consistent controls, and check `keyboard focus` and `dropdowns` through real interactions instead of relying on screenshots alone.",
+    ],
+  },
+  {
+    version: "0.66.3",
+    date: "2026-09-21",
+    items: [
+      "Your agent's scratch files should keep work moving, not hold it up. I fixed temporary-file handling across `macOS`, `Linux`, and `Windows`, so your agent can read, write, and edit its scratch files without getting tripped up by the wrong folder.",
+    ],
+  },
+  {
+    version: "0.66.2",
+    date: "2026-09-21",
+    items: [
+      "Your pictures no longer get left behind in connected editors. I fixed missing `screenshots` and `generated images` in `ACP` connections, so you can see them as they arrive and when you reopen a saved chat.",
+    ],
+  },
+  {
+    version: "0.66.1",
+    date: "2026-09-20",
+    items: [
+      "Your `activity bar` now tells the story of the request you just made, not the last one. I separated earlier check warnings from fresh answers, gave research and background work clearer finish messages, and stopped blocked checks from leaving you waiting on a review that won't start.",
+    ],
+  },
+  {
+    version: "0.66.0",
+    date: "2026-09-20",
+    items: [
+      "Know what's happening without reading the whole chat. I rebuilt the `activity bar` with short, color-coded statuses and smooth transitions, so `Needs you` and `Not verified` stand out even after the work stops.",
+      "I tightened `Ken` and `Autopilot` reviews around what you actually asked for. Your latest decisions stay in focus, and reviews check for unfinished work without chasing endless optional improvements.",
+      "Your `slash commands` now listen to what you ask this time. I fixed custom instructions getting lost behind template defaults, so your chosen scope and format take priority.",
+    ],
+  },
+  {
+    version: "0.65.2",
+    date: "2026-09-19",
+    items: [
+      "Deep-thinking models just got dramatically faster out of the gate. New chats on models like `GPT-6 Astra` no longer start at maximum reasoning, and `plan mode` caps its deep thinking, so you get answers sooner and burn far less of your usage.",
+      "Your next message no longer waits for housekeeping. I moved context compaction into the background so it tidies up while you read the answer, which keeps long conversations snappy instead of pausing your next prompt.",
+    ],
+  },
+  {
     version: "0.65.1",
     date: "2026-09-16",
     items: [

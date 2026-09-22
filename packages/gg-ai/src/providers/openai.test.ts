@@ -599,15 +599,17 @@ describe("streamOpenAI request shaping", () => {
       for await (const _event of result) {
         /* consume */
       }
-      const wire = ((createMock.mock.calls[0]?.[0] as Record<string, any>).tools as Array<any>)[0]
-        .function;
+      const request = createMock.mock.calls[0]?.[0] as OpenAI.ChatCompletionCreateParamsStreaming;
+      const tool = request.tools?.[0];
+      if (tool?.type !== "function") throw new Error("Expected a function tool");
+      const wire = tool.function;
       if (provider === "openai") {
         expect(wire.strict).toBe(true);
-        expect(wire.parameters.required).toEqual(["path", "offset"]);
-        expect(wire.parameters.additionalProperties).toBe(false);
+        expect(wire.parameters).toHaveProperty("required", ["path", "offset"]);
+        expect(wire.parameters).toHaveProperty("additionalProperties", false);
       } else {
         expect(wire.strict).toBeUndefined();
-        expect(wire.parameters.required).toEqual(["path"]);
+        expect(wire.parameters).toHaveProperty("required", ["path"]);
       }
     }
   });

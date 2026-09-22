@@ -1,7 +1,7 @@
 import os from "node:os";
 import type { ThinkingLevel } from "../types.js";
 
-const CODEX_CLIENT_VERSION = "0.153.4";
+const CODEX_CLIENT_VERSION = "0.155.1";
 
 /** Shared wire profile; image-result handling remains separate from text streaming. */
 export function codexRequestProfile(model: string, thinking?: ThinkingLevel) {
@@ -19,6 +19,7 @@ export function codexRequestProfile(model: string, thinking?: ThinkingLevel) {
   return {
     headers,
     parallelToolCalls: !responsesLite,
+    text: responsesLite ? { verbosity: "low" } : undefined,
     reasoning: {
       effort: thinking === "ultra" ? "max" : (thinking ?? (responsesLite ? "low" : "none")),
       summary: "auto",

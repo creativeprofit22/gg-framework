@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as tempPaths from "./temp-paths.js";
 import { isCatastrophicCommand, resolveWriteGuard } from "./workspace-guard.js";
 
 const cwd = path.join(os.tmpdir(), "guard-test-workspace");
@@ -15,6 +16,12 @@ describe("resolveWriteGuard", () => {
   it("allows paths under the OS temp dir", () => {
     const target = path.join(os.tmpdir(), "scratch", "notes.md");
     expect(resolveWriteGuard("/somewhere/else", target).allowed).toBe(true);
+  });
+
+  it("allows every shared temporary root, including conventional /tmp on POSIX", () => {
+    for (const root of tempPaths.getTempRoots()) {
+      expect(resolveWriteGuard(cwd, path.join(root, "gg-scratch", "notes.md")).allowed).toBe(true);
+    }
   });
 
   it("allows paths under the agent's own ~/.gg state dir", () => {
@@ -96,6 +103,9 @@ describe("resolveWriteGuard", () => {
     // at an empty decoy that is a SIBLING of the scratch repos, so `cwd` is
     // the only root that can allow them.
     beforeEach(async () => {
+      // Isolate workspace containment from the intentionally allowed /tmp root
+      // (Linux fixtures otherwise remain allowed even after TMPDIR changes).
+      vi.spyOn(tempPaths, "getTempRoots").mockImplementation(() => [os.tmpdir()]);
       const decoy = await fs.mkdtemp(path.join(realTmp, "guard-decoy-"));
       made.push(decoy);
       for (const key of tmpVars) {
@@ -105,6 +115,7 @@ describe("resolveWriteGuard", () => {
     });
 
     afterEach(async () => {
+      vi.restoreAllMocks();
       for (const key of tmpVars) {
         const previous = savedTmpVars.get(key);
         if (previous === undefined) delete process.env[key];

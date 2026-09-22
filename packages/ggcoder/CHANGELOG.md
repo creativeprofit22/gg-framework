@@ -1,5 +1,59 @@
 # @kenkaiiii/ggcoder
 
+## 5.60.9
+
+### Patch Changes
+
+- Tighten UI skill guidance for shared focus indicators, dropdown interaction checks, and concise supporting copy that preserves essential instructions.
+  - @kenkaiiii/gg-ai@5.60.9
+  - @kenkaiiii/gg-agent@5.60.9
+  - @kenkaiiii/gg-core@5.60.9
+
+## 5.60.8
+
+### Patch Changes
+
+- Fix temporary-file access across macOS, Linux, and Windows, including Git Bash /tmp paths, while preserving workspace write protections.
+  - @kenkaiiii/gg-ai@5.60.8
+  - @kenkaiiii/gg-agent@5.60.8
+  - @kenkaiiii/gg-core@5.60.8
+
+## 5.60.7
+
+### Patch Changes
+
+- Fix missing tool images in ACP clients during live updates and when restoring saved conversations.
+  - @kenkaiiii/gg-ai@5.60.7
+  - @kenkaiiii/gg-agent@5.60.7
+  - @kenkaiiii/gg-core@5.60.7
+
+## 5.60.6
+
+### Patch Changes
+
+- Keep verification results scoped to the current request and prevent blocked checks from advertising a pending review handoff.
+  - @kenkaiiii/gg-ai@5.60.6
+  - @kenkaiiii/gg-agent@5.60.6
+  - @kenkaiiii/gg-core@5.60.6
+
+## 5.60.5
+
+### Patch Changes
+
+- Fix slash-command argument precedence and preserve user intent in Ken reviews. Report verification, retry, cancellation, and review outcomes from observed lifecycle events, keeping interrupted responses and pending work distinct from passing checks.
+  - @kenkaiiii/gg-ai@5.60.5
+  - @kenkaiiii/gg-agent@5.60.5
+  - @kenkaiiii/gg-core@5.60.5
+
+## 5.60.4
+
+### Patch Changes
+
+- Fix runaway deep-reasoning burn: new sessions on Codex flagship models start at the vendor-declared default thinking level instead of the ceiling, plan mode caps reasoning effort at `medium`, and responses-lite models send low verbosity for catalog parity. Also compact in the background after the final response so the next prompt doesn't pay the summarizer latency.
+  - @kenkaiiii/gg-ai@5.60.4
+  - @kenkaiiii/gg-agent@5.60.4
+  - @kenkaiiii/gg-core@5.60.4
+
 ## 5.60.3
 
 ### Patch Changes

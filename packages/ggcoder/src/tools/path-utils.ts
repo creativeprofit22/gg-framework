@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { getMsysTempDir } from "../core/temp-paths.js";
 
 export interface ResolvePathOpts {
   /** Injected for testability; defaults to process.platform. */
@@ -21,13 +22,10 @@ export interface ResolvePathOpts {
  *   - Non-Windows platforms are left completely alone: `/c/foo` is a perfectly
  *     legitimate POSIX path on macOS/Linux and rewriting it would be a
  *     data-corrupting regression. Hence the strict platform gate.
- *   - MSYS virtual mounts (`/tmp`, `/usr`, `/home`, `/bin`) are NOT translated.
- *     They live under the Git-Bash install root, which we cannot determine
- *     cheaply or deterministically here, and a wrong guess silently reads or
- *     writes the wrong file — far worse than a clear ENOENT.
- *   - We do NOT shell out to `cygpath`: this sits on the hot path of every
- *     single file tool call, so it would cost a process spawn per call, and
- *     `cygpath` is not always on PATH anyway. Pure string manipulation only.
+ *   - Virtual mounts are not guessed here. `resolvePath` separately handles
+ *     `/tmp` using the selected shell's cached mount lookup; `/usr`, `/home`
+ *     and `/bin` remain untranslated.
+ *   - Drive conversion is pure string manipulation, with no process spawn.
  */
 export function msysToWindowsPath(filePath: string, opts: ResolvePathOpts = {}): string {
   const platform = opts.platform ?? process.platform;
@@ -51,6 +49,15 @@ export function msysToWindowsPath(filePath: string, opts: ResolvePathOpts = {}):
 export function resolvePath(cwd: string, filePath: string, opts: ResolvePathOpts = {}): string {
   if (filePath.startsWith("~")) {
     filePath = path.join(os.homedir(), filePath.slice(1));
+  }
+  if ((opts.platform ?? process.platform) === "win32" && /^\/tmp(?:\/|$)/.test(filePath)) {
+    const temp = getMsysTempDir(opts);
+    if (!temp) {
+      throw new Error(
+        "Cannot resolve Git Bash /tmp. Use the native Windows path reported by `cygpath -aw /tmp`.",
+      );
+    }
+    return path.win32.resolve(temp, `.${filePath.slice(4)}`);
   }
   return path.resolve(cwd, msysToWindowsPath(filePath, opts));
 }

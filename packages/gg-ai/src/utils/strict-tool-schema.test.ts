@@ -55,10 +55,9 @@ describe("makeStrictToolSchema", () => {
       },
       required: ["edits"],
     });
-    const items = (strict.properties as Record<string, any>).edits.items;
-    expect(items.required).toEqual(["old_text", "anchor"]);
-    expect(items.additionalProperties).toBe(false);
-    expect(items.properties.anchor).toEqual({
+    expect(strict).toHaveProperty("properties.edits.items.required", ["old_text", "anchor"]);
+    expect(strict).toHaveProperty("properties.edits.items.additionalProperties", false);
+    expect(strict).toHaveProperty("properties.edits.items.properties.anchor", {
       anyOf: [{ type: "string" }, { type: "null" }],
     });
   });

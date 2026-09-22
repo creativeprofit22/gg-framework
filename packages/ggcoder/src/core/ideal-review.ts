@@ -170,7 +170,13 @@ export const IDEAL_REVIEW_PROMPT =
   "Judge this by reading the code you changed \u2014 " +
   "reuse completed checks while code is unchanged. If anything is wrong, fix it now; rerun the affected " +
   "checks and reread those changes before finishing; earlier results do not verify later edits. " +
-  "Do not claim coverage without corresponding assertions. If everything is good, respond with the final " +
+  "Do not claim coverage without corresponding assertions. Before calling the task complete, reconcile " +
+  "each requirement in the original request with the delivered behavior, including applicable failure, " +
+  "cancellation, retry, and handoff paths. Passing tests alone do not establish that the request is complete. " +
+  "Fix known in-scope gaps now rather than leaving the user to discover them by asking whether it is done. " +
+  "Do not expand this into unrelated improvements. If blocked, lead with the incomplete outcome and list " +
+  "what remains unverified; otherwise clearly separate what was implemented, verified, and committed or released. " +
+  "If everything is good, respond with the final " +
   "answer only; do not mention this ideal review unless it changed the work or a required " +
   "cross-check could not be completed.";
 

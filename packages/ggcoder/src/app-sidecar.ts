@@ -95,6 +95,7 @@ import {
   type UserTurnDeps,
   type UserTurnOutcome,
 } from "./app-sidecar-user-turn.js";
+import { describeRunVerification, describeTurnVerification } from "./core/run-status.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
 import {
@@ -3422,8 +3423,10 @@ async function createSession(
     // his own Ideal self-review adds latency and can corrupt the verdict shape.
     ken.setIdealReviewSuppressed(true);
     await ken.initialize();
-    // Deliberately no bus bridge: the review is silent. Errors surface via the
-    // runAutopilotReview try/catch as autopilot_error frames.
+    // Keep review text/tools silent; report usage only for whole-task accounting.
+    ken.eventBus.on("turn_end", (d) => {
+      broadcast("autopilot_usage", { outputTokens: d.usage.outputTokens });
+    });
     kenAutoSession = ken;
     log("INFO", "app-sidecar", "ken autopilot session ready", {
       provider: target.provider,
@@ -3501,6 +3504,7 @@ async function createSession(
   async function runAgent(
     label: string,
     run: () => Promise<void | ProgrammaticExecutionOutcome>,
+    reviewPending: () => boolean = () => false,
   ): Promise<void> {
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
@@ -3514,7 +3518,11 @@ async function createSession(
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
     let programmaticSettlement: ReturnType<typeof settleProgrammaticRun>;
-    broadcast("run_start", { text: label, runState: runLifecycle.state });
+    broadcast("run_start", {
+      text: label,
+      runState: runLifecycle.state,
+      continued: !ownsGeneration,
+    });
     try {
       if (ownsGeneration) {
         await renewCurrentPhaseLease(`run:${generation}:running`);
@@ -3607,6 +3615,15 @@ async function createSession(
         broadcast("run_end", {
           ...programmaticSettlement?.event,
           ...createRunEndPayload(outcome, runLifecycle.state),
+          reviewPending:
+            !cancelled &&
+            runSucceeded &&
+            (reviewPending() || !ownsGeneration),
+          ...describeRunVerification(session.getVerificationEvidence(), null),
+          turnVerification: describeTurnVerification(
+            session.getRunVerificationActivity(),
+            null,
+          ),
         });
       }
       // Autopilot's review loop is driven explicitly from POST /prompt (see
@@ -4213,7 +4230,7 @@ async function createSession(
           } else {
             await promptActiveSession(next.text, undefined, { meta: next.meta });
           }
-        });
+        }, isAutopilotEnabled);
         const decision = shouldStartAutopilotCycle({
           enabled: isAutopilotEnabled(),
           cancelled: autopilotCancelled,
@@ -4236,7 +4253,8 @@ async function createSession(
             kind: decision.kind,
           });
           await runAutopilotCycle(next.text);
-        } else if (isAutopilotEnabled()) {
+        } else {
+          broadcast("autopilot_ignored", { reason: decision.reason });
           log("INFO", "app-sidecar", "autopilot skipped (queued turn)", {
             reason: decision.reason,
           });
@@ -4511,7 +4529,7 @@ async function createSession(
     broadcast("extras", footerExtras());
   }
   const userTurnDeps: UserTurnDeps = {
-    runAgent,
+    runAgent: (text, run) => runAgent(text, run, isAutopilotEnabled),
     getMessages: () => session.getMessages(),
     clearCancelled: () => {
       autopilotCancelled = false;
@@ -4527,7 +4545,8 @@ async function createSession(
     decision: (decision) => {
       if (decision.start) {
         log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
-      } else if (isAutopilotEnabled()) {
+      } else {
+        broadcast("autopilot_ignored", { reason: decision.reason });
         log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
       }
     },

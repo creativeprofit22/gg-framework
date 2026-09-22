@@ -563,12 +563,155 @@ describe("AgentSession stale tool-output pruning", () => {
     await session.prompt("prune usage fallback");
     await session.dispose();
 
-    // The transform after the in-loop mutation is the last shouldCompact call;
-    // its actualTokens argument must be an estimate of the pruned history,
-    // far below the stale 180k usage figure.
-    const lastCall = shouldCompactMock.mock.calls.at(-1)!;
-    const actualTokens = lastCall[3] as number;
-    expect(actualTokens).toBeLessThan(50_000);
+    // No shouldCompact call may carry the stale 180k usage figure after the
+    // prune: the in-loop transform estimates the pruned history, and the
+    // post-turn background probe runs with no provider context at all. Every
+    // call that reports tokens must be far below the stale usage.
+    const numericCalls = shouldCompactMock.mock.calls
+      .map((call) => call[3])
+      .filter((tokens): tokens is number => typeof tokens === "number");
+    expect(numericCalls.length).toBeGreaterThan(0);
+    for (const actualTokens of numericCalls) {
+      expect(actualTokens).toBeLessThan(50_000);
+    }
+  });
+});
+
+describe("AgentSession post-turn compaction", () => {
+  it("compacts in the background after the final response instead of on the next prompt's critical path", async () => {
+    // Below threshold before the run, above it once the run's usage lands —
+    // exactly the case where the old pre-run-only path charged the next
+    // prompt the summarizer latency.
+    let overThreshold = false;
+    let compactFinished = false;
+    shouldCompactMock.mockImplementation(() => overThreshold);
+    compactMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      compactFinished = true;
+      overThreshold = false; // compacted history is below the threshold again
+      return compactionResult([
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "[compacted]" },
+      ] as Message[]);
+    });
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "final answer" });
+      overThreshold = true;
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    await session.prompt("do the thing");
+
+    // The turn completed WITHOUT waiting on the still-running background
+    // compaction — that is the whole point of the post-turn path.
+    expect(compactFinished).toBe(false);
+    await vi.waitFor(() => expect(compactFinished).toBe(true));
+    expect(compactMock).toHaveBeenCalledTimes(1);
+
+    // The next prompt must not compact again (pre-run sees the already-
+    // compacted history) and must not be delayed by the finished background
+    // compaction's promise tracking.
+    await session.prompt("next turn");
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    await session.dispose();
+  });
+
+  it("skips post-turn compaction when a compaction already ran this turn or input is queued", async () => {
+    let overThreshold = true;
+    shouldCompactMock.mockImplementation(() => overThreshold);
+    compactMock.mockImplementation(async () => {
+      overThreshold = false;
+      return compactionResult([
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "[compacted]" },
+      ] as Message[]);
+    });
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "reply" });
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+
+    // Case 1: pre-run compaction already handled this turn — the post-turn
+    // probe must not fire a second compaction for the same boundary.
+    await session.prompt("needs compacting");
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(compactMock).toHaveBeenCalledTimes(1);
+
+    // Case 2: user input queued while the run was live — the post-turn path
+    // must defer to the queued turn instead of racing it.
+    overThreshold = true;
+    session.queueMessage("already waiting");
+    await session.prompt("another run");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(compactMock).toHaveBeenCalledTimes(2); // pre-run of this turn only
+    await session.dispose();
+  });
+
+  it("does not drop a prompt that arrives while the background compaction is running", async () => {
+    let overThreshold = false;
+    let compactFinished = false;
+    const loopSnapshots: string[][] = [];
+    shouldCompactMock.mockImplementation(() => overThreshold);
+    compactMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      compactFinished = true;
+      overThreshold = false;
+      return compactionResult([
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "[compacted]" },
+      ] as Message[]);
+    });
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      loopSnapshots.push(
+        messages.map((m) => (typeof m.content === "string" ? m.content : "<blocks>")),
+      );
+      messages.push({ role: "assistant", content: "reply" });
+      overThreshold = true;
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    await session.prompt("first turn");
+    expect(compactFinished).toBe(false); // background compaction is mid-flight
+
+    // Races the 25ms compaction. Without settling first, this message is
+    // pushed onto the array the background compact() is about to replace —
+    // silently dropped from the model's view of the conversation.
+    await session.prompt("arrived mid-compaction");
+
+    expect(loopSnapshots.length).toBe(2);
+    expect(loopSnapshots[1]).toContain("arrived mid-compaction");
+    await vi.waitFor(() => expect(compactFinished).toBe(true));
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    await session.dispose();
   });
 });
 

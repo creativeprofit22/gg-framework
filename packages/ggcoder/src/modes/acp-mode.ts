@@ -52,6 +52,7 @@ import {
 } from "../utils/plan-steps.js";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
+import { acpToolImages } from "./acp-images.js";
 
 /** The ACP major version this mode implements. Bumped only for breaking changes. */
 export const ACP_PROTOCOL_VERSION = 1;
@@ -602,6 +603,7 @@ export function historyUpdates(messages: readonly Message[]): Record<string, unk
             type: "content",
             content: { type: "text", text: messageText(entry.content) },
           },
+          ...acpToolImages(entry.content),
         ],
       });
     }
@@ -958,13 +960,16 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         });
       }),
 
-      bus.on("tool_call_end", ({ toolCallId, result, isError }) => {
+      bus.on("tool_call_end", ({ toolCallId, result, isError, details }) => {
         notifyUpdate({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
-          content: diffContent(toolCallId, isError) ?? [
-            { type: "content", content: { type: "text", text: result } },
+          content: [
+            ...(diffContent(toolCallId, isError) ?? [
+              { type: "content", content: { type: "text", text: result } },
+            ]),
+            ...acpToolImages(undefined, details),
           ],
         });
       }),

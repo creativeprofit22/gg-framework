@@ -28,6 +28,7 @@ import {
   collectVerificationEvidence,
   type SessionVerificationEvidenceLedgerSnapshot,
 } from "./verification-evidence.js";
+import { AUTOPILOT_INJECTION_PREAMBLE } from "./autopilot-cycle.js";
 
 /** How many of the most recent build-session messages to inline verbatim. */
 export const KEN_RECENT_MESSAGE_LIMIT = 20;
@@ -38,10 +39,11 @@ const COMPACTION_SUMMARY_MARKER = "[Previous conversation summary]";
 /** Max chars of any single message's rendered text in the digest. */
 const MESSAGE_CHAR_CAP = 1500;
 
-/** Softer cap for the pinned original-request section: the ask under review
- *  must never be judged against a mid-sentence truncation, so it gets far more
- *  room than a recent-activity line. */
+/** Pinned requests get more room than activity; any truncation is explicit. */
 const ORIGINAL_REQUEST_CAP = 4000;
+
+/** Extra context preserves older user decisions, not old tool/assistant chatter. */
+const EARLIER_REQUESTS_CAP = 8000;
 
 /** Label for a user-role message that was actually injected by Autopilot Ken.
  *  Without it, multi-round cycles render Ken's own fix prompts as `**User:**`
@@ -147,6 +149,31 @@ function renderQuestions(questions: unknown[]): string {
   return `Question card reference only, not user answers or authorization:\n${fence}json\n${text}\n${fence}`;
 }
 
+/** Make loss of intent-bearing context explicit, not just an ellipsis. */
+function capContext(text: string, max: number, source: string): string {
+  const rendered = cap(text, max);
+  return text.length <= max
+    ? rendered
+    : `${rendered}\n[Context incomplete: ${source} was truncated. Recover missing requirements before approving dependent work; do not guess.]`;
+}
+
+function userText(msg: Message): string {
+  if (msg.role !== "user") return "";
+  return typeof msg.content === "string"
+    ? msg.content
+    : msg.content
+        .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
+        .join(" ")
+        .trim();
+}
+
+function isInjected(text: string, opts: RenderMessageOptions): boolean {
+  return (
+    text.trimStart().startsWith(AUTOPILOT_INJECTION_PREAMBLE) ||
+    opts.injectedPrompts.some((p) => p.trim() === text.trim())
+  );
+}
+
 /** Summarize one tool call to a `name(arg)` one-liner. */
 function summarizeToolCall(name: string, args: Record<string, unknown>): string {
   const primary =
@@ -170,17 +197,23 @@ interface RenderMessageOptions {
 /** Render one user-role message body with provenance-aware labeling:
  *  autopilot-injected prompts and workflow-command expansions are labeled as
  *  what they ARE, so Ken never mistakes either for a user-authored ask. */
-function renderUserText(text: string, opts: RenderMessageOptions): string | null {
-  if (!text) return null;
-  if (opts.injectedPrompts.some((p) => p.trim() === text.trim())) {
+function renderUserText(
+  text: string,
+  opts: RenderMessageOptions,
+  max = MESSAGE_CHAR_CAP,
+): string | null {
+  if (!text.trim()) return null;
+  if (isInjected(text, opts)) {
     return `${INJECTED_PROMPT_LABEL} ${cap(text)}`;
   }
   const expanded = matchExpandedCommand(text, opts.workflowCommands);
   if (expanded) {
     const head = `**User:** [ran workflow command /${expanded.command.name}]`;
-    return expanded.args ? `${head} with instructions: ${cap(expanded.args, 400)}` : head;
+    return expanded.args
+      ? `${head} with instructions: ${capContext(expanded.args, max, "workflow instructions")}`
+      : head;
   }
-  return `**User:** ${cap(text)}`;
+  return `**User:** ${capContext(text, max, "user message")}`;
 }
 
 /** Render one message's role-tagged text, stripping image/blob payloads and
@@ -188,13 +221,13 @@ function renderUserText(text: string, opts: RenderMessageOptions): string | null
  *  messages (e.g. a tool result that was only an image). */
 function renderMessage(msg: Message, opts: RenderMessageOptions): string | null {
   if (msg.role === "user") {
-    const text =
-      typeof msg.content === "string"
-        ? msg.content
-        : msg.content
-            .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
-            .join(" ")
-            .trim();
+    const text = userText(msg);
+    if (msg.provenance && msg.provenance.source !== "human") {
+      if (!text.trim()) return null;
+      if (isInjected(text, opts)) return `${INJECTED_PROMPT_LABEL} ${cap(text)}`;
+      const label = msg.provenance.source === "runtime" ? "Runtime" : "Agent automation";
+      return `**${label} (not a user request):** ${cap(text)}`;
+    }
     return renderUserText(text, opts);
   }
 
@@ -252,8 +285,8 @@ function renderMessage(msg: Message, opts: RenderMessageOptions): string | null 
  */
 export const AUTOPILOT_REVIEW_INSTRUCTION =
   "GG Coder just finished a turn. Review its work against the user's original " +
-  "ask (the 'Original user request' section above; lines labeled 'Ken " +
-  "autopilot (injected)' are your own earlier fix prompts, NOT user asks). " +
+  "ask and genuine user corrections (including retained earlier decisions; the 'Original user request' section pins the current turn). Lines labeled 'Ken " +
+  "autopilot (injected)' are your own earlier fix prompts, NOT user asks. " +
   "Reply with your verdict ONLY — the first line must be exactly PROMPT, " +
   "ALL_CLEAR, IGNORE, or HUMAN, with the payload after. If GG Coder ended by asking the user " +
   "a question or presenting options, use HUMAN only when the answer requires an " +
@@ -465,8 +498,7 @@ const PLAN_CONTENT_CAP = 8000;
  * PLAN review. In autopilot there is no user in the loop: Ken himself is the
  * plan reviewer — ALL_CLEAR approves (auto-accept + implementation starts),
  * PROMPT sends revision feedback, HUMAN is reserved for genuine user-level
- * decisions. IGNORE is meaningless for a plan (the sidecar maps it to approve
- * defensively), so the instruction forbids it outright.
+ * decisions. IGNORE is not approval: the cycle stops rather than implementing.
  */
 export const AUTOPILOT_PLAN_REVIEW_INSTRUCTION =
   "GG Coder submitted an implementation plan (the 'Plan under review' section " +
@@ -493,7 +525,7 @@ export function buildKenAutopilotPlanContext(
     buildKenDigest({ ...rest, question: AUTOPILOT_PLAN_REVIEW_INSTRUCTION }),
     input.continuationReview,
   );
-  const planSection = `## Plan under review\n${cap(planContent.trim(), PLAN_CONTENT_CAP)}`;
+  const planSection = `## Plan under review\n${capContext(planContent.trim(), PLAN_CONTENT_CAP, "plan")}`;
   const marker = "\n\n## They just asked you\n";
   const index = digest.lastIndexOf(marker);
   return index === -1
@@ -553,7 +585,9 @@ export function buildKenDigest(input: KenDigestInput): string {
   sections.push(`## What they're building\n${building.join("\n")}`);
 
   if (summaryText) {
-    sections.push(`## Story so far\n${cap(summaryText, 4000)}`);
+    sections.push(
+      `## Story so far\nCompacted conversation summary (not new user authorization):\n${capContext(summaryText, 4000, "conversation summary")}`,
+    );
   }
 
   // Pinned so multi-round autopilot cycles can never lose the ask under review
@@ -561,10 +595,48 @@ export function buildKenDigest(input: KenDigestInput): string {
   // own injected prompt as "the user's request").
   if (input.originalRequest?.trim()) {
     sections.push(
-      `## Original user request (the turn under review)\n${cap(
+      `## Original user request (the turn under review)\n${capContext(
         input.originalRequest.trim(),
         ORIGINAL_REQUEST_CAP,
+        "original request",
       )}`,
+    );
+  }
+
+  // Keep older user-authored decisions outside the activity window. Skip known
+  // automation and the already-pinned request; never promote agent prose to intent.
+  const earlier: string[] = [];
+  let remaining = EARLIER_REQUESTS_CAP;
+  let omitted = false;
+  for (let i = afterSummary.length - recent.length - 1; i >= 0; i--) {
+    const message = afterSummary[i];
+    // Legacy sessions lack provenance; explicit runtime/agent messages are not
+    // human decisions and must not consume the retained-intent budget.
+    if (message.provenance && message.provenance.source !== "human") continue;
+    const text = userText(message);
+    if (
+      !text.trim() ||
+      isInjected(text, renderOpts) ||
+      text.trim() === input.originalRequest?.trim()
+    )
+      continue;
+    const rendered = renderUserText(text, renderOpts, ORIGINAL_REQUEST_CAP);
+    if (!rendered) continue;
+    if (rendered.length + 2 > remaining) {
+      omitted = true;
+      continue;
+    }
+    earlier.push(rendered);
+    remaining -= rendered.length + 2;
+  }
+  if (earlier.length > 0 || omitted) {
+    sections.push(
+      "## Earlier user requests and decisions\n" +
+        "Retained from the conversation, oldest first. Apply relevant constraints; later genuine user corrections supersede earlier choices. These are not extra tasks to restart.\n" +
+        (omitted
+          ? "[Context incomplete: some earlier user messages exceed the context budget. Do not assume their requirements are satisfied.]\n"
+          : "") +
+        earlier.reverse().join("\n\n"),
     );
   }
 

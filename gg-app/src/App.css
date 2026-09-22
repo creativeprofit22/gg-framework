@@ -4977,6 +4977,55 @@ select {
   gap: 6px;
 }
 
+/* One compact rail: the status wins space over secondary usage metadata. */
+.task-activity {
+  container-type: inline-size;
+}
+.activity-summary {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.task-activity .statusrow-left {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.task-activity .statusrow {
+  gap: 8px;
+  white-space: nowrap;
+}
+/* Reuse streaming text's dissolve without replaying on timer updates. */
+.activity-label-reveal {
+  display: inline-block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: md-word-in 220ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-label-reveal {
+    animation: none;
+  }
+}
+.activity-workspace-warning {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.activity-meta {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+@container (max-width: 480px) {
+  .activity-token-count,
+  .activity-summary:has(.activity-workspace-warning) .activity-meta {
+    display: none;
+  }
+}
+
 .inputwrap {
   flex: 0 0 auto;
   display: flex;

@@ -1,6 +1,6 @@
 ---
 name: evidence-led-ui
-description: Use for broad or design-sensitive web/mobile UI work: net-new pages/screens, redesigns, design-system work, visual polish, responsive or accessibility overhauls, and UI quality review/critique. Do NOT use for small UI edits that follow existing patterns (bug fixes, minor styling tweaks, wiring, copy changes, small component additions matching neighbors); just match the surrounding code for those. Also exclude database/API schemas, CLI output, standalone image/SVG generation, and description-only tasks.
+description: Use for web/mobile UI creation, redesign, visual polish, accessibility work, and UI review, including small styling fixes and changes to focus, control states, borders, or dropdown icons. Use the small-edit path for narrow changes. Exclude behavior-only wiring unrelated to visual states, copy-only changes, database/API schemas, CLI output, standalone image/SVG generation, and description-only tasks.
 license: See LICENSES.md
 compatibility: Full review requires filesystem inspection and rendered screenshots; web research and browser/device tooling are optional and unavailable checks must be reported honestly.
 ---
@@ -8,6 +8,15 @@ compatibility: Full review requires filesystem inspection and rendered screensho
 # Evidence-Led UI
 
 Use this skill for web or mobile interface creation, redesign, implementation, styling, and review.
+
+## Small-edit path
+
+For a narrow styling or control-state fix, skip the broad design workflow, not verification:
+
+1. Read the shared primitive, tokens, state rules, and affected callers. Reproduce the reported sequence before editing.
+2. For focus, borders, glass effects, or dropdown icons, read `references/craft-rulings.md` § Control icon insets and § No sticky pointer focus. Identify the rule drawing the defect before adding an override.
+3. Fix the shared owner, not each screen. Check affected variants and remove superseded local treatments within scope. Any supporting copy added or changed must pass § Copy must earn its space in `references/craft-rulings.md`; small edits must not accumulate redundant descriptions.
+4. Run the applicable interaction regression matrix in the craft rulings using the project's browser checks or manual browser verification. Screenshots alone cannot pass interaction checks. Report actual evidence and any unverified platform.
 
 ## Governing rule
 
@@ -26,7 +35,7 @@ Apply these on every UI task. Read `references/craft-rulings.md` when implementi
 - **Reuse first:** Search for existing components, variants, tokens, utilities, icon wrappers, focus rings, and motion curves before creating new ones.
 - **Purposeful feedback:** Relevant hover, focus, press, selected, expanded, loading, success, and error states need clear feedback. Avoid abrupt changes when a short transition improves continuity.
 - **No soft semantic tint-on-tint:** Do not default badges, buttons, toasts, cards, selected states, or icon medallions to a low-opacity semantic-color background with saturated same-hue text or icons, with or without a matching border. Unless the user explicitly requests that treatment or an established system must be preserved, choose a product-specific alternative rather than imposing one universal replacement style.
-- **No sticky pointer focus:** Clicking or tapping must not leave a focus ring, highlighted border, shadow, background, or container `:focus-within` treatment stuck after the interaction ends, a native popup closes, or the user clicks elsewhere. Preserve immediate, visible keyboard focus by distinguishing input modality instead of suppressing focus globally.
+- **Focus is not selection or decoration:** Diagnose the actual painted layer before changing it. Reuse one shared focus treatment, separate from glass borders/reflections and selected, expanded, or error states. Do not stack local rings on it. Prevent stale pointer-originated highlights without blurring controls, suppressing keyboard focus, or removing legitimate state cues. Prefer native `:focus-visible` behavior; custom modality handling requires a reproduced platform defect and the regression matrix in `references/craft-rulings.md`.
 - **No generic hover lift:** Do not default to `translateY`, bobbing, floating, or scale-up on hover. Prefer color, border, underline, icon fill, opacity, or restrained shadow changes.
 - **No `transition: all`:** Name transition properties, reuse duration/easing tokens, and provide a reduced-motion path.
 - **Intentional type:** Reuse the existing type system. For net-new web work, select an appropriate modern family or pairing; do not use Arial, Helvetica, or bare `system-ui` as the aesthetic direction.
@@ -34,6 +43,7 @@ Apply these on every UI task. Read `references/craft-rulings.md` when implementi
 - **No unsupported accessibility claims:** Treat ADA as an equal-access legal obligation, not a badge earned by Lighthouse, axe, or another scanner. Never label a UI `ADA compliant` or `WCAG conformant` from source review or automated checks alone; a claim requires a defined scope, per-criterion evidence, manual keyboard and assistive-technology testing, and qualified legal or product-owner review when legal compliance is asserted.
 - **Measured contrast:** Meet WCAG 2.2 contrast for text, controls, icons, focus, and meaningful graphics. Muted text must remain readable.
 - **Consistent flow:** Repeated navigation and actions keep the same order, labels, icons, placement, and behavior across sections and pages.
+- **Copy must earn its space:** Start with clear labels, controls, and relevant status, not automatic subtitles, helper paragraphs, or footer notes. Supporting text must add information needed here that the interface does not already communicate. Remove repetition, show state-specific guidance when needed, and move optional detail into contextual help. Keep essential instructions and consequences visible before action. Reduce unnecessary copy before compressing layout; verify reading effort in the rendered UI. See `references/craft-rulings.md` § Copy must earn its space.
 - **No generated em dashes:** Do not write em dashes in user-facing UI copy unless explicitly requested or exact supplied source text must remain unchanged.
 
 ## Reference map

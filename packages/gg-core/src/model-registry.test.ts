@@ -253,6 +253,19 @@ describe("model registry context windows", () => {
     expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
   });
 
+  it("starts Codex models at their catalog default, not the ladder ceiling", () => {
+    // openai/codex models.json `default_reasoning_level`: the deep-reasoning
+    // flagships ship "low", the balanced tiers "medium". Defaulting to
+    // maxThinkingLevel made fresh Astra sessions reason at max effort.
+    expect(getDefaultThinkingLevel("gpt-6-astra")).toBe("low");
+    expect(getDefaultThinkingLevel("gpt-5.6-sol")).toBe("low");
+    expect(getDefaultThinkingLevel("gpt-5.6-terra")).toBe("medium");
+    expect(getDefaultThinkingLevel("gpt-5.6-luna")).toBe("medium");
+    // Ceilings are unchanged — users can still opt up.
+    expect(getModel("gpt-6-astra")?.maxThinkingLevel).toBe("ultra");
+    expect(getModel("gpt-5.6-luna")?.maxThinkingLevel).toBe("max");
+  });
+
   it("pairs GLM-5.3 with its Flash sibling, both at a max thinking ceiling", () => {
     expect(getDefaultModel("glm")).toMatchObject({
       id: "glm-5.3",

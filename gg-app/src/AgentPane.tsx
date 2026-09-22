@@ -2554,28 +2554,45 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Run a single task: the sidecar opens a fresh session and streams progress
   // back (session_reset → task_start → run_start/…/run_end). Close the modal so
   // the transcript is visible while it runs.
+  //
+  // These three handlers still toast, but they also RETURN the promise and
+  // rethrow, so the modal's controller can keep one action pending (no double
+  // dispatch) and show the same failure inline next to the task it belongs to.
   const handleRunTask = useCallback(
-    (id: string) => {
-      void runTask(id)
-        .then(() => setShowTasks(false))
-        .catch((error) => toast(taskErrorMessage(error), "error"));
-    },
+    (id: string): Promise<void> =>
+      runTask(id)
+        .then(() => {
+          setShowTasks(false);
+        })
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
     [runTask],
   );
 
   // Run every pending task sequentially (a fresh session each), in order.
-  const handleRunAllTasks = useCallback(() => {
-    void runAllTasks()
-      .then(() => setShowTasks(false))
-      .catch((error) => toast(taskErrorMessage(error), "error"));
-  }, [runAllTasks]);
+  const handleRunAllTasks = useCallback(
+    (): Promise<void> =>
+      runAllTasks()
+        .then(() => {
+          setShowTasks(false);
+        })
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
+    [runAllTasks],
+  );
 
   const handleDeleteTask = useCallback(
-    (id: string) => {
-      void deleteTask(id)
+    (id: string): Promise<void> =>
+      deleteTask(id)
         .then(setProjectTasks)
-        .catch((error) => toast(taskErrorMessage(error), "error"));
-    },
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
     [deleteTask],
   );
 

@@ -2866,7 +2866,8 @@ select {
   padding: 6px 6px;
   border-radius: var(--radius-button);
 }
-.tasks-item:hover {
+.tasks-item:hover,
+.tasks-item.is-viewed {
   background: var(--surface-1);
 }
 .tasks-dot {
@@ -2875,13 +2876,29 @@ select {
   width: 14px;
   text-align: center;
 }
+/* The title is the way into a task's full prompt, so it is a real button:
+   keyboard- and touch-reachable, and allowed two lines before clipping instead
+   of ellipsising every title into uselessness. */
 .tasks-title {
   flex: 1 1 auto;
   min-width: 0;
+  font-family: inherit;
   font-size: 13.5px;
+  line-height: 1.35;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-button);
+  cursor: pointer;
+  padding: 2px 4px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.tasks-title:hover {
+  text-decoration: underline;
 }
 .tasks-status {
   flex: 0 0 auto;
@@ -2895,19 +2912,129 @@ select {
   flex: 0 0 auto;
   background: transparent;
   border: none;
+  border-radius: var(--radius-button);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
+  /* Comfortable, deliberate target next to Run rather than a 16px glyph. */
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 6px;
   transition: color var(--t-fast);
 }
-.tasks-delete:hover {
+.tasks-delete:hover:not(:disabled) {
   color: var(--error) !important;
+}
+.tasks-delete:disabled,
+.tasks-title:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+@media (pointer: coarse) {
+  .tasks-delete {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+.tasks-modal :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 .tasks-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.tasks-notice,
+.tasks-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* ── Task detail (full title + full prompt, reached from the title button) ── */
+.tasks-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tasks-back {
+  align-self: flex-start;
+}
+.tasks-detail-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.tasks-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--sans);
+  font-size: 11px;
+}
+.tasks-detail-prompt {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Long prompts scroll inside the panel; the actions row stays reachable. */
+  max-height: min(46vh, 340px);
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+}
+.tasks-detail .tasks-actions {
+  margin-top: 4px;
+  justify-content: space-between;
+}
+/* ── Delete confirmation (inline, mirrors .azure-confirm) ── */
+.tasks-confirm {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--error) 55%, var(--border));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--error) 8%, var(--surface-1));
+}
+.tasks-confirm h4,
+.tasks-confirm p {
+  margin: 0;
+}
+.tasks-confirm h4 {
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.tasks-confirm p {
+  margin-top: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tasks-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.tasks-confirm-delete {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+}
+/* Hover strengthens the outline and tints the fill rather than lightening the
+   label, which would wash out on the light appearance. */
+.tasks-confirm-delete:hover:not(:disabled) {
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+@media (forced-colors: active) {
+  .tasks-confirm,
+  .tasks-detail-prompt,
+  .tasks-confirm-delete {
+    border-color: CanvasText;
+  }
 }
 /* ── MCP server management modal (mirrors .tasks-*) ─────────────────── */
 .mcp-empty {

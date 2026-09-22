@@ -2370,7 +2370,9 @@ describe("AgentPane task request failures", () => {
       const emit = paneEvents(pane);
       vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
       await openTasksModal(pane);
-      fireEvent.click(screen.getByRole("button", { name: all ? "Run all (1)" : "Run" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: all ? "Run all (1)" : `Run: ${projectTask.title}` }),
+      );
       await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
       act(() => {
         emit?.({ type: "tasks_run_done", data: {} });
@@ -2393,7 +2395,7 @@ describe("AgentPane task request failures", () => {
       ).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
       await screen.findByRole("dialog", { name: "Tasks" });
-      const retry = screen.getByRole("button", { name: "Run" });
+      const retry = screen.getByRole("button", { name: `Run: ${projectTask.title}` });
       expect(retry).toMatchObject({ disabled: false });
       fireEvent.click(retry);
       await waitFor(() => expect(pane.runTask).toHaveBeenCalledTimes(all ? 1 : 2));
@@ -2406,7 +2408,7 @@ describe("AgentPane task request failures", () => {
     vi.mocked(pane.listTasks).mockResolvedValue([projectTask]);
     await openTasksModal(pane);
     act(() => emit?.({ type: "autopilot_review_start", data: {} }));
-    const single = screen.getByRole("button", { name: "Run" });
+    const single = screen.getByRole("button", { name: `Run: ${projectTask.title}` });
     const all = screen.getByRole("button", { name: "Run all (1)" });
     expect(single).toMatchObject({ disabled: true });
     expect(all).toMatchObject({ disabled: true });
@@ -2445,7 +2447,7 @@ describe("AgentPane task request failures", () => {
     vi.mocked(pane.runTask).mockRejectedValue(new Error("task cannot start"));
     await openTasksModal(pane);
 
-    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    fireEvent.click(screen.getByRole("button", { name: `Run: ${projectTask.title}` }));
 
     await waitFor(() =>
       expect(nativeMocks.toast).toHaveBeenCalledWith("task cannot start", "error"),
@@ -2475,12 +2477,17 @@ describe("AgentPane task request failures", () => {
     vi.mocked(pane.deleteTask).mockRejectedValue(new Error("task delete refused"));
     await openTasksModal(pane);
 
-    fireEvent.click(screen.getByTitle("Delete task"));
+    // Deletion is now confirmed inside the modal: the row control only opens
+    // the confirmation, and the failure must leave the task in place.
+    fireEvent.click(screen.getByRole("button", { name: `Delete task: ${projectTask.title}` }));
+    expect(pane.deleteTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete task" }));
 
     await waitFor(() =>
       expect(nativeMocks.toast).toHaveBeenCalledWith("task delete refused", "error"),
     );
     expect(screen.getByText(projectTask.title)).toBeTruthy();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
   });
 });
 

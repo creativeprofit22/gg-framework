@@ -697,8 +697,8 @@ export function App(props: AppProps) {
 
   // Derive credentials for the current provider + model. Almost always keyed
   // by provider id, but a model can prefer one storage key and fall back to
-  // another (e.g. Xiaomi's mimo-v2.5-pro-ultraspeed is API-Credits-only,
-  // while mimo-v2.5-pro prefers the Token Plan but falls back to API Credits
+  // another (e.g. Xiaomi's mimo-v2.6-pro-ultraspeed is API-Credits-only,
+  // while mimo-v2.6-pro prefers the Token Plan but falls back to API Credits
   // when only that's configured) — see getAuthStorageKeys().
   const currentCreds = getAuthStorageKeys(currentProvider, currentModel)
     .map((key) => props.credentialsByProvider?.[key])

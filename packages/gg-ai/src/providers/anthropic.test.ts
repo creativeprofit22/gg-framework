@@ -563,7 +563,7 @@ describe("streamAnthropic non-streaming fallback", () => {
 
     const result = streamAnthropic({
       provider: "anthropic",
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-ant-test",
       // A large max_tokens is exactly what tripped the SDK's client-side

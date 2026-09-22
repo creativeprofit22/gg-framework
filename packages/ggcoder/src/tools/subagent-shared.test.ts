@@ -45,7 +45,7 @@ describe("selectSubAgent", () => {
   it("honours an explicit model id", () => {
     const pinned = agent({ name: "pinned", model: "claude-haiku-4-5" });
 
-    expect(selectSubAgent([pinned], "pinned", "anthropic", "claude-opus-5").model).toBe(
+    expect(selectSubAgent([pinned], "pinned", "anthropic", "claude-opus-5-5").model).toBe(
       "claude-haiku-4-5",
     );
   });

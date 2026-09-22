@@ -66,6 +66,10 @@ experiments/prompt-bench/.bench-sandbox-*
 /bench/*
 !/bench/size-gate.mjs
 !/bench/startup-gate.mjs
+!/bench/ui-library-real-flow/
+/bench/ui-library-real-flow/*
+!/bench/ui-library-real-flow/*.mjs
+!/bench/ui-library-real-flow/*.md
 !/bench/baseline/
 /bench/baseline/*
 !/bench/baseline/sizes.json

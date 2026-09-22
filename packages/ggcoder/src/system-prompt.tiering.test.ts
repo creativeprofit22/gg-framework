@@ -171,7 +171,12 @@ describe("tool tiering in the system prompt", () => {
     // block must stay a rounding error next to a schema per tool.
     const indexBlockStart = prompt.indexOf("Available on demand");
     const indexBlock = prompt.slice(indexBlockStart, prompt.indexOf("\n\n", indexBlockStart));
-    expect(indexBlock.length).toBeLessThan(1_200);
+    // Raised from 1,200 when upstream's `ui_registry`/`ui_adopt` joined the
+    // deferred tier: the index grows one terse line per deferred tool, and both
+    // hints are already at fork brevity. The guard is the ratio, not the
+    // constant — this block stays ~1.2KB against a schema per tool, so tiering
+    // still pays for itself.
+    expect(indexBlock.length).toBeLessThan(1_260);
     // Raised with the "How to Talk" reply-shape rules, then again for the
     // always-on security defaults in Code Quality, then again for the Code
     // Quality minimization ladder (benchmarked: same correctness, 50–76% less

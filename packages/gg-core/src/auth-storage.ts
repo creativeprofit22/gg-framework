@@ -116,8 +116,8 @@ export function providerStorageKeys(provider: string): string[] {
 /**
  * Storage key for the Xiaomi API Credits credential (`https://api.xiaomimimo.com/v1`).
  * Kept distinct from the `xiaomi` Token Plan entry (`token-plan-sgp.xiaomimimo.com`)
- * so a user can configure BOTH — `mimo-v2.5-pro-ultraspeed` is API Credits-only,
- * while `mimo-v2.5-pro`/`mimo-v2.5` prefer the Token Plan but fall back to API
+ * so a user can configure BOTH — `mimo-v2.6-pro-ultraspeed` is API Credits-only,
+ * while `mimo-v2.6-pro`/`mimo-v2.6-flash` prefer the Token Plan but fall back to API
  * Credits when only that's configured. Which key(s) a model tries, and in what
  * order, is decided per-model via `getAuthStorageKeys()` in model-registry.ts.
  */

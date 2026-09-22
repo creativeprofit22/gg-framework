@@ -599,9 +599,9 @@ describe("ACP mode over stdio", () => {
     // anything about ggcoder.
     expect(model).toMatchObject({ category: "model", type: "select" });
     expect(thinking).toMatchObject({ category: "thought_level", type: "select" });
-    expect(model.currentValue).toBe("claude-opus-5");
+    expect(model.currentValue).toBe("claude-opus-5-5");
     expect(model.options.length).toBeGreaterThan(1);
-    expect(model.options.some((option) => option.value === "claude-opus-5")).toBe(true);
+    expect(model.options.some((option) => option.value === "claude-opus-5-5")).toBe(true);
     expect(thinking.currentValue).toBe("off");
     expect(thinking.options[0]).toMatchObject({ value: "off" });
 

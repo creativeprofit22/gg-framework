@@ -23,8 +23,8 @@ describe("CLI model resolution", () => {
   });
 
   it("gives a valid explicit interactive model precedence over saved settings", () => {
-    expect(resolveInteractiveCliModel("anthropic", "claude-opus-5", "claude-sonnet-5")).toBe(
-      "claude-opus-5",
+    expect(resolveInteractiveCliModel("anthropic", "claude-opus-5-5", "claude-sonnet-5")).toBe(
+      "claude-opus-5-5",
     );
   });
 

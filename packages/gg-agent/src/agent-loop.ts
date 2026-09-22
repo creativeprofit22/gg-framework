@@ -479,6 +479,72 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+// ── Prompt-size scaling for the first-event watchdog ─────────────────────
+// A remote provider must prefill the ENTIRE prompt before its first token, and
+// prefill speed is finite: GLM's public transport measured ~3-5K tok/s
+// uncached (213K-token prompt → 44-68s to first event, 2026-09-22 sidecar
+// log). A fixed 45s budget below real prefill time turns every large-context
+// turn into a false stall: abort + full re-prefill, multiplying the very
+// latency it was meant to cap. The budget scales with prompt size (2× the
+// observed worst-case slope) up to a ceiling, mirroring the local-backend
+// exemption — aborting early only guarantees a cold retry.
+const PREFILL_TIMEOUT_MS_PER_1K_TOKENS = 640; // 2× observed worst (~0.32ms/token)
+const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s base — Opus can think long before the first event
+const STREAM_FIRST_EVENT_TIMEOUT_MAX_MS = 180_000;
+const STREAM_FIRST_EVENT_TIMEOUT_SCALE_MIN_TOKENS = 20_000; // below this, 45s is plenty
+
+/**
+ * First-event timeout scaled to prompt size, or null when the fixed budget
+ * already covers the prompt (small prompts keep the snappy 45s stall
+ * detection). Only the plain remote path scales — local backends and
+ * silent-reasoning providers carry their own larger budgets.
+ */
+export function scaledFirstEventTimeoutMs(promptTokens: number): number | null {
+  if (promptTokens < STREAM_FIRST_EVENT_TIMEOUT_SCALE_MIN_TOKENS) return null;
+  return Math.min(
+    STREAM_FIRST_EVENT_TIMEOUT_MAX_MS,
+    STREAM_FIRST_EVENT_TIMEOUT_MS + (promptTokens / 1000) * PREFILL_TIMEOUT_MS_PER_1K_TOKENS,
+  );
+}
+
+// ── Prompt-cache health observability ───────────────────────────────────
+// Compaction latency caps are set per provider from measured behavior, and
+// the measurement that matters is the cache-hit ratio on large prompts: a
+// provider whose implicit cache misses often behaves exactly like GLM's
+// public transport (full re-prefill every turn) even if it advertises
+// caching. Usage is normalized so inputTokens EXCLUDES cache hits (Anthropic
+// convention — see extractOpenAIUsage), so the served-from-cache share of the
+// prompt is cacheRead / (input + cacheRead + cacheWrite).
+const CACHE_HEALTH_MIN_PROMPT_TOKENS = 40_000; // below this, misses are cheap
+const CACHE_HEALTH_LOW_RATIO = 0.5; // less than half served from cache on a large prompt
+
+export interface CacheHealth {
+  /** Served-from-cache share of the prompt, or null when the prompt is too
+   *  small for the ratio to matter. */
+  ratio: number | null;
+  promptTokens: number;
+  cacheRead: number;
+  low: boolean;
+}
+
+/** Per-turn prompt-cache health from normalized provider usage. */
+export function assessCacheHealth(usage: Usage): CacheHealth {
+  const input = usage.inputTokens ?? 0;
+  const cacheRead = usage.cacheRead ?? 0;
+  const cacheWrite = usage.cacheWrite ?? 0;
+  const promptTokens = input + cacheRead + cacheWrite;
+  if (promptTokens < CACHE_HEALTH_MIN_PROMPT_TOKENS) {
+    return { ratio: null, promptTokens, cacheRead, low: false };
+  }
+  const ratio = cacheRead / promptTokens;
+  return {
+    ratio,
+    promptTokens,
+    cacheRead,
+    low: ratio < CACHE_HEALTH_LOW_RATIO,
+  };
+}
+
 export async function* agentLoop(
   messages: Message[],
   options: AgentOptions,
@@ -558,6 +624,9 @@ export async function* agentLoop(
   let providerCalls = 0;
   let nonStreamingCalls = 0;
   let warnedNonStreaming = false;
+  // Prompt-cache health warns once per run — every turn still logs a
+  // cache_health diag line, but the miss alert must not spam a long session.
+  let warnedPromptCacheMiss = false;
   // A rejected output budget is worth exactly one retry: the ceiling the
   // provider named is applied to the replay, so a second failure means the
   // limit was not the problem and retrying again just burns the same tokens.
@@ -570,7 +639,8 @@ export async function* agentLoop(
   });
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
-  const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
+  // (The 45s first-event base and its prompt-size scaling live at module scope
+  // — see scaledFirstEventTimeoutMs.)
   // 90s of true API silence between events once streaming starts. This measures
   // only time the *API* was quiet -- the timer is armed after we finish yielding
   // each event downstream, so slow UI/consumer render time is excluded (see the
@@ -613,12 +683,12 @@ export async function* agentLoop(
   // loopback hosts entirely — the 90s inter-event timer still arms as soon as
   // the first event lands, and the caller's abort signal is untouched.
   const localBackend = isLocalBackendUrl(options.baseUrl);
-  const firstEventTimeoutMs = localBackend
+  const baseFirstEventTimeoutMs = localBackend
     ? Number.POSITIVE_INFINITY
     : usesSilentReasoningBudget
       ? STREAM_THINKING_IDLE_TIMEOUT_MS // 5min before first visible token
       : STREAM_FIRST_EVENT_TIMEOUT_MS; // 45s
-  const initialHardTimeoutMs =
+  const baseHardTimeoutMs =
     localBackend || usesSilentReasoningBudget
       ? STREAM_THINKING_HARD_TIMEOUT_MS // 10min absolute cap before output
       : STREAM_HARD_TIMEOUT_MS; // 90s
@@ -640,21 +710,37 @@ export async function* agentLoop(
       if (logicalTurnStartedAt === 0) logicalTurnStartedAt = Date.now();
       toolMap = new Map((options.tools ?? []).map((t) => [t.name, t]));
 
-      // Estimate message payload size for diagnostics.
-      // Gated behind _diagFn — the char-counting loop is O(n) over the
-      // full message history and runs every turn. Skip it entirely when
-      // no diagnostic callback is registered (production default).
-      if (_diagFn) {
-        let msgChars = 0;
-        for (const m of messages) {
-          if (typeof m.content === "string") msgChars += m.content.length;
-          else if (Array.isArray(m.content)) {
-            for (const p of m.content) {
-              if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
-              if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
-            }
+      // Estimate message payload size for diagnostics AND for scaling the
+      // first-event watchdog with prompt size. The char-counting loop is O(n)
+      // over the full message history and runs every turn — cheap (a
+      // sub-millisecond scan of a few hundred KB) even uncondensed.
+      let msgChars = 0;
+      for (const m of messages) {
+        if (typeof m.content === "string") msgChars += m.content.length;
+        else if (Array.isArray(m.content)) {
+          for (const p of m.content) {
+            if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
+            if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
           }
         }
+      }
+      // Scale the first-event watchdog on the plain remote path: prefill time
+      // grows linearly with prompt tokens (~3-5K tok/s observed), so a large
+      // prompt legitimately needs longer than 45s to reach its first event.
+      let firstEventTimeoutMs: number;
+      let initialHardTimeoutMs: number;
+      if (baseFirstEventTimeoutMs === STREAM_FIRST_EVENT_TIMEOUT_MS) {
+        const promptTokens = Math.ceil(msgChars / 3); // conservative: ~3 chars/token
+        const scaled = scaledFirstEventTimeoutMs(promptTokens);
+        firstEventTimeoutMs = scaled ?? baseFirstEventTimeoutMs;
+        // The hard cap must never fire before the first-event budget or it
+        // becomes the abort path instead of the safety net.
+        initialHardTimeoutMs = Math.max(baseHardTimeoutMs, firstEventTimeoutMs + 30_000);
+      } else {
+        firstEventTimeoutMs = baseFirstEventTimeoutMs;
+        initialHardTimeoutMs = baseHardTimeoutMs;
+      }
+      if (_diagFn) {
         diag("turn_start", {
           turn,
           messages: messages.length,
@@ -1477,6 +1563,34 @@ export async function* agentLoop(
       }
       if (response.usage.cacheWrite) {
         totalUsage.cacheWrite = (totalUsage.cacheWrite ?? 0) + response.usage.cacheWrite;
+      }
+
+      // Per-turn prompt-cache health. This is the evidence that decides
+      // which providers need a latency cap in resolveCompactionPolicy: a
+      // large prompt consistently served mostly uncached is the GLM pattern.
+      const cacheHealth = assessCacheHealth(response.usage);
+      if (cacheHealth.ratio !== null) {
+        diag("cache_health", {
+          promptTokens: cacheHealth.promptTokens,
+          cacheRead: cacheHealth.cacheRead,
+          ratio: Math.round(cacheHealth.ratio * 100) / 100,
+          provider: options.provider,
+          model: options.model,
+        });
+        if (cacheHealth.low && !warnedPromptCacheMiss) {
+          warnedPromptCacheMiss = true;
+          diag("prompt_cache_miss", {
+            promptTokens: cacheHealth.promptTokens,
+            cacheRead: cacheHealth.cacheRead,
+            ratio: Math.round(cacheHealth.ratio * 100) / 100,
+            provider: options.provider,
+            model: options.model,
+            impact:
+              "large prompts are consistently served mostly uncached — every turn re-prefills " +
+              "the whole context; if this persists, lower the provider's compaction latency cap " +
+              "(resolveCompactionPolicy)",
+          });
+        }
       }
 
       // Append assistant message and anchor the provider's authoritative usage

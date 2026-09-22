@@ -122,7 +122,7 @@ export async function runLogin(): Promise<void> {
 
     // Xiaomi splits API-key auth across two distinct endpoints: the Token Plan
     // (default, current behavior) and API Credits (required for models like
-    // mimo-v2.5-pro-ultraspeed that aren't served over the Token Plan).
+    // mimo-v2.6-pro-ultraspeed that aren't served over the Token Plan).
     let xiaomiCredits = false;
     if (provider === "xiaomi") {
       const choice = (

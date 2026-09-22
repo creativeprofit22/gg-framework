@@ -60,7 +60,7 @@ const compactionAck = {
 // Two stored conversations in the main project. The newer one has two real
 // compaction generations; the older one deliberately points at a missing parent.
 async function seedSessions() {
-  const older = await manager.create(cwd, "anthropic", "claude-opus-5", {
+  const older = await manager.create(cwd, "anthropic", "claude-opus-5-5", {
     parentSessionId: "missing-parent-checkpoint",
     generation: 1,
     preview: "older: rename the widget",
@@ -68,7 +68,7 @@ async function seedSessions() {
   await appendMessage(older.path, summary("older fallback summary"));
   await appendMessage(older.path, { role: "assistant", content: "Recovered from summary." });
 
-  const original = await manager.create(cwd, "anthropic", "claude-opus-5");
+  const original = await manager.create(cwd, "anthropic", "claude-opus-5-5");
   await appendMessage(original.path, { role: "user", content: "newer: add the config panel" });
   await appendMessage(original.path, {
     role: "assistant",
@@ -83,7 +83,7 @@ async function seedSessions() {
   });
   await appendMessage(original.path, { role: "assistant", content: "Added the config panel." });
 
-  const first = await manager.create(cwd, "anthropic", "claude-opus-5", {
+  const first = await manager.create(cwd, "anthropic", "claude-opus-5-5", {
     conversationId: original.id,
     generation: 1,
     parentSessionId: original.id,
@@ -100,7 +100,7 @@ async function seedSessions() {
   await appendMessage(first.path, { role: "user", content: "after first compaction" });
   await appendMessage(first.path, { role: "assistant", content: "First follow-up complete." });
 
-  const newest = await manager.create(cwd, "anthropic", "claude-opus-5", {
+  const newest = await manager.create(cwd, "anthropic", "claude-opus-5-5", {
     conversationId: original.id,
     generation: 2,
     parentSessionId: first.id,
@@ -115,11 +115,11 @@ async function seedSessions() {
   await appendMessage(newest.path, { role: "assistant", content: "Second follow-up complete." });
 
   // An empty session must never reach the phone: it has nothing to resume.
-  await manager.create(cwd, "anthropic", "claude-opus-5");
+  await manager.create(cwd, "anthropic", "claude-opus-5-5");
 
   let other;
   if (otherCwd) {
-    other = await manager.create(otherCwd, "anthropic", "claude-opus-5");
+    other = await manager.create(otherCwd, "anthropic", "claude-opus-5-5");
     await appendMessage(other.path, { role: "user", content: "other project: fix the parser" });
     await appendMessage(other.path, { role: "assistant", content: "Fixed." });
   }
@@ -167,7 +167,7 @@ class ScriptedSession {
 
   #messages = [];
   #sessionId = "acp-fixture-session";
-  #model = "claude-opus-5";
+  #model = "claude-opus-5-5";
   #provider = "anthropic";
   #thinking;
 
@@ -240,7 +240,7 @@ class ScriptedSession {
 
   async prompt(content) {
     if (content === "show tool images") {
-      const saved = await manager.create(cwd, "anthropic", "claude-opus-5");
+      const saved = await manager.create(cwd, "anthropic", "claude-opus-5-5");
       await appendMessage(saved.path, { role: "user", content: "tool image history" });
       const data =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=";
@@ -461,7 +461,7 @@ process.stderr.write(`seeded=${JSON.stringify(seeded)}\n`);
 
 await runAcpMode({
   provider: "anthropic",
-  model: "claude-opus-5",
+  model: "claude-opus-5-5",
   cwd,
   version: "0.0.0-test",
   createSession: (signal, hooks) => {

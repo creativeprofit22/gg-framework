@@ -51,6 +51,7 @@ Apply these on every UI task. Read `references/craft-rulings.md` when implementi
 Resolve every path from the installed skill root. Load only what the task needs:
 
 - `references/craft-rulings.md`: implementation detail for the binding defaults above.
+- `references/ui-libraries.md`: real Bklit/Kokonut component discovery/adoption and Motion APIs. Read for relevant React UI creation after checking existing project UI; use deferred `ui_registry` and `ui_adopt` rather than inventing a library lookalike.
 - `references/production-contract.md`: binding pass/fail semantics, WCAG/ADA accessibility, forms, performance, resilience, platform, trust, AI, media, theme, and release checks. Read its accessibility sections for every implemented or reviewed UI; read the full contract for broad features, behavior changes, forms, navigation, data/AI interfaces, native work, performance work, or release review.
 - `references/archetypes.md`: surface-specific direction and relevant source slugs. Read for net-new UI, redesigns, or unresolved visual direction.
 - `references/observed-patterns.md`: measured corpus observations. Read only sections that answer a real design question.

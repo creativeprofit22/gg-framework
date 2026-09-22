@@ -310,7 +310,7 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
   });
 
   it("resolveCredentials prefers the first storageKey, falling back to the next when only that's configured", async () => {
-    // Mirrors mimo-v2.5-pro: prefer Token Plan ("xiaomi"), fall back to
+    // Mirrors mimo-v2.6-pro: prefer Token Plan ("xiaomi"), fall back to
     // API Credits when only that's configured.
     const tokenPlanOnly = await makeStorage();
     await tokenPlanOnly.setCredentials("xiaomi", {

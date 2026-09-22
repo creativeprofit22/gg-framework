@@ -132,7 +132,7 @@ describe("shouldCompact", () => {
     }
     const estimated = estimateConversationTokens(messages);
 
-    const opusContext = getContextWindow("claude-opus-5");
+    const opusContext = getContextWindow("claude-opus-5-5");
     const kimiContext = getContextWindow("kimi-k2.7-code");
 
     // Sanity: Opus has 1M, Kimi has 256k
@@ -154,6 +154,17 @@ describe("shouldCompact", () => {
     expect(shouldCompact(messages, 200_000, 0.8, 170_000)).toBe(true);
     // actualTokens under threshold — no compact despite same messages
     expect(shouldCompact(messages, 200_000, 0.8, 100_000)).toBe(false);
+  });
+
+  it("honors an explicit latency-capped trigger limit over window × threshold", () => {
+    // The GLM latency-cap path: a 1M window at 0.85 would never fire at
+    // 150K tokens, but the policy's capped target (176K × 0.85 ≈ 149.6K)
+    // must — this is exactly the 2026-09-22 session that ran 60 minutes.
+    const messages = [makeMessage("system", "sys"), makeMessage("user", "hello")];
+    expect(shouldCompact(messages, 1_000_000, 0.85, 150_000, 149_600)).toBe(true);
+    expect(shouldCompact(messages, 1_000_000, 0.85, 149_599, 149_600)).toBe(false);
+    // Without the explicit limit, the old behavior holds (no compaction)
+    expect(shouldCompact(messages, 1_000_000, 0.85, 150_000)).toBe(false);
   });
 
   it("falls back to char-based estimate when actualTokens is undefined", () => {
@@ -187,13 +198,16 @@ describe("shouldCompact", () => {
     expect(getCompactionReserveTokens(16_384)).toBe(21_384);
   });
 
-  it("does not let an output-token reserve move the percentage boundary", () => {
+  it("does not let theoretical output size move the percentage boundary", () => {
+    // The old deprecated `_reserveTokens` parameter is gone: output-token
+    // ceilings no longer affect the trigger at all — there is no slot to
+    // smuggle one through.
     const messages = [makeMessage("user", "x")];
     const contextWindow = 272_000;
     const boundary = Math.ceil(contextWindow * 0.8);
 
-    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1, 128_000)).toBe(false);
-    expect(shouldCompact(messages, contextWindow, 0.8, boundary, 128_000)).toBe(true);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary)).toBe(true);
   });
 });
 
@@ -220,13 +234,14 @@ describe("compaction thresholds across all models", () => {
   });
 
   it.each(MODELS)("$id ignores theoretical output size at the boundary", (model) => {
+    // Output-token ceilings do not move the boundary — the deprecated
+    // reserve parameter is gone, so there is no slot to smuggle one through.
     const contextWindow = getContextWindow(model.id, { provider: model.provider });
     const boundary = Math.ceil(contextWindow * 0.8);
+    expect(model.maxOutputTokens).toBeGreaterThan(0);
 
-    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1, model.maxOutputTokens)).toBe(
-      false,
-    );
-    expect(shouldCompact(messages, contextWindow, 0.8, boundary, model.maxOutputTokens)).toBe(true);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary)).toBe(true);
   });
 
   it("unknown models fall back to a 200k context window", () => {

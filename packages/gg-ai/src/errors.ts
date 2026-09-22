@@ -378,7 +378,7 @@ function finaliseBySource(
         message: "",
         guidance:
           hint ??
-          "Only Kimi, Gemini, MiniMax, and MiMo-V2.5 can analyze video. Switch to one of those via the model selector.",
+          "Only Kimi, Gemini, MiniMax, and MiMo-V2.6 can analyze video. Switch to one of those via the model selector.",
         ...(requestId ? { requestId } : {}),
       };
     case "ggcoder":

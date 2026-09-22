@@ -11,6 +11,8 @@
  * Cross-tool preferences for those tools live in TOOL_STEERING instead.
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
+  ui_registry: "Inspect public Bklit/Kokonut components, shadcn source and Motion APIs.",
+  ui_adopt: "Plan/adopt Bklit/Kokonut source without overwrites or installs.",
   code_nav:
     "Language-server navigation: `definition`, `references`, `symbols` (file outline), `hover` " +
     "(type/signature). Exact and cross-file, unlike text search.",
@@ -18,8 +20,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Find the most relevant functions/classes/types for a query via AST chunking + BM25 " +
     "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
     "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
-  source_path:
-    "Resolve installed dependency source; inspect before use.",
+  source_path: "Resolve installed dependency source; inspect before use.",
   tauri_package: "Inspect/configure/package/verify Tauri v2 JSON apps.",
   programmatic_profile: "Inspect/persist.",
   programmatic_command: "Review/create commands; separately approve isolated runs.",
@@ -138,6 +139,8 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "tasks",
   "tauri_package",
   "tool_search",
+  "ui_registry",
+  "ui_adopt",
   "wait_agent",
   "web_fetch",
   "web_search",

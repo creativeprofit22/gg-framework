@@ -920,7 +920,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
   await runJsonMode({
     message: positionals[0] ?? "",
     provider: (values.provider ?? "anthropic") as Provider,
-    model: values.model ?? "claude-opus-5",
+    model: values.model ?? "claude-opus-5-5",
     cwd: process.cwd(),
     systemPrompt: values["system-prompt"],
     agentPrompt: values["agent-prompt"],

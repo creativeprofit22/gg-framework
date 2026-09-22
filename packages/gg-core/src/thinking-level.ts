@@ -20,12 +20,12 @@ const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
 const SAKANA_THINKING_LEVELS: readonly ThinkingLevel[] = ["high", "xhigh", "max"];
 const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"];
 // Grok reasoning models take reasoning_effort low/medium/high (server default
-// high; reasoning can't be fully disabled — "off" just omits the param). Grok
-// 4.6 adds an `xhigh` top rung (docs: low/medium/high default/xhigh); 4.5
-// keeps its `high` ceiling because each model slices this ladder by its
-// registry maxThinkingLevel.
+// high; reasoning can't be fully disabled — "off" just omits the param). The
+// registered Grok (4.7) exposes the full ladder including the `xhigh` top
+// rung (docs: low/medium/high default/xhigh); each model slices this ladder
+// by its registry maxThinkingLevel.
 const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh"];
-// Opus 5 / 4.7 expose the full ladder including xhigh ("extended capability for
+// Opus 5.x / 4.7 expose the full ladder including xhigh ("extended capability for
 // long-horizon work"). Other adaptive Anthropic models omit xhigh and would 400.
 const ANTHROPIC_XHIGH_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",

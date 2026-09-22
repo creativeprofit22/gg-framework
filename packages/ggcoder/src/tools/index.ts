@@ -8,6 +8,10 @@ import type { EditSource } from "../core/lsp/edit-telemetry.js";
 import { createReadTool } from "./read.js";
 import { getVideoByteLimit } from "../core/model-registry.js";
 import { createWriteTool } from "./write.js";
+import { UiRegistry } from "../core/ui-registry.js";
+import { adoptionOperations } from "../core/ui-adoption.js";
+import { createUiRegistryTool } from "./ui-registry.js";
+import { createUiAdoptTool } from "./ui-adopt.js";
 import { createEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
 import { createTauriPackageTool } from "./tauri-package.js";
@@ -337,6 +341,30 @@ export async function createTools(
     } catch {
       // Auth not loaded yet or check failed — skip the tool silently.
     }
+  }
+
+  const uiRegistry = new UiRegistry(opts?.getNetworkPolicy);
+  tools.push(createUiRegistryTool(uiRegistry));
+  // Adoption currently supports the local filesystem only. Never silently write
+  // locally when a host supplied remote operations.
+  if (ops === localOperations) {
+    tools.push(
+      createUiAdoptTool(
+        cwd,
+        uiRegistry,
+        createWriteTool(
+          cwd,
+          readFiles,
+          adoptionOperations(cwd),
+          planModeRef,
+          opts?.onFileMutated,
+          opts?.onPreFileMutation,
+          getDiagnostics,
+          opts?.getWriteGuardSettings,
+        ),
+        planModeRef,
+      ),
+    );
   }
 
   const rebuildReadTool = (model: string): AgentTool =>

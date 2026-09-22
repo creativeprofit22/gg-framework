@@ -212,6 +212,30 @@ describe("AgentSession built-in tool tiering", () => {
     }
   }, 20_000);
 
+  it("discovers UI libraries in a normal session and executes the promoted tool offline", async () => {
+    const session = await createSession();
+    try {
+      const prompt = String(session.getMessages()[0]?.content ?? "");
+      expect(prompt).toContain("**ui_registry**");
+      expect(prompt).toContain("**ui_adopt**");
+      const tools = (session as unknown as { tools: AgentTool[] }).tools;
+      const originalNames = tools.map((tool) => tool.name);
+      const context = { signal: new AbortController().signal, toolCallId: "ui-discovery-test" };
+      await tools
+        .find((tool) => tool.name === "tool_search")!
+        .execute({ query: "ui_registry ui_adopt Bklit Kokonut Motion" }, context);
+      expect(tools.slice(0, originalNames.length).map((tool) => tool.name)).toEqual(originalNames);
+      expect(tools.map((tool) => tool.name)).toContain("ui_registry");
+      expect(tools.map((tool) => tool.name)).toContain("ui_adopt");
+      const result = await tools
+        .find((tool) => tool.name === "ui_registry")!
+        .execute({ action: "motion" }, context);
+      expect(JSON.parse(String(result)).kind).toBe("animation-api");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("registers tool_search even with no MCP server connected", async () => {
     const session = await createSession();
     try {

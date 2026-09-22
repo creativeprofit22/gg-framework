@@ -34,7 +34,7 @@ describe("groupByProvider", () => {
     { id: "gpt-5.6-sol", provider: "openai" },
     { id: "claude-sonnet-5", provider: "anthropic" },
     { id: "local/ollama/qwen3", provider: "local" },
-    { id: "claude-opus-5", provider: "anthropic" },
+    { id: "claude-opus-5-5", provider: "anthropic" },
     { id: "grok-4.5", provider: "xai" },
   ];
 
@@ -49,7 +49,7 @@ describe("groupByProvider", () => {
 
   it("preserves each provider's curated model order", () => {
     const anthropic = groupByProvider(models).find((g) => g.provider === "anthropic")!;
-    expect(anthropic.models.map((m) => m.id)).toEqual(["claude-sonnet-5", "claude-opus-5"]);
+    expect(anthropic.models.map((m) => m.id)).toEqual(["claude-sonnet-5", "claude-opus-5-5"]);
     expect(anthropic.label).toBe("Anthropic");
   });
 

@@ -186,6 +186,7 @@ describe("AgentSession worker auto-compaction", () => {
       expect.any(Number),
       0.1,
       undefined,
+      expect.any(Number),
     );
     expect(compactMock).toHaveBeenCalledWith(
       expect.arrayContaining([
@@ -857,6 +858,7 @@ describe("AgentSession mid-turn compaction", () => {
       200_000,
       0.8,
       expectedActiveTokens,
+      160_000, // policy.targetTokens: 0.8 × 200K window (anthropic carries no latency cap)
     );
     expect(compactMock.mock.calls.at(-1)?.[0]).toContainEqual(pendingMessage);
   });
@@ -1068,7 +1070,13 @@ describe("AgentSession mid-turn compaction", () => {
     await session.prompt("custom threshold");
     await session.dispose();
 
-    expect(shouldCompactMock).toHaveBeenCalledWith(expect.any(Array), 200_000, 0.65, 1_100);
+    expect(shouldCompactMock).toHaveBeenCalledWith(
+      expect.any(Array),
+      200_000,
+      0.65,
+      1_100,
+      130_000, // policy.targetTokens: 0.65 × 200K
+    );
   });
 
   it("honors autoCompact false for non-forced calls but force bypasses settings and cooldown", async () => {

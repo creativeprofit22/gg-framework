@@ -19,6 +19,7 @@ import {
   getContextWindow,
   type ContextWindowOptions,
 } from "../../core/model-registry.js";
+import { resolveCompactionPolicy } from "../../core/compaction/policy.js";
 import { log } from "../../core/logger.js";
 import type { AuthStorage } from "../../core/auth-storage.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
@@ -271,8 +272,16 @@ export function useContextCompaction({
       }
 
       const contextWindow = getContextWindow(currentModel, contextWindowOptions);
+      const policy = resolveCompactionPolicy({
+        provider: currentProvider,
+        model: currentModel,
+        contextWindow,
+        threshold,
+        accountId: contextWindowOptions.accountId,
+        approvedPlanPath: approvedPlanPathRef.current,
+      });
       const activeTokens = calculateActiveContextTokens(messages, { usage, pendingMessages });
-      if (shouldCompact(messages, contextWindow, threshold, activeTokens)) {
+      if (shouldCompact(messages, contextWindow, threshold, activeTokens, policy.targetTokens)) {
         const result = await compactConversation(messages);
         if (result !== messages) {
           messagesRef.current = result;

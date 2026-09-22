@@ -1,5 +1,50 @@
 # @kenkaiiii/ggcoder
 
+## 5.63.0
+
+### Minor Changes
+
+- Add Claude Opus 5.5 (`claude-opus-5-5`) and retire the Opus 5 entry. Fable-5.1-class output at $4/$20 per MTok with 1M context and the full adaptive effort ladder; provider pages, CLI defaults, and footers now name Opus 5.5. Fast mode (gated `speed: "fast"` research preview) is documented but not wired up.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.63.0
+- @kenkaiiii/gg-agent@5.63.0
+- @kenkaiiii/gg-core@5.63.0
+
+## 5.62.0
+
+### Minor Changes
+
+- Add the newly released Grok 4.7 and Xiaomi MiMo-V2.6 family to the model registry. xAI defaults to Grok 4.7 (500K context, image input, reasoning up to xhigh) and retires the superseded Grok 4.6/4.5. Xiaomi ships the full-modal MiMo-V2.6-Pro (new default), low-cost MiMo-V2.6-Flash (now the fast/scout model), and API-Credits-only MiMo-V2.6-Pro-UltraSpeed, retiring the V2.5 ids ahead of their 2026-10-21 platform deprecation. Login provider descriptions and the video-support guidance are updated to match.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.62.0
+- @kenkaiiii/gg-agent@5.62.0
+- @kenkaiiii/gg-core@5.62.0
+
+## 5.61.1
+
+### Patch Changes
+
+- Fix slow agent turns on large contexts: latency-capped compaction triggers (evidence-based per provider), prompt-scaled first-event stream timeout, and per-turn prompt-cache health observability.
+  - @kenkaiiii/gg-ai@5.61.1
+  - @kenkaiiii/gg-agent@5.61.1
+  - @kenkaiiii/gg-core@5.61.1
+
+## 5.61.0
+
+### Minor Changes
+
+- Add real UI library integration: `ui_registry` discovers and inspects public Bklit/Kokonut components, supporting shadcn source, and Motion animation APIs; `ui_adopt` plans and adopts registry source into React projects with TypeScript import relocation, prerequisite/conflict checks, attribution, and never overwrites user files. Bundled `evidence-led-ui` skill now routes relevant React UI work to these tools.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.61.0
+- @kenkaiiii/gg-agent@5.61.0
+- @kenkaiiii/gg-core@5.61.0
+
 ## 5.60.9
 
 ### Patch Changes

@@ -56,6 +56,8 @@ export const CORE_TOOL_NAMES: readonly string[] = [
  * (the child-agent control cluster follows `spawn_agent`).
  */
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
+  "ui_registry",
+  "ui_adopt",
   "source_path",
   "tauri_package",
   "programmatic_profile",

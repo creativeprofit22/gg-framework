@@ -117,7 +117,10 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       threshold: savedSettings.compactThreshold,
       accountId: creds.accountId,
     });
-    if (savedSettings.autoCompact && shouldCompact(messages, contextWindow, policy.threshold)) {
+    if (
+      savedSettings.autoCompact &&
+      shouldCompact(messages, contextWindow, policy.threshold, undefined, policy.targetTokens)
+    ) {
       stdout.write("Compacting restored session...\n");
       const compactionAbort = new AbortController();
       const onSigint = () => compactionAbort.abort();

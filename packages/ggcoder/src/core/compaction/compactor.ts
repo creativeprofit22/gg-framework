@@ -241,7 +241,10 @@ const COMPACTION_MIN_MESSAGES = 4;
  * Check if compaction should be triggered.
  *
  * The boundary is the first whole token at or above the configured percentage
- * of the active transport's context window. Output-token ceilings do not move it.
+ * of the active transport's context window — or, when `triggerLimitTokens` is
+ * provided (the caller resolved it via resolveCompactionPolicy, which may cap
+ * the window on a latency budget), that absolute limit. Output-token ceilings
+ * do not move it.
  */
 export function shouldCompact(
   messages: Message[],
@@ -249,8 +252,9 @@ export function shouldCompact(
   threshold = 0.85,
   /** Actual API-reported token count — preferred over char-based estimate when available. */
   actualTokens?: number,
-  /** @deprecated Output-token reserves no longer affect compaction decisions. */
-  _reserveTokens = COMPACTION_RESERVE_TOKENS,
+  /** Pre-resolved trigger limit (policy.targetTokens). Takes precedence over
+   *  contextWindow × threshold so latency-capped policies fire where they should. */
+  triggerLimitTokens?: number,
 ): boolean {
   // Don't attempt compaction with too few messages — compact() would bail
   // anyway (middleMessages <= 2), but this avoids the spinner + LLM auth dance.
@@ -261,7 +265,10 @@ export function shouldCompact(
     return false;
   }
   const estimated = actualTokens ?? estimateConversationTokens(messages);
-  const limit = Math.ceil(contextWindow * threshold);
+  const limit =
+    triggerLimitTokens != null && triggerLimitTokens > 0
+      ? Math.ceil(triggerLimitTokens)
+      : Math.ceil(contextWindow * threshold);
   const source = actualTokens != null ? "actual" : "estimated";
   log("INFO", "compaction", `Context check: ${estimated} ${source} tokens, threshold ${limit}`);
   return estimated >= limit;

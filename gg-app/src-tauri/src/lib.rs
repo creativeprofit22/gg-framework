@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 #[cfg(any(test, not(target_os = "windows")))]
@@ -3195,11 +3195,52 @@ async fn roadmap_reminder_notification_permission(
         .unwrap_or(RoadmapReminderNotificationPermission::Unavailable)
 }
 
+/// Scoped identity for one reminder occurrence dispatched to the OS.
+///
+/// Ordering against deletion is explicit: the webview host owns the deletion gate and
+/// rechecks the adopted authoritative snapshot immediately before invoking this command.
+/// This native boundary only enforces complete scoped identity plus at-most-once dispatch
+/// per occurrence for the life of the app process. A notification already handed to the
+/// OS is never retracted here.
+fn scoped_reminder_dispatch_key(
+    project_key: &str,
+    phase_id: &str,
+    occurrence_key: &str,
+) -> Result<String, String> {
+    let project = project_key.trim();
+    let phase = phase_id.trim();
+    let occurrence = occurrence_key.trim();
+    if project.is_empty() || phase.is_empty() || occurrence.is_empty() {
+        return Err("reminder dispatch identity is incomplete".to_string());
+    }
+    Ok(format!("{project}\u{1f}{phase}\u{1f}{occurrence}"))
+}
+
+fn dispatched_reminder_occurrences() -> &'static Mutex<HashSet<String>> {
+    static DISPATCHED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    DISPATCHED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn admit_scoped_reminder_dispatch(key: String) -> Result<(), String> {
+    let mut dispatched = dispatched_reminder_occurrences()
+        .lock()
+        .map_err(|_| "reminder dispatch state unavailable".to_string())?;
+    if !dispatched.insert(key) {
+        return Err("reminder occurrence already dispatched".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn show_roadmap_reminder_notification(
     app: tauri::AppHandle,
     sound_enabled: bool,
+    project_key: String,
+    phase_id: String,
+    occurrence_key: String,
 ) -> Result<(), String> {
+    let key = scoped_reminder_dispatch_key(&project_key, &phase_id, &occurrence_key)?;
+    admit_scoped_reminder_dispatch(key)?;
     let spec = roadmap_reminder_notification_spec(sound_enabled);
     let mut notification = app
         .notification()
@@ -12005,6 +12046,31 @@ mod tests {
         assert_eq!(audible.sound, Some("Submarine"));
         #[cfg(target_os = "linux")]
         assert_eq!(audible.sound, Some("message-new-instant"));
+    }
+
+    #[test]
+    fn scoped_reminder_dispatch_requires_complete_identity_and_admits_each_occurrence_once() {
+        assert!(scoped_reminder_dispatch_key("  ", "phase-1", "occurrence-1").is_err());
+        assert!(scoped_reminder_dispatch_key("/work", "", "occurrence-1").is_err());
+        assert!(scoped_reminder_dispatch_key("/work", "phase-1", " ").is_err());
+
+        let first =
+            scoped_reminder_dispatch_key("/work/scoped", "phase-scoped", "occurrence-scoped")
+                .unwrap();
+        let repeat =
+            scoped_reminder_dispatch_key(" /work/scoped ", "phase-scoped", "occurrence-scoped")
+                .unwrap();
+        assert_eq!(first, repeat);
+        let other =
+            scoped_reminder_dispatch_key("/work/scoped", "phase-scoped", "occurrence-next").unwrap();
+        assert_ne!(first, other);
+
+        assert!(admit_scoped_reminder_dispatch(first.clone()).is_ok());
+        assert_eq!(
+            admit_scoped_reminder_dispatch(repeat).unwrap_err(),
+            "reminder occurrence already dispatched"
+        );
+        assert!(admit_scoped_reminder_dispatch(other).is_ok());
     }
 
     #[test]

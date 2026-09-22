@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: pluginLogError }));
 
 import {
+  admitReminderDelivery,
   dateToLocalInputValue,
   laterTodayReminderTime,
   localDateTimeToIso,
@@ -16,10 +17,19 @@ import {
   resetReminderPermissionCacheForTests,
   RoadmapReminderDeliveryHost,
   tomorrowReminderTime,
+  type NativeReminderNotificationRequest,
+  type ReminderDeliveryCandidate,
 } from "./roadmap-reminders";
+import {
+  applyNotesPhaseDeletion,
+  notesPhaseDeletionGeneration,
+} from "@kenkaiiii/gg-core/project-notes";
 import type {
   NotesClient,
+  NotesDocumentV3,
+  NotesPhase,
   NotesReminderMutationResult,
+  ProjectNotesSnapshot,
   ReminderReserveOutcome,
 } from "./notes-types";
 
@@ -49,29 +59,111 @@ function reservation(occurrenceKey = "occurrence-1"): ReminderReserveOutcome {
   };
 }
 
-function deliveryClient(reservations: ReminderReserveOutcome[]) {
-  const snapshot = {
-    projectKey: "/work",
-    revision: 2,
-    document: {
-      version: 3 as const,
-      reference: "",
-      currentFocus: "",
-      tasks: [],
-      handoff: { text: "", updatedAt: null, readAt: null },
-      updatedAt: "2026-07-28T12:00:00.000Z",
-      legacyImportedAt: null,
-      phases: [],
-      references: [],
+const PROJECT_KEY = "/work";
+const FIXTURE_TIME = "2026-07-28T12:00:00.000Z";
+
+function reminderPhase(occurrenceKey: string): NotesPhase {
+  return {
+    id: `phase-${occurrenceKey}`,
+    title: `Phase ${occurrenceKey}`,
+    goal: "Deliver the reminder",
+    doneWhen: ["Reminder delivered"],
+    order: 0,
+    status: "in-progress",
+    sourcePrompt: "",
+    referenceIds: [],
+    session: { sessionId: "session-1", sessionPath: "/session" },
+    reminder: {
+      id: `reminder-${occurrenceKey}`,
+      occurrenceKey,
+      dueAt: FIXTURE_TIME,
+      note: `Note ${occurrenceKey}`,
+      createdAt: FIXTURE_TIME,
+      lastDelivery: null,
     },
+    attentionReason: null,
+    createdAt: FIXTURE_TIME,
+    updatedAt: FIXTURE_TIME,
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
+    lifecycleEvents: [],
+    roadmapEvents: [],
   };
+}
+
+function notesDocument(occurrenceKeys: string[]): NotesDocumentV3 {
+  return {
+    version: 3,
+    reference: "",
+    currentFocus: "",
+    tasks: [],
+    handoff: { text: "", updatedAt: null, readAt: null },
+    updatedAt: FIXTURE_TIME,
+    legacyImportedAt: null,
+    phases: occurrenceKeys.map((key, index) => ({ ...reminderPhase(key), order: index })),
+    references: [],
+  };
+}
+
+function snapshotOf(document: NotesDocumentV3, revision = 2): ProjectNotesSnapshot {
+  return { projectKey: PROJECT_KEY, revision, document };
+}
+
+/** Applies the real deletion transition so fixtures match authoritative snapshots. */
+function transitionPhase(
+  document: NotesDocumentV3,
+  phaseId: string,
+  action: "delete" | "recover",
+  revision: number,
+): NotesDocumentV3 {
+  const next = structuredClone(document);
+  const index = next.phases.findIndex((candidate) => candidate.id === phaseId);
+  if (index < 0) throw new Error(`Expected phase ${phaseId}`);
+  const phase = next.phases[index]!;
+  next.phases[index] = applyNotesPhaseDeletion(
+    phase,
+    {
+      version: 1,
+      action,
+      operationId: `${action}-${phaseId}-${revision}`,
+      phaseId,
+      expectedProjectKey: PROJECT_KEY,
+      expectedRevision: revision,
+      expectedGeneration: notesPhaseDeletionGeneration(phase),
+    },
+    FIXTURE_TIME,
+  );
+  return next;
+}
+
+/** Mirrors the ProjectNotes admission gate over whichever document is currently adopted. */
+function documentAdmission(latest: () => NotesDocumentV3 | null) {
+  return (candidate: ReminderDeliveryCandidate) => {
+    const document = latest();
+    if (candidate.projectKey !== undefined && candidate.projectKey !== PROJECT_KEY) {
+      return { status: "reject", reason: "project-changed" } as const;
+    }
+    return admitReminderDelivery(document, candidate);
+  };
+}
+
+function deliveryClient(
+  reservations: ReminderReserveOutcome[],
+  claimSnapshot: () => ProjectNotesSnapshot = () => snapshotOf(notesDocument([])),
+) {
   return {
     reserveReminder: vi.fn(async () => reservations.shift() ?? { status: "none" as const }),
-    claimReminder: vi.fn(async () => ({
-      status: "ok" as const,
-      snapshot,
-      phase: undefined as never,
-    })),
+    claimReminder: vi.fn(async (leaseToken: string) => {
+      const snapshot = claimSnapshot();
+      const occurrenceKey = leaseToken.replace(/^lease-/, "");
+      const phase =
+        snapshot.document.phases.find(
+          (candidate) => candidate.reminder?.occurrenceKey === occurrenceKey,
+        ) ?? reminderPhase(occurrenceKey);
+      return { status: "ok" as const, snapshot, phase };
+    }),
     releaseReminder: vi.fn(async () => ({ status: "released" as const })),
   } satisfies Pick<NotesClient, "reserveReminder" | "claimReminder" | "releaseReminder">;
 }
@@ -310,17 +402,19 @@ describe("RoadmapReminderDeliveryHost", () => {
   it("claims background native delivery before dispatch and passes the existing sound toggle once", async () => {
     const client = deliveryClient([reservation(), { status: "none" }]);
     const order: string[] = [];
+    const claimed = snapshotOf(notesDocument(["occurrence-1"]), 3);
     client.claimReminder.mockImplementation(async () => {
       order.push("claimed");
-      return { status: "ok", snapshot: {} as never, phase: undefined as never };
+      return { status: "ok", snapshot: claimed, phase: claimed.document.phases[0]! };
     });
-    const native = vi.fn(async (soundEnabled: boolean) => {
-      order.push(`native:${soundEnabled}`);
+    const native = vi.fn(async (request: NativeReminderNotificationRequest) => {
+      order.push(`native:${request.soundEnabled}`);
     });
     const host = new RoadmapReminderDeliveryHost(client, vi.fn(), {
       notificationPermission: vi.fn(async () => "granted" as const),
       showNativeNotification: native,
       soundEnabled: () => true,
+      admitDelivery: documentAdmission(() => claimed.document),
     });
 
     await host.drain(false);
@@ -330,15 +424,21 @@ describe("RoadmapReminderDeliveryHost", () => {
   });
 
   it("keeps mute from suppressing native display", async () => {
-    const client = deliveryClient([reservation(), { status: "none" }]);
-    const native = vi.fn(async () => undefined);
+    const document = notesDocument(["occurrence-1"]);
+    const client = deliveryClient([reservation(), { status: "none" }], () =>
+      snapshotOf(document, 3),
+    );
+    const native = vi.fn(async (): Promise<void> => undefined);
     const host = new RoadmapReminderDeliveryHost(client, vi.fn(), {
       notificationPermission: vi.fn(async () => "granted" as const),
       showNativeNotification: native,
       soundEnabled: () => false,
+      admitDelivery: documentAdmission(() => document),
     });
     await host.drain(false);
-    expect(native).toHaveBeenCalledWith(false);
+    expect(native).toHaveBeenCalledWith(
+      expect.objectContaining({ soundEnabled: false, occurrenceKey: "occurrence-1" }),
+    );
   });
 
   it("routes a denied production command result to fallback without native dispatch", async () => {
@@ -516,7 +616,7 @@ describe("RoadmapReminderDeliveryHost", () => {
     const log = vi.fn();
     const host = new RoadmapReminderDeliveryHost(client, vi.fn(), {
       notificationPermission: vi.fn(async () => "granted" as const),
-      showNativeNotification: vi.fn(async () => {
+      showNativeNotification: vi.fn(async (): Promise<void> => {
         throw new Error("native unavailable");
       }),
       logError: log,
@@ -524,6 +624,165 @@ describe("RoadmapReminderDeliveryHost", () => {
     await host.drain(false);
     expect(client.claimReminder).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.objectContaining({ message: "native unavailable" }));
+  });
+
+  describe("deferred claim admission after phase deletion", () => {
+    /**
+     * Sequences the confirmed gap: the claim commits durably, deletion is persisted and
+     * adopted, and only then does the old claim response resolve.
+     */
+    function deferredClaimHost(options: {
+      focused: boolean;
+      onInApp?: (delivery: unknown) => void;
+      showNativeNotification?: (request: unknown) => Promise<void>;
+      permission?: "granted" | "denied" | "unavailable";
+    }) {
+      const live = notesDocument(["occurrence-1"]);
+      const phaseId = live.phases[0]!.id;
+      let adopted: NotesDocumentV3 | null = live;
+      const claimGate = deferred<void>();
+      const reservations = [reservation(), { status: "none" as const }];
+      const client = {
+        reserveReminder: vi.fn(
+          async () => reservations.shift() ?? ({ status: "none" } as ReminderReserveOutcome),
+        ),
+        claimReminder: vi.fn(async () => {
+          // Commits against the pre-deletion document, then resolves late.
+          const committed = snapshotOf(structuredClone(live), 3);
+          await claimGate.promise;
+          return {
+            status: "ok" as const,
+            snapshot: committed,
+            phase: committed.document.phases[0]!,
+          };
+        }),
+        releaseReminder: vi.fn(async () => ({ status: "released" as const })),
+      } satisfies Pick<NotesClient, "reserveReminder" | "claimReminder" | "releaseReminder">;
+
+      const host = new RoadmapReminderDeliveryHost(client, options.onInApp ?? vi.fn(), {
+        admitDelivery: documentAdmission(() => adopted),
+        notificationPermission: vi.fn(async () => options.permission ?? "granted"),
+        showNativeNotification: vi.fn(
+          options.showNativeNotification ?? (async () => undefined),
+        ) as never,
+        logError: vi.fn(),
+      });
+
+      return {
+        client,
+        host,
+        phaseId,
+        live,
+        adopt: (document: NotesDocumentV3 | null) => {
+          adopted = document;
+        },
+        releaseClaim: () => claimGate.resolve(),
+        drain: () => host.drain(options.focused),
+      };
+    }
+
+    it("drops an in-app delivery whose claim resolves after the deletion snapshot was adopted", async () => {
+      const onInApp = vi.fn();
+      const scenario = deferredClaimHost({ focused: true, onInApp });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+      expect(scenario.client.claimReminder).toHaveBeenCalledTimes(1);
+
+      scenario.adopt(transitionPhase(scenario.live, scenario.phaseId, "delete", 3));
+      scenario.releaseClaim();
+      await draining;
+
+      expect(onInApp).not.toHaveBeenCalled();
+    });
+
+    it("drops a native dispatch whose claim resolves after the deletion snapshot was adopted", async () => {
+      const showNativeNotification = vi.fn(async () => undefined);
+      const scenario = deferredClaimHost({ focused: false, showNativeNotification });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+      expect(scenario.client.claimReminder).toHaveBeenCalledTimes(1);
+
+      scenario.adopt(transitionPhase(scenario.live, scenario.phaseId, "delete", 3));
+      scenario.releaseClaim();
+      await draining;
+
+      expect(showNativeNotification).not.toHaveBeenCalled();
+    });
+
+    it("drops a delivery when the phase was deleted and recovered before the claim resolved", async () => {
+      const onInApp = vi.fn();
+      const scenario = deferredClaimHost({ focused: true, onInApp });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+
+      const deleted = transitionPhase(scenario.live, scenario.phaseId, "delete", 3);
+      scenario.adopt(transitionPhase(deleted, scenario.phaseId, "recover", 4));
+      scenario.releaseClaim();
+      await draining;
+
+      // Recovery never restores reminders, and the deletion generation moved on.
+      expect(onInApp).not.toHaveBeenCalled();
+    });
+
+    it("drops a delivery when the host is disposed while the claim is in flight", async () => {
+      const onInApp = vi.fn();
+      const scenario = deferredClaimHost({ focused: true, onInApp });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+
+      scenario.host.dispose();
+      scenario.releaseClaim();
+      await draining;
+
+      expect(onInApp).not.toHaveBeenCalled();
+    });
+
+    it("drops a delivery when the project changed while the claim was in flight", async () => {
+      const onInApp = vi.fn();
+      const scenario = deferredClaimHost({ focused: true, onInApp });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+
+      scenario.adopt(null);
+      scenario.releaseClaim();
+      await draining;
+
+      expect(onInApp).not.toHaveBeenCalled();
+    });
+
+    it("drops the permission-fallback in-app delivery after a deletion resolves late", async () => {
+      const onInApp = vi.fn();
+      const scenario = deferredClaimHost({ focused: false, onInApp, permission: "denied" });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+
+      scenario.adopt(transitionPhase(scenario.live, scenario.phaseId, "delete", 3));
+      scenario.releaseClaim();
+      await draining;
+
+      expect(scenario.client.claimReminder).toHaveBeenCalledWith(
+        "lease-occurrence-1",
+        "in-app-fallback",
+        "denied",
+      );
+      expect(onInApp).not.toHaveBeenCalled();
+    });
+
+    it("still delivers, with scoped native identity, when the phase survives the claim", async () => {
+      const showNativeNotification = vi.fn(async () => undefined);
+      const scenario = deferredClaimHost({ focused: false, showNativeNotification });
+      const draining = scenario.drain();
+      await flushMicrotasks();
+      scenario.releaseClaim();
+      await draining;
+
+      expect(showNativeNotification).toHaveBeenCalledExactlyOnceWith({
+        soundEnabled: expect.any(Boolean),
+        projectKey: PROJECT_KEY,
+        phaseId: scenario.phaseId,
+        occurrenceKey: "occurrence-1",
+      });
+    });
   });
 
   it("queues multiple focused claims in due order instead of stacking delivery work", async () => {

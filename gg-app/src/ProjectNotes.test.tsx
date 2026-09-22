@@ -412,6 +412,8 @@ class FakeProjectNotesClient implements NotesClient {
   readonly claimCalls: Array<{ leaseToken: string; channel: string; permission: string }> = [];
   readonly reserveOutcomes: ReminderReserveOutcome[] = [];
   claimOutcome: ReminderClaimOutcome | null = null;
+  /** Holds one claim response open so a deletion can be adopted mid-flight. */
+  claimGate: Promise<void> | null = null;
   readonly reconciliationCalls: PhaseExecutionReconciliationRequestV3[] = [];
   reconciliationOutcome: PhaseExecutionReconciliationOutcome = { status: "missing" };
   getNotesCalls = 0;
@@ -584,6 +586,12 @@ class FakeProjectNotesClient implements NotesClient {
     );
     if (!current || !phase?.reminder) return { status: "stale-occurrence" };
     const document = structuredClone(current.document);
+    // The claim commits against this pre-deletion document; the response may resolve later.
+    if (this.claimGate) {
+      const gate = this.claimGate;
+      this.claimGate = null;
+      await gate;
+    }
     const nextPhase = document.phases.find((candidate) => candidate.id === phase.id)!;
     nextPhase.reminder!.lastDelivery = {
       occurrenceKey: nextPhase.reminder!.occurrenceKey,
@@ -766,6 +774,51 @@ describe("ProjectNotes", () => {
       expect(screen.queryByRole("region", { name: "Authoritative title" })).toBeNull(),
     );
     expect(screen.queryByText("Replacement note")).toBeNull();
+  });
+
+  it("drops a reminder whose claim resolves after the phase deletion snapshot was adopted", async () => {
+    const cwd = "/work/deferred-claim-deletion";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("deferred claim deletion");
+    const selected = phase("deferred-claim", "in-progress", true);
+    initial.phases = [selected];
+    client.seed(cwd, initial);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    let releaseClaim!: () => void;
+    client.claimGate = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await waitFor(() => expect(client.claimCalls).toHaveLength(1));
+
+    const current = client.snapshots.get(canonicalProjectKey(cwd))!;
+    const deleted = structuredClone(current.document);
+    deleted.phases = [
+      applyNotesPhaseDeletion(
+        deleted.phases[0]!,
+        {
+          version: 1,
+          action: "delete",
+          operationId: "delete-deferred-claim",
+          phaseId: selected.id,
+          expectedProjectKey: canonicalProjectKey(cwd),
+          expectedRevision: current.revision + 5,
+          expectedGeneration: notesPhaseDeletionGeneration(deleted.phases[0]!),
+        },
+        NOW,
+      ),
+    ];
+    act(() => client.publish(cwd, deleted, current.revision + 5));
+
+    await act(async () => {
+      releaseClaim();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.queryByRole("region", { name: /Phase /u })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Notes, 1 reminder due" })).toBeNull();
   });
 
   it("queues alerts for two document-unique reminder occurrences without suppressing either", async () => {

@@ -16,9 +16,12 @@ import {
   isNotesHandoffUnread,
 } from "./notes-status";
 import {
+  admitReminderDelivery,
   reminderMutationResultMessage,
   RoadmapReminderDeliveryHost,
   type InAppReminderDelivery,
+  type ReminderDeliveryAdmission,
+  type ReminderDeliveryCandidate,
 } from "./roadmap-reminders";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
 import type {
@@ -144,6 +147,16 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
   };
   const activePhaseCount = getActiveNotesPhaseCount(notesDocument);
   const activeReminderCount = getActiveNotesReminderCount(notesDocument);
+  // Delivery admission reads the latest adopted document, never a render-time capture,
+  // so a claim that resolves after a deletion snapshot cannot requeue a deleted phase.
+  const notesDocumentRef = useRef(notesDocument);
+  const activeProjectIdentityRef = useRef(activeProjectIdentity);
+  // Synced after commit (never during render) and before the delivery-host effect below,
+  // so admission always reads the document this render adopted.
+  useEffect(() => {
+    notesDocumentRef.current = notesDocument;
+    activeProjectIdentityRef.current = activeProjectIdentity;
+  }, [notesDocument, activeProjectIdentity]);
 
   useEffect(() => {
     setShowNotes(false);
@@ -161,15 +174,12 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     setReminderQueue((current) => {
       if (current.length === 0) return current;
       return current.flatMap((delivery) => {
+        const admission = admitReminderDelivery(notesDocument, {
+          phaseId: delivery.phase.id,
+          occurrenceKey: delivery.reminder.occurrenceKey,
+        });
         const phase = notesDocument.phases.find((candidate) => candidate.id === delivery.phase.id);
-        if (
-          !phase ||
-          phase.archivedAt !== null ||
-          phase.status === "done" ||
-          phase.status === "cancelled" ||
-          phase.reminder === null ||
-          phase.reminder.occurrenceKey !== delivery.reminder.occurrenceKey
-        ) {
+        if (admission.status !== "admit" || !phase?.reminder) {
           return [];
         }
         return [
@@ -190,13 +200,37 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
 
   useEffect(() => {
     if (!activeProjectIdentity) return;
-    const host = new RoadmapReminderDeliveryHost(client, (delivery) => {
-      setReminderQueue((current) =>
-        current.some((item) => item.reminder.occurrenceKey === delivery.reminder.occurrenceKey)
-          ? current
-          : [...current, delivery],
-      );
-    });
+    const hostProjectIdentity = activeProjectIdentity;
+    const admitDelivery = (candidate: ReminderDeliveryCandidate): ReminderDeliveryAdmission => {
+      if (
+        activeProjectIdentityRef.current !== hostProjectIdentity ||
+        (candidate.projectKey !== undefined && candidate.projectKey !== hostProjectIdentity)
+      ) {
+        return { status: "reject", reason: "project-changed" };
+      }
+      return admitReminderDelivery(notesDocumentRef.current, candidate);
+    };
+    const host = new RoadmapReminderDeliveryHost(
+      client,
+      (delivery) => {
+        // A late callback must not undo pruning: revalidate against the latest document.
+        if (
+          admitDelivery({
+            phaseId: delivery.phase.id,
+            occurrenceKey: delivery.reminder.occurrenceKey,
+            projectKey: delivery.snapshot?.projectKey,
+          }).status !== "admit"
+        ) {
+          return;
+        }
+        setReminderQueue((current) =>
+          current.some((item) => item.reminder.occurrenceKey === delivery.reminder.occurrenceKey)
+            ? current
+            : [...current, delivery],
+        );
+      },
+      { admitDelivery },
+    );
     deliveryHostRef.current = host;
     const unsubscribe = client.subscribe((event) => {
       if (authorityReadyRef.current && isRoadmapReminderDueEvent(event)) {

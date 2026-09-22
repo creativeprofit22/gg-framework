@@ -18,11 +18,20 @@ describe("phase deletion contract", () => {
   it.each([
     { action: "purge" }, { actor: "admin" }, { operationId: "a".repeat(257) },
     { operationId: "\n" }, { expectedProjectKey: "x".repeat(4097) },
+    { operationId: "operation\u0000" }, { phaseId: "phase\u001f" },
+    { expectedProjectKey: "project\u0000key" }, { expectedProjectKey: "project\u001bkey" },
+    { expectedProjectKey: "   " },
     { expectedRevision: -1 }, { expectedRevision: 0.5 }, { expectedGeneration: Infinity },
     { expectedRevision: Number.MAX_SAFE_INTEGER + 1 }, { version: 2 }, { phaseId: "" },
   ])("rejects malformed or unauthorized request fields %j", async (patch) => {
     const doc = await completionCompatibilityFixture();
     expect(isPhaseDeletionRequest({ ...request(doc.phases[2]!), ...patch })).toBe(false);
+  });
+
+  it("accepts printable Unicode in identifiers and the project key", async () => {
+    const doc = await completionCompatibilityFixture();
+    expect(isPhaseDeletionRequest({ ...request(doc.phases[2]!),
+      operationId: "opération-\u{1f680}", expectedProjectKey: "E:/Projets/ggé-\u{1f5c2}" })).toBe(true);
   });
 
   it("accepts documents without metadata and key-order-independent request fingerprints", async () => {

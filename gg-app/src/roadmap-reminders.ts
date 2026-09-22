@@ -1,8 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { error as logError } from "@tauri-apps/plugin-log";
+import {
+  isNotesPhasePresent,
+  notesPhaseDeletionGeneration,
+} from "@kenkaiiii/gg-core/project-notes";
 import { isSoundEnabled } from "./sounds";
 import type {
   NotesClient,
+  NotesDocumentV3,
   NotesReminderMutationResult,
   NotesReminderPermission,
   ProjectNotesSnapshot,
@@ -115,11 +120,69 @@ export type NativeNotificationPermission = Extract<
   "granted" | "denied" | "unavailable"
 >;
 
+/** Scoped identity of one reminder occurrence awaiting final delivery admission. */
+export interface ReminderDeliveryCandidate {
+  phaseId: string;
+  occurrenceKey: string;
+  /** Present once a claim response carries its authoritative snapshot. */
+  projectKey?: string;
+}
+
+export type ReminderDeliveryRejection =
+  | "no-document"
+  | "project-changed"
+  | "phase-missing"
+  | "phase-deleted"
+  | "phase-archived"
+  | "phase-inactive"
+  | "reminder-missing"
+  | "stale-occurrence"
+  | "deletion-generation-changed"
+  | "disposed"
+  | "admission-failed";
+
+export type ReminderDeliveryAdmission =
+  | { status: "admit"; deletionGeneration: number }
+  | { status: "reject"; reason: ReminderDeliveryRejection };
+
+/**
+ * Final-delivery admission against the latest authoritative document. A claim can
+ * commit before a phase deletion and still resolve after that deletion snapshot was
+ * adopted, so every awaited claim is rechecked here before anything is dispatched.
+ */
+export function admitReminderDelivery(
+  document: NotesDocumentV3 | null | undefined,
+  candidate: Pick<ReminderDeliveryCandidate, "phaseId" | "occurrenceKey">,
+): ReminderDeliveryAdmission {
+  if (!document) return { status: "reject", reason: "no-document" };
+  const phase = document.phases.find((entry) => entry.id === candidate.phaseId);
+  if (!phase) return { status: "reject", reason: "phase-missing" };
+  if (!isNotesPhasePresent(phase)) return { status: "reject", reason: "phase-deleted" };
+  if (phase.archivedAt !== null) return { status: "reject", reason: "phase-archived" };
+  if (phase.status === "done" || phase.status === "cancelled") {
+    return { status: "reject", reason: "phase-inactive" };
+  }
+  if (!phase.reminder) return { status: "reject", reason: "reminder-missing" };
+  if (phase.reminder.occurrenceKey !== candidate.occurrenceKey) {
+    return { status: "reject", reason: "stale-occurrence" };
+  }
+  return { status: "admit", deletionGeneration: notesPhaseDeletionGeneration(phase) };
+}
+
+/** Scoped identity carried to the native notification adapter alongside sound preference. */
+export interface NativeReminderNotificationRequest {
+  soundEnabled: boolean;
+  projectKey: string;
+  phaseId: string;
+  occurrenceKey: string;
+}
+
 export interface RoadmapReminderDeliveryDependencies {
   client: Pick<NotesClient, "reserveReminder" | "claimReminder" | "releaseReminder">;
   onInApp(delivery: InAppReminderDelivery): void;
   notificationPermission(): Promise<NativeNotificationPermission>;
-  showNativeNotification(soundEnabled: boolean): Promise<void>;
+  showNativeNotification(request: NativeReminderNotificationRequest): Promise<void>;
+  admitDelivery(candidate: ReminderDeliveryCandidate): ReminderDeliveryAdmission;
   soundEnabled(): boolean;
   now(): number;
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -151,8 +214,14 @@ export class RoadmapReminderDeliveryHost {
         const permission = await invoke<unknown>("roadmap_reminder_notification_permission");
         return isNativeNotificationPermission(permission) ? permission : "unavailable";
       },
-      showNativeNotification: (soundEnabled) =>
-        invoke("show_roadmap_reminder_notification", { soundEnabled }),
+      showNativeNotification: (request) =>
+        invoke("show_roadmap_reminder_notification", {
+          soundEnabled: request.soundEnabled,
+          projectKey: request.projectKey,
+          phaseId: request.phaseId,
+          occurrenceKey: request.occurrenceKey,
+        }),
+      admitDelivery: () => ({ status: "admit", deletionGeneration: 0 }),
       soundEnabled: isSoundEnabled,
       now: Date.now,
       setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
@@ -220,6 +289,17 @@ export class RoadmapReminderDeliveryHost {
         return;
       }
 
+      const candidate: ReminderDeliveryCandidate = {
+        phaseId: reservation.phase.id,
+        occurrenceKey: reservation.reminder.occurrenceKey,
+      };
+      const baseline = this.admit(candidate);
+      if (baseline.status !== "admit") {
+        await this.releaseReservation(reservation.leaseToken);
+        this.resetTransportRetry();
+        return;
+      }
+
       let permission: NativeNotificationPermission | null = null;
       try {
         if (!this.latestFocused) {
@@ -262,6 +342,17 @@ export class RoadmapReminderDeliveryHost {
         }
 
         this.resetTransportRetry();
+
+        // The claim committed durably before this response resolved, so the phase may
+        // already be deleted, recovered, or replaced in the adopted snapshot. Recheck
+        // final admission here; the occurrence stays consumed either way.
+        if (this.disposed) return;
+        const projectKey = claim.snapshot?.projectKey;
+        const final = this.admit({ ...candidate, projectKey });
+        if (final.status !== "admit" || final.deletionGeneration !== baseline.deletionGeneration) {
+          continue;
+        }
+
         if (inAppDelivery) {
           try {
             this.dependencies.onInApp({ ...reservation, snapshot: claim.snapshot });
@@ -269,8 +360,14 @@ export class RoadmapReminderDeliveryHost {
             this.dependencies.logError(error);
           }
         } else if (nativeDelivery) {
+          if (typeof projectKey !== "string" || projectKey.length === 0) continue;
           try {
-            await this.dependencies.showNativeNotification(this.dependencies.soundEnabled());
+            await this.dependencies.showNativeNotification({
+              soundEnabled: this.dependencies.soundEnabled(),
+              projectKey,
+              phaseId: candidate.phaseId,
+              occurrenceKey: candidate.occurrenceKey,
+            });
           } catch (error) {
             this.dependencies.logError(error);
           }
@@ -280,6 +377,17 @@ export class RoadmapReminderDeliveryHost {
         this.scheduleTransportRetry(error);
         return;
       }
+    }
+  }
+
+  /** Fail closed: an admission callback that throws must not dispatch a delivery. */
+  private admit(candidate: ReminderDeliveryCandidate): ReminderDeliveryAdmission {
+    if (this.disposed) return { status: "reject", reason: "disposed" };
+    try {
+      return this.dependencies.admitDelivery(candidate);
+    } catch (error) {
+      this.dependencies.logError(error);
+      return { status: "reject", reason: "admission-failed" };
     }
   }
 

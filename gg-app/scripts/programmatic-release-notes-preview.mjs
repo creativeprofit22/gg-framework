@@ -8,7 +8,7 @@ import { initScript, responses, requireVisualFixtureUrl } from "./capture-screen
 // Browser-only verification. Native window APIs and Decisions IPC are mocked;
 // records below are actual retained workflow evidence, not synthetic verification.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const output = resolve(root, ".gg/screenshots/upstream-0664-release-notes");
+const output = resolve(root, ".gg/screenshots/upstream-0690-release-notes");
 const baseUrl = requireVisualFixtureUrl(
   process.env.GG_RELEASE_PREVIEW_URL ?? "http://127.0.0.1:1436/",
 );
@@ -30,7 +30,10 @@ for (const record of records) {
 assert.equal(records[0].evidence.merge, "04991d1277beb6eae7dfa7fb9177832cfdcbc4a9");
 assert.equal(records[0].evidence.upstreamParent, "ec29187fabda3767663e0ff815423307ed3420a6");
 assert.equal(records[0].verification.installer, null);
-assert.equal(app.version, "0.66.4");
+// The newest verified Decisions record is still the 0.66.4 integration: the
+// 0.69.0 merge resolved conflicts by hand, so the workflow never recorded one.
+// Its evidence stays pinned above; only the app version moves forward.
+assert.equal(app.version, "0.69.0");
 assert.equal(records[0].verification.checks, "passed");
 const plain = (text) => text.replaceAll("`", "");
 const browser = await chromium.launch({

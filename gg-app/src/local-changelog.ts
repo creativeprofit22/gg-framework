@@ -53,6 +53,11 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
+    // The identifier names 0.66.4 because that build was packaged but never
+    // installed, so these notes were never delivered to a reader. The content
+    // now covers upstream through 0.69.0 instead of being duplicated into a
+    // second entry. Keep the identifier: it is opaque to readers, and changing
+    // it would present already-written notes as unread.
     id: "local-2026-09-22-upstream-0664-status-and-reading",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,

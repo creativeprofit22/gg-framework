@@ -30,7 +30,7 @@ export function describeRunVerification(
   return {
     verification: evidence.some((entry) => entry.status === "failed")
       ? "failed"
-      : problem
+      : problem || evidence.some((entry) => entry.status === "rejected" || entry.status === "unavailable")
         ? "incomplete"
         : verifiedChecks > 0
           ? "passed"

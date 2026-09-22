@@ -44,7 +44,9 @@ describe("request-scoped host verification", () => {
     expect(ledger.snapshot().currentEvidence).toEqual([]);
     expect(ledger.snapshot().staleEvidence).toHaveLength(1);
     record(ledger, "after-edit");
-    expect(ledger.runActivity().evidence.map((e) => e.status)).toEqual(["rejected", "passed"]);
+    expect(ledger.runActivity().evidence.map((e) => e.status)).toEqual(["passed"]);
+    expect(ledger.snapshot().staleEvidence).toHaveLength(1);
+    expect(ledger.snapshot().currentEvidence).toHaveLength(1);
   });
 
   it("does not promote missing execution metadata to passed evidence", () => {

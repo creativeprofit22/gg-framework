@@ -693,19 +693,27 @@ export class SessionVerificationEvidenceLedger {
   }
 
   runActivity(): { changed: boolean; checked: boolean; evidence: VerificationEvidence[] } {
-    const evidence: VerificationEvidence[] = [];
+    return { changed: this.runChanged, checked: this.runChecked, evidence: this.activityEvidence(this.run) };
+  }
+
+  workspaceEvidence(): VerificationEvidence[] {
+    return this.activityEvidence();
+  }
+
+  private activityEvidence(run?: number): VerificationEvidence[] {
+    const evidence = new Map<string, VerificationEvidence>();
     for (const entry of this.entries.values()) {
-      if (entry.run !== this.run) continue;
+      if (run !== undefined && entry.run !== run) continue;
       const classification = classifyVerificationCommand(entry.evidence.command);
       if (!classification.candidate) continue;
       const current = entry.generation === this.generation;
-      evidence.push({
+      evidence.set(entry.evidence.command, {
         command: entry.evidence.command,
-        status: !current || !classification.accepted ? "rejected" : entry.evidence.status === "unclassified" ? "unavailable" : entry.evidence.status,
+        status: entry.evidence.status === "failed" && classification.accepted ? "failed" : !current || !classification.accepted ? "rejected" : entry.evidence.status === "unclassified" ? "unavailable" : entry.evidence.status,
         reason: !current ? "Superseded by a later workspace mutation" : !classification.accepted ? classification.reason : entry.evidence.reason,
       });
     }
-    return { changed: this.runChanged, checked: this.runChecked, evidence };
+    return [...evidence.values()];
   }
 
   get revision(): number {

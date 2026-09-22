@@ -5017,7 +5017,7 @@ ${content}
   }
 
   getVerificationEvidence() {
-    return this.getRunVerificationActivity().evidence;
+    return this.verificationEvidenceLedger.workspaceEvidence();
   }
 
   getVerificationEvidenceLedgerSnapshot(): SessionVerificationEvidenceLedgerSnapshot {

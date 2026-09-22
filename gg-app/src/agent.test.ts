@@ -462,6 +462,21 @@ const diagnostics = {
   consistency: "unbound",
 };
 
+describe("pane deletion native adapter", () => {
+  beforeEach(() => invoke.mockReset());
+  it("preserves retry identity and validates shared responses without exposing credentials", async () => {
+    const request = { version: 1 as const, action: "delete" as const, operationId: "retry-1", phaseId: "phase-1",
+      expectedProjectKey: "synthetic", expectedRevision: 3, expectedGeneration: 0 };
+    const outcome = { status: "uncertain", operationId: "retry-1", message: "Retry the same request" };
+    invoke.mockResolvedValue(outcome);
+    const client = createPaneAgentClient("pane-a");
+    await expect(client.mutatePhaseDeletion!(request)).resolves.toEqual(outcome);
+    expect(invoke).toHaveBeenCalledWith("agent_notes_phase_deletion", { paneId: "pane-a", request });
+    invoke.mockResolvedValue({ ...outcome, forged: true });
+    await expect(client.mutatePhaseDeletion!(request)).rejects.toThrow("Invalid phase deletion response");
+  });
+});
+
 describe("pane Notes storage diagnostics", () => {
   beforeEach(() => invoke.mockReset());
 

@@ -1,5 +1,5 @@
 import type { ActivePhaseContextV1 } from "./phase-context.js";
-import { canonicalProjectKey } from "./project-notes-repository.js";
+import { canonicalProjectKey, isNotesPhaseDeleted } from "./project-notes-repository.js";
 import type {
   NotesSessionLink,
   ProjectNotesPhaseLifecycleOutcome,
@@ -120,7 +120,7 @@ export class AppSidecarPhaseCancellationCoordinator {
     }
 
     const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === phaseId);
-    if (!phase || phase.archivedAt !== null) {
+    if (!phase || isNotesPhaseDeleted(phase) || phase.archivedAt !== null) {
       return failed(phaseId, "phase-not-found", "This Roadmap phase is no longer active.");
     }
     if (phase.status === "done" || phase.status === "cancelled" || phase.session === null) {

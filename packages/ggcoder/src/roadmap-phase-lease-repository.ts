@@ -50,6 +50,8 @@ export interface PhaseLeaseContext {
   phaseId: string;
   phaseStatus: NotesPhaseStatus;
   planId: string | null;
+  /** Earliest revision at which a new lease can belong to this phase incarnation. */
+  lastDeletionRevision?: number;
 }
 
 export interface PhaseLeaseExecutionInput {
@@ -58,6 +60,8 @@ export interface PhaseLeaseExecutionInput {
   holder: RoadmapPhaseLeaseHolderV1;
   context: PhaseLeaseContext;
   runState?: "idle" | "running";
+  /** Host re-reads Notes inside the lease lock (lease before Notes ordering). */
+  loadCurrentContext?: () => Promise<PhaseLeaseContext | null>;
 }
 
 interface StoredOperation {
@@ -122,6 +126,35 @@ export class RoadmapPhaseLeaseRepository {
     };
   }
 
+  /** Holds the same lock as acquisition until the Notes mutation has committed.
+   * Never releases a lease on the caller's behalf; expiry alone does not prove its owner stopped.
+   */
+  async withNoConflictingLease<T>(
+    cwd: string,
+    phaseId: string,
+    operation: () => Promise<T>,
+  ): Promise<{ status: "executed"; value: T } | { status: "conflicting-lease" | "ambiguous-lease" }> {
+    const paths = this.paths(cwd);
+    await ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const projectKey = canonicalProjectKey(cwd);
+      const [primary, backup] = await Promise.all([
+        readCandidate(paths.primary, projectKey), readCandidate(paths.backup, projectKey),
+      ]);
+      if (primary.status === "invalid" || backup.status === "invalid" ||
+          (primary.status === "missing" && backup.status !== "missing")) return { status: "ambiguous-lease" };
+      const lease = primary.status === "valid" ? primary.state.leases[phaseId] : undefined;
+      if (lease) {
+        const liveness = await this.processLiveness(lease.holder).catch(() => "unknown" as const);
+        if (liveness === "unknown") return { status: "ambiguous-lease" };
+        if (Date.parse(lease.expiresAt) > this.now().getTime() || liveness !== "dead") {
+          return { status: "conflicting-lease" };
+        }
+      }
+      return { status: "executed", value: await operation() };
+    });
+  }
+
   async withFence<T>(
     input: PhaseLeaseFenceInput,
     operation: () => Promise<T>,
@@ -163,7 +196,8 @@ export class RoadmapPhaseLeaseRepository {
     input: PhaseLeaseExecutionInput,
     predecessorProof: RoadmapPhaseLeasePredecessorProofV1 | null,
   ): Promise<PhaseLeaseOutcome> {
-    const { request, context } = input;
+    const { request } = input;
+    let { context } = input;
     if (request.phaseId !== context.phaseId) return { status: "phase-not-found" };
     if (
       canonicalProjectKey(request.expectedProjectKey) !== canonicalProjectKey(context.projectKey)
@@ -189,6 +223,16 @@ export class RoadmapPhaseLeaseRepository {
         return { status: "corrupt", primary: loaded.primary, backup: loaded.backup };
       }
       const state = loaded.state;
+      if (input.loadCurrentContext && request.action !== "release") {
+        const fresh = await input.loadCurrentContext();
+        if (!fresh || fresh.phaseId !== request.phaseId) return { status: "phase-not-found" };
+        if (canonicalProjectKey(fresh.projectKey) !== projectKey) return {
+          status: "project-mismatch", roadmapRevision: fresh.roadmapRevision, currentProjectKey: fresh.projectKey };
+        if (fresh.planId !== request.planId) return { status: "plan-mismatch" };
+        if (request.expectedRevision < (fresh.lastDeletionRevision ?? 0)) return {
+          status: "stale-revision", roadmapRevision: fresh.roadmapRevision, leaseRevision: state.leaseRevision };
+        context = fresh;
+      }
       if (request.action === "inspect") {
         if (request.expectedRevision !== context.roadmapRevision) {
           return {

@@ -67,6 +67,7 @@ export interface NotesPhaseDetailProps {
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(status: NotesPhaseStatus): void;
   onArchivePhase(): void;
+  onDeletePhase?(): void;
   isTopologyMutationBlocked(mutation: RoadmapTopologyMutation): boolean;
   onCancelPhase(): Promise<PhaseRunCancellationResult>;
   onLinkReference(referenceId: string): void;

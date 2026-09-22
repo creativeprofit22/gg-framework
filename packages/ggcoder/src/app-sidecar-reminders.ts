@@ -6,7 +6,7 @@ import {
   readJsonBody,
   requestPathname,
 } from "./app-sidecar-http-json.js";
-import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
+import { canonicalProjectKey, isNotesPhaseDeleted } from "@kenkaiiii/gg-core/project-notes";
 import {
   isValidNotesReminderDeliveryPair,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
@@ -141,7 +141,7 @@ function hasDeliveredDueReminder(document: NotesDocumentV3, nowMs: number): bool
 }
 
 function isEligiblePhase(phase: NotesPhase): boolean {
-  return phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled";
+  return !isNotesPhaseDeleted(phase) && phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled";
 }
 
 function compareOccurrences(left: DueReminderOccurrence, right: DueReminderOccurrence): number {

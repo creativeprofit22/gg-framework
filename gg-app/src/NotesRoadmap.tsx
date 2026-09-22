@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
 import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
 import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
 import { referenceSourceLabel } from "./notes-reference";
@@ -52,6 +53,7 @@ interface RoadmapProps {
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onArchivePhase(id: string): void;
+  onDeletePhase?(id: string): void;
   onLinkReferenceToPhase(
     referenceId: string,
     phaseId: string,
@@ -107,6 +109,7 @@ interface RoadmapProps {
 }
 
 interface ArchiveProps {
+  onDeletePhase?(id: string): void;
   phases: NotesPhase[];
   onRestorePhase(id: string): void;
 }
@@ -126,6 +129,7 @@ export function NotesRoadmap({
   onMovePhase,
   onChangePhaseStatus,
   onArchivePhase,
+  onDeletePhase,
   onLinkReferenceToPhase,
   onUnlinkReferenceFromPhase,
   onCreateReference,
@@ -154,7 +158,7 @@ export function NotesRoadmap({
   onActionSuccess,
   onReconciliationSuccess,
 }: RoadmapProps): React.ReactElement {
-  const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
+  const visiblePhases = phases.filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt === null);
   const currentTime = useRoadmapCurrentTime(phases);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedPhaseId);
   const [showCreate, setShowCreate] = useState(false);
@@ -353,6 +357,7 @@ export function NotesRoadmap({
           );
         },
         isTopologyMutationBlocked: (mutation) => isRoadmapTopologyMutationBlocked(phases, mutation),
+        onDeletePhase: onDeletePhase ? () => onDeletePhase(selectedPhase.id) : undefined,
         onArchivePhase: () => {
           const selectedIndex = visiblePhases.findIndex((phase) => phase.id === selectedPhase.id);
           const focusId =
@@ -432,6 +437,7 @@ export function NotesRoadmap({
         <button
           ref={newPhaseButtonRef}
           type="button"
+          data-phase-focus-fallback
           className="notes-roadmap-new"
           aria-expanded={showCreate}
           aria-controls="notes-roadmap-create"
@@ -584,6 +590,7 @@ export function NotesRoadmap({
                           }}
                           type="button"
                           className="notes-roadmap-title"
+                          data-phase-focus={phase.id}
                           aria-label={`Inspect phase: ${phase.title}`}
                           aria-expanded={selected}
                           aria-controls={selected ? `notes-phase-panel-${phase.id}` : undefined}
@@ -673,8 +680,8 @@ export function NotesRoadmap({
   );
 }
 
-export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): React.ReactElement {
-  const archivedPhases = phases.filter((phase) => phase.archivedAt !== null);
+export function NotesRoadmapArchive({ phases, onRestorePhase, onDeletePhase }: ArchiveProps): React.ReactElement {
+  const archivedPhases = phases.filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt !== null);
   const [announcement, setAnnouncement] = useState("");
   return (
     <div className="notes-phase-archive">
@@ -695,6 +702,7 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
                 </span>
                 <button
                   type="button"
+                  data-phase-focus={phase.id}
                   aria-label={`Restore phase: ${phase.title}`}
                   disabled={isRoadmapTopologyMutationBlocked(phases, {
                     type: "restore",
@@ -715,6 +723,7 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
                 >
                   Restore
                 </button>
+                {onDeletePhase && <button type="button" onClick={() => onDeletePhase(phase.id)} aria-label={`Delete phase: ${phase.title}`}>Delete phase</button>}
               </li>
             );
           })}
@@ -732,7 +741,7 @@ function useRoadmapCurrentTime(phases: NotesPhase[]): Date {
     () =>
       phases
         .flatMap((phase) =>
-          phase.archivedAt === null && phase.reminder ? [Date.parse(phase.reminder.dueAt)] : [],
+          isNotesPhasePresent(phase) && phase.archivedAt === null && phase.reminder ? [Date.parse(phase.reminder.dueAt)] : [],
         )
         .filter(Number.isFinite)
         .sort((left, right) => left - right),

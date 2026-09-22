@@ -2,6 +2,10 @@ import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
 
+// Nested confirmations can unmount with their parent on project switches.
+// Reference counts restore the original state regardless of cleanup order.
+const modalInertOwners = new WeakMap<HTMLElement, { count: number; original: boolean }>();
+
 const FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
   "a[href]",
@@ -49,7 +53,9 @@ export function Modal({
   children,
   onClose,
   className,
+  canClose = true,
 }: {
+  canClose?: boolean;
   title: React.ReactNode;
   children: React.ReactNode;
   onClose: () => void;
@@ -61,13 +67,20 @@ export function Modal({
   const titleId = useId();
 
   useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+    onCloseRef.current = canClose ? onClose : () => undefined;
+  }, [onClose, canClose]);
 
   useEffect(() => {
     const returnFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
+    const backdrop = dialog?.parentElement;
+    const background = Array.from(document.body.children)
+      .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== backdrop);
+    for (const element of background) {
+      const owner = modalInertOwners.get(element) ?? { count: 0, original: element.inert === true };
+      owner.count++; modalInertOwners.set(element, owner); element.inert = true;
+    }
     const initialFocus = dialog
       ? (availableModalElements(dialog, "[data-modal-initial-focus]")[0] ??
         availableModalElements(dialog, "[role='tab'][aria-selected='true']")[0] ??
@@ -77,6 +90,8 @@ export function Modal({
     initialFocus?.focus();
 
     const onKey = (event: KeyboardEvent): void => {
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      if (dialogs.item(dialogs.length - 1) !== dialog) return;
       if (event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
@@ -105,6 +120,10 @@ export function Modal({
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
+      for (const element of background) {
+        const owner = modalInertOwners.get(element);
+        if (owner && --owner.count === 0) { element.inert = owner.original; modalInertOwners.delete(element); }
+      }
       returnFocus?.focus();
     };
   }, []);
@@ -118,7 +137,7 @@ export function Modal({
     <div
       className="modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (canClose && event.target === event.currentTarget) onClose();
       }}
     >
       <div
@@ -139,6 +158,7 @@ export function Modal({
             type="button"
             aria-label="Close"
             title="Close"
+            disabled={!canClose}
             onClick={onClose}
           >
             {"\u00d7"}

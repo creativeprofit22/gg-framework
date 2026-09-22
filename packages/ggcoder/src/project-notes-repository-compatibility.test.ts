@@ -107,7 +107,7 @@ describe("copied Notes completion compatibility (real validators)", () => {
       primary.revision = 9;
       primary.document.currentFocus = "Newer content must survive";
       if (format === "document") primary.document.version = 4;
-      else if (format === "store") primary.storeVersion = 2;
+      else if (format === "store") primary.storeVersion = 3;
       else if (format === "metadata") primary.document.futureMetadata = { preserve: true };
       else if (format === "phase-metadata") primary.document.phases[0].futureMetadata = true;
       else primary.futureMetadata = true;
@@ -130,20 +130,18 @@ describe("copied Notes completion compatibility (real validators)", () => {
   );
 
   it.each(["document", "store", "metadata"])(
-    "uses a valid primary despite an unsupported %s backup",
+    "protects an unsupported %s backup even with a valid primary",
     async (format) => {
       const { cwd, repository, paths, document } = await copiedStore();
       const backup = JSON.parse(await fs.readFile(paths.backup, "utf8"));
       if (format === "document") backup.document.version = 4;
-      else if (format === "store") backup.storeVersion = 2;
+      else if (format === "store") backup.storeVersion = 3;
       else backup.document.futureMetadata = true;
       await fs.writeFile(paths.backup, JSON.stringify(backup));
       const before = await bytes(paths);
-      expect(await repository.load(cwd)).toMatchObject({
-        status: "ok", recoveredFromBackup: false, snapshot: { revision: 1, document },
-      });
+      expect(await repository.load(cwd)).toMatchObject({ status: "unsupported", source: "backup" });
+      expect(await repository.save(cwd, 1, document)).toMatchObject({ status: "unsupported" });
       expect(await bytes(paths)).toEqual(before);
-      expect(await repository.save(cwd, 1, document)).toMatchObject({ status: "ok" });
     },
   );
 

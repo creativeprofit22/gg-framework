@@ -4,6 +4,7 @@ export type SessionMutationKind =
   | "new-session"
   | "task-run"
   | "phase-start"
+  | "phase-deletion"
   | "prompt-start"
   | "ken-start"
   | "ken-append"

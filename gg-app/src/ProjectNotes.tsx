@@ -1,4 +1,4 @@
-import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
+import { canonicalProjectKey, isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
 import type { SlashCommand } from "./agent";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -116,6 +116,8 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     changePhaseStatus,
     archivePhase,
     restorePhase,
+    preparePhaseDeletion,
+    mutatePhaseDeletion,
     savePrompt,
     createReference,
     editReference,
@@ -218,7 +220,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     () => ({
       listDestinations: () =>
         notesDocument.phases
-          .filter((phase) => phase.archivedAt === null)
+          .filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt === null)
           .sort((left, right) => left.order - right.order)
           .map((phase) => ({
             phaseId: phase.id,
@@ -387,6 +389,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onMovePhase={movePhase}
             onChangePhaseStatus={changePhaseStatus}
             onArchivePhase={archivePhase}
+            phaseDeletionBridge={{ prepare: preparePhaseDeletion, mutate: mutatePhaseDeletion }}
             onRestorePhase={restorePhase}
             onCreateReference={createReference}
             onEditReference={editReference}

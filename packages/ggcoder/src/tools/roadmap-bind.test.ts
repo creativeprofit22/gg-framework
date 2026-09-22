@@ -3,6 +3,47 @@ import { resolveToolSchema, stream } from "@kenkaiiii/gg-ai";
 import { RoadmapBindParams, createRoadmapBindTool } from "./roadmap-bind.js";
 
 describe("roadmap_bind tool", () => {
+  it("sends an Anthropic-compatible schema while retaining every binding action", async () => {
+    const tool = createRoadmapBindTool(async () => ({ status: "missing" as const }));
+    const original = structuredClone(tool.rawInputSchema);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    await stream({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      apiKey: "test-key",
+      messages: [{ role: "user", content: "schema regression fixture" }],
+      tools: [tool],
+      fetch: fetchMock,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { tools } = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body));
+    expect(tools[0].name).toBe("roadmap_bind");
+    const schema = tools[0].input_schema;
+    expect(schema.type).toBe("object");
+    for (const key of ["oneOf", "anyOf", "allOf"]) expect(schema).not.toHaveProperty(key);
+    expect(schema.properties.action.enum).toEqual([
+      "inspect",
+      "bind-current",
+      "rebind-current",
+      "acquire",
+      "renew",
+      "release",
+      "takeover",
+    ]);
+    expect(schema.required).toEqual(["action"]);
+    expect(schema.properties.confirm_rebind.const).toBe(true);
+    expect(schema.properties.confirm_takeover.const).toBe(true);
+    expect(tool.rawInputSchema).toEqual(original);
+    expect(RoadmapBindParams.safeParse({ action: "takeover" }).success).toBe(false);
+  });
+
   it("sends an object-root schema through the installed DeepSeek adapter without losing branches", async () => {
     const tool = createRoadmapBindTool(async () => ({ status: "missing" as const }));
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(

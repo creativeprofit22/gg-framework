@@ -1,3 +1,6 @@
+import { isNotesPhasePresent, validateNotesPhaseDeletion, type NotesPhaseDeletion } from "./roadmap-phase-deletion.js";
+export * from "./roadmap-phase-deletion.js";
+
 export type NotesTaskStatus = "todo" | "done";
 
 export interface NotesTask {
@@ -492,6 +495,8 @@ export interface NotesPhase {
   sourcePrompt: string;
   referenceIds: string[];
   session: NotesSessionLink | null;
+  /** Additive retained deletion history. Absence means never deleted. */
+  deletion?: NotesPhaseDeletion;
   /** Additive v3 durable execution state. Absence means legacy session-owned execution. */
   execution?: NotesPhaseExecutionV1;
   reminder: NotesReminder | null;
@@ -518,6 +523,7 @@ export function classifyRoadmapAutoStartEligibility(
 ): NotesRoadmapAutoStartEligibility {
   const candidates = phases.filter(
     (phase) =>
+      isNotesPhasePresent(phase) &&
       phase.id !== completedPhaseId &&
       phase.archivedAt === null &&
       (phase.status === "not-started" || phase.status === "planning") &&
@@ -543,6 +549,9 @@ export function isNotesPhaseAdvancementSourceCurrent(
   checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
 ): boolean {
   return (
+    isNotesPhasePresent(phase) &&
+    !phase.deletion?.events.some(event => event.action === "delete" &&
+      phase.roadmapEvents.findIndex(candidate => candidate.id === checkpoint.id) < event.retired.roadmapEventCount) &&
     phase.id === checkpoint.completedPhaseId &&
     phase.status === "done" &&
     phase.archivedAt === null &&
@@ -2076,8 +2085,10 @@ function validatePhase(
   knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
-  if (!isRecordWithKeys(value, PHASE_KEYS) && !isRecordWithKeys(value, LEGACY_PHASE_KEYS)) {
-    return validationError(pathPrefix, `expected legacy fields with optional execution`);
+  if (!isRecordWithKeys(value, PHASE_KEYS) && !isRecordWithKeys(value, LEGACY_PHASE_KEYS) &&
+      !isRecordWithKeys(value, [...PHASE_KEYS, "deletion"]) &&
+      !isRecordWithKeys(value, [...LEGACY_PHASE_KEYS, "deletion"])) {
+    return validationError(pathPrefix, "expected legacy fields with optional execution and deletion");
   }
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "expected a stable ID");
@@ -2138,6 +2149,34 @@ function validatePhase(
     value.overrides,
   );
   if (pendingTransitionError) return pendingTransitionError;
+  if ("deletion" in value) {
+    const deletionError = validateNotesPhaseDeletion(
+      value.deletion, value.id, Array.isArray(value.roadmapEvents) ? value.roadmapEvents.length : 0,
+      (retired, retiredPath) => {
+        const errors = [
+          validateNotesSessionLink(retired.session, `${retiredPath}.session`),
+          retired.execution === null ? null : validateNotesPhaseExecution(retired.execution, `${retiredPath}.execution`),
+          validateReminder(retired.reminder, `${retiredPath}.reminder`),
+          validateOverrides(retired.overrides, `${retiredPath}.overrides`, knownReferenceIds),
+          validatePendingAutomaticLifecycleTransition(retired.pendingAutomaticLifecycleTransition,
+            `${retiredPath}.pendingAutomaticLifecycleTransition`, retired.overrides),
+        ];
+        const nestedError = errors.find(error => error !== null);
+        if (nestedError) return nestedError;
+        return isNotesPhaseStatus(retired.status) && isNullableTimestamp(retired.completedAt) &&
+          isNullableTimestamp(retired.archivedAt) && isNullableNonEmptyString(retired.attentionReason)
+          ? null : validationError(retiredPath, "invalid retired runtime fields");
+      }, `${pathPrefix}.deletion`,
+    );
+    if (deletionError) return deletionError;
+    const deletion = value.deletion as NotesPhaseDeletion;
+    if (deletion.currentDeletionId !== null && (value.session !== null || "execution" in value ||
+        value.reminder !== null || value.pendingAutomaticLifecycleTransition !== null ||
+        (value.overrides as NotesPhaseOverrides).status !== null ||
+        (value.overrides as NotesPhaseOverrides).referenceIds !== null)) {
+      return validationError(`${pathPrefix}.deletion`, "deleted phase cannot retain live runtime authority");
+    }
+  }
   const lifecycleError = validateLifecycleEvents(
     value.lifecycleEvents,
     `${pathPrefix}.lifecycleEvents`,
@@ -2151,6 +2190,7 @@ function validatePhase(
     value.session as NotesSessionLink | null,
     value.id,
     knownPhaseIds,
+    value.deletion as NotesPhaseDeletion | undefined,
   );
 }
 
@@ -2420,9 +2460,10 @@ function validateRoadmapEvents(
   value: unknown,
   pathPrefix: string,
   knownReferenceIds: ReadonlySet<string>,
-  phaseSession: NotesSessionLink | null,
+  currentPhaseSession: NotesSessionLink | null,
   phaseId: string,
   knownPhaseIds: ReadonlySet<string>,
+  deletion?: NotesPhaseDeletion,
 ): NotesValidationError | null {
   if (!Array.isArray(value)) {
     return validationError(pathPrefix, "expected an append-only event array");
@@ -2444,6 +2485,12 @@ function validateRoadmapEvents(
   let previousTimestamp = -Infinity;
 
   for (let index = 0; index < value.length; index += 1) {
+    // Retired sessions validate only the exact history prefix that preceded deletion.
+    // This is persisted-record validation, never permission to resume that session.
+    const retiredEvent = deletion?.events.find(event =>
+      event.action === "delete" && index < event.retired.roadmapEventCount);
+    const phaseSession = retiredEvent?.action === "delete"
+      ? retiredEvent.retired.session : currentPhaseSession;
     const event = value[index];
     const eventPath = `${pathPrefix}[${index}]`;
     if (typeof event !== "object" || event === null || Array.isArray(event)) {

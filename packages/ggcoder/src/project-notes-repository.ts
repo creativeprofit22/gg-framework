@@ -10,6 +10,13 @@ import type {
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import {
+  applyNotesPhaseDeletion,
+  isNotesPhaseDeleted,
+  isPhaseDeletionRequest,
+  notesPhaseDeletionGeneration,
+  phaseDeletionFingerprint,
+  type PhaseDeletionRequest,
+  type PhaseDeletionOutcome,
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
@@ -81,6 +88,19 @@ export interface StoredProjectNotesV1 {
   revision: number;
   document: NotesDocumentV3;
 }
+
+export interface StoredProjectNotesV2 extends Omit<StoredProjectNotesV1, "storeVersion"> {
+  storeVersion: 2;
+}
+export type StoredProjectNotes = StoredProjectNotesV1 | StoredProjectNotesV2;
+
+/** Required commit-time host policy; invoked with fresh Notes under the Notes lock.
+ * The caller must already hold the compatible lease/session coordination locks.
+ */
+export type PhaseDeletionCommitGuard = (
+  snapshot: ProjectNotesSnapshot,
+  phase: NotesPhase,
+) => Promise<Extract<PhaseDeletionOutcome, { status: "refused" | "unavailable" }> | null>;
 
 export interface ProjectNotesReminderDeliveryRequest {
   phaseId: string;
@@ -453,7 +473,7 @@ type Candidate =
   | { status: "unsupported" }
   | { status: "missing" }
   | { status: "invalid"; reason: ProjectNotesCorruptReason }
-  | { status: "valid"; envelope: StoredProjectNotesV1; migratedFromV2: boolean };
+  | { status: "valid"; envelope: StoredProjectNotes; migratedFromV2: boolean };
 
 type CurrentState =
   | { status: "missing" }
@@ -461,7 +481,7 @@ type CurrentState =
   | (ProjectNotesCorruption & { status: "corrupt" })
   | {
       status: "ok";
-      envelope: StoredProjectNotesV1;
+      envelope: StoredProjectNotes;
       source: "primary" | "backup";
       migratedFromV2: boolean;
     };
@@ -1193,6 +1213,39 @@ function selectedAdvancementTargetId(
   return targetIndex === null ? null : document.phases[targetIndex]!.id;
 }
 
+/** Generic saves cannot remove phase identities or manufacture deletion authority. */
+function validateGenericSaveDeletionAuthority(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  const previousById = new Map(previous.phases.map(phase => [phase.id, phase]));
+  const nextById = new Map(next.phases.map(phase => [phase.id, phase]));
+  for (const phase of previous.phases) {
+    if (!nextById.has(phase.id)) {
+      return validationError("phases", "Phase removal requires the dedicated recoverable deletion operation");
+    }
+  }
+  for (const phase of next.phases) {
+    const old = previousById.get(phase.id);
+    if (!isDeepStrictEqual(old?.deletion, phase.deletion)) {
+      return validationError("phases", "Deletion history can only change through the dedicated deletion or recovery operation");
+    }
+    if (old?.deletion?.currentDeletionId != null) {
+      // Contiguous-array reindexing is the only generic change to a retained tombstone.
+      const { order: _oldOrder, ...oldContent } = old;
+      const { order: _newOrder, ...newContent } = phase;
+      if (!isDeepStrictEqual(oldContent, newContent)) {
+        return validationError("phases", "Recover a deleted phase before editing it");
+      }
+    }
+    if (old?.deletion && (!isDeepStrictEqual(old.session, phase.session) ||
+        !isDeepStrictEqual(old.execution, phase.execution))) {
+      return validationError("phases", "Recovered phase runtime authority requires a fresh dedicated binding");
+    }
+  }
+  return null;
+}
+
 function validateGenericSaveAdvancementAuthority(
   previous: NotesDocumentV3,
   next: NotesDocumentV3,
@@ -1330,6 +1383,9 @@ export class ProjectNotesRepository {
   async migrate(cwd: string, document: unknown): Promise<ProjectNotesMigrationOutcome> {
     const validated = coerceNotesDocumentV3(document);
     if (!validated.ok) return { status: "invalid", error: validated.error };
+    if (validated.document.phases.some(phase => phase.deletion !== undefined)) {
+      return { status: "invalid", error: validationError("phases", "Migration cannot create deletion history") };
+    }
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
     await this.ensureDirectory(paths.directory);
@@ -1346,7 +1402,7 @@ export class ProjectNotesRepository {
         return { status: "ok", snapshot: toSnapshot(current.envelope), migrated: false };
       }
 
-      const envelope: StoredProjectNotesV1 = {
+      const envelope: StoredProjectNotes = {
         storeVersion: 1,
         projectKey,
         revision: 1,
@@ -1382,6 +1438,11 @@ export class ProjectNotesRepository {
       if (current.envelope.revision !== expectedRevision) {
         return { status: "conflict", snapshot: toSnapshot(current.envelope) };
       }
+      const deletionAuthorityError = validateGenericSaveDeletionAuthority(
+        current.envelope.document,
+        validated.document,
+      );
+      if (deletionAuthorityError) return { status: "invalid", error: deletionAuthorityError };
       const capturedAtError = validateImmutableReferenceCapturedAt(
         current.envelope.document,
         validated.document,
@@ -1429,8 +1490,8 @@ export class ProjectNotesRepository {
         return { status: "invalid", error: advancementAuthorityError };
       }
 
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
+      const next: StoredProjectNotes = {
+        storeVersion: current.envelope.storeVersion,
         projectKey,
         revision: expectedRevision + 1,
         document: validated.document,
@@ -1439,6 +1500,72 @@ export class ProjectNotesRepository {
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next) };
     });
+  }
+
+  async mutatePhaseDeletion(
+    cwd: string,
+    request: PhaseDeletionRequest,
+    guard: PhaseDeletionCommitGuard,
+    timestamp = new Date().toISOString(),
+  ): Promise<PhaseDeletionOutcome> {
+    if (!isPhaseDeletionRequest(request) || typeof guard !== "function" ||
+        request.expectedProjectKey !== canonicalProjectKey(cwd)) {
+      return { status: "unavailable", message: "Invalid deletion request or project scope." };
+    }
+    try {
+      const outcome = await this.withLockedCurrent<PhaseDeletionOutcome>(cwd, async (paths, current, source) => {
+        if (source !== "primary") return { status: "refused", reason: "recovery-required",
+          message: "Project Notes was recovered from a backup. Resolve storage recovery before deleting or recovering a phase." };
+        const snapshot = toSnapshot(current);
+        // Replay identity is global to this project and survives recovery and later cycles.
+        const prior = current.document.phases.flatMap(phase => phase.deletion?.events ?? [])
+          .find(event => event.request.operationId === request.operationId);
+        if (prior) {
+          if (prior.fingerprint !== phaseDeletionFingerprint(request)) return {
+            status: "refused", reason: "operation-id-reused", message: "This request identity belongs to a different operation." };
+          return { status: "committed", action: prior.action, operationId: request.operationId,
+            replayed: true, snapshot };
+        }
+        if (current.revision !== request.expectedRevision) return { status: "conflict", snapshot };
+        const phaseIndex = current.document.phases.findIndex(phase => phase.id === request.phaseId);
+        const phase = current.document.phases[phaseIndex];
+        if (!phase) return { status: "missing" };
+        if (notesPhaseDeletionGeneration(phase) !== request.expectedGeneration) return {
+          status: "refused", reason: "stale-generation", message: "This phase changed. Refresh and confirm the action again." };
+        if ((request.action === "delete") === isNotesPhaseDeleted(phase)) return {
+          status: "refused", reason: request.action === "delete" ? "already-deleted" : "not-deleted",
+          message: "The phase is no longer in the state you confirmed." };
+        // User-approved replacement for the absent snapshot-based topology guard.
+        if (pendingAdvancementAuthorities(current.document).length > 0) return {
+          status: "refused", reason: "protected-advancement",
+          message: "Resolve the pending next-phase decision before deleting or recovering a phase." };
+        if (phase.execution?.state === "needs-reconciliation" || phase.execution?.pendingCompletion != null ||
+            phase.execution?.state === "completion-pending") return {
+          status: "refused", reason: "recovery-required",
+          message: "Resolve execution recovery or pending completion before deleting this phase." };
+        const refusal = await guard(snapshot, structuredClone(phase));
+        if (refusal) return refusal;
+        const document = structuredClone(current.document);
+        document.phases[phaseIndex] = applyNotesPhaseDeletion(phase, request, timestamp);
+        document.updatedAt = timestamp;
+        // First deletion upgrades BOTH backup and primary. Never downgrade after recovery.
+        // A pre-primary interruption leaves a readable old snapshot, not a completed deletion.
+        const upgraded: StoredProjectNotesV2 = { ...current, storeVersion: 2 };
+        const next = await this.commitDocument(paths, upgraded, document, {
+          validationMode: "validated", context: "Phase deletion or recovery",
+        });
+        return { status: "committed", action: request.action, operationId: request.operationId,
+          replayed: false, snapshot: toSnapshot(next) };
+      });
+      if (outcome.status === "corrupt" || outcome.status === "unsupported") return {
+        status: "unavailable", message: "Project Notes storage needs recovery or a supported app version. No deletion was attempted." };
+      return outcome;
+    } catch {
+      // A rename may have persisted even if directory synchronization/acknowledgement failed.
+      // The caller retains exactly this request identity; replay resolves the outcome.
+      return { status: "uncertain", operationId: request.operationId,
+        message: "The write outcome is uncertain. Reconnect and retry this same request to check what was saved." };
+    }
   }
 
   async createApprovedPhases(
@@ -1606,6 +1733,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (currentPhase.status === "done" || currentPhase.status === "cancelled") {
         return { status: "phase-inactive" };
@@ -1651,6 +1779,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const priorById = currentPhase.roadmapEvents.find(
         (event) => event.id === request.resolutionId,
       );
@@ -1722,6 +1851,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.execution) {
         return isDeepStrictEqual(currentPhase.execution.repository, request.repository) &&
           isDeepStrictEqual(currentPhase.execution.plan, request.plan)
@@ -1762,6 +1892,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.execution) {
         return isDeepStrictEqual(currentPhase.execution, request.execution)
           ? { status: "duplicate", revision }
@@ -1796,6 +1927,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const execution = currentPhase.execution;
       if (!execution?.plan) return { status: "execution-missing" };
       if (execution.plan.contentHash !== request.planHash) return { status: "plan-mismatch" };
@@ -1829,6 +1961,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const execution = currentPhase.execution;
       if (!execution?.plan) return { status: "execution-missing" };
 
@@ -1915,6 +2048,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const execution = currentPhase.execution;
       if (!execution?.plan) return { status: "execution-missing" };
       if (executionRequiresReconciliation(currentPhase)) {
@@ -1961,6 +2095,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const execution = currentPhase.execution;
       if (!execution?.plan) return { status: "execution-missing" };
       if (executionRequiresReconciliation(currentPhase)) {
@@ -2010,6 +2145,14 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
+      if (currentPhase.deletion && (request.expectedRevision === undefined ||
+          request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision)) {
+        return { status: "stale-revision", revision };
+      }
+      if (currentPhase.deletion && (!currentPhase.session || !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))) {
+        return { status: "stale-session" };
+      }
       const normalizedReferences = request.proposedReferences.map(
         normalizeRoadmapProposedReference,
       );
@@ -2179,14 +2322,22 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (executionRequiresReconciliation(currentPhase)) {
         return { status: "operation-conflict", revision };
+      }
+      if (currentPhase.deletion && (!currentPhase.session || !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))) {
+        return { status: "stale-session" };
       }
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapImplementationCheckpoint =>
           event.type === "implementation-checkpoint" && event.id === request.checkpointId,
       );
       if (prior) {
+        if (currentPhase.deletion?.events.some(event => event.action === "delete" &&
+            currentPhase.roadmapEvents.indexOf(prior) < event.retired.roadmapEventCount)) {
+          return { status: "duplicate-id-conflict", revision };
+        }
         return sameImplementationCheckpointPayload(prior, request)
           ? { status: "duplicate", revision, phaseId: request.phaseId }
           : { status: "duplicate-id-conflict", revision };
@@ -2385,6 +2536,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       const pendingAdvancement = pendingAdvancementCheckpointForSuccessor(
         current.document,
         phaseId,
@@ -2482,6 +2634,10 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
+      if (currentPhase.deletion && request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision) {
+        return { status: "stale-revision", revision };
+      }
       const executionSession = currentPhase.execution?.lastSession ?? null;
       const alreadyBound =
         notesSessionLinksEqual(currentPhase.session, request.destinationSession) &&
@@ -2616,6 +2772,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (!notesSessionLinksEqual(currentPhase.session, expectedSession)) {
         return { status: "stale-session" };
@@ -2676,7 +2833,12 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.deletion && (!currentPhase.session || !transition.expectedSession ||
+          !notesSessionLinksEqual(currentPhase.session, transition.expectedSession))) {
+        return { status: "stale-session" };
+      }
       if (
         transition.expectedSession !== undefined &&
         !notesSessionLinksEqual(currentPhase.session, transition.expectedSession)
@@ -2772,6 +2934,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (
         expectedSession !== undefined &&
@@ -2793,7 +2956,7 @@ export class ProjectNotesRepository {
 
   private async confirmAutomaticPhaseAdvancementLocked(
     paths: ProjectNotesPaths,
-    current: StoredProjectNotesV1,
+    current: StoredProjectNotes,
     request: ProjectNotesAutomaticPhaseAdvancementRequest,
   ): Promise<ProjectNotesAutomaticPhaseAdvancementOutcome> {
     const operationId = `automatic-phase-advancement:${request.checkpointId}`;
@@ -2840,7 +3003,7 @@ export class ProjectNotesRepository {
       const eligible = current.document.phases.filter(
         (phase) =>
           phase.id !== sourcePhase.id &&
-          phase.archivedAt === null &&
+          !isNotesPhaseDeleted(phase) && phase.archivedAt === null &&
           (phase.status === "not-started" || phase.status === "planning") &&
           phase.overrides.status === null &&
           (phase.session === null ||
@@ -2849,7 +3012,7 @@ export class ProjectNotesRepository {
       );
       const activeLinks = sameSessionId.filter(
         (phase) =>
-          phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled",
+          !isNotesPhaseDeleted(phase) && phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled",
       );
       if (
         existingConfirmation.actor !== "system" ||
@@ -2889,7 +3052,7 @@ export class ProjectNotesRepository {
       sameSessionId.some(
         (phase) =>
           phase.id !== sourcePhase.id &&
-          phase.archivedAt === null &&
+          !isNotesPhaseDeleted(phase) && phase.archivedAt === null &&
           phase.status !== "done" &&
           phase.status !== "cancelled",
       )
@@ -2931,7 +3094,7 @@ export class ProjectNotesRepository {
 
   private async withLockedCurrent<T>(
     cwd: string,
-    operation: (paths: ProjectNotesPaths, current: StoredProjectNotesV1) => Promise<T>,
+    operation: (paths: ProjectNotesPaths, current: StoredProjectNotes, source: "primary" | "backup") => Promise<T>,
   ): Promise<T | UnavailableCurrentState> {
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
@@ -2939,16 +3102,16 @@ export class ProjectNotesRepository {
     return this.lock(paths.primary, async () => {
       const current = await this.readCurrent(paths, projectKey);
       if (current.status !== "ok") return current;
-      return operation(paths, current.envelope);
+      return operation(paths, current.envelope, current.source);
     });
   }
 
   private async commitDocument(
     paths: ProjectNotesPaths,
-    current: StoredProjectNotesV1,
+    current: StoredProjectNotes,
     document: NotesDocumentV3,
     options: CommitDocumentOptions,
-  ): Promise<StoredProjectNotesV1> {
+  ): Promise<StoredProjectNotes> {
     let committedDocument = document;
     if (options.validationMode === "validated") {
       const validation = validateNotesDocumentV3(document);
@@ -2957,8 +3120,8 @@ export class ProjectNotesRepository {
       }
       committedDocument = validation.document;
     }
-    const next: StoredProjectNotesV1 = {
-      storeVersion: 1,
+    const next: StoredProjectNotes = {
+      storeVersion: current.storeVersion,
       projectKey: current.projectKey,
       revision: current.revision + 1,
       document: committedDocument,
@@ -3022,9 +3185,17 @@ export class ProjectNotesRepository {
     const primary = await this.readCandidate(paths.primary, projectKey);
     if (primary.status === "unsupported") return unsupportedFormat("primary");
     if (primary.status === "valid") {
+      // Preserve a partially completed envelope upgrade without migrating files on read.
+      // Also protect a newer backup even when an older primary remains readable.
+      let envelope = primary.envelope;
+      const backup = await this.readCandidate(paths.backup, projectKey);
+      if (backup.status === "unsupported") return unsupportedFormat("backup");
+      if (envelope.storeVersion === 1 && backup.status === "valid" && backup.envelope.storeVersion === 2) {
+        envelope = { ...envelope, storeVersion: 2 };
+      }
       return {
         status: "ok",
-        envelope: primary.envelope,
+        envelope,
         source: "primary",
         migratedFromV2: primary.migratedFromV2,
       };
@@ -3071,7 +3242,7 @@ export class ProjectNotesRepository {
           ? document.version
           : undefined;
       if (
-        (typeof envelope.storeVersion === "number" && envelope.storeVersion > 1) ||
+        (typeof envelope.storeVersion === "number" && envelope.storeVersion > 2) ||
         (typeof documentVersion === "number" && documentVersion > 3)
       ) {
         return { status: "unsupported" };
@@ -3084,7 +3255,7 @@ export class ProjectNotesRepository {
       // an older backup. Known legacy projections still pass the strict parser above.
       if (
         typeof value === "object" && value !== null && !Array.isArray(value) &&
-        "storeVersion" in value && value.storeVersion === 1 &&
+        "storeVersion" in value && (value.storeVersion === 1 || value.storeVersion === 2) &&
         "projectKey" in value && typeof value.projectKey === "string" &&
         "revision" in value && Number.isInteger(value.revision) &&
         (value.revision as number) >= 0 &&
@@ -3120,10 +3291,10 @@ function unsupportedFormat(source: "primary" | "backup"): ProjectNotesUnsupporte
 
 function parseStoredEnvelope(
   value: unknown,
-): { envelope: StoredProjectNotesV1; migratedFromV2: boolean } | null {
+): { envelope: StoredProjectNotes; migratedFromV2: boolean } | null {
   if (
     !isRecordWithKeys(value, ENVELOPE_KEYS) ||
-    value.storeVersion !== 1 ||
+    (value.storeVersion !== 1 && value.storeVersion !== 2) ||
     typeof value.projectKey !== "string" ||
     !Number.isInteger(value.revision) ||
     (value.revision as number) < 0
@@ -3131,10 +3302,10 @@ function parseStoredEnvelope(
     return null;
   }
   const document = coerceNotesDocumentV3(value.document);
-  if (!document.ok) return null;
+  if (!document.ok || (value.storeVersion === 1 && document.document.phases.some(phase => phase.deletion !== undefined))) return null;
   return {
     envelope: {
-      storeVersion: 1,
+      storeVersion: value.storeVersion,
       projectKey: value.projectKey,
       revision: value.revision as number,
       document: document.document,
@@ -3160,7 +3331,7 @@ function isTimestamp(value: unknown): value is string {
   );
 }
 
-function serializeEnvelope(envelope: StoredProjectNotesV1): string {
+function serializeEnvelope(envelope: StoredProjectNotes): string {
   return `${JSON.stringify(envelope, null, 2)}\n`;
 }
 
@@ -3168,7 +3339,7 @@ function executionRequiresReconciliation(phase: NotesPhase): boolean {
   return phase.execution?.state === "needs-reconciliation";
 }
 
-function toSnapshot(envelope: StoredProjectNotesV1): ProjectNotesSnapshot {
+function toSnapshot(envelope: StoredProjectNotes): ProjectNotesSnapshot {
   return {
     projectKey: envelope.projectKey,
     revision: envelope.revision,

@@ -1,4 +1,4 @@
-import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
+import { canonicalProjectKey, type PhaseDeletionRequest, type PhaseDeletionOutcome } from "@kenkaiiii/gg-core/project-notes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { canonicalReferenceIdentity, type NotesReferenceInput } from "./notes-reference";
 import { isNotesHandoffUnread } from "./notes-status";
@@ -65,6 +65,8 @@ export interface NotesPhaseInput {
 }
 
 export interface UseProjectNotesResult {
+  preparePhaseDeletion(): Promise<ProjectNotesSnapshot>;
+  mutatePhaseDeletion(request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome>;
   value: string;
   onChange(value: string): void;
   document: NotesDocumentV3;
@@ -183,6 +185,22 @@ export function useProjectNotes(
   const queueRef = useRef<NotesMutation[]>([]);
   const inFlightMutationIdRef = useRef<number | null>(null);
   const nextMutationIdRef = useRef(0);
+  const deletionPreparation = useRef<{ epoch: number; resolve(snapshot: ProjectNotesSnapshot): void; reject(error: Error): void } | null>(null);
+  useEffect(() => {
+    const pending = deletionPreparation.current;
+    if (!pending) return;
+    if (pending.epoch !== epochRef.current || modeRef.current !== "sidecar" ||
+        authorityDiagnostics.some(diagnostic => diagnostic.kind === "save-failed")) {
+      deletionPreparation.current = null;
+      pending.reject(new Error("Changes could not be saved. Keep your edits and resolve the save error before deleting."));
+    } else if (queueRef.current.length === 0 && inFlightMutationIdRef.current === null && authoritativeRef.current) {
+      deletionPreparation.current = null; pending.resolve(authoritativeRef.current);
+    }
+  });
+  useEffect(() => () => {
+    deletionPreparation.current?.reject(new Error("The project changed."));
+    deletionPreparation.current = null;
+  }, [cwd]);
   const processQueueRef = useRef<() => void>(() => undefined);
   const readAuthoritativeNotesRef = useRef<(confirmRecovery?: boolean) => Promise<void>>(
     async () => undefined,
@@ -232,6 +250,34 @@ export function useProjectNotes(
     },
     [renderSidecarState],
   );
+
+  const preparePhaseDeletion = useCallback(async (): Promise<ProjectNotesSnapshot> => {
+    if (!client?.mutatePhaseDeletion || modeRef.current !== "sidecar" || !authoritativeRef.current) {
+      throw new Error("Reconnect to Project Notes before deleting or recovering a phase.");
+    }
+    if (authorityDiagnostics.some(diagnostic => diagnostic.kind === "save-failed")) {
+      throw new Error("Resolve the Notes save error first. Your unsaved edits have not been discarded.");
+    }
+    if (queueRef.current.length === 0 && inFlightMutationIdRef.current === null) return authoritativeRef.current;
+    return new Promise((resolve, reject) => {
+      deletionPreparation.current?.reject(new Error("A newer confirmation replaced this request."));
+      deletionPreparation.current = { epoch: epochRef.current, resolve, reject };
+      processQueueRef.current();
+    });
+  }, [client, authorityDiagnostics]);
+
+  const mutatePhaseDeletion = useCallback(async (request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome> => {
+    if (!client?.mutatePhaseDeletion || modeRef.current !== "sidecar" || queueRef.current.length > 0 ||
+        inFlightMutationIdRef.current !== null || activeCwdRef.current === null ||
+        request.expectedProjectKey !== canonicalProjectKey(activeCwdRef.current)) {
+      return { status: "unavailable", message: "Finish saving edits and reconnect to this project before retrying." };
+    }
+    const epoch = epochRef.current;
+    const outcome = await client.mutatePhaseDeletion(request);
+    if (epoch !== epochRef.current) return { status: "unavailable", message: "The project changed." };
+    if (outcome.status === "committed" || outcome.status === "conflict") adoptSnapshot(outcome.snapshot, request.expectedProjectKey, epoch);
+    return outcome;
+  }, [client, adoptSnapshot]);
 
   const enterFallback = useCallback(
     (
@@ -1501,6 +1547,8 @@ export function useProjectNotes(
     document,
     revision: authoritativeRevision,
     authorityReady,
+    preparePhaseDeletion,
+    mutatePhaseDeletion,
     refresh,
     changeCurrentFocus,
     createTask,

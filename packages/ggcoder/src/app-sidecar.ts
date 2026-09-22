@@ -260,6 +260,7 @@ import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
+import { createAppSidecarPhaseDeletionCoordinator, type PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import {
   createAppSidecarStorageDiagnostics,
@@ -1175,8 +1176,20 @@ async function main(): Promise<void> {
   const reminders = createAppSidecarReminderHandler(reminderCoordinator, (error) =>
     captureSidecarError(error, "app-sidecar.reminders.request"),
   );
+  const phaseDeletion = createAppSidecarPhaseDeletionCoordinator({
+    repository: notesRepository, leases: phaseLeaseRepository, reconciliations: roadmapReconciliations,
+    listSessions: () => [...sessions.values()].map(context => context.phaseDeletionSession),
+    onCommittedSnapshot: broadcastNotesSnapshot,
+  });
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
+    phaseDeletion: { execute: async (input, context) => {
+      const owner = sessions.get(context.logicalSessionId);
+      if (!owner || canonicalProjectKey(owner.cwd) !== canonicalProjectKey(context.cwd)) {
+        return { status: "unavailable", message: "The authenticated project session is unavailable." };
+      }
+      return phaseDeletion.execute(input, owner.phaseDeletionSession);
+    } },
     diagnostics: storageDiagnostics,
     onCommittedSnapshot: broadcastNotesSnapshot,
     onError: (error) => {
@@ -1863,6 +1876,7 @@ async function createProgressManager(
 type WorkspaceMode = "code" | "chat";
 
 interface SessionContext {
+  phaseDeletionSession: PhaseDeletionSession;
   id: string;
   mode: WorkspaceMode;
   chatAgent: ChatAgentId;
@@ -7596,6 +7610,13 @@ async function createSession(
     handle,
     dispose,
     isRunning: () => isAppSidecarSessionBusy(sessionBusyState()),
+    phaseDeletionSession: {
+      getState: () => ({ ...session.getState(), cwd }),
+      getBusyState: sessionBusyState,
+      getActivePhaseContext: () => session.getActivePhaseContext(),
+      setActivePhaseContext: context => session.setActivePhaseContext(context),
+      mutations: sessionMutations,
+    },
   };
 }
 

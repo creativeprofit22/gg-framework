@@ -1,5 +1,6 @@
 import { estimateTokens } from "./core/compaction/token-estimator.js";
 import {
+  isNotesPhaseDeleted,
   validateNotesReferenceProjection,
   validateNotesSessionLink,
   type NotesPhase,
@@ -273,6 +274,7 @@ export function createActivePhaseContext(input: {
   executionStage?: ActivePhaseExecutionStage;
   approvedPlanPath?: string;
 }): ActivePhaseContextV1 {
+  if (isNotesPhaseDeleted(input.phase)) throw new Error("Deleted phases cannot become active context");
   if (input.phase.archivedAt !== null) {
     throw new ActivePhaseContextError("Archived phases cannot become active session context.");
   }

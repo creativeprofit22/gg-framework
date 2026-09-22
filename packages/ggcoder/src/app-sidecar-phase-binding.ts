@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalProjectKey,
+  isNotesPhaseDeleted,
   notesSessionLinksEqual,
   type NotesSessionLink,
   type ProjectNotesLoadOutcome,
@@ -36,6 +37,7 @@ import {
 } from "./roadmap-phase-execution.js";
 import type {
   PhaseLeaseFenceInput,
+  PhaseLeaseContext,
   RoadmapPhaseLeaseHolderV1,
   RoadmapPhaseLeasePredecessorProofV1,
   RoadmapPhaseLeaseRepository,
@@ -176,7 +178,7 @@ export function createAppSidecarPhaseBindingService(
       if (!state.sessionPath) throw new Error("Phase launch requires a persisted session.");
       const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
       if (
-        !phase ||
+        !phase || isNotesPhaseDeleted(phase) ||
         phase.archivedAt !== null ||
         phase.status === "done" ||
         !notesSessionLinksEqual(phase.session, state)
@@ -196,6 +198,7 @@ export function createAppSidecarPhaseBindingService(
         request,
         holder: phaseLeaseHolder(options, state),
         runState: "idle" as const,
+        loadCurrentContext: () => loadCurrentLeaseContext(options, state.cwd, phaseId),
         context: {
           projectKey: snapshot.projectKey,
           roadmapRevision: snapshot.revision,
@@ -316,7 +319,7 @@ export function createAppSidecarPhaseBindingService(
       if (loaded.status !== "ok")
         return { status: loaded.status === "missing" ? "notes-missing" : "corrupt" };
       const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === phaseId);
-      if (!phase) return { status: "phase-not-found" };
+      if (!phase || isNotesPhaseDeleted(phase)) return { status: "phase-not-found" };
       if (phase.archivedAt !== null) return { status: "phase-archived" };
       const context = {
         projectKey: loaded.snapshot.projectKey,
@@ -338,7 +341,8 @@ export function createAppSidecarPhaseBindingService(
         takeoverReason: null,
         predecessorProof: null,
       };
-      const input = { cwd: state.cwd, request, context, holder, runState: "idle" as const };
+      const input = { cwd: state.cwd, request, context, holder, runState: "idle" as const,
+        loadCurrentContext: () => loadCurrentLeaseContext(options, state.cwd, phaseId) };
       // Renewal authenticates the full holder and marker under the repository lock.
       // Failed renewal may only fall back to acquisition's absent/dead-owner rules.
       let acquired = await leases.execute(
@@ -396,7 +400,7 @@ export function createAppSidecarPhaseBindingService(
         );
         if (
           context.projectKey !== canonicalProjectKey(state.cwd) ||
-          !phase ||
+          !phase || isNotesPhaseDeleted(phase) ||
           phase.archivedAt !== null ||
           phase.status === "done" ||
           !notesSessionLinksEqual(context.session, currentSession) ||
@@ -430,7 +434,7 @@ export function createAppSidecarPhaseBindingService(
       const linkedPhases = loaded.snapshot.document.phases.filter(
         (candidate) =>
           candidate.session?.sessionPath === state.sessionPath &&
-          candidate.archivedAt === null &&
+          !isNotesPhaseDeleted(candidate) && candidate.archivedAt === null &&
           candidate.status !== "done",
       );
       const phase = localPhaseId
@@ -438,7 +442,7 @@ export function createAppSidecarPhaseBindingService(
         : linkedPhases.length === 1
           ? linkedPhases[0]
           : undefined;
-      if (!phase || phase.archivedAt !== null || phase.status === "done") {
+      if (!phase || isNotesPhaseDeleted(phase) || phase.archivedAt !== null || phase.status === "done") {
         if (context || marker) await clearSessionContext(session, "binding-reconciliation");
         return context || marker ? "cleared" : "none";
       }
@@ -585,7 +589,7 @@ async function executePhaseExecutionReconciliation(
   const phase = loaded.snapshot.document.phases.find(
     (candidate) => candidate.id === request.phaseId,
   );
-  if (!phase) return { status: "phase-not-found" };
+  if (!phase || isNotesPhaseDeleted(phase)) return { status: "phase-not-found" };
   if (!phase.execution?.plan) return { status: "execution-missing" };
 
   const resolvePlanSnapshot = options.resolvePlanSnapshot ?? resolveExecutionPlanSnapshot;
@@ -704,7 +708,7 @@ async function persistLeaseContextFromLatestNotes(
   if (latest.status !== "ok") return false;
   const phase = latest.snapshot.document.phases.find((candidate) => candidate.id === lease.phaseId);
   if (
-    !phase ||
+    !phase || isNotesPhaseDeleted(phase) ||
     phase.archivedAt !== null ||
     lease.projectKey !== latest.snapshot.projectKey ||
     !notesSessionLinksEqual(phase.session, state) ||
@@ -742,6 +746,20 @@ async function persistLeaseContextFromLatestNotes(
   return true;
 }
 
+async function loadCurrentLeaseContext(
+  options: AppSidecarPhaseBindingOptions,
+  cwd: string,
+  phaseId: string,
+): Promise<PhaseLeaseContext | null> {
+  const loaded = await options.repository.load(cwd);
+  if (loaded.status !== "ok" || loaded.recoveredFromBackup) return null;
+  const phase = loaded.snapshot.document.phases.find(candidate => candidate.id === phaseId);
+  if (!phase || isNotesPhaseDeleted(phase) || phase.archivedAt !== null) return null;
+  return { projectKey: loaded.snapshot.projectKey, roadmapRevision: loaded.snapshot.revision,
+    phaseId, phaseStatus: phase.status, planId: phase.execution?.plan?.planId ?? null,
+    lastDeletionRevision: (phase.deletion?.events.at(-1)?.request.expectedRevision ?? -1) + 1 };
+}
+
 async function executePhaseLease(
   options: AppSidecarPhaseBindingOptions,
   request: PhaseLeaseRequestV2,
@@ -763,7 +781,7 @@ async function executePhaseLease(
   const phase = loaded.snapshot.document.phases.find(
     (candidate) => candidate.id === request.phaseId,
   );
-  if (!phase) return { status: "phase-not-found" };
+  if (!phase || isNotesPhaseDeleted(phase)) return { status: "phase-not-found" };
   if (phase.archivedAt !== null && request.action !== "release") {
     return { status: "phase-archived" };
   }
@@ -775,6 +793,7 @@ async function executePhaseLease(
     request,
     holder: phaseLeaseHolder(options, state),
     runState: session.getPhaseLeaseRunState?.() ?? "idle",
+    loadCurrentContext: () => loadCurrentLeaseContext(options, state.cwd, request.phaseId),
     context: {
       projectKey: loaded.snapshot.projectKey,
       roadmapRevision: loaded.snapshot.revision,
@@ -823,6 +842,7 @@ async function executePhaseLease(
         (candidate) => candidate.id === request.phaseId,
       );
       if (!latestPhase) return { status: "phase-not-found" };
+      if (isNotesPhaseDeleted(latestPhase)) return { status: "phase-not-found" };
       if (latestPhase.archivedAt !== null) return { status: "phase-archived" };
       if (latestPhase.status === "done") return { status: "phase-terminal" };
       return { status: "plan-mismatch" };
@@ -1067,7 +1087,7 @@ function bindingPreflight(
   const phase = loaded.snapshot.document.phases.find(
     (candidate) => candidate.id === request.phaseId,
   );
-  if (!phase) return { status: "phase-not-found" };
+  if (!phase || isNotesPhaseDeleted(phase)) return { status: "phase-not-found" };
   if (phase.archivedAt !== null) return { status: "phase-archived" };
   if (phase.status === "done") return { status: "phase-terminal" };
   return null;

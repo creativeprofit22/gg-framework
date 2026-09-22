@@ -63,6 +63,8 @@ import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listene
 import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
   isPhaseRunCancellationResult,
+  isPhaseDeletionOutcome,
+  isPhaseDeletionRequest,
   isPhaseStartResult,
   isPhaseBindingOutcome,
   isPhaseExecutionReconciliationOutcome,
@@ -3332,6 +3334,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
           state.openAICodexContextProfileEligibility,
         ),
       };
+    },
+    async mutatePhaseDeletion(request) {
+      if (!isPhaseDeletionRequest(request)) throw new Error("Invalid phase deletion request");
+      const outcome = await call<unknown>("agent_notes_phase_deletion", { request });
+      if (!isPhaseDeletionOutcome(outcome)) throw new Error("Invalid phase deletion response");
+      return outcome;
     },
     async getNotes() {
       const outcome = await call<unknown>("agent_notes_get");

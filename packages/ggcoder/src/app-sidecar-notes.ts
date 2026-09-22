@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { isPhaseDeletionRequest, type PhaseDeletionOutcome } from "@kenkaiiii/gg-core/project-notes";
 import {
   AppSidecarJsonBodyError,
   isExactRecord,
@@ -22,6 +23,9 @@ export const NOTES_REQUEST_BODY_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface AppSidecarNotesHandlerOptions {
   repository: Pick<ProjectNotesRepository, "load" | "migrate" | "save" | "resolveRoadmapBlocker">;
+  phaseDeletion?: {
+    execute(input: unknown, context: StorageDiagnosticsSessionContext): Promise<PhaseDeletionOutcome>;
+  };
   diagnostics: {
     inspect(context: StorageDiagnosticsSessionContext): Promise<ProjectNotesStorageDiagnostics>;
   };
@@ -53,9 +57,21 @@ export function createAppSidecarNotesHandler(
       const isNotesRoute =
         pathname === "/notes" ||
         pathname === "/notes/diagnostics" ||
+        pathname === "/notes/phase-deletion" ||
         pathname === "/notes/migrate" ||
         pathname === "/notes/roadmap/blocker-resolution";
       if (!isNotesRoute) return false;
+
+      if (method === "POST" && pathname === "/notes/phase-deletion") {
+        void readJsonBody(req, 16 * 1024).then(async body => {
+          if (!isPhaseDeletionRequest(body)) { sendJson(res, 400, invalidBody()); return; }
+          const outcome: PhaseDeletionOutcome = options.phaseDeletion
+            ? await options.phaseDeletion.execute(body, context)
+            : { status: "unavailable", message: "Phase deletion is unavailable in this session." };
+          sendJson(res, 200, outcome);
+        }).catch(error => sendBodyReadError(res, error, onError));
+        return true;
+      }
 
       if (method === "GET" && pathname === "/notes/diagnostics") {
         void diagnostics

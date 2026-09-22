@@ -1,5 +1,7 @@
 import {
   isNotesDocumentV3,
+  type PhaseDeletionRequest,
+  type PhaseDeletionOutcome,
   isNullableNotesSessionLink,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   type NotesDocumentV3,
@@ -369,7 +371,11 @@ export type ProjectNotesRoadmapBlockerResolutionOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
+export { isPhaseDeletionOutcome, isPhaseDeletionRequest } from "@kenkaiiii/gg-core/project-notes";
+export type { PhaseDeletionRequest, PhaseDeletionOutcome } from "@kenkaiiii/gg-core/project-notes";
+
 export interface NotesClient {
+  mutatePhaseDeletion?(request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome>;
   getNotes(): Promise<ProjectNotesReadOutcome>;
   getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   bindRoadmapPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;

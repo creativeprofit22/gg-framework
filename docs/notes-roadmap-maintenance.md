@@ -2,6 +2,8 @@
 
 Audit baseline: 2026-07-30 at commit `0811a66a`.
 
+For recoverable phase deletion, retention, ownership, recovery steps and current evidence limits, see [Roadmap phase deletion](notes-roadmap-deletion.md) (reviewed 2026-09-21). The queue below is historical, not the deletion feature's completion checklist.
+
 This is the remaining maintenance queue from the scoped Phases 00–26 sweep. Execute it in the order below; do not combine cleanup with behavior changes.
 
 ## Status

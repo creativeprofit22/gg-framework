@@ -1,5 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Modal } from "./Modal";
+import { usePhaseDeletion, type PhaseDeletionBridge } from "./notes-roadmap/usePhaseDeletion";
+import { NotesPhaseDeletionDialog } from "./notes-roadmap/NotesPhaseDeletionDialog";
+import { NotesDeletedPhases } from "./notes-roadmap/NotesDeletedPhases";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
 import { NotesReferences } from "./NotesReferences";
@@ -39,6 +42,7 @@ const NOTES_TABS: ReadonlyArray<{ id: NotesTab; label: string }> = [
 ];
 
 interface Props {
+  phaseDeletionBridge?: PhaseDeletionBridge;
   value: string;
   onChange(value: string): void;
   currentFocus: string;
@@ -149,6 +153,7 @@ export function NotesModal(props: Props): React.ReactElement {
 
 /** The editor is deferred; its modal shell and focus containment stay synchronous. */
 export function NotesModalContent({
+  phaseDeletionBridge,
   value,
   onChange,
   currentFocus,
@@ -209,6 +214,8 @@ export function NotesModalContent({
   onChangeHandoff,
   onHandoffPresented,
 }: Props): React.ReactElement {
+  const deletion = usePhaseDeletion(expectedProjectKey, phaseDeletionBridge);
+  const deletePhase = (id: string) => { const phase = phases.find(p => p.id === id); if (phase) void deletion.begin(phase, "delete"); };
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
   const tabRefs = useRef<Record<NotesTab, HTMLButtonElement | null>>({
@@ -260,6 +267,12 @@ export function NotesModalContent({
 
   return (
     <div className="notes-shell">
+      <NotesPhaseDeletionDialog controller={deletion} />
+      {deletion.success && <div className="notes-phase-deletion-feedback">
+        <p role="status">{deletion.success.message}</p>
+        {deletion.success.deletionId && <button type="button" className="notes-roadmap-new" onClick={() => void deletion.undo()}>Undo</button>}
+        <button type="button" className="notes-roadmap-new" onClick={deletion.clearSuccess}>Dismiss message</button>
+      </div>}
       <div className="notes-shell-status">{persistenceStatus}</div>
       <div className="notes-tabs-scroll">
         <div
@@ -377,6 +390,7 @@ export function NotesModalContent({
                 onMovePhase={onMovePhase}
                 onChangePhaseStatus={onChangePhaseStatus}
                 onArchivePhase={onArchivePhase}
+                onDeletePhase={deletePhase}
                 onLinkReferenceToPhase={onLinkReferenceToPhase}
                 onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
                 onAcceptReferenceProposal={onAcceptReferenceProposal}
@@ -460,7 +474,8 @@ export function NotesModalContent({
               aria-labelledby="notes-archive-heading"
             >
               <h2 id="notes-archive-heading">Done / Archive</h2>
-              <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} />
+              <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} onDeletePhase={deletePhase} />
+              <NotesDeletedPhases phases={phases} onRecover={phase => void deletion.begin(phase, "recover")} disabled={deletion.pending} />
               <h3 className="notes-archive-task-heading">Notes tasks</h3>
               <button
                 type="button"

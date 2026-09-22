@@ -93,6 +93,51 @@ afterEach(async () => {
   ]);
 });
 
+describe("phase deletion lease coordination", () => {
+  it.each(["alive", "unknown", "dead"] as const)("does not treat expiry as proof of safety (%s)", async state => {
+    const leases = repository();
+    await leases.execute({ cwd, request: request("acquire", "first"), holder: holderA, context });
+    now += PHASE_LEASE_TTL_MS + 1; liveness = state;
+    let executed = false;
+    const result = await leases.withNoConflictingLease(cwd, context.phaseId, async () => { executed = true; return 1; });
+    expect(result.status).toBe(state === "dead" ? "executed" : state === "alive" ? "conflicting-lease" : "ambiguous-lease");
+    expect(executed).toBe(state === "dead");
+  });
+
+  it("refuses ambiguous primary recovery even when the lease backup is valid", async () => {
+    const leases = repository();
+    await leases.execute({ cwd, request: request("acquire", "first"), holder: holderA, context });
+    await fs.writeFile(leases.paths(cwd).primary, "{broken");
+    expect(await leases.withNoConflictingLease(cwd, context.phaseId, async () => true))
+      .toEqual({ status: "ambiguous-lease" });
+  });
+
+  it("revalidates availability inside the acquisition lock, before historical replay", async () => {
+    const leases = repository(); const input = { cwd, request: request("acquire", "first"), holder: holderA, context };
+    expect((await leases.execute(input)).status).toBe("acquired");
+    expect(await leases.execute({ ...input, loadCurrentContext: async () => null }))
+      .toEqual({ status: "phase-not-found" });
+    expect(await leases.execute({ ...input, loadCurrentContext: async () => ({ ...context, roadmapRevision: 11, lastDeletionRevision: 11 }) }))
+      .toMatchObject({ status: "stale-revision", roadmapRevision: 11, leaseRevision: 1 });
+  });
+
+  it("holds acquisition until deletion's Notes commit finishes and then refuses stale admission", async () => {
+    const leases = repository();
+    let begin!: () => void; const entered = new Promise<void>(resolve => { begin = resolve; });
+    let finish!: () => void; const held = new Promise<void>(resolve => { finish = resolve; });
+    let available = true;
+    const deletion = leases.withNoConflictingLease(cwd, context.phaseId, async () => {
+      begin(); await held; available = false; return "committed";
+    });
+    await entered;
+    const acquisition = leases.execute({ cwd, request: request("acquire", "racing"), holder: holderA,
+      context, loadCurrentContext: async () => available ? context : null });
+    finish();
+    expect(await deletion).toEqual({ status: "executed", value: "committed" });
+    expect(await acquisition).toEqual({ status: "phase-not-found" });
+  });
+});
+
 describe("roadmap phase lease repository", () => {
   it("serializes simultaneous acquisition so one fence wins", async () => {
     const first = repository();

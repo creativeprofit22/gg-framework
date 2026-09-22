@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import {
   ProjectNotesRepository,
+  applyNotesPhaseDeletion,
   canonicalProjectKey,
   isNotesDocumentV3,
   NOTES_REFERENCE_METADATA_FIELDS,
@@ -216,6 +217,46 @@ async function readEnvelope(filePath: string): Promise<StoredProjectNotesV1> {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe("ProjectNotesRepository deletion authority", () => {
+  it.each([false, true])("rejects generic omission even for history-free phases (history=%s)", async history => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/deletion-omission";
+    const document = notes();
+    if (!history) {
+      document.phases[0]!.lifecycleEvents = [];
+      document.phases[0]!.roadmapEvents = [];
+    }
+    expect((await repository.migrate(cwd, document)).status).toBe("ok");
+    const before = await fs.readFile(repository.paths(cwd).primary, "utf8");
+    const omitted = { ...document, phases: [] };
+    expect(await repository.save(cwd, 1, omitted)).toMatchObject({
+      status: "invalid", error: { message: expect.stringContaining("dedicated recoverable deletion") },
+    });
+    expect(await fs.readFile(repository.paths(cwd).primary, "utf8")).toBe(before);
+  });
+
+  it("rejects tombstone creation through generic save and migration without writing", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/deletion-authority";
+    const document = notes();
+    expect((await repository.migrate(cwd, document)).status).toBe("ok");
+    const before = await fs.readFile(repository.paths(cwd).primary, "utf8");
+    document.phases[0] = applyNotesPhaseDeletion(document.phases[0]!, {
+      version: 1, action: "delete", operationId: "delete-1", phaseId: document.phases[0]!.id,
+      expectedProjectKey: canonicalProjectKey(cwd), expectedRevision: 1, expectedGeneration: 0,
+    }, NOW);
+    expect(validateNotesDocumentV3(document).ok).toBe(true);
+    expect(await repository.save(cwd, 1, document)).toMatchObject({
+      status: "invalid", error: { message: expect.stringContaining("Deletion history") },
+    });
+    expect(await fs.readFile(repository.paths(cwd).primary, "utf8")).toBe(before);
+    expect(await repository.migrate("/work/deletion-fresh", document)).toMatchObject({
+      status: "invalid", error: { message: "Migration cannot create deletion history" },
+    });
+    await expect(fs.stat(repository.paths("/work/deletion-fresh").primary)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 describe("ProjectNotesRepository reminder occurrence contract", () => {

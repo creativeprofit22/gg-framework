@@ -1,5 +1,7 @@
 #[cfg(all(debug_assertions, target_os = "windows"))]
 mod appearance_background_probe;
+#[path = "agent/notes.rs"]
+mod notes_phase_deletion;
 mod azure_connection;
 mod qwen_cloud_connection;
 use qwen_cloud_connection::{qwen_cloud_connection_status, qwen_cloud_connection_save, qwen_cloud_connection_remove, qwen_cloud_connection_test};
@@ -10525,6 +10527,7 @@ pub fn run() {
             open_url,
             agent_state,
             agent_notes_get,
+            notes_phase_deletion::agent_notes_phase_deletion,
             agent_notes_diagnostics,
             agent_notes_phase_binding,
             agent_phase_start,

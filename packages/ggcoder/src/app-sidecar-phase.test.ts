@@ -1595,10 +1595,6 @@ describe("production launchBoundPhase orchestration", () => {
           fs.writeFile(paths.primary, "{malformed"),
           fs.writeFile(paths.backup, "{malformed"),
         ]);
-      } else if (kind === "phase-not-found") {
-        await updatePhase(repository, cwd, (notes) => {
-          notes.phases = [];
-        });
       } else if (kind === "phase-archived") {
         await updatePhase(repository, cwd, (notes) => {
           notes.phases[0]!.archivedAt = NOW;
@@ -1606,7 +1602,8 @@ describe("production launchBoundPhase orchestration", () => {
       }
       const fixture = new ProductionPhaseFixture(repository, cwd);
 
-      const response = await fixture.start();
+      // A missing identity must not be fabricated via now-forbidden generic removal.
+      const response = await fixture.start(kind === "phase-not-found" ? "missing-phase" : "phase-21");
 
       expect(response).toMatchObject({ status, body: { status: "failed", code } });
       expect(fixture.createCalls).toBe(0);

@@ -542,6 +542,30 @@ afterEach(async () => {
 });
 
 describe("app sidecar phase binding service", () => {
+  it("refuses a bind that preflighted before deletion but acquires its lease afterward", async () => {
+    const { cwd, repository, agentDir } = await setup("delete-bind-race");
+    const leases = new RoadmapPhaseLeaseRepository(agentDir);
+    let entered!: () => void; const holding = new Promise<void>(resolve => { entered = resolve; });
+    let ready!: () => void; const bindingReady = new Promise<void>(resolve => { ready = resolve; });
+    const deletion = leases.withNoConflictingLease(cwd, "phase-1", async () => {
+      entered(); await bindingReady;
+      return repository.mutatePhaseDeletion(cwd, { version: 1, action: "delete", operationId: "delete-race",
+        phaseId: "phase-1", expectedProjectKey: canonicalProjectKey(cwd), expectedRevision: 1,
+        expectedGeneration: 0 }, async () => null);
+    });
+    await holding;
+    const service = createAppSidecarPhaseBindingService({ repository, leaseRepository: {
+      execute: async input => { ready(); return leases.execute(input); },
+      withFence: leases.withFence.bind(leases), reconcileTakeover: leases.reconcileTakeover.bind(leases),
+    }, daemonInstanceId: "race-daemon", processId: process.pid, processStartToken: "race-start" });
+    const destination = new FakeSession(cwd, sessionB);
+    const binding = service.bind(request(cwd), destination);
+    expect(await deletion).toMatchObject({ status: "executed", value: { status: "committed" } });
+    expect(await binding).toMatchObject({ status: "phase-not-found" });
+    expect(destination.active).toBeUndefined(); expect(destination.leaseMarker).toBeUndefined();
+  });
+
+
   it("persists destination context and fans out one authoritative snapshot", async () => {
     const { cwd, repository } = await setup("commit");
     const aliasCwd = `${cwd}${path.sep}.`;

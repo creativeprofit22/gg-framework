@@ -1,28 +1,38 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-18",
-  "label": "Upstream 0.65.1, with steadier queues and clearer next steps",
+  "date": "2026-09-22",
+  "label": "Upstream 0.66.4, with clearer status and a workspace that reads your way",
   "sections": [
     {
-      "title": "Queued messages stay with the right conversation",
+      "title": "Know what this request actually finished",
       "items": [
-        "Cancel the message you meant to cancel. When two queued prompts have the same text, removing one no longer removes the other's conversation bubble. The remaining prompt keeps its attachments and enhancements, and another pane's queue stays separate.",
-        "Keep an accurate conversation when timing is close. If a queued message has already reached the agent, a late cancellation does not erase it. Delayed replies cannot bring a cancelled bubble back or replace a newer queue, and the queued label clears when a message starts running."
+        "Follow the work without reading every tool message. The `activity bar` now distinguishes checking code, retrying, reconnecting, waiting for you, and `Ken` reviewing. It keeps the result visible when work stops, and each pane follows its own conversation instead of borrowing another pane's progress.",
+        "Read a fresh answer without inheriting yesterday's green check. Status separates checks from the current request from warnings about earlier work, and gives research and background jobs their own finish messages. Passing checks are not a claim that an update was released or installed.",
+        "Keep `Ken` and `Autopilot` focused on the work you asked for. Reviews retain your latest decisions and look for unfinished requirements rather than an endless list of optional improvements. Your Local Fork still waits for your approval before implementing a proposed plan."
       ]
     },
     {
-      "title": "Explore useful work without granting permission to run it",
+      "title": "Keep your instructions, images, and longer conversations together",
       "items": [
-        "Start with what your project needs in `Opportunities`, even before a scanner is configured. Discovery can suggest reusing a command, extending one, preparing something new, or leaving already-automated work alone. Scanner results stay separate from those suggestions, so finding a candidate is not proof that a command exists or is ready to run.",
-        "Review a candidate before committing to it. Selecting an opportunity starts a read-only review; it does not create files or run the proposed work. A missing command needs a complete proposal before it can be ready for your next decision, and a finished review now returns its summary to the selected opportunity instead of leaving it looking unfinished.",
-        "Keep earlier decisions in view. Recommendation history retains completed and dismissed choices and lets you browse older candidates without treating an old review as fresh permission. Changed project context calls for a new review; creating a command and executing it still require separate approvals."
+        "Make a `slash command` fit this invocation. An explicit choice of scope, format, or whether to edit takes priority over the template's default, while the rest of its procedure stays intact. Neither command text nor its arguments grant permission to use tools or skip an approval.",
+        "Keep working through longer conversations. Automatic compaction can prepare a shorter history in the background, then use it at a safe boundary rather than interrupting a tool result. Your recent conversation and saved command invocations remain part of the continuation.",
+        "Keep pictures with your chat in connected editors. `ACP` connections now forward screenshots and generated images both as they arrive and when saved history is reopened, instead of leaving the image behind.",
+        "Start supported deep-thinking models at a more practical reasoning level. New chats use the model's default rather than automatically choosing its maximum, and `plan mode` limits deeper reasoning. A reasoning choice you saved still takes precedence where that model supports it."
       ]
     },
     {
-      "title": "More predictable connections and replies",
+      "title": "Make the Local Fork easier to read",
       "items": [
-        "Manage your `Qwen Cloud` connection without exposing a saved key in the interface. Saving, replacing, or removing it refreshes connection and model availability across open windows. Changes wait while work is running, and a locally saved key is not presented as a remotely verified account or allowance.",
-        "Read progress without guessing what finished. Replies keep the Local Fork's short-by-default style, with room for detail when you need it, while distinguishing work that is implemented, tested, committed, or released. There is no hard reply-length limit, and a successful check is not described as an installed update."
+        "Choose a workspace that suits your eyes in `Settings > Appearance`. Switch between `Dark` and `Light`, adjust `Prose size`, `Letter spacing`, and `Paragraph spacing`, or limit the reading width in wide panes. Code and compact controls keep their sizing, and `Reset appearance defaults` gives you a clear way back.",
+        "Keep your place while arranging conversations. Reading anchors, drafts, and focus stay with their pane through supported swaps and resizes, while saved appearance choices carry across windows. `Identity markers` and `Crisp reveal` offer another way to distinguish speakers and read streamed replies."
+      ]
+    },
+    {
+      "title": "Recover without hiding what went wrong",
+      "items": [
+        "A provider refusal no longer disappears behind a blank finish. The agent can make one bounded recovery attempt when the provider's response allows it; a repeated refusal remains a clear error in the conversation. This does not override the provider's restrictions or promise that every request will succeed.",
+        "Let scratch files stay out of your way. Temporary-file handling now accounts for the shell's scratch folder on Windows as well as platform temporary folders, while preserving checks that keep file access within the permitted locations.",
+        "Ask for interfaces with fewer repeated descriptions and more consistent controls. The updated `UI skill` puts more emphasis on checking keyboard focus and dropdown behavior through actual interactions, not treating a screenshot as proof that everything works."
       ]
     }
   ]

@@ -53,10 +53,24 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-18-upstream-0651-queues-and-discovery",
+    id: "local-2026-09-22-upstream-0664-status-and-reading",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-18-upstream-0651-queues-and-discovery",
+    label: "Upstream 0.65.1, with steadier queues and clearer next steps",
+    date: "2026-09-18",
+    items: [
+      "Cancel the message you meant to cancel. When two queued prompts have the same text, removing one no longer removes the other's conversation bubble. The remaining prompt keeps its attachments and enhancements, and another pane's queue stays separate.",
+      "Keep an accurate conversation when timing is close. If a queued message has already reached the agent, a late cancellation does not erase it. Delayed replies cannot bring a cancelled bubble back or replace a newer queue, and the queued label clears when a message starts running.",
+      "Start with what your project needs in `Opportunities`, even before a scanner is configured. Discovery can suggest reusing a command, extending one, preparing something new, or leaving already-automated work alone. Scanner results stay separate from those suggestions, so finding a candidate is not proof that a command exists or is ready to run.",
+      "Review a candidate before committing to it. Selecting an opportunity starts a read-only review; it does not create files or run the proposed work. A missing command needs a complete proposal before it can be ready for your next decision, and a finished review now returns its summary to the selected opportunity instead of leaving it looking unfinished.",
+      "Keep earlier decisions in view. Recommendation history retains completed and dismissed choices and lets you browse older candidates without treating an old review as fresh permission. Changed project context calls for a new review; creating a command and executing it still require separate approvals.",
+      "Manage your `Qwen Cloud` connection without exposing a saved key in the interface. Saving, replacing, or removing it refreshes connection and model availability across open windows. Changes wait while work is running, and a locally saved key is not presented as a remotely verified account or allowance.",
+      "Read progress without guessing what finished. Replies keep the Local Fork's short-by-default style, with room for detail when you need it, while distinguishing work that is implemented, tested, committed, or released. There is no hard reply-length limit, and a successful check is not described as an installed update.",
+    ],
   },
   {
     id: "local-2026-09-15-upstream-0650-reviewed-commands",

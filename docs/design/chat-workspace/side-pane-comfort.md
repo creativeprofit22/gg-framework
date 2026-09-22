@@ -1,10 +1,10 @@
 # Side-pane reading comfort
 
-Status: research and proposals only; no side-pane layout implementation approved.
+Status, 2026-09-21: **current reading and pane-swap workflow checked by the user and satisfactory for now**. The user confirmed they had already checked the comfort workflow and that it is "fine atm". No further comfort review or side-pane redesign is currently requested. Revisit only if the user reports renewed discomfort or changed needs; the proposals below remain historical, unapproved alternatives.
 
 ## Scope and user evidence
 
-The user reports that center panes are comfortable with the current reading improvements, but sustained reading at either edge still causes discomfort while sitting or standing. Preserve center-pane defaults. The aim is to reduce sideways viewing for long replies, not to promise treatment for eye strain. Physical display arrangement, viewing distance, eyewear and the user's position remain unknown.
+The earlier user report was that center panes were comfortable with the current reading improvements, but sustained reading at either edge still causes discomfort while sitting or standing. Preserve center-pane defaults. The aim is to reduce sideways viewing for long replies, not to promise treatment for eye strain. Physical display arrangement, viewing distance, eyewear and the user's position remain unknown.
 
 Separately approved and implemented: user messages share the assistant's left text edge in the Light browser preview, retaining their bubble wrapper. Original comparison and installed defaults are unchanged. Personality profile icons remain future work, not part of this change.
 
@@ -22,9 +22,11 @@ Better typography reduces reading difficulty within a pane but cannot move an of
 
 GG already has pane rearrangement, keyboard focus, resizable splits, and copy-to-new-window behavior in `WorkspaceShell.tsx`. Focus alone does not reposition content. Copying a pane is not equivalent to a temporary reading view: it has separate session/lifecycle constraints, including active-work restrictions. Reuse the existing pane/session rather than proposing a duplicate agent session.
 
-## Proposed directions
+## Historical proposed directions — parked
 
-### Recommended: a temporary "Read here" view for side panes
+These proposals predate the completed pane swaps and the user's current comfort confirmation. They are not the recommended next work.
+
+### Previously recommended: a temporary "Read here" view for side panes
 
 An explicit action on a side pane opens its conversation at the user's preferred forward reading location, using the same left-aligned messages and comfortable line length. A clearly labelled Back control and Escape restore the prior workspace view. No automatic movement when a pane finishes, receives text, or gains focus.
 

@@ -1,5 +1,9 @@
 # Decisions
 
+## Current reading comfort accepted for now, 2026-09-21
+
+The user confirmed they had already checked the current six-pane reading/pane-swap workflow and that it is "fine atm". Treat the current experience as satisfactory for their present use, not an outstanding comfort-review task. Preserve the current design; do not propose another comfort comparison or the historical "Read here" alternative unless discomfort or requirements change. This is user-reported acceptance, not a new automated check, accessibility assessment, health claim or release approval. Other technical verification gaps retain their separate scope.
+
 ## Native integration decision, 2026-09-21
 
 The user separately approved the native appearance plan: keep Dark as default, offer opt-in Light and six independent saved reading controls, and use the visible native developer app for review. Source integration and bounded native verification are now implemented; see [native appearance](native-appearance.md) for defaults, evidence and acceptance gaps. During verification the user additionally approved closing/reopening only the owned developer app and applying its existing guarded debug setup to What's New. No additional window privileges were granted. A later request explicitly authorized diagnosing the verification hang before resuming; detached debug requests now fail promptly and secondary-window closure is exercised in the permanent smoke.

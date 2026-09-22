@@ -2,6 +2,8 @@
 
 Status: the separately approved **native Light and saved reading preferences are integrated in app source**, with scoped Windows developer-native evidence. Dark remains the default. Use the [native appearance workflow and verification limits](native-appearance.md) for current review. Light remains source-inspired, not fidelity-verified. The full acceptance matrix is not certified complete, and the installed app has not changed.
 
+Current user feedback, 2026-09-21: the reading/pane-swap workflow has already been checked and is satisfactory for now. Do not schedule another comfort comparison or revive the historical "Read here" proposal without a new need. See [the current decision](decisions.md#current-reading-comfort-accepted-for-now-2026-09-21); technical verification limits remain separate.
+
 ## Goal
 
 Compare the actual GG Coder workspace with independently selectable reading adjustments, optional small identity markers, and a Yaatuber-derived light surface. Preserve humor, ranks, effects, controls, and technical character. Six panes are the principal case, not a fixed layout requirement. No generated whole-app concept is an implementation target.

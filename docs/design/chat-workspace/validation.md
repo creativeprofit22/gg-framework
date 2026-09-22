@@ -84,6 +84,8 @@ Also run the new preview tests and affected Markdown/workspace tests. Inspect em
 
 ## Comfort comparison (manual acceptance)
 
+**Current user acceptance, 2026-09-21:** the user has already checked the current reading/pane-swap workflow and reports it is "fine atm". No repeat comfort comparison is pending. This records their present experience, not completion of every protocol condition below or a medical/accessibility claim. Retain the following protocol for a future user-reported need, not as the next task.
+
 Use the same long reply, usual room lighting, display scaling and app zoom. Compare briefly first; continue longer only if comfortable. Change one reading setting at a time, then compare palette using identical reading settings. Include the usual six-pane layout and an expanded pane. Note readability, scrolling effort and fatigue without treating any result as medical evidence. No candidate is selected or promoted automatically.
 
 ## Earlier execution checkpoint (18 September local time)

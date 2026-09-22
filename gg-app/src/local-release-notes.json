@@ -31,6 +31,7 @@
       "items": [
         "Follow the work without reading every tool message. The `activity bar` now distinguishes checking code, retrying, reconnecting, waiting for you, and `Ken` reviewing. It keeps the result visible when work stops, and each pane follows its own conversation instead of borrowing another pane's progress.",
         "Read a fresh answer without inheriting yesterday's green check. Status separates checks from the current request from warnings about earlier work, and gives research and background jobs their own finish messages. Passing checks are not a claim that an update was released or installed.",
+        "Watch a task list update as it happens. When your agent adds, finishes, or drops a task, the count in the header and an open `Tasks` view now change immediately, rather than waiting for the next background refresh or a manual reopen.",
         "Keep `Ken` and `Autopilot` focused on the work you asked for. Reviews retain your latest decisions and look for unfinished requirements rather than an endless list of optional improvements. Your Local Fork still waits for your approval before implementing a proposed plan."
       ]
     },
@@ -53,6 +54,7 @@
     {
       "title": "Recover without hiding what went wrong",
       "items": [
+        "Reach a brand-new model on the day it arrives. When `Anthropic` turns a request away because it expects a newer client than this app reports, the app now reads the version it asked for, adopts it straight away, and retries your message instead of repeating the refusal for up to a day. This was keeping `Claude Opus 5.5` unreachable behind an `unsupported model` error.",
         "A provider refusal no longer disappears behind a blank finish. The agent can make one bounded recovery attempt when the provider's response allows it; a repeated refusal remains a clear error in the conversation. This does not override the provider's restrictions or promise that every request will succeed.",
         "Let scratch files stay out of your way. Temporary-file handling now accounts for the shell's scratch folder on Windows as well as platform temporary folders, while preserving checks that keep file access within the permitted locations."
       ]

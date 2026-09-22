@@ -2209,6 +2209,10 @@ async function createSession(
     // window (project picker, session list) — whenever a resumed session was
     // over the context threshold. First prompt compacts instead, with UI events.
     deferLoadCompaction: true,
+    // The `tasks` tool mutates tasks.json directly with no event of its own —
+    // without this, the header count and an open Tasks modal only refresh on
+    // the next run/prune broadcast or the next explicit GET /tasks.
+    onTasksChanged: () => broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) }),
   };
   let session!: AgentSession;
   let planGate!: AppSidecarPlanGate;

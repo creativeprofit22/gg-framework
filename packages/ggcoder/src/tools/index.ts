@@ -156,6 +156,8 @@ export interface CreateToolsOptions {
    * turn polling.
    */
   notifications?: AgentNotificationQueue;
+  /** Callback after the `tasks` tool successfully adds, completes, or removes a task. */
+  onTasksChanged?: () => void;
 }
 
 export interface CreateToolsResult {
@@ -272,7 +274,7 @@ export async function createTools(
     createTaskOutputTool(processManager),
     createTaskSendTool(processManager),
     createTaskStopTool(processManager),
-    createTasksTool(cwd),
+    createTasksTool(cwd, opts?.onTasksChanged),
     createScreenshotTool(cwd),
   ];
 

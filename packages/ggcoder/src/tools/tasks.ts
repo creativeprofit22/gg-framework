@@ -21,7 +21,10 @@ const TasksParams = z.object({
   id: z.string().optional().describe("Task ID (required for done/remove — use list to find IDs)"),
 });
 
-export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
+export function createTasksTool(
+  cwd: string,
+  onTasksChanged?: () => void,
+): AgentTool<typeof TasksParams> {
   let pending: Promise<void> = Promise.resolve();
 
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -55,6 +58,7 @@ export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
             // Re-read under the lock: a concurrent delete elsewhere must not be
             // undone by writing a list captured before it landed.
             await mutateTasks(cwd, (tasks) => [...tasks, task]);
+            onTasksChanged?.();
             log("INFO", "tasks", `Task added: ${title}`, { id: task.id });
             return `Task added: "${title}" (id: ${task.id.slice(0, 8)})`;
           }
@@ -85,6 +89,7 @@ export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
             });
             const done = picked.task;
             if (!done) return `Error: no task found matching id "${id}".`;
+            onTasksChanged?.();
             log("INFO", "tasks", `Task done: ${done.title}`, { id: done.id });
             return `Marked done: "${done.title}"`;
           }
@@ -104,6 +109,7 @@ export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
             });
             const removed = taken.task;
             if (!removed) return `Error: no task found matching id "${id}".`;
+            onTasksChanged?.();
             log("INFO", "tasks", `Task removed: ${removed.title}`, { id: removed.id });
             return `Removed: "${removed.title}"`;
           }

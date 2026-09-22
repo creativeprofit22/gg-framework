@@ -48,7 +48,7 @@ import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage, NotLoggedInError } from "./auth-storage.js";
 import { dualAuthProvider, parseReferencedFiles, type NotesWorkspaceSnapshotV1, type SlashCommandListing } from "@kenkaiiii/gg-core";
-import { getClaudeCliUserAgent } from "./claude-code-version.js";
+import { getClaudeCliUserAgent, noteRequiredClaudeCodeVersion } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { isGrokCliEndpoint } from "./oauth/xai.js";
 import {
@@ -425,6 +425,8 @@ export interface AgentSessionOptions {
   approveToolExecution?: (name: string, args: unknown, signal?: AbortSignal) => Promise<boolean>;
   /** Host freshness check after approval/receipt waits, immediately before guarded dispatch. */
   validateToolExecution?: () => Promise<void>;
+  /** Host-provided broadcast hook fired after the `tasks` tool adds, completes, or removes a task. */
+  onTasksChanged?: () => void;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -930,6 +932,7 @@ export class AgentSession {
         this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
         this.reviewCoverage.recordChanged(filePath);
       },
+      onTasksChanged: this.opts.onTasksChanged,
       // Lazy — sessionId/model/provider can change after createTools() runs, so
       // sub-agent spawns read the current parent state at execution time.
       getProvider: () => this.provider,
@@ -3082,7 +3085,9 @@ ${content}
       }
     }
 
-    const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
+    // Reassignable: Anthropic can reject the spoofed claude-cli version as too
+    // old for a newly released model, and the retry below rebuilds it.
+    let userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
     const loopMessages = await this.prepareDynamicContext();
 
@@ -3391,6 +3396,16 @@ ${content}
           await clearInvalidStaticApiKey(fallbackErr);
           throw fallbackErr;
         }
+      } else if (
+        this.provider === "anthropic" &&
+        (await noteRequiredClaudeCodeVersion(err instanceof Error ? err.message : String(err)))
+      ) {
+        // A just-released model requires a newer Claude Code client than our
+        // cached version spoofs. The floor has been raised on disk — rebuild the
+        // User-Agent and retry this turn once instead of failing the user.
+        userAgent = await getClaudeCliUserAgent();
+        log("INFO", "anthropic", `Retrying with refreshed client version: ${userAgent}`);
+        await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
       } else if (err instanceof ProviderError && err.statusCode === 401) {
         // Static API-key providers (GLM, Moonshot API key, etc.) have no refresh
         // mechanism — retrying with the same key is pointless. Clear the

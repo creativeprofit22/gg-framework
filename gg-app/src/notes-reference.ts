@@ -1,10 +1,11 @@
 import {
+  isNotesPhasePresent,
   normalizeCanonicalUrl,
   NOTES_REFERENCE_METADATA_FIELDS,
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
 } from "@kenkaiiii/gg-core/project-notes";
-import type { NotesReference } from "./notes-types";
+import type { NotesPhase, NotesReference } from "./notes-types";
 export {
   canonicalReferenceIdentity,
   normalizeCanonicalUrl,
@@ -208,6 +209,77 @@ export function normalizeNotesReferenceDraft(
       relevance: draft.relevance.trim(),
     },
   };
+}
+
+/**
+ * Only present (non-deleted) phases accept reference link changes through generic saves; the
+ * repository refuses any edit to a retained tombstone until it is recovered.
+ */
+export function isReferenceAttachTarget(phase: Pick<NotesPhase, "deletion">): boolean {
+  return isNotesPhasePresent(phase);
+}
+
+/** The phase currently lists the reference, directly or through its reference override. */
+export function isReferenceLinkedToPhase(
+  phase: Pick<NotesPhase, "referenceIds" | "overrides">,
+  referenceId: string,
+): boolean {
+  return (
+    phase.referenceIds.includes(referenceId) ||
+    (phase.overrides.referenceIds?.value.includes(referenceId) ?? false)
+  );
+}
+
+/**
+ * Retained history that core validation resolves against the shared library: overrides retired
+ * by deletion events (kept even after recovery) and accepted Roadmap proposals or decisions.
+ */
+export function isReferenceRetainedByPhaseHistory(
+  phase: Pick<NotesPhase, "deletion" | "roadmapEvents">,
+  referenceId: string,
+): boolean {
+  for (const event of phase.deletion?.events ?? []) {
+    if (
+      event.action === "delete" &&
+      (event.retired.overrides.referenceIds?.value.includes(referenceId) ?? false)
+    ) {
+      return true;
+    }
+  }
+  for (const event of phase.roadmapEvents) {
+    if (event.type === "reference-decision" && event.referenceId === referenceId) return true;
+    if (
+      event.type === "status-update" &&
+      event.proposedReferences.some((proposal) => proposal.referenceId === referenceId)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface NotesReferencePhaseDependency {
+  phase: NotesPhase;
+  /** The link is a current, user-editable attachment on a present phase. */
+  editable: boolean;
+  /** The phase keeps the reference through immutable history (a deleted-phase link or retained events). */
+  retained: boolean;
+}
+
+/** Every phase that still requires the reference, split by whether the user can release it. */
+export function referencePhaseDependencies(
+  phases: readonly NotesPhase[],
+  referenceId: string,
+): NotesReferencePhaseDependency[] {
+  const dependencies: NotesReferencePhaseDependency[] = [];
+  for (const phase of phases) {
+    const linked = isReferenceLinkedToPhase(phase, referenceId);
+    const present = isReferenceAttachTarget(phase);
+    const editable = linked && present;
+    const retained = (linked && !present) || isReferenceRetainedByPhaseHistory(phase, referenceId);
+    if (editable || retained) dependencies.push({ phase, editable, retained });
+  }
+  return dependencies;
 }
 
 export function referenceRepositoryKey(

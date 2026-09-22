@@ -399,6 +399,9 @@ export function referenceLinkAnnouncement(
   if (result.status === "missing-phase") {
     return `Couldn’t ${action}: the phase was removed in another window.`;
   }
+  if (result.status === "deleted-phase") {
+    return `Couldn’t ${action}: the phase was deleted in another window. Recover it from the Roadmap to change its references.`;
+  }
   if (result.status === "failed" && result.reason === "invalid") {
     return `Couldn’t ${action}: Project Notes rejected the change. Review the reference and try again.`;
   }

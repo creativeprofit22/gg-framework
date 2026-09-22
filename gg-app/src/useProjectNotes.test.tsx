@@ -2,6 +2,10 @@
 
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  applyNotesPhaseDeletion,
+  notesPhaseDeletionGeneration,
+} from "@kenkaiiii/gg-core/project-notes";
 import type { NotesReferenceInput } from "./notes-reference";
 import { createEmptyNotesDocument, createNotesRepository, v3NotesKey } from "./notes-storage";
 import type {
@@ -98,6 +102,28 @@ function phase(id: string, order: number): NotesDocumentV3["phases"][number] {
     lifecycleEvents: [],
     roadmapEvents: [],
   };
+}
+
+function deletedPhase(
+  id: string,
+  order: number,
+  cwd: string,
+  expectedRevision = 1,
+): NotesDocumentV3["phases"][number] {
+  const source = phase(id, order);
+  return applyNotesPhaseDeletion(
+    source,
+    {
+      version: 1,
+      action: "delete",
+      operationId: `delete-${id}-${expectedRevision}`,
+      phaseId: id,
+      expectedProjectKey: cwd,
+      expectedRevision,
+      expectedGeneration: notesPhaseDeletionGeneration(source),
+    },
+    NOW,
+  );
 }
 
 function pendingPlanApprovalDocument(): NotesDocumentV3 {
@@ -873,6 +899,152 @@ describe("useProjectNotes sidecar authority", () => {
     expect(hook.result.current.document.references).toEqual([]);
   });
 
+  it("refuses reference link changes on deleted tombstones and keeps retained history dependencies", async () => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    const repository = createNotesRepository(storage, testClock);
+    const initial = notes("free-form");
+    initial.references = [
+      savedReference("ref-1"),
+      {
+        ...savedReference("ref-2", "https://github.com/owner/repo/blob/main/src/second.ts#L1-L2"),
+        path: "src/second.ts",
+      },
+    ];
+    const linkedSource = {
+      ...phase("deleted", 1),
+      referenceIds: ["ref-1"],
+      overrides: {
+        status: null,
+        referenceIds: { value: ["ref-1"], source: "user" as const, updatedAt: NOW },
+      },
+    };
+    const tombstone = applyNotesPhaseDeletion(
+      linkedSource,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-deleted-1",
+        phaseId: "deleted",
+        expectedProjectKey: cwd,
+        expectedRevision: 1,
+        expectedGeneration: notesPhaseDeletionGeneration(linkedSource),
+      },
+      NOW,
+    );
+    // Recovered phases keep the retired override in deletion history even though the
+    // current link list is empty again.
+    const recoveredSource = {
+      ...phase("recovered", 2),
+      overrides: {
+        status: null,
+        referenceIds: { value: ["ref-2"], source: "user" as const, updatedAt: NOW },
+      },
+    };
+    const recoveredTombstone = applyNotesPhaseDeletion(
+      recoveredSource,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-recovered-1",
+        phaseId: "recovered",
+        expectedProjectKey: cwd,
+        expectedRevision: 1,
+        expectedGeneration: notesPhaseDeletionGeneration(recoveredSource),
+      },
+      NOW,
+    );
+    const recovered = applyNotesPhaseDeletion(
+      recoveredTombstone,
+      {
+        version: 1,
+        action: "recover",
+        operationId: "recover-recovered-1",
+        phaseId: "recovered",
+        expectedProjectKey: cwd,
+        expectedRevision: 2,
+        expectedGeneration: notesPhaseDeletionGeneration(recoveredTombstone),
+      },
+      LATER,
+    );
+    initial.phases = [phase("active", 0), tombstone, recovered];
+    seed(storage, cwd, initial);
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        storage,
+        repository,
+        clock: testClock,
+        idFactory: () => "ref-created",
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(3));
+
+    let created: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      created = await hook.result.current.createReference(
+        { ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"), path: "src/other.ts" },
+        ["active", "deleted"],
+      );
+    });
+    expect(created).toEqual({ status: "deleted-phase", phaseId: "deleted" });
+    expect(hook.result.current.document.references).toHaveLength(2);
+    expect(hook.result.current.document.phases[0]?.referenceIds).toEqual([]);
+
+    let link: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      link = await hook.result.current.linkReferenceToPhase("ref-2", "deleted");
+    });
+    expect(link).toEqual({ status: "deleted-phase", phaseId: "deleted" });
+    let unlink: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      unlink = await hook.result.current.unlinkReferenceFromPhase("ref-1", "deleted");
+    });
+    expect(unlink).toEqual({ status: "deleted-phase", phaseId: "deleted" });
+    expect(hook.result.current.document.phases[1]).toEqual(tombstone);
+
+    let deleteLinked: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      deleteLinked = await hook.result.current.deleteReference("ref-1");
+    });
+    expect(deleteLinked).toEqual({ status: "linked-blocked", phaseIds: ["deleted"] });
+    let deleteRetained: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      deleteRetained = await hook.result.current.deleteReference("ref-2");
+    });
+    expect(deleteRetained).toEqual({ status: "linked-blocked", phaseIds: ["recovered"] });
+    expect(hook.result.current.document.references.map((item) => item.id)).toEqual([
+      "ref-1",
+      "ref-2",
+    ]);
+
+    // Refusals never poison later saves: present phases (including recovered ones) still accept links.
+    let recoveredLink: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      recoveredLink = await hook.result.current.linkReferenceToPhase("ref-1", "recovered");
+    });
+    expect(recoveredLink).toEqual({ status: "committed", referenceId: "ref-1" });
+    let activeCreate: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      activeCreate = await hook.result.current.createReference(
+        { ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"), path: "src/other.ts" },
+        ["active"],
+      );
+    });
+    expect(activeCreate).toEqual({ status: "committed", referenceId: "ref-created" });
+    expect(hook.result.current.document.phases.map((item) => item.referenceIds)).toEqual([
+      ["ref-created"],
+      ["ref-1"],
+      ["ref-1"],
+    ]);
+    const persisted = JSON.parse(storage.getItem(v3NotesKey(cwd))!) as NotesDocumentV3;
+    expect(persisted.phases.map((item) => item.referenceIds)).toEqual([
+      ["ref-created"],
+      ["ref-1"],
+      ["ref-1"],
+    ]);
+    expect(persisted.phases[1]).toEqual(tombstone);
+  });
+
   it("converges concurrent identical creates on one reference and merges requested phase links", async () => {
     const cwd = "/work/project";
     const server = new FakeNotesServer();
@@ -1159,6 +1331,130 @@ describe("useProjectNotes sidecar authority", () => {
     expect(persisted.phases.map((item) => item.order)).toEqual([0, 1, 2]);
     expect(persisted.phases[1]?.archivedAt).toBeNull();
   });
+
+  it("moves a phase past a hidden deleted tombstone to its visible neighbour", async () => {
+    const cwd = "/work/move-past-tombstone";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    const tombstone = deletedPhase("B", 1, cwd);
+    initial.phases = [phase("A", 0), tombstone, phase("C", 2)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(3));
+
+    act(() => hook.result.current.movePhase("A", "down"));
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(2));
+    const persisted = server.snapshots.get(cwd)!.document;
+    expect(persisted.phases.map((item) => item.id)).toEqual(["C", "B", "A"]);
+    expect(persisted.phases.map((item) => item.order)).toEqual([0, 1, 2]);
+    const { order: _order, ...retainedTombstone } = tombstone;
+    const { order: persistedOrder, ...persistedTombstone } = persisted.phases[1]!;
+    expect(persistedOrder).toBe(1);
+    expect(persistedTombstone).toEqual(retainedTombstone);
+    expect(persisted.phases[0]).toMatchObject({ ...initial.phases[2], order: 0 });
+    expect(persisted.phases[2]).toMatchObject({ ...initial.phases[0], order: 2 });
+    expect(persisted.phases.flatMap((item) => item.lifecycleEvents)).toEqual([]);
+    expect(persisted.phases.flatMap((item) => item.roadmapEvents)).toEqual([]);
+  });
+
+  it("reorders only surviving active phases across multiple tombstones and archived slots", async () => {
+    const cwd = "/work/move-mixed-slots";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    const archived = phase("D", 3);
+    archived.archivedAt = NOW;
+    initial.phases = [
+      deletedPhase("T1", 0, cwd),
+      phase("A", 1),
+      deletedPhase("T2", 2, cwd),
+      archived,
+      deletedPhase("T3", 4, cwd),
+      phase("C", 5),
+    ];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(6));
+
+    // First visible row cannot move up, last visible row cannot move down.
+    act(() => hook.result.current.movePhase("A", "up"));
+    act(() => hook.result.current.movePhase("C", "down"));
+    act(() => hook.result.current.movePhase("T2", "down"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(client.saveCalls).toHaveLength(0);
+
+    act(() => hook.result.current.movePhase("C", "up"));
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(2));
+    const persisted = server.snapshots.get(cwd)!.document;
+    expect(persisted.phases.map((item) => item.id)).toEqual(["T1", "C", "T2", "D", "T3", "A"]);
+    expect(persisted.phases.map((item) => item.order)).toEqual([0, 1, 2, 3, 4, 5]);
+    for (const index of [0, 2, 3, 4]) {
+      const { order: _before, ...before } = initial.phases[index]!;
+      const { order: _after, ...after } = persisted.phases[index]!;
+      expect(after).toEqual(before);
+    }
+    expect(persisted.phases[1]).toMatchObject({ id: "C", title: "Phase C", order: 1 });
+    expect(persisted.phases[5]).toMatchObject({ id: "A", title: "Phase A", order: 5 });
+  });
+
+  it.each(["source", "target"] as const)(
+    "drops a queued move when another window deletes the %s instead of substituting a hidden phase",
+    async (deletedRole) => {
+      const cwd = `/work/move-conflict-${deletedRole}`;
+      const server = new FakeNotesServer();
+      const initial = notes("base");
+      initial.phases = [phase("A", 0), phase("B", 1), phase("C", 2)];
+      server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+      const client = server.connect(cwd);
+      const storage = new MemoryStorage();
+      const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+      await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(3));
+      client.deferSaves = true;
+
+      act(() => hook.result.current.movePhase("A", "down"));
+      await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+      expect(client.pendingSaves[0]?.document.phases.map((item) => item.id)).toEqual([
+        "B",
+        "A",
+        "C",
+      ]);
+
+      // Another window commits a dedicated deletion of the source or target first.
+      const deletedId = deletedRole === "source" ? "A" : "B";
+      const concurrent = structuredClone(initial);
+      concurrent.phases = concurrent.phases.map((item) =>
+        item.id === deletedId ? deletedPhase(deletedId, item.order, cwd, 1) : item,
+      );
+      act(() => {
+        server.snapshots.set(cwd, { projectKey: cwd, revision: 2, document: concurrent });
+        server.emit(cwd, server.snapshots.get(cwd)!);
+      });
+
+      act(() => client.flushNextSave());
+      await waitFor(() => expect(client.pendingSaves).toHaveLength(0));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(server.snapshots.get(cwd)?.revision).toBe(2);
+      expect(client.saveCalls).toHaveLength(1);
+      await waitFor(() =>
+        expect(hook.result.current.document.phases.map((item) => item.id)).toEqual([
+          "A",
+          "B",
+          "C",
+        ]),
+      );
+      expect(hook.result.current.document).toEqual(concurrent);
+    },
+  );
 
   it("drops a stale task operation that became invalid instead of resurrecting it", async () => {
     const cwd = "/work/project";

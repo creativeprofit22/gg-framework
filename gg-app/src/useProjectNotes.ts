@@ -1,10 +1,16 @@
 import {
   canonicalProjectKey,
+  isNotesPhasePresent,
   type PhaseDeletionRequest,
   type PhaseDeletionOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { canonicalReferenceIdentity, type NotesReferenceInput } from "./notes-reference";
+import {
+  canonicalReferenceIdentity,
+  isReferenceAttachTarget,
+  referencePhaseDependencies,
+  type NotesReferenceInput,
+} from "./notes-reference";
 import { isNotesHandoffUnread } from "./notes-status";
 import {
   arraysEqual,
@@ -156,6 +162,10 @@ interface NotesMutation {
 }
 
 const systemClock = (): string => new Date().toISOString();
+
+/** Present (not deleted) and not archived: the rows the active Roadmap renders. */
+const isActiveVisiblePhase = (phase: NotesDocumentV3["phases"][number]): boolean =>
+  isNotesPhasePresent(phase) && phase.archivedAt === null;
 
 export function useProjectNotes(
   cwd: string | null,
@@ -1066,7 +1076,9 @@ export function useProjectNotes(
 
   const movePhase = useCallback(
     (id: string, direction: "up" | "down") => {
-      const visiblePhases = documentRef.current.phases.filter((phase) => phase.archivedAt === null);
+      // Same predicate as the active Roadmap list: deleted tombstones and archived phases keep
+      // their stored slots and are never treated as visible neighbours.
+      const visiblePhases = documentRef.current.phases.filter(isActiveVisiblePhase);
       const visiblePosition = visiblePhases.findIndex((phase) => phase.id === id);
       const targetId = visiblePhases[visiblePosition + (direction === "up" ? -1 : 1)]?.id;
       if (visiblePosition === -1 || !targetId) return;
@@ -1074,7 +1086,9 @@ export function useProjectNotes(
       const placeBeforeTarget = direction === "up";
       enqueueMutation({
         evaluate: documentMutation((current) => {
-          const visiblePhases = current.phases.filter((phase) => phase.archivedAt === null);
+          // Replay stays anchored to the originally chosen neighbour; if either phase was
+          // deleted or archived meanwhile, drop the move rather than substitute a hidden phase.
+          const visiblePhases = current.phases.filter(isActiveVisiblePhase);
           const sourcePosition = visiblePhases.findIndex((phase) => phase.id === id);
           const anchorPosition = visiblePhases.findIndex((phase) => phase.id === targetId);
           if (sourcePosition === -1 || anchorPosition === -1) return null;
@@ -1098,7 +1112,7 @@ export function useProjectNotes(
 
           let visibleIndex = 0;
           const phases = current.phases.map((phase) =>
-            phase.archivedAt === null ? reorderedVisiblePhases[visibleIndex++]! : phase,
+            isActiveVisiblePhase(phase) ? reorderedVisiblePhases[visibleIndex++]! : phase,
           );
           return { ...current, phases: normalizePhaseOrder(phases), updatedAt: now };
         }),
@@ -1234,6 +1248,15 @@ export function useProjectNotes(
             result: { status: "missing-phase", phaseId: missingPhaseId },
           };
         }
+        const deletedPhaseId = requestedPhaseIds.find((phaseId) =>
+          current.phases.some((phase) => phase.id === phaseId && !isReferenceAttachTarget(phase)),
+        );
+        if (deletedPhaseId) {
+          return {
+            document: null,
+            result: { status: "deleted-phase", phaseId: deletedPhaseId },
+          };
+        }
         const idCollision = current.references.find((reference) => reference.id === id);
         if (idCollision) {
           return {
@@ -1319,12 +1342,12 @@ export function useProjectNotes(
         if (!current.references.some((reference) => reference.id === id)) {
           return { document: null, result: { status: "missing-reference" } };
         }
-        const phaseIds = current.phases
-          .filter(
-            (phase) =>
-              phase.referenceIds.includes(id) || phase.overrides.referenceIds?.value.includes(id),
-          )
-          .map((phase) => phase.id);
+        // Current links plus retained history (tombstone links, retired overrides, accepted
+        // proposals) all resolve against the library, so removing the reference would fail core
+        // validation.
+        const phaseIds = referencePhaseDependencies(current.phases, id).map(
+          (dependency) => dependency.phase.id,
+        );
         if (phaseIds.length > 0) {
           return { document: null, result: { status: "linked-blocked", phaseIds } };
         }
@@ -1348,8 +1371,10 @@ export function useProjectNotes(
         if (!current.references.some((reference) => reference.id === referenceId)) {
           return { document: null, result: { status: "missing-reference" } };
         }
-        if (!current.phases.some((phase) => phase.id === phaseId)) {
-          return { document: null, result: { status: "missing-phase", phaseId } };
+        const phase = current.phases.find((candidate) => candidate.id === phaseId);
+        if (!phase) return { document: null, result: { status: "missing-phase", phaseId } };
+        if (!isReferenceAttachTarget(phase)) {
+          return { document: null, result: { status: "deleted-phase", phaseId } };
         }
         const timestamp = mutationTimestamp(now, current.updatedAt);
         const phases = updateReferenceLink(current.phases, referenceId, phaseId, true, timestamp);
@@ -1369,8 +1394,10 @@ export function useProjectNotes(
         if (!current.references.some((reference) => reference.id === referenceId)) {
           return { document: null, result: { status: "missing-reference" } };
         }
-        if (!current.phases.some((phase) => phase.id === phaseId)) {
-          return { document: null, result: { status: "missing-phase", phaseId } };
+        const phase = current.phases.find((candidate) => candidate.id === phaseId);
+        if (!phase) return { document: null, result: { status: "missing-phase", phaseId } };
+        if (!isReferenceAttachTarget(phase)) {
+          return { document: null, result: { status: "deleted-phase", phaseId } };
         }
         const timestamp = mutationTimestamp(now, current.updatedAt);
         const phases = updateReferenceLink(current.phases, referenceId, phaseId, false, timestamp);

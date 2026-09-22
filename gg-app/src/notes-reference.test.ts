@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { NotesReference } from "./notes-types";
+import {
+  applyNotesPhaseDeletion,
+  notesPhaseDeletionGeneration,
+} from "@kenkaiiii/gg-core/project-notes";
+import type { NotesPhase, NotesReference } from "./notes-types";
 import {
   canonicalReferenceIdentity,
   emptyNotesReferenceDraft,
   groupNotesReferences,
+  isReferenceAttachTarget,
+  isReferenceLinkedToPhase,
+  isReferenceRetainedByPhaseHistory,
   normalizeCanonicalUrl,
   normalizeNotesReferenceDraft,
   NOTES_REFERENCE_METADATA_FIELDS,
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
   notesReferenceToDraft,
+  referencePhaseDependencies,
   referenceRepositoryKey,
   referenceRepositoryLabel,
   referenceSourceLabel,
@@ -247,5 +255,126 @@ describe("structured reference helpers", () => {
     expect(referenceSourceLabel({ ...REFERENCE, path: null, range: null, pullRequest: 7 })).toBe(
       "Pull request #7",
     );
+  });
+
+  describe("phase eligibility", () => {
+    const NOW = "2026-07-25T12:00:00.000Z";
+    const LATER = "2026-07-25T12:01:00.000Z";
+    const phase = (id: string, referenceIds: string[] = []): NotesPhase => ({
+      id,
+      title: `Phase ${id}`,
+      goal: "",
+      doneWhen: ["done"],
+      order: 0,
+      status: "not-started",
+      sourcePrompt: "",
+      referenceIds,
+      session: null,
+      reminder: null,
+      attentionReason: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      completedAt: null,
+      archivedAt: null,
+      overrides: {
+        status: null,
+        referenceIds:
+          referenceIds.length > 0 ? { value: referenceIds, source: "user", updatedAt: NOW } : null,
+      },
+      pendingAutomaticLifecycleTransition: null,
+      lifecycleEvents: [],
+      roadmapEvents: [],
+    });
+    const deleteAt = (source: NotesPhase, revision: number): NotesPhase =>
+      applyNotesPhaseDeletion(
+        source,
+        {
+          version: 1,
+          action: "delete",
+          operationId: `delete-${source.id}-${revision}`,
+          phaseId: source.id,
+          expectedProjectKey: "/work",
+          expectedRevision: revision,
+          expectedGeneration: notesPhaseDeletionGeneration(source),
+        },
+        NOW,
+      );
+    const recoverAt = (source: NotesPhase, revision: number): NotesPhase =>
+      applyNotesPhaseDeletion(
+        source,
+        {
+          version: 1,
+          action: "recover",
+          operationId: `recover-${source.id}-${revision}`,
+          phaseId: source.id,
+          expectedProjectKey: "/work",
+          expectedRevision: revision,
+          expectedGeneration: notesPhaseDeletionGeneration(source),
+        },
+        LATER,
+      );
+
+    it("treats only present phases as attach targets, including archived ones", () => {
+      const active = phase("active");
+      const archived = { ...phase("archived"), archivedAt: NOW };
+      const deleted = deleteAt(phase("deleted"), 1);
+      const recovered = recoverAt(deleted, 2);
+      expect(isReferenceAttachTarget(active)).toBe(true);
+      expect(isReferenceAttachTarget(archived)).toBe(true);
+      expect(isReferenceAttachTarget(deleted)).toBe(false);
+      expect(isReferenceAttachTarget(recovered)).toBe(true);
+    });
+
+    it("splits reference dependencies into editable links and retained history", () => {
+      const editable = phase("editable", ["ref-1"]);
+      const unrelated = phase("unrelated", ["ref-2"]);
+      const tombstone = deleteAt(phase("tombstone", ["ref-1"]), 1);
+      // Deletion retires the override into history; recovery restores editability of the
+      // current link but the retired override still pins the reference.
+      const recovered = {
+        ...recoverAt(deleteAt(phase("recovered", ["ref-1"]), 1), 2),
+        referenceIds: [],
+      };
+      expect(isReferenceLinkedToPhase(tombstone, "ref-1")).toBe(true);
+      expect(isReferenceLinkedToPhase(recovered, "ref-1")).toBe(false);
+      expect(isReferenceRetainedByPhaseHistory(tombstone, "ref-1")).toBe(true);
+      expect(isReferenceRetainedByPhaseHistory(recovered, "ref-1")).toBe(true);
+      expect(isReferenceRetainedByPhaseHistory(editable, "ref-1")).toBe(false);
+      expect(isReferenceRetainedByPhaseHistory(unrelated, "ref-1")).toBe(false);
+
+      expect(
+        referencePhaseDependencies([editable, unrelated, tombstone, recovered], "ref-1").map(
+          ({ phase: item, editable: canEdit, retained }) => [item.id, canEdit, retained],
+        ),
+      ).toEqual([
+        ["editable", true, false],
+        ["tombstone", false, true],
+        ["recovered", false, true],
+      ]);
+      expect(referencePhaseDependencies([editable, tombstone, recovered], "ref-2")).toEqual([]);
+      // A recovered phase that still lists the reference is both editable and retained.
+      const recoveredLinked = recoverAt(deleteAt(phase("both", ["ref-1"]), 1), 2);
+      expect(referencePhaseDependencies([recoveredLinked], "ref-1")).toEqual([
+        { phase: recoveredLinked, editable: true, retained: true },
+      ]);
+    });
+
+    it("counts accepted Roadmap proposals and decisions as retained history", () => {
+      const withDecision: NotesPhase = {
+        ...phase("decided"),
+        roadmapEvents: [
+          {
+            type: "reference-decision",
+            id: "decision-1",
+            proposalId: "proposal-1",
+            decision: "accepted",
+            referenceId: "ref-1",
+            timestamp: NOW,
+          },
+        ],
+      };
+      expect(isReferenceRetainedByPhaseHistory(withDecision, "ref-1")).toBe(true);
+      expect(isReferenceRetainedByPhaseHistory(withDecision, "ref-2")).toBe(false);
+    });
   });
 });

@@ -2,9 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   emptyNotesReferenceDraft,
   groupNotesReferences,
+  isReferenceAttachTarget,
+  isReferenceLinkedToPhase,
   normalizeNotesReferenceDraft,
   notesReferenceFieldMaxLength,
   notesReferenceToDraft,
+  referencePhaseDependencies,
   referenceRepositoryLabel,
   referenceSourceLabel,
   type NotesReferenceDraft,
@@ -168,7 +171,7 @@ export function NotesReferences({
           );
           return;
         }
-        if (result.status === "missing-phase") {
+        if (result.status === "missing-phase" || result.status === "deleted-phase") {
           setPhaseIds((current) => current.filter((id) => id !== result.phaseId));
         }
         setAnnouncement(referenceOperationFailure(result, "save"));
@@ -194,16 +197,15 @@ export function NotesReferences({
     focusAfterDetail(id);
   };
 
-  const linkedPhases = selected
-    ? phases.filter(
-        (phase) =>
-          phase.referenceIds.includes(selected.id) ||
-          phase.overrides.referenceIds?.value.includes(selected.id),
-      )
-    : [];
+  const dependencies = selected ? referencePhaseDependencies(phases, selected.id) : [];
+  // Unlinking only helps when the phase does not also pin the reference through history.
+  const editableLinks = dependencies.filter(
+    (dependency) => dependency.editable && !dependency.retained,
+  );
+  const retainedLinks = dependencies.filter((dependency) => dependency.retained);
 
   const deleteSelected = (): void => {
-    if (!selected || linkedPhases.length > 0 || deletingReference) return;
+    if (!selected || dependencies.length > 0 || deletingReference) return;
     const index = references.findIndex((reference) => reference.id === selected.id);
     const nextFocusId = references[index + 1]?.id ?? references[index - 1]?.id ?? null;
     const deleting = selected;
@@ -464,6 +466,9 @@ export function NotesReferences({
               ) : (
                 <ul>
                   {phases.map((phase) => {
+                    const attachable = isReferenceAttachTarget(phase);
+                    // Deleted phases only show the link they retain; they never become new targets.
+                    if (!attachable && !isReferenceLinkedToPhase(phase, selected.id)) return null;
                     const checked = phase.referenceIds.includes(selected.id);
                     return (
                       <li key={phase.id}>
@@ -471,14 +476,29 @@ export function NotesReferences({
                           <input
                             type="checkbox"
                             checked={checked}
-                            disabled={pendingLink === `${selected.id}:${phase.id}`}
+                            disabled={!attachable || pendingLink === `${selected.id}:${phase.id}`}
+                            aria-describedby={
+                              attachable ? undefined : `notes-reference-deleted-link-${phase.id}`
+                            }
                             onChange={(event) =>
                               changeReferenceLink(selected, phase, event.target.checked)
                             }
                           />
                           <span>
                             <strong>{phase.title}</strong>
-                            <small>{phase.archivedAt ? "Archived" : phaseStatusLabel(phase)}</small>
+                            <small>
+                              {!attachable
+                                ? "Deleted"
+                                : phase.archivedAt
+                                  ? "Archived"
+                                  : phaseStatusLabel(phase)}
+                            </small>
+                            {!attachable && (
+                              <small id={`notes-reference-deleted-link-${phase.id}`}>
+                                Kept as history; recover the phase from the Roadmap to change
+                                this link.
+                              </small>
+                            )}
                           </span>
                         </label>
                       </li>
@@ -489,10 +509,23 @@ export function NotesReferences({
             </fieldset>
 
             <div className="notes-reference-delete">
-              {linkedPhases.length > 0 ? (
+              {dependencies.length > 0 ? (
                 <p>
-                  Unlink this reference from {linkedPhases.map((phase) => phase.title).join(", ")}{" "}
-                  before deleting it.
+                  {editableLinks.length > 0 && (
+                    <>
+                      Unlink this reference from{" "}
+                      {editableLinks.map((dependency) => dependency.phase.title).join(", ")} before
+                      deleting it.
+                    </>
+                  )}
+                  {editableLinks.length > 0 && retainedLinks.length > 0 && " "}
+                  {retainedLinks.length > 0 && (
+                    <>
+                      {retainedLinks.map((dependency) => dependency.phase.title).join(", ")}{" "}
+                      {retainedLinks.length === 1 ? "keeps" : "keep"} this reference as retained
+                      Roadmap history, so it can’t be deleted.
+                    </>
+                  )}
                 </p>
               ) : confirmDelete ? (
                 <div
@@ -555,6 +588,7 @@ function ReferenceForm({
   onCancel(): void;
 }): React.ReactElement {
   const errorCount = Object.values(errors).filter(Boolean).length;
+  const attachablePhases = phases.filter(isReferenceAttachTarget);
   return (
     <form
       id="notes-reference-form"
@@ -612,11 +646,11 @@ function ReferenceForm({
         </div>
       </fieldset>
 
-      {mode === "create" && phases.length > 0 && (
+      {mode === "create" && attachablePhases.length > 0 && (
         <fieldset className="notes-reference-initial-phases">
           <legend>Attach to phases</legend>
           <div className="notes-reference-checkboxes">
-            {phases.map((phase) => (
+            {attachablePhases.map((phase) => (
               <label key={phase.id}>
                 <input
                   type="checkbox"
@@ -728,6 +762,9 @@ function referenceOperationFailure(
   }
   if (result.status === "missing-phase") {
     return `Couldn’t ${action}: the phase was removed in another window.`;
+  }
+  if (result.status === "deleted-phase") {
+    return `Couldn’t ${action}: the phase was deleted in another window. Its links are kept as history until it is recovered.`;
   }
   if (result.reason === "invalid") {
     return `Couldn’t ${action}: Project Notes rejected the change. Review the reference and try again.`;

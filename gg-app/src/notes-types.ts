@@ -239,6 +239,8 @@ export type NotesReferenceOperationResult =
   | { status: "linked-blocked"; phaseIds: string[] }
   | { status: "missing-reference" }
   | { status: "missing-phase"; phaseId: string }
+  /** The phase is a retained deletion tombstone; its links stay read-only until recovery. */
+  | { status: "deleted-phase"; phaseId: string }
   | { status: "failed"; reason: NotesOperationFailureReason };
 
 export type NotesReminderMutationResult =

@@ -6,6 +6,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import { dateToLocalInputValue } from "./roadmap-reminders";
+import {
+  applyNotesPhaseDeletion,
+  notesPhaseDeletionGeneration,
+} from "@kenkaiiii/gg-core/project-notes";
 import * as notesLoader from "./notes-modal-loader";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
@@ -31,6 +35,8 @@ import type {
   ProjectNotesSnapshot,
   ProjectNotesStorageDiagnostics,
   PhaseBindingOutcome,
+  PhaseDeletionOutcome,
+  PhaseDeletionRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
   PhaseLeaseOutcome,
@@ -503,6 +509,32 @@ class FakeProjectNotesClient implements NotesClient {
     this.snapshots.set(projectKey, snapshot);
     this.emit(snapshot);
     return { status: "ok", snapshot };
+  }
+
+  /** Commits the shared pure transition so deletion journeys exercise real metadata. */
+  async mutatePhaseDeletion(request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome> {
+    const projectKey = canonicalProjectKey(this.cwd);
+    const current = this.snapshots.get(projectKey);
+    if (!current) return { status: "missing" };
+    if (current.revision !== request.expectedRevision)
+      return { status: "conflict", snapshot: current };
+    const document = structuredClone(current.document);
+    const index = document.phases.findIndex((candidate) => candidate.id === request.phaseId);
+    if (index < 0) return { status: "missing" };
+    document.phases[index] = applyNotesPhaseDeletion(
+      document.phases[index]!,
+      request,
+      new Date().toISOString(),
+    );
+    const snapshot = { projectKey, revision: current.revision + 1, document };
+    this.snapshots.set(projectKey, snapshot);
+    return {
+      status: "committed",
+      action: request.action,
+      operationId: request.operationId,
+      replayed: false,
+      snapshot,
+    };
   }
 
   async resolveRoadmapBlocker(
@@ -3401,6 +3433,77 @@ describe("ProjectNotes", () => {
     expect(screen.getByText("Selected phase")).toBeTruthy();
   });
 
+  it("moves past hidden deleted and archived slots and bounds first/last row controls", async () => {
+    const cwd = "/work/roadmap-move-tombstones";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    const deleteAt = (source: NotesPhase, order: number): NotesPhase =>
+      applyNotesPhaseDeletion(
+        { ...source, order },
+        {
+          version: 1,
+          action: "delete",
+          operationId: `delete-${source.id}`,
+          phaseId: source.id,
+          expectedProjectKey: canonicalProjectKey(cwd),
+          expectedRevision: 1,
+          expectedGeneration: notesPhaseDeletionGeneration(source),
+        },
+        NOW,
+      );
+    populated.phases = [
+      { ...phase("alpha", "not-started"), title: "Alpha", order: 0 },
+      deleteAt({ ...phase("tomb-1", "not-started"), title: "Tomb 1" }, 1),
+      { ...phase("archived", "done"), title: "Archived", order: 2, archivedAt: NOW },
+      deleteAt({ ...phase("tomb-2", "not-started"), title: "Tomb 2" }, 3),
+      { ...phase("gamma", "not-started"), title: "Gamma", order: 4 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    const activeTitles = () =>
+      screen
+        .getAllByRole("button", { name: /^Inspect phase: /u })
+        .map((button) => button.getAttribute("aria-label"));
+    expect(activeTitles()).toEqual(["Inspect phase: Alpha", "Inspect phase: Gamma"]);
+    expect(screen.getByText("Deleted phases (2)")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    selectPhaseView("More");
+    expect((screen.getByRole("button", { name: "Move up" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Move down" }));
+
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.id),
+      ).toEqual(["gamma", "tomb-1", "archived", "tomb-2", "alpha"]),
+    );
+    const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases;
+    expect(stored.map((item) => item.order)).toEqual([0, 1, 2, 3, 4]);
+    for (const index of [1, 2, 3]) {
+      const { order: _before, ...before } = populated.phases[index]!;
+      const { order: _after, ...after } = stored[index]!;
+      expect(after).toEqual(before);
+    }
+    expect(stored.flatMap((item) => item.lifecycleEvents)).toEqual([]);
+    expect(stored.flatMap((item) => item.roadmapEvents)).toEqual([]);
+
+    await waitFor(() =>
+      expect(activeTitles()).toEqual(["Inspect phase: Gamma", "Inspect phase: Alpha"]),
+    );
+    expect(screen.getByText("Deleted phases (2)")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Move down" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole("button", { name: "Move up" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
   it("shows phase cancellation pending and leaves Notes active when cancellation fails", async () => {
     const cwd = "/work/roadmap-cancel-failure";
     const client = new FakeProjectNotesClient(cwd);
@@ -3829,6 +3932,192 @@ describe("ProjectNotes", () => {
     ).toBeTruthy();
     expect(screen.queryByText(/Detached reference from Phase alpha/)).toBeNull();
     expect(await screen.findByText("No structured references yet")).toBeTruthy();
+  });
+
+  it("shows deleted-phase links read-only and hides tombstones from attach targets", async () => {
+    const cwd = "/work/reference-deleted-phase-links";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-kept")];
+    const deletedSource: NotesPhase = {
+      ...phase("gone", "not-started"),
+      title: "Phase gone",
+      order: 1,
+      referenceIds: ["ref-kept"],
+      overrides: {
+        status: null,
+        referenceIds: { value: ["ref-kept"], source: "user", updatedAt: NOW },
+      },
+    };
+    initial.phases = [
+      { ...phase("alpha", "in-progress"), title: "Phase alpha" },
+      applyNotesPhaseDeletion(
+        deletedSource,
+        {
+          version: 1,
+          action: "delete",
+          operationId: "delete-gone",
+          phaseId: "gone",
+          expectedProjectKey: canonicalProjectKey(cwd),
+          expectedRevision: 1,
+          expectedGeneration: notesPhaseDeletionGeneration(deletedSource),
+        },
+        NOW,
+      ),
+      { ...phase("archived", "done"), title: "Phase archived", order: 2, archivedAt: NOW },
+    ];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+
+    const deletedLink = screen.getByRole("checkbox", { name: /Phase gone/ }) as HTMLInputElement;
+    expect(deletedLink.checked).toBe(true);
+    expect(deletedLink.disabled).toBe(true);
+    expect(screen.getByText("Deleted")).toBeTruthy();
+    expect(screen.getByText(/recover the phase from the Roadmap/)).toBeTruthy();
+    expect(
+      screen.getByText(/Phase gone keeps this reference as retained Roadmap history/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Unlink this reference/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete reference" })).toBeNull();
+
+    // Active and archived phases still accept links.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Phase archived/ }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[2]!.referenceIds,
+      ).toEqual(["ref-kept"]),
+    );
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[1]).toEqual(
+      initial.phases[1],
+    );
+    expect(
+      screen.getByText(/Unlink this reference from Phase archived before deleting it/),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "New reference" }));
+    const attach = screen.getByRole("group", { name: "Attach to phases" });
+    expect(attach.textContent).toContain("Phase alpha");
+    expect(attach.textContent).toContain("Phase archived");
+    expect(attach.textContent).not.toContain("Phase gone");
+  });
+
+  it("refuses a link when the phase is deleted in another window before the save", async () => {
+    const cwd = "/work/reference-link-deleted-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-stale")];
+    initial.phases = [{ ...phase("alpha", "in-progress"), title: "Phase alpha" }];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    const tombstone = applyNotesPhaseDeletion(
+      initial.phases[0]!,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-alpha",
+        phaseId: "alpha",
+        expectedProjectKey: canonicalProjectKey(cwd),
+        expectedRevision: 1,
+        expectedGeneration: notesPhaseDeletionGeneration(initial.phases[0]!),
+      },
+      NOW,
+    );
+    client.beforeNextSave = () => {
+      client.seed(cwd, { ...initial, phases: [tombstone] }, 2);
+    };
+    fireEvent.click(screen.getByRole("checkbox", { name: /Phase alpha/ }));
+
+    expect(
+      await screen.findByText(/Couldn’t attach: the phase was deleted in another window/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Attached reference to Phase alpha/)).toBeNull();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]).toEqual(tombstone);
+    // The reference panel rebased onto the tombstone and no longer offers the link.
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /Phase alpha/ })).toBeNull());
+    expect((await screen.findByLabelText("Notes storage status")).textContent).not.toContain(
+      "Changes aren’t saved",
+    );
+  });
+
+  it("keeps the create form open when a checked phase is deleted in another window", async () => {
+    const cwd = "/work/reference-create-deleted-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.phases = [
+      { ...phase("alpha", "in-progress"), title: "Phase alpha" },
+      { ...phase("beta", "not-started"), title: "Phase beta", order: 1 },
+    ];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Reference");
+    fireEvent.click(screen.getByRole("button", { name: "New reference" }));
+    fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
+      target: { value: "https://github.com/owner/repo/blob/main/src/new.ts" },
+    });
+    fireEvent.change(screen.getByLabelText("Repository owner (required)"), {
+      target: { value: "owner" },
+    });
+    fireEvent.change(screen.getByLabelText("Repository name (required)"), {
+      target: { value: "repo" },
+    });
+    fireEvent.change(screen.getByLabelText("Path"), { target: { value: "src/new.ts" } });
+    fireEvent.change(screen.getByLabelText("Relevance note"), {
+      target: { value: "Kept draft text" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Phase alpha" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Phase beta" }));
+    const tombstone = applyNotesPhaseDeletion(
+      initial.phases[1]!,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-beta",
+        phaseId: "beta",
+        expectedProjectKey: canonicalProjectKey(cwd),
+        expectedRevision: 1,
+        expectedGeneration: notesPhaseDeletionGeneration(initial.phases[1]!),
+      },
+      NOW,
+    );
+    client.beforeNextSave = () => {
+      client.seed(cwd, { ...initial, phases: [initial.phases[0]!, tombstone] }, 2);
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+
+    expect(
+      await screen.findByText(/Couldn’t save: the phase was deleted in another window/),
+    ).toBeTruthy();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.references).toEqual([]);
+    expect((screen.getByLabelText("Relevance note") as HTMLTextAreaElement).value).toBe(
+      "Kept draft text",
+    );
+    expect(
+      (screen.getByRole("checkbox", { name: "Phase alpha" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Phase beta" })).toBeNull());
+
+    // Retrying with the surviving phase succeeds; the refusal did not poison the save path.
+    fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.referenceIds,
+      ).toHaveLength(1),
+    );
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[1]).toEqual(tombstone);
   });
 
   it("keeps a reference edit open when the backend rejects the save", async () => {

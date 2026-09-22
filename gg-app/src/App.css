@@ -9083,6 +9083,23 @@ select {
   padding: 12px;
   background: var(--surface-2);
 }
+/* Detail sits beside the list instead of inside the selected card. */
+.notes-roadmap-workspace.has-detail {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.78fr) minmax(0, 1.22fr);
+  align-items: start;
+  gap: 12px;
+  padding: 12px 12px 12px 0;
+}
+.notes-roadmap-workspace.has-detail .notes-roadmap-list {
+  padding-inline-start: 12px;
+  border-inline-end: 1px solid var(--border);
+}
+.notes-roadmap-workspace.has-detail .notes-phase-detail {
+  position: sticky;
+  top: 12px;
+  margin: 0;
+}
 .notes-roadmap-list {
   display: grid;
   min-width: 0;
@@ -9181,13 +9198,6 @@ select {
   border-color: var(--warning);
   color: var(--warning);
 }
-.notes-roadmap-goal {
-  margin: 8px 0 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
 .notes-roadmap-attention,
 .notes-roadmap-reconciliation {
   margin: 10px 0 0;
@@ -9201,32 +9211,6 @@ select {
 .notes-roadmap-attention strong,
 .notes-roadmap-reconciliation strong {
   color: var(--warning);
-}
-.notes-roadmap-criteria {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-.notes-roadmap-criteria h4 {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  line-height: 1.4;
-  text-transform: uppercase;
-}
-.notes-roadmap-criteria ul {
-  display: grid;
-  margin: 6px 0 0;
-  padding-inline-start: 18px;
-  gap: 3px;
-}
-.notes-roadmap-criteria li {
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
 }
 .notes-roadmap-card-footer {
   display: flex;
@@ -11159,10 +11143,14 @@ select {
   white-space: nowrap;
   clip-path: inset(50%);
 }
+/* The Roadmap heading is a programmatic focus landing spot (tabindex="-1") when a phase
+   disappears mid-mutation and every phase control is disabled. Without it here it would
+   draw Chrome's near-black UA ring on this dark surface. */
 .notes-modal button:focus-visible,
 .notes-modal input:focus-visible,
 .notes-modal select:focus-visible,
-.notes-modal textarea:focus-visible {
+.notes-modal textarea:focus-visible,
+.notes-modal #notes-roadmap-heading:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
@@ -11231,7 +11219,8 @@ select {
   .notes-modal button:focus-visible,
   .notes-modal input:focus-visible,
   .notes-modal select:focus-visible,
-  .notes-modal textarea:focus-visible {
+  .notes-modal textarea:focus-visible,
+  .notes-modal #notes-roadmap-heading:focus-visible {
     outline-color: Highlight;
   }
 }
@@ -11248,6 +11237,17 @@ select {
   }
   .notes-roadmap-workspace {
     padding: 8px;
+  }
+  .notes-roadmap-workspace.has-detail {
+    display: block;
+    padding: 8px;
+  }
+  .notes-roadmap-workspace.has-detail .notes-roadmap-list {
+    display: none;
+  }
+  .notes-roadmap-workspace.has-detail .notes-phase-detail {
+    position: static;
+    margin: 0;
   }
   .notes-roadmap-card-summary {
     padding: 12px;

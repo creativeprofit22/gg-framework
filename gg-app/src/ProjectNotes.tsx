@@ -92,6 +92,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
   const [showNotes, setShowNotes] = useState(false);
   const [modalProjectIdentity, setModalProjectIdentity] = useState<string | null>(null);
   const [roadmapTargetPhaseId, setRoadmapTargetPhaseId] = useState<string | null>(null);
+  const [roadmapPhaseRequest, setRoadmapPhaseRequest] = useState(0);
   const [reminderQueue, setReminderQueue] = useState<InAppReminderDelivery[]>([]);
   const [reminderPending, setReminderPending] = useState(false);
   const [reminderError, setReminderError] = useState<string | null>(null);
@@ -161,6 +162,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
   useEffect(() => {
     setShowNotes(false);
     setRoadmapTargetPhaseId(null);
+    setRoadmapPhaseRequest(0);
     setReminderQueue([]);
     setReminderError(null);
   }, [activeProjectIdentity]);
@@ -362,6 +364,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
                 } else {
                   setModalProjectIdentity(activeProjectIdentity);
                   setRoadmapTargetPhaseId(activeReminder.phase.id);
+                  // Bump the request token so an already-open Notes modal navigates
+                  // instead of treating the phase id as a mount-time default.
+                  setRoadmapPhaseRequest((request) => request + 1);
                   setShowNotes(true);
                   removeActiveReminder();
                 }
@@ -410,6 +415,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             expectedRevision={revision}
             expectedProjectKey={cwd ? canonicalProjectKey(cwd) : null}
             initialRoadmapPhaseId={roadmapTargetPhaseId}
+            roadmapPhaseRequest={roadmapPhaseRequest}
             persistenceStatus={<NotesPersistenceStatus {...notesPersistenceStatus(diagnostics)} />}
             onChangeCurrentFocus={changeCurrentFocus}
             onCreateTask={createTask}

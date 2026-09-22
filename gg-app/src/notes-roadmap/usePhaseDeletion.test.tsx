@@ -13,6 +13,7 @@ import {
   applyNotesPhaseDeletion,
   type NotesPhase,
   type PhaseDeletionOutcome,
+  type PhaseDeletionRequest,
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
 import { createEmptyNotesDocument } from "../notes-storage";
@@ -72,6 +73,37 @@ function fixture() {
   };
   return { bridge, current: () => current };
 }
+const deletionRequest = (
+  operationId: string,
+  action: "delete" | "recover",
+  expectedRevision: number,
+  expectedGeneration: number,
+): PhaseDeletionRequest => ({
+  version: 1,
+  action,
+  operationId,
+  phaseId: phase.id,
+  expectedProjectKey: "synthetic",
+  expectedRevision,
+  expectedGeneration,
+});
+/** Builds the real D1 -> R1 -> D2 history a second window would have written. */
+function cycles(d1: PhaseDeletionRequest, r1: PhaseDeletionRequest, d2: PhaseDeletionRequest) {
+  const deletedByD1 = applyNotesPhaseDeletion(structuredClone(phase), d1, now);
+  const recoveredByR1 = applyNotesPhaseDeletion(deletedByD1, r1, now);
+  const deletedByD2 = applyNotesPhaseDeletion(recoveredByR1, d2, now);
+  const at = (p: NotesPhase, revision: number): ProjectNotesSnapshot => ({
+    ...snapshot(),
+    revision,
+    document: { ...createEmptyNotesDocument(now), phases: [p] },
+  });
+  return {
+    afterD1: at(deletedByD1, 2),
+    afterR1: at(recoveredByR1, 3),
+    afterD2: at(deletedByD2, 4),
+    d2DeletionId: deletedByD2.deletion!.currentDeletionId!,
+  };
+}
 afterEach(cleanup);
 
 describe("phase deletion controller", () => {
@@ -117,6 +149,98 @@ describe("phase deletion controller", () => {
     expect(hook.result.current.success?.message).toContain(
       "Past runs and reminders were not resumed",
     );
+  });
+
+  it("never offers Undo for a newer deletion when an old delete is replayed", async () => {
+    const f = fixture();
+    const hook = renderHook(() => usePhaseDeletion("synthetic", f.bridge));
+    await act(async () => {
+      await hook.result.current.begin(phase, "delete");
+    });
+    const d1 = hook.result.current.request!;
+    const history = cycles(
+      d1,
+      deletionRequest("r1", "recover", 2, 1),
+      deletionRequest("d2", "delete", 3, 2),
+    );
+    // The repository replays the historical D1 acknowledgement with the CURRENT snapshot.
+    vi.mocked(f.bridge.mutate).mockResolvedValueOnce({
+      status: "committed",
+      action: "delete",
+      operationId: d1.operationId,
+      replayed: true,
+      snapshot: history.afterD2,
+    });
+    await act(async () => {
+      await hook.result.current.confirm();
+    });
+    expect(hook.result.current.success?.deletionId).toBeNull();
+    expect(hook.result.current.success?.deletionId).not.toBe(history.d2DeletionId);
+    expect(hook.result.current.success?.message).toContain("The earlier deletion was saved");
+    expect(hook.result.current.success?.message).toContain("deleted again");
+    // Undo cannot dispatch recovery for the unrelated current deletion.
+    await act(async () => {
+      await hook.result.current.undo();
+    });
+    expect(hook.result.current.target).toBeNull();
+    expect(hook.result.current.request).toBeNull();
+    expect(f.bridge.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not announce a recovered phase when an old recovery is replayed", async () => {
+    const f = fixture();
+    const d1 = deletionRequest("d1", "delete", 1, 0);
+    const deletedByD1 = applyNotesPhaseDeletion(structuredClone(phase), d1, now);
+    vi.mocked(f.bridge.prepare).mockResolvedValueOnce({
+      ...snapshot(),
+      revision: 2,
+      document: { ...createEmptyNotesDocument(now), phases: [deletedByD1] },
+    });
+    const hook = renderHook(() => usePhaseDeletion("synthetic", f.bridge));
+    await act(async () => {
+      await hook.result.current.begin(phase, "recover", d1.operationId);
+    });
+    const r1 = hook.result.current.request!;
+    const history = cycles(d1, r1, deletionRequest("d2", "delete", 3, 2));
+    vi.mocked(f.bridge.mutate).mockResolvedValueOnce({
+      status: "committed",
+      action: "recover",
+      operationId: r1.operationId,
+      replayed: true,
+      snapshot: history.afterD2,
+    });
+    await act(async () => {
+      await hook.result.current.confirm();
+    });
+    expect(hook.result.current.success?.message).toContain("The earlier recovery was saved");
+    expect(hook.result.current.success?.message).not.toContain("Past runs and reminders");
+    expect(hook.result.current.success?.deletionId).toBeNull();
+  });
+
+  it("reports a phase recovered elsewhere after an old delete is replayed", async () => {
+    const f = fixture();
+    const hook = renderHook(() => usePhaseDeletion("synthetic", f.bridge));
+    await act(async () => {
+      await hook.result.current.begin(phase, "delete");
+    });
+    const d1 = hook.result.current.request!;
+    const history = cycles(
+      d1,
+      deletionRequest("r1", "recover", 2, 1),
+      deletionRequest("d2", "delete", 3, 2),
+    );
+    vi.mocked(f.bridge.mutate).mockResolvedValueOnce({
+      status: "committed",
+      action: "delete",
+      operationId: d1.operationId,
+      replayed: true,
+      snapshot: history.afterR1,
+    });
+    await act(async () => {
+      await hook.result.current.confirm();
+    });
+    expect(hook.result.current.success?.deletionId).toBeNull();
+    expect(hook.result.current.success?.message).toContain("has since been recovered");
   });
 
   it("never rebases a stale destructive request without renewed confirmation", async () => {

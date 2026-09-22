@@ -74,14 +74,20 @@ describe("narrow-window layout contracts", () => {
     );
   });
 
-  it("stacks Roadmap cards and inline detail with compact, consistently spaced controls", () => {
+  it("splits Roadmap cards and phase detail with compact, consistently spaced controls", () => {
     expect(appCss).toMatch(/\.notes-roadmap-list\s*\{[\s\S]*?display:\s*grid;[\s\S]*?gap:\s*10px;/);
     expect(appCss).toMatch(
       /\.notes-phase-detail\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?margin:\s*0 12px 12px;/,
     );
-    expect(appCss).not.toMatch(
-      /\.notes-roadmap-workspace(?:\.has-detail)?\s*\{[^}]*grid-template-columns:/,
+    // Selecting a phase opens an adjacent detail column on wide layouts.
+    expect(appCss).toMatch(
+      /\.notes-roadmap-workspace\.has-detail\s*\{[^}]*grid-template-columns:\s*minmax\(/,
     );
+    // Narrow layouts show the detail instead of the list.
+    expect(appCss).toMatch(
+      /@media \(max-width:\s*760px\)[\s\S]*?\.notes-roadmap-workspace\.has-detail \.notes-roadmap-list\s*\{\s*display:\s*none;/,
+    );
+    expect(appCss).not.toMatch(/\.notes-roadmap-workspace\s*\{[^}]*grid-template-columns:/);
     expect(appCss).toMatch(
       /\.notes-phase-detail-heading\s*\{[\s\S]*?gap:\s*8px 12px;[\s\S]*?padding:\s*10px 12px 8px;/,
     );

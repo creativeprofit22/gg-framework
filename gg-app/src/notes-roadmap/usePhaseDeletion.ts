@@ -12,7 +12,17 @@ export interface PhaseDeletionBridge {
   prepare(): Promise<ProjectNotesSnapshot>;
   mutate(request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome>;
 }
-export function usePhaseDeletion(projectKey: string | null, bridge?: PhaseDeletionBridge) {
+export function usePhaseDeletion(
+  projectKey: string | null,
+  bridge?: PhaseDeletionBridge,
+  /**
+   * Runs in the same update as the adopted snapshot when a delete commits and the phase
+   * is now deleted, so a caller can retire its own selection before the phase leaves the
+   * list. This is a notification, not a second recovery model: it changes no contract
+   * here and never affects dispatch, feedback or focus below.
+   */
+  onDeleteCommitted?: (phaseId: string) => void,
+) {
   const [target, setTarget] = useState<{ phase: NotesPhase; action: "delete" | "recover" } | null>(
     null,
   );
@@ -115,18 +125,34 @@ export function usePhaseDeletion(projectKey: string | null, bridge?: PhaseDeleti
         setTarget(null);
         setRequest(null);
         setUncertain(false);
+        // The acknowledged operation may be a replay of an older cycle: keep its identity
+        // separate from whatever deletion the current snapshot holds.
         const current = outcome.snapshot.document.phases.find((p) => p.id === request.phaseId);
-        const stillDeleted = current && isNotesPhaseDeleted(current);
-        setSuccess({
-          phase: target.phase,
-          deletionId: stillDeleted ? current.deletion!.currentDeletionId : null,
-          message:
-            outcome.action === "recover"
-              ? `Recovered “${target.phase.title}”. Past runs and reminders were not resumed.`
-              : stillDeleted
-                ? `Deleted “${target.phase.title}”. You can recover it from Deleted phases.`
-                : `The earlier deletion was saved. “${target.phase.title}” has since been recovered.`,
-        });
+        const currentDeletionId =
+          current && isNotesPhaseDeleted(current) ? current.deletion!.currentDeletionId : null;
+        const acknowledged =
+          outcome.operationId === request.operationId && outcome.action === request.action
+            ? outcome.operationId
+            : null;
+        const title = target.phase.title;
+        let deletionId: string | null = null;
+        let message: string;
+        if (outcome.action === "recover") {
+          message =
+            currentDeletionId === null
+              ? `Recovered “${title}”. Past runs and reminders were not resumed.`
+              : `The earlier recovery was saved. “${title}” has since been deleted again — recover it from Deleted phases.`;
+        } else if (acknowledged !== null && currentDeletionId === acknowledged) {
+          deletionId = acknowledged;
+          message = `Deleted “${title}”. You can recover it from Deleted phases.`;
+        } else if (currentDeletionId === null) {
+          message = `The earlier deletion was saved. “${title}” has since been recovered.`;
+        } else {
+          message = `The earlier deletion was saved. “${title}” has since been deleted again — recover that deletion from Deleted phases.`;
+        }
+        setSuccess({ phase: target.phase, deletionId, message });
+        if (outcome.action === "delete" && currentDeletionId !== null)
+          onDeleteCommitted?.(request.phaseId);
         requestAnimationFrame(() => {
           const titles = Array.from(
             document.querySelectorAll<HTMLElement>("[data-phase-focus]"),

@@ -5,10 +5,10 @@ import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
 import { referenceSourceLabel } from "./notes-reference";
 import type { SlashCommand } from "./agent";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
+import { useRoadmapPhaseNavigation } from "./notes-roadmap/useRoadmapPhaseNavigation";
 import { resolveRoadmapCommandActions } from "./notes-roadmap/roadmap-command-actions";
 import type { NotesPhaseDetailProps } from "./notes-roadmap/NotesPhaseDetailState";
 import {
-  activeRoadmapBlocker,
   lines,
   phaseActionLabel,
   primaryAction,
@@ -19,6 +19,7 @@ import {
   isRoadmapPhaseStartProtected,
   isRoadmapTopologyMutationBlocked,
   statusLabel,
+  visibleRoadmapAttentionReason,
 } from "./notes-roadmap/roadmap-presentation";
 import type { NotesPhaseInput } from "./useProjectNotes";
 import type {
@@ -47,13 +48,16 @@ interface RoadmapProps {
   expectedRevision: number | null;
   expectedProjectKey: string | null;
   initialSelectedPhaseId?: string | null;
+  /** Increments when a new navigation request targets `initialSelectedPhaseId`. */
+  selectedPhaseRequest?: number;
   openSource?: OpenReferenceUrl;
   onCreatePhase(input: NotesPhaseInput): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onArchivePhase(id: string): void;
-  onDeletePhase?(id: string): void;
+  /** `onDeleted` runs when that deletion commits, so the caller can retire a selection. */
+  onDeletePhase?(id: string, onDeleted?: () => void): void;
   onLinkReferenceToPhase(
     referenceId: string,
     phaseId: string,
@@ -123,6 +127,7 @@ export function NotesRoadmap({
   expectedRevision,
   expectedProjectKey,
   initialSelectedPhaseId = null,
+  selectedPhaseRequest = 0,
   openSource = openReferenceUrl,
   onCreatePhase,
   onEditPhase,
@@ -162,49 +167,43 @@ export function NotesRoadmap({
     (phase) => isNotesPhasePresent(phase) && phase.archivedAt === null,
   );
   const currentTime = useRoadmapCurrentTime(phases);
-  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedPhaseId);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
   const [doneWhen, setDoneWhen] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [pendingPhaseId, setPendingPhaseId] = useState<string | null>(null);
-  const [focusRequest, setFocusRequest] = useState<{ phaseId: string | null } | null>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
-  const newPhaseButtonRef = useRef<HTMLButtonElement>(null);
-  const phaseTitleRefs = useRef(new Map<string, HTMLButtonElement>());
-  const selectedPhase = visiblePhases.find((phase) => phase.id === selectedId) ?? null;
+  const navigation = useRoadmapPhaseNavigation({
+    phases: visiblePhases,
+    initialSelectedPhaseId,
+    selectionRequest: selectedPhaseRequest,
+    onSelectionMissing: () =>
+      setAnnouncement("That phase is no longer in the roadmap. Returned to the phase list."),
+  });
+  const {
+    selectedId,
+    selectedPhase,
+    rootRef,
+    fallbackRef: newPhaseButtonRef,
+    registerPhaseTitle,
+    focusAfterDetail,
+    selectPhase,
+    closeDetail,
+    togglePhase,
+    clearSelection,
+  } = navigation;
   const advancement = useMemo(() => selectRoadmapAdvancement(phases), [phases]);
   const commandActions = useMemo(() => resolveRoadmapCommandActions(commands), [commands]);
   const [nextPhaseStatus, setNextPhaseStatus] = useState("");
 
   useEffect(() => {
-    if (selectedId !== null && !selectedPhase) setSelectedId(null);
-  }, [selectedId, selectedPhase]);
-
-  useEffect(() => {
     if (showCreate) titleInputRef.current?.focus();
   }, [showCreate]);
 
-  useEffect(() => {
-    if (!focusRequest) return;
-    const phaseTitle = focusRequest.phaseId
-      ? phaseTitleRefs.current.get(focusRequest.phaseId)
-      : undefined;
-    if (phaseTitle) {
-      phaseTitle.focus();
-      return;
-    }
-    newPhaseButtonRef.current?.focus();
-  }, [focusRequest]);
-
-  const focusAfterRender = (phaseId: string | null): void => {
-    setFocusRequest({ phaseId });
-  };
-
   const closeCreate = (): void => {
     setShowCreate(false);
-    focusAfterRender(null);
+    focusAfterDetail(null);
   };
 
   const createPhase = (): void => {
@@ -218,28 +217,10 @@ export function NotesRoadmap({
     closeCreate();
   };
 
-  const selectPhase = (phaseId: string): void => {
-    setShowCreate(false);
-    setSelectedId(phaseId);
-  };
-
-  const closeDetail = (): void => {
-    const phaseId = selectedId;
-    setSelectedId(null);
-    focusAfterRender(phaseId);
-  };
-
-  const togglePhase = (phaseId: string): void => {
-    if (phaseId === selectedId) {
-      closeDetail();
-      return;
-    }
-    selectPhase(phaseId);
-  };
-
   const runCardAction = async (phase: NotesPhase): Promise<void> => {
     const action = primaryAction(phase);
     if (action === "Review") {
+      setShowCreate(false);
       selectPhase(phase.id);
       return;
     }
@@ -359,15 +340,19 @@ export function NotesRoadmap({
           );
         },
         isTopologyMutationBlocked: (mutation) => isRoadmapTopologyMutationBlocked(phases, mutation),
-        onDeletePhase: onDeletePhase ? () => onDeletePhase(selectedPhase.id) : undefined,
+        // A deliberate delete leaves the list the way Archive does: selection is cleared
+        // here, so the missing-selection recovery line stays for genuine disappearances.
+        // Focus is left to the deletion controller, which picks a surviving phase title.
+        onDeletePhase: onDeletePhase
+          ? () => onDeletePhase(selectedPhase.id, () => clearSelection(null))
+          : undefined,
         onArchivePhase: () => {
           const selectedIndex = visiblePhases.findIndex((phase) => phase.id === selectedPhase.id);
           const focusId =
             visiblePhases[selectedIndex + 1]?.id ?? visiblePhases[selectedIndex - 1]?.id ?? null;
           onArchivePhase(selectedPhase.id);
           setAnnouncement(`Archived phase: ${selectedPhase.title}`);
-          setSelectedId(null);
-          focusAfterRender(focusId);
+          clearSelection(focusId);
         },
         onCancelPhase: async () => {
           const result = await onCancelPhase(selectedPhase.id);
@@ -430,10 +415,12 @@ export function NotesRoadmap({
     : null;
 
   return (
-    <div className="notes-roadmap">
+    <div className="notes-roadmap" ref={rootRef}>
       <div className="notes-roadmap-toolbar">
         <div>
-          <h2 id="notes-roadmap-heading">Roadmap</h2>
+          <h2 id="notes-roadmap-heading" tabIndex={-1} data-roadmap-focus-last-resort>
+            Roadmap
+          </h2>
           <p>{visiblePhases.length === 1 ? "1 phase" : `${visiblePhases.length} phases`}</p>
         </div>
         <button
@@ -561,7 +548,7 @@ export function NotesRoadmap({
         </section>
       )}
 
-      <div className="notes-roadmap-workspace">
+      <div className={`notes-roadmap-workspace${selectedPhaseDetailProps ? " has-detail" : ""}`}>
         {visiblePhases.length === 0 ? (
           <div className="notes-roadmap-empty">
             <strong>No roadmap phases yet</strong>
@@ -574,22 +561,17 @@ export function NotesRoadmap({
               const action = primaryAction(phase);
               const actionLabel = phaseActionLabel(phase, action);
               const lifecycle = notesLifecyclePresentation(phase);
-              const blocker = activeRoadmapBlocker(phase);
-              const detailProps =
-                selectedPhaseDetailProps?.phase.id === phase.id ? selectedPhaseDetailProps : null;
+              const attentionReason = visibleRoadmapAttentionReason(phase);
               return (
                 <li
                   key={phase.id}
-                  className={`notes-roadmap-row${selected ? " is-selected" : ""}${blocker ? " is-blocked" : ""}`}
+                  className={`notes-roadmap-row${selected ? " is-selected" : ""}${attentionReason ? " is-blocked" : ""}`}
                 >
                   <div className="notes-roadmap-card-summary">
                     <div className="notes-roadmap-card-heading">
                       <h3 className="notes-roadmap-card-title">
                         <button
-                          ref={(element) => {
-                            if (element) phaseTitleRefs.current.set(phase.id, element);
-                            else phaseTitleRefs.current.delete(phase.id);
-                          }}
+                          ref={(element) => registerPhaseTitle(phase.id, element)}
                           type="button"
                           className="notes-roadmap-title"
                           data-phase-focus={phase.id}
@@ -610,28 +592,10 @@ export function NotesRoadmap({
                       </span>
                     </div>
 
-                    {phase.goal.trim().length > 0 && (
-                      <p className="notes-roadmap-goal">{phase.goal}</p>
-                    )}
-
-                    {blocker && (
+                    {attentionReason && (
                       <p className="notes-roadmap-attention">
-                        <strong>Needs attention:</strong> {blocker.blocker}
+                        <strong>Needs attention:</strong> {attentionReason}
                       </p>
-                    )}
-
-                    {phase.doneWhen.length > 0 && (
-                      <section
-                        className="notes-roadmap-criteria"
-                        aria-label={`Done when for ${phase.title}`}
-                      >
-                        <h4>Done when</h4>
-                        <ul>
-                          {phase.doneWhen.map((criterion, index) => (
-                            <li key={`${phase.id}-criterion-${index}`}>{criterion}</li>
-                          ))}
-                        </ul>
-                      </section>
                     )}
 
                     <div className="notes-roadmap-card-footer">
@@ -662,16 +626,19 @@ export function NotesRoadmap({
                       )}
                     </div>
                   </div>
-
-                  {detailProps && (
-                    <div id={`notes-phase-panel-${phase.id}`}>
-                      <NotesPhaseDetail key={detailProps.phase.id} {...detailProps} />
-                    </div>
-                  )}
                 </li>
               );
             })}
           </ol>
+        )}
+
+        {selectedPhaseDetailProps && (
+          <div id={`notes-phase-panel-${selectedPhaseDetailProps.phase.id}`}>
+            <NotesPhaseDetail
+              key={selectedPhaseDetailProps.phase.id}
+              {...selectedPhaseDetailProps}
+            />
+          </div>
         )}
       </div>
 

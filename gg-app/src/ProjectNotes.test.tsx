@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1096,6 +1096,33 @@ describe("ProjectNotes", () => {
     ).not.toBeNull();
   });
 
+  it("navigates an already-open Notes modal from Overview to the reminder's Roadmap detail", async () => {
+    const cwd = "/work/open-reminder-while-open";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("open reminder while open");
+    const selected = phase("open-while-open", "not-started", true);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await screen.findByRole("button", { name: "Open phase" });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Notes/ }));
+    expect(
+      (await screen.findByRole("tab", { name: "Overview" })).getAttribute("aria-selected"),
+    ).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open phase" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Roadmap" }).getAttribute("aria-selected")).toBe(
+        "true",
+      ),
+    );
+    await waitFor(() => expect(phaseDetail("Phase open-while-open")).not.toBeNull());
+  });
+
   it("schedules a preset, keeps invalid custom wall time in place, and explains local fallback delivery", async () => {
     const cwd = "/work/schedule-reminder";
     const client = new FakeProjectNotesClient(cwd);
@@ -1520,7 +1547,7 @@ describe("ProjectNotes", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "New phase" }));
   });
 
-  it("renders polished phase cards and expands phase details inline", async () => {
+  it("renders concise phase cards and opens detail beside the list", async () => {
     const cwd = "/work/roadmap-cards";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("roadmap cards");
@@ -1544,30 +1571,214 @@ describe("ProjectNotes", () => {
     const card = inspect.closest(".notes-roadmap-row");
     expect(card?.querySelector(".notes-roadmap-card-title")?.tagName).toBe("H3");
     expect(card?.querySelector(".notes-roadmap-card-title")?.contains(inspect)).toBe(true);
-    expect(card?.querySelector(".notes-roadmap-goal")?.textContent).toBe(alpha.goal);
-    expect(card?.querySelector(".notes-roadmap-criteria h4")?.textContent).toBe("Done when");
-    expect(card?.querySelector(".notes-roadmap-criteria")?.textContent).toContain(
-      "Narrow layouts preserve hierarchy",
-    );
+    // The card stays concise: goal and criteria belong to the detail presentation.
+    expect(card?.querySelector(".notes-roadmap-goal")).toBeNull();
+    expect(card?.querySelector(".notes-roadmap-criteria")).toBeNull();
     expect(card?.querySelector(".notes-phase-status")?.textContent).toBe("Working");
+    expect(card?.querySelector(".notes-roadmap-card-footer .notes-roadmap-primary")).not.toBeNull();
 
     fireEvent.click(inspect);
     expect(inspect.getAttribute("aria-expanded")).toBe("true");
-    expect(card?.closest(".notes-roadmap")?.classList.contains("has-detail")).toBe(false);
-    expect(card?.closest(".notes-roadmap-workspace")?.classList.contains("has-detail")).toBe(false);
+    const workspace = card?.closest(".notes-roadmap-workspace");
+    expect(workspace?.classList.contains("has-detail")).toBe(true);
     const detailId = inspect.getAttribute("aria-controls");
     expect(detailId).toBe(`notes-phase-panel-${alpha.id}`);
     expect(globalThis.document.querySelectorAll(`[id="${detailId}"]`)).toHaveLength(1);
-    expect(
-      globalThis.document
-        .getElementById(detailId!)
-        ?.contains(card?.querySelector(".notes-phase-detail") ?? null),
-    ).toBe(true);
+    const panel = globalThis.document.getElementById(detailId!);
+    // Detail is a sibling of the list, not nested inside the selected card.
+    expect(panel?.parentElement).toBe(workspace);
+    expect(card?.contains(panel)).toBe(false);
+    expect(panel?.querySelector(".notes-phase-detail")).not.toBeNull();
+    // Exactly one title, and the criteria remain reachable in detail.
     expect(
       globalThis.document.querySelectorAll(`[id="notes-phase-detail-${alpha.id}"]`),
     ).toHaveLength(1);
+    expect(panel?.textContent).toContain(alpha.goal);
+    expect(panel?.textContent).toContain("Narrow layouts preserve hierarchy");
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(list.children).toHaveLength(2);
+    // The unselected card keeps its own primary action.
+    expect(screen.getByRole("button", { name: "Start phase: Verify the release" })).toBeTruthy();
+  });
+
+  it("restores the roadmap scroll position and focus when leaving phase detail", async () => {
+    const cwd = "/work/roadmap-back";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("roadmap back");
+    document.phases = [
+      { ...phase("alpha", "in-progress"), title: "Alpha phase", order: 0 },
+      { ...phase("beta", "not-started"), title: "Beta phase", order: 1 },
+    ];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+
+    const panel = screen
+      .getByRole("list", { name: "Roadmap phases" })
+      .closest(".notes-panel") as HTMLElement;
+    // jsdom has no layout, so model the scroll container explicitly.
+    let scrollTop = 0;
+    Object.defineProperty(panel, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    panel.scrollTop = 180;
+
+    const title = screen.getByRole("button", { name: "Inspect phase: Beta phase" });
+    fireEvent.click(title);
+    expect(phaseDetail("Beta phase")).not.toBeNull();
+    panel.scrollTop = 0;
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+
+    await waitFor(() => expect(globalThis.document.activeElement).toBe(title));
+    expect(panel.scrollTop).toBe(180);
+    expect(phaseDetail("Beta phase")).toBeNull();
+    expect(title.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("discards an open phase edit when returning to the roadmap", async () => {
+    const cwd = "/work/roadmap-back-editing";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("roadmap back editing");
+    document.phases = [{ ...phase("draft", "in-progress"), title: "Draft phase" }];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase("Draft phase");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const goal = screen.getByLabelText("Edit goal") as HTMLTextAreaElement;
+    fireEvent.change(goal, { target: { value: "Discarded draft goal" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+    expect(phaseDetail("Draft phase")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Draft phase" }));
+    expect(phaseDetail("Draft phase")).not.toBeNull();
+    // The draft is not silently saved and the phase reopens in its view presentation.
+    expect(screen.queryByLabelText("Edit goal")).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(globalThis.document.body.textContent).not.toContain("Discarded draft goal");
+    expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]?.goal).toBe(
+      document.phases[0]!.goal,
+    );
+  });
+
+  it("clears a selection that disappears and explains the return to the list", async () => {
+    const cwd = "/work/roadmap-missing-selection";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("roadmap missing selection");
+    populated.phases = [
+      { ...phase("alpha", "in-progress"), title: "Alpha phase", order: 0 },
+      { ...phase("beta", "not-started"), title: "Beta phase", order: 1 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase("Beta phase");
+    expect(phaseDetail("Beta phase")).not.toBeNull();
+    // Keyboard focus is inside the detail when the phase disappears.
+    (screen.getByRole("button", { name: "Back to roadmap" }) as HTMLElement).focus();
+
+    const remaining = { ...populated, phases: [populated.phases[0]!] };
+    act(() => client.publish(cwd, remaining, 2));
+
+    await waitFor(() => expect(phaseDetail("Beta phase")).toBeNull());
+    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1);
+    expect(
+      globalThis.document
+        .querySelector(".notes-roadmap-workspace")
+        ?.classList.contains("has-detail"),
+    ).toBe(false);
+    await waitFor(() =>
+      expect(
+        screen.getByText("That phase is no longer in the roadmap. Returned to the phase list."),
+      ).toBeTruthy(),
+    );
+    expect(globalThis.document.activeElement).toBe(
+      screen.getByRole("button", { name: "New phase" }),
+    );
+  });
+
+  it("keeps focus inside the Roadmap when the fallback control is disabled", async () => {
+    const cwd = "/work/roadmap-missing-selection-disabled";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("roadmap missing selection disabled");
+    populated.phases = [
+      { ...phase("alpha", "in-progress"), title: "Alpha phase", order: 0 },
+      { ...phase("beta", "not-started"), title: "Beta phase", order: 1 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} phaseActionDisabled />);
+
+    await openRoadmapPhase("Beta phase");
+    expect(phaseDetail("Beta phase")).not.toBeNull();
+    // New phase is a correct mutation guard here, and focus() on a disabled control is a no-op.
+    expect((screen.getByRole("button", { name: "New phase" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    // Keyboard focus is inside the detail when the phase disappears.
+    const detail = phaseDetail("Beta phase")!;
+    const detailTab = within(detail).getAllByRole("tab")[0] as HTMLElement;
+    detailTab.focus();
+    expect(globalThis.document.activeElement).toBe(detailTab);
+
+    const remaining = { ...populated, phases: [populated.phases[0]!] };
+    act(() => client.publish(cwd, remaining, 2));
+
+    await waitFor(() => expect(phaseDetail("Beta phase")).toBeNull());
+    const roadmap = globalThis.document.querySelector(".notes-roadmap");
+    expect(roadmap).not.toBeNull();
+    await waitFor(() => {
+      const active = globalThis.document.activeElement;
+      expect(active).not.toBe(globalThis.document.body);
+      expect(roadmap!.contains(active)).toBe(true);
+      // Every phase control is guarded, so focus lands on the Roadmap heading.
+      expect(active).toBe(globalThis.document.getElementById("notes-roadmap-heading"));
+    });
+  });
+
+  it("reports a deliberate deletion once, without the missing-selection recovery line", async () => {
+    const cwd = "/work/roadmap-delete-selection";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("roadmap delete selection");
+    populated.phases = [
+      { ...phase("alpha", "in-progress"), title: "Alpha phase", order: 0 },
+      { ...phase("beta", "not-started"), title: "Beta phase", order: 1 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase("Beta phase");
+    selectPhaseView("More");
+    fireEvent.click(screen.getByRole("button", { name: "Delete phase" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete “Beta phase”?" });
+    const confirm = await waitFor(() =>
+      within(dialog).getByRole("button", { name: "Delete phase" }),
+    );
+    fireEvent.click(confirm);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Deleted “Beta phase”. You can recover it from Deleted phases."),
+      ).toBeTruthy(),
+    );
+    expect(phaseDetail("Beta phase")).toBeNull();
+    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1);
+    // The deletion dialog already explained this removal and how to recover it.
+    expect(
+      screen.queryByText("That phase is no longer in the roadmap. Returned to the phase list."),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Inspect phase: Alpha phase" }),
+      ),
+    );
   });
 
   it("collapses an expanded Roadmap card and returns focus to its title", async () => {
@@ -3189,6 +3400,30 @@ describe("ProjectNotes", () => {
       screen.getByRole("button", { name: "Inspect phase: Blocked deployment" }).closest("li")
         ?.textContent,
     ).toContain("Needs you");
+  });
+
+  it("explains lifecycle attention on the phase card without a blocked report", async () => {
+    const cwd = "/work/roadmap-lifecycle-attention";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("lifecycle attention");
+    const reason = "The phase session failed";
+    const selected = phase("crashed", "needs-attention");
+    selected.title = "Crashed session";
+    selected.attentionReason = reason;
+    selected.roadmapEvents = [];
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    const row = screen
+      .getByRole("button", { name: "Inspect phase: Crashed session" })
+      .closest("li")!;
+    expect(row.classList.contains("notes-roadmap-row")).toBe(true);
+    expect(row.classList.contains("is-blocked")).toBe(true);
+    expect(row.querySelector(".notes-roadmap-attention")?.textContent).toContain(reason);
+    expect(row.textContent).toContain("Needs you");
   });
 
   it("renders authoritative lifecycle labels and recovery actions without losing selection", async () => {

@@ -144,6 +144,67 @@ Do not weaken release safety, re-enable packaged automation, remove active Phase
 - `pnpm --filter gg-app check`
 - Confirm `gg-app/vitest.config.ts` references only retained tests and repository search finds no obsolete runner imports.
 
+## Roadmap navigation
+
+The approved journey is `Notes → Roadmap tab → phase list → phase detail → Back`.
+
+| Width            | List                                                  | Detail                             |
+| ---------------- | ----------------------------------------------------- | ---------------------------------- |
+| Wide (> 760px)   | stays visible in the left column, selected row marked | right column, focused presentation |
+| Narrow (≤ 760px) | hidden while detail is open                           | replaces the list                  |
+
+### Ownership
+
+| Concern                                                                                       | Owner                                                                                              |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Selected phase, captured return scroll offset, focus intent, missing-selection reconciliation | `gg-app/src/notes-roadmap/useRoadmapPhaseNavigation.ts`                                            |
+| Card/list presentation                                                                        | `gg-app/src/NotesRoadmap.tsx`                                                                      |
+| Detail presentation and per-phase view/edit drafts                                            | `notes-roadmap/NotesPhaseDetail.tsx` + `NotesPhaseDetailState.tsx`                                 |
+| Mutations, lease/binding, completion authority                                                | `useProjectNotes`, `notes-roadmap/roadmap-command-actions.ts`, `notes-roadmap/usePhaseDeletion.ts` |
+
+Reminder navigation joins the same journey: the alert's **Open phase** sets the
+target phase id plus a monotonic request token in `gg-app/src/ProjectNotes.tsx`.
+`NotesModal` switches to the Roadmap tab on a new token, and
+`useRoadmapPhaseNavigation` selects the phase through the ordinary `selectPhase`
+path, so scroll capture and missing-selection recovery still apply. The token
+matters because the Notes modal may already be open; a bare phase id would only
+ever be read at mount. If the requested phase is absent, the existing
+missing-selection path returns the user to the list with its announcement.
+
+There is one selection owner and no routing framework. Detail renders as a sibling
+of the phase list inside `.notes-roadmap-workspace`, which carries `has-detail`
+while a phase is selected; the card keeps identity, status, a significant blocker
+line and one primary action, because detail's Overview already shows goal and
+`Done when`.
+
+### Back, drafts and missing items
+
+- **Back** (`Back to roadmap`, or re-activating the selected card title) restores the
+  list scroll offset captured at selection and returns focus to the originating card
+  title. If that phase is gone, focus falls back to **New phase**, matching the
+  Reference detail pattern in `gg-app/src/NotesReferences.tsx`. Unlike **New
+  reference**, **New phase** is disabled while a phase mutation is in flight, and
+  `focus()` on a disabled control is a silent no-op — so the hook resolves in order
+  originating phase title → **New phase** → the `Roadmap` heading (`tabIndex={-1}`),
+  skipping any candidate that is disabled, detached, hidden or inert. Focus never
+  falls through to `document.body`.
+- **Drafts** are per-phase local state in `NotesPhaseDetailState`. Back while editing
+  discards the local draft exactly as `Close edit`/unmount does today. Nothing is
+  silently saved.
+- **Missing selection** (a phase that disappears for reasons outside this surface:
+  another window's delete or recovery, a project switch): selection clears, a status
+  line explains the return to the list, and focus moves to a surviving control only
+  when it was lost with the detail.
+- **Deliberate removal from the open detail** (Archive phase, Delete phase): the
+  detail retires its own selection before the phase leaves the list, so the action's
+  own confirmation feedback is the single account of it. Delete keeps the deletion
+  controller's focus move to a surviving phase title.
+- Deletion and recovery keep their own contracts — see
+  [`notes-roadmap-deletion.md`](./notes-roadmap-deletion.md). No second recovery
+  model exists here.
+- Implementation progress and verification remain separate surfaces; navigation
+  never makes "implementation finished" read as "verification passed".
+
 ## Final gate for every phase
 
 Run `pnpm check`, `pnpm lint`, `pnpm format:check`, and `git diff --check`. Review the diff for scope creep before starting the next ordered item.

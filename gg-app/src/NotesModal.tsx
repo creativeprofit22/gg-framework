@@ -58,6 +58,8 @@ interface Props {
   expectedRevision: number | null;
   expectedProjectKey: string | null;
   initialRoadmapPhaseId?: string | null;
+  /** Increments when a new navigation request targets `initialRoadmapPhaseId`. */
+  roadmapPhaseRequest?: number;
   persistenceStatus: React.ReactNode;
   onChangeCurrentFocus(value: string): void;
   onCreateTask(text: string): void;
@@ -169,6 +171,7 @@ export function NotesModalContent({
   expectedRevision,
   expectedProjectKey,
   initialRoadmapPhaseId = null,
+  roadmapPhaseRequest = 0,
   persistenceStatus,
   onChangeCurrentFocus,
   onCreateTask,
@@ -214,10 +217,20 @@ export function NotesModalContent({
   onChangeHandoff,
   onHandoffPresented,
 }: Props): React.ReactElement {
-  const deletion = usePhaseDeletion(expectedProjectKey, phaseDeletionBridge);
-  const deletePhase = (id: string) => {
+  // Set by whichever surface asked for this deletion, so an intentional delete can retire
+  // its own selection instead of being reported as an unexplained disappearance. Every
+  // request replaces it, and a commit consumes it.
+  const deletionCommitted = useRef<(() => void) | null>(null);
+  const deletion = usePhaseDeletion(expectedProjectKey, phaseDeletionBridge, () => {
+    const handler = deletionCommitted.current;
+    deletionCommitted.current = null;
+    handler?.();
+  });
+  const deletePhase = (id: string, onDeleted?: () => void) => {
     const phase = phases.find((p) => p.id === id);
-    if (phase) void deletion.begin(phase, "delete");
+    if (!phase) return;
+    deletionCommitted.current = onDeleted ?? null;
+    void deletion.begin(phase, "delete");
   };
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
@@ -230,13 +243,20 @@ export function NotesModalContent({
   const [activeTab, setActiveTab] = useState<NotesTab>(
     initialRoadmapPhaseId ? "roadmap" : "overview",
   );
+  const handledRoadmapRequest = useRef(roadmapPhaseRequest);
   useLayoutEffect(() => {
+    // A request that arrives while the modal is already open is navigation, not a
+    // mount-time default, so the Roadmap tab has to become active here too.
+    if (roadmapPhaseRequest !== handledRoadmapRequest.current) {
+      handledRoadmapRequest.current = roadmapPhaseRequest;
+      if (initialRoadmapPhaseId) setActiveTab("roadmap");
+    }
     const tab = tabRefs.current[initialRoadmapPhaseId ? "roadmap" : "overview"];
     const dialog = tab?.closest("[role='dialog']");
     // Restore the existing initial-tab focus after loading, without stealing it
     // from another dialog that may have opened in the meantime.
     if (dialog?.contains(document.activeElement)) tab?.focus();
-  }, [initialRoadmapPhaseId]);
+  }, [initialRoadmapPhaseId, roadmapPhaseRequest]);
 
   const [showArchived, setShowArchived] = useState(false);
   const [referenceCreateRequest, setReferenceCreateRequest] = useState(0);
@@ -399,6 +419,7 @@ export function NotesModalContent({
                 expectedRevision={expectedRevision}
                 expectedProjectKey={expectedProjectKey}
                 initialSelectedPhaseId={initialRoadmapPhaseId}
+                selectedPhaseRequest={roadmapPhaseRequest}
                 openSource={openSource}
                 onCreatePhase={onCreatePhase}
                 onEditPhase={onEditPhase}

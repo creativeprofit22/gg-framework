@@ -518,6 +518,14 @@ function providerGuidance(
   ) {
     return `${name} doesn't recognise this model on your account. Switch to a different model via the model selector, or check your subscription tier.`;
   }
+  if (
+    provider === "anthropic" &&
+    lower.includes("input_schema") &&
+    lower.includes("does not support") &&
+    lower.includes("at the top level")
+  ) {
+    return "GG Coder sent a tool schema that Anthropic does not support. Retrying the same request will not help. Update GG Coder; if it persists, report this error as a tool compatibility bug.";
+  }
   if (lower.includes("context_length_exceeded") || lower.includes("prompt is too long")) {
     return `Context window for this ${name} model is full. Compact the conversation to shrink history, or start a new session.`;
   }

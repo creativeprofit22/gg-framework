@@ -166,28 +166,22 @@ export async function prewarmAnthropicCache(options: {
           ...(system ?? []),
         ]
       : system;
-    const tools = options.tools?.length
-      ? toAnthropicTools(options.tools, {
-          cacheControl,
-          // Keep the serialized tool bytes identical to runStream so the
-          // prewarmed prompt cache actually hits — both are gated by the flag.
-          enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
-        })
-      : undefined;
+    const tools = [
+      ...toAnthropicTools(options.tools ?? [], {
+        cacheControl,
+        // Keep the serialized tool bytes identical to runStream so the
+        // prewarmed prompt cache actually hits — both are gated by the flag.
+        enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
+      }),
+      ...(options.serverTools ?? []),
+    ];
     await client.messages.create(
       {
         model: options.model,
         max_tokens: 1,
         messages,
         ...(fullSystem ? { system: fullSystem as Anthropic.MessageCreateParams["system"] } : {}),
-        ...(tools
-          ? {
-              tools: [
-                ...tools,
-                ...(options.serverTools ?? []),
-              ] as Anthropic.MessageCreateParams["tools"],
-            }
-          : {}),
+        ...(tools.length ? { tools: tools as Anthropic.MessageCreateParams["tools"] } : {}),
       } as Anthropic.MessageCreateParamsNonStreaming,
       {
         signal: options.signal ?? undefined,

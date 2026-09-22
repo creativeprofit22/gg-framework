@@ -138,7 +138,6 @@
         "type": "object",
         "properties": {
           "action": {
-            "type": "string",
             "enum": [
               "list",
               "resolve"
@@ -189,9 +188,10 @@
         },
         "required": [
           "action"
-        ]
+        ],
+        "additionalProperties": false
       },
-      "hash": "fbc3a629c582d9d95d67e9aa48b296df869aec222c334888b3a8e2fbb2b9016b"
+      "hash": "46ea789de3400dbfedc2709968d691f10d0e31ad79ab2a1fe64dbd85a7d42f62"
     },
     {
       "name": "edit",
@@ -396,7 +396,6 @@
         "type": "object",
         "properties": {
           "action": {
-            "type": "string",
             "enum": [
               "run",
               "inspect",
@@ -829,9 +828,10 @@
         },
         "required": [
           "action"
-        ]
+        ],
+        "additionalProperties": false
       },
-      "hash": "2f1365d5fd7efb60c1fe8e641506b9d924478b75b8e07e20302965fd59edfd90"
+      "hash": "1c8e6b8afca394837cbb8b770351571fa58a35205663257bc5f4498b2e8fdecb"
     },
     {
       "name": "programmatic_profile",
@@ -840,7 +840,6 @@
         "type": "object",
         "properties": {
           "action": {
-            "type": "string",
             "enum": [
               "inspect",
               "generate"
@@ -925,9 +924,10 @@
         },
         "required": [
           "action"
-        ]
+        ],
+        "additionalProperties": false
       },
-      "hash": "509a1292678eda97cc99c442a19ea79d6fad9f3110003bbd4d7525b1be06ba4f"
+      "hash": "0b63879a681517bf6f3a30f122967fd0313a649ad4eb9505ef835fa0e54992d1"
     },
     {
       "name": "programmatic_scan",

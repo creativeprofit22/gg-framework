@@ -3,13 +3,15 @@
  *
  * Builds the REAL default tool array via `createTools()` — the same factory every
  * session entry point (agent-session, CLI, interactive) uses — serializes each
- * tool with `resolveToolSchema` (the exact encoding provider requests carry),
- * and pins the canonicalized catalog against a committed snapshot.
+ * tool with `resolveToolSchema` (base schemas before provider adapters),
+ * and pins the canonicalized catalog against a committed snapshot. Providers
+ * may normalize, sanitize, or enforce strict schemas afterward; this snapshot
+ * does not pin every provider's final request. Serialized-request regression
+ * tests verify the actual wire format.
  *
- * Why: an accidental schema/description edit is silent. It changes what every
- * model sees on every request, and invalidates the cached prompt prefix, without
- * failing any test that isn't explicitly looking. This test is the test that is
- * explicitly looking (deepseek-harness takeaway: CI-verified tool catalog).
+ * Why: an accidental schema/description edit can silently change what models
+ * see and invalidate cached prompt prefixes. This test catches base-catalog
+ * drift (deepseek-harness takeaway: CI-verified tool catalog).
  *
  * Regenerate after an INTENTIONAL schema change:
  *   UPDATE_TOOL_CATALOG=1 pnpm vitest run tools/tool-catalog.test.ts

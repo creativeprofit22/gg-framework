@@ -118,7 +118,8 @@ describe("formatError Mythos access", () => {
 
 describe("formatError invalid tool schema", () => {
   it.each([undefined, 400])("explains schema incompatibility with status %s", (statusCode) => {
-    const message = "Invalid JSON schema: regex lookaround is not supported. Found at $.properties.selection.anyOf[0].properties.command.properties.name.pattern.";
+    const message =
+      "Invalid JSON schema: regex lookaround is not supported. Found at $.properties.selection.anyOf[0].properties.command.properties.name.pattern.";
     const formatted = formatError(new ProviderError("openai", message, { statusCode }));
     expect(formatted.message).toBe(message);
     expect(formatted.guidance).toContain("schema compatibility problem");
@@ -185,6 +186,20 @@ describe("VideoUnsupportedError", () => {
 });
 
 describe("formatErrorForDisplay", () => {
+  it("identifies an incompatible Anthropic tool schema instead of blaming an outage", () => {
+    const out = formatErrorForDisplay(
+      new ProviderError(
+        "anthropic",
+        "invalid_request_error: tools.25.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level",
+        { statusCode: 400 },
+      ),
+    );
+    expect(out).toContain("GG Coder sent a tool schema that Anthropic does not support");
+    expect(out).toContain("Retrying the same request will not help");
+    expect(out).not.toContain("not GG Coder");
+    expect(out).not.toContain("status.anthropic.com");
+  });
+
   it("renders an Anthropic 529 overloaded error as headline + message + guidance", () => {
     const out = formatErrorForDisplay(
       new ProviderError("anthropic", "overloaded_error: Overloaded", { statusCode: 529 }),

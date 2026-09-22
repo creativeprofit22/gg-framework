@@ -124,7 +124,7 @@
 
 ### Patch Changes
 
-- Export `resolveToolSchema` from gg-ai so the exact request-path tool-schema serialization (raw input-schema passthrough for MCP tools, zod-to-JSON otherwise) is reusable; ggcoder's new tool-catalog test pins every default tool's name, description, and schema against a committed snapshot so accidental schema drift fails CI instead of silently invalidating cached prompt prefixes.
+- Export `resolveToolSchema` from gg-ai so base tool-schema resolution (raw input-schema passthrough for MCP tools, zod-to-JSON otherwise) is reusable before provider-specific normalization; ggcoder's new tool-catalog test pins every default tool's name, description, and base schema against a committed snapshot, not each provider's final request, so accidental schema drift fails CI instead of silently invalidating cached prompt prefixes.
 
 ## 5.44.2
 

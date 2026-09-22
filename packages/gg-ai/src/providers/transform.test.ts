@@ -124,6 +124,161 @@ describe("provider image budgeting", () => {
 });
 
 describe("Anthropic transform", () => {
+  it.each(["constructor", "toString", "__proto__"])(
+    "keeps own raw field %s and its required status without changing the MCP validator",
+    (key) => {
+      const rawInputSchema = JSON.parse(JSON.stringify({
+        oneOf: ["inspect", "takeover"].map((action) => ({
+          type: "object",
+          properties: { action: { const: action }, [key]: { type: "string" } },
+          required: ["action", key],
+        })),
+      }));
+      const before = structuredClone(rawInputSchema);
+      const parameters = z.record(z.string(), z.unknown());
+      const tool = { name: "mcp_members", description: "test", parameters, rawInputSchema };
+      const input = JSON.parse(JSON.stringify({ action: "inspect", [key]: "value" }));
+      const validationBefore = parameters.safeParse(input);
+      const schema = toAnthropicTools([tool])[0]!.input_schema;
+      const properties = schema.properties as Record<string, unknown>;
+      expect(schema.required).toEqual(["action", key]);
+      expect(Object.hasOwn(properties, key)).toBe(true);
+      expect(properties[key]).toEqual({ type: "string" });
+      expect(properties.action).toEqual({ enum: ["inspect", "takeover"] });
+      expect(tool.parameters).toBe(parameters);
+      expect(parameters.safeParse(input)).toEqual(validationBefore);
+      expect(tool.rawInputSchema).toBe(rawInputSchema);
+      expect(rawInputSchema).toEqual(before);
+    },
+  );
+  it.each([false, true])("preserves literal/integer alternatives with raw schema: %s", (raw) => {
+    const parameters = z.union([
+      z.object({ value: z.literal("auto") }),
+      z.object({ value: z.int().min(1) }),
+    ]);
+    const rawInputSchema = {
+      oneOf: [
+        {
+          type: "object",
+          properties: { value: { type: "string", const: "auto" } },
+          required: ["value"],
+        },
+        {
+          type: "object",
+          properties: { value: { type: "integer", minimum: 1 } },
+          required: ["value"],
+        },
+      ],
+    };
+    const before = structuredClone(rawInputSchema);
+    // MCP wrappers accept a record; validation of raw schemas belongs to the server.
+    const tool = {
+      name: "auto_or_count",
+      description: "test",
+      parameters: raw ? z.record(z.string(), z.unknown()) : parameters,
+      ...(raw ? { rawInputSchema } : {}),
+    };
+    const originalParameters = tool.parameters;
+    const expected = raw
+      ? rawInputSchema.oneOf.map((branch) => branch.properties.value)
+      : parameters.options.map((branch) => z.toJSONSchema(branch).properties!.value);
+    expect(toAnthropicTools([tool])[0]?.input_schema.properties).toEqual({
+      value: { anyOf: expected },
+    });
+    expect(tool.parameters).toBe(originalParameters);
+    expect(tool.parameters.parse({ value: "auto" })).toEqual({ value: "auto" });
+    expect(tool.parameters.parse({ value: 1 })).toEqual({ value: 1 });
+    expect(tool.parameters.safeParse({ value: 0 }).success).toBe(raw);
+    expect(tool.parameters.safeParse({ value: "other" }).success).toBe(raw);
+    expect(rawInputSchema).toEqual(before);
+  });
+  it("names incompatible tools without altering other providers' raw schemas", () => {
+    for (const rawInputSchema of [
+      { type: "string" },
+      { allOf: [{ $ref: "#/$defs/missing" }] },
+      { anyOf: [{ type: "string" }, { type: "object" }] },
+    ]) {
+      const tool = {
+        name: "mcp_problem",
+        description: "test",
+        parameters: z.object({}),
+        rawInputSchema,
+      };
+      expect(() => toAnthropicTools([tool])).toThrow(/mcp_problem.*incompatible with Anthropic/);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: rawInputSchema } });
+    }
+  });
+  it.each(["oneOf", "anyOf"])(
+    "normalizes raw root %s without changing runtime validation",
+    (keyword) => {
+      const parameters = z.discriminatedUnion("action", [
+        z.object({ action: z.literal("inspect") }).strict(),
+        z.object({ action: z.literal("takeover"), confirm: z.literal(true) }).strict(),
+      ]);
+      const rawInputSchema = {
+        type: "object",
+        [keyword]: parameters.options.map((option) => z.toJSONSchema(option)),
+      };
+      const before = structuredClone(rawInputSchema);
+      const tool = { name: "binding", description: "Binding actions", parameters, rawInputSchema };
+      const [definition] = toAnthropicTools([tool]);
+      expect(definition?.input_schema).toMatchObject({
+        type: "object",
+        properties: { action: { enum: ["inspect", "takeover"] }, confirm: { const: true } },
+        required: ["action"],
+      });
+      for (const key of ["oneOf", "anyOf", "allOf"]) {
+        expect(definition?.input_schema).not.toHaveProperty(key);
+      }
+      expect(rawInputSchema).toEqual(before);
+      expect(parameters.safeParse({ action: "takeover" }).success).toBe(false);
+      expect(parameters.safeParse({ action: "takeover", confirm: true }).success).toBe(true);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: before } });
+    },
+  );
+
+  it.each(["oneOf", "anyOf"])(
+    "retains shared raw %s fields only in Anthropic's projection",
+    (keyword) => {
+      const parameters = z.intersection(
+        z.object({ workspace: z.string().min(1) }),
+        z.discriminatedUnion("action", [
+          z.object({ action: z.literal("read"), path: z.string() }),
+          z.object({ action: z.literal("list") }),
+        ]),
+      );
+      const rawInputSchema = {
+        type: "object",
+        properties: { workspace: { type: "string", minLength: 1 } },
+        required: ["workspace"],
+        [keyword]: [
+          {
+            properties: { action: { const: "read" }, path: { type: "string" } },
+            required: ["action", "path"],
+          },
+          { properties: { action: { const: "list" } }, required: ["action"] },
+        ],
+      };
+      const before = structuredClone(rawInputSchema);
+      const tool = { name: "workspace_actions", description: "test", parameters, rawInputSchema };
+      expect(toAnthropicTools([tool])[0]?.input_schema).toEqual({
+        type: "object",
+        properties: {
+          workspace: { type: "string", minLength: 1 },
+          action: { enum: ["read", "list"] },
+          path: { type: "string" },
+        },
+        required: ["workspace", "action"],
+      });
+      expect(tool.rawInputSchema).toBe(rawInputSchema);
+      expect(rawInputSchema).toEqual(before);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: before } });
+      expect(parameters.safeParse({ action: "list" }).success).toBe(false);
+      expect(parameters.safeParse({ workspace: "project", action: "read" }).success).toBe(false);
+      expect(parameters.safeParse({ workspace: "project", action: "list" }).success).toBe(true);
+    },
+  );
+
   it("splits system prompt into cached and uncached blocks at the marker", () => {
     const cacheControl = { type: "ephemeral" as const };
     const messages: Message[] = [

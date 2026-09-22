@@ -15,7 +15,7 @@ import type {
   ToolChoice,
   ToolResultContent,
 } from "../types.js";
-import { resolveToolSchema, zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { normalizeRootForAnthropic, resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { DEFAULT_REASONING_FIELD } from "./reasoning-field.js";
 
@@ -614,14 +614,27 @@ export function toAnthropicTools(
   },
 ): Anthropic.Tool[] {
   return tools.map((tool, index) => {
+    let inputSchema: Record<string, unknown>;
+    try {
+      inputSchema = normalizeRootForAnthropic(resolveToolSchema(tool));
+      if (inputSchema.type !== "object") {
+        throw new Error("Anthropic requires an object input schema");
+      }
+    } catch (error) {
+      throw new Error(
+        `Tool ${JSON.stringify(tool.name)} is incompatible with Anthropic: ${error instanceof Error ? error.message : "invalid input schema"}`,
+        { cause: error },
+      );
+    }
     const anthropicTool: Anthropic.Tool & {
       cache_control?: { type: "ephemeral"; ttl?: "1h" };
       eager_input_streaming?: boolean;
     } = {
       name: tool.name,
       description: tool.description,
-      input_schema: (tool.rawInputSchema ??
-        zodToJsonSchema(tool.parameters)) as Anthropic.Tool["input_schema"],
+      // Raw schemas need the same root-union normalization as Zod schemas.
+      // Only adapt provider hints; leave the original runtime validator intact.
+      input_schema: inputSchema as Anthropic.Tool["input_schema"],
       ...(options?.enableFineGrainedToolStreaming ? { eager_input_streaming: true } : {}),
     };
     if (options?.cacheControl && index === tools.length - 1) {

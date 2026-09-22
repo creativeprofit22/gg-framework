@@ -80,8 +80,9 @@ export {
 export { setProviderDiagnostic } from "./utils/diag.js";
 export type { ProviderDiagnosticFn } from "./utils/diag.js";
 
-// Tool schema serialization — the exact encoding every provider request uses
+// Base tool schema resolution before provider adapters
 // (rawInputSchema passthrough for MCP tools, zodToJsonSchema otherwise).
+// Providers may normalize, sanitize, or enforce strict schemas afterward.
 export { resolveToolSchema } from "./utils/zod-to-json-schema.js";
 
 // Provider request transforms (exposed for request-building + verification)

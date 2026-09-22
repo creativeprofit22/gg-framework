@@ -73,7 +73,8 @@ export function createToolSearchTool(
           if (resolution && !resolution.ok) unavailable.set(name, resolution);
         }
       }
-      // Fail closed on both backing-server reachability and serialized schema size.
+      // Fail closed on backing-server reachability and serialized base-schema size.
+      // Budget resolveToolSchema output before adapter transformations, not final wire bytes.
       const oversized: Array<{ name: string; bytes: number }> = [];
       const promotableNames: string[] = [];
       for (const tool of matches) {

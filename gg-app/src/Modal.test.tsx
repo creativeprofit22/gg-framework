@@ -7,9 +7,20 @@ afterEach(cleanup);
 
 describe("Modal", () => {
   it("restores background interaction when nested dialogs unmount together on project change", () => {
-    const background = document.createElement("button"); document.body.append(background);
-    const view = render(<Modal title="Outer" onClose={() => {}}><span>Notes</span></Modal>);
-    view.rerender(<Modal title="Outer" onClose={() => {}}><Modal title="Inner" onClose={() => {}}><button>Cancel</button></Modal></Modal>);
+    const background = document.createElement("button");
+    document.body.append(background);
+    const view = render(
+      <Modal title="Outer" onClose={() => {}}>
+        <span>Notes</span>
+      </Modal>,
+    );
+    view.rerender(
+      <Modal title="Outer" onClose={() => {}}>
+        <Modal title="Inner" onClose={() => {}}>
+          <button>Cancel</button>
+        </Modal>
+      </Modal>,
+    );
     expect(background.inert).toBe(true);
     view.unmount();
     expect(background.inert).not.toBe(true);

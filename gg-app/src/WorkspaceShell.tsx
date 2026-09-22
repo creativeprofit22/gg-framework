@@ -348,7 +348,12 @@ function ReadyWorkspaceShell({
   }, []);
 
   const commitSwap = useCallback((side: string, middle: string, size: WorkspaceSize) => {
-    if (activePaneDragRef.current || closingPaneIdsRef.current.has(side) || closingPaneIdsRef.current.has(middle)) return null;
+    if (
+      activePaneDragRef.current ||
+      closingPaneIdsRef.current.has(side) ||
+      closingPaneIdsRef.current.has(middle)
+    )
+      return null;
     const current = layoutRef.current;
     const next = swapWorkspacePanes(current, side, middle, size);
     if (next === current) return null;
@@ -356,8 +361,19 @@ function ReadyWorkspaceShell({
     setLayout(next);
     return next;
   }, []);
-  const swapLabel = useCallback((id: string) => snapshots[id]?.sessionTitle?.trim() || `Conversation ${id}`, [snapshots]);
-  const swaps = useWorkspacePaneSwaps({ layout, layoutRef, gridRef, closingPaneIdsRef, commit: commitSwap, focusPane, label: swapLabel });
+  const swapLabel = useCallback(
+    (id: string) => snapshots[id]?.sessionTitle?.trim() || `Conversation ${id}`,
+    [snapshots],
+  );
+  const swaps = useWorkspacePaneSwaps({
+    layout,
+    layoutRef,
+    gridRef,
+    closingPaneIdsRef,
+    commit: commitSwap,
+    focusPane,
+    label: swapLabel,
+  });
   const preserveSwapFocus = swaps.preserveFocus;
   useEffect(() => {
     const scheduledPaneId = layout.focusedPaneId;
@@ -781,9 +797,19 @@ function ReadyWorkspaceShell({
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {copyAnnouncement}
       </div>
-      <p id={PANE_SWAP_HELP_ID} className="visually-hidden">{swaps.help}</p>
-      <div className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{swaps.announcement}</div>
-      <div className="workspace-grid" data-pane-count={leafIds.length} ref={gridRef} tabIndex={-1} aria-label="Conversation workspace">
+      <p id={PANE_SWAP_HELP_ID} className="visually-hidden">
+        {swaps.help}
+      </p>
+      <div className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+        {swaps.announcement}
+      </div>
+      <div
+        className="workspace-grid"
+        data-pane-count={leafIds.length}
+        ref={gridRef}
+        tabIndex={-1}
+        aria-label="Conversation workspace"
+      >
         <WorkspaceNode
           node={layout.root}
           swaps={swaps}

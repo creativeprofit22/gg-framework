@@ -23,14 +23,74 @@
   --preview-code-addition-bg: #294337;
   --preview-code-deletion-bg: #56363e;
 }
-#root[data-chat-preview="light"] .markdown pre { color: var(--preview-code-text); background: var(--preview-code-bg); padding-inline-end: 78px; }
-#root[data-chat-preview="light"] .markdown pre code { color: var(--preview-code-text); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-subst, .hljs-emphasis, .hljs-strong) { color: var(--preview-code-text); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-doctag, .hljs-keyword, .hljs-template-tag, .hljs-template-variable, .hljs-type, .hljs-variable.language_) { color: var(--preview-code-keyword); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-title, .hljs-section) { color: var(--preview-code-entity); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-attr, .hljs-attribute, .hljs-literal, .hljs-meta, .hljs-number, .hljs-operator, .hljs-variable, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id) { color: var(--preview-code-constant); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-regexp, .hljs-string, .hljs-name, .hljs-quote, .hljs-selector-tag, .hljs-selector-pseudo) { color: var(--preview-code-string); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-built_in, .hljs-symbol, .hljs-bullet) { color: var(--preview-code-symbol); }
-#root[data-chat-preview="light"] .markdown pre :is(.hljs-comment, .hljs-code, .hljs-formula) { color: var(--preview-code-comment); }
-#root[data-chat-preview="light"] .markdown pre .hljs-addition { color: var(--preview-code-string); background: var(--preview-code-addition-bg); }
-#root[data-chat-preview="light"] .markdown pre .hljs-deletion { color: var(--preview-code-keyword); background: var(--preview-code-deletion-bg); }
+#root[data-chat-preview="light"] .markdown pre {
+  color: var(--preview-code-text);
+  background: var(--preview-code-bg);
+  padding-inline-end: 78px;
+}
+#root[data-chat-preview="light"] .markdown pre code {
+  color: var(--preview-code-text);
+}
+#root[data-chat-preview="light"] .markdown pre :is(.hljs-subst, .hljs-emphasis, .hljs-strong) {
+  color: var(--preview-code-text);
+}
+#root[data-chat-preview="light"]
+  .markdown
+  pre
+  :is(
+    .hljs-doctag,
+    .hljs-keyword,
+    .hljs-template-tag,
+    .hljs-template-variable,
+    .hljs-type,
+    .hljs-variable.language_
+  ) {
+  color: var(--preview-code-keyword);
+}
+#root[data-chat-preview="light"] .markdown pre :is(.hljs-title, .hljs-section) {
+  color: var(--preview-code-entity);
+}
+#root[data-chat-preview="light"]
+  .markdown
+  pre
+  :is(
+    .hljs-attr,
+    .hljs-attribute,
+    .hljs-literal,
+    .hljs-meta,
+    .hljs-number,
+    .hljs-operator,
+    .hljs-variable,
+    .hljs-selector-attr,
+    .hljs-selector-class,
+    .hljs-selector-id
+  ) {
+  color: var(--preview-code-constant);
+}
+#root[data-chat-preview="light"]
+  .markdown
+  pre
+  :is(
+    .hljs-regexp,
+    .hljs-string,
+    .hljs-name,
+    .hljs-quote,
+    .hljs-selector-tag,
+    .hljs-selector-pseudo
+  ) {
+  color: var(--preview-code-string);
+}
+#root[data-chat-preview="light"] .markdown pre :is(.hljs-built_in, .hljs-symbol, .hljs-bullet) {
+  color: var(--preview-code-symbol);
+}
+#root[data-chat-preview="light"] .markdown pre :is(.hljs-comment, .hljs-code, .hljs-formula) {
+  color: var(--preview-code-comment);
+}
+#root[data-chat-preview="light"] .markdown pre .hljs-addition {
+  color: var(--preview-code-string);
+  background: var(--preview-code-addition-bg);
+}
+#root[data-chat-preview="light"] .markdown pre .hljs-deletion {
+  color: var(--preview-code-keyword);
+  background: var(--preview-code-deletion-bg);
+}

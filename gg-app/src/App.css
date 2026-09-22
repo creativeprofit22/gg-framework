@@ -8405,7 +8405,10 @@ select {
   opacity: 0;
   pointer-events: none;
   touch-action: manipulation;
-  transition: color var(--t-fast), border-color var(--t-fast), background-color var(--t-fast);
+  transition:
+    color var(--t-fast),
+    border-color var(--t-fast),
+    background-color var(--t-fast);
 }
 .workspace-pane-slot:hover .pane-swap-button,
 .workspace-pane-slot:focus-within .pane-swap-button {
@@ -8420,7 +8423,9 @@ select {
   opacity: 1;
   pointer-events: auto;
 }
-.workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] { right: 35px; }
+.workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] {
+  right: 35px;
+}
 @container conversation-pane (max-width: 200px) {
   .workspace-pane-actions:has([data-pane-swap-direction]) {
     top: 37px;
@@ -8431,7 +8436,9 @@ select {
     padding-right: 0;
     padding-top: 35px;
   }
-  .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) { padding-top: 128px; }
+  .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) {
+    padding-top: 128px;
+  }
 }
 .workspace-pane-actions .pane-swap-button:focus-visible,
 .workspace-pane-actions .pane-swap-button[data-swap-keyboard-focus]:focus {
@@ -8462,15 +8469,28 @@ select {
   }
 }
 @media (hover: none), (pointer: coarse) {
-  .workspace-pane-actions:has([data-pane-swap-direction]) { min-width: 94px; padding-right: 94px; }
-  .workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] { right: 47px; }
+  .workspace-pane-actions:has([data-pane-swap-direction]) {
+    min-width: 94px;
+    padding-right: 94px;
+  }
+  .workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] {
+    right: 47px;
+  }
   @container conversation-pane (max-width: 200px) {
-    .workspace-pane-actions:has([data-pane-swap-direction]) { min-width: 0; padding-right: 0; padding-top: 47px; }
-    .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) { padding-top: 144px; }
+    .workspace-pane-actions:has([data-pane-swap-direction]) {
+      min-width: 0;
+      padding-right: 0;
+      padding-top: 47px;
+    }
+    .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) {
+      padding-top: 144px;
+    }
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .workspace-pane-actions .pane-swap-button { transition: none; }
+  .workspace-pane-actions .pane-swap-button {
+    transition: none;
+  }
 }
 @media (forced-colors: active) {
   .workspace-pane-actions .pane-swap-button[data-swap-keyboard-focus]:focus,
@@ -8478,7 +8498,9 @@ select {
   .workspace-grid[data-swap-keyboard-focus]:focus,
   .workspace-pane-actions .pane-swap-button:focus-visible,
   .workspace-pane-slot:focus-visible,
-  .workspace-grid:focus-visible { outline-color: Highlight; }
+  .workspace-grid:focus-visible {
+    outline-color: Highlight;
+  }
 }
 .workspace-pane-close {
   position: absolute;
@@ -10913,25 +10935,87 @@ select {
   overflow-wrap: anywhere;
 }
 /* Recoverable phase deletion uses the existing Notes button and surface tokens. */
-.notes-phase-deletion-dialog { max-width: 540px; max-height: calc(100dvh - 32px); overflow: auto; }
-.notes-phase-deletion-dialog .modal-title { overflow-wrap: anywhere; min-width: 0; }
-.notes-phase-deletion-body { padding: 0 20px 20px; color: var(--text-secondary); line-height: 1.5; }
-.notes-phase-deletion-body p { overflow-wrap: anywhere; }
-.notes-phase-deletion-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.notes-phase-deletion-dialog {
+  max-width: 540px;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+.notes-phase-deletion-dialog .modal-title {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.notes-phase-deletion-body {
+  padding: 0 20px 20px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.notes-phase-deletion-body p {
+  overflow-wrap: anywhere;
+}
+.notes-phase-deletion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .notes-phase-deletion-dialog button:focus-visible,
-.notes-deleted-phases summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.notes-phase-deletion-dialog button:disabled { opacity: 0.55; cursor: default; }
-.notes-deleted-phases { margin-block: 16px; color: var(--text-secondary); }
-.notes-deleted-phases summary { cursor: pointer; min-height: 30px; padding-block: 6px; }
-.notes-deleted-phases ul { list-style: none; padding: 0; margin: 0; }
-.notes-deleted-phases li { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 12px; border-block-end: 1px solid var(--border-strong); }
-.notes-deleted-phases li > div { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
-.notes-deleted-phases p { font-size: 12px; line-height: 1.5; }
-.notes-phase-deletion-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; color: var(--text-secondary); }
-.notes-phase-deletion-feedback p { flex: 1 1 200px; margin: 0; overflow-wrap: anywhere; }
+.notes-deleted-phases summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.notes-phase-deletion-dialog button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.notes-deleted-phases {
+  margin-block: 16px;
+  color: var(--text-secondary);
+}
+.notes-deleted-phases summary {
+  cursor: pointer;
+  min-height: 30px;
+  padding-block: 6px;
+}
+.notes-deleted-phases ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.notes-deleted-phases li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-block: 12px;
+  border-block-end: 1px solid var(--border-strong);
+}
+.notes-deleted-phases li > div {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.notes-deleted-phases p {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.notes-phase-deletion-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  color: var(--text-secondary);
+}
+.notes-phase-deletion-feedback p {
+  flex: 1 1 200px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 @media (forced-colors: active) {
   .notes-phase-deletion-dialog button:focus-visible,
-  .notes-deleted-phases summary:focus-visible { outline-color: Highlight; }
+  .notes-deleted-phases summary:focus-visible {
+    outline-color: Highlight;
+  }
 }
 .notes-empty {
   margin: 0;

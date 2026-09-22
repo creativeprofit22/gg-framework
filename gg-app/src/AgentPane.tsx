@@ -1312,7 +1312,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // re-pins. Default true so a fresh transcript follows the newest output.
   const stickToBottomRef = useRef(true);
   const { ignoreRestoredScroll } = usePaneSwapViewState({
-    paneId, scrollRef, inputRef, stickToBottomRef, register: props.registerSwapViewState,
+    paneId,
+    scrollRef,
+    inputRef,
+    stickToBottomRef,
+    register: props.registerSwapViewState,
   });
 
   // Pin to the bottom. Images (screenshots / attachments) load asynchronously
@@ -5610,7 +5614,10 @@ const TranscriptRow = memo(function TranscriptRow({
         // Coder" in Ken's color (like a slash command shows `/name`), not the
         // full prompt body. The full body still went to GG Coder.
         return (
-          <div data-swap-row={item.id} className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}>
+          <div
+            data-swap-row={item.id}
+            className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}
+          >
             {item.queued && <span className="queued-pill">queued</span>}
             <span className="command-shimmer" style={{ color: theme.ken }}>
               Sent to {PRODUCT_DISPLAY_NAME}
@@ -5623,7 +5630,10 @@ const TranscriptRow = memo(function TranscriptRow({
         // phrase) with a highlight + shimmer sweep. The full expanded prompt
         // was sent to the agent. Labels read as prose, so drop the mono font.
         return (
-          <div data-swap-row={item.id} className={`user-msg command${item.label ? " labelled" : ""}`}>
+          <div
+            data-swap-row={item.id}
+            className={`user-msg command${item.label ? " labelled" : ""}`}
+          >
             <span className="command-shimmer" style={{ color: theme.commandColor }}>
               {item.label ?? item.text}
             </span>
@@ -5755,7 +5765,12 @@ const TranscriptRow = memo(function TranscriptRow({
     case "mcp_tool_failure": {
       const label = item.displayName ?? item.name.replace(/^mcp__/, "").replace("__", " / ");
       return (
-        <div className="line error" data-swap-row={item.id} role="status" aria-label={`Failed MCP tool: ${label}`}>
+        <div
+          className="line error"
+          data-swap-row={item.id}
+          role="status"
+          aria-label={`Failed MCP tool: ${label}`}
+        >
           <div style={{ color: theme.error, fontWeight: 600 }}>Failed</div>
           <div style={{ color: theme.text }}>{label}</div>
           <div style={{ color: theme.textDim, whiteSpace: "pre-wrap" }}>{item.result}</div>

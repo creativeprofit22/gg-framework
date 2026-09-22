@@ -446,7 +446,11 @@ export function NotesPhaseMoreControls(): ReactElement {
           >
             Archive phase
           </button>
-          {onDeletePhase && <button type="button" disabled={controlsDisabled} onClick={onDeletePhase}>Delete phase</button>}
+          {onDeletePhase && (
+            <button type="button" disabled={controlsDisabled} onClick={onDeletePhase}>
+              Delete phase
+            </button>
+          )}
         </div>
       </div>
     </>

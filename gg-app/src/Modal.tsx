@@ -75,11 +75,14 @@ export function Modal({
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     const backdrop = dialog?.parentElement;
-    const background = Array.from(document.body.children)
-      .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== backdrop);
+    const background = Array.from(document.body.children).filter(
+      (element): element is HTMLElement => element instanceof HTMLElement && element !== backdrop,
+    );
     for (const element of background) {
       const owner = modalInertOwners.get(element) ?? { count: 0, original: element.inert === true };
-      owner.count++; modalInertOwners.set(element, owner); element.inert = true;
+      owner.count++;
+      modalInertOwners.set(element, owner);
+      element.inert = true;
     }
     const initialFocus = dialog
       ? (availableModalElements(dialog, "[data-modal-initial-focus]")[0] ??
@@ -122,7 +125,10 @@ export function Modal({
       document.removeEventListener("keydown", onKey);
       for (const element of background) {
         const owner = modalInertOwners.get(element);
-        if (owner && --owner.count === 0) { element.inert = owner.original; modalInertOwners.delete(element); }
+        if (owner && --owner.count === 0) {
+          element.inert = owner.original;
+          modalInertOwners.delete(element);
+        }
       }
       returnFocus?.focus();
     };

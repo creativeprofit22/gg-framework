@@ -146,9 +146,10 @@ vi.mock("./useKenMentor", async (importOriginal) => {
 vi.mock("./useProgress", async (importOriginal) => {
   const actual = await importOriginal<typeof ProgressModule>();
   return {
-    useProgress: (client: PaneAgentClient) => nativeMocks.realProgress
-      ? actual.useProgress(client)
-      : { snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false },
+    useProgress: (client: PaneAgentClient) =>
+      nativeMocks.realProgress
+        ? actual.useProgress(client)
+        : { snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false },
   };
 });
 vi.mock("./useAgentEvents", async (importOriginal) => {
@@ -545,7 +546,9 @@ function client(paneId: string, generation: number): PaneAgentClient {
 }
 
 describe("authoritative progress celebrations", () => {
-  afterEach(() => { nativeMocks.realProgress = false; });
+  afterEach(() => {
+    nativeMocks.realProgress = false;
+  });
 
   it.each([
     [55, 56, false, false, false],
@@ -556,7 +559,10 @@ describe("authoritative progress celebrations", () => {
   ])("resolves %i → %i (rank=%s tier=%s reduced=%s)", async (from, to, rank, tier, reduced) => {
     nativeMocks.realProgress = true;
     vi.stubGlobal("matchMedia", (media: string) => ({
-      matches: reduced, media, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      matches: reduced,
+      media,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
     }));
     const pane = client("rank-events", 1);
     vi.mocked(pane.getState).mockResolvedValue(agentState("test"));
@@ -570,13 +576,20 @@ describe("authoritative progress celebrations", () => {
     const event = { ...progressTransition(from, to), origin: false };
     act(() => paneEvents(pane)({ type: "progress", data: event }));
     expect(nativeMocks.toast).toHaveBeenCalledWith(
-      rank ? `Rank up! → ${event.rankName}` : `Level up! → Level ${to}`, "success", 5200,
+      rank ? `Rank up! → ${event.rankName}` : `Level up! → Level ${to}`,
+      "success",
+      5200,
     );
     expect(Boolean(container.querySelector(".confetti-canvas"))).toBe(tier && !reduced);
     expect(playSound).not.toHaveBeenCalled();
     expect(container.querySelector(".rank-badge-celebrate")).toBeTruthy();
     act(() => paneEvents(pane)({ type: "progress", data: { ...event, origin: true } }));
-    act(() => paneEvents(pane)({ type: "progress", data: { ...event, ladder: [], levelUp: null, eventNonce: null } }));
+    act(() =>
+      paneEvents(pane)({
+        type: "progress",
+        data: { ...event, ladder: [], levelUp: null, eventNonce: null },
+      }),
+    );
     expect(nativeMocks.toast).toHaveBeenCalledTimes(1);
     expect(playSound).not.toHaveBeenCalled();
   });
@@ -590,9 +603,16 @@ describe("authoritative progress celebrations", () => {
     await act(async () => {});
     nativeMocks.toast.mockClear();
     vi.mocked(playSound).mockClear();
-    act(() => paneEvents(pane)({ type: "progress", data: {
-      ...progressTransition(55, 101), ladder: [], origin: true,
-    } }));
+    act(() =>
+      paneEvents(pane)({
+        type: "progress",
+        data: {
+          ...progressTransition(55, 101),
+          ladder: [],
+          origin: true,
+        },
+      }),
+    );
     expect(nativeMocks.toast).toHaveBeenCalledWith("Level up! → Level 101", "success", 5200);
     expect(container.querySelector(".confetti-canvas")).toBeNull();
     expect(playSound).toHaveBeenCalledWith("levelUp");
@@ -2485,50 +2505,108 @@ describe("AgentPane automatic update footer banner", () => {
 });
 
 describe("AgentPane swap reading anchors", () => {
-  it.each(["ken", "autopilot"] as const)("retains an unpinned long %s paragraph in both width directions among tool/message rows", async (kind) => {
-    const pane = client("pane-reading-anchor", 1);
-    const prose = "Reading this long paragraph should survive either width exchange. ".repeat(80);
-    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
-    vi.mocked(pane.listHistory).mockResolvedValue([
-      { role: "assistant", text: "", mcpToolFailure: { name: "mcp__fixture__tool", result: "Earlier tool failure" } },
-      { role: "assistant", text: prose, ...(kind === "ken" ? { ken: true } : { autopilot: { phase: "human" as const, reason: prose } }) },
-      { role: "assistant", text: "Later normal message" },
-    ]);
-    let view: PaneSwapViewState | null = null;
-    render(<AgentPane client={pane} target={target} registerSwapViewState={(_id, next) => { view = next; }} />);
-    await screen.findByText("Later normal message");
-    await waitFor(() => expect(document.querySelector(".ken-msg p")?.textContent).toBe(prose.trim()));
-    const scroll = document.querySelector<HTMLDivElement>(".transcript")!;
-    const row = scroll.querySelector<HTMLElement>(".ken-msg")!;
-    const text = row.querySelector("p")!.firstChild!;
-    Object.defineProperties(scroll, { scrollHeight: { configurable: true, value: 5000 }, clientHeight: { configurable: true, value: 200 } });
-    vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 200, width: 400, height: 200 } as DOMRect);
-    let columns = 40;
-    for (const el of scroll.children) {
-      vi.spyOn(el, "getBoundingClientRect").mockImplementation(() => el === row
-        ? ({ top: 100 - scroll.scrollTop, bottom: 4000 - scroll.scrollTop, width: columns * 8, height: 3900 } as DOMRect)
-        : ({ top: el === scroll.firstElementChild ? -200 : 4000, bottom: el === scroll.firstElementChild ? -100 : 4100, width: 400, height: 100 } as DOMRect));
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
-    Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: true, value: function(this: Range) {
-      if (this.startContainer !== text) return { top: -200, bottom: -100, width: 8, height: 100 };
-      const top = 100 + Math.floor(this.startOffset / columns) * 20 - scroll.scrollTop;
-      const bottom = 100 + (Math.floor(Math.max(this.startOffset, this.endOffset - 1) / columns) + 1) * 20 - scroll.scrollTop;
-      return { top, bottom, width: 8, height: bottom - top };
-    } });
-    try {
-      scroll.scrollTop = 300; fireEvent.scroll(scroll);
-      const narrow = view!.capture(); columns = 20; act(narrow);
-      expect(scroll.scrollTop).toBe(500);
-      const wide = view!.capture(); columns = 40; act(wide);
-      expect(scroll.scrollTop).toBe(300);
-      const missing = view!.capture(); row.remove(); scroll.scrollTop = 700; act(missing);
-      expect(scroll.scrollTop).toBe(300);
-    } finally {
-      if (descriptor) Object.defineProperty(Range.prototype, "getBoundingClientRect", descriptor);
-      else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
-    }
-  });
+  it.each(["ken", "autopilot"] as const)(
+    "retains an unpinned long %s paragraph in both width directions among tool/message rows",
+    async (kind) => {
+      const pane = client("pane-reading-anchor", 1);
+      const prose = "Reading this long paragraph should survive either width exchange. ".repeat(80);
+      vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+      vi.mocked(pane.listHistory).mockResolvedValue([
+        {
+          role: "assistant",
+          text: "",
+          mcpToolFailure: { name: "mcp__fixture__tool", result: "Earlier tool failure" },
+        },
+        {
+          role: "assistant",
+          text: prose,
+          ...(kind === "ken"
+            ? { ken: true }
+            : { autopilot: { phase: "human" as const, reason: prose } }),
+        },
+        { role: "assistant", text: "Later normal message" },
+      ]);
+      let view: PaneSwapViewState | null = null;
+      render(
+        <AgentPane
+          client={pane}
+          target={target}
+          registerSwapViewState={(_id, next) => {
+            view = next;
+          }}
+        />,
+      );
+      await screen.findByText("Later normal message");
+      await waitFor(() =>
+        expect(document.querySelector(".ken-msg p")?.textContent).toBe(prose.trim()),
+      );
+      const scroll = document.querySelector<HTMLDivElement>(".transcript")!;
+      const row = scroll.querySelector<HTMLElement>(".ken-msg")!;
+      const text = row.querySelector("p")!.firstChild!;
+      Object.defineProperties(scroll, {
+        scrollHeight: { configurable: true, value: 5000 },
+        clientHeight: { configurable: true, value: 200 },
+      });
+      vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue({
+        top: 0,
+        bottom: 200,
+        width: 400,
+        height: 200,
+      } as DOMRect);
+      let columns = 40;
+      for (const el of scroll.children) {
+        vi.spyOn(el, "getBoundingClientRect").mockImplementation(() =>
+          el === row
+            ? ({
+                top: 100 - scroll.scrollTop,
+                bottom: 4000 - scroll.scrollTop,
+                width: columns * 8,
+                height: 3900,
+              } as DOMRect)
+            : ({
+                top: el === scroll.firstElementChild ? -200 : 4000,
+                bottom: el === scroll.firstElementChild ? -100 : 4100,
+                width: 400,
+                height: 100,
+              } as DOMRect),
+        );
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+      Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+        configurable: true,
+        value: function (this: Range) {
+          if (this.startContainer !== text)
+            return { top: -200, bottom: -100, width: 8, height: 100 };
+          const top = 100 + Math.floor(this.startOffset / columns) * 20 - scroll.scrollTop;
+          const bottom =
+            100 +
+            (Math.floor(Math.max(this.startOffset, this.endOffset - 1) / columns) + 1) * 20 -
+            scroll.scrollTop;
+          return { top, bottom, width: 8, height: bottom - top };
+        },
+      });
+      try {
+        scroll.scrollTop = 300;
+        fireEvent.scroll(scroll);
+        const narrow = view!.capture();
+        columns = 20;
+        act(narrow);
+        expect(scroll.scrollTop).toBe(500);
+        const wide = view!.capture();
+        columns = 40;
+        act(wide);
+        expect(scroll.scrollTop).toBe(300);
+        const missing = view!.capture();
+        row.remove();
+        scroll.scrollTop = 700;
+        act(missing);
+        expect(scroll.scrollTop).toBe(300);
+      } finally {
+        if (descriptor) Object.defineProperty(Range.prototype, "getBoundingClientRect", descriptor);
+        else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+      }
+    },
+  );
 });
 
 describe("AgentPane lifecycle", () => {
@@ -3932,7 +4010,9 @@ describe("AgentPane lifecycle", () => {
     expect(
       await screen.findByText("Read-only project evidence despite unreadable settings."),
     ).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe("This request did not finish. You can retry it when the current work has stopped.");
+    expect(screen.getByRole("alert").textContent).toBe(
+      "This request did not finish. You can retry it when the current work has stopped.",
+    );
     const errorDetails = screen.getByText("Error details");
     expect(errorDetails.closest("details")!.open).toBe(false);
     fireEvent.click(errorDetails);
@@ -4009,11 +4089,19 @@ describe("AgentPane lifecycle", () => {
       act(() => emit("programmatic_assessment", { ...identity, phase: "completed", assessment }));
       act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
       expect(
-        await screen.findByRole("heading", { name: `Project assessment: ${status === "failed" ? "Incomplete" : status === "cancelled" ? "Cancelled" : "Unavailable"}` }),
+        await screen.findByRole("heading", {
+          name: `Project assessment: ${status === "failed" ? "Incomplete" : status === "cancelled" ? "Cancelled" : "Unavailable"}`,
+        }),
       ).toBeTruthy();
-      const details = within(screen.getByRole("region", { name: "Project assessment" })).getByText("Details");
+      const details = within(screen.getByRole("region", { name: "Project assessment" })).getByText(
+        "Details",
+      );
       if (!details.closest("details")!.open) fireEvent.click(details);
-      expect(screen.getByRole("heading", { name: `Saved checks: ${status === "failed" ? "Failed" : status === "cancelled" ? "Cancelled" : "Unavailable"}` })).toBeTruthy();
+      expect(
+        screen.getByRole("heading", {
+          name: `Saved checks: ${status === "failed" ? "Failed" : status === "cancelled" ? "Cancelled" : "Unavailable"}`,
+        }),
+      ).toBeTruthy();
       act(() =>
         emit("programmatic_assessment", {
           ...identity,
@@ -4146,24 +4234,42 @@ describe("AgentPane lifecycle", () => {
         );
         fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
         expect(
-          (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement)
-            .disabled,
+          (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
         ).toBe(false);
         expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
-        expect(document.activeElement).toBe(document.querySelector("[data-programmatic-selection]"));
+        expect(document.activeElement).toBe(
+          document.querySelector("[data-programmatic-selection]"),
+        );
         expect(screen.getByText("Browse suggested tasks (1)").closest("details")!.open).toBe(false);
-        expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(["report", "discover"]);
+        expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual([
+          "report",
+          "discover",
+        ]);
         vi.mocked(pane.programmatic).mockResolvedValueOnce({
-          version: 1, action: "review-candidate", ok: true,
-          candidateReview: { status: "prepared", candidate, summary: "Review prepared without execution" },
+          version: 1,
+          action: "review-candidate",
+          ok: true,
+          candidateReview: {
+            status: "prepared",
+            candidate,
+            summary: "Review prepared without execution",
+          },
         });
         fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
-        await waitFor(() => expect(pane.programmatic).toHaveBeenLastCalledWith({
-          version: 1, action: "review-candidate", intent: "review-only", source: "current",
-          assessmentId: candidate.assessmentId, candidateId: candidate.candidateId,
-          expectedRevision: candidate.revision,
-        }));
-        expect(await screen.findByText("Review prepared. Nothing has been created, changed or run.")).toBeTruthy();
+        await waitFor(() =>
+          expect(pane.programmatic).toHaveBeenLastCalledWith({
+            version: 1,
+            action: "review-candidate",
+            intent: "review-only",
+            source: "current",
+            assessmentId: candidate.assessmentId,
+            candidateId: candidate.candidateId,
+            expectedRevision: candidate.revision,
+          }),
+        );
+        expect(
+          await screen.findByText("Review prepared. Nothing has been created, changed or run."),
+        ).toBeTruthy();
         expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
       }
       expect(screen.queryByText(/Discovery is in progress/)).toBeNull();

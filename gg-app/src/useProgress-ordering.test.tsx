@@ -5,30 +5,56 @@ import type { ProgressSnapshot, SidecarEvent } from "./agent";
 import { useProgress } from "./useProgress";
 
 const initial: ProgressSnapshot = {
-  level: 14, rankName: "Compiler", tier: 3, tierName: "Builder", tierGlyph: "*",
-  effectId: "none", xp: 10000, xpIntoLevel: 0, xpForLevel: 1000, percent: 0,
+  level: 14,
+  rankName: "Compiler",
+  tier: 3,
+  tierName: "Builder",
+  tierGlyph: "*",
+  effectId: "none",
+  xp: 10000,
+  xpIntoLevel: 0,
+  xpForLevel: 1000,
+  percent: 0,
   streak: { current: 1, best: 1 },
   totals: { prompts: 1, commits: 0, linesShipped: 0, projects: 1 },
   xpBySource: { prompts: 10000, commits: 0, streakBonus: 0 },
-  memberSince: "2026-07-01T12:00:00Z", ladder: [], levelUp: null, eventNonce: "initial",
+  memberSince: "2026-07-01T12:00:00Z",
+  ladder: [],
+  levelUp: null,
+  eventNonce: "initial",
 };
 const live: ProgressSnapshot = {
-  ...initial, level: 15, rankName: "Operator", xp: 11000,
-  levelUp: { from: 14, to: 15, rankName: "Operator" }, eventNonce: "live", origin: true,
+  ...initial,
+  level: 15,
+  rankName: "Operator",
+  xp: 11000,
+  levelUp: { from: 14, to: 15, rankName: "Operator" },
+  eventNonce: "live",
+  origin: true,
 };
 
 function controlledClient() {
   let resolve!: (value: ProgressSnapshot) => void;
   let reject!: (error: Error) => void;
-  const pending = new Promise<ProgressSnapshot>((yes, no) => { resolve = yes; reject = no; });
+  const pending = new Promise<ProgressSnapshot>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
   let listener!: (event: SidecarEvent) => void;
   const unsubscribe = vi.fn();
   return {
     getProgress: () => pending,
-    subscribe: (callback: typeof listener) => { listener = callback; return unsubscribe; },
+    subscribe: (callback: typeof listener) => {
+      listener = callback;
+      return unsubscribe;
+    },
     emit: (data: unknown) => act(() => listener({ type: "progress", data } as SidecarEvent)),
-    resolve: async (value = initial) => { await act(async () => resolve(value)); },
-    reject: async () => { await act(async () => reject(new Error("Unavailable"))); },
+    resolve: async (value = initial) => {
+      await act(async () => resolve(value));
+    },
+    reject: async () => {
+      await act(async () => reject(new Error("Unavailable")));
+    },
     unsubscribe,
   };
 }

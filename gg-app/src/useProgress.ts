@@ -17,11 +17,15 @@ export interface LevelTransition extends LevelUpEvent {
 }
 
 // Resolve against the event's own ladder, never a later refreshed snapshot.
-function resolveTransition(event: LevelUpEvent, ladder: ProgressSnapshot["ladder"]): LevelTransition {
-  const atLevel = (level: number) => ladder.reduce<ProgressSnapshot["ladder"][number] | undefined>(
-    (best, entry) => entry.level <= level && (!best || entry.level > best.level) ? entry : best,
-    undefined,
-  );
+function resolveTransition(
+  event: LevelUpEvent,
+  ladder: ProgressSnapshot["ladder"],
+): LevelTransition {
+  const atLevel = (level: number) =>
+    ladder.reduce<ProgressSnapshot["ladder"][number] | undefined>(
+      (best, entry) => (entry.level <= level && (!best || entry.level > best.level) ? entry : best),
+      undefined,
+    );
   const from = atLevel(event.from);
   const to = atLevel(event.to);
   // Legacy/empty ladders cannot prove a rank or tier crossing.
@@ -42,7 +46,9 @@ export interface ProgressState {
   levelUpOrigin: boolean;
 }
 
-export function useProgress(client: Pick<PaneAgentClient, "getProgress" | "subscribe">): ProgressState {
+export function useProgress(
+  client: Pick<PaneAgentClient, "getProgress" | "subscribe">,
+): ProgressState {
   const [snapshot, setSnapshot] = useState<ProgressSnapshot | null>(null);
   const [levelUp, setLevelUp] = useState<LevelTransition | null>(null);
   const [levelUpNonce, setLevelUpNonce] = useState<string | null>(null);
@@ -61,7 +67,8 @@ export function useProgress(client: Pick<PaneAgentClient, "getProgress" | "subsc
     // Keep this local to the effect so replacement clients can initialize anew.
     let acceptedLiveProgress = false;
 
-    void client.getProgress()
+    void client
+      .getProgress()
       .then((snap) => {
         if (disposed || acceptedLiveProgress || !isProgressSnapshot(snap)) return;
         if (snap.eventNonce) seenNonces.current.add(snap.eventNonce);

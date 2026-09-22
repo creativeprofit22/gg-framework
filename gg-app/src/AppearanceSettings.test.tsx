@@ -6,17 +6,28 @@ import { appearance, APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE } from "./appear
 import { Modal } from "./Modal";
 
 let stop: () => void;
-beforeEach(() => { localStorage.clear(); stop = appearance.start(); act(() => appearance.reset()); });
-afterEach(() => { cleanup(); stop(); vi.restoreAllMocks(); });
+beforeEach(() => {
+  localStorage.clear();
+  stop = appearance.start();
+  act(() => appearance.reset());
+});
+afterEach(() => {
+  cleanup();
+  stop();
+  vi.restoreAllMocks();
+});
 
 describe("Appearance settings", () => {
   it("labels all seven independent controls and saves live", () => {
     render(<AppearanceSettings />);
     expect(screen.getAllByRole("combobox")).toHaveLength(7);
     const values = [
-      ["Theme", "light", "theme"], ["Prose size", "16", "size"],
-      ["Letter spacing", "normal", "tracking"], ["Paragraph spacing", "roomy", "paragraphs"],
-      ["Wide-pane reading width", "on", "cap"], ["Identity markers", "on", "markers"],
+      ["Theme", "light", "theme"],
+      ["Prose size", "16", "size"],
+      ["Letter spacing", "normal", "tracking"],
+      ["Paragraph spacing", "roomy", "paragraphs"],
+      ["Wide-pane reading width", "on", "cap"],
+      ["Identity markers", "on", "markers"],
       ["Streamed words", "crisp", "streaming"],
     ];
     for (const [label, value, field] of values) {
@@ -32,9 +43,15 @@ describe("Appearance settings", () => {
   it("updates after a storage event and resets only appearance", () => {
     localStorage.setItem("unrelated", "keep");
     render(<AppearanceSettings />);
-    act(() => window.dispatchEvent(new StorageEvent("storage", {
-      key: APPEARANCE_STORAGE_KEY, newValue: JSON.stringify({ theme: "light", markers: "on" }), storageArea: localStorage,
-    })));
+    act(() =>
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: APPEARANCE_STORAGE_KEY,
+          newValue: JSON.stringify({ theme: "light", markers: "on" }),
+          storageArea: localStorage,
+        }),
+      ),
+    );
     expect((screen.getByLabelText("Theme") as HTMLSelectElement).value).toBe("light");
     fireEvent.click(screen.getByRole("button", { name: "Reset appearance defaults" }));
     expect(appearance.getSnapshot().preferences).toEqual(DEFAULT_APPEARANCE);
@@ -42,23 +59,35 @@ describe("Appearance settings", () => {
   });
   it("shows a nonblocking failed-save status while keeping the choice", () => {
     render(<AppearanceSettings />);
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
     fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
     expect(screen.getByRole("status").textContent).toContain("could not be saved");
     expect((screen.getByLabelText("Theme") as HTMLSelectElement).value).toBe("light");
   });
   it("uses the existing modal focus trap, Escape, focus return and body portal", () => {
-    const opener = document.createElement("button"); document.body.append(opener); opener.focus();
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
     const close = vi.fn();
-    const view = render(<Modal title="Settings" onClose={close}><AppearanceSettings /></Modal>);
+    const view = render(
+      <Modal title="Settings" onClose={close}>
+        <AppearanceSettings />
+      </Modal>,
+    );
     const dialog = screen.getByRole("dialog", { name: "Settings" });
     expect(dialog.parentElement?.parentElement).toBe(document.body);
     const reset = screen.getByRole("button", { name: "Reset appearance defaults" });
-    reset.focus(); fireEvent.keyDown(document, { key: "Tab" });
+    reset.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(reset);
-    fireEvent.keyDown(document, { key: "Escape" }); expect(close).toHaveBeenCalledOnce();
-    view.unmount(); expect(document.activeElement).toBe(opener); opener.remove();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(close).toHaveBeenCalledOnce();
+    view.unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
   });
 });

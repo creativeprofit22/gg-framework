@@ -12,8 +12,13 @@ const choices = {
 } as const;
 export type Appearance = { [K in keyof typeof choices]: (typeof choices)[K][number] };
 export const DEFAULT_APPEARANCE: Readonly<Appearance> = Object.freeze({
-  theme: "dark", size: "15", tracking: "current", paragraphs: "current",
-  cap: "off", markers: "off", streaming: "current",
+  theme: "dark",
+  size: "15",
+  tracking: "current",
+  paragraphs: "current",
+  cap: "off",
+  markers: "off",
+  streaming: "current",
 });
 const fields = Object.keys(choices) as (keyof Appearance)[];
 export interface AppearanceSnapshot {
@@ -29,12 +34,18 @@ export function parseAppearance(raw: string | null): Appearance {
     if (!value || typeof value !== "object" || Array.isArray(value)) return result;
     for (const field of fields) {
       const candidate = Object.prototype.hasOwnProperty.call(value, field)
-        ? (value as Record<string, unknown>)[field] : undefined;
-      if (typeof candidate === "string" && (choices[field] as readonly string[]).includes(candidate)) {
+        ? (value as Record<string, unknown>)[field]
+        : undefined;
+      if (
+        typeof candidate === "string" &&
+        (choices[field] as readonly string[]).includes(candidate)
+      ) {
         Object.assign(result, { [field]: candidate });
       }
     }
-  } catch { /* Malformed records use defaults; never repair-write during loading. */ }
+  } catch {
+    /* Malformed records use defaults; never repair-write during loading. */
+  }
   return result;
 }
 
@@ -46,7 +57,7 @@ export function applyAppearance(root: HTMLElement, appearance: Readonly<Appearan
 
 export function createAppearanceOwner(host: Window, root: HTMLElement, transient = false) {
   const listeners = new Set<() => void>();
-  const captures = new Set<() => (() => void)>();
+  const captures = new Set<() => () => void>();
   let turnRestores: (() => void)[] | undefined;
   let unsaved: Partial<Appearance> = {};
   let snapshot: AppearanceSnapshot = { preferences: DEFAULT_APPEARANCE, persistenceWarning: null };
@@ -61,9 +72,11 @@ export function createAppearanceOwner(host: Window, root: HTMLElement, transient
       turnRestores = [...captures].map((capture) => capture());
       // Several synchronous preference changes are one reflow transaction.
       // Re-capturing between them can choose a newly exposed preceding line.
-      queueMicrotask(() => { turnRestores = undefined; });
+      queueMicrotask(() => {
+        turnRestores = undefined;
+      });
     }
-    const restores = changed && !transient ? turnRestores ?? [] : [];
+    const restores = changed && !transient ? (turnRestores ?? []) : [];
     snapshot = Object.freeze({ preferences: Object.freeze(preferences), persistenceWarning });
     if (!transient) applyAppearance(root, preferences);
     restores.forEach((restore) => restore());
@@ -72,19 +85,31 @@ export function createAppearanceOwner(host: Window, root: HTMLElement, transient
   const start = (): (() => void) => {
     if (stop) return stop;
     if (transient) return () => {};
-    try { publish(read(), null); }
-    catch { publish({ ...DEFAULT_APPEARANCE }, "Appearance storage is unavailable. Changes apply only in this window."); }
+    try {
+      publish(read(), null);
+    } catch {
+      publish(
+        { ...DEFAULT_APPEARANCE },
+        "Appearance storage is unavailable. Changes apply only in this window.",
+      );
+    }
     applyAppearance(root, snapshot.preferences);
     const onStorage = (event: StorageEvent) => {
       if (event.key !== null && event.key !== APPEARANCE_STORAGE_KEY) return;
-      try { if (event.storageArea && event.storageArea !== host.localStorage) return; }
-      catch { return; }
+      try {
+        if (event.storageArea && event.storageArea !== host.localStorage) return;
+      } catch {
+        return;
+      }
       // Removal/clear resets preferences. Never echo another window's write.
       unsaved = {};
       publish(parseAppearance(event.key === null ? null : event.newValue), null);
     };
     host.addEventListener("storage", onStorage);
-    stop = () => { host.removeEventListener("storage", onStorage); stop = undefined; };
+    stop = () => {
+      host.removeEventListener("storage", onStorage);
+      stop = undefined;
+    };
     return stop;
   };
   const update = (patch: Partial<Appearance>) => {
@@ -92,15 +117,25 @@ export function createAppearanceOwner(host: Window, root: HTMLElement, transient
     for (const field of fields) {
       if (Object.prototype.hasOwnProperty.call(patch, field)) {
         const candidate = patch[field];
-        if (typeof candidate === "string" && (choices[field] as readonly string[]).includes(candidate)) {
+        if (
+          typeof candidate === "string" &&
+          (choices[field] as readonly string[]).includes(candidate)
+        ) {
           Object.assign(valid, { [field]: candidate });
         }
       }
     }
     if (!Object.keys(valid).length) return;
-    if (transient) { publish({ ...snapshot.preferences, ...valid }, null); return; }
+    if (transient) {
+      publish({ ...snapshot.preferences, ...valid }, null);
+      return;
+    }
     let latest = snapshot.preferences;
-    try { latest = read(); } catch { /* Keep the session choice if storage is denied. */ }
+    try {
+      latest = read();
+    } catch {
+      /* Keep the session choice if storage is denied. */
+    }
     const next = { ...latest, ...unsaved, ...valid };
     let warning: string | null = null;
     try {
@@ -113,15 +148,29 @@ export function createAppearanceOwner(host: Window, root: HTMLElement, transient
     publish(next, warning);
   };
   return {
-    start, update,
+    start,
+    update,
     reset: () => update({ ...DEFAULT_APPEARANCE }),
     getSnapshot: () => snapshot,
-    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    beforeApply: (capture: () => (() => void)) => { captures.add(capture); return () => { captures.delete(capture); }; },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    beforeApply: (capture: () => () => void) => {
+      captures.add(capture);
+      return () => {
+        captures.delete(capture);
+      };
+    },
   };
 }
 
 // Preview comparisons have their own temporary owner and must neither read nor
 // write saved preferences. The normal and What's New entries share this owner.
-export const appearance = createAppearanceOwner(window, document.documentElement,
-  import.meta.env.DEV && window.location.pathname === "/__chat-design-preview");
+export const appearance = createAppearanceOwner(
+  window,
+  document.documentElement,
+  import.meta.env.DEV && window.location.pathname === "/__chat-design-preview",
+);

@@ -215,7 +215,10 @@ export function NotesModalContent({
   onHandoffPresented,
 }: Props): React.ReactElement {
   const deletion = usePhaseDeletion(expectedProjectKey, phaseDeletionBridge);
-  const deletePhase = (id: string) => { const phase = phases.find(p => p.id === id); if (phase) void deletion.begin(phase, "delete"); };
+  const deletePhase = (id: string) => {
+    const phase = phases.find((p) => p.id === id);
+    if (phase) void deletion.begin(phase, "delete");
+  };
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
   const tabRefs = useRef<Record<NotesTab, HTMLButtonElement | null>>({
@@ -268,11 +271,23 @@ export function NotesModalContent({
   return (
     <div className="notes-shell">
       <NotesPhaseDeletionDialog controller={deletion} />
-      {deletion.success && <div className="notes-phase-deletion-feedback">
-        <p role="status">{deletion.success.message}</p>
-        {deletion.success.deletionId && <button type="button" className="notes-roadmap-new" onClick={() => void deletion.undo()}>Undo</button>}
-        <button type="button" className="notes-roadmap-new" onClick={deletion.clearSuccess}>Dismiss message</button>
-      </div>}
+      {deletion.success && (
+        <div className="notes-phase-deletion-feedback">
+          <p role="status">{deletion.success.message}</p>
+          {deletion.success.deletionId && (
+            <button
+              type="button"
+              className="notes-roadmap-new"
+              onClick={() => void deletion.undo()}
+            >
+              Undo
+            </button>
+          )}
+          <button type="button" className="notes-roadmap-new" onClick={deletion.clearSuccess}>
+            Dismiss message
+          </button>
+        </div>
+      )}
       <div className="notes-shell-status">{persistenceStatus}</div>
       <div className="notes-tabs-scroll">
         <div
@@ -474,8 +489,16 @@ export function NotesModalContent({
               aria-labelledby="notes-archive-heading"
             >
               <h2 id="notes-archive-heading">Done / Archive</h2>
-              <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} onDeletePhase={deletePhase} />
-              <NotesDeletedPhases phases={phases} onRecover={phase => void deletion.begin(phase, "recover")} disabled={deletion.pending} />
+              <NotesRoadmapArchive
+                phases={phases}
+                onRestorePhase={onRestorePhase}
+                onDeletePhase={deletePhase}
+              />
+              <NotesDeletedPhases
+                phases={phases}
+                onRecover={(phase) => void deletion.begin(phase, "recover")}
+                disabled={deletion.pending}
+              />
               <h3 className="notes-archive-task-heading">Notes tasks</h3>
               <button
                 type="button"

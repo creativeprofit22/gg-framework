@@ -158,7 +158,9 @@ export function NotesRoadmap({
   onActionSuccess,
   onReconciliationSuccess,
 }: RoadmapProps): React.ReactElement {
-  const visiblePhases = phases.filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt === null);
+  const visiblePhases = phases.filter(
+    (phase) => isNotesPhasePresent(phase) && phase.archivedAt === null,
+  );
   const currentTime = useRoadmapCurrentTime(phases);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedPhaseId);
   const [showCreate, setShowCreate] = useState(false);
@@ -680,8 +682,14 @@ export function NotesRoadmap({
   );
 }
 
-export function NotesRoadmapArchive({ phases, onRestorePhase, onDeletePhase }: ArchiveProps): React.ReactElement {
-  const archivedPhases = phases.filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt !== null);
+export function NotesRoadmapArchive({
+  phases,
+  onRestorePhase,
+  onDeletePhase,
+}: ArchiveProps): React.ReactElement {
+  const archivedPhases = phases.filter(
+    (phase) => isNotesPhasePresent(phase) && phase.archivedAt !== null,
+  );
   const [announcement, setAnnouncement] = useState("");
   return (
     <div className="notes-phase-archive">
@@ -723,7 +731,15 @@ export function NotesRoadmapArchive({ phases, onRestorePhase, onDeletePhase }: A
                 >
                   Restore
                 </button>
-                {onDeletePhase && <button type="button" onClick={() => onDeletePhase(phase.id)} aria-label={`Delete phase: ${phase.title}`}>Delete phase</button>}
+                {onDeletePhase && (
+                  <button
+                    type="button"
+                    onClick={() => onDeletePhase(phase.id)}
+                    aria-label={`Delete phase: ${phase.title}`}
+                  >
+                    Delete phase
+                  </button>
+                )}
               </li>
             );
           })}
@@ -741,7 +757,9 @@ function useRoadmapCurrentTime(phases: NotesPhase[]): Date {
     () =>
       phases
         .flatMap((phase) =>
-          isNotesPhasePresent(phase) && phase.archivedAt === null && phase.reminder ? [Date.parse(phase.reminder.dueAt)] : [],
+          isNotesPhasePresent(phase) && phase.archivedAt === null && phase.reminder
+            ? [Date.parse(phase.reminder.dueAt)]
+            : [],
         )
         .filter(Number.isFinite)
         .sort((left, right) => left - right),

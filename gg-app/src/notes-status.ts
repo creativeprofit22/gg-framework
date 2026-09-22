@@ -7,7 +7,10 @@ export function getUnfinishedNotesTaskCount(document: NotesDocumentV3): number {
 
 export function getSavedPromptCount(document: NotesDocumentV3): number {
   return document.phases.filter(
-    (phase) => isNotesPhasePresent(phase) && phase.archivedAt === null && phase.sourcePrompt.trim().length > 0,
+    (phase) =>
+      isNotesPhasePresent(phase) &&
+      phase.archivedAt === null &&
+      phase.sourcePrompt.trim().length > 0,
   ).length;
 }
 
@@ -23,13 +26,19 @@ function isActivePhase(status: NotesDocumentV3["phases"][number]["status"]): boo
 }
 
 export function getActiveNotesPhaseCount(document: NotesDocumentV3): number {
-  return document.phases.filter((phase) => isNotesPhasePresent(phase) && phase.archivedAt === null && isActivePhase(phase.status))
-    .length;
+  return document.phases.filter(
+    (phase) =>
+      isNotesPhasePresent(phase) && phase.archivedAt === null && isActivePhase(phase.status),
+  ).length;
 }
 
 export function getActiveNotesReminderCount(document: NotesDocumentV3): number {
   return document.phases.filter(
-    (phase) => isNotesPhasePresent(phase) && phase.archivedAt === null && isActivePhase(phase.status) && phase.reminder !== null,
+    (phase) =>
+      isNotesPhasePresent(phase) &&
+      phase.archivedAt === null &&
+      isActivePhase(phase.status) &&
+      phase.reminder !== null,
   ).length;
 }
 
@@ -37,7 +46,8 @@ export function getDueNotesReminderCount(document: NotesDocumentV3): number {
   return document.phases.filter((phase) => {
     const reminder = phase.reminder;
     return (
-      isNotesPhasePresent(phase) && phase.archivedAt === null &&
+      isNotesPhasePresent(phase) &&
+      phase.archivedAt === null &&
       isActivePhase(phase.status) &&
       reminder !== null &&
       reminder.lastDelivery?.occurrenceKey === reminder.occurrenceKey

@@ -5,7 +5,11 @@ import { AgentPane, type AgentPaneProps } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";
 import { PaneSwapButton } from "./PaneSwapButton";
-import { PANE_SWAP_HELP_ID, PANE_SWAP_CLOSING_REASON, type WorkspacePaneSwaps } from "./useWorkspacePaneSwaps";
+import {
+  PANE_SWAP_HELP_ID,
+  PANE_SWAP_CLOSING_REASON,
+  type WorkspacePaneSwaps,
+} from "./useWorkspacePaneSwaps";
 import {
   MAX_SPLIT_RATIO,
   MIN_SPLIT_RATIO,
@@ -61,7 +65,6 @@ export interface WorkspaceNodeProps {
     ratio: number,
   ) => void;
 }
-
 
 function isPaneDragHandle(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest(".pane-drag-handle") !== null;
@@ -191,10 +194,22 @@ function WorkspaceAgentLeaf({
 
   const registerHost = swaps?.registerHost;
   const registerButton = swaps?.registerButton;
-  const hostRef = useCallback((el: HTMLElement | null) => registerHost?.(paneId, el), [paneId, registerHost]);
-  const buttonRef = useCallback((el: HTMLButtonElement | null) => registerButton?.(paneId, el), [paneId, registerButton]);
-  const leftSwapRef = useCallback((el: HTMLButtonElement | null) => registerButton?.(`${paneId}:left`, el), [paneId, registerButton]);
-  const rightSwapRef = useCallback((el: HTMLButtonElement | null) => registerButton?.(`${paneId}:right`, el), [paneId, registerButton]);
+  const hostRef = useCallback(
+    (el: HTMLElement | null) => registerHost?.(paneId, el),
+    [paneId, registerHost],
+  );
+  const buttonRef = useCallback(
+    (el: HTMLButtonElement | null) => registerButton?.(paneId, el),
+    [paneId, registerButton],
+  );
+  const leftSwapRef = useCallback(
+    (el: HTMLButtonElement | null) => registerButton?.(`${paneId}:left`, el),
+    [paneId, registerButton],
+  );
+  const rightSwapRef = useCallback(
+    (el: HTMLButtonElement | null) => registerButton?.(`${paneId}:right`, el),
+    [paneId, registerButton],
+  );
   const swapRow = swaps?.rows.get(paneId);
   return (
     <section
@@ -248,53 +263,87 @@ function WorkspaceAgentLeaf({
           onReject={onPaneDropReject}
         />
       )}
-        <div className="workspace-pane-actions" aria-label="Pane actions">
-          {focused && <>
-          <button
-            type="button"
-            aria-label="Copy to New Window"
-            title="Copy to New Window"
-            disabled={copyingPaneId !== null}
-            onClick={() => onCopyPane(paneId)}
-          >
-            <CopyPlus size={15} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            aria-label="Split Right"
-            title="Split Right"
-            disabled={!canSplit}
-            onClick={() => onSplitPane(paneId, "horizontal")}
-          >
-            <PanelRight size={15} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            aria-label="Split Down"
-            title="Split Down"
-            disabled={!canSplit}
-            onClick={() => onSplitPane(paneId, "vertical")}
-          >
-            <PanelBottom size={15} aria-hidden="true" />
-          </button>
-          </>}
-          {swaps && swapRow?.available && !closingPaneIds.has(paneId) && (
-            swapRow.middleId !== paneId ?
-              <PaneSwapButton paneId={paneId} label={`conversation ${paneId}`} helpId={PANE_SWAP_HELP_ID}
-                unavailableReason={closingPaneIds.has(swapRow.middleId) ? PANE_SWAP_CLOSING_REASON : undefined}
-                buttonRef={buttonRef} onSwap={swaps.swap} /> :
-              <>
-                {swapRow.paneIds.indexOf(paneId) > 0 && <PaneSwapButton paneId={paneId} direction="left"
-                  label={`conversation ${paneId}`} helpId={PANE_SWAP_HELP_ID} buttonRef={leftSwapRef}
-                  unavailableReason={closingPaneIds.has(swapRow.paneIds[swapRow.paneIds.indexOf(paneId) - 1]) ? PANE_SWAP_CLOSING_REASON : undefined}
-                  onSwap={(id, _button, keyboard) => swaps.swapFromMiddle(id, "left", keyboard)} />}
-                {swapRow.paneIds.indexOf(paneId) < swapRow.paneIds.length - 1 && <PaneSwapButton paneId={paneId} direction="right"
-                  label={`conversation ${paneId}`} helpId={PANE_SWAP_HELP_ID} buttonRef={rightSwapRef}
-                  unavailableReason={closingPaneIds.has(swapRow.paneIds[swapRow.paneIds.indexOf(paneId) + 1]) ? PANE_SWAP_CLOSING_REASON : undefined}
-                  onSwap={(id, _button, keyboard) => swaps.swapFromMiddle(id, "right", keyboard)} />}
-              </>
-          )}
-        </div>
+      <div className="workspace-pane-actions" aria-label="Pane actions">
+        {focused && (
+          <>
+            <button
+              type="button"
+              aria-label="Copy to New Window"
+              title="Copy to New Window"
+              disabled={copyingPaneId !== null}
+              onClick={() => onCopyPane(paneId)}
+            >
+              <CopyPlus size={15} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              aria-label="Split Right"
+              title="Split Right"
+              disabled={!canSplit}
+              onClick={() => onSplitPane(paneId, "horizontal")}
+            >
+              <PanelRight size={15} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              aria-label="Split Down"
+              title="Split Down"
+              disabled={!canSplit}
+              onClick={() => onSplitPane(paneId, "vertical")}
+            >
+              <PanelBottom size={15} aria-hidden="true" />
+            </button>
+          </>
+        )}
+        {swaps &&
+          swapRow?.available &&
+          !closingPaneIds.has(paneId) &&
+          (swapRow.middleId !== paneId ? (
+            <PaneSwapButton
+              paneId={paneId}
+              label={`conversation ${paneId}`}
+              helpId={PANE_SWAP_HELP_ID}
+              unavailableReason={
+                closingPaneIds.has(swapRow.middleId) ? PANE_SWAP_CLOSING_REASON : undefined
+              }
+              buttonRef={buttonRef}
+              onSwap={swaps.swap}
+            />
+          ) : (
+            <>
+              {swapRow.paneIds.indexOf(paneId) > 0 && (
+                <PaneSwapButton
+                  paneId={paneId}
+                  direction="left"
+                  label={`conversation ${paneId}`}
+                  helpId={PANE_SWAP_HELP_ID}
+                  buttonRef={leftSwapRef}
+                  unavailableReason={
+                    closingPaneIds.has(swapRow.paneIds[swapRow.paneIds.indexOf(paneId) - 1])
+                      ? PANE_SWAP_CLOSING_REASON
+                      : undefined
+                  }
+                  onSwap={(id, _button, keyboard) => swaps.swapFromMiddle(id, "left", keyboard)}
+                />
+              )}
+              {swapRow.paneIds.indexOf(paneId) < swapRow.paneIds.length - 1 && (
+                <PaneSwapButton
+                  paneId={paneId}
+                  direction="right"
+                  label={`conversation ${paneId}`}
+                  helpId={PANE_SWAP_HELP_ID}
+                  buttonRef={rightSwapRef}
+                  unavailableReason={
+                    closingPaneIds.has(swapRow.paneIds[swapRow.paneIds.indexOf(paneId) + 1])
+                      ? PANE_SWAP_CLOSING_REASON
+                      : undefined
+                  }
+                  onSwap={(id, _button, keyboard) => swaps.swapFromMiddle(id, "right", keyboard)}
+                />
+              )}
+            </>
+          ))}
+      </div>
       {paneId !== PRIMARY_PANE_ID && (
         <button
           type="button"

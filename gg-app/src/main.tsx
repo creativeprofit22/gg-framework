@@ -18,12 +18,16 @@ import "./appearance.css";
 // Apply saved document-wide preferences before either React entry renders.
 const stopAppearance = appearance.start();
 const stopNativeAppearance = startNativeAppearance();
-const stopAppearanceServices = () => { stopNativeAppearance(); stopAppearance(); };
+const stopAppearanceServices = () => {
+  stopNativeAppearance();
+  stopAppearance();
+};
 window.addEventListener("pagehide", stopAppearanceServices, { once: true });
-if (import.meta.hot) import.meta.hot.dispose(() => {
-  window.removeEventListener("pagehide", stopAppearanceServices);
-  stopAppearanceServices();
-});
+if (import.meta.hot)
+  import.meta.hot.dispose(() => {
+    window.removeEventListener("pagehide", stopAppearanceServices);
+    stopAppearanceServices();
+  });
 
 // Release history belongs to the notes window, not every workspace's startup.
 const WhatsNewWindow = lazy(() =>

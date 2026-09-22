@@ -17,9 +17,10 @@ export function RankBadge({
   if (!snapshot) return null;
   const atMaxLevel = snapshot.maxLevel !== undefined && snapshot.level >= snapshot.maxLevel;
   // Legacy producers do not identify their cap; never guess from a denominator sentinel.
-  const progress = snapshot.maxLevel === undefined || atMaxLevel
-    ? `${atMaxLevel ? "Maximum level · " : ""}${new Intl.NumberFormat().format(snapshot.xp)} lifetime XP`
-    : `${snapshot.xpIntoLevel}/${snapshot.xpForLevel} XP to next`;
+  const progress =
+    snapshot.maxLevel === undefined || atMaxLevel
+      ? `${atMaxLevel ? "Maximum level · " : ""}${new Intl.NumberFormat().format(snapshot.xp)} lifetime XP`
+      : `${snapshot.xpIntoLevel}/${snapshot.xpForLevel} XP to next`;
   const title = `${snapshot.rankName} — Level ${snapshot.level} · ${progress}`;
   const cls = className ? `rank-badge ${className}` : "rank-badge";
   return (

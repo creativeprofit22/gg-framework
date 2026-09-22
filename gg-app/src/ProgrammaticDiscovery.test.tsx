@@ -156,7 +156,11 @@ it.each(["dismissed", "completed"] as const)(
       offset: 0,
     });
     view.rerender(<ProgrammaticChat {...props} state={state} />);
-    expect(screen.getByText(`Recorded decision: ${decision === "completed" ? "Marked complete" : "Dismissed"}`)).toBeTruthy();
+    expect(
+      screen.getByText(
+        `Recorded decision: ${decision === "completed" ? "Marked complete" : "Dismissed"}`,
+      ),
+    ).toBeTruthy();
     expect(state.candidateStale).toBe(true);
     expect(props.onAction.mock.calls.map(([request]) => request.action)).toEqual([
       "history-detail",
@@ -243,10 +247,11 @@ it.each([51, 100, 101])(
       expect(state.historyDetail).toBe(detail);
       expect(state.candidateDetail).toBe(candidate);
       expect(state.candidateStale).toBe(true);
-      expect(screen.getByText("New automation would need to be built (saved suggestion)")).toBeTruthy();
       expect(
-        (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement)
-          .disabled,
+        screen.getByText("New automation would need to be built (saved suggestion)"),
+      ).toBeTruthy();
+      expect(
+        (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
       ).toBe(true);
       expect(
         (screen.getByRole("button", { name: "Previous history" }) as HTMLButtonElement).disabled,
@@ -302,21 +307,37 @@ const candidate: DiscoveryCandidate = {
   nextStep: { available: true, reason: "Creation needs separate approval" },
 };
 it("shows one complete task explanation and visible consequences before review", () => {
-  const item = { ...candidate, outcome: "Check release notes against shipped changes", rationale: "Compare release notes with recent changes so missing user-facing fixes can be reviewed before release.", risks: ["The comparison may send selected project text to the configured provider."] };
+  const item = {
+    ...candidate,
+    outcome: "Check release notes against shipped changes",
+    rationale:
+      "Compare release notes with recent changes so missing user-facing fixes can be reviewed before release.",
+    risks: ["The comparison may send selected project text to the configured provider."],
+  };
   const props = fixture(item);
-  const state = programmaticChatReducer(props.state, { type: "select-candidate", source: "current", id: item.candidateId });
+  const state = programmaticChatReducer(props.state, {
+    type: "select-candidate",
+    source: "current",
+    id: item.candidateId,
+  });
   render(<ProgrammaticChat {...props} state={state} />);
   expect(screen.getAllByText(item.rationale)).toHaveLength(1);
   expect(screen.getByText(item.risks[0]).closest("details")).toBeNull();
   expect(screen.getByText(`Scope: ${item.workflow.scope}`).closest("details")).toBeNull();
-  expect(screen.getByText(`Proposed changes, not permission: ${item.workflow.mutationBoundary}`).closest("details")).toBeNull();
+  expect(
+    screen
+      .getByText(`Proposed changes, not permission: ${item.workflow.mutationBoundary}`)
+      .closest("details"),
+  ).toBeNull();
   expect(screen.getByText(item.details[0]).closest("details")).toBeNull();
   const listSummary = screen.getByText("Browse suggested tasks (1)");
   const list = listSummary.closest("details")!;
   expect(list.open).toBe(false);
   fireEvent.click(listSummary);
   expect(list.open).toBe(true);
-  expect((screen.getByRole("button", { name: item.outcome })).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: item.outcome }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
   expect(screen.getAllByText("New automation would need to be built")).toHaveLength(1);
   const selectedRegion = screen.getByRole("region", { name: "Selected opportunity" });
   const technical = within(selectedRegion).getByText("Details").closest("details")!;
@@ -324,18 +345,35 @@ it("shows one complete task explanation and visible consequences before review",
   expect(within(technical).getByText(`Success check: ${item.workflow.successCheck}`)).toBeTruthy();
   expect(props.onAction).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
-  expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "review-candidate", intent: "review-only", source: "current", assessmentId: item.assessmentId, candidateId: item.candidateId, expectedRevision: item.revision });
+  expect(props.onAction).toHaveBeenCalledExactlyOnceWith({
+    version: 1,
+    action: "review-candidate",
+    intent: "review-only",
+    source: "current",
+    assessmentId: item.assessmentId,
+    candidateId: item.candidateId,
+    expectedRevision: item.revision,
+  });
   expect(props.onRun).not.toHaveBeenCalled();
 });
 
 it("offers explicit fresh discovery for stale suggestions without retrying automatically", () => {
   const props = fixture();
   const selected = programmaticChatReducer(props.state, {
-    type: "select-candidate", source: "current", id: candidate.candidateId,
+    type: "select-candidate",
+    source: "current",
+    id: candidate.candidateId,
   });
-  render(<ProgrammaticChat {...props} state={{ ...selected, candidateStale: true, discoveryStale: true }} />);
+  render(
+    <ProgrammaticChat
+      {...props}
+      state={{ ...selected, candidateStale: true, discoveryStale: true }}
+    />,
+  );
   expect(props.onAction).not.toHaveBeenCalled();
-  expect((screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(
+    (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
+  ).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Check again" }));
   expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "discover" });
 });
@@ -472,9 +510,10 @@ it.each([
   });
   const { rerender } = render(<ProgrammaticChat {...props} state={selected} />);
   expect(screen.getByRole("region", { name: "Selected opportunity" })).toBeTruthy();
-  const reviewName = choice === "reuse-command" || choice === "extend-command"
-    ? "Reinspect command (read-only)"
-    : "Review this task";
+  const reviewName =
+    choice === "reuse-command" || choice === "extend-command"
+      ? "Reinspect command (read-only)"
+      : "Review this task";
   if (choice === "manual") {
     expect(screen.queryByRole("button", { name: reviewName })).toBeNull();
   } else {
@@ -516,12 +555,18 @@ it("retains user selection and focus through unrelated rerenders without automat
   expect(props.onAction).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: candidate.outcome }));
   expect(props.onSelectCandidate).toHaveBeenCalledExactlyOnceWith("current", candidate.candidateId);
-  const selected = programmaticChatReducer(props.state, { type: "select-candidate", source: "current", id: candidate.candidateId });
+  const selected = programmaticChatReducer(props.state, {
+    type: "select-candidate",
+    source: "current",
+    id: candidate.candidateId,
+  });
   view.rerender(<ProgrammaticChat {...props} state={selected} />);
   const target = document.querySelector("[data-programmatic-selection]");
   expect(document.activeElement).toBe(target);
   expect(screen.getByText("Browse suggested tasks (1)").closest("details")!.open).toBe(false);
-  view.rerender(<ProgrammaticChat {...props} state={{ ...selected, notice: "Unrelated update" }} />);
+  view.rerender(
+    <ProgrammaticChat {...props} state={{ ...selected, notice: "Unrelated update" }} />,
+  );
   expect(document.querySelector("[data-programmatic-selection]")).toBe(target);
   expect(document.activeElement).toBe(target);
   expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
@@ -532,11 +577,28 @@ it("retains user selection and focus through unrelated rerenders without automat
 
 it("keeps uncertain discovery inert with an explicit retry and original error details", () => {
   const props = fixture();
-  const selected = programmaticChatReducer(props.state, { type: "select-candidate", source: "current", id: candidate.candidateId });
+  const selected = programmaticChatReducer(props.state, {
+    type: "select-candidate",
+    source: "current",
+    id: candidate.candidateId,
+  });
   const error = "Transport failed <b>not confirmed</b>";
-  render(<ProgrammaticChat {...props} state={{ ...selected, assessmentUncertain: true, discoveryStale: true, candidateStale: true, error }} />);
+  render(
+    <ProgrammaticChat
+      {...props}
+      state={{
+        ...selected,
+        assessmentUncertain: true,
+        discoveryStale: true,
+        candidateStale: true,
+        error,
+      }}
+    />,
+  );
   expect(screen.getByText(/Discovery completion could not be confirmed/)).toBeTruthy();
-  expect(screen.getByRole("alert").textContent).toBe("This request did not finish. You can retry it when the current work has stopped.");
+  expect(screen.getByRole("alert").textContent).toBe(
+    "This request did not finish. You can retry it when the current work has stopped.",
+  );
   const summary = screen.getByText("Error details");
   expect(summary.closest("details")!.open).toBe(false);
   fireEvent.click(summary);
@@ -711,7 +773,9 @@ it.each(["incomplete", "cancelled", "refreshing"] as const)(
     expect(screen.queryByText(/No worthwhile need was identified/)).toBeNull();
     expect(screen.getByText(/These suggestions are from an earlier check/)).toBeTruthy();
     expect(
-      screen.getByText(`Project assessment: ${status === "refreshing" ? "Finished" : status === "cancelled" ? "Cancelled" : "Incomplete"}`),
+      screen.getByText(
+        `Project assessment: ${status === "refreshing" ? "Finished" : status === "cancelled" ? "Cancelled" : "Incomplete"}`,
+      ),
     ).toBeTruthy();
   },
 );

@@ -420,35 +420,60 @@ afterEach(() => cleanup());
 
 describe("useProjectNotes sidecar authority", () => {
   it("waits for queued edits before preparing a destructive confirmation", async () => {
-    const cwd = "/work/deletion-save-queue"; const storage = new MemoryStorage();
-    const server = new FakeNotesServer(); server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const cwd = "/work/deletion-save-queue";
+    const storage = new MemoryStorage();
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
     const client = Object.assign(server.connect(cwd), {
-      mutatePhaseDeletion: async () => ({ status: "unavailable" as const, message: "Fixture only" }),
+      mutatePhaseDeletion: async () => ({
+        status: "unavailable" as const,
+        message: "Fixture only",
+      }),
     });
     client.deferSaves = true;
     const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
     await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
     act(() => hook.result.current.onChange("unsaved content"));
     let prepared: ProjectNotesSnapshot | null = null;
-    act(() => { void hook.result.current.preparePhaseDeletion().then(snapshot => { prepared = snapshot; }); });
+    act(() => {
+      void hook.result.current.preparePhaseDeletion().then((snapshot) => {
+        prepared = snapshot;
+      });
+    });
     expect(prepared).toBeNull();
     act(() => client.flushNextSave());
-    await waitFor(() => expect(prepared).toMatchObject({ revision: 2, document: { reference: "unsaved content" } }));
+    await waitFor(() =>
+      expect(prepared).toMatchObject({ revision: 2, document: { reference: "unsaved content" } }),
+    );
   });
 
   it("preserves unsaved edits and refuses deletion when the save fails", async () => {
-    const cwd = "/work/deletion-failed-save"; const storage = new MemoryStorage();
-    const server = new FakeNotesServer(); server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const cwd = "/work/deletion-failed-save";
+    const storage = new MemoryStorage();
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
     const client = Object.assign(server.connect(cwd), {
-      mutatePhaseDeletion: async () => ({ status: "unavailable" as const, message: "Must not dispatch" }),
+      mutatePhaseDeletion: async () => ({
+        status: "unavailable" as const,
+        message: "Must not dispatch",
+      }),
     });
     client.deferSaves = true;
     const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
     await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
     act(() => hook.result.current.onChange("unsaved content"));
     let failure = "";
-    act(() => { void hook.result.current.preparePhaseDeletion().catch(error => { failure = error.message; }); });
-    act(() => client.pendingSaves.shift()!.resolve({ status: "invalid", error: { path: "reference", message: "Synthetic save error" } }));
+    act(() => {
+      void hook.result.current.preparePhaseDeletion().catch((error) => {
+        failure = error.message;
+      });
+    });
+    act(() =>
+      client.pendingSaves.shift()!.resolve({
+        status: "invalid",
+        error: { path: "reference", message: "Synthetic save error" },
+      }),
+    );
     await waitFor(() => expect(failure).toContain("could not be saved"));
     expect(hook.result.current.document.reference).toBe("unsaved content");
     expect(server.snapshots.get(cwd)?.document.reference).toBe("base");

@@ -1,8 +1,22 @@
 // @vitest-environment jsdom
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getProgress, subscribe, type PaneAgentClient, type ProgressSnapshot, type SidecarEvent } from "./agent";
+import {
+  getProgress,
+  subscribe,
+  type PaneAgentClient,
+  type ProgressSnapshot,
+  type SidecarEvent,
+} from "./agent";
 import { useProgress } from "./useProgress";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
@@ -63,16 +77,31 @@ describe("pane-owned progress", () => {
     let oldListener!: (event: SidecarEvent) => void;
     const unsubscribe = vi.fn();
     const oldClient = {
-      getProgress: () => new Promise<ProgressSnapshot>((resolve) => { resolveInitial = resolve; }),
-      subscribe: (callback: (event: SidecarEvent) => void) => { oldListener = callback; return unsubscribe; },
+      getProgress: () =>
+        new Promise<ProgressSnapshot>((resolve) => {
+          resolveInitial = resolve;
+        }),
+      subscribe: (callback: (event: SidecarEvent) => void) => {
+        oldListener = callback;
+        return unsubscribe;
+      },
     };
     let currentListener!: (event: SidecarEvent) => void;
-    const initial = { ...valid, eventNonce: "initial", levelUp: { from: 1, to: 2, rankName: "Tinkerer" } };
+    const initial = {
+      ...valid,
+      eventNonce: "initial",
+      levelUp: { from: 1, to: 2, rankName: "Tinkerer" },
+    };
     const currentClient = {
       getProgress: async () => initial,
-      subscribe: (callback: (event: SidecarEvent) => void) => { currentListener = callback; return vi.fn(); },
+      subscribe: (callback: (event: SidecarEvent) => void) => {
+        currentListener = callback;
+        return vi.fn();
+      },
     };
-    const hook = renderHook(({ client }) => useProgress(client), { initialProps: { client: oldClient } });
+    const hook = renderHook(({ client }) => useProgress(client), {
+      initialProps: { client: oldClient },
+    });
     hook.rerender({ client: currentClient });
     await waitFor(() => expect(hook.result.current.snapshot).toEqual(initial));
     act(() => currentListener({ type: "progress", data: initial }));
@@ -86,22 +115,38 @@ describe("pane-owned progress", () => {
   });
   it.each([false, true])("keeps origin and nonce effects local (reverse=%s)", async (reverse) => {
     const callbacks = new Map<string, (event: SidecarEvent) => void>();
-    const clients = ["primary", "secondary"].map((paneId) => ({
-      paneId,
-      getProgress: vi.fn().mockResolvedValue(valid),
-      subscribe: vi.fn((callback: (event: SidecarEvent) => void) => {
-        callbacks.set(paneId, callback);
-        return () => { callbacks.delete(paneId); };
-      }),
-    }) satisfies Pick<PaneAgentClient, "paneId" | "getProgress" | "subscribe">);
+    const clients = ["primary", "secondary"].map(
+      (paneId) =>
+        ({
+          paneId,
+          getProgress: vi.fn().mockResolvedValue(valid),
+          subscribe: vi.fn((callback: (event: SidecarEvent) => void) => {
+            callbacks.set(paneId, callback);
+            return () => {
+              callbacks.delete(paneId);
+            };
+          }),
+        }) satisfies Pick<PaneAgentClient, "paneId" | "getProgress" | "subscribe">,
+    );
     const hooks = clients.map((pane) => renderHook(() => useProgress(pane)));
-    await waitFor(() => hooks.forEach((hook) => expect(hook.result.current.snapshot).toEqual(valid)));
+    await waitFor(() =>
+      hooks.forEach((hook) => expect(hook.result.current.snapshot).toEqual(valid)),
+    );
     for (const owner of ["secondary", "primary"]) {
-      const award = { ...valid, xp: owner === "secondary" ? 20 : 30,
-        levelUp: { from: 1, to: 2, rankName: "Tinkerer" }, eventNonce: owner };
+      const award = {
+        ...valid,
+        xp: owner === "secondary" ? 20 : 30,
+        levelUp: { from: 1, to: 2, rankName: "Tinkerer" },
+        eventNonce: owner,
+      };
       const ordered = reverse ? [...clients].reverse() : clients;
       for (const pane of ordered) {
-        act(() => callbacks.get(pane.paneId)!({ type: "progress", data: { ...award, origin: pane.paneId === owner } }));
+        act(() =>
+          callbacks.get(pane.paneId)!({
+            type: "progress",
+            data: { ...award, origin: pane.paneId === owner },
+          }),
+        );
       }
       hooks.forEach((hook, index) => {
         expect(hook.result.current.snapshot?.xp).toBe(award.xp);
@@ -110,7 +155,14 @@ describe("pane-owned progress", () => {
         expect(hook.result.current.levelUpOrigin).toBe(clients[index].paneId === owner);
       });
       const celebrations = hooks.map((hook) => hook.result.current.levelUp);
-      act(() => clients.forEach((pane) => callbacks.get(pane.paneId)!({ type: "progress", data: { ...award, origin: pane.paneId === owner } })));
+      act(() =>
+        clients.forEach((pane) =>
+          callbacks.get(pane.paneId)!({
+            type: "progress",
+            data: { ...award, origin: pane.paneId === owner },
+          }),
+        ),
+      );
       hooks.forEach((hook, index) => expect(hook.result.current.levelUp).toBe(celebrations[index]));
     }
     hooks.forEach((hook) => hook.unmount());
@@ -179,7 +231,9 @@ describe("progress boundary and workspace recovery", () => {
       await act(async () => {});
       expect(screen.queryByRole("button")).toBeNull();
       emit(valid);
-      await waitFor(() => expect(screen.getByTitle("Tinkerer — Level 1 · 10 lifetime XP")).toBeTruthy());
+      await waitFor(() =>
+        expect(screen.getByTitle("Tinkerer — Level 1 · 10 lifetime XP")).toBeTruthy(),
+      );
     },
   );
 });

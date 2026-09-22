@@ -258,144 +258,285 @@ afterEach(() => {
 describe("middle swap integration", () => {
   async function ready(twoRows = false) {
     const ids = ["primary", "middle", "right"];
-    localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({
-      version: 9, focusedPaneId: "primary", panes: Object.fromEntries(ids.map((id) => [id, null])),
-      root: { type: "split", direction: "horizontal", size: { type: "ratio", value: 33 },
-        first: { type: "leaf", paneId: "primary" }, second: {
-          type: "split", direction: "horizontal", size: { type: "ratio", value: 50 },
-          first: { type: "leaf", paneId: "middle" }, second: { type: "leaf", paneId: "right" },
-        } },
-    }));
+    localStorage.setItem(
+      "gg-workspace-layout-recursive:main",
+      JSON.stringify({
+        version: 9,
+        focusedPaneId: "primary",
+        panes: Object.fromEntries(ids.map((id) => [id, null])),
+        root: {
+          type: "split",
+          direction: "horizontal",
+          size: { type: "ratio", value: 33 },
+          first: { type: "leaf", paneId: "primary" },
+          second: {
+            type: "split",
+            direction: "horizontal",
+            size: { type: "ratio", value: 50 },
+            first: { type: "leaf", paneId: "middle" },
+            second: { type: "leaf", paneId: "right" },
+          },
+        },
+      }),
+    );
     if (twoRows) {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
-      const otherRow = JSON.parse(JSON.stringify(saved.root).replace(/"primary"/g, '"bottom-left"').replace(/"middle"/g, '"bottom-middle"').replace(/"right"/g, '"bottom-right"'));
-      saved.root = { type: "split", direction: "vertical", size: { type: "ratio", value: 50 }, first: saved.root, second: otherRow };
+      const otherRow = JSON.parse(
+        JSON.stringify(saved.root)
+          .replace(/"primary"/g, '"bottom-left"')
+          .replace(/"middle"/g, '"bottom-middle"')
+          .replace(/"right"/g, '"bottom-right"'),
+      );
+      saved.root = {
+        type: "split",
+        direction: "vertical",
+        size: { type: "ratio", value: 50 },
+        first: saved.root,
+        second: otherRow,
+      };
       for (const id of ["bottom-left", "bottom-middle", "bottom-right"]) saved.panes[id] = null;
       localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify(saved));
     }
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 1500, height: 800, left: 0, top: 0, right: 1500, bottom: 800 } as DOMRect);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 1500,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 1500,
+      bottom: 800,
+    } as DOMRect);
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByRole("button", { name: "Swap with middle: conversation primary" });
     await act(async () => {});
   }
-  it.each(["middle", "right"])("refuses only closing %s participants until failed disposal recovers", async (closing) => {
-    await ready(true);
-    act(() => {
-      for (const [index, id] of ["primary", "middle", "right", "bottom-left", "bottom-middle", "bottom-right"].entries()) {
-        emitPaneSnapshot(id, { generation: index + 10, activeWork: false, cwd: `/${id}`, sessionPath: `/${id}.jsonl`, projectBound: true });
+  it.each(["middle", "right"])(
+    "refuses only closing %s participants until failed disposal recovers",
+    async (closing) => {
+      await ready(true);
+      act(() => {
+        for (const [index, id] of [
+          "primary",
+          "middle",
+          "right",
+          "bottom-left",
+          "bottom-middle",
+          "bottom-right",
+        ].entries()) {
+          emitPaneSnapshot(id, {
+            generation: index + 10,
+            activeWork: false,
+            cwd: `/${id}`,
+            sessionPath: `/${id}.jsonl`,
+            projectBound: true,
+          });
+        }
+      });
+      let rejectDisposal!: (error: Error) => void;
+      bridge.disposePaneSession.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectDisposal = reject;
+          }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: `Close ${closing} pane` }));
+      expect(bridge.disposePaneSession).toHaveBeenCalledExactlyOnceWith(
+        closing,
+        closing === "middle" ? 11 : 12,
+      );
+      expect(screen.queryByRole("dialog")).toBeNull();
+      const actionName =
+        closing === "middle"
+          ? "Swap with middle: conversation primary"
+          : "Swap with right pane: conversation middle";
+      const action = screen.getByRole("button", { name: actionName }) as HTMLButtonElement;
+      expect(action.disabled).toBe(true);
+      expect(action.title).toContain("a pane is closing");
+      expect(
+        action
+          .getAttribute("aria-describedby")!
+          .split(" ")
+          .map((id) => document.getElementById(id)?.textContent)
+          .join(" "),
+      ).toContain("a pane is closing");
+      const saved = () => JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      const before = saved();
+      const hosts = [...document.querySelectorAll("[data-pane-id]")];
+      fireEvent.click(action, { detail: 1 });
+      fireEvent.keyDown(action, { key: "Enter" });
+      fireEvent.click(action, { detail: 0 }); // native Enter activation
+      const input = screen.getByRole("textbox", { name: "primary input" });
+      act(() => input.focus());
+      expect(
+        fireEvent.keyDown(input, {
+          key: "ArrowRight",
+          ctrlKey: true,
+          altKey: true,
+          shiftKey: true,
+        }),
+      ).toBe(true);
+      expect(screen.getByRole("status").textContent).toContain("a pane is closing");
+      expect(saved().root).toEqual(before.root);
+      expect(saved().panes).toEqual(before.panes);
+      expect([...document.querySelectorAll("[data-pane-id]")]).toEqual(hosts);
+      expect(paneUnmounts.size).toBe(0);
+      if (closing === "right") {
+        const left = screen.getByRole("button", {
+          name: "Swap with left pane: conversation middle",
+        }) as HTMLButtonElement;
+        expect(left.disabled).toBe(false);
+        expect(
+          fireEvent.keyDown(input, {
+            key: "ArrowLeft",
+            ctrlKey: true,
+            altKey: true,
+            shiftKey: true,
+          }),
+        ).toBe(false);
+        expect(saved().root.first).not.toEqual(before.root.first);
+        // Restore the pair using the still-valid center direction.
+        fireEvent.click(
+          screen.getByRole("button", { name: "Swap with left pane: conversation primary" }),
+        );
       }
-    });
-    let rejectDisposal!: (error: Error) => void;
-    bridge.disposePaneSession.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectDisposal = reject; }));
-    fireEvent.click(screen.getByRole("button", { name: `Close ${closing} pane` }));
-    expect(bridge.disposePaneSession).toHaveBeenCalledExactlyOnceWith(closing, closing === "middle" ? 11 : 12);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    const actionName = closing === "middle" ? "Swap with middle: conversation primary" : "Swap with right pane: conversation middle";
-    const action = screen.getByRole("button", { name: actionName }) as HTMLButtonElement;
-    expect(action.disabled).toBe(true);
-    expect(action.title).toContain("a pane is closing");
-    expect(action.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)?.textContent).join(" ")).toContain("a pane is closing");
-    const saved = () => JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
-    const before = saved();
-    const hosts = [...document.querySelectorAll("[data-pane-id]")];
-    fireEvent.click(action, { detail: 1 });
-    fireEvent.keyDown(action, { key: "Enter" });
-    fireEvent.click(action, { detail: 0 }); // native Enter activation
-    const input = screen.getByRole("textbox", { name: "primary input" });
-    act(() => input.focus());
-    expect(fireEvent.keyDown(input, { key: "ArrowRight", ctrlKey: true, altKey: true, shiftKey: true })).toBe(true);
-    expect(screen.getByRole("status").textContent).toContain("a pane is closing");
-    expect(saved().root).toEqual(before.root);
-    expect(saved().panes).toEqual(before.panes);
-    expect([...document.querySelectorAll("[data-pane-id]")]).toEqual(hosts);
-    expect(paneUnmounts.size).toBe(0);
-    if (closing === "right") {
-      const left = screen.getByRole("button", { name: "Swap with left pane: conversation middle" }) as HTMLButtonElement;
-      expect(left.disabled).toBe(false);
-      expect(fireEvent.keyDown(input, { key: "ArrowLeft", ctrlKey: true, altKey: true, shiftKey: true })).toBe(false);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Swap with middle: conversation bottom-left" }),
+      );
+      expect(saved().root.first).toEqual(before.root.first);
+      expect(saved().root.second).not.toEqual(before.root.second);
+      expect(saved().panes).toEqual(before.panes);
+      expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        rejectDisposal(new Error("disposal failed"));
+      });
+      expect(
+        screen.getByText(
+          `Pane ${closing} stayed open because its session could not be disposed. Try closing it again.`,
+        ),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      const recovered = screen.getByRole("button", { name: actionName }) as HTMLButtonElement;
+      expect(recovered.disabled).toBe(false);
+      fireEvent.click(recovered, { detail: 0 });
       expect(saved().root.first).not.toEqual(before.root.first);
-      // Restore the pair using the still-valid center direction.
-      fireEvent.click(screen.getByRole("button", { name: "Swap with left pane: conversation primary" }));
-    }
-    fireEvent.click(screen.getByRole("button", { name: "Swap with middle: conversation bottom-left" }));
-    expect(saved().root.first).toEqual(before.root.first);
-    expect(saved().root.second).not.toEqual(before.root.second);
-    expect(saved().panes).toEqual(before.panes);
-    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
-    await act(async () => { rejectDisposal(new Error("disposal failed")); });
-    expect(screen.getByText(`Pane ${closing} stayed open because its session could not be disposed. Try closing it again.`)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    const recovered = screen.getByRole("button", { name: actionName }) as HTMLButtonElement;
-    expect(recovered.disabled).toBe(false);
-    fireEvent.click(recovered, { detail: 0 });
-    expect(saved().root.first).not.toEqual(before.root.first);
-    expect(paneUnmounts.size).toBe(0);
-    expect([...paneMounts.values()]).toEqual([1, 1, 1, 1, 1, 1]);
-    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
-  });
-  it.each(["left", "right"] as const)("swaps from the center toward %s and keeps that center action focused", async (direction) => {
-    await ready();
-    const side = direction === "left" ? "primary" : "right";
-    const button = screen.getByRole("button", { name: `Swap with ${direction} pane: conversation middle` });
-    act(() => button.focus());
-    fireEvent.click(button, { detail: 0 });
-    const target = screen.getByRole("button", { name: `Swap with ${direction} pane: conversation ${side}` });
-    expect(document.activeElement).toBe(target);
-    expect(target.hasAttribute("data-swap-keyboard-focus")).toBe(true);
-    expect(screen.getByTestId(`pane-${side}`).getAttribute("data-focused")).toBe("true");
-    expect(screen.getByRole("button", { name: "Swap with middle: conversation middle" })).toBeTruthy();
-    fireEvent.click(target, { detail: 0 });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: `Swap with ${direction} pane: conversation middle` }));
-    expect([...paneMounts.values()]).toEqual([1, 1, 1]);
-    expect(paneUnmounts.size).toBe(0);
-    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
-  });
+      expect(paneUnmounts.size).toBe(0);
+      expect([...paneMounts.values()]).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(["left", "right"] as const)(
+    "swaps from the center toward %s and keeps that center action focused",
+    async (direction) => {
+      await ready();
+      const side = direction === "left" ? "primary" : "right";
+      const button = screen.getByRole("button", {
+        name: `Swap with ${direction} pane: conversation middle`,
+      });
+      act(() => button.focus());
+      fireEvent.click(button, { detail: 0 });
+      const target = screen.getByRole("button", {
+        name: `Swap with ${direction} pane: conversation ${side}`,
+      });
+      expect(document.activeElement).toBe(target);
+      expect(target.hasAttribute("data-swap-keyboard-focus")).toBe(true);
+      expect(screen.getByTestId(`pane-${side}`).getAttribute("data-focused")).toBe("true");
+      expect(
+        screen.getByRole("button", { name: "Swap with middle: conversation middle" }),
+      ).toBeTruthy();
+      fireEvent.click(target, { detail: 0 });
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: `Swap with ${direction} pane: conversation middle` }),
+      );
+      expect([...paneMounts.values()]).toEqual([1, 1, 1]);
+      expect(paneUnmounts.size).toBe(0);
+      expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    },
+  );
   it("preserves the center action when a shortcut moves its conversation to the side", async () => {
     await ready();
     const button = screen.getByRole("button", { name: "Swap with left pane: conversation middle" });
     act(() => button.focus());
     fireEvent.keyDown(button, { key: "ArrowRight", ctrlKey: true, altKey: true, shiftKey: true });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Swap with left pane: conversation right" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Swap with left pane: conversation right" }),
+    );
   });
-  it.each(["primary", "right"])("hands %s button focus to the displaced side occupant and exchanges back", async (side) => {
-    await ready();
-    const first = screen.getByRole("button", { name: `Swap with middle: conversation ${side}` });
-    const hosts = ["primary", "middle", "right"].map((id) => document.getElementById(`workspace-pane-${id}`));
-    act(() => first.focus());
-    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
-    expect(document.activeElement).toBe(first);
-    fireEvent.click(first);
-    const destination = screen.getByRole("button", { name: "Swap with middle: conversation middle" });
-    expect(document.activeElement).toBe(destination);
-    expect(screen.queryByRole("button", { name: `Swap with middle: conversation ${side}` })).toBeNull();
-    expect(screen.getByTestId("pane-middle").getAttribute("data-focused")).toBe("true");
-    expect(screen.getByRole("status").textContent).toContain("focused side action can exchange the pair again");
-    fireEvent.click(destination);
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: `Swap with middle: conversation ${side}` }));
-    expect(["primary", "middle", "right"].map((id) => document.getElementById(`workspace-pane-${id}`))).toEqual(hosts);
-    expect([...paneMounts.values()]).toEqual([1, 1, 1]); expect(paneUnmounts.size).toBe(0);
-    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
-  });
+  it.each(["primary", "right"])(
+    "hands %s button focus to the displaced side occupant and exchanges back",
+    async (side) => {
+      await ready();
+      const first = screen.getByRole("button", { name: `Swap with middle: conversation ${side}` });
+      const hosts = ["primary", "middle", "right"].map((id) =>
+        document.getElementById(`workspace-pane-${id}`),
+      );
+      act(() => first.focus());
+      await act(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+      expect(document.activeElement).toBe(first);
+      fireEvent.click(first);
+      const destination = screen.getByRole("button", {
+        name: "Swap with middle: conversation middle",
+      });
+      expect(document.activeElement).toBe(destination);
+      expect(
+        screen.queryByRole("button", { name: `Swap with middle: conversation ${side}` }),
+      ).toBeNull();
+      expect(screen.getByTestId("pane-middle").getAttribute("data-focused")).toBe("true");
+      expect(screen.getByRole("status").textContent).toContain(
+        "focused side action can exchange the pair again",
+      );
+      fireEvent.click(destination);
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: `Swap with middle: conversation ${side}` }),
+      );
+      expect(
+        ["primary", "middle", "right"].map((id) => document.getElementById(`workspace-pane-${id}`)),
+      ).toEqual(hosts);
+      expect([...paneMounts.values()]).toEqual([1, 1, 1]);
+      expect(paneUnmounts.size).toBe(0);
+      expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    },
+  );
   it("permits the exact composer chord without losing drafts, selection or conversation focus", async () => {
     await ready();
     const input = screen.getByRole("textbox", { name: "primary input" }) as HTMLInputElement;
     const other = screen.getByRole("textbox", { name: "middle input" }) as HTMLInputElement;
-    input.value = "draft one"; other.value = "draft two";
-    act(() => { input.focus(); input.setSelectionRange(2, 5); });
+    input.value = "draft one";
+    other.value = "draft two";
+    act(() => {
+      input.focus();
+      input.setSelectionRange(2, 5);
+    });
     fireEvent.keyDown(input, { key: "ArrowLeft", ctrlKey: true, altKey: true, shiftKey: true });
     expect(document.activeElement).toBe(input);
-    expect(input.value).toBe("draft one"); expect(other.value).toBe("draft two");
+    expect(input.value).toBe("draft one");
+    expect(other.value).toBe("draft two");
     expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
-    expect(screen.queryByRole("button", { name: "Swap with middle: conversation primary" })).toBeNull();
-    expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).root.first.paneId).toBe("middle");
+    expect(
+      screen.queryByRole("button", { name: "Swap with middle: conversation primary" }),
+    ).toBeNull();
+    expect(
+      JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).root.first.paneId,
+    ).toBe("middle");
   });
-  it.each([{ repeat: true }, { isComposing: true }, { shiftKey: false }, { altKey: false }])("ignores excluded keyboard input %j", async (extra) => {
-    await ready();
-    const input = screen.getByRole("textbox", { name: "primary input" });
-    act(() => input.focus());
-    fireEvent.keyDown(input, { key: "ArrowLeft", ctrlKey: true, altKey: true, shiftKey: true, ...extra });
-    expect(screen.getByRole("button", { name: "Swap with middle: conversation primary" })).toBeTruthy();
-  });
+  it.each([{ repeat: true }, { isComposing: true }, { shiftKey: false }, { altKey: false }])(
+    "ignores excluded keyboard input %j",
+    async (extra) => {
+      await ready();
+      const input = screen.getByRole("textbox", { name: "primary input" });
+      act(() => input.focus());
+      fireEvent.keyDown(input, {
+        key: "ArrowLeft",
+        ctrlKey: true,
+        altKey: true,
+        shiftKey: true,
+        ...extra,
+      });
+      expect(
+        screen.getByRole("button", { name: "Swap with middle: conversation primary" }),
+      ).toBeTruthy();
+    },
+  );
 });
 
 describe("mergePaneSnapshot", () => {
@@ -661,16 +802,24 @@ describe("WorkspaceShell", () => {
   });
 
   it("retains HTML drag state through its normal pointercancel until a valid edge drop", async () => {
-    saveTwoPaneLayout(); render(<WorkspaceShell renderPane={renderPane} />);
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
     fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     const dataTransfer = dragTransfer();
-    fireEvent.dragStart(screen.getByRole("button", { name: "Move pane secondary" }), { dataTransfer });
+    fireEvent.dragStart(screen.getByRole("button", { name: "Move pane secondary" }), {
+      dataTransfer,
+    });
     fireEvent.pointerCancel(window);
     const zone = document.querySelector('[data-pane-id="primary"] [data-placement="left"]');
     expect(zone).not.toBeNull();
-    fireEvent.dragOver(zone!, { dataTransfer }); fireEvent.drop(zone!, { dataTransfer });
-    await waitFor(() => expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).root.first.paneId).toBe("secondary"));
+    fireEvent.dragOver(zone!, { dataTransfer });
+    fireEvent.drop(zone!, { dataTransfer });
+    await waitFor(() =>
+      expect(
+        JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).root.first.paneId,
+      ).toBe("secondary"),
+    );
     expect(bridge.disposePaneSession).not.toHaveBeenCalled();
   });
 

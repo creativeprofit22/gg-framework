@@ -49,18 +49,23 @@ it("renders queued startup and later native failures through the standalone entr
   // reached the real bus. This deterministically exercises the pre-subscriber race.
   await import("./main");
   await act(async () => {});
-  expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("Native appearance synchronization failed"));
+  expect(consoleError).toHaveBeenCalledWith(
+    expect.stringContaining("Native appearance synchronization failed"),
+  );
   expect(screen.queryByRole("status")).toBeNull();
   const client = await vi.importActual<typeof ReactDomClient>("react-dom/client");
   root = client.createRoot(container);
   await act(async () => root!.render(mocks.render.mock.calls[0][0] as ReactNode));
-  const message = "Window appearance could not be updated. The selected theme still applies to content.";
+  const message =
+    "Window appearance could not be updated. The selected theme still applies to content.";
   expect((await screen.findByRole("status")).textContent).toBe(message);
   expect(container.querySelectorAll(".toaster")).toHaveLength(1);
   await screen.findByRole("button", { name: "Got it" });
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
   expect(screen.queryByRole("status")).toBeNull();
 
   mocks.invoke.mockRejectedValueOnce(new Error("permission denied"));

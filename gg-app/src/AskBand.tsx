@@ -338,7 +338,13 @@ export function AskBand({
   const numbered = questions.length > 1;
 
   return (
-    <div className="ask-band" data-swap-row="" ref={bandRef} role="group" aria-label="GG Coder needs your answer">
+    <div
+      className="ask-band"
+      data-swap-row=""
+      ref={bandRef}
+      role="group"
+      aria-label="GG Coder needs your answer"
+    >
       {questions.map((q, i) => (
         <Question
           key={q.id}

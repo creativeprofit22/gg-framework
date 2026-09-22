@@ -27,16 +27,19 @@ async function harness(provider = "anthropic") {
   let runner = "";
   let taskRunner = "";
   let errorReporter = "";
+  let admission = "";
   function visit(node: ts.Node) {
     if (ts.isIfStatement(node) && node.expression.getText(file) === 'method === "POST" && url === "/tasks/run"') route = node.getText(file);
     if (ts.isFunctionDeclaration(node) && node.name?.text === "runTasks") runner = node.getText(file);
     if (ts.isFunctionDeclaration(node) && node.name?.text === "broadcastError") errorReporter = node.getText(file);
     if (ts.isFunctionDeclaration(node) && node.name?.text === "runTaskById") taskRunner = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "taskRunAdmissionConflict") admission = node.getText(file);
     ts.forEachChild(node, visit);
   }
   visit(file);
   expect(route).not.toBe("");
   expect(runner).not.toBe("");
+  expect(admission).not.toBe("");
   const reset = deferred();
   const review = deferred();
   const cadence = deferred();
@@ -52,6 +55,7 @@ async function harness(provider = "anthropic") {
   });
   const context = vm.createContext({
     running: false, autopilotActive: false, taskTurnActive: false, taskRunAll: false,
+    queuedCount: 0, planMode: false,
     autopilotCancelled: false, runLifecycle: { running: false },
     runClaim: new RunClaim(), taskSweepClaim: new RunClaim(),
     sessionMutations: new AppSidecarSessionMutationCoordinator(),
@@ -60,10 +64,14 @@ async function harness(provider = "anthropic") {
     assertProviderExecutionAllowed, runUnattended,
     planGateConflict: () => null,
     readBody: async (req: { body: string }) => req.body,
-    json: (res: { resolve: (value: number) => void }, status: number) => res.resolve(status),
+    json: (res: { resolve: (value: number) => void; body?: unknown }, status: number, body?: unknown) => {
+      res.body = body;
+      res.resolve(status);
+    },
     log: vi.fn(), cwd: "project", formatSidecarError,
     desktopGuidance: (text: string) => text, sidecarErrorSecrets: [], captureSidecarError: vi.fn(),
-    session: { newSession, getState: () => ({ provider }), getQueuedCount: () => 0, getPlanMode: () => false,
+    session: { newSession, getState: () => ({ provider }),
+      getQueuedCount: () => context.queuedCount as number, getPlanMode: () => context.planMode as boolean,
       getAppMarkers: () => [], persistAppMarker: async () => {} },
     loadTasksSync: () => tasks.map((status, index) => ({ id: String(index), title: String(index), prompt: String(index), status })),
     isManuallyRunnableTaskStatus: (status: string) => status === "pending" || status === "blocked",
@@ -87,12 +95,19 @@ async function harness(provider = "anthropic") {
   });
   // Extract the authoritative busy projection too, rather than duplicating its contract.
   const busy = source.slice(source.indexOf("  const sessionBusyState ="), source.indexOf("  // Set by /cancel"));
-  vm.runInContext(ts.transpileModule(`${busy}\n${errorReporter}\n${taskRunner}\n${runner}\nfunction request(req, res) { const method = "POST", url = "/tasks/run"; ${route} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  vm.runInContext(ts.transpileModule(`${busy}\n${errorReporter}\n${admission}\n${taskRunner}\n${runner}\nfunction request(req, res) { const method = "POST", url = "/tasks/run"; ${route} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   const runTaskById = vi.fn(context.runTaskById);
   context.runTaskById = runTaskById;
-  const request = (all = false) => new Promise<number>((resolve) => context.request({ body: JSON.stringify({ id: "0", all }), resume() {} }, { resolve }));
+  const responses: { body?: unknown }[] = [];
+  const request = (all = false, id: string | null = "0") =>
+    new Promise<number>((resolve) => {
+      const res: { resolve: (value: number) => void; body?: unknown } = { resolve };
+      responses.push(res);
+      context.request({ body: JSON.stringify({ id, all }), resume() {} }, res);
+    });
+  const lastBody = () => responses[responses.length - 1]?.body as Record<string, unknown> | undefined;
   const settled = async () => { queue.resolve(); await vi.waitFor(() => expect(context.taskSweepClaim.active).toBe(false)); };
-  return { context, request, reset, review, cadence, reviewed, between, draining, settled, runTaskById, newSession,
+  return { context, request, lastBody, resetTasks: () => { tasks[0] = "pending"; tasks[1] = "pending"; }, reset, review, cadence, reviewed, between, draining, settled, runTaskById, newSession,
     snapshot: () => ({ conversation, tasks: [...tasks], all: context.taskRunAll }) };
 }
 
@@ -233,6 +248,8 @@ describe("task route admission", () => {
     await h.settled();
     expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error")).toHaveLength(0);
     expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "tasks_run_done")).toHaveLength(1);
+    // Ownership released: a still-runnable task is admitted again.
+    h.resetTasks();
     expect(await h.request()).toBe(202);
     await h.settled();
   });
@@ -272,6 +289,67 @@ describe("task route admission", () => {
     expect(await h.request()).toBe(409);
     expect(h.context.taskSweepClaim.active).toBe(false);
     expect(h.newSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["queued messages", "queued_messages_pending", (h: Awaited<ReturnType<typeof harness>>) => { h.context.queuedCount = 2; }],
+    ["plan mode", "plan_mode_active", (h: Awaited<ReturnType<typeof harness>>) => { h.context.planMode = true; }],
+  ] as const)("refuses a run blocked by %s with a descriptive 409", async (_label, code, block) => {
+    const h = await harness();
+    block(h);
+    const before = h.snapshot();
+    expect(await h.request()).toBe(409);
+    expect(h.lastBody()?.error).toBe(code);
+    expect(String(h.lastBody()?.message)).toMatch(/[a-z]/);
+    expect(await h.request(true)).toBe(409);
+    expect(h.lastBody()?.error).toBe(code);
+    expect(h.snapshot()).toEqual(before);
+    expect(h.runTaskById).not.toHaveBeenCalled();
+    expect(h.newSession).not.toHaveBeenCalled();
+    expect(h.context.taskSweepClaim.active).toBe(false);
+    // The same request is admitted once the blocking state clears.
+    h.context.queuedCount = 0;
+    h.context.planMode = false;
+    expect(await h.request()).toBe(202);
+    h.reset.resolve(); h.review.resolve();
+    await h.settled();
+  });
+
+  it("refuses a task whose status is not manually runnable", async () => {
+    const h = await harness();
+    h.context.finalizeTaskRun("project", "0", true); // status → done
+    expect(await h.request(false, "0")).toBe(409);
+    expect(h.lastBody()?.error).toBe("task_not_runnable");
+    expect(h.runTaskById).not.toHaveBeenCalled();
+  });
+
+  it("admits an ordinary idle run without a 409", async () => {
+    const h = await harness();
+    expect(await h.request()).toBe(202);
+    expect(h.lastBody()).toEqual({ accepted: true });
+    h.reset.resolve(); h.review.resolve();
+    await h.settled();
+    expect(h.runTaskById).toHaveBeenCalledTimes(1);
+    expect(h.snapshot().tasks).toEqual(["done", "pending"]);
+    expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error")).toHaveLength(0);
+  });
+
+  it("reports a refusal that only appears after acceptance", async () => {
+    const h = await harness();
+    // State flipped between route admission and the accepted sweep body.
+    h.context.planMode = true;
+    const done = h.context.runTasks("0", true);
+    await h.settled();
+    await done;
+    const events = h.context.broadcast.mock.calls as [string, Record<string, unknown>][];
+    expect(events.filter(([type]) => type === "error")).toEqual([["error", {
+      headline: "Run All did not start",
+      message: "Cannot run tasks while plan mode is active. Leave plan mode first.",
+      guidance: "Clear the blocking state, then open Tasks and run it again.",
+    }]]);
+    expect(events.filter(([type]) => type === "tasks_run_done")).toHaveLength(1);
+    expect(h.runTaskById).not.toHaveBeenCalled();
+    expect(h.snapshot().tasks).toEqual(["pending", "pending"]);
   });
 
   it.each(["lifecycle", "provider", "mutation"])("rejects an existing %s owner", async (owner) => {

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import type * as NodeFs from "node:fs";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
@@ -16,9 +16,23 @@ import {
   QWEN_UNATTENDED_ERROR,
 } from "./core/provider-execution-policy.js";
 
+// The task store now writes via lock file + temp file + rename, so the harness
+// models that whole surface in memory instead of touching the real home dir.
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof NodeFs>("node:fs");
-  return { ...actual, readFileSync: vi.fn(), writeFileSync: vi.fn() };
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    existsSync: vi.fn(() => true),
+    openSync: vi.fn(() => 1),
+    closeSync: vi.fn(),
+    writeSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
+  };
 });
 
 import {
@@ -51,18 +65,24 @@ async function taskRunnerHarness(enabled = true, cancelledDuringRun = false, opt
   const file = ts.createSourceFile("app-sidecar.ts", source, ts.ScriptTarget.Latest, true);
   const declarations: string[] = [];
   function visit(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && ["runTaskById", "runTasks", "runAutopilotCycle"].includes(node.name?.text ?? "")) {
+    if (ts.isFunctionDeclaration(node) && ["runTaskById", "runTasks", "runAutopilotCycle", "taskRunAdmissionConflict"].includes(node.name?.text ?? "")) {
       declarations.push(node.getText(file));
     }
     ts.forEachChild(node, visit);
   }
   visit(file);
-  expect(declarations).toHaveLength(3);
+  expect(declarations).toHaveLength(4);
   let tasks = [task("first", "pending"), task("second", "pending")];
   if (options.workflow) tasks.forEach((task) => { task.prompt = "/compare"; });
   vi.mocked(readFileSync).mockImplementation(() => JSON.stringify(tasks));
+  // The store stages the list in a temp file; the rename is what publishes it.
+  let staged: TaskRecord[] | null = null;
   vi.mocked(writeFileSync).mockImplementation((_path, data) => {
-    tasks = JSON.parse(String(data)) as TaskRecord[];
+    staged = JSON.parse(String(data)) as TaskRecord[];
+  });
+  vi.mocked(renameSync).mockImplementation(() => {
+    if (staged) tasks = staged;
+    staged = null;
   });
   let messages: Message[] = [];
   let cancelled = true; // A previous cancellation must not disable a new task.
@@ -96,7 +116,7 @@ async function taskRunnerHarness(enabled = true, cancelledDuringRun = false, opt
   const userTurnDeps: UserTurnDeps = {
     runAgent: async (_text, run) => {
       try { await run(); } catch { /* Production runAgent reports and swallows failures. */ }
-      context.pruneDoneTasksSync(); // The real runAgent's early cleanup boundary.
+      context.pruneDoneTasksSync("project"); // The real runAgent's early cleanup boundary.
     },
     getMessages: () => messages,
     clearCancelled: () => { cancelled = false; },
@@ -357,9 +377,10 @@ describe("app sidecar task runner", () => {
     expect(getNextRunnableTask("project")).toBeNull();
   });
 
-  it("wires both sidecar run-all selections through the runnable selector", async () => {
+  it("wires every sidecar run-all selection through the runnable selector", async () => {
     const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
-    expect(source.match(/getNextRunnableTask\(cwd\)/g)).toHaveLength(2);
+    // Route admission, the sweep's first task, and its advance step.
+    expect(source.match(/getNextRunnableTask\(cwd\)/g)).toHaveLength(3);
     expect(source).not.toContain("getNextPendingTask");
   });
 });

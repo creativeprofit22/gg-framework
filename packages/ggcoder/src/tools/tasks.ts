@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { log } from "../core/logger.js";
-import { createTaskRecord, loadTasks, saveTasks } from "../core/tasks-store.js";
+import { createTaskRecord, loadTasks, mutateTasks, type TaskRecord } from "../core/tasks-store.js";
 
 const TasksParams = z.object({
   action: z
@@ -51,10 +51,10 @@ export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
           case "add": {
             if (!title) return "Error: title is required for add action.";
             if (!prompt) return "Error: prompt is required for add action.";
-            const tasks = await loadTasks(cwd);
             const task = createTaskRecord(title, prompt);
-            tasks.push(task);
-            await saveTasks(cwd, tasks);
+            // Re-read under the lock: a concurrent delete elsewhere must not be
+            // undone by writing a list captured before it landed.
+            await mutateTasks(cwd, (tasks) => [...tasks, task]);
             log("INFO", "tasks", `Task added: ${title}`, { id: task.id });
             return `Task added: "${title}" (id: ${task.id.slice(0, 8)})`;
           }
@@ -73,27 +73,37 @@ export function createTasksTool(cwd: string): AgentTool<typeof TasksParams> {
 
           case "done": {
             if (!id) return "Error: id is required for done action.";
-            const tasks = await loadTasks(cwd);
-            const task = tasks.find(
-              (candidate) => candidate.id === id || candidate.id.startsWith(id),
-            );
-            if (!task) return `Error: no task found matching id "${id}".`;
-            task.status = "done";
-            await saveTasks(cwd, tasks);
-            log("INFO", "tasks", `Task done: ${task.title}`, { id: task.id });
-            return `Marked done: "${task.title}"`;
+            const picked: { task: TaskRecord | null } = { task: null };
+            await mutateTasks(cwd, (tasks) => {
+              const task = tasks.find(
+                (candidate) => candidate.id === id || candidate.id.startsWith(id),
+              );
+              if (!task) return null;
+              task.status = "done";
+              picked.task = task;
+              return tasks;
+            });
+            const done = picked.task;
+            if (!done) return `Error: no task found matching id "${id}".`;
+            log("INFO", "tasks", `Task done: ${done.title}`, { id: done.id });
+            return `Marked done: "${done.title}"`;
           }
 
           case "remove": {
             if (!id) return "Error: id is required for remove action.";
-            const tasks = await loadTasks(cwd);
-            const idx = tasks.findIndex(
-              (candidate) => candidate.id === id || candidate.id.startsWith(id),
-            );
-            if (idx === -1) return `Error: no task found matching id "${id}".`;
-            const [removed] = tasks.splice(idx, 1);
+            const taken: { task: TaskRecord | null } = { task: null };
+            await mutateTasks(cwd, (tasks) => {
+              const idx = tasks.findIndex(
+                (candidate) => candidate.id === id || candidate.id.startsWith(id),
+              );
+              if (idx === -1) return null;
+              const [record] = tasks.splice(idx, 1);
+              if (!record) return null;
+              taken.task = record;
+              return tasks;
+            });
+            const removed = taken.task;
             if (!removed) return `Error: no task found matching id "${id}".`;
-            await saveTasks(cwd, tasks);
             log("INFO", "tasks", `Task removed: ${removed.title}`, { id: removed.id });
             return `Removed: "${removed.title}"`;
           }

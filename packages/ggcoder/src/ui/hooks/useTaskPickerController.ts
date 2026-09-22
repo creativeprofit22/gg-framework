@@ -1,9 +1,9 @@
 import { useCallback, useState } from "react";
 import { assertProviderExecutionAllowed } from "../../core/provider-execution-policy.js";
 import {
+  deleteTaskSync,
   getNextRunnableTask,
   loadTasksSync,
-  saveTasksSync,
   type TaskRecord,
 } from "../../core/tasks-store.js";
 
@@ -81,9 +81,9 @@ export function useTaskPickerController({
 
   const deleteTask = useCallback(
     (task: TaskRecord) => {
-      const nextTasks = loadTasksSync(displayedCwd).filter((candidate) => candidate.id !== task.id);
-      saveTasksSync(displayedCwd, nextTasks);
-      setTasks(nextTasks);
+      // Locked re-read + atomic replace, so a concurrent agent `tasks` write is
+      // not clobbered by the list this picker rendered from.
+      setTasks(deleteTaskSync(displayedCwd, task.id));
     },
     [displayedCwd],
   );

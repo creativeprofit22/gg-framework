@@ -217,7 +217,7 @@ import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
   loadTasksSync,
-  saveTasksSync,
+  deleteTaskSync,
   pruneDoneTasksSync,
   getNextRunnableTask,
   markTaskInProgress,
@@ -3198,6 +3198,53 @@ async function createSession(
     };
   };
 
+  /**
+   * The remaining `/tasks/run` admission conditions — the ones `runTaskById`
+   * enforces but the route's busy/ownership pre-checks never saw. Without this,
+   * a refused run answered 202 and then did nothing at all: the Tasks modal
+   * closed and the user was told nothing. `runTaskById` keeps its own copy of
+   * these checks as the last line of defence; this one exists so the refusal is
+   * a typed 409 the modal can render.
+   *
+   * Runnability itself stays owned by `MANUALLY_RUNNABLE_TASK_STATUSES`.
+   */
+  function taskRunAdmissionConflict(
+    startId: string | null,
+    all: boolean,
+  ): { error: string; message: string } | null {
+    if (session.getQueuedCount() > 0) {
+      return {
+        error: "queued_messages_pending",
+        message: all
+          ? "Cannot run tasks while queued messages are waiting. Send or cancel them first."
+          : "Cannot run this task while queued messages are waiting. Send or cancel them first.",
+      };
+    }
+    if (session.getPlanMode()) {
+      return {
+        error: "plan_mode_active",
+        message: "Cannot run tasks while plan mode is active. Leave plan mode first.",
+      };
+    }
+    const resolvedId = startId ?? getNextRunnableTask(cwd)?.id ?? null;
+    const task = resolvedId
+      ? loadTasksSync(cwd).find((t) => t.id === resolvedId || t.id.startsWith(resolvedId))
+      : undefined;
+    if (!task) {
+      return {
+        error: "task_not_runnable",
+        message: startId ? "That task no longer exists." : "No task is ready to run.",
+      };
+    }
+    if (!isManuallyRunnableTaskStatus(task.status)) {
+      return {
+        error: "task_not_runnable",
+        message: `That task is ${task.status} and cannot be run.`,
+      };
+    }
+    return null;
+  }
+
   // Workflow (prompt-template) commands: built-in + the project's custom
   // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
   // expanded templates in Ken's digests. Loaded fresh so a newly added custom
@@ -4327,6 +4374,18 @@ async function createSession(
     autopilotCancelled = false;
     taskRunAll = all;
     try {
+      // Belt and braces: the route already answers 409 for these, so reaching
+      // here means state changed after acceptance. Say so instead of exiting
+      // silently through `!ran` below.
+      const conflict = taskRunAdmissionConflict(startId, all);
+      if (conflict) {
+        broadcastError("error", "task run refused after acceptance", new Error(conflict.error), {
+          headline: all ? "Run All did not start" : "Task run did not start",
+          message: conflict.message,
+          guidance: "Clear the blocking state, then open Tasks and run it again.",
+        });
+        return;
+      }
       let currentId: string | null = startId ?? getNextRunnableTask(cwd)?.id ?? null;
       while (currentId) {
         // A manually selected single task remains interactive. Run-all is a batch.
@@ -6134,6 +6193,12 @@ async function createSession(
           json(res, 409, sessionMutations.conflictBody());
           return;
         }
+        // The conditions runTaskById would otherwise refuse silently after a 202.
+        const admission = taskRunAdmissionConflict(id, all);
+        if (admission) {
+          json(res, 409, admission);
+          return;
+        }
         // No await between admission and claiming ownership. Internal review/plan
         // transitions still use sessionMutations; the sweep owns their outer lifetime.
         if (!taskSweepClaim.claim()) {
@@ -6180,8 +6245,9 @@ async function createSession(
           json(res, 400, { error: "missing task id" });
           return;
         }
-        const remaining = loadTasksSync(cwd).filter((t) => t.id !== id && !t.id.startsWith(id));
-        saveTasksSync(cwd, remaining);
+        // Locked re-read + atomic replace: a `tasks` tool write racing this
+        // delete must not resurrect the task the user just confirmed gone.
+        const remaining = deleteTaskSync(cwd, id);
         json(res, 200, { tasks: remaining });
       });
       return;

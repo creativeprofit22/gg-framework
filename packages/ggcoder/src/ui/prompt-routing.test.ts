@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { routePromptCommandInput } from "./prompt-routing.js";
+import { expandPromptCommand } from "../core/prompt-command-expansion.js";
 
 const commands = [{ name: "builtin", aliases: ["alias"], description: "Fixture", prompt: "Built-in prompt" }];
 const customCommands = [{ name: "MyCommand", prompt: "Custom prompt" }];
@@ -12,7 +13,7 @@ describe("prompt command routing", () => {
         cmdName: name,
         cmdArgs: focus,
         promptText,
-        fullPrompt: `${promptText}\n\n## User Instructions\n\n${focus}`,
+        fullPrompt: expandPromptCommand(promptText, focus),
       });
     }
   });

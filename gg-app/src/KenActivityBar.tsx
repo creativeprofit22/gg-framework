@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { ThinkingOrb } from "thinking-orbs";
+import { ThinkingOrb } from "./ActivityOrb";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import { formatTokenCount } from "./ActivityBar";

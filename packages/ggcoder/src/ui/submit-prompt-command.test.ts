@@ -9,6 +9,7 @@ import * as customCommandLoader from "../core/custom-commands.js";
 import * as discoveryModule from "../core/command-discovery.js";
 import { handleUiSlashCommand, UI_SLASH_COMMANDS } from "./submit-slash-commands.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { expandPromptCommand } from "../core/prompt-command-expansion.js";
 import { getAppPaths } from "../config.js";
 
 let cwd: string;
@@ -51,7 +52,7 @@ describe("terminal live custom command resolution", () => {
     for (const input of ["/model", "/m", "/models", "/model focus"]) {
       const opts = { ...options(input), customCommands };
       if (!(await handleUiSlashCommand(input, actions))) await submitPromptCommand(opts);
-      if (input === "/model focus") expect(opts.runAgent).toHaveBeenCalledWith("Current model template\n\n## User Instructions\n\nfocus");
+      if (input === "/model focus") expect(opts.runAgent).toHaveBeenCalledWith(expandPromptCommand("Current model template", "focus"));
       else expect(opts.runAgent).not.toHaveBeenCalled();
     }
     expect(actions.openModelSelector).toHaveBeenCalledTimes(3);
@@ -68,7 +69,7 @@ describe("terminal live custom command resolution", () => {
     const opts = { ...options("/live focus"), customCommands };
     expect(await submitPromptCommand(opts)).toBe(change !== "deletion");
     if (change === "deletion") expect(opts.runAgent).not.toHaveBeenCalled();
-    else expect(opts.runAgent).toHaveBeenCalledWith(`${change === "project removal" ? "Global body" : "Current body"}\n\n## User Instructions\n\nfocus`);
+    else expect(opts.runAgent).toHaveBeenCalledWith(expandPromptCommand(change === "project removal" ? "Global body" : "Current body", "focus"));
     expect(JSON.stringify(vi.mocked(opts.runAgent).mock.calls)).not.toContain("Stale body");
   });
 

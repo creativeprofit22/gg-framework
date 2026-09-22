@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { TaskActivity } from "./task-activity";
-import { ThinkingOrb } from "thinking-orbs";
+import { ThinkingOrb } from "./ActivityOrb";
 import { theme } from "./theme";
 import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";

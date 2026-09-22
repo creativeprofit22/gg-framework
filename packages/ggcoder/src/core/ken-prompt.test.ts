@@ -120,7 +120,7 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
   it("limits structured approval warnings to corpus availability, not failed verification", () => {
     expect(prompt).toContain('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}');
     expect(prompt).toContain("Never append prose to ALL_CLEAR");
-    expect(prompt).toContain("For otherwise approved work ONLY, if the corpus comparison was unavailable or declined");
+    expect(prompt).toContain("For otherwise approved work ONLY, if a relevant corpus comparison was attempted but unavailable or declined");
     expect(prompt).toContain("Report known failures and unavailable checks honestly");
     expect(prompt).toContain("missing transcript evidence alone is not a failure");
     expect(prompt).toContain("PROMPT only when something real is wrong or unfinished: a failing/absent test, a broken build");

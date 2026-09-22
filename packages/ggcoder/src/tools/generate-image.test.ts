@@ -235,8 +235,8 @@ describe("generate_image — generation (no image input)", () => {
     expect(body.parallel_tool_calls).toBe(false);
     expect(body.reasoning).toEqual({ effort: "low", summary: "auto", context: "all_turns" });
     expect(headers.originator).toBe("codex_cli_rs");
-    expect(headers.version).toBe("0.153.4");
-    expect(headers["User-Agent"]).toBe("codex_cli_rs/0.153.4");
+    expect(headers.version).toBe("0.155.1");
+    expect(headers["User-Agent"]).toBe("codex_cli_rs/0.155.1");
     expect(headers).not.toHaveProperty("X-OpenAI-Internal-Codex-Responses-Lite");
     const { codexRequestProfile } = await import("@kenkaiiii/gg-ai");
     expect(codexRequestProfile("gpt-6-astra", "low").headers["X-OpenAI-Internal-Codex-Responses-Lite"]).toBe("true");

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { theme } from "./theme";
 import { INITIAL_ACTIVITY } from "./task-activity";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ActivityBar } from "./ActivityBar";
 
 const baseProps = {
@@ -14,6 +14,12 @@ const baseProps = {
   thinkingAccumMs: 0,
   onCancel: vi.fn(),
 };
+
+beforeAll(async () => {
+  const { container, unmount } = render(<ActivityBar {...baseProps} />);
+  await waitFor(() => expect(container.querySelector("canvas")).toBeTruthy());
+  unmount();
+});
 
 describe("ActivityBar plan progress", () => {
   it("shows approved-plan progress only while a run is active", () => {

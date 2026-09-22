@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { KenActivityBar } from "./KenActivityBar";
@@ -35,8 +35,9 @@ describe("KenActivityBar", () => {
     fireEvent(document, new Event("visibilitychange"));
     expect(screen.getByText("6s")).toBeTruthy();
   });
-  it("uses the listening orb and shimmer with Ken's existing color", () => {
+  it("uses the listening orb and shimmer with Ken's existing color", async () => {
     const { container } = render(<KenActivityBar {...baseProps} />);
+    await waitFor(() => expect(container.querySelector("canvas")).toBeTruthy());
     const orb = container.querySelector("canvas");
     expect(orb?.getAttribute("aria-label")).toBe("Listening…");
     expect(orb?.getAttribute("aria-hidden")).toBe("true");

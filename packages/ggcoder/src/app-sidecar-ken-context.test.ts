@@ -220,7 +220,13 @@ it.each(["stable", "experimental"] as const)("retains exact evidence across roll
     expect(rolling.digest).toContain(instruction);
     expect(rolling.digest).not.toContain("ACTIVITY-0:");
     expect(rolling.digest).toContain("ACTIVITY-23:");
-    expect(rolling.digest).not.toContain("ACTIVITY-UNCAPPED-TAIL");
+    // Earlier user decisions have a separate, explicitly bounded retention budget.
+    // The rolling activity section still truncates each message independently.
+    const recentActivity = rolling.digest.split("## Recent activity (GG Coder and user)\n")[1]!;
+    expect(recentActivity).not.toContain("ACTIVITY-UNCAPPED-TAIL");
+    const earlierRequests = rolling.digest.split("## Earlier user requests and decisions\n")[1]!.split("## Recent activity")[0]!;
+    expect(earlierRequests).toContain("ACTIVITY-UNCAPPED-TAIL");
+    expect(earlierRequests.length).toBeLessThan(8_500);
     expect(rolling.digest).toContain("Current objective/status evidence");
     expect(rolling.digest).toContain("preserve audit identifiers");
 

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
+import { describeRunVerification, describeTurnVerification } from "./core/run-status.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalProjectKey,
@@ -357,7 +358,11 @@ describe("transparent status leases", () => {
           abortOwnedWork: () => {},
           pendingCancelDrain: null,
           cancelGeneration: 0,
+          describeRunVerification,
+          describeTurnVerification,
           session: {
+            getVerificationEvidence: () => [],
+            getRunVerificationActivity: () => ({ changed: false, checked: false, evidence: [] }),
             getMessages: () => [],
             getActivePhaseContext: () => owner.active,
             getQueuedCount: () => 0,

@@ -7,6 +7,7 @@ import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { restoreUserRow, resolveRestoredCommand } from "./session-history.js";
 import { getPromptCommand } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
@@ -314,7 +315,7 @@ describe("slash-command restore", () => {
 
     const body = session.getMessages().find((message) => message.role === "user")!.content;
     expect(body).toBe(
-      `${getPromptCommand("expand")!.prompt}\n\n## User Instructions\n\nfocus area`,
+      expandPromptCommand(getPromptCommand("expand")!.prompt, "focus area"),
     );
     expect(agentLoopMock).toHaveBeenCalledTimes(1);
     await session.dispose();

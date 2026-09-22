@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stream, StreamResult } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import { expandPromptCommand } from "../core/prompt-command-expansion.js";
 import type * as AgentSessionModule from "../core/agent-session.js";
 import { AuthStorage } from "../core/auth-storage.js";
 import { TelegramBot, type TelegramMessage } from "../core/telegram.js";
@@ -101,7 +102,7 @@ it("preserves custom command case and strips only the token's bot mention", asyn
   expect(AgentSession.prototype.prompt).toHaveBeenCalledExactlyOnceWith("/MyCommand  café@other\n日本語");
   expect(stream).toHaveBeenCalledOnce();
   expect(vi.mocked(stream).mock.calls[0]![0].messages.find((message) => message.role === "user")?.content)
-    .toBe("Custom fixture body\n\n## User Instructions\n\ncafé@other\n日本語");
+    .toBe(expandPromptCommand("Custom fixture body", "café@other\n日本語"));
 });
 
 it("rejects mentioned generic commands while busy without forwarding or cancelling", async () => {

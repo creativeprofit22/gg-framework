@@ -1424,9 +1424,14 @@ export async function* agentLoop(
         (contentArr !== null &&
           contentArr.some(
             (part) =>
-              part.type === "text" || part.type === "tool_call" || part.type === "server_tool_call",
+              (part.type === "text" && part.text.trim().length > 0) ||
+              part.type === "tool_call" ||
+              part.type === "server_tool_call",
           ));
-      if (!hasActionableContent) {
+      // A refusal may intentionally contain no text. Respect that terminal
+      // decision instead of replaying it and disguising it as an empty response.
+      const isRefusal = response.stopReason === "refusal";
+      if (!hasActionableContent && !isRefusal) {
         if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
           emptyResponseRetries++;
           diag("retry", {
@@ -1452,7 +1457,7 @@ export async function* agentLoop(
         // Exhausted retries — fall through and let the agent finish, but flag
         // it so the terminal branch warns instead of ending silently.
       }
-      const emptyExhausted = !hasActionableContent;
+      const emptyExhausted = !hasActionableContent && !isRefusal;
       emptyResponseRetries = 0;
 
       // Only clear the non-streaming fallback after an actionable response —
@@ -1477,10 +1482,9 @@ export async function* agentLoop(
       // Append assistant message and anchor the provider's authoritative usage
       // at that exact history position. Later tool/user messages stay pending
       // until the next provider request observes them.
-      // EXCEPTION: an empty message (retries exhausted) is NOT appended — a
-      // contentless assistant turn poisons the history and every subsequent
-      // request in the session replays it and comes back empty again.
-      if (!emptyExhausted) {
+      // EXCEPTION: a contentless message (including an empty refusal) is NOT
+      // appended — it can poison subsequent requests when replayed as history.
+      if (hasActionableContent) {
         messages.push(response.message);
         latestProviderUsage = response.usage;
         usageAnchorIndex = messages.length - 1;

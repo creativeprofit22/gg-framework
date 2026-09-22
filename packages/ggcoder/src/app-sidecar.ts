@@ -22,7 +22,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawn, type ChildProcess } from "node:child_process";
-import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
+import { GGAIError, environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import { appSettingsFile } from "./app-sidecar-paths.js";
@@ -2978,6 +2978,21 @@ async function createSession(
     target.eventBus.on("turn_end", (data) => broadcast("turn_end", data));
     target.eventBus.on("agent_done", (data) => broadcast("agent_done", data));
     target.eventBus.on("truncated", (data) => {
+      if (data.reason === "refusal") {
+        // The webview renders error rows, not raw truncated events. Preserve
+        // the provider's terminal decision even when it supplied no text.
+        broadcastError(
+          "error",
+          "provider refusal",
+          new GGAIError("The provider declined this request.", { source: "provider" }),
+          {
+            headline: "The provider declined this request.",
+            message: "The model stopped with a refusal. This is not an empty-response or connection error.",
+            guidance: "Review your request and the conversation context before trying again.",
+          },
+        );
+        return;
+      }
       if (data.reason === "empty_response") {
         broadcastError(
           "error",

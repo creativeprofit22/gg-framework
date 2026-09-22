@@ -2431,6 +2431,74 @@ describe("agentLoop truncation handling", () => {
     ]);
   });
 
+  it.each([
+    { label: "empty string", content: "" },
+    { label: "empty array", content: [] },
+    { label: "blank text block", content: [{ type: "text", text: "  " }] },
+    { label: "thinking only", content: [{ type: "thinking", text: "", signature: "sig" }] },
+  ] satisfies { label: string; content: Message["content"] }[])(
+    "preserves an empty refusal ($label) without retrying or appending an empty assistant turn",
+    async ({ content }) => {
+      const response = makeResponse("", "refusal");
+      mockStream.mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {},
+        response: Promise.resolve({
+          ...response,
+          message: { ...response.message, content },
+        }),
+      } as unknown as ReturnType<typeof stream>);
+      const messages: Message[] = [{ role: "user", content: "Reply with exactly OK." }];
+
+      const { events } = await collectLoop(messages, {
+        provider: "anthropic",
+        model: "claude-opus-5",
+      });
+
+      expect(truncatedEvents(events)).toEqual([
+        { type: "truncated", reason: "refusal", continued: false },
+      ]);
+      expect(mockStream).toHaveBeenCalledTimes(1);
+      expect(events.filter((event) => event.type === "retry")).toEqual([]);
+      expect(messages.filter((message) => message.role === "assistant")).toEqual([]);
+      expect(events.some((event) => event.type === "agent_done")).toBe(true);
+    },
+  );
+
+  it("preserves a contentless Anthropic SSE refusal through the real adapter", async () => {
+    const { stream: realStream } = await vi.importActual<{ stream: typeof stream }>(
+      "@kenkaiiii/gg-ai",
+    );
+    const wireEvents = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_refusal", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 21, output_tokens: 0, cache_creation_input_tokens: 23254 },
+        },
+      },
+      { type: "message_delta", delta: { stop_reason: "refusal" }, usage: { output_tokens: 0 } },
+      { type: "message_stop" },
+    ];
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(
+      wireEvents.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    mockStream.mockImplementation((options) => realStream({ ...options, fetch: fetchMock }));
+    const messages: Message[] = [{ role: "user", content: "Reply with exactly OK." }];
+    const { events, result } = await collectLoop(messages, {
+      provider: "anthropic", model: "claude-opus-5", apiKey: "test-key", thinking: "xhigh",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(truncatedEvents(events)).toEqual([
+      { type: "truncated", reason: "refusal", continued: false },
+    ]);
+    expect(events.filter((event) => event.type === "retry")).toEqual([]);
+    expect(result.totalUsage).toMatchObject({ inputTokens: 21, outputTokens: 0, cacheWrite: 23254 });
+    expect(messages).toEqual([{ role: "user", content: "Reply with exactly OK." }]);
+  });
+
   it("executes tools normally on max_tokens with tool calls — no truncated event", async () => {
     const toolResp = {
       [Symbol.asyncIterator]: async function* () {

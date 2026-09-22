@@ -1,6 +1,7 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import type { EventBus } from "../core/event-bus.js";
 
 // Source HTTP tests exercise real prompt persistence, never provider generation.
 // The parent releases this gate over private fixture IPC, not an application route.
@@ -15,6 +16,7 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
   value: async function (this: {
     tools: AgentTool[];
     messages: Message[];
+    eventBus: EventBus;
     getHookSteeringMessages(): Message[] | null;
     flushPendingMessages(): Promise<void>;
   }) {
@@ -27,6 +29,11 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
         { signal: new AbortController().signal, toolCallId: "fixture-ask" });
     }
     await generation;
+    const truncated = process.env.GG_FIXTURE_TRUNCATED;
+    if (truncated === "refusal" || truncated === "empty_response") {
+      this.eventBus.emit("truncated", { reason: truncated, continued: false });
+      return;
+    }
     if (process.env.GG_FIXTURE_QUEUE_DRAIN) {
       if (process.env.GG_FIXTURE_QUEUE_DRAIN === "steering") {
         // Include a hidden runtime row before consumption; hints must use actual positions.

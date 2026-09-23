@@ -227,6 +227,39 @@ describe("ProjectPicker project creation", () => {
     await waitFor(() => expect(chosenB).toHaveBeenCalledWith("/Users/dev/project-c"));
   });
 
+  it("previews the projects folder re-read after a settings refresh", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/old-root", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([]);
+
+    const { rerender } = render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        refreshSignal={0}
+        showWindowControls={false}
+      />,
+    );
+    await waitFor(() => expect(getSettingsMock).toHaveBeenCalledTimes(1));
+
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/new-root", configured: true });
+    rerender(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        refreshSignal={1}
+        showWindowControls={false}
+      />,
+    );
+    await waitFor(() => expect(getSettingsMock).toHaveBeenCalledTimes(2));
+
+    // The empty-list state shows a second "+ New project" button; either opens the modal.
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ New project" }))[0]!);
+    const dialog = screen.getByRole("dialog", { name: "New project" });
+    await waitFor(() => expect(dialog.textContent).toContain("/Users/new-root/"));
+    expect(dialog.textContent).not.toContain("/Users/old-root");
+  });
+
   it("keeps the modal open when the initiating picker cannot bind", async () => {
     const bindB = vi.fn().mockRejectedValue(new Error("binding failed"));
     const chosenB = vi.fn();

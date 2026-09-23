@@ -3910,7 +3910,6 @@ select {
 .plan-review-body {
   min-width: 0;
   overflow-x: auto;
-  overscroll-behavior: contain;
   padding-block: 16px;
   font-size: 16px;
   line-height: 1.6;

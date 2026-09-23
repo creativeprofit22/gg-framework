@@ -1,17 +1,17 @@
 # Radio recovery and Settings save behaviour
 
-Status: implemented in app source on 2026-09-23 (Roadmap phase "Unify light-theme controls and recovery feedback"). Verified with unit tests and browser checks on synthetic data only. The installed app is unchanged. Native persistence, IPC and audio playback were not exercised.
+Status: implemented and committed on 2026-09-23 (Roadmap phase "Unify light-theme controls and recovery feedback"). Verified with unit tests, browser walkthroughs on synthetic data, and native checks in the developer app: real IPC, persistence of station, volume and project folder across reopen, and mpv start, stop and station switching at process level. Not verified: audible output, screen readers, the installed or packaged app, and density metrics. This is not release approval.
 
 ## Radio: loading, empty, ready, failed
 
 The station list has four outcomes, and each looks different:
 
-| State | What the user sees | Play |
-| --- | --- | --- |
-| Loading | "Loading stations…" in the picker and below it | Disabled |
-| Ready | Station list and the selected station's description | Enabled |
-| Empty | "No radio stations are available right now." plus **Retry** | Disabled |
-| Failed | "Couldn't load radio stations." plus **Retry** | Disabled |
+| State   | What the user sees                                          | Play     |
+| ------- | ----------------------------------------------------------- | -------- |
+| Loading | "Loading stations…" in the picker and below it              | Disabled |
+| Ready   | Station list and the selected station's description         | Enabled  |
+| Empty   | "No radio stations are available right now." plus **Retry** | Disabled |
+| Failed  | "Couldn't load radio stations." plus **Retry**              | Disabled |
 
 - The desktop's existing radio state read (`getRadioState`) now throws when it fails. It no longer pretends there are zero stations. The native command is unchanged.
 - `RadioButton` owns the state. Every read gets a sequence number and only the newest one is applied. A slow read from app start therefore can't overwrite the fresher read made when the modal opens, and closing mid-load does nothing harmful.

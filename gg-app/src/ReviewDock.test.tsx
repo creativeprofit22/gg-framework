@@ -68,6 +68,21 @@ describe("ReviewDock", () => {
     expect(focused).toContain("67cqh");
     expect(focused).not.toMatch(/360px|40cqh/);
   });
+  it("lets wheel scrolling reach the review reader from horizontally scrollable plan content", () => {
+    // `overflow-x: auto` also computes `overflow-y: auto`, so the plan body becomes a
+    // scroll container that never scrolls vertically. Overscroll containment there
+    // swallows the wheel before it reaches the real review scroller.
+    const planBody = styles.match(/\.plan-review-body \{([^}]+)\}/)?.[1];
+    expect(planBody).toBeDefined();
+    expect(planBody).toContain("overflow-x: auto");
+    expect(planBody).not.toMatch(/overscroll-behavior/);
+    const reviewSelector = /\.(review-|plan-review|plan-feedback|roadmap-draft)/;
+    const contained = [...styles.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, selector, body]) => reviewSelector.test(selector) && /overscroll-behavior/.test(body))
+      .map(([, selector]) => selector.trim())
+      .sort();
+    expect(contained).toEqual([".review-content-scroller", ".review-dock-panel"]);
+  });
   it("keeps the real plan feedback mounted across collapse with controls outside its scroller", () => {
     const accept = vi.fn();
     const feedback = vi.fn();

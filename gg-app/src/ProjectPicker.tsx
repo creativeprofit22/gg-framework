@@ -121,7 +121,9 @@ export function ProjectPicker({
 
   useEffect(() => {
     let cancelled = false;
-    // Settings are read natively (Rust) — no sidecar wait needed.
+    // Settings are read natively (Rust) — no sidecar wait needed. Re-read on
+    // refreshSignal so a tray Settings folder change updates the New project
+    // preview (Rust creates under the freshly read root).
     void getSettings()
       .then((s) => {
         if (!cancelled && s) setProjectsRoot(s.projectsRoot);
@@ -130,7 +132,7 @@ export function ProjectPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshSignal]);
 
   const openProject = useCallback(
     (project: DiscoveredProject): void => {

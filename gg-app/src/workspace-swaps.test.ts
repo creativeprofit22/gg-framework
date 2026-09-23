@@ -72,11 +72,50 @@ describe("physical same-row middle swaps", () => {
   });
   it("rejects transitive boundary chains and hidden geometry", () => {
     const rs = rects([100, 100, 100]);
-    rs[0].top = -0.8;
-    rs[2].top = 0.8;
+    rs[0].top = -4;
+    rs[2].top = 4;
     expect(findSwapRow(rs, "1").available).toBe(false);
     expect(findSwapRow(rects([100, 0, 100]), "0").available).toBe(false);
   });
+  it("treats rows offset by less than a divider as aligned, but not larger offsets", () => {
+    const rs = rects([100, 100, 100]);
+    rs[0].top = 3.85;
+    rs[0].height = 100 - 3.85;
+    expect(findSwapRow(rs, "1")).toMatchObject({ available: true, middleId: "1" });
+    rs[0].top = 7;
+    rs[0].height = 93;
+    expect(findSwapRow(rs, "1").available).toBe(false);
+  });
+  it.each([600, 800, 1000, 1300])(
+    "offers swaps in a 3x2 grid whose first column divider was dragged slightly (%ipx tall)",
+    (height) => {
+      // Saved desktop layout: the first column's row divider sits at 50.3%, the others at 50%.
+      const grid = split(
+        split(leaf("a"), leaf("d"), "vertical", 50.29761904761905),
+        split(
+          split(leaf("b"), leaf("e"), "vertical", 50),
+          split(leaf("c"), leaf("f"), "vertical", 50),
+          "horizontal",
+          49.83890597220655,
+        ),
+        "horizontal",
+        32.34375,
+      );
+      const all = workspacePaneRects(grid, { width: 1900, height });
+      expect(findSwapRow(all, "b")).toEqual({
+        available: true,
+        paneIds: ["a", "b", "c"],
+        middleId: "b",
+      });
+      expect(findSwapRow(all, "e")).toEqual({
+        available: true,
+        paneIds: ["d", "e", "f"],
+        middleId: "e",
+      });
+      const swapped = swapWorkspacePanes(layout(grid), "a", "b", { width: 1900, height });
+      expect(workspaceLayoutLeafIds(swapped.root)).toEqual(["b", "d", "a", "e", "c", "f"]);
+    },
+  );
   it.each(["a", "c", "d", "f"])(
     "exchanges %s in either row, preserving everything else",
     (side) => {

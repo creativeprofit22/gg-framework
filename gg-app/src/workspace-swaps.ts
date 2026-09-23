@@ -20,6 +20,11 @@ export type SwapRow =
   { available: true; paneIds: string[]; middleId: string } | { available: false; reason: string };
 const unavailable = (reason: string): SwapRow => ({ available: false, reason });
 const tolerance = 1;
+/**
+ * Row boundaries agree when they differ by less than one divider thickness: dragging one
+ * column's divider a few pixels off its neighbours still reads as one grid row visually.
+ */
+const rowTolerance = DIVIDER_SIZE_PX - 1e-6;
 
 /** Resolve the renderer's exact, untransformed CSS geometry in CSS pixels. */
 export function workspacePaneRects(root: WorkspaceLayoutNode, size: WorkspaceSize): PaneRect[] {
@@ -49,8 +54,8 @@ export function findSwapRow(rects: readonly PaneRect[], paneId: string): SwapRow
   const aligned = rects
     .filter(
       (r) =>
-        Math.abs(r.top - origin.top) <= tolerance &&
-        Math.abs(bottom(r) - bottom(origin)) <= tolerance,
+        Math.abs(r.top - origin.top) <= rowTolerance &&
+        Math.abs(bottom(r) - bottom(origin)) <= rowTolerance,
     )
     .sort((a, b) => a.left - b.left);
   const index = aligned.indexOf(origin);
@@ -63,8 +68,8 @@ export function findSwapRow(rects: readonly PaneRect[], paneId: string): SwapRow
   const row = aligned.slice(first, last + 1);
   // Pairwise boundary agreement, not a transitive chain of near-overlaps.
   if (
-    Math.max(...row.map((r) => r.top)) - Math.min(...row.map((r) => r.top)) > tolerance ||
-    Math.max(...row.map(bottom)) - Math.min(...row.map(bottom)) > tolerance
+    Math.max(...row.map((r) => r.top)) - Math.min(...row.map((r) => r.top)) > rowTolerance ||
+    Math.max(...row.map(bottom)) - Math.min(...row.map(bottom)) > rowTolerance
   ) {
     return unavailable("Swap needs an unambiguous aligned row.");
   }

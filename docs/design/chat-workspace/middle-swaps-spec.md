@@ -16,7 +16,7 @@ The six-pane example is not a product restriction. Target actual untransformed s
 
 ## Approved interaction contract
 
-- **Rows:** horizontally contiguous panes with matching top/bottom boundaries within one CSS pixel. No transitive overlap or crossing a taller spanning pane. Partial-workspace rows and unequal widths are supported; fewer than three panes or ambiguous boundaries are unavailable.
+- **Rows:** horizontally contiguous panes with matching top/bottom boundaries within less than one divider thickness (7 CSS pixels), so a grid whose column dividers were dragged a few pixels apart still reads as rows. Horizontal adjacency stays within one CSS pixel. No transitive overlap or crossing a taller spanning pane. Partial-workspace rows and unequal widths are supported; fewer than three panes or ambiguous boundaries are unavailable.
 - **Middle:** nearest pane centre to the midpoint of row bounds, ties left. Any non-middle pane may exchange with it. Recompute after resize, split, close, or movement; never wrap to another row.
 - **Controls (ergonomics correction, user approved):** labelled, keyboard-reachable “Swap with middle” actions remain on side panes. Every eligible center pane also has always-visible left/right arrow buttons to exchange with its immediate neighbour in that direction, without reaching to the side pane. All controls work independently of Rearrange mode. Side actions retain hover/focus/touch visibility; accessible help explains eligibility.
 - **Shortcuts:** Ctrl+Alt+Shift+Left/Right (Windows/Linux), Cmd+Option+Shift+Left/Right (macOS), exchanges the immediate left/right neighbour of the middle in the focused pane's row. Buttons can choose farther panes. Do not claim universal OS conflict freedom.

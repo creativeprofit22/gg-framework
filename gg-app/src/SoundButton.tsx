@@ -29,13 +29,16 @@ export function SoundButton({
         settingsVariant ? "modal-btn" : "btn btn-ghost btn-icon btn-nav-icon home-settings"
       }
       title={on ? "Sound effects on — click to mute" : "Sound effects muted — click to enable"}
+      // The icon-only variant has no text: name it and expose on/off as pressed.
+      aria-label={settingsVariant ? undefined : "Sound effects"}
+      aria-pressed={settingsVariant ? undefined : on}
       style={on ? undefined : { color: theme.textMuted }}
       onClick={toggle}
     >
       {on ? (
-        <Volume2 size={settingsVariant ? 16 : 20} />
+        <Volume2 size={settingsVariant ? 16 : 20} aria-hidden="true" />
       ) : (
-        <VolumeOff size={settingsVariant ? 16 : 20} />
+        <VolumeOff size={settingsVariant ? 16 : 20} aria-hidden="true" />
       )}
       {settingsVariant ? (on ? "Sound on" : "Sound off") : null}
     </button>

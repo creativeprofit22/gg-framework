@@ -1834,7 +1834,10 @@ export interface RadioState {
   volume: number;
 }
 
-/** Read app-wide radio state (stations, playback, and volume). */
+/**
+ * Read app-wide radio state (stations, playback, and volume). Throws on a
+ * failed read so callers can tell "couldn't load" apart from "no stations".
+ */
 export async function getRadioState(): Promise<RadioState> {
   try {
     const res = await invoke<RadioState>("agent_radio_state", { paneId: "primary" });
@@ -1845,7 +1848,7 @@ export async function getRadioState(): Promise<RadioState> {
     };
   } catch (e) {
     await logError(`agent_radio_state failed: ${String(e)}`);
-    return { stations: [], current: null, volume: 70 };
+    throw e;
   }
 }
 
@@ -3607,8 +3610,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
           current: r.current ?? null,
           volume: Number.isFinite(r.volume) ? r.volume : 70,
         };
-      } catch {
-        return { stations: [], current: null, volume: 70 };
+      } catch (e) {
+        await logError(`agent_radio_state failed: ${String(e)}`);
+        throw e;
       }
     },
     async setRadio(station) {

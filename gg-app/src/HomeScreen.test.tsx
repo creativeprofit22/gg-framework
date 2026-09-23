@@ -166,6 +166,21 @@ describe("HomeScreen local-patched update outcomes", () => {
   });
 });
 
+describe("HomeScreen icon-only controls", () => {
+  it("gives the Settings and Telegram setup icons distinct names and glyphs", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    await renderHome();
+
+    const settings = screen.getByRole("button", { name: "Settings" });
+    const telegram = screen.getByRole("button", { name: "Telegram setup" });
+    expect(settings).not.toBe(telegram);
+    // Same-looking icons only told apart by a hover title were ambiguous.
+    expect(settings.querySelector("svg")?.getAttribute("class")).not.toBe(
+      telegram.querySelector("svg")?.getAttribute("class"),
+    );
+  });
+});
+
 describe("HomeScreen What's New trigger", () => {
   it("stays available when idle and calls the existing native opener", async () => {
     vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));

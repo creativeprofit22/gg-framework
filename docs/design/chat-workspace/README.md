@@ -18,6 +18,7 @@ Compare the actual GG Coder workspace with independently selectable reading adju
 - [Light-surface and code refinement](surface-refinement.md)
 - [Latest rank badge, scorecard and Autopilot refinement](rank-controls.md)
 - [Tasks: actions, states and removal](tasks-actions.md)
+- [Radio recovery and Settings save behaviour](radio-settings-feedback.md)
 
 ## Separate pane-swap implementation
 

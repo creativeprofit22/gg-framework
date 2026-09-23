@@ -18,6 +18,18 @@
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.13);
 
+  /* Meter — a filled track with a draggable thumb (Radio volume). Themes
+     override these together so track, fill and thumb stay legible. */
+  --meter-track-bg: radial-gradient(circle, #1b2735, #090a0f);
+  --meter-track-border: #313131;
+  --meter-track-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --meter-fill: linear-gradient(90deg, #00f260, #0575e6);
+  --meter-fill-glow: 0 0 5px #00f260, 0 0 9px #0575e6;
+  --meter-thumb-bg: #111820;
+  --meter-thumb-border: rgba(255, 255, 255, 0.85);
+  --meter-thumb-shadow: 0 0 0 2px rgba(5, 117, 230, 0.4), 0 2px 7px rgba(0, 0, 0, 0.65);
+  --meter-thumb-shadow-active: 0 0 0 3px rgba(5, 117, 230, 0.5), 0 2px 9px rgba(0, 0, 0, 0.72);
+
   /* Text — one ink at four levels. */
   --text: #f2f3f7;
   --text-secondary: #c8c9d2;
@@ -888,6 +900,16 @@ select {
   line-height: 1.25;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
   background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+}
+/* The four 220×170 corner cards need room around the centred content; in a
+   narrow or short window they would cover captions and buttons, so the
+   decoration steps aside. The Memes preference is unchanged. Boundaries were
+   measured on the Home fixture: narrower than 820px, or narrower than 1100px
+   and shorter than 760px, a card covered the logo, captions or buttons. */
+@media (max-width: 819px), (max-width: 1099px) and (max-height: 759px), (max-height: 559px) {
+  .meme-layer {
+    display: none;
+  }
 }
 /* Home content sits above the meme layer. */
 .home > .ascii-logo,
@@ -2046,6 +2068,7 @@ select {
 /* Azure connection management stays inside Settings so users can review the
    non-secret connection metadata beside the rest of the app preferences. */
 .settings-modal {
+  --settings-pad: 24px;
   width: min(560px, 92vw);
   max-height: min(760px, 92vh);
   overflow-y: auto;
@@ -2180,9 +2203,10 @@ select {
 }
 @media (max-width: 560px) {
   .settings-modal {
+    --settings-pad: 16px;
     width: 96vw;
     max-height: 94vh;
-    padding: 16px;
+    padding: var(--settings-pad);
   }
   .azure-settings-heading,
   .azure-settings-state,
@@ -2276,6 +2300,17 @@ select {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 26px;
+}
+/* Settings scrolls; keep Save folder/Cancel pinned to its bottom edge. The
+   negative margins cover the modal's padding so content scrolls behind. */
+.settings-modal .modal-actions {
+  position: sticky;
+  bottom: calc(-1 * var(--settings-pad));
+  z-index: 1;
+  margin: 26px calc(-1 * var(--settings-pad)) calc(-1 * var(--settings-pad));
+  padding: 12px var(--settings-pad) var(--settings-pad);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
 }
 
 /* Internet radio reuses the modal system, with a larger version of the title
@@ -2436,23 +2471,30 @@ select {
   height: 22px;
   flex: 1 1 auto;
 }
+/* Failed/empty station read: the reason and its Retry sit where the station
+   description normally does. */
+.radio-load-status {
+  justify-content: space-between;
+  margin-top: 8px;
+}
+.radio-load-status .modal-hint {
+  margin-top: 0;
+}
 .radio-volume-track {
   position: absolute;
   inset: 2px 0;
   overflow: hidden;
-  border: 1px solid #313131;
+  border: 1px solid var(--meter-track-border);
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle, #1b2735, #090a0f);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  background: var(--meter-track-bg);
+  box-shadow: var(--meter-track-shadow);
 }
 .radio-volume-fill {
   height: 100%;
   min-width: 1px;
   border-radius: inherit;
-  background: linear-gradient(90deg, #00f260, #0575e6);
-  box-shadow:
-    0 0 5px #00f260,
-    0 0 9px #0575e6;
+  background: var(--meter-fill);
+  box-shadow: var(--meter-fill-glow);
 }
 .radio-volume-input {
   appearance: none;
@@ -2472,12 +2514,10 @@ select {
   appearance: none;
   width: 18px;
   height: 18px;
-  border: 2px solid rgba(255, 255, 255, 0.85);
+  border: 2px solid var(--meter-thumb-border);
   border-radius: 50%;
-  background: #111820;
-  box-shadow:
-    0 0 0 2px rgba(5, 117, 230, 0.4),
-    0 2px 7px rgba(0, 0, 0, 0.65);
+  background: var(--meter-thumb-bg);
+  box-shadow: var(--meter-thumb-shadow);
   transition:
     transform 90ms ease,
     box-shadow 90ms ease;
@@ -2485,9 +2525,7 @@ select {
 
 .radio-volume-input:active::-webkit-slider-thumb {
   transform: scale(1.08);
-  box-shadow:
-    0 0 0 3px rgba(5, 117, 230, 0.5),
-    0 2px 9px rgba(0, 0, 0, 0.72);
+  box-shadow: var(--meter-thumb-shadow-active);
 }
 /* Modal actions are glossy pills: neutral by default, .primary = violet. */
 .modal-btn {
@@ -2497,7 +2535,7 @@ select {
   gap: 6px;
   background: var(--gloss-neutral);
   color: var(--text-secondary);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
   box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
@@ -8977,10 +9015,15 @@ select {
 .notes-phase-lifecycle-actions button,
 .notes-phase-secondary-actions button,
 .notes-phase-blocker-resolve,
-.notes-phase-archive button {
+.notes-phase-archive button,
+.notes-roadmap-proposal-actions button,
+.notes-phase-references-heading > button,
+.notes-phase-reference-option > button,
+.notes-reminder-section button,
+.notes-storage-diagnostics button {
   flex: 0 0 auto;
   min-height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   background: var(--gloss-neutral);
   color: var(--text-secondary);
@@ -8998,14 +9041,24 @@ select {
 .notes-phase-lifecycle-actions button:hover:not(:disabled),
 .notes-phase-secondary-actions button:hover:not(:disabled),
 .notes-phase-blocker-resolve:hover:not(:disabled),
-.notes-phase-archive button:hover {
+.notes-phase-archive button:hover,
+.notes-roadmap-proposal-actions button:hover:not(:disabled),
+.notes-phase-references-heading > button:hover:not(:disabled),
+.notes-phase-reference-option > button:hover:not(:disabled),
+.notes-reminder-section button:hover:not(:disabled),
+.notes-storage-diagnostics button:hover:not(:disabled) {
   filter: brightness(1.18);
   color: var(--text);
 }
 .notes-phase-form-actions button:disabled,
 .notes-phase-lifecycle-actions button:disabled,
 .notes-phase-secondary-actions button:disabled,
-.notes-phase-blocker-resolve:disabled {
+.notes-phase-blocker-resolve:disabled,
+.notes-roadmap-proposal-actions button:disabled,
+.notes-phase-references-heading > button:disabled,
+.notes-phase-reference-option > button:disabled,
+.notes-reminder-section button:disabled,
+.notes-storage-diagnostics button:disabled {
   cursor: default;
   opacity: 0.4;
 }
@@ -10032,7 +10085,7 @@ select {
 .notes-phase-references-empty button {
   flex: 0 0 auto;
   min-height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   background: var(--gloss-neutral);
   color: var(--text-secondary);
@@ -10642,7 +10695,6 @@ select {
 }
 .notes-phase-references-heading > button,
 .notes-phase-status-control > button {
-  min-height: 30px;
   margin-top: 8px;
 }
 .notes-phase-execution {
@@ -10851,10 +10903,6 @@ select {
   gap: 10px;
 }
 
-.notes-reminder-section button {
-  min-height: 32px;
-}
-
 .notes-reminder-section input,
 .notes-reminder-section textarea {
   box-sizing: border-box;
@@ -10960,7 +11008,7 @@ select {
 .notes-task-actions button,
 .notes-archive-toggle {
   flex: 0 0 auto;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   background: var(--gloss-neutral);
   color: var(--text-secondary);

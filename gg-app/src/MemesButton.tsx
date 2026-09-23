@@ -23,13 +23,16 @@ export function MemesButton({
         settingsVariant ? "modal-btn" : "btn btn-ghost btn-icon btn-nav-icon home-settings"
       }
       title={on ? "Meme GIFs on — click to hide" : "Meme GIFs hidden — click to show"}
+      // The icon-only variant has no text: name it and expose on/off as pressed.
+      aria-label={settingsVariant ? undefined : "Meme GIFs"}
+      aria-pressed={settingsVariant ? undefined : on}
       style={on ? undefined : { color: theme.textMuted }}
       onClick={() => setMemesEnabled(!on)}
     >
       {on ? (
-        <Image size={settingsVariant ? 16 : 20} />
+        <Image size={settingsVariant ? 16 : 20} aria-hidden="true" />
       ) : (
-        <ImageOff size={settingsVariant ? 16 : 20} />
+        <ImageOff size={settingsVariant ? 16 : 20} aria-hidden="true" />
       )}
       {settingsVariant ? (on ? "Memes on" : "Memes off") : null}
     </button>

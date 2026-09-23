@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Settings, Download } from "lucide-react";
+import { Settings, Download, Send } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeBackdrop } from "./HomeBackdrop";
@@ -351,6 +351,7 @@ export function HomeScreen({
           <button
             className="btn btn-ghost btn-icon btn-nav-icon home-settings"
             title="Settings"
+            aria-label="Settings"
             onClick={() => setShowSettings(true)}
           >
             <Settings size={20} strokeWidth={2} aria-hidden="true" />
@@ -386,9 +387,10 @@ export function HomeScreen({
           <button
             className="btn btn-ghost btn-icon btn-nav-icon home-settings"
             title="Telegram setup"
+            aria-label="Telegram setup"
             onClick={() => setShowTelegram(true)}
           >
-            <Settings size={20} strokeWidth={2} aria-hidden="true" />
+            <Send size={20} strokeWidth={2} aria-hidden="true" />
           </button>
         </div>
       </div>

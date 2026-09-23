@@ -68,6 +68,24 @@ export function appSidecarSessionBusyConflictBody(
   };
 }
 
+/** User-facing refusal copy for `/tasks/run`; the machine-readable `error` codes stay shared. */
+export const TASK_RUN_BUSY_MESSAGE =
+  "Cannot run tasks while the current session is still working. Try again when it finishes.";
+export const TASK_RUN_REFRESH_MESSAGE =
+  "Cannot run tasks while settings are being reloaded. Try again in a moment.";
+export const TASK_RUN_PLAN_HANDOFF_MESSAGE =
+  "Cannot run tasks while a plan approval is being handed off. Try again in a moment.";
+
+/**
+ * `/tasks/run` busy refusal. Keeps the shared `session_busy` code and state but
+ * describes the task run rather than the new-session reset the shared body names.
+ */
+export function appSidecarTaskRunBusyConflictBody(
+  state: AppSidecarSessionBusyState,
+): AppSidecarSessionBusyConflictBody {
+  return { ...appSidecarSessionBusyConflictBody(state), message: TASK_RUN_BUSY_MESSAGE };
+}
+
 /**
  * Executes the authoritative `/new-session` gate, lease, operation, and release contract.
  *

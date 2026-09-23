@@ -12,7 +12,15 @@ import {
 } from "./core/provider-execution-policy.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
-import { AppSidecarSessionMutationCoordinator, isAppSidecarSessionBusy, appSidecarSessionBusyConflictBody } from "./app-sidecar-session-mutation.js";
+import {
+  AppSidecarSessionMutationCoordinator,
+  isAppSidecarSessionBusy,
+  appSidecarSessionBusyConflictBody,
+  appSidecarTaskRunBusyConflictBody,
+  TASK_RUN_BUSY_MESSAGE,
+  TASK_RUN_PLAN_HANDOFF_MESSAGE,
+  TASK_RUN_REFRESH_MESSAGE,
+} from "./app-sidecar-session-mutation.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -60,7 +68,8 @@ async function harness(provider = "anthropic") {
     runClaim: new RunClaim(), taskSweepClaim: new RunClaim(),
     sessionMutations: new AppSidecarSessionMutationCoordinator(),
     reloadCoordinator: new AppSidecarReloadCoordinator(),
-    isAppSidecarSessionBusy, appSidecarSessionBusyConflictBody,
+    isAppSidecarSessionBusy, appSidecarTaskRunBusyConflictBody,
+    TASK_RUN_BUSY_MESSAGE, TASK_RUN_PLAN_HANDOFF_MESSAGE, TASK_RUN_REFRESH_MESSAGE,
     assertProviderExecutionAllowed, runUnattended,
     planGateConflict: () => null,
     readBody: async (req: { body: string }) => req.body,
@@ -287,6 +296,10 @@ describe("task route admission", () => {
     const h = await harness();
     h.context.reloadCoordinator.prepare([]);
     expect(await h.request()).toBe(409);
+    expect(h.lastBody()).toEqual({
+      error: "configuration refresh in progress",
+      message: "Cannot run tasks while settings are being reloaded. Try again in a moment.",
+    });
     expect(h.context.taskSweepClaim.active).toBe(false);
     expect(h.newSession).not.toHaveBeenCalled();
   });
@@ -358,6 +371,38 @@ describe("task route admission", () => {
     if (owner === "provider") h.context.runClaim.claim();
     if (owner === "mutation") h.context.sessionMutations.tryAcquire("new-session");
     expect(await h.request()).toBe(409);
+    expect(h.lastBody()?.error).toBe(owner === "mutation" ? "session_mutation_in_progress" : "session_busy");
+    expect(h.lastBody()?.message).toBe(TASK_RUN_BUSY_MESSAGE);
     expect(h.runTaskById).not.toHaveBeenCalled();
+  });
+
+  it("describes a busy refusal as a task run, not a new session", async () => {
+    const h = await harness();
+    h.context.running = true;
+    expect(await h.request()).toBe(409);
+    expect(h.lastBody()).toMatchObject({
+      error: "session_busy",
+      message: "Cannot run tasks while the current session is still working. Try again when it finishes.",
+    });
+    expect(h.lastBody()?.state).toMatchObject({ running: true });
+    // The claim-race refusal uses the same task-specific wording.
+    h.context.running = false;
+    h.context.taskSweepClaim.claim();
+    expect(await h.request()).toBe(409);
+    expect(h.lastBody()).toMatchObject({ error: "session_busy", message: TASK_RUN_BUSY_MESSAGE });
+    // The shared session-reset body keeps its new-session wording for other routes.
+    expect(appSidecarSessionBusyConflictBody({ running: true, autopilotActive: false, runLifecycleRunning: false }).message).toBe(
+      "Cannot start a new session while the current session is active.",
+    );
+  });
+
+  it("gives a plan-handoff refusal a task-specific message", async () => {
+    const h = await harness();
+    h.context.planGateConflict = () => ({ error: "plan-approval-handoff-pending" });
+    expect(await h.request()).toBe(409);
+    expect(h.lastBody()).toEqual({
+      error: "plan-approval-handoff-pending",
+      message: TASK_RUN_PLAN_HANDOFF_MESSAGE,
+    });
   });
 });

@@ -374,7 +374,10 @@ import {
 import {
   AppSidecarSessionMutationCoordinator,
   isAppSidecarSessionBusy,
-  appSidecarSessionBusyConflictBody,
+  appSidecarTaskRunBusyConflictBody,
+  TASK_RUN_BUSY_MESSAGE,
+  TASK_RUN_PLAN_HANDOFF_MESSAGE,
+  TASK_RUN_REFRESH_MESSAGE,
   runAppSidecarNewSessionMutation,
   runAppSidecarPromptStartup,
   type SessionMutationOwner,
@@ -6173,7 +6176,7 @@ async function createSession(
       const conflict = planGateConflict();
       if (conflict) {
         req.resume();
-        json(res, 409, conflict);
+        json(res, 409, { ...conflict, message: TASK_RUN_PLAN_HANDOFF_MESSAGE });
         return;
       }
       void readBody(req, res).then((raw) => {
@@ -6190,11 +6193,11 @@ async function createSession(
         }
         const busy = sessionBusyState();
         if (isAppSidecarSessionBusy(busy)) {
-          json(res, 409, appSidecarSessionBusyConflictBody(busy));
+          json(res, 409, appSidecarTaskRunBusyConflictBody(busy));
           return;
         }
         if (sessionMutations.owner) {
-          json(res, 409, sessionMutations.conflictBody());
+          json(res, 409, { ...sessionMutations.conflictBody(), message: TASK_RUN_BUSY_MESSAGE });
           return;
         }
         // The conditions runTaskById would otherwise refuse silently after a 202.
@@ -6206,13 +6209,16 @@ async function createSession(
         // No await between admission and claiming ownership. Internal review/plan
         // transitions still use sessionMutations; the sweep owns their outer lifetime.
         if (!taskSweepClaim.claim()) {
-          json(res, 409, appSidecarSessionBusyConflictBody(sessionBusyState()));
+          json(res, 409, appSidecarTaskRunBusyConflictBody(sessionBusyState()));
           return;
         }
         const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
         if (!releaseOperation) {
           taskSweepClaim.release();
-          json(res, 409, { error: "configuration refresh in progress" });
+          json(res, 409, {
+            error: "configuration refresh in progress",
+            message: TASK_RUN_REFRESH_MESSAGE,
+          });
           return;
         }
         json(res, 202, { accepted: true });

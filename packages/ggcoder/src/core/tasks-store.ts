@@ -14,7 +14,11 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { isRunnableTaskStatus, type ProjectTask } from "@kenkaiiii/gg-core";
+import {
+  isRunnableTaskStatus,
+  type KnownProjectTaskBlockReason,
+  type ProjectTask,
+} from "@kenkaiiii/gg-core";
 
 const TASKS_BASE = join(homedir(), ".gg-tasks", "projects");
 
@@ -272,12 +276,26 @@ export function markTaskInProgress(cwd: string, taskId: string, completionPendin
   });
 }
 
-/** Release provisional completion only after orchestration has explicitly settled. */
-export function finalizeTaskRun(cwd: string, taskId: string, succeeded: boolean): void {
+/**
+ * Release provisional completion only after orchestration has explicitly
+ * settled. A blocked run records why (`lastOutcome`); a successful run clears it.
+ */
+export function finalizeTaskRun(
+  cwd: string,
+  taskId: string,
+  succeeded: boolean,
+  blockReason?: KnownProjectTaskBlockReason,
+): void {
   mutateTasksSync(cwd, (tasks) => {
     const task = tasks.find((candidate) => candidate.id === taskId);
     if (!task) return null; // Respect an explicit removal during the run.
-    if (!succeeded) task.status = "blocked";
+    if (succeeded) {
+      delete task.lastOutcome;
+    } else {
+      task.status = "blocked";
+      if (blockReason) task.lastOutcome = { reason: blockReason, at: new Date().toISOString() };
+      else delete task.lastOutcome; // Unknown cause: never show a stale reason.
+    }
     delete task.completionPending;
     return tasks;
   });

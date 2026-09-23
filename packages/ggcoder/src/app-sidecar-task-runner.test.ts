@@ -250,6 +250,40 @@ describe("app sidecar task runner", () => {
     expect(runner.getTasks()).toMatchObject([{ status: "blocked" }, { status: "pending" }]);
   });
 
+  it.each([
+    { name: "a review failure", options: { verdict: null }, reason: "review-failed" },
+    { name: "a HUMAN verdict", options: { verdict: { kind: "human", reason: "Choose" } }, reason: "review-failed" },
+    { name: "a plan-mode interruption", options: { plan: "drafting" }, reason: "plan-mode" },
+    { name: "a submitted plan checkpoint", options: { plan: "submitted" }, reason: "plan-checkpoint" },
+    { name: "queued messages", options: { queued: true }, reason: "queued-messages" },
+    { name: "a failed agent turn", options: { failure: "initial" }, reason: "run-failed" },
+  ] satisfies Array<{
+    name: string; options: Parameters<typeof taskRunnerHarness>[2]; reason: string;
+  }>)("records why the run blocked after $name", async ({ options, reason }) => {
+    const runner = await taskRunnerHarness(true, false, options);
+    await runner.runTasks("first", false);
+    expect(runner.getTasks()[0]).toMatchObject({
+      id: "first", status: "blocked", lastOutcome: { reason, at: expect.any(String) },
+    });
+  });
+
+  it("records a cancelled run", async () => {
+    const runner = await taskRunnerHarness(true, true);
+    await runner.runTasks("first", false);
+    expect(runner.getTasks()[0]).toMatchObject({ status: "blocked", lastOutcome: { reason: "cancelled" } });
+  });
+
+  it("clears a stale block reason when a later run succeeds", () => {
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify([
+      { ...task("first", "in-progress"), lastOutcome: { reason: "plan-mode", at: "2026-09-04T00:00:00.000Z" } },
+    ]));
+    let written: TaskRecord[] = [];
+    vi.mocked(writeFileSync).mockImplementation((_path, data) => { written = JSON.parse(String(data)); });
+    finalizeTaskRun("project", "first", true);
+    expect(written[0]).not.toHaveProperty("lastOutcome");
+    expect(written[0].status).toBe("in-progress");
+  });
+
   it.each(["initial", "injected", "review"] as const)("pauses after %s failure", async (failure) => {
     const runner = await taskRunnerHarness(true, false, {
       failure, ...(failure === "injected" ? { verdict: { kind: "prompt" as const, body: "Fix" } } : {}),

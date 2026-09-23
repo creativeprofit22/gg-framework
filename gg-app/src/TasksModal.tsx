@@ -50,6 +50,27 @@ function runLabel(status: ProjectTask["status"]): string {
   return "Run";
 }
 
+/**
+ * Presentation-only wording for why the last run ended blocked. The daemon
+ * decides the reason; unknown reasons from a newer build render nothing.
+ */
+const OUTCOME_SENTENCE: Partial<Record<string, string>> = {
+  "review-failed": "Last run stopped: Autopilot review did not clear the work.",
+  "run-failed": "Last run stopped: the agent\u2019s turn ended with an error.",
+  cancelled: "Last run stopped: it was cancelled.",
+  "plan-mode":
+    "Last run stopped: the session was in plan mode, so the task was not carried out. Leave plan mode before retrying.",
+  "plan-checkpoint":
+    "Last run stopped: a plan is waiting for your approval or revision, so the task was not finished. Resolve the plan before retrying.",
+  "queued-messages":
+    "Last run stopped: messages were queued during the run. Send or cancel them before retrying.",
+};
+
+function outcomeSentence(task: ProjectTask): string | null {
+  const reason = task.lastOutcome?.reason;
+  return reason === undefined ? null : (OUTCOME_SENTENCE[reason] ?? null);
+}
+
 function statusStyle(status: ProjectTask["status"]): { label: string; color: string } {
   return STATUS_STYLE[status] ?? UNKNOWN_STATUS_STYLE;
 }
@@ -235,6 +256,7 @@ export function TasksModal({
   if (selectedTask) {
     const status = statusStyle(selectedTask.status);
     const created = formatCreatedAt(selectedTask.createdAt);
+    const outcome = outcomeSentence(selectedTask);
     return (
       <Modal title="Tasks" className="tasks-modal" onClose={onClose}>
         <div className="tasks-detail">
@@ -256,6 +278,11 @@ export function TasksModal({
               <span style={{ color: theme.textMuted }}>{`Added ${created}`}</span>
             )}
           </div>
+          {outcome !== null && (
+            <div className="tasks-detail-meta" data-testid="tasks-last-outcome">
+              <span style={{ color: theme.textMuted }}>{outcome}</span>
+            </div>
+          )}
           {(selectedTask.prompt ?? "").trim() === "" ? (
             // Legacy/hand-edited records can carry an empty or missing prompt; the runner
             // falls back to the title, so say that instead of showing an empty box.

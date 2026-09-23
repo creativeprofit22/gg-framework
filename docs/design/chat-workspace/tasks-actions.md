@@ -25,6 +25,19 @@ Status comes from the daemon and is pushed live over the `tasks_list` SSE event.
 | `done`        | done     | —             | Not runnable.                                                                                                        |
 | unknown       | unknown  | —             | Fail closed for statuses this build does not know.                                                                   |
 
+### Why a task is blocked
+
+`blocked` covers several different endings. The daemon records which one in the optional `lastOutcome: { reason, at }` field of `ProjectTask` (`gg-core`) when it finalizes a run, and clears it when a later run succeeds. It is informational only: it never changes `status` or run eligibility. The detail panel (not the list row) shows one muted sentence for it; records without the field, or with a reason this build does not know, show nothing.
+
+| Reason            | Recorded when (first match wins)                                         | Detail panel says                                                                          |
+| ----------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `cancelled`       | The run was cancelled                                                    | Last run stopped: it was cancelled.                                                        |
+| `plan-mode`       | The session was in plan mode at the end of the run                       | …the session was in plan mode, so the task was not carried out. Leave plan mode…            |
+| `plan-checkpoint` | A submitted plan awaits approval or revision                             | …a plan is waiting for your approval or revision… Resolve the plan before retrying.         |
+| `run-failed`      | The agent turn errored before review                                     | …the agent’s turn ended with an error.                                                     |
+| `review-failed`   | Autopilot review ended without clearing the work (HUMAN, capped, failed) | …Autopilot review did not clear the work.                                                  |
+| `queued-messages` | Review cleared, but user messages were queued during the run             | …messages were queued during the run. Send or cancel them before retrying.                 |
+
 Every run — first, retry or repeat — opens a **fresh session** and streams into the transcript. `Run all (n)` counts and launches only `pending` and `blocked` tasks, sequentially, unchanged from before.
 
 ## Refusals are visible
@@ -64,10 +77,11 @@ The delete control carries an accessible name (`Delete task: <title>`) and a com
 
 ## Verification checklist
 
-- `pnpm --filter gg-app exec vitest run src/TasksModal.test.tsx` — detail open/back with focus return, long prompt, per-status run wording, eligibility, busy/pending, duplicate activation blocked, cancel, delete failure, delete success and focus landing, empty list, task removed externally, running-task delete warning present for `in-progress` and absent for `pending`.
+- `pnpm --filter gg-app exec vitest run src/TasksModal.test.tsx` — detail open/back with focus return, long prompt, per-status run wording, eligibility, busy/pending, duplicate activation blocked, cancel, delete failure, delete success and focus landing, empty list, task removed externally, running-task delete warning present for `in-progress` and absent for `pending`, last-outcome sentence in the detail panel only and absent without a known `lastOutcome`.
 - `pnpm --filter gg-app exec vitest run src/AgentPane.test.tsx` — run/run-all/list/delete failures across the real transport seam, including the confirmation step.
 - `pnpm --filter ggcoder exec vitest run src/app-sidecar-task-admission.test.ts` — `/tasks/run` admission: 409 with a descriptive body for queued messages, plan mode and a non-runnable status; 202 when idle; the post-acceptance refusal broadcast.
-- `node .gg/tasks-actions-ui.mjs` — synthetic browser probe of the real component at 1280×800 and 390×844: keyboard detail navigation, hit-area measurement, cancel, delete failure and success, no dialog overflow. Uses in-memory handlers: **no task is run and nothing is deleted**.
+- `pnpm --filter ggcoder exec vitest run src/app-sidecar-task-runner.test.ts` — recorded `lastOutcome` reason per blocking cause, and clearing on a later success.
+- `pnpm --filter gg-app smoke:tasks-actions` (`gg-app/scripts/tasks-actions-dev-smoke.mjs`, runs in CI on every OS) — synthetic browser smoke of the real component and CSS at 1280×800 and 390×844: keyboard detail navigation, delete hit area (32px fine / 44px coarse pointer), two-line title wrapping, detail prompt scrolling with the actions row on screen, cancel, delete failure and success, no dialog overflow, zero page errors. Hosts its own Vite server; pass `--origin http://127.0.0.1:1420` to reuse a running dev server and `--evidence <dir>` for screenshots plus `report.json`. Uses in-memory handlers: **no task is run and nothing is deleted**.
 - `pnpm --filter gg-app check`, `build`, `lint`, `format:check`, plus the polish probes (`visual.mjs`, `measure-density.mjs`, `affordance.mjs` including `--pointer coarse`, `a11y.mjs`, `states.mjs`).
 
 Browser and synthetic-fixture results do not verify native Tauri IPC, daemon behaviour, or installers.

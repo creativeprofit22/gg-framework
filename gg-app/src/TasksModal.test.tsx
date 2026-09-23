@@ -155,6 +155,35 @@ describe("TasksModal", () => {
     expect(document.querySelector(".tasks-detail-prompt")).toBeNull();
   });
 
+  it("explains why the last run blocked in the detail panel only", () => {
+    renderModal([
+      {
+        ...taskWithStatus("blocked"),
+        lastOutcome: { reason: "plan-mode", at: "2026-09-05T00:00:00.000Z" },
+      },
+    ]);
+    // The list row stays unchanged.
+    expect(screen.queryByText(/Last run stopped/u)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: `Inspect task: ${TITLE}` }));
+
+    const line = screen.getByText(/Last run stopped: the session was in plan mode/u);
+    expect(line.closest(".tasks-detail-meta")).not.toBeNull();
+    const expected = document.createElement("span");
+    expected.style.color = theme.textMuted;
+    expect(line.style.color).toBe(expected.style.color);
+  });
+
+  it.each([
+    ["no recorded outcome", undefined],
+    ["an unknown future reason", { reason: "paused-by-policy", at: "2026-09-05T00:00:00.000Z" }],
+  ])("shows no outcome line for %s", (_name, lastOutcome) => {
+    renderModal([{ ...taskWithStatus("blocked"), lastOutcome }]);
+    fireEvent.click(screen.getByRole("button", { name: `Inspect task: ${TITLE}` }));
+    expect(screen.queryByText(/Last run stopped/u)).toBeNull();
+    expect(screen.queryByTestId("tasks-last-outcome")).toBeNull();
+  });
+
   it("explains a missing prompt field on a legacy record", () => {
     // A hand-edited/legacy record can reach the UI without `prompt` at all: the
     // store only backfills it from `text` when `text` exists.

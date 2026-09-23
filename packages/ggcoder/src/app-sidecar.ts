@@ -37,7 +37,11 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
-import type { DesktopContextSnapshot, DesktopSessionUXState } from "@kenkaiiii/gg-core";
+import type {
+  DesktopContextSnapshot,
+  DesktopSessionUXState,
+  KnownProjectTaskBlockReason,
+} from "@kenkaiiii/gg-core";
 import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
 import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
@@ -4353,6 +4357,8 @@ async function createSession(
       `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
       `tasks({ action: "done", id: "${shortId}" })`;
     let succeeded = false;
+    // A throw before the outcome is known means the turn itself failed.
+    let blockReason: KnownProjectTaskBlockReason = "run-failed";
     taskTurnActive = true;
     try {
       const outcome = await runUserTurn(
@@ -4361,18 +4367,29 @@ async function createSession(
         () => promptActiveSession(task.prompt + completionHint, AUTOMATION_PROVENANCE),
         isWorkflowCommandText(task.prompt, await loadWorkflowCommandSpecs()),
       );
-      succeeded =
-        (outcome === "all-clear" || outcome === "ignored" || outcome === "no-review") &&
-        !autopilotCancelled &&
-        !session.getPlanMode() &&
-        planGateConflict() === null &&
-        session.getQueuedCount() === 0;
+      // First matching cause wins; null only when every success condition holds.
+      const reason: KnownProjectTaskBlockReason | null =
+        autopilotCancelled || outcome === "cancelled"
+          ? "cancelled"
+          : session.getPlanMode()
+            ? "plan-mode"
+            : planGateConflict() !== null || outcome === "plan-pending"
+              ? "plan-checkpoint"
+              : outcome === "run-failed"
+                ? "run-failed"
+                : outcome !== "all-clear" && outcome !== "ignored" && outcome !== "no-review"
+                  ? "review-failed"
+                  : session.getQueuedCount() !== 0
+                    ? "queued-messages"
+                    : null;
+      succeeded = reason === null;
+      if (reason !== null) blockReason = reason;
       return succeeded;
     } finally {
       taskTurnActive = false;
       // Agent-marked completion stays provisional through work AND review.
       // Unresolved work remains retryable rather than disappearing on /tasks.
-      finalizeTaskRun(cwd, task.id, succeeded);
+      finalizeTaskRun(cwd, task.id, succeeded, blockReason);
       broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
     }
   }

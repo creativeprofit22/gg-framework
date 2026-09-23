@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeBackdrop } from "./HomeBackdrop";
 import { MemeLayer } from "./MemeLayer";
-import { SettingsModal } from "./SettingsModal";
+import { SettingsModal } from "./LazySettingsModal";
 import { TelegramSettingsModal } from "./TelegramSettingsModal";
 import { McpModal } from "./McpModal";
 import { SteroidsModal } from "./SteroidsModal";

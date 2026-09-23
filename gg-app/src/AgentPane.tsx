@@ -144,7 +144,7 @@ import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
-import { SettingsModal } from "./SettingsModal";
+import { SettingsModal } from "./LazySettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
 import { Toaster } from "./Toaster";

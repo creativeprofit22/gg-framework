@@ -144,6 +144,28 @@ test("desktop lint and format checks are mandatory non-mutating app gates", () =
   assert.ok(appJob.indexOf("      - name: Frontend lint") < buildIndex);
 });
 
+test("tasks actions browser smoke is a blocking cross-platform app gate", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["smoke:tasks-actions"],
+    "node scripts/tasks-actions-dev-smoke.mjs",
+  );
+
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const app = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
+  const smoke = app.match(
+    /      - name: Tasks actions browser smoke\r?\n[\s\S]*?(?=\r?\n      - name:)/,
+  )?.[0];
+  assert.ok(smoke);
+  assert.match(smoke, /^        shell: bash\r?$/m);
+  assert.ok(smoke.includes("        run: pnpm --filter gg-app smoke:tasks-actions"));
+  assert.doesNotMatch(smoke, /continue-on-error|\|\||^\s*if:|--origin/m);
+  const chromium = app.indexOf("pnpm exec playwright install --with-deps chromium");
+  assert.ok(chromium > 0 && app.indexOf("      - name: Tasks actions browser smoke") > chromium);
+});
+
 test("roadmap reliability native smoke remains an isolated Windows app gate", () => {
   const packageJson = JSON.parse(
     readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),

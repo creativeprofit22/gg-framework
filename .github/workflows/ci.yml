@@ -235,6 +235,15 @@ jobs:
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
 
+      # Browser-only synthetic fixture (every OS): real TasksModal + App.css with
+      # in-memory handlers, so no task runs and nothing is deleted. Hosts its own
+      # Vite server on a free port; guards the 32px/44px delete hit areas, two-line
+      # titles, detail prompt scrolling and dialog overflow at 1280x800 + 390x844.
+      - name: Tasks actions browser smoke
+        shell: bash
+        timeout-minutes: 10
+        run: pnpm --filter gg-app smoke:tasks-actions
+
       - name: Rust unit tests (path + window-chrome resolution)
         working-directory: gg-app/src-tauri
         run: cargo test

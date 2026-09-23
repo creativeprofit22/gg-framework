@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { Writable } from "node:stream";
+import { killProcessTreeAsync } from "../utils/process.js";
 import { log } from "./logger.js";
 
 /**
@@ -286,6 +287,19 @@ function terminateChild(child: ChildProcess | null): void {
       } catch {
         child.kill("SIGTERM");
       }
+    } else if (process.platform === "win32" && child.pid) {
+      // Windows launchers (mpv.com, package-manager shims) start the real
+      // player as a child, so killing only the wrapper leaves audio playing.
+      const pid = child.pid;
+      void killProcessTreeAsync({
+        pid,
+        isExited: () => child.exitCode !== null || child.signalCode !== null,
+      }).catch((error: unknown) => {
+        log("WARN", "radio", "could not stop player process tree", {
+          pid: String(pid),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     } else {
       child.kill("SIGTERM");
     }
@@ -513,7 +527,7 @@ function buildInstallHint(): string {
     case "linux":
       return `${base} On Linux (Debian/Ubuntu): \`sudo apt install mpv\`. Fedora: \`sudo dnf install mpv\`. Arch: \`sudo pacman -S mpv\`.`;
     case "win32":
-      return `${base} On Windows: \`winget install mpv.mpv\` (or download from https://mpv.io).`;
+      return `${base} On Windows: \`winget install --id mpv-player.mpv-CI.MSVC -e\` (official build; restart the app afterwards so it sees the updated PATH).`;
     default:
       return `${base} See https://mpv.io for platform installation instructions.`;
   }

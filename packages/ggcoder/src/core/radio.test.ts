@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => {
       return child;
     }),
     createConnection: vi.fn(() => socket),
+    killProcessTreeAsync: vi.fn(async () => {}),
     existsSync: vi.fn((candidate: unknown) => {
       const executable = String(candidate);
       if (preferredPlayer === "ffplay") {
@@ -52,6 +53,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
 vi.mock("node:fs", () => ({ existsSync: mocks.existsSync }));
 vi.mock("node:net", () => ({ createConnection: mocks.createConnection }));
+vi.mock("../utils/process.js", () => ({ killProcessTreeAsync: mocks.killProcessTreeAsync }));
 
 import { RADIO_STATIONS, getRadioVolume, playRadio, setRadioVolume, stopRadio } from "./radio.js";
 
@@ -136,6 +138,22 @@ describe("radio", () => {
       expect(mocks.spawn).not.toHaveBeenCalled();
     },
   );
+
+  it("stops the whole player process tree on Windows so wrapper launchers cannot leave audio playing", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      expect(playRadio("somafm-heavyweight-reggae")).toEqual({ ok: true });
+      stopRadio();
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+
+    expect(mocks.killProcessTreeAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: mocks.child.pid }),
+    );
+    expect(mocks.child.kill).not.toHaveBeenCalled();
+  });
 
   it("clamps app-wide volume to whole percentages", () => {
     expect(setRadioVolume(-1).ok).toBe(true);

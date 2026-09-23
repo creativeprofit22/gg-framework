@@ -396,6 +396,18 @@ describe("task route admission", () => {
     );
   });
 
+  it("answers an admission-time throw with a 500 instead of hanging", async () => {
+    const h = await harness();
+    h.context.session.getQueuedCount = () => { throw new Error("store unavailable"); };
+    expect(await h.request()).toBe(500);
+    expect(h.lastBody()).toEqual({
+      error: "task_run_failed",
+      message: "The task could not be started. Try again.",
+    });
+    expect(h.context.taskSweepClaim.active).toBe(false);
+    expect(h.runTaskById).not.toHaveBeenCalled();
+  });
+
   it("gives a plan-handoff refusal a task-specific message", async () => {
     const h = await harness();
     h.context.planGateConflict = () => ({ error: "plan-approval-handoff-pending" });

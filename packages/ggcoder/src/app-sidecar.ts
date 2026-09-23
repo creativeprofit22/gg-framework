@@ -730,6 +730,10 @@ interface FileHit {
   name: string;
 }
 
+/** Shown inline in the Tasks modal when a confirmed delete could not be saved. */
+const TASK_DELETE_FAILED_MESSAGE =
+  "The task could not be deleted. It is still in the list. Try again.";
+
 const FILE_SEARCH_LIMIT = 20;
 // Upper bound on files walked per search (baseline #8 memory cap). Far above the
 // 20-result output limit, so relevance/recency ranking is unaffected in practice.
@@ -6254,6 +6258,16 @@ async function createSession(
             taskSweepClaim.release();
             releaseOperation();
           });
+      }).catch((error) => {
+        // An admission-time throw must still answer: otherwise the Rust proxy
+        // (no client timeout) and the Tasks modal wait forever.
+        captureSidecarError(error, "app-sidecar.tasks.run");
+        if (!res.headersSent) {
+          json(res, 500, {
+            error: "task_run_failed",
+            message: "The task could not be started. Try again.",
+          });
+        }
       });
       return;
     }
@@ -6274,8 +6288,22 @@ async function createSession(
         }
         // Locked re-read + atomic replace: a `tasks` tool write racing this
         // delete must not resurrect the task the user just confirmed gone.
-        const remaining = deleteTaskSync(cwd, id);
+        // A failed write (lock timeout, EPERM/EBUSY on Windows) leaves the file
+        // untouched and must answer, or the modal stays stuck on "Deleting…".
+        let remaining: ReturnType<typeof deleteTaskSync>;
+        try {
+          remaining = deleteTaskSync(cwd, id);
+        } catch (error) {
+          captureSidecarError(error, "app-sidecar.tasks.delete");
+          json(res, 500, { error: "task_delete_failed", message: TASK_DELETE_FAILED_MESSAGE });
+          return;
+        }
         json(res, 200, { tasks: remaining });
+      }).catch((error) => {
+        captureSidecarError(error, "app-sidecar.tasks.delete");
+        if (!res.headersSent) {
+          json(res, 500, { error: "task_delete_failed", message: TASK_DELETE_FAILED_MESSAGE });
+        }
       });
       return;
     }

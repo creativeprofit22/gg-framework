@@ -495,8 +495,8 @@ export function NotesReferences({
                             </small>
                             {!attachable && (
                               <small id={`notes-reference-deleted-link-${phase.id}`}>
-                                Kept as history; recover the phase from the Roadmap to change
-                                this link.
+                                Kept as history; recover the phase from the Roadmap to change this
+                                link.
                               </small>
                             )}
                           </span>

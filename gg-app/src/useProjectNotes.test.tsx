@@ -982,7 +982,10 @@ describe("useProjectNotes sidecar authority", () => {
     let created: NotesReferenceOperationResult | undefined;
     await act(async () => {
       created = await hook.result.current.createReference(
-        { ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"), path: "src/other.ts" },
+        {
+          ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"),
+          path: "src/other.ts",
+        },
         ["active", "deleted"],
       );
     });
@@ -1026,7 +1029,10 @@ describe("useProjectNotes sidecar authority", () => {
     let activeCreate: NotesReferenceOperationResult | undefined;
     await act(async () => {
       activeCreate = await hook.result.current.createReference(
-        { ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"), path: "src/other.ts" },
+        {
+          ...referenceInput("https://github.com/owner/repo/blob/main/src/other.ts#L1-L2"),
+          path: "src/other.ts",
+        },
         ["active"],
       );
     });
@@ -1446,11 +1452,7 @@ describe("useProjectNotes sidecar authority", () => {
       expect(server.snapshots.get(cwd)?.revision).toBe(2);
       expect(client.saveCalls).toHaveLength(1);
       await waitFor(() =>
-        expect(hook.result.current.document.phases.map((item) => item.id)).toEqual([
-          "A",
-          "B",
-          "C",
-        ]),
+        expect(hook.result.current.document.phases.map((item) => item.id)).toEqual(["A", "B", "C"]),
       );
       expect(hook.result.current.document).toEqual(concurrent);
     },

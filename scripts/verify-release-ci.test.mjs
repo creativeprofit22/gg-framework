@@ -113,6 +113,37 @@ test("command discovery and desktop refresh lint is a mandatory non-mutating CI 
   assert.ok(aggregate.includes('[[ "$TEST_RESULT" == "success" ]]'));
 });
 
+test("desktop lint and format checks are mandatory non-mutating app gates", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),
+  );
+  assert.doesNotMatch(packageJson.scripts.lint, /--fix/);
+  assert.match(packageJson.scripts["format:check"], /^prettier --check /);
+
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const appJob = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
+  const step = (name) =>
+    appJob.match(new RegExp(`      - name: ${name}\\r?\\n[\\s\\S]*?(?=\\r?\\n      - name:)`))?.[0];
+  const expected = [
+    ["Frontend format check", "pnpm --filter gg-app format:check"],
+    ["Frontend lint", "pnpm --filter gg-app lint"],
+  ];
+  for (const [name, command] of expected) {
+    const gate = step(name);
+    assert.ok(gate, name);
+    assert.match(gate, /^        shell: bash\r?$/m);
+    assert.ok(gate.includes(`        run: ${command}`), name);
+    assert.doesNotMatch(gate, /--fix|--write|continue-on-error|\|\||^\s*if:/m);
+  }
+  assert.doesNotMatch(appJob, /lint:fix|prettier --write|gg-app format\r?$/m);
+  const buildIndex = appJob.indexOf("      - name: Frontend build + initial JavaScript size gate");
+  const frameworkIndex = appJob.indexOf("      - name: Build framework packages");
+  assert.ok(buildIndex > 0 && frameworkIndex > 0);
+  assert.ok(appJob.indexOf("      - name: Frontend format check") < frameworkIndex);
+  assert.ok(appJob.indexOf("      - name: Frontend lint") > frameworkIndex);
+  assert.ok(appJob.indexOf("      - name: Frontend lint") < buildIndex);
+});
+
 test("roadmap reliability native smoke remains an isolated Windows app gate", () => {
   const packageJson = JSON.parse(
     readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),

@@ -160,6 +160,12 @@ jobs:
           node --test scripts/audit-generated.test.mjs
           node scripts/audit-generated.mjs --inspect
 
+      # Report-only desktop gates: CI never rewrites sources. Formatting
+      # needs no build, so it fails fast before the slow framework/sidecar work.
+      - name: Frontend format check
+        shell: bash
+        run: pnpm --filter gg-app format:check
+
       # shell: bash for the same reason as the `test` job — on Windows a
       # PowerShell multi-line step only reports the LAST line's exit code, so a
       # failing build here would pass silently.
@@ -170,6 +176,12 @@ jobs:
           pnpm --filter @kenkaiiii/gg-agent build
           pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
+
+      # Type-aware lint resolves workspace package types, so it runs after the
+      # framework build but before the sidecar, smokes, and frontend build.
+      - name: Frontend lint
+        shell: bash
+        run: pnpm --filter gg-app lint
 
       - name: Stage node runtime + bundle sidecar
         run: |

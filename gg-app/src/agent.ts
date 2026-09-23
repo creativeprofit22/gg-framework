@@ -613,17 +613,6 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
 /** A project task from the ~/.gg-tasks store (the agent's `tasks` tool). */
 export type ProjectTask = SharedProjectTask;
 
-/** List this project's tasks, including statuses from newer sidecars. */
-export async function listTasks(): Promise<ProjectTask[]> {
-  try {
-    const res = await invoke<{ tasks: ProjectTask[] }>("agent_tasks", { paneId: "primary" });
-    return res.tasks ?? [];
-  } catch (e) {
-    await logError(`agent_tasks failed: ${String(e)}`);
-    return [];
-  }
-}
-
 /** Run a single task end-to-end in its own fresh session. */
 export async function runTask(id: string): Promise<void> {
   await invoke("agent_run_tasks", { paneId: "primary", id, all: false });
@@ -632,20 +621,6 @@ export async function runTask(id: string): Promise<void> {
 /** Run every pending task sequentially (a fresh session each), in order. */
 export async function runAllTasks(): Promise<void> {
   await invoke("agent_run_tasks", { paneId: "primary", id: null, all: true });
-}
-
-/** Delete a task by id. Returns the remaining tasks. */
-export async function deleteTask(id: string): Promise<ProjectTask[]> {
-  try {
-    const res = await invoke<{ tasks: ProjectTask[] }>("agent_delete_task", {
-      paneId: "primary",
-      id,
-    });
-    return res.tasks ?? [];
-  } catch (e) {
-    await logError(`agent_delete_task failed: ${String(e)}`);
-    return [];
-  }
 }
 
 export async function listMemories(): Promise<MemorySnapshot> {

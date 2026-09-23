@@ -1,5 +1,5 @@
 import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core/plan-review";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { FileCheck } from "lucide-react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
@@ -54,6 +54,22 @@ export function PlanReviewModal({
   } ${feedbackWithinLimit ? "remaining" : "over limit"}`;
   const submitFeedback = (): void => {
     if (!busy && canSubmitFeedback) onFeedback(normalizedFeedback);
+  };
+
+  const feedbackButtonRef = useRef<HTMLButtonElement>(null);
+  const refocusFeedbackButton = useRef(false);
+
+  // Leaving feedback mode unmounts the focused textarea; hand focus back to
+  // the button that opened it instead of dropping it on <body>.
+  useEffect(() => {
+    if (feedbackMode || !refocusFeedbackButton.current) return;
+    refocusFeedbackButton.current = false;
+    feedbackButtonRef.current?.focus();
+  }, [feedbackMode]);
+
+  const closeFeedback = (): void => {
+    refocusFeedbackButton.current = true;
+    setFeedbackMode(false);
   };
 
   return (
@@ -131,7 +147,7 @@ export function PlanReviewModal({
                 } else if (event.key === "Escape") {
                   event.preventDefault();
                   event.stopPropagation();
-                  setFeedbackMode(false);
+                  closeFeedback();
                 }
               }}
             />
@@ -151,7 +167,7 @@ export function PlanReviewModal({
                   type="button"
                   className="btn btn-ghost btn-sm"
                   disabled={busy}
-                  onClick={() => setFeedbackMode(false)}
+                  onClick={closeFeedback}
                 >
                   Cancel
                 </button>
@@ -172,6 +188,7 @@ export function PlanReviewModal({
               {busy ? "Approving…" : "Approve"}
             </button>
             <button
+              ref={feedbackButtonRef}
               type="button"
               className="btn btn-ghost"
               disabled={busy}

@@ -39,6 +39,29 @@ export function getModelDisplayId(modelId: string): string {
     : modelId;
 }
 
+type AzureIdentityCapabilities = Omit<ModelInfo, "name" | "provider">;
+
+const GPT_56_CAPABILITIES = {
+  contextWindow: 1_050_000,
+  codexContextWindow: 272_000,
+  maxOutputTokens: 128_000,
+  supportsThinking: true,
+  supportsImages: true,
+  supportsVideo: false,
+} as const;
+
+/**
+ * Upstream retired GPT-5.6 from the OpenAI catalog, but an Azure customer can
+ * still run a GPT-5.6 deployment. Keep its capabilities for Azure identity
+ * mapping only, so such a deployment is not downgraded to the conservative
+ * fallback. These entries never reappear in the OpenAI model menu.
+ */
+const RETIRED_AZURE_IDENTITIES: readonly AzureIdentityCapabilities[] = [
+  { id: "gpt-5.6-sol", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "low", costTier: "high", maxThinkingLevel: "ultra" },
+  { id: "gpt-5.6-terra", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "medium", costTier: "medium", maxThinkingLevel: "ultra" },
+  { id: "gpt-5.6-luna", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "medium", costTier: "low", maxThinkingLevel: "max" },
+];
+
 export function registerConfiguredAzureModel(
   environment: AzureOpenAIEnvironment = process.env,
 ): ModelInfo | undefined {
@@ -50,9 +73,9 @@ export function registerConfiguredAzureModel(
   if (existing) return existing;
 
   const modelIdentity = config.modelIdentity ?? config.deployment;
-  const identityModel = MODELS.find(
-    (candidate) => candidate.provider === "openai" && candidate.id === modelIdentity,
-  );
+  const identityModel: AzureIdentityCapabilities | undefined =
+    MODELS.find((candidate) => candidate.provider === "openai" && candidate.id === modelIdentity) ??
+    RETIRED_AZURE_IDENTITIES.find((candidate) => candidate.id === modelIdentity);
   const conservativeCapabilities: Omit<ModelInfo, "id" | "name" | "provider"> = {
     contextWindow: 128_000,
     maxOutputTokens: 16_384,

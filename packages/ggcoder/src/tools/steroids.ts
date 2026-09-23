@@ -153,7 +153,8 @@ Actions:
 - show: read a file (from/to for a region; search results carry line numbers).
 - files: files indexed for one repo. repos: indexed repos, one line each (tag/limit to narrow).
 - discover: find good GitHub repos; query is 'topic:X language:Y' or 2-3 keywords, never a sentence (4+ words returns nothing). found=0: retry ONCE with 2 words or a topic: form before giving up. add=true indexes everything found (ask the user first).
-- add: index specific repos (owner/name list); the way to take a chosen subset of discover results.
+- add: index specific repos (owner/name list); the way to take a chosen subset of discover results. On an already-indexed repo, add re-fetches its latest commit.
+Freshness: \`repos\` marks rows indexed over 7 days ago as STALE. Before relying on a stale repo for an answer, refresh it with add (no need to ask — it is already in the corpus). Only indexing NEW repos needs the user's agreement.
 - recent: upstream changes in the last N hours.
 repo/language are case-insensitive; a path without globs is a prefix ('src' = 'src/**').
 \`omitted\` = cut by maxTokens (default 6000); \`more_available\` = narrow the query.
@@ -164,15 +165,18 @@ interface RepoRow {
   language?: string;
   files?: number;
   last_commit?: string;
+  indexed_at?: string;
   tags?: string[];
 }
+
+const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * `repos --json` is ~370 bytes per repo (commit, byte counts, url, ...); a
  * 400-repo corpus came back as 160 KB and blew the tool-result cap. One line
  * per repo keeps the whole list readable.
  */
-export function compactRepos(json: string): string {
+export function compactRepos(json: string, now: number = Date.now()): string {
   let parsed: { count?: number; repositories?: RepoRow[] };
   try {
     parsed = JSON.parse(json) as typeof parsed;
@@ -180,13 +184,24 @@ export function compactRepos(json: string): string {
     return json;
   }
   const rows = parsed.repositories ?? [];
+  let stale = 0;
   const lines = rows.map((r) => {
     const tags = r.tags?.length ? ` [${r.tags.join(",")}]` : "";
-    return `${r.repo}  ${r.language ?? "?"}  ${r.files ?? "?"} files  ${r.last_commit ?? ""}${tags}`;
+    const indexed = r.indexed_at ? Date.parse(r.indexed_at) : NaN;
+    let age = "";
+    if (Number.isFinite(indexed)) {
+      const days = Math.max(0, Math.floor((now - indexed) / 86_400_000));
+      const isStale = now - indexed > STALE_AFTER_MS;
+      if (isStale) stale++;
+      age = `  indexed ${days}d ago${isStale ? " STALE" : ""}`;
+    }
+    return `${r.repo}  ${r.language ?? "?"}  ${r.files ?? "?"} files  ${r.last_commit ?? ""}${age}${tags}`;
   });
-  return [`${parsed.count ?? rows.length} repos indexed, ${rows.length} shown`, ...lines].join(
-    "\n",
-  );
+  const staleNote = stale > 0 ? `, ${stale} STALE (refresh with add before relying on them)` : "";
+  return [
+    `${parsed.count ?? rows.length} repos indexed, ${rows.length} shown${staleNote}`,
+    ...lines,
+  ].join("\n");
 }
 
 // Indexing (`add`, `discover --add`) is deliberately NOT gated on plan mode:

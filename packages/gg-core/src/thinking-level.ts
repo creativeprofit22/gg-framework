@@ -70,7 +70,8 @@ function isOpenAIGptModel(provider: Provider, model: string): boolean {
   const identity = resolvedModelIdentity(model);
   return (
     (provider === "openai" && identity.startsWith("gpt-")) ||
-    (provider === "azure" && identity === "gpt-5.6-sol")
+    // Azure deployments mapped to a GPT-5.6 or GPT-6 identity share its effort ladder.
+    (provider === "azure" && (identity.startsWith("gpt-5.6-") || identity.startsWith("gpt-6-")))
   );
 }
 

@@ -4,8 +4,31 @@ const CIRCULAR = "[CIRCULAR]";
 
 const SENSITIVE_NAME =
   /(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|key|auth(?:orization)?|bearer|cookie|credential|private[_-]?key|password|passwd|secret)(?:$|[_-])/i;
-const SENSITIVE_ASSIGNMENT =
-  /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|key|auth(?:orization)?|bearer|cookie|credential|private[_-]?key|password|passwd|secret))\b(\s*[=:]\s*)(["']?)([^\s,"';}]+)\3/gi;
+/**
+ * Generic `name = value` detection is deliberately narrow. Tool output is mostly
+ * source code, where `const token = await getToken()` or `key === "name"` are
+ * ordinary code — rewriting them corrupts what the model reads and breaks
+ * `edit` matching. So only two credential-shaped forms are matched:
+ *
+ * 1. ENV-style ALL-CAPS names ending in a secret word (`OPENAI_API_KEY=…`,
+ *    `DB_PASSWORD: …`), with any spacing, case-sensitive, whose value contains
+ *    a digit. Names that merely contain the word (`TOKEN_URL`, `AUTH_PROVIDERS`)
+ *    and digit-free values (`STORAGE_KEY = "app:zoom"`, `= savedValue`) are
+ *    code, not credentials. References (`$X`, `process.env.X`) name a secret
+ *    rather than contain one, so they are left alone.
+ * 2. Compact `name=value` with no surrounding whitespace, as in `.env` files,
+ *    query strings and logs (`token=…&`). Formatted code puts spaces around
+ *    `=`, so it never reaches this form.
+ *
+ * Values shorter than 8 characters are skipped: they are counts, flags and
+ * placeholders, not credentials. High-confidence formats (PEM, JWT, provider
+ * prefixes, auth headers) and exact environment values (the real secrets, in
+ * any form) are handled separately.
+ */
+const ENV_SECRET_ASSIGNMENT =
+  /\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|TOKEN|KEY|AUTH|AUTHORIZATION|BEARER|CREDENTIALS?|PASSWORD|PASSWD|SECRET))\b(\s*[=:]\s*)(["']?)(?!\$|process\.env|os\.environ|import\.meta|env\.)(?=[^\s,"';}]*\d)([^\s,"';}=$][^\s,"';}]{7,})\3/g;
+const COMPACT_SECRET_ASSIGNMENT =
+  /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|auth|authorization|credentials?|password|passwd|secret)|(?:[a-z0-9]+[_-])+key)=(["']?)(?!\$)([^\s,"'&;}=][^\s,"'&;}]{7,})\2/gi;
 
 export interface RedactionOptions {
   /** Exact secret values to remove in addition to high-confidence formats. */
@@ -55,9 +78,17 @@ export function redactText(text: string, options: RedactionOptions = {}): string
     /\b(authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\s,;]+/gi,
     `$1${REDACTED}`,
   );
-  result = result.replace(/\b(bearer|basic)\s+[A-Za-z0-9+/_.=-]{8,}/gi, `$1 ${REDACTED}`);
-  // Cookie headers are security-sensitive as a whole; avoid trying to infer safe cookie names.
-  result = result.replace(/\b(cookie|set-cookie)(\s*[:=]\s*)[^\r\n]+/gi, `$1$2${REDACTED}`);
+  // A short plain word after "bearer"/"basic" is prose ("bearer authentication",
+  // "basic functionality"). Credentials are either mixed (digits, symbols,
+  // inner capitals) or, when purely alphabetic, long: 16+ letters is rare in prose.
+  result = result.replace(
+    /\b(bearer|basic)\s+(?![A-Za-z][a-z]{0,14}\b)[A-Za-z0-9+/_.=-]{8,}/gi,
+    `$1 ${REDACTED}`,
+  );
+  // Cookie headers are security-sensitive as a whole; avoid trying to infer safe
+  // cookie names. Header values start with `name=`, which separates them from
+  // code such as `cookie: req.headers.cookie`.
+  result = result.replace(/\b(cookie|set-cookie)(\s*:\s*)[^\s=;:]+=[^\r\n]*/gi, `$1$2${REDACTED}`);
   // Token Plan keys may have short suffixes; redact even without an env snapshot.
   result = result.replace(/\bsk-sp-[A-Za-z0-9_-]+/g, REDACTED);
   // JWTs and well-known provider/repository token prefixes.
@@ -70,8 +101,13 @@ export function redactText(text: string, options: RedactionOptions = {}): string
     REDACTED,
   );
   result = result.replace(
-    SENSITIVE_ASSIGNMENT,
-    (_match, name: string, separator: string) => `${name}${separator}${REDACTED}`,
+    ENV_SECRET_ASSIGNMENT,
+    (_match, name: string, separator: string, quote: string) =>
+      `${name}${separator}${quote}${REDACTED}${quote}`,
+  );
+  result = result.replace(
+    COMPACT_SECRET_ASSIGNMENT,
+    (_match, name: string, quote: string) => `${name}=${quote}${REDACTED}${quote}`,
   );
 
   for (const secret of normalizedSecrets(options.secrets)) {

@@ -141,3 +141,20 @@ describe("PlanReviewModal durable human gate", () => {
     }
   });
 });
+
+describe("PlanReviewModal feedback focus", () => {
+  it("returns focus to the Feedback button when feedback is cancelled with Escape", () => {
+    render(<PlanReviewModal content="1. Do the thing" onAccept={vi.fn()} onFeedback={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
+    const input = screen.getByPlaceholderText("What should change about this plan?");
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Feedback" }));
+  });
+
+  it("returns focus to the Feedback button when feedback is cancelled with Cancel", () => {
+    render(<PlanReviewModal content="1. Do the thing" onAccept={vi.fn()} onFeedback={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Feedback" }));
+  });
+});

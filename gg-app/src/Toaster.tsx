@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Info, CheckCircle2, AlertTriangle, XCircle, X } from "lucide-react";
 import { theme } from "./theme";
-import { subscribeToasts, dismissToast, type Toast, type ToastTone } from "./toast";
+import {
+  subscribeToasts,
+  dismissToast,
+  pauseToast,
+  resumeToast,
+  type Toast,
+  type ToastTone,
+} from "./toast";
 
 // Must match the .toast-out animation duration in App.css.
 const EXIT_MS = 260;
@@ -70,14 +77,43 @@ export function Toaster(): React.ReactElement {
     };
   }, []);
 
+  // Screen-reader announcements live in two regions that are mounted for the
+  // app's whole life: a live region only speaks changes made AFTER it exists,
+  // so a toast that mounts with its text already inside is often skipped.
+  // Errors interrupt (alert); everything else waits its turn (status).
+  const live = rendered.filter((t) => !t.leaving);
+  const announce = (urgent: boolean): React.ReactNode =>
+    live
+      .filter((t) => (t.tone === "error") === urgent)
+      .map((t) => <div key={t.id}>{t.message}</div>);
+
   return (
     <div className="toaster">
+      <div className="sr-only" role="status">
+        {announce(false)}
+      </div>
+      <div className="sr-only" role="alert">
+        {announce(true)}
+      </div>
       {rendered.map((t) => {
         const color = TONE_COLOR[t.tone];
         const Icon = TONE_ICON[t.tone];
         return (
-          <div key={t.id} className={`toast${t.leaving ? " leaving" : ""}`} role="status">
+          // Hovering or focusing a toast holds its countdown so it can be read.
+          <div
+            key={t.id}
+            className={`toast${t.leaving ? " leaving" : ""}`}
+            onMouseEnter={() => pauseToast(t.id)}
+            onMouseLeave={(e) => {
+              if (!e.currentTarget.contains(document.activeElement)) resumeToast(t.id);
+            }}
+            onFocus={() => pauseToast(t.id)}
+            onBlur={(e) => {
+              if (!e.currentTarget.matches(":hover")) resumeToast(t.id);
+            }}
+          >
             <span
+              aria-hidden="true"
               className="toast-icon"
               style={{
                 color,

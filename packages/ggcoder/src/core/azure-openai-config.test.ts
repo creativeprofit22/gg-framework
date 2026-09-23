@@ -185,31 +185,37 @@ describe("Azure OpenAI app boundaries", () => {
   });
 
   it("registers and selects a namespaced Azure deployment alongside the same OpenAI model ID", async () => {
-    addedModelIds.add("azure:gpt-5.6-sol");
+    // Use a model the OpenAI catalog still ships so both identities coexist.
+    const currentEnvironment = {
+      ...completeEnvironment,
+      AZURE_OPENAI_DEPLOYMENT: "gpt-6-sol",
+      AZURE_OPENAI_MODEL_ID: "gpt-6-sol",
+    };
+    addedModelIds.add("azure:gpt-6-sol");
     const openAIModel = MODELS.find(
-      (candidate) => candidate.id === "gpt-5.6-sol" && candidate.provider === "openai",
+      (candidate) => candidate.id === "gpt-6-sol" && candidate.provider === "openai",
     );
-    const model = registerConfiguredAzureModel(completeEnvironment);
+    const model = registerConfiguredAzureModel(currentEnvironment);
 
     expect(openAIModel).toBeDefined();
     expect(model).toMatchObject({
-      id: "azure:gpt-5.6-sol",
-      name: "Azure OpenAI (gpt-5.6-sol)",
+      id: "azure:gpt-6-sol",
+      name: "Azure OpenAI (gpt-6-sol)",
       provider: "azure",
       contextWindow: 1_050_000,
       maxOutputTokens: 128_000,
       supportsThinking: true,
       supportsImages: true,
       supportsVideo: false,
-      costTier: "high",
+      costTier: "medium",
       maxThinkingLevel: "ultra",
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
-    expect(registerConfiguredAzureModel(completeEnvironment)).toBe(model);
-    expect(MODELS.filter((candidate) => candidate.id === "gpt-5.6-sol")).toEqual([openAIModel]);
-    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-5.6-sol")).toEqual([model]);
+    expect(registerConfiguredAzureModel(currentEnvironment)).toBe(model);
+    expect(MODELS.filter((candidate) => candidate.id === "gpt-6-sol")).toEqual([openAIModel]);
+    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-6-sol")).toEqual([model]);
     expect(getDefaultModel("azure")).toBe(model);
-    expect(getModelDisplayId(model!.id)).toBe("gpt-5.6-sol");
+    expect(getModelDisplayId(model!.id)).toBe("gpt-6-sol");
     expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([
       "low",
       "medium",
@@ -218,7 +224,7 @@ describe("Azure OpenAI app boundaries", () => {
       "max",
       "ultra",
     ]);
-    expect(resolveTransportModel("azure", model!.id, completeEnvironment)).toBe("gpt-5.6-sol");
+    expect(resolveTransportModel("azure", model!.id, currentEnvironment)).toBe("gpt-6-sol");
 
     const selected = await resolveStartOrFallback(
       { hasProviderAuth: async (provider) => provider === "azure" },
@@ -228,7 +234,7 @@ describe("Azure OpenAI app boundaries", () => {
     );
     expect(selected).toEqual({
       provider: "azure",
-      model: "azure:gpt-5.6-sol",
+      model: "azure:gpt-6-sol",
       loggedIn: true,
     });
   });

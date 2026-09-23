@@ -835,7 +835,7 @@ describe("toOpenAIReasoningEffort", () => {
     expect(toOpenAIReasoningEffort("max", "gpt-6-astra")).toBe("max");
     expect(toOpenAIReasoningEffort("max", "gpt-5.6-sol")).toBe("xhigh");
     expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
-    expect(toOpenAIReasoningEffort("ultra", "gpt-5.6-sol")).toBe("xhigh");
+    expect(toOpenAIReasoningEffort("ultra", "gpt-6-sol")).toBe("xhigh");
   });
 });
 

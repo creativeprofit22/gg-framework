@@ -1,5 +1,12 @@
 # @kenkaiiii/gg-agent
 
+## 5.64.0
+
+### Patch Changes
+
+- Updated dependencies [4800b0f]
+  - @kenkaiiii/gg-ai@5.64.0
+
 ## 5.63.0
 
 ### Patch Changes

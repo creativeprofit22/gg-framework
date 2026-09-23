@@ -22,6 +22,33 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.70.2",
+    date: "2026-09-23",
+    items: [
+      "GG Coder feels alive now. Your messages rise into the chat, tool steps slide in as they run, popups and menus fade away instead of vanishing, and every screen change glides with a soft `crossfade`. Hit `Show full output` on a long code block and it grows open smoothly instead of jumping.",
+      "Reviewing a plan is a proper moment now. The `YOUR PLAN` banner draws itself in line by line, your plan rises in underneath, and a stray Enter can never approve it by accident. It's fully keyboard friendly, so Tab stays right where your decision is.",
+      "Errors wait for you now. They stay on screen until you close them, and any notice holds still while you hover it, so nothing important slips past while you're looking away.",
+      "A calmer, cleaner look. The top bar keeps `/commit` as the one standout action, Ken's replies read in easy normal text with his signature teal stripe, and your project list is tidier with neat, lined-up times.",
+    ],
+  },
+  {
+    version: "0.70.1",
+    date: "2026-09-23",
+    items: [
+      "Every button now tells you what it does. I built slick new `tooltips` across the whole app that actually show up on Mac, pop in instantly as you glide between buttons, and never appear when you didn't ask for them.",
+      "GG Coder got a serious polish pass. Faint grey text is crisper and easier on the eyes, menus and popups now float in smoothly, and keyboard users get a clear `focus ring` so you always know where you are. Got `Reduce Motion` switched on? I calm every animation down for you now.",
+      "Squeeze your windows as small as you like. At narrow sizes the header buttons neatly wrap instead of sliding off the edge, your issue and PR counts stay fully readable, and the logo shrinks to fit.",
+    ],
+  },
+  {
+    version: "0.70.0",
+    date: "2026-09-23",
+    items: [
+      "OpenAI's brand new `GPT-6 Sol` and `GPT-6 Luna` just landed. Sol is your new OpenAI default, a serious coder that climbs all the way to `ultra` effort, and Luna is the lightning-fast, dirt-cheap sidekick I now hand your helper agents. Both read screenshots and remember a huge amount of your project at once.",
+      "Your secrets are safer than ever. I hide API keys and passwords from the AI, and now I also make sure it can never accidentally overwrite a real key in your files with the hidden placeholder it was shown. Your `.env` stays exactly as you left it.",
+    ],
+  },
+  {
     version: "0.69.0",
     date: "2026-09-23",
     items: [

@@ -87,7 +87,8 @@ export function KenActivityBar({
         <svg width="0" height="0" aria-hidden="true" style={{ position: "absolute" }}>
           <defs>
             <filter id={orbTintId} colorInterpolationFilters="sRGB">
-              <feFlood floodColor={theme.ken} />
+              {/* In `style`, not the attribute: presentation attributes don't resolve var(). */}
+              <feFlood style={{ floodColor: theme.ken }} />
               <feComposite in2="SourceAlpha" operator="in" />
             </filter>
           </defs>

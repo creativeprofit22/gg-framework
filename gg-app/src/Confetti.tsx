@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { theme } from "./theme";
+import { resolveColor, theme } from "./theme";
 
 /**
  * One-shot confetti burst, fired from the center of its positioned parent the
@@ -56,6 +56,8 @@ export function Confetti(): React.ReactElement | null {
     // Burst origin: center of the modal.
     const cx = w / 2;
     const cy = h / 2;
+    // Canvas can't read `var()`: resolve the theme tokens once per burst.
+    const colors = COLORS.map((c) => resolveColor(c, canvas));
     const particles: Particle[] = Array.from({ length: COUNT }, () => {
       const angle = Math.random() * Math.PI * 2;
       const speed = 5 + Math.random() * 9;
@@ -67,7 +69,7 @@ export function Confetti(): React.ReactElement | null {
         rot: Math.random() * Math.PI,
         vrot: (Math.random() - 0.5) * 0.4,
         size: 4 + Math.random() * 4,
-        color: COLORS[Math.floor(Math.random() * COLORS.length)] ?? theme.primary,
+        color: colors[Math.floor(Math.random() * colors.length)] ?? resolveColor(theme.primary),
       };
     });
 

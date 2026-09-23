@@ -53,15 +53,41 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    // The identifier names 0.66.4 because that build was packaged but never
-    // installed, so these notes were never delivered to a reader. The content
-    // now covers upstream through 0.69.0 instead of being duplicated into a
-    // second entry. Keep the identifier: it is opaque to readers, and changing
-    // it would present already-written notes as unread.
-    id: "local-2026-09-22-upstream-0664-status-and-reading",
+    id: "local-2026-09-23-upstream-0702-gpt6-and-calmer-app",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    // Named 0.66.4 because that build was packaged but never installed; the
+    // content covers upstream through 0.69.0. Keep the identifier: changing it
+    // would present already-read notes as unread.
+    id: "local-2026-09-22-upstream-0664-status-and-reading",
+    label: "Upstream 0.69.0, with Claude Opus 5.5 and long sessions that keep their pace",
+    date: "2026-09-22",
+    items: [
+      "Choose `Claude Opus 5.5` when a coding session runs long. Anthropic built it for exactly that, and it reasons adaptively at every level from `low` through `max` rather than being locked to one setting. It holds a `1M` token conversation, reads images, and costs less to run than the model it replaces. New `Anthropic` chats still start on `Claude Sonnet 5` unless you pick otherwise.",
+      "`Grok 4.7` now starts your `xAI` chats in place of `4.6`. It keeps the same `500K` context and adds an extra-deep `xhigh` reasoning level for the problems that need more thought.",
+      "Xiaomi's `MiMo V2.6` family replaces `V2.5`. `MiMo V2.6 Pro` starts your `Xiaomi` chats and can read screenshots and video clips alongside your code, `MiMo V2.6 Flash` keeps quick lookups inexpensive, and an `UltraSpeed` option is there when pace matters more than depth.",
+      "A long session no longer slows to a crawl. Conversations are now shortened against a budget suited to the model before they ever get heavy, so the pace an hour into a large task holds up instead of degrading.",
+      "Fewer phantom stalls on a large prompt. A big request is no longer abandoned after a fixed wait and restarted from the beginning; it gets the time the work actually needs, so you see fewer unexplained pauses and retries.",
+      "Ask for UI and get genuine source rather than an invented lookalike. Your agent can inspect public `Bklit` and `Kokonut` components, `shadcn` source, and animation APIs, then plan and adopt that real source into your project. Adoption does not overwrite your existing files or install packages on its own.",
+      "Animation that respects how you like to work. New `Motion` guidance means real animation APIs, your `reduced motion` preference honored, and animations cleaned up when a view closes.",
+      "Ask for interfaces with fewer repeated descriptions and more consistent controls. The updated `UI skill` puts more emphasis on checking keyboard focus and dropdown behavior through actual interactions, not treating a screenshot as proof that everything works.",
+      "Follow the work without reading every tool message. The `activity bar` now distinguishes checking code, retrying, reconnecting, waiting for you, and `Ken` reviewing. It keeps the result visible when work stops, and each pane follows its own conversation instead of borrowing another pane's progress.",
+      "Read a fresh answer without inheriting yesterday's green check. Status separates checks from the current request from warnings about earlier work, and gives research and background jobs their own finish messages. Passing checks are not a claim that an update was released or installed.",
+      "Watch a task list update as it happens. When your agent adds, finishes, or drops a task, the count in the header and an open `Tasks` view now change immediately, rather than waiting for the next background refresh or a manual reopen.",
+      "Keep `Ken` and `Autopilot` focused on the work you asked for. Reviews retain your latest decisions and look for unfinished requirements rather than an endless list of optional improvements. Your Local Fork still waits for your approval before implementing a proposed plan.",
+      "Make a `slash command` fit this invocation. An explicit choice of scope, format, or whether to edit takes priority over the template's default, while the rest of its procedure stays intact. Neither command text nor its arguments grant permission to use tools or skip an approval.",
+      "Keep working through longer conversations. Automatic compaction can prepare a shorter history in the background, then use it at a safe boundary rather than interrupting a tool result. Your recent conversation and saved command invocations remain part of the continuation.",
+      "Keep pictures with your chat in connected editors. `ACP` connections now forward screenshots and generated images both as they arrive and when saved history is reopened, instead of leaving the image behind.",
+      "Start supported deep-thinking models at a more practical reasoning level. New chats use the model's default rather than automatically choosing its maximum, and `plan mode` limits deeper reasoning. A reasoning choice you saved still takes precedence where that model supports it.",
+      "Choose a workspace that suits your eyes in `Settings > Appearance`. Switch between `Dark` and `Light`, adjust `Prose size`, `Letter spacing`, and `Paragraph spacing`, or limit the reading width in wide panes. Code and compact controls keep their sizing, and `Reset appearance defaults` gives you a clear way back.",
+      "Keep your place while arranging conversations. Reading anchors, drafts, and focus stay with their pane through supported swaps and resizes, while saved appearance choices carry across windows. `Identity markers` and `Crisp reveal` offer another way to distinguish speakers and read streamed replies.",
+      "Reach a brand-new model on the day it arrives. When `Anthropic` turns a request away because it expects a newer client than this app reports, the app now reads the version it asked for, adopts it straight away, and retries your message instead of repeating the refusal for up to a day. This was keeping `Claude Opus 5.5` unreachable behind an error saying the model was not supported.",
+      "A provider refusal no longer disappears behind a blank finish. The agent can make one bounded recovery attempt when the provider's response allows it; a repeated refusal remains a clear error in the conversation. This does not override the provider's restrictions or promise that every request will succeed.",
+      "Let scratch files stay out of your way. Temporary-file handling now accounts for the shell's scratch folder on Windows as well as platform temporary folders, while preserving checks that keep file access within the permitted locations.",
+    ],
   },
   {
     id: "local-2026-09-18-upstream-0651-queues-and-discovery",

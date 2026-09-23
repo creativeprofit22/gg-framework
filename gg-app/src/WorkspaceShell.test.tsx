@@ -39,6 +39,15 @@ const lifecycleCallbacks = new Map<string, Array<AgentPaneProps["onLifecycleErro
 const latestPaneProps = new Map<string, AgentPaneProps>();
 const paneTargetSetters = new Map<string, (cwd: string | null) => void>();
 const MAX_LIFECYCLE_EFFECT_EXECUTIONS = 8;
+// The Toaster mirrors each toast into screen-reader-only live regions; match
+// only what is visibly rendered so "warns once" still counts real notices.
+const VISIBLE = { ignore: "script, style, .sr-only *" };
+/** The workspace's own swap announcer, not the Toaster's live region. */
+function swapStatus(): HTMLElement {
+  const regions = screen.getAllByRole("status").filter((el) => !el.classList.contains("sr-only"));
+  expect(regions).toHaveLength(1);
+  return regions[0];
+}
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
@@ -374,7 +383,7 @@ describe("middle swap integration", () => {
           shiftKey: true,
         }),
       ).toBe(true);
-      expect(screen.getByRole("status").textContent).toContain("a pane is closing");
+      expect(swapStatus().textContent).toContain("a pane is closing");
       expect(saved().root).toEqual(before.root);
       expect(saved().panes).toEqual(before.panes);
       expect([...document.querySelectorAll("[data-pane-id]")]).toEqual(hosts);
@@ -411,6 +420,7 @@ describe("middle swap integration", () => {
       expect(
         screen.getByText(
           `Pane ${closing} stayed open because its session could not be disposed. Try closing it again.`,
+          VISIBLE,
         ),
       ).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
@@ -482,7 +492,7 @@ describe("middle swap integration", () => {
         screen.queryByRole("button", { name: `Swap with middle: conversation ${side}` }),
       ).toBeNull();
       expect(screen.getByTestId("pane-middle").getAttribute("data-focused")).toBe("true");
-      expect(screen.getByRole("status").textContent).toContain(
+      expect(swapStatus().textContent).toContain(
         "focused side action can exchange the pair again",
       );
       fireEvent.click(destination);
@@ -1032,9 +1042,9 @@ describe("WorkspaceShell", () => {
     latestPaneProps.get("secondary")?.onLifecycleError?.(new Error("secondary restore failed"));
 
     expect(
-      await screen.findByText(/Pane secondary could not restore its saved session/),
+      await screen.findByText(/Pane secondary could not restore its saved session/, VISIBLE),
     ).toBeTruthy();
-    expect(screen.queryByText(/Pane primary could not restore its saved session/)).toBeNull();
+    expect(screen.queryByText(/Pane primary could not restore its saved session/, VISIBLE)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   });
 
@@ -1206,6 +1216,7 @@ describe("WorkspaceShell", () => {
     expect(
       await screen.findByText(
         "Pane secondary stayed open because its session could not be disposed. Try closing it again.",
+        VISIBLE,
       ),
     ).toBeTruthy();
     expect(screen.getByTestId("pane-secondary")).toBeTruthy();
@@ -1223,11 +1234,11 @@ describe("WorkspaceShell", () => {
     render(<WorkspaceShell renderPane={renderPane} />);
 
     expect(
-      await screen.findByText(/Pane secondary could not restore its saved session/),
+      await screen.findByText(/Pane secondary could not restore its saved session/, VISIBLE),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
-    expect(screen.getAllByText(/Pane secondary could not restore its saved session/)).toHaveLength(
+    expect(screen.getAllByText(/Pane secondary could not restore its saved session/, VISIBLE)).toHaveLength(
       1,
     );
     expect(lifecycleEffectExecutions.get("secondary")).toBe(1);
@@ -1239,17 +1250,17 @@ describe("WorkspaceShell", () => {
     });
     render(<WorkspaceShell renderPane={renderPane} />);
 
-    expect(await screen.findByText(/Workspace layout could not be read/)).toBeTruthy();
-    expect(screen.getAllByText(/Workspace layout could not be read/)).toHaveLength(1);
+    expect(await screen.findByText(/Workspace layout could not be read/, VISIBLE)).toBeTruthy();
+    expect(screen.getAllByText(/Workspace layout could not be read/, VISIBLE)).toHaveLength(1);
   });
 
   it("warns once and preserves malformed workspace bytes", async () => {
     localStorage.setItem("gg-workspace-layout-recursive:main", "{malformed");
     render(<WorkspaceShell renderPane={renderPane} />);
 
-    expect(await screen.findByText(/Workspace layout was malformed/)).toBeTruthy();
+    expect(await screen.findByText(/Workspace layout was malformed/, VISIBLE)).toBeTruthy();
     expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe("{malformed");
-    expect(screen.getAllByText(/Workspace layout was malformed/)).toHaveLength(1);
+    expect(screen.getAllByText(/Workspace layout was malformed/, VISIBLE)).toHaveLength(1);
   });
 
   it("clamps horizontal, vertical, and nested splits to pixel minima with narrow fallback", () => {

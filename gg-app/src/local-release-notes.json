@@ -1,62 +1,40 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-22",
-  "label": "Upstream 0.69.0, with Claude Opus 5.5 and long sessions that keep their pace",
+  "date": "2026-09-23",
+  "label": "Upstream 0.70.2, with GPT-6 Sol and Luna and a calmer app",
   "sections": [
     {
-      "title": "Pick a stronger model for the work in front of you",
+      "title": "Pick from OpenAI's newest models",
       "items": [
-        "Choose `Claude Opus 5.5` when a coding session runs long. Anthropic built it for exactly that, and it reasons adaptively at every level from `low` through `max` rather than being locked to one setting. It holds a `1M` token conversation, reads images, and costs less to run than the model it replaces. New `Anthropic` chats still start on `Claude Sonnet 5` unless you pick otherwise.",
-        "`Grok 4.7` now starts your `xAI` chats in place of `4.6`. It keeps the same `500K` context and adds an extra-deep `xhigh` reasoning level for the problems that need more thought.",
-        "Xiaomi's `MiMo V2.6` family replaces `V2.5`. `MiMo V2.6 Pro` starts your `Xiaomi` chats and can read screenshots and video clips alongside your code, `MiMo V2.6 Flash` keeps quick lookups inexpensive, and an `UltraSpeed` option is there when pace matters more than depth."
+        "`GPT-6 Sol` and `GPT-6 Luna` join `GPT-6 Astra` in the model menu, replacing the `GPT-5.6` family. Sol is a strong coder that reaches up to `ultra` effort, and Luna is the quick, inexpensive choice for lighter work. New OpenAI chats in your Local Fork still start on `GPT-6 Astra` unless you pick otherwise."
       ]
     },
     {
-      "title": "Keep a long conversation quick",
+      "title": "Keep your secrets where you left them",
       "items": [
-        "A long session no longer slows to a crawl. Conversations are now shortened against a budget suited to the model before they ever get heavy, so the pace an hour into a large task holds up instead of degrading.",
-        "Fewer phantom stalls on a large prompt. A big request is no longer abandoned after a fixed wait and restarted from the beginning; it gets the time the work actually needs, so you see fewer unexplained pauses and retries."
+        "API keys and passwords were already hidden from the agent. Now it also cannot overwrite a real key in your files with the hidden placeholder it was shown, so a routine edit to your `.env` or config leaves your actual secrets intact."
       ]
     },
     {
-      "title": "Ask for interfaces built from real components",
+      "title": "Read and move around the app more comfortably",
       "items": [
-        "Ask for UI and get genuine source rather than an invented lookalike. Your agent can inspect public `Bklit` and `Kokonut` components, `shadcn` source, and animation APIs, then plan and adopt that real source into your project. Adoption does not overwrite your existing files or install packages on its own.",
-        "Animation that respects how you like to work. New `Motion` guidance means real animation APIs, your `reduced motion` preference honored, and animations cleaned up when a view closes.",
-        "Ask for interfaces with fewer repeated descriptions and more consistent controls. The updated `UI skill` puts more emphasis on checking keyboard focus and dropdown behavior through actual interactions, not treating a screenshot as proof that everything works."
+        "Every button can now explain itself. Hover or tab onto a control and its `tooltip` appears in the app's own style, quickly as you move between buttons, and never when you did not ask for one.",
+        "Always know where you are with the keyboard. Controls show a clear `focus ring`, and popups fade away instead of vanishing. With `Reduce Motion` switched on in your system settings, those animations calm down for you.",
+        "Errors wait for you. They stay on screen until you close them, and any notice holds still while you hover or focus it, so nothing important slips past while you are looking away."
       ]
     },
     {
-      "title": "Know what this request actually finished",
+      "title": "Arrange and run your work with fewer surprises",
       "items": [
-        "Follow the work without reading every tool message. The `activity bar` now distinguishes checking code, retrying, reconnecting, waiting for you, and `Ken` reviewing. It keeps the result visible when work stops, and each pane follows its own conversation instead of borrowing another pane's progress.",
-        "Read a fresh answer without inheriting yesterday's green check. Status separates checks from the current request from warnings about earlier work, and gives research and background jobs their own finish messages. Passing checks are not a claim that an update was released or installed.",
-        "Watch a task list update as it happens. When your agent adds, finishes, or drops a task, the count in the header and an open `Tasks` view now change immediately, rather than waiting for the next background refresh or a manual reopen.",
-        "Keep `Ken` and `Autopilot` focused on the work you asked for. Reviews retain your latest decisions and look for unfinished requirements rather than an endless list of optional improvements. Your Local Fork still waits for your approval before implementing a proposed plan."
-      ]
-    },
-    {
-      "title": "Keep your instructions, images, and longer conversations together",
-      "items": [
-        "Make a `slash command` fit this invocation. An explicit choice of scope, format, or whether to edit takes priority over the template's default, while the rest of its procedure stays intact. Neither command text nor its arguments grant permission to use tools or skip an approval.",
-        "Keep working through longer conversations. Automatic compaction can prepare a shorter history in the background, then use it at a safe boundary rather than interrupting a tool result. Your recent conversation and saved command invocations remain part of the continuation.",
-        "Keep pictures with your chat in connected editors. `ACP` connections now forward screenshots and generated images both as they arrive and when saved history is reopened, instead of leaving the image behind.",
-        "Start supported deep-thinking models at a more practical reasoning level. New chats use the model's default rather than automatically choosing its maximum, and `plan mode` limits deeper reasoning. A reasoning choice you saved still takes precedence where that model supports it."
-      ]
-    },
-    {
-      "title": "Make the Local Fork easier to read",
-      "items": [
-        "Choose a workspace that suits your eyes in `Settings > Appearance`. Switch between `Dark` and `Light`, adjust `Prose size`, `Letter spacing`, and `Paragraph spacing`, or limit the reading width in wide panes. Code and compact controls keep their sizing, and `Reset appearance defaults` gives you a clear way back.",
-        "Keep your place while arranging conversations. Reading anchors, drafts, and focus stay with their pane through supported swaps and resizes, while saved appearance choices carry across windows. `Identity markers` and `Crisp reveal` offer another way to distinguish speakers and read streamed replies."
+        "Swap arrows now appear on every pane in a grid, including the middle column of a `3x2` layout whose dividers were dragged a few pixels apart. Rows that line up by eye are treated as the same row.",
+        "See why a task stopped. When a `Tasks` run ends early, the task now says why, such as `Last run stopped: it was cancelled.` Running or deleting a task also reports a clear failure instead of waiting forever when the run cannot start or the save fails.",
+        "Settings and `Radio` tell you what happened. Saving or loading shows its progress and any error, the `New project` folder preview follows a changed projects folder straight away, and pausing the radio on Windows really stops playback."
       ]
     },
     {
       "title": "Recover without hiding what went wrong",
       "items": [
-        "Reach a brand-new model on the day it arrives. When `Anthropic` turns a request away because it expects a newer client than this app reports, the app now reads the version it asked for, adopts it straight away, and retries your message instead of repeating the refusal for up to a day. This was keeping `Claude Opus 5.5` unreachable behind an error saying the model was not supported.",
-        "A provider refusal no longer disappears behind a blank finish. The agent can make one bounded recovery attempt when the provider's response allows it; a repeated refusal remains a clear error in the conversation. This does not override the provider's restrictions or promise that every request will succeed.",
-        "Let scratch files stay out of your way. Temporary-file handling now accounts for the shell's scratch folder on Windows as well as platform temporary folders, while preserving checks that keep file access within the permitted locations."
+        "A command that cannot start is now reported as a failure rather than looking like it quietly succeeded, and turning off network access also stops a web fetch that is already following redirects."
       ]
     }
   ]

@@ -70,7 +70,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 | Provider          | Models                                                             | Auth             |
 | ----------------- | ------------------------------------------------------------------ | ---------------- |
 | **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5, Haiku 4.5                    | OAuth            |
-| **OpenAI**        | GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna              | OAuth            |
+| **OpenAI**        | GPT-6 Astra, GPT-6 Sol, GPT-6 Luna                                 | OAuth            |
 | **Moonshot**      | Kimi K3, Kimi K2.7 Code                                            | OAuth or API key |
 | **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash (image)                                     | API key          |
 | **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |
@@ -160,7 +160,7 @@ Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub rep
 
 `subagent` remains blocking. The async suite launches persistent NDJSON worker processes, so a parent can start up to four active child turns, keep working, steer them, and wait for any or all results. Up to eight idle workers remain available for follow-up; bounded snapshots retain the latest 20 agents.
 
-Only GPT-5.6 Sol/Terra at **Ultra** delegates proactively. Lower Sol/Terra levels use async agents only when the user or project/skill instructions request delegation; other models receive no proactive policy.
+Only GPT-6 Astra/Sol at **Ultra** delegates proactively. Lower Astra/Sol levels use async agents only when the user or project/skill instructions request delegation; other models receive no proactive policy.
 
 Children share the parent working directory, not isolated worktrees. Parallel writes must target disjoint files or subsystems. Async fan-out is one level deep, child output is bounded, idle workers reap after 10 minutes, and workers are not resumable after a CLI/app restart.
 
@@ -202,7 +202,7 @@ Eleven ship built in, and route themselves when the work matches:
 | `durable`          | User data must not be lost — first database/table, migrations, backfills/imports, destructive operations, backups and recovery; any store (Postgres, MySQL, SQLite, Mongo, serverless).                                                                                                                                             |
 | `evidence-led-ui`  | Broad or design-sensitive UI work — new screens, redesigns, design systems, accessibility passes.                                                                                                                                                                                                                                   |
 | `lean`             | Speed and resource efficiency — slow loading/startup, jank, high CPU, memory leaks and hogging, zombie/orphan processes, bundle bloat, dead code/styles, Core Web Vitals; while building anything that should stay fast, or a perf pass on an existing project. Any stack: web, backend, Electron, Tauri, mobile, native, game, ML. |
-| `refactoring`      | Restructuring existing code without changing behavior — "refactor", "clean up", "reduce tech debt", "modernize" or migrate legacy code; test-guarded steps, revert-on-red, characterization tests for untested code. |
+| `refactoring`      | Restructuring existing code without changing behavior — "refactor", "clean up", "reduce tech debt", "modernize" or migrate legacy code; test-guarded steps, revert-on-red, characterization tests for untested code.                                                                                                                |
 | `root-cause`       | A bug that resists the obvious fix, makes no sense, or keeps coming back — gated diagnosis from red repro to ranked hypotheses to regression test.                                                                                                                                                                                  |
 | `shared-language`  | Fuzzy or drifting domain vocabulary, recurring naming decisions, and hard-to-reverse decisions worth recording (glossary + decision records).                                                                                                                                                                                       |
 | `tdd`              | Test-driven development — red-green-refactor with pre-agreed seams, when the user asks for test-first work.                                                                                                                                                                                                                         |

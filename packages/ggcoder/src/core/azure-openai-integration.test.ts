@@ -8,7 +8,7 @@ import type { AgentSession as AgentSessionType } from "./agent-session.js";
 it("sends an AgentSession prompt through the registered Azure OpenAI deployment", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-home-"));
   const project = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-project-"));
-  const deployment = "gpt-5.6-sol";
+  const deployment = "gpt-6-sol";
   const internalModelId = `azure:${deployment}`;
   const apiKey = "azure-integration-secret";
   const baseUrl =
@@ -61,7 +61,7 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
     expect(azureModel).toMatchObject({
       provider: "azure",
       id: internalModelId,
-      name: "Azure OpenAI (gpt-5.6-sol)",
+      name: "Azure OpenAI (gpt-6-sol)",
     });
 
     const { AgentSession } = await import("./agent-session.js");

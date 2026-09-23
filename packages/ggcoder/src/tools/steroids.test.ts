@@ -73,6 +73,34 @@ describe("compactRepos", () => {
     );
   });
 
+  it("shows index age and flags repos indexed over a week ago as STALE", () => {
+    const now = Date.parse("2026-09-23T00:00:00Z");
+    const json = JSON.stringify({
+      count: 2,
+      repositories: [
+        {
+          repo: "a/b",
+          language: "go",
+          files: 1,
+          last_commit: "2026-09-20",
+          indexed_at: "2026-09-21T00:00:00Z",
+        },
+        {
+          repo: "c/d",
+          language: "go",
+          files: 1,
+          last_commit: "2026-09-01",
+          indexed_at: "2026-09-02T00:00:00Z",
+        },
+      ],
+    });
+    expect(compactRepos(json, now)).toBe(
+      "2 repos indexed, 2 shown, 1 STALE (refresh with add before relying on them)\n" +
+        "a/b  go  1 files  2026-09-20  indexed 2d ago\n" +
+        "c/d  go  1 files  2026-09-01  indexed 21d ago STALE",
+    );
+  });
+
   it("passes non-JSON through untouched", () => {
     expect(compactRepos("not json")).toBe("not json");
   });

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { withViewTransition } from "./view-transition";
 
 export interface DropdownOption {
   value: string;
@@ -66,7 +67,8 @@ export function Dropdown({
   }
 
   function closeList(returnFocus = true): void {
-    setOpen(false);
+    // The list folds back up into the trigger (see "Exits" in App.css).
+    withViewTransition(() => setOpen(false));
     if (returnFocus) requestAnimationFrame(() => triggerRef.current?.focus());
   }
 
@@ -98,7 +100,9 @@ export function Dropdown({
     // A press that starts outside the control cancels the list. Registered on
     // the next tick so the click that opened it doesn't immediately close it.
     const closeOnOutsidePress = (event: MouseEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        withViewTransition(() => setOpen(false));
+      }
     };
     const listenerId = window.setTimeout(
       () => document.addEventListener("mousedown", closeOnOutsidePress),

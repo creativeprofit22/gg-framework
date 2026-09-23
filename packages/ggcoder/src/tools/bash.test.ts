@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import { getToolOutputRoot } from "./overflow.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { AgentNotificationQueue } from "../core/agent-notifications.js";
 import { resolveShell } from "../core/shell.js";
+import { localOperations } from "./operations.js";
 import { existsSync } from "node:fs";
 import { useFakeHome } from "../test-support/fake-home.js";
 
@@ -115,6 +117,24 @@ describe("renderBashOutput", () => {
 });
 
 describe("createBashTool shell snapshot", () => {
+  it("reports a tool error when the shell cannot be spawned instead of a successful result", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager(), {
+      ...localOperations,
+      process: {
+        ...localOperations.process,
+        spawn: (_file, _args, options) => spawn(path.join(tmpHome, "missing-shell"), [], options),
+      },
+    });
+
+    const result = await tool.execute(
+      { command: "echo never-ran" },
+      { signal: new AbortController().signal, toolCallId: "spawn-error" },
+    );
+    if (typeof result === "string") throw new Error("Expected structured bash output");
+    expect(result.isError).toBe(true);
+    expect(result.content).toMatch(/Failed to spawn/);
+  });
+
   it("describes cmd.exe semantics when resolution falls back to cmd", () => {
     const tool = createBashTool(tmpHome, new ProcessManager(), undefined, undefined, {
       platform: "win32",

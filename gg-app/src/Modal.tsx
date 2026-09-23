@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
+import { withViewTransition } from "./view-transition";
 
 // Nested confirmations can unmount with their parent on project switches.
 // Reference counts restore the original state regardless of cleanup order.
@@ -63,11 +64,17 @@ export function Modal({
   className?: string;
 }): React.ReactElement {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
   const titleId = useId();
+  // The modal's own dismissals (Escape, backdrop, ×) animate out. Closes the
+  // parent triggers itself (Save, Cancel) stay instant: they usually open the
+  // next thing, and a fading ghost would sit over it.
+  const dismiss = (): void => withViewTransition(onClose);
+  // Focus handling stays local (not the shared useDialogFocus): the modal also
+  // inerts the background, honours stacked dialogs and skips hidden controls.
+  const onCloseRef = useRef(dismiss);
 
   useEffect(() => {
-    onCloseRef.current = canClose ? onClose : () => undefined;
+    onCloseRef.current = canClose ? () => withViewTransition(onClose) : () => undefined;
   }, [onClose, canClose]);
 
   useEffect(() => {
@@ -143,7 +150,7 @@ export function Modal({
     <div
       className="modal-backdrop"
       onMouseDown={(event) => {
-        if (canClose && event.target === event.currentTarget) onClose();
+        if (canClose && event.target === event.currentTarget) dismiss();
       }}
     >
       <div
@@ -165,7 +172,7 @@ export function Modal({
             aria-label="Close"
             title="Close"
             disabled={!canClose}
-            onClick={onClose}
+            onClick={dismiss}
           >
             {"\u00d7"}
           </button>

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { error as logError, attachConsole } from "@tauri-apps/plugin-log";
 import App from "./App";
 import { ZoomController } from "./ZoomController";
+import { TooltipLayer } from "./TooltipLayer";
 import { WhatsNewModal } from "./WhatsNewModal";
 import { Toaster } from "./Toaster";
 // Experimental: webcam gaze → window focus. Disabled for now; re-enable by
@@ -84,6 +85,7 @@ if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
     <>
       <App />
       <ZoomController />
+      <TooltipLayer />
       <WhatsNewModal />
       {/* <GazeController /> */}
     </>,

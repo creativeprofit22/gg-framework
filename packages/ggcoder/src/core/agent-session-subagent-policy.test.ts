@@ -26,11 +26,11 @@ afterEach(async () => {
 // these flaked intermittently on a busy machine. Give them honest headroom.
 const INIT_TIMEOUT_MS = 30_000;
 
-describe("Sol/Terra async orchestration policy", () => {
+describe("Astra/Sol async orchestration policy", () => {
   it(
     "injects proactive named-tool guidance only at Ultra",
     async () => {
-      const prompt = await systemPrompt("gpt-5.6-sol", "ultra");
+      const prompt = await systemPrompt("gpt-6-sol", "ultra");
       expect(prompt).toContain("Proactively use spawn_agent");
       expect(prompt).toContain("Start every independent child before calling wait_agent");
       expect(prompt).toContain("disjoint files or subsystems");
@@ -41,7 +41,7 @@ describe("Sol/Terra async orchestration policy", () => {
   it(
     "injects explicit-request-only guidance below Ultra",
     async () => {
-      const prompt = await systemPrompt("gpt-5.6-terra", "high");
+      const prompt = await systemPrompt("gpt-6-sol", "high");
       expect(prompt).toContain(
         "only when the user or applicable project/skill instructions explicitly request",
       );
@@ -53,7 +53,7 @@ describe("Sol/Terra async orchestration policy", () => {
   it(
     "leaves other models unchanged",
     async () => {
-      await expect(systemPrompt("gpt-5.5-codex", "ultra")).resolves.toBe("base prompt");
+      await expect(systemPrompt("gpt-6-luna", "ultra")).resolves.toBe("base prompt");
     },
     INIT_TIMEOUT_MS,
   );

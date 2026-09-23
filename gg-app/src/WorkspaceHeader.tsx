@@ -107,7 +107,7 @@ export function WorkspaceHeader({
               </button>
               {gitBranch && (
                 <>
-                  <span className="chat-head-sep" data-tauri-drag-region>
+                  <span className="chat-head-sep" aria-hidden="true" data-tauri-drag-region>
                     {"│"}
                   </span>
                   {gitHubRepoUrl ? (
@@ -128,7 +128,7 @@ export function WorkspaceHeader({
               )}
               {additionalRoots.length > 0 && (
                 <>
-                  <span className="chat-head-sep" data-tauri-drag-region>
+                  <span className="chat-head-sep" aria-hidden="true" data-tauri-drag-region>
                     {"│"}
                   </span>
                   <span
@@ -142,7 +142,7 @@ export function WorkspaceHeader({
               )}
               {gitDirtyFileCount > 0 && (
                 <>
-                  <span className="chat-head-sep" data-tauri-drag-region>
+                  <span className="chat-head-sep" aria-hidden="true" data-tauri-drag-region>
                     {"│"}
                   </span>
                   <span
@@ -156,7 +156,7 @@ export function WorkspaceHeader({
               )}
               {gitHubIssues !== null && gitHubIssues > 0 && (
                 <>
-                  <span className="chat-head-sep" data-tauri-drag-region>
+                  <span className="chat-head-sep" aria-hidden="true" data-tauri-drag-region>
                     {"│"}
                   </span>
                   <button
@@ -172,7 +172,7 @@ export function WorkspaceHeader({
               )}
               {gitHubPRs !== null && gitHubPRs > 0 && (
                 <>
-                  <span className="chat-head-sep" data-tauri-drag-region>
+                  <span className="chat-head-sep" aria-hidden="true" data-tauri-drag-region>
                     {"│"}
                   </span>
                   <button

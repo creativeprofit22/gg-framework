@@ -45,11 +45,11 @@ describe("RenderAppConfig async orchestration plumbing", () => {
 
     config.onRuntimeStateChange({
       provider: "openai",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       thinking: "ultra",
     });
 
     expect(config.subAgentManager).toBe(manager);
-    expect(updates).toEqual([{ provider: "openai", model: "gpt-5.6-sol", thinking: "ultra" }]);
+    expect(updates).toEqual([{ provider: "openai", model: "gpt-6-sol", thinking: "ultra" }]);
   });
 });

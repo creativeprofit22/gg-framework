@@ -484,7 +484,7 @@ describe("streamOpenAICodex", () => {
     const fetchMock = vi.mocked(fetch);
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       messages: [{ role: "user", content: longMessage }],
       apiKey: "test-credential",
       accountId: "acct",
@@ -701,7 +701,7 @@ describe("streamOpenAICodex", () => {
 
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "token",
       accountId: "acct",
@@ -718,8 +718,8 @@ describe("streamOpenAICodex", () => {
 
   it.each([
     ["gpt-5.5", "none"],
-    ["gpt-5.6-luna", "low"],
-    ["gpt-5.6-sol", "low"],
+    ["gpt-6-luna", "low"],
+    ["gpt-6-sol", "low"],
     ["gpt-6-astra", "low"],
     ["gpt-5.6-terra", "low"],
   ])("uses a supported default effort for %s without explicit thinking", async (model, effort) => {
@@ -762,7 +762,7 @@ describe("streamOpenAICodex", () => {
     const fetchMock = vi.mocked(fetch);
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "token",
       accountId: "acct",
@@ -781,7 +781,7 @@ describe("streamOpenAICodex", () => {
       "X-OpenAI-Internal-Codex-Responses-Lite": "true",
     });
     expect(body).toMatchObject({
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       parallel_tool_calls: false,
       reasoning: { effort: "low", summary: "auto", context: "all_turns" },
       // Catalog parity: responses-lite models declare default_verbosity "low".
@@ -925,7 +925,7 @@ describe("streamOpenAICodex", () => {
     await expect(missingModel.response).rejects.toMatchObject({
       hint:
         "This model is not in OpenAI's current catalog for your ChatGPT account. " +
-        "Switch to GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, or GPT-5.6 Luna via the model selector.",
+        "Switch to GPT-6 Astra, GPT-6 Sol, or GPT-6 Luna via the model selector.",
     });
   });
 
@@ -946,7 +946,7 @@ describe("streamOpenAICodex", () => {
 
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "token",
       accountId: "acct",

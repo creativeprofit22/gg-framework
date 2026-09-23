@@ -20,6 +20,7 @@ export function Badge({
   const style = color
     ? {
         color,
+        // color-mix, not appended hex alpha: `color` may be a `var(--x)` token.
         background: `linear-gradient(180deg, color-mix(in srgb, ${color} 21.9608%, transparent) 0%, color-mix(in srgb, ${color} 9.4118%, transparent) 100%)`,
         borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
         boxShadow: "0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2)",

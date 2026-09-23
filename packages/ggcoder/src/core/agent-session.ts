@@ -161,7 +161,7 @@ import { clampThinkingForPlanMode } from "./thinking-level.js";
 import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
 import { discoverAgents } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
-import { detectProjectStack } from "./language-detector.js";
+import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
 import {
   type IdealReviewDecision,
   type IdealReviewStats,
@@ -182,7 +182,7 @@ import {
   detectTextRepetition,
   type CycleDetection,
 } from "./loop-breaker.js";
-import { buildRegroundingMessage } from "./regrounding.js";
+import { buildRegroundingMessage, requestTextForRegrounding } from "./regrounding.js";
 import {
   buildSemanticLoopJudgePrompt,
   buildSemanticLoopMessage,
@@ -725,6 +725,13 @@ export class AgentSession {
   private agentPrompt?: string;
   /** Stable prompt prefix retained separately from the volatile uncached tail. */
   private baseSystemPrompt = "";
+  /**
+   * Project languages whose style packs and verify commands are in the
+   * standard prompt. Only ever grows within a session (same policy as the
+   * terminal UI): a pack disappearing mid-task would rewrite the cached prefix
+   * for no benefit.
+   */
+  private activeLanguages = new Set<LanguageId>();
   /** Shared with the tool layer so plan-mode restrictions read live state. */
   private planModeRef = { current: false };
   /** Path of the approved plan currently being implemented, or undefined. When
@@ -2976,6 +2983,10 @@ ${content}
 
   private async runLoopInternal(options: { disableTools?: boolean }): Promise<void> {
     assertProviderExecutionAllowed(this.provider, this.opts.unattended);
+    // Languages are re-detected at each task boundary so a project scaffolded
+    // during the previous turn gets its packs; the prompt is rebuilt only when
+    // the set grows, keeping the cached prefix stable otherwise.
+    if (this.refreshActiveLanguages()) await this.rebuildSystemPromptInPlace();
     this.refreshSystemPromptTail();
     // One-shot cache-key marker per session so turn_end cacheRead numbers
     // in the log can be traced back to a specific routing namespace —
@@ -2993,8 +3004,7 @@ ${content}
     // Reset self-correction hook state for this run; pin the latest user message
     // as the verbatim original request for post-compaction re-grounding.
     const lastUser = [...this.messages].reverse().find((m) => m.role === "user");
-    const originalRequest = typeof lastUser?.content === "string" ? lastUser.content : "";
-    this.resetHookState(originalRequest);
+    this.resetHookState(requestTextForRegrounding(lastUser));
 
     // Resolve OAuth credentials and run agent loop.
     // On 401, force-refresh the token and retry once — the provider may have
@@ -4972,12 +4982,38 @@ ${content}
             }
           : approvedPlanPath,
       toolNames,
-      undefined,
+      this.activeLanguages,
       this.provider,
       this.recordRenderedEnvironment(),
       deferredToolNames,
       this.contextLimits,
     );
+  }
+
+  /**
+   * Add newly detected project languages. Returns true when the set grew and
+   * the standard prompt therefore needs a rebuild. Custom and sub-agent
+   * prompts never render packs, so detection is skipped for them.
+   */
+  private refreshActiveLanguages(): boolean {
+    if (this.customSystemPrompt || this.agentPrompt !== undefined) return false;
+    let grew = false;
+    try {
+      for (const id of detectLanguages(this.cwd)) {
+        if (this.activeLanguages.has(id)) continue;
+        this.activeLanguages.add(id);
+        grew = true;
+      }
+    } catch (err) {
+      log("WARN", "language", `Language detection failed: ${(err as Error).message}`);
+      return false;
+    }
+    if (grew) {
+      log("INFO", "language", "Style packs active", {
+        active: [...this.activeLanguages].join(","),
+      });
+    }
+    return grew;
   }
 
   /** Rebuild messages[0] from current plan-mode + approved-plan state. */

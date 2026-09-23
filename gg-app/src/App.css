@@ -34,7 +34,10 @@
   --text: #f2f3f7;
   --text-secondary: #c8c9d2;
   --text-muted: #9a9ba5;
-  --text-dim: #63646e;
+  /* Lowest ink that still reads: 5.48:1 on --bg, 5.05:1 on --surface-1,
+     4.62:1 on --surface-2 (modals, toasts). On --surface-3 (dropdowns) it
+     falls short: use --text-muted there. */
+  --text-dim: #858691;
 
   /* Accent — periwinkle, bright enough to carry near-black text on a fill.
      That luminance is the whole trick: a dark fill cannot hold a dark label,
@@ -78,15 +81,61 @@
 
   /* Shape system — generous and soft, matching the reference: pills for
      controls, heavy rounding on cards, no hairline boxes. */
+  --radius-sm: 4px;
   --radius-button: 8px;
   --radius-card: 14px;
   --radius-pill: 9999px;
+
+  /* Elevation: three steps, all neutral black so depth never tints a surface.
+     sm  controls sitting on a surface (slider tracks, meters)
+     md  menus, dropdowns, tooltips: anything anchored to a trigger
+     lg  free-floating layers: modals, toasts, overlays */
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
 
   /* Motion — colour-on-hover (no movement). Enter is quick so the control feels
      responsive; exit is slower so it settles rather than snaps back. */
   --t-fast: 0.15s ease;
   --t-in: 0.12s cubic-bezier(0.32, 0, 0.24, 1);
   --t-out: 0.24s cubic-bezier(0.32, 0, 0.24, 1);
+  /* Easing roles. Every entrance, exit and settle draws from these instead of
+     retyping a curve.
+     --ease-out     things arriving (menus, reveals, chips): quick start, soft land.
+     --ease-expo    growth that should feel instant then settle (toasts, composer).
+     --ease-in      things leaving: gathers speed on the way out.
+     --ease-in-out  in-place changes (height, progress).
+     --ease-glow    the slow ambient window-glow crossfade. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-glow: cubic-bezier(0.33, 0, 0.15, 1);
+  /* Surfaces that appear on demand (modals, menus, popovers) share one entrance. */
+  --dur-enter: 160ms;
+  /* Leaving is quicker than arriving: the user already decided, so get out of
+     the way. Used by the view-transition exits (modal, dropdown). */
+  --dur-exit: 120ms;
+  /* New transcript rows (your message, the reply, notices) rising into place. */
+  --dur-row: 220ms;
+
+  /* Keyboard focus: one ring for every control, drawn with box-shadow so it
+     follows the control's radius. :focus-visible means pointer clicks never
+     show it and keyboard focus always does. */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--primary);
+
+  /* Stacking layers for UI that floats over other UI. Component-internal
+     stacking (0-5) stays local. Order: dropdown < popover < menu < drop
+     overlay < modal < plan review < toast < system (gaze, zoom). */
+  --z-dropdown: 10;
+  --z-float: 20;
+  --z-popover: 50;
+  --z-menu: 60;
+  --z-overlay: 80;
+  --z-modal: 100;
+  --z-modal-raised: 120;
+  --z-toast: 200;
+  --z-system: 400;
 
   /* Button fills. Flat and luminous rather than glossy gradients: the
      reference gets its depth from the ambient glow behind the surface, not
@@ -104,7 +153,7 @@
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
   /* Bubble and input geometry, matching the reference app. */
   /* Composer growth. Expo-out, matching the reference app's panel curve. */
-  --t-composer: 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  --t-composer: 0.16s var(--ease-expo);
   /* Shared horizontal rail: transcript, composer, header and footer all align
      to this inset, so nothing steps in or out down the right edge. */
   --rail: 16px;
@@ -292,6 +341,52 @@
     filter var(--t-in),
     box-shadow var(--t-in);
 }
+/* ── Press feedback ──
+   Everything clickable dips slightly while held, so a click is felt even when
+   the result lands elsewhere (a modal opens, a row re-renders). Uses the
+   standalone `scale` property, not `transform`, so it composes with any
+   transform a control already has and never touches their transition lists.
+   Instant on purpose: press-down should feel physical, not animated. Wide
+   rows dip less than compact buttons, or their edges visibly lurch. */
+:is(
+    .btn,
+    .modal-btn,
+    .nav-toggle,
+    .thinking-toggle,
+    .modal-close,
+    .toast-close,
+    .attach-remove,
+    .mcp-delete,
+    .tasks-delete
+  ):active:not(:disabled) {
+  scale: 0.96;
+}
+:is(.picker-item, .slash-item, .dropdown-option:not([aria-disabled="true"])):active {
+  scale: 0.99;
+}
+.picker-item:active,
+.slash-item:active {
+  background: var(--surface-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(
+    .btn,
+    .modal-btn,
+    .nav-toggle,
+    .thinking-toggle,
+    .modal-close,
+    .toast-close,
+    .attach-remove,
+    .mcp-delete,
+    .tasks-delete,
+    .picker-item,
+    .slash-item,
+    .dropdown-option
+  ):active {
+    scale: none;
+  }
+}
+
 .btn:disabled {
   opacity: 0.4;
   cursor: default;
@@ -392,12 +487,22 @@
   box-sizing: border-box;
 }
 
+/* One keyboard-focus ring for every control, in the accent rather than the
+   webview's default blue. Outline (not box-shadow) so it never fights a
+   component's own shadow, and it follows border-radius in WebKit and
+   Chromium. :focus-visible keeps it off pointer clicks. Components with a
+   bespoke focus treatment override this with their own :focus-visible rule. */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 /* ── Toasts (bottom-right, slide up + fade) ── */
 .toaster {
   position: fixed;
   right: 18px;
   bottom: 18px;
-  z-index: 200;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -414,10 +519,10 @@
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-lg);
   font-size: 13px;
   color: var(--text);
-  animation: toast-in 0.32s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  animation: toast-in 0.32s var(--ease-expo);
 }
 @keyframes toast-in {
   from {
@@ -431,7 +536,7 @@
 }
 /* Exit: slide straight down and fade out. Duration must match EXIT_MS. */
 .toast.leaving {
-  animation: toast-out 0.26s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) forwards;
+  animation: toast-out 0.26s var(--ease-expo) forwards;
   pointer-events: none;
 }
 @keyframes toast-out {
@@ -444,13 +549,33 @@
     transform: translateY(20px);
   }
 }
+/* Reduced motion keeps the fade (so arrival and dismissal still read) but
+   drops the travel. Same durations, so EXIT_MS still lines up. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation-name: fade-in;
+  }
+  .toast.leaving {
+    animation-name: fade-out;
+  }
+}
 /* ── Zoom level overlay ───────────────────────────────────────────────────
    Centered flash shown on Cmd/Ctrl +/- / 0. Sits above everything; the wrapper
    counter-scales the page zoom so the card is a constant on-screen size. */
 .zoom-overlay {
   position: fixed;
   inset: 0;
-  z-index: 400;
+  z-index: var(--z-system);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -466,9 +591,9 @@
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
-  box-shadow: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-lg);
   animation:
-    zoom-overlay-in 0.16s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    zoom-overlay-in 0.16s var(--ease-expo),
     zoom-overlay-out 0.3s ease 0.6s forwards;
 }
 @keyframes zoom-overlay-in {
@@ -484,6 +609,13 @@
 @keyframes zoom-overlay-out {
   to {
     opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zoom-overlay-card {
+    animation:
+      fade-in 0.16s linear,
+      zoom-overlay-out 0.3s ease 0.6s forwards;
   }
 }
 .zoom-overlay-pct {
@@ -627,8 +759,8 @@ select {
   /* Long and eased: the glow is ambient, so a state change should register
      peripherally rather than announce itself. */
   transition:
-    --glow-live 1.6s cubic-bezier(0.33, 0, 0.15, 1),
-    opacity 1.2s cubic-bezier(0.33, 0, 0.15, 1);
+    --glow-live 1.6s var(--ease-glow),
+    opacity 1.2s var(--ease-glow);
 }
 .app::before {
   --glow-live: var(--glow);
@@ -735,7 +867,7 @@ select {
 .app-restoring-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--primary);
   box-shadow: 0 0 10px rgb(77 157 255 / 45%);
   animation: appRestoringPulse 1.2s ease-in-out infinite;
@@ -764,17 +896,17 @@ select {
 .app-file-dragover::before {
   content: "";
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-overlay);
   background: rgb(0 0 0 / 42%);
 }
 .app-file-dragover::after {
   content: "Drop files to attach";
   top: 50%;
   left: 50%;
-  z-index: 81;
+  z-index: calc(var(--z-overlay) + 1);
   transform: translate(-50%, -50%);
   padding: 18px 26px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--surface-2) 92%, var(--primary));
   color: var(--text);
   font-size: 22px;
@@ -851,13 +983,13 @@ select {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-lg);
   background: var(--surface-1);
   opacity: 0;
   /* --rot (set inline per card) is folded into the keyframe so the card can
      rise + scale into place instead of popping, while keeping its tilt. */
   --rot: 0deg;
-  animation: meme-fade 6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: meme-fade 6s var(--ease-out) forwards;
 }
 @keyframes meme-fade {
   0% {
@@ -872,6 +1004,24 @@ select {
   100% {
     opacity: 0;
     transform: rotate(var(--rot)) scale(0.97) translateY(-6px);
+  }
+}
+/* Reduced motion: the card still appears and leaves on the same 6s lifetime,
+   but only fades, holding its tilt instead of rising and scaling. */
+@keyframes meme-fade-still {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  12%,
+  84% {
+    opacity: 0.85;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .meme-card {
+    transform: rotate(var(--rot));
+    animation-name: meme-fade-still;
   }
 }
 .meme-gif {
@@ -927,11 +1077,11 @@ select {
 .home > .home-tagline,
 .home > .home-byline,
 .home > .home-actions {
-  animation: reveal-up 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: reveal-up 460ms var(--ease-out) both;
 }
 .home > .ascii-logo {
   animation:
-    reveal-up 460ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    reveal-up 460ms var(--ease-out) both,
     ggshimmer 4s linear infinite;
   animation-delay: 120ms, 0s;
 }
@@ -1014,7 +1164,7 @@ select {
      the top edge. The 1px bleed guarantees full coverage regardless of the
      rounding direction. */
   inset: -1px;
-  z-index: 10;
+  z-index: var(--z-dropdown);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1042,7 +1192,7 @@ select {
   text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
   white-space: pre;
   text-align: center;
-  animation: ken-power-flash 1150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: ken-power-flash 1150ms var(--ease-out) both;
 }
 /* Scale-and-fade "power flash": pops in slightly undersized (like the zoom
    HUD), rests at full size while held, then grows a touch further as it
@@ -1534,7 +1684,21 @@ select {
   }
 }
 @media (max-width: 440px) {
-  /* Quad-tile widths: keep identity (folder, elastic) + the GitHub counts. */
+  /* Quad-tile widths: the folder had already shrunk to nothing, leaving the
+     accent dot and a leading separator. Drop it and that separator explicitly
+     so the whole counts get the room. (The separator to drop is the one not
+     preceded by a count chip; the dirty count before it is hidden at 520px.) */
+  /* Direct children only: the CI indicator keeps its own separator. */
+  .chat-head-cwd,
+  .chat-head-title > .chat-head-sep:not(.chat-head-github + .chat-head-sep) {
+    display: none;
+  }
+}
+@media (max-width: 520px) {
+  /* Near the 480px minimum window the strip also carries the macOS traffic-light
+     gutter and the usage meter; folder + dirty + issues + PRs don't fit, and the
+     issues chip was hard-clipped mid-word. Keep identity (folder, elastic) +
+     the GitHub counts. */
   .chat-head-dirty,
   .chat-head-sep:has(+ .chat-head-dirty) {
     display: none;
@@ -1577,14 +1741,9 @@ select {
   flex: none;
   white-space: nowrap;
 }
-/* The trailing chip absorbs the final squeeze with a graceful ellipsis instead
-   of the container hard-clipping it mid-word (quad-tile widths). */
-.chat-head-github:last-child {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* Counts stay whole: the folder name is the one elastic segment. (An earlier
+   rule let the trailing chip ellipsize, but a count clipped to "1 …" or to
+   nothing behind a dangling separator carried no information.) */
 .chat-head-github:hover:not(:disabled) {
   color: var(--text);
 }
@@ -1961,14 +2120,14 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: var(--z-modal);
 }
 .modal {
   width: min(440px, 90vw);
   border: 1px solid;
   border-radius: var(--radius-card);
   padding: 24px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-lg);
   /* Modals can be mounted inside centered containers (e.g. `.home` is
      text-align: center). Pin left alignment so every modal's text matches
      regardless of where it's rendered. */
@@ -1990,6 +2149,103 @@ select {
 .continuation-confirmation .modal-actions {
   flex-wrap: wrap;
 }
+/* The dialog itself only takes focus as a fallback; its controls carry the ring. */
+.modal:focus {
+  outline: none;
+}
+
+/* ── On-demand surfaces: one shared entrance ──
+   Modals, menus and popovers arrive the same way: a short fade with a few
+   pixels of travel from the side they open toward. `backwards` (not `both`)
+   so no transform lingers after the entrance: a transformed ancestor would
+   become the containing block for fixed-position children. Exits (modal,
+   dropdown) run through the View Transitions API (see view-transition.ts):
+   the real UI is already updated underneath and only a snapshot fades out,
+   kept to --dur-exit so the ghost is gone before the eye settles on what's
+   behind it. */
+@keyframes surface-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--enter-y, 4px)) scale(0.98);
+  }
+}
+.modal-backdrop {
+  animation: fade-in var(--dur-enter) linear backwards;
+}
+.modal,
+.dropdown-menu,
+.winlayout-menu,
+.slash-menu,
+.model-menu,
+.bgtasks-menu {
+  animation: surface-in var(--dur-enter) var(--ease-out) backwards;
+}
+/* Menus hanging below their trigger drop down into place. */
+.dropdown-menu,
+.winlayout-menu {
+  --enter-y: -4px;
+  transform-origin: top center;
+}
+.slash-menu,
+.model-menu,
+.bgtasks-menu {
+  transform-origin: bottom center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal,
+  .dropdown-menu,
+  .winlayout-menu,
+  .slash-menu,
+  .model-menu,
+  .bgtasks-menu {
+    animation-name: fade-in;
+  }
+}
+
+/* ── Exits (View Transitions) ──
+   Each exiting surface carries its own transition name so its snapshot can
+   shrink away on its own while the rest of the window crossfades. Names must
+   be unique among rendered elements; only one modal and one dropdown are ever
+   open, and a clash just skips the animation (the UI still updates). */
+.modal {
+  view-transition-name: gg-modal;
+}
+.dropdown-menu {
+  view-transition-name: gg-dropdown;
+}
+@keyframes surface-out {
+  to {
+    opacity: 0;
+    transform: translateY(var(--exit-y, 4px)) scale(0.97);
+  }
+}
+/* The root crossfade is what screen changes (home, picker, workspace) use.
+   When only a modal or dropdown closes, old and new root are identical, so
+   it runs but is invisible. */
+::view-transition-group(root),
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--dur-enter);
+  animation-timing-function: var(--ease-out);
+}
+::view-transition-old(gg-modal),
+::view-transition-old(gg-dropdown) {
+  animation: surface-out var(--dur-exit) var(--ease-in) both;
+}
+::view-transition-old(gg-dropdown) {
+  --exit-y: -4px;
+}
+/* Surfaces that close have no "new" state; anything unexpected there should
+   appear instantly rather than morph. */
+::view-transition-new(gg-modal),
+::view-transition-new(gg-dropdown) {
+  animation: none;
+}
+::view-transition-group(gg-modal),
+::view-transition-group(gg-dropdown) {
+  animation-duration: var(--dur-exit);
+}
+
 /* Any scroll container inside a modal gets a thin, non-overlapping scrollbar so
    the thumb never sits on top of the row content. */
 .modal ::-webkit-scrollbar {
@@ -1998,7 +2254,7 @@ select {
 }
 .modal ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .modal-head {
   display: flex;
@@ -2021,7 +2277,7 @@ select {
   width: 26px;
   height: 26px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -2052,12 +2308,22 @@ select {
 }
 .modal-input {
   width: 100%;
-  border: none;
+  /* Transparent at rest so the field stays borderless, but the 1px is always
+     reserved: focus only recolours it, so nothing shifts. Padding is 1px less
+     than the old borderless value to keep the same outer size. */
+  border: 1px solid transparent;
   outline: none;
   border-radius: var(--radius-card);
   font-family: var(--sans);
   font-size: 14px;
-  padding: 11px 13px;
+  line-height: 1.3;
+  padding: 10px 12px;
+  transition: border-color var(--t-fast);
+}
+/* Text fields show focus on click too: that is where typing will land. Same
+   treatment as an open .dropdown-trigger. */
+.modal-input:focus {
+  border-color: var(--primary);
 }
 .modal-row {
   display: flex;
@@ -2376,7 +2642,7 @@ select {
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  z-index: 10;
+  z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2386,7 +2652,7 @@ select {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface-3);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-md);
   outline: none;
 }
 .dropdown-option {
@@ -2422,10 +2688,11 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Sits on --surface-3, where --text-dim falls below 4.5:1. */
 .dropdown-option-description {
   display: block;
   margin-top: 2px;
-  color: var(--text-dim);
+  color: var(--text-muted);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2575,7 +2842,7 @@ select {
      Scrolls internally once the notes outgrow the area. */
   height: min(72vh, 680px);
   resize: none;
-  border: 1px solid;
+  border: 1px solid var(--border);
   border-radius: var(--radius-card);
   padding: 14px 16px;
   font-family: var(--sans);
@@ -2583,6 +2850,10 @@ select {
   line-height: 1.6;
   outline: none;
   overflow-y: auto;
+  transition: border-color var(--t-fast);
+}
+.notes-input:focus {
+  border-color: var(--primary);
 }
 /* The notes modal is a workspace, not a small dialog — give it room. */
 .notes-modal {
@@ -2713,7 +2984,7 @@ select {
 }
 .whatsnew-window ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 /* Scroll container takes the remaining height and engages once the notes outgrow
    it — short release lists sit at their natural height, long ones scroll. */
@@ -2769,7 +3040,7 @@ select {
   margin: 2px 0 18px;
   color: var(--text-muted);
   font-family: var(--sans);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -2895,7 +3166,7 @@ select {
 }
 .tasks-list::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .tasks-item {
   display: flex;
@@ -3123,7 +3394,7 @@ select {
   padding: 6px 8px;
   margin-bottom: 2px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-button);
   font-size: 12px;
   cursor: pointer;
 }
@@ -3153,15 +3424,15 @@ select {
 }
 .hf-progress {
   height: 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   margin-top: 12px;
   overflow: hidden;
 }
 .hf-progress-fill {
   height: 100%;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: #9b8cf7;
-  transition: width 240ms ease-out;
+  transition: width var(--t-out);
 }
 @media (prefers-reduced-motion: reduce) {
   .hf-progress-fill {
@@ -3192,7 +3463,7 @@ select {
 }
 .mcp-list::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .mcp-item {
   display: flex;
@@ -3215,7 +3486,7 @@ select {
 .mcp-name {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3224,7 +3495,7 @@ select {
 .mcp-scope {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 10.5px;
+  font-size: 11px;
   padding: 1px 6px;
   border-radius: var(--radius-button);
   background: var(--surface-1);
@@ -3286,9 +3557,12 @@ select {
   flex: 0 0 auto;
   margin-bottom: 8px;
   padding: 10px 12px;
-  color: var(--error);
-  background: color-mix(in srgb, var(--error) 10%, var(--surface-1));
+  /* Ink and mark: readable ink on a neutral surface, with the error red
+     carried by a solid leading rule and the border alone. */
+  color: var(--text);
+  background: var(--surface-1);
   border: 1px solid color-mix(in srgb, var(--error) 35%, var(--border));
+  box-shadow: inset 3px 0 0 var(--error);
   border-radius: var(--radius-button);
   font-size: 13px;
   line-height: 1.45;
@@ -3354,6 +3628,25 @@ select {
 }
 .picker-item:hover {
   background: var(--surface-1);
+  border-color: var(--border);
+}
+/* The timestamp is scanned down a column, not read as a label: plain faint
+   text with fixed-width digits so "3m ago" / "19h ago" line up, instead of a
+   bordered chip repeated on every row. It brightens with its row on hover. */
+.picker-row > .badge {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  transition: color var(--t-fast);
+}
+.picker-item:hover .picker-row > .badge {
+  color: var(--text-muted);
 }
 .picker-row {
   display: flex;
@@ -3376,7 +3669,7 @@ select {
 }
 .picker-meta {
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: 12px;
 }
 /* Origin tag on a session row that came from another coding tool. Sits inline
    ahead of the message count; the hue is the signal, matching the project
@@ -3447,18 +3740,23 @@ select {
 .winlayout-select:disabled {
   cursor: default;
 }
+/* Same as .model-picker: ring the visible icon, not the invisible select. */
+.winlayout:has(.winlayout-select:focus-visible) .winlayout-icon-btn {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 /* Windows/Linux fallback: keep the popup inside the webview because native
    WebView2/WebKitGTK select popups can open without accepting a selection. */
 .menu-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 59;
+  z-index: calc(var(--z-menu) - 1);
 }
 .winlayout-menu {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 60;
+  z-index: var(--z-menu);
   display: flex;
   min-width: 150px;
   flex-direction: column;
@@ -3466,7 +3764,7 @@ select {
   padding: 5px;
   border: 1px solid;
   border-radius: var(--radius-card);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-md);
 }
 .winlayout-item {
   display: flex;
@@ -3770,12 +4068,12 @@ select {
   transform: translateY(6px);
   pointer-events: none;
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease,
+    opacity var(--dur-enter) var(--ease-out),
+    transform var(--dur-enter) var(--ease-out),
     background var(--t-fast),
     border-color var(--t-fast),
     color var(--t-fast),
-    visibility 0s linear 0.18s;
+    visibility 0s linear var(--dur-enter);
 }
 .export-chat.visible {
   opacity: 1;
@@ -3783,8 +4081,8 @@ select {
   transform: translateY(0);
   pointer-events: auto;
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease,
+    opacity var(--dur-enter) var(--ease-out),
+    transform var(--dur-enter) var(--ease-out),
     background var(--t-fast),
     border-color var(--t-fast),
     color var(--t-fast),
@@ -3808,13 +4106,13 @@ select {
   .export-chat {
     transform: none;
     transition:
-      opacity 0.18s ease,
-      visibility 0s linear 0.18s;
+      opacity var(--dur-enter) var(--ease-out),
+      visibility 0s linear var(--dur-enter);
   }
   .export-chat.visible {
     transform: none;
     transition:
-      opacity 0.18s ease,
+      opacity var(--dur-enter) var(--ease-out),
       visibility 0s;
   }
 }
@@ -3836,7 +4134,7 @@ select {
   white-space: pre-wrap;
   word-break: break-word;
   /* Fades out under the Ken power banner (see `.ken-power-overlay`). */
-  transition: opacity 200ms ease;
+  transition: opacity var(--dur-row) var(--ease-out);
 }
 
 /* NOTE: `content-visibility: auto` was tried here as a long-session perf win but
@@ -3848,12 +4146,36 @@ select {
    position. Plain rows render fine even in long sessions, so it's not worth the
    jank — leave it off. */
 
+/* ── Live transcript rows: one entrance ──
+   Only rows that arrive after the session hydrated get `.row-enter` (see
+   TranscriptRow), so restored history never replays. Your own message rises
+   from the composer below it; replies, notices and cards settle in with less
+   travel so a burst of rows reads as calm, not bouncy. `backwards` so no
+   transform lingers (it would re-parent fixed-position children). */
+@keyframes row-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--row-y, 6px));
+  }
+}
+.row-enter {
+  animation: row-rise var(--dur-row) var(--ease-out) backwards;
+}
+.row-enter[data-kind="user"] {
+  --row-y: 14px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .row-enter {
+    animation-name: fade-in;
+  }
+}
+
 .transcript::-webkit-scrollbar {
   width: var(--scrollbar);
 }
 .transcript::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .line {
@@ -3918,6 +4240,13 @@ select {
   font-size: 20px;
   line-height: 1.35;
 }
+/* The plan scroller is the focus target (arrow keys scroll a long plan); an
+   inset ring because the region runs edge to edge inside the dock and an
+   outset outline would be clipped. Pointer clicks never show it. */
+.plan-review-details:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
 .plan-review-ken {
   padding-block: 8px;
   font-size: 14px;
@@ -3934,6 +4263,8 @@ select {
 .plan-reject {
   margin-left: auto;
 }
+/* Bordered destructive treatment: hover firms the red border and lifts the
+   surface a step, rather than washing the fill red under red text. */
 .plan-reject:hover:not(:disabled) {
   color: var(--error);
   border-color: color-mix(in srgb, var(--error) 55%, var(--border));
@@ -3999,6 +4330,52 @@ select {
   }
 }
 
+/* ── Plan review entrance: the app's decision moment ──
+   Staged so the eye lands in reading order: the takeover fades in, the YOUR
+   PLAN banner draws left-to-right one row at a time, then the plan rises in,
+   then the decision bar. ~600ms end to end; every stage uses `backwards` so
+   nothing lingers once it has landed. Initial focus is on the plan body (see
+   PlanReviewModal), so the late-arriving buttons can't catch a stray Enter. */
+@keyframes plan-line-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+.plan-review {
+  animation: fade-in var(--dur-enter) linear backwards;
+}
+.plan-review-banner .plan-logo-line {
+  animation: plan-line-draw 260ms var(--ease-out) backwards;
+}
+.plan-review-banner .plan-logo-line:nth-child(2) {
+  animation-delay: 60ms;
+}
+.plan-review-banner .plan-logo-line:nth-child(3) {
+  animation-delay: 120ms;
+}
+.plan-review-banner .plan-logo-line:nth-child(4) {
+  animation-delay: 180ms;
+}
+.plan-review-body {
+  animation: row-rise var(--dur-row) var(--ease-out) 280ms backwards;
+}
+.plan-review-ken,
+.plan-review-actions {
+  --row-y: 8px;
+  animation: row-rise var(--dur-row) var(--ease-out) 380ms backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-review-banner .plan-logo-line,
+  .plan-review-body,
+  .plan-review-ken,
+  .plan-review-actions {
+    animation: none;
+  }
+}
+
 /* ── Plan mode ASCII banner ── */
 .plan-logo {
   margin: 10px 0;
@@ -4038,12 +4415,13 @@ select {
      the text and every bubble below it at the moment the message is sent. */
   border: 1px solid transparent;
 }
-/* `@Ken` prompt bubble: tinted in Ken's color (matching his replies + the input
-   highlight) so the transcript shows this message went to the mentor, not GG
-   Coder. A faint Ken-tinted fill keeps it readable on the right edge. */
+/* `@Ken` prompt bubble: Ken's colour on the ink (matching his replies + the
+   input highlight) and on the bubble's reserved border, so the transcript
+   shows this message went to the mentor, not GG Coder. The fill stays the
+   normal user bubble: a Ken-tinted wash under Ken-coloured text muddied both. */
 .user-msg.user-ken {
   color: var(--ken);
-  background: color-mix(in srgb, var(--ken) 12%, var(--user-bg));
+  border-color: color-mix(in srgb, var(--ken) 45%, transparent);
 }
 /* Sent prompts get their own identity without changing the composer or special states. */
 .user-msg:where(:not(.user-ken-sent, .user-ken, .ask-answered-bubble, .queued, .promoted)) {
@@ -4055,7 +4433,7 @@ select {
 /* "Sent to GG Coder" bubble (from a Ken prompt-block button): same faint Ken
    tint as a @Ken bubble, with the shimmer label carrying Ken's color. */
 .user-msg.user-ken-sent {
-  background: color-mix(in srgb, var(--ken) 12%, var(--user-bg));
+  border-color: color-mix(in srgb, var(--ken) 45%, transparent);
 }
 
 /* ── Queued steering message: still waiting to be injected mid-run. Dim it
@@ -4083,7 +4461,7 @@ select {
    invisible border. */
 .user-msg.promoted {
   border-style: dashed;
-  animation: ggqueuedpromote 300ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ggqueuedpromote 300ms var(--ease-out);
 }
 @keyframes ggqueuedpromote {
   from {
@@ -4098,13 +4476,14 @@ select {
 .queued-pill {
   display: block;
   font-family: var(--sans);
-  font-size: 9px;
+  font-size: 11px;
   /* Explicit line-height so the collapse below starts at the pill's REAL height.
      `max-height: 2em` overshot the rendered 13.9px by 22%, and that slack is
      dead time: the label sits still through the first fifth of the beat, then
      drops. Pinning both to the same number makes the collapse start moving on
-     frame one. */
-  line-height: 14px;
+     frame one. Unitless (1.28 x 11px = 14px) so the label still fits when the
+     user enlarges text; the max-heights below use the same 1.28em. */
+  line-height: 1.28;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   margin-bottom: 6px;
@@ -4114,18 +4493,18 @@ select {
   /* Collapsed by height (not unmounted) on promotion, so the bubble shrinks
      over the beat instead of losing a whole line in one frame. */
   overflow: hidden;
-  max-height: 14px;
+  max-height: 1.28em;
   animation: ggqueuedpulse 2s ease-in-out infinite;
 }
 .user-msg.promoted .queued-pill {
-  animation: ggqueuedpillout 300ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: ggqueuedpillout 300ms var(--ease-out) forwards;
 }
 @keyframes ggqueuedpillout {
   from {
     /* Midpoint of the pulse it takes over from, so the handoff is at worst half
        an amplitude rather than a jump to full brightness. */
     opacity: 0.52;
-    max-height: 14px;
+    max-height: 1.28em;
     margin-bottom: 6px;
   }
   to {
@@ -4248,7 +4627,7 @@ select {
 .markdown .md-word {
   display: inline-block;
   white-space: pre;
-  animation: md-word-in 220ms ease-out both;
+  animation: md-word-in var(--dur-row) var(--ease-out) both;
 }
 @keyframes md-word-in {
   from {
@@ -4338,7 +4717,7 @@ select {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   padding: 0.08em 0.4em;
   word-break: break-word;
 }
@@ -4419,13 +4798,16 @@ select {
   border-color: var(--border-strong);
   background: var(--surface-2);
 }
-/* Ken Kai (mentor agent): the whole reply is tinted in Ken's color — that tint
-   IS the only signal it's Ken, not GG Coder. No border line, no badge. Color the
-   markdown text and its inline elements (headings, list markers, bold, links),
-   but leave the runnable-prompt block to its own styling below. */
-.ken-msg .assistant-text,
-.ken-msg .assistant-text .markdown,
-.ken-msg .assistant-text .markdown :is(p, li, h1, h2, h3, h4, strong, em, blockquote, code) {
+/* Ken Kai (mentor agent). Whole paragraphs of cyan were tiring to read, so the
+   prose stays in normal ink and Ken is marked by what frames it instead: the
+   teal dot, a thin teal rule down the reply, and teal headings / bold / links
+   as accents. Still unmistakably Ken at a glance, without the colour wall.
+   The runnable-prompt block keeps its own styling below. */
+.ken-msg .assistant-text {
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--ken) 55%, transparent);
+}
+.ken-msg .assistant-text .markdown :is(h1, h2, h3, h4, strong) {
   color: var(--ken);
 }
 .ken-msg .assistant-text .markdown a {
@@ -4809,6 +5191,24 @@ select {
 }
 .tool-dot {
   flex: 0 0 auto;
+  /* Running → done recolours (purple → green/red) instead of flipping. */
+  transition: color var(--t-out);
+}
+/* New tool calls slide in from the left edge of the pinned panel. Rows are
+   keyed by call id, so a row finishing never replays this. */
+@keyframes tool-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+}
+.livetoolpanel .tool-row {
+  animation: tool-in var(--dur-enter) var(--ease-out) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .livetoolpanel .tool-row {
+    animation-name: fade-in;
+  }
 }
 .tool-line {
   flex: 1 1 auto;
@@ -5016,6 +5416,15 @@ select {
 .blink {
   animation: ggblink 1s steps(1, end) infinite;
 }
+@media (prefers-reduced-motion: reduce) {
+  .blink,
+  .queued-dot {
+    animation: none;
+  }
+  .queued-dot {
+    opacity: 0.52;
+  }
+}
 
 /* ── Pinned live region (tool panel + activity bar) ── */
 .liveregion {
@@ -5030,8 +5439,10 @@ select {
   border-top: 1px solid var(--border);
 }
 
-/* ── Plan step completion row (✓ from [DONE:n] markers): blue circle, white
-   tick + label, mirroring the requested ggcoder treatment. ── */
+/* ── Plan step completion row (✓ from [DONE:n] markers): blue circle + tick,
+   mirroring the requested ggcoder treatment. The tick takes --on-primary, the
+   ink paired with every --primary fill: white on this periwinkle measured
+   1.91:1, dark ink measures 9.92:1. ── */
 .plan-step-done {
   display: flex;
   align-items: center;
@@ -5047,7 +5458,7 @@ select {
   height: 18px;
   border-radius: var(--radius-pill);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
@@ -5167,7 +5578,7 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  animation: md-word-in 220ms ease-out both;
+  animation: md-word-in var(--dur-row) var(--ease-out) both;
 }
 @media (prefers-reduced-motion: reduce) {
   .activity-label-reveal {
@@ -5506,7 +5917,7 @@ select {
 }
 .enh-diss::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 /* Smooth dissolve: the whole old draft fades + drifts up while its height (set
    inline by JS) collapses to one line. One CSS tween, no character deletion — it
@@ -5525,7 +5936,7 @@ select {
   transition:
     opacity 460ms ease,
     transform 460ms ease,
-    height 460ms cubic-bezier(0.4, 0, 0.2, 1);
+    height 460ms var(--ease-in-out);
   will-change: opacity, transform, height;
 }
 .enh-diss-fade.dissolving {
@@ -5548,7 +5959,7 @@ select {
 .enh-diss-skeleton .skeleton {
   width: 100%;
   height: 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
   /* Override the shared background-position sweep — we sweep via ::after below. */
   animation: none;
@@ -5678,17 +6089,55 @@ select {
   text-decoration: underline dashed color-mix(in srgb, var(--secondary) 70%, transparent);
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 0 2px;
   cursor: help;
   outline: none;
+}
+/* ── App-wide tooltip (TooltipLayer) ──
+   Replaces native `title` tooltips. Same surface as .enh-tip so every hint in
+   the app looks alike. Position is set inline by the layer; pointer-events
+   stay on so the pointer can move onto it (WCAG 1.4.13 hoverable). */
+.gg-tooltip {
+  position: fixed;
+  z-index: var(--z-system);
+  max-width: 280px;
+  padding: 6px 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  /* Some hints are multi-line (model details); keep their breaks. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  --enter-y: 3px;
+  animation: surface-in 120ms var(--ease-out) backwards;
+}
+.gg-tooltip[data-side="bottom"] {
+  --enter-y: -3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gg-tooltip {
+    animation-name: fade-in;
+  }
+}
+
+/* The term is focusable so keyboard users can open its tooltip; the outline
+   reset above is replaced here, not dropped. */
+.enh-term:focus-visible {
+  box-shadow: 0 0 0 2px var(--primary);
 }
 .enh-tip {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%) translateY(4px);
-  z-index: 50;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -5698,7 +6147,7 @@ select {
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-md);
   font-family: var(--sans);
   font-size: 12px;
   line-height: 1.4;
@@ -5730,8 +6179,9 @@ select {
   visibility: visible;
   transform: translateX(-50%) translateY(0);
 }
+/* On --surface-2, so the lowest ink that passes is --text-muted. */
 .enh-tip-said {
-  color: var(--text-dim);
+  color: var(--text-muted);
 }
 .enh-tip-orig {
   color: var(--text);
@@ -5765,7 +6215,7 @@ select {
   width: 28px;
   height: 28px;
   object-fit: cover;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   flex: 0 0 auto;
 }
 .attach-icon {
@@ -5910,8 +6360,8 @@ select {
   border: 1px solid;
   border-radius: var(--radius-card);
   padding: 6px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  z-index: 50;
+  box-shadow: var(--shadow-md);
+  z-index: var(--z-popover);
   max-height: 44vh;
   overflow-y: auto;
 }
@@ -6085,7 +6535,7 @@ select {
 }
 .input::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .input::placeholder {
@@ -6211,6 +6661,14 @@ select {
     box-shadow: 0 0 0 0 transparent;
   }
 }
+/* Both loops run for as long as an update waits, so reduced motion stops them
+   outright. The banner's colour and dot still mark it. */
+@media (prefers-reduced-motion: reduce) {
+  .update-banner::after,
+  .update-banner-dot {
+    animation: none;
+  }
+}
 /* Home-screen update pill — small green-gradient chip floating above the ASCII
    logo, shown only when an update is pending. Deliberately smaller than the
    primary action buttons so it reads as a notification, not a main CTA. */
@@ -6225,20 +6683,18 @@ select {
   background: linear-gradient(135deg, #36c489 0%, #2dd4bf 100%);
   color: #04130d;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-family: var(--sans);
   font-size: 12px;
   font-weight: 600;
   padding: 5px 12px;
   cursor: pointer;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--success) 35%, transparent);
-  transition:
-    filter var(--t-fast),
-    transform var(--t-fast);
+  /* Colour-on-hover like every other control: no lift. */
+  transition: filter var(--t-fast);
 }
 .home-update:hover:not(:disabled) {
   filter: brightness(1.08);
-  transform: translateY(-1px);
 }
 .home-update:disabled {
   opacity: 0.7;
@@ -6392,7 +6848,7 @@ select {
    rule — they were identical declarations sitting either side of the keyframe. */
 .footer-reveal,
 .transcript-reveal {
-  animation: reveal-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: reveal-up var(--dur-enter) var(--ease-out) both;
 }
 
 /* Shared smooth entrance: a small rise + fade. Fast, eased, no layout cost
@@ -6423,10 +6879,10 @@ select {
   color: var(--text-dim, #8b8b8b);
   background: transparent;
   border: 1px solid var(--border, #2a2a2a);
-  border-radius: 6px;
+  border-radius: var(--radius-button);
   cursor: pointer;
   opacity: 0.8;
-  transition: opacity 120ms ease;
+  transition: opacity var(--t-in);
 }
 .code-expand:hover {
   opacity: 1;
@@ -6522,7 +6978,7 @@ select {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  animation: reveal-up 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
 .skeleton-dot {
   flex: 0 0 auto;
@@ -6536,7 +6992,7 @@ select {
   min-width: 0;
 }
 .skeleton-lines .skeleton {
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 
 /* Project / session list placeholder rows. */
@@ -6551,10 +7007,10 @@ select {
   justify-content: space-between;
   padding: 14px 16px;
   border-radius: var(--radius-card);
-  animation: reveal-up 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
 .skeleton-item .skeleton {
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 
 /* Picker list reveal: the loaded rows fade up once when discovery finishes
@@ -6564,7 +7020,7 @@ select {
 }
 .picker-reveal > .picker-item,
 .picker-reveal > .picker-item-wrap {
-  animation: reveal-up 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6606,11 +7062,17 @@ select {
 /* Right cluster holds the controls (context, thinking, model, provider) at
    their natural size so they stay legible and clickable. */
 .footer-right {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   gap: 16px;
   min-width: 0;
+  /* Narrow windows: controls wrap to a second line as whole units instead of
+     breaking inside "Thinking medium" or a model name. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+  white-space: nowrap;
 }
 .astra-control-group {
   display: inline-flex;
@@ -6704,8 +7166,8 @@ select {
   border: 1px solid;
   border-radius: var(--radius-card);
   padding: 6px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  z-index: 100;
+  box-shadow: var(--shadow-md);
+  z-index: var(--z-modal);
   min-width: 280px;
   max-width: min(440px, 90vw);
 }
@@ -6719,11 +7181,11 @@ select {
   gap: 8px;
   padding: 4px 6px;
   border-radius: var(--radius-button);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .bgtasks-dot {
   flex: 0 0 auto;
-  font-size: 9px;
+  font-size: 11px;
 }
 .bgtasks-cmd {
   flex: 1 1 auto;
@@ -6814,6 +7276,13 @@ select {
 .model-select:disabled {
   cursor: default;
 }
+/* The select is invisible (it only takes the click), so its keyboard focus ring
+   is too. Draw the ring on the visible wrapper instead. */
+.model-picker:has(.model-select:focus-visible) {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
 /* Windows/Linux fallback menu. The trigger keeps the same plain-text footer
    treatment as the native macOS control. */
 .model-button {
@@ -6838,7 +7307,7 @@ select {
   /* Portaled to body so responsive footer overflow cannot clip the popup. The
      viewport-clamped horizontal and trigger-relative bottom coordinates are inline. */
   position: fixed;
-  z-index: 50;
+  z-index: var(--z-popover);
   max-width: min(640px, 90vw);
   max-height: 50vh;
   overflow-y: auto;
@@ -6847,7 +7316,7 @@ select {
   padding: 8px;
   border: 1px solid;
   border-radius: var(--radius-card);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-md);
 }
 .model-menu-title {
   padding: 2px 6px 6px;
@@ -6862,7 +7331,7 @@ select {
 }
 .model-menu-subtitle {
   padding: 2px 6px 3px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -6884,7 +7353,7 @@ select {
   border-radius: var(--radius-button);
   background: transparent;
   font-family: var(--sans);
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6908,7 +7377,7 @@ select {
 .gaze-frame {
   position: fixed;
   inset: 3px;
-  z-index: 380;
+  z-index: calc(var(--z-system) - 20);
   pointer-events: none;
   border: 2px solid transparent;
   border-radius: 10px;
@@ -6919,6 +7388,7 @@ select {
 .platform-windows .gaze-frame,
 .platform-linux .gaze-frame {
   inset: 1px;
+  /* Matches the OS window corner, not the component scale. */
   border-radius: 4px;
 }
 .gaze-frame-hover {
@@ -6933,22 +7403,24 @@ select {
 /* Small status pill (camera owner window only), bottom-left. */
 .gaze-pill {
   /* Pinned: inheriting the app's 1.55 body line-height made the label's line
-     box taller than its glyphs, which reads as vertically off-centre. */
-  line-height: 1;
+     box taller than its glyphs, which reads as vertically off-centre. 1 went
+     too far the other way (no descender room, label rides high); 1.25 with
+     1px less padding keeps the pill's outer height. */
+  line-height: 1.25;
   position: fixed;
   left: 12px;
   bottom: 12px;
-  z-index: 390;
+  z-index: calc(var(--z-system) - 10);
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
+  padding: 4px 10px;
   font-family: var(--sans);
   font-size: 11px;
   color: var(--text-muted);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.6);
   pointer-events: none;
   user-select: none;
@@ -7078,6 +7550,15 @@ select {
 .cl-switch > input:focus {
   opacity: 0.12;
 }
+/* The input is a 12%-opacity ripple, so an outline on it would be near
+   invisible. Keyboard focus rings the visible track instead. */
+.cl-switch > input:focus-visible {
+  outline: none;
+}
+.cl-switch > input:focus-visible + span::before {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
 .cl-switch:hover > input:focus {
   opacity: 0.16;
 }
@@ -7134,7 +7615,9 @@ select {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: -0.005em;
-  line-height: 1;
+  /* Fixed height + flex centring set the box; 1.25 just gives the label its
+     descender room so it sits optically centred instead of high. */
+  line-height: 1.25;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
@@ -7158,16 +7641,18 @@ select {
   gap: 3px;
   pointer-events: none;
   transform: translateX(-50%);
-  z-index: 20;
+  z-index: var(--z-float);
 }
 .rank-xp-chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px 8px;
+  padding: 3px 8px;
   border: 0;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--success) 16%, var(--surface-1));
+  /* Neutral raised chip; the success green lives only in the ink. A green
+     wash under green text read as a generic library badge. */
+  background: var(--surface-2);
   color: var(--success);
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.3),
@@ -7175,7 +7660,7 @@ select {
   font-family: var(--sans);
   font-size: 11px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.25;
   white-space: nowrap;
   animation: rankXpChip 1.7s ease-out both;
 }
@@ -7184,7 +7669,7 @@ select {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: linear-gradient(180deg, rgba(77, 157, 255, 0.28), rgba(155, 140, 247, 0.18));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
@@ -7218,7 +7703,7 @@ select {
   top: 50%;
   width: 4px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   pointer-events: none;
   opacity: 0;
   box-shadow:
@@ -7334,10 +7819,10 @@ select {
     animation: rankBadgeGlyph 2.2s ease-out both;
   }
   .rank-badge-celebrate .rank-level {
-    animation: rankBadgeLevel 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: rankBadgeLevel 0.42s var(--ease-out) both;
   }
   .rank-badge-celebrate .rank-name {
-    animation: rankBadgeName 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: rankBadgeName 0.7s var(--ease-out) both;
   }
   .rank-badge-celebrate .rank-sparks {
     animation: rankBadgeSparks 1.2s ease-out both;
@@ -7356,6 +7841,22 @@ select {
   }
   .rank-fx-origin {
     animation: rankOriginShift 10s ease-in-out infinite;
+  }
+}
+/* Reduced motion: the chip fades in place over the same lifetime. */
+@keyframes rankXpChipStill {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  16%,
+  72% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rank-xp-chip {
+    animation-name: rankXpChipStill;
   }
 }
 @keyframes rankXpChip {
@@ -7554,7 +8055,7 @@ select {
 }
 .scorecard-bar {
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(0, 0, 0, 0.38);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
   overflow: hidden;
@@ -7588,7 +8089,7 @@ select {
 }
 .scorecard-stat-bar {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(0, 0, 0, 0.38);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
   overflow: hidden;
@@ -7645,9 +8146,10 @@ select {
   background: transparent;
   color: var(--text-muted);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  /* The 14px track sets the row height; 1.25 only gives labels descender room. */
+  line-height: 1.25;
   cursor: pointer;
   transition:
     background var(--t-fast),
@@ -7664,7 +8166,8 @@ select {
   cursor: default;
 }
 .title-usage-window {
-  width: 25px;
+  /* Sized in characters so the longest label ("week") fits at any font size. */
+  width: 4ch;
   color: var(--text-muted);
   font-weight: 650;
   text-align: right;
@@ -7678,7 +8181,7 @@ select {
   border: 1px solid #313131;
   border-radius: var(--radius-pill);
   background: radial-gradient(circle, #1b2735, #090a0f);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-sm);
 }
 .title-usage-fill {
   position: absolute;
@@ -7689,7 +8192,7 @@ select {
   box-shadow:
     0 0 4px #00f260,
     0 0 7px #0575e6;
-  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width 0.45s var(--ease-out);
 }
 .title-usage-fill::before {
   position: absolute;
@@ -7749,6 +8252,14 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Below 440px the strip can't hold the project counts and the reset time
+   together; the counts were being clipped ("1 P"). The reset time stays in the
+   meter's tooltip and accessible name, so drop the visible copy first. */
+@media (max-width: 440px) {
+  .title-usage-reset {
+    display: none;
+  }
+}
 @keyframes titleUsageRipple {
   from {
     opacity: 0.7;
@@ -7807,8 +8318,9 @@ select {
   color: var(--text-muted);
   cursor: pointer;
   font-family: var(--sans);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.3;
   transition:
     background-color var(--t-fast),
     color var(--t-fast);
@@ -7845,7 +8357,7 @@ select {
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-align: left;
@@ -7870,7 +8382,7 @@ select {
   border-radius: var(--radius-pill);
   background: var(--surface-1);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: capitalize;
 }
 .memory-importance,
@@ -7913,7 +8425,8 @@ select {
 .memory-modal-error {
   color: var(--error);
 }
-.memory-table .sr-only {
+/* Visually hidden, still read by screen readers. */
+.sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -8112,12 +8625,12 @@ select {
   /* Enter: slide up from under the composer and settle. Animating max-height
      alongside opacity means the composer is pushed smoothly rather than
      jumping the moment a message queues. */
-  animation: ggqueuedin 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ggqueuedin 260ms var(--ease-out);
 }
 /* Exit: reverse, and collapse the box so the composer glides back down instead
    of snapping. Held on screen for EXIT_MS by QueuedBar before it unmounts. */
 .queued-bar.leaving {
-  animation: ggqueuedout 220ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  animation: ggqueuedout 220ms var(--ease-in) forwards;
   pointer-events: none;
 }
 @keyframes ggqueuedin {
@@ -8214,7 +8727,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: ggqueuedlist 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ggqueuedlist 200ms var(--ease-out);
 }
 @keyframes ggqueuedlist {
   from {
@@ -8238,7 +8751,7 @@ select {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  animation: ggqueuedrow 220ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: ggqueuedrow 220ms var(--ease-out) backwards;
 }
 .queued-list-item:nth-child(2) {
   animation-delay: 40ms;
@@ -11624,21 +12137,21 @@ select {
   margin: 0;
 }
 .ask-closed {
-  font-size: 12.5px;
+  font-size: 13px;
   /* Dim measured 3.37:1 on the bare transcript canvas this line sits on, under
      the 4.5:1 floor. Muted clears it and still reads as the quietest row. */
   color: var(--text-muted);
 }
 .ask-subq-q {
   margin: 0 0 7px;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.45;
   color: var(--text);
 }
 .ask-detail {
   margin: -3px 0 8px;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.5;
   /* Secondary, not muted: this sits on a raised surface, and muted grey on grey
      was genuinely hard to read. */
@@ -11768,7 +12281,7 @@ select {
   flex: 1 1 auto;
 }
 .ask-row-hint {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 400;
   line-height: 1.4;
   /* On the pill's own gradient, --text-dim measured ~2.2:1 — under the 4.5:1
@@ -11784,7 +12297,7 @@ select {
 /* Accelerator index. Dim and unboxed — a hint, never competing with the label. */
 .ask-num {
   font-family: var(--sans);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-muted);
 }

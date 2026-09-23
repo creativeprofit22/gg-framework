@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const RESPONSES_URL = "https://example.openai.azure.com/openai/v1/responses";
 const TEST_API_KEY = "azure-test-key";
-const MODEL_ID = "azure:gpt-5.6-sol";
-const DEPLOYMENT = "gpt-5.6-sol";
-// Exceed the upstream GPT-5.6 Sol 1.05M-window 10% compaction threshold across two turns.
+const MODEL_ID = "azure:gpt-6-sol";
+const DEPLOYMENT = "gpt-6-sol";
+// Exceed the upstream GPT-6 Sol 1.05M-window 10% compaction threshold across two turns.
 const LARGE_RESPONSE = "old context ".repeat(20_000);
 const SUMMARY =
   "### Primary Request and Intent\nPreserve Azure compaction context.\n\n### Next Step\nResume the Azure session.";

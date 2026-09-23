@@ -58,13 +58,12 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("openai", "gpt-5.2", "high")).toBeUndefined();
   });
 
-  it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {
+  it("exposes Ultra only for GPT-6 models that support proactive delegation", () => {
     const baseLevels = ["low", "medium", "high", "xhigh", "max"];
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-sol")).toEqual([...baseLevels, "ultra"]);
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-terra")).toEqual([...baseLevels, "ultra"]);
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-luna")).toEqual(baseLevels);
-    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "max")).toBe("ultra");
-    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "ultra")).toBeUndefined();
+    expect(getSupportedThinkingLevels("openai", "gpt-6-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-6-luna")).toEqual(baseLevels);
+    expect(getNextThinkingLevel("openai", "gpt-6-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6-sol", "ultra")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {

@@ -38,7 +38,7 @@ describe("createTools subagent depth policy", () => {
     const result = await createTools(process.cwd(), {
       agents: [agent],
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       lspDiagnostics: false,
     });
     results.push(result);
@@ -53,7 +53,7 @@ describe("createTools subagent depth policy", () => {
     const result = await createTools(process.cwd(), {
       agents: [agent],
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       disableSubagents: true,
       lspDiagnostics: false,
     });

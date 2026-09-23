@@ -47,7 +47,7 @@ describe("calculateActiveContextTokens", () => {
   it("triggers Codex compaction at 85% from normalized usage plus pending messages", () => {
     const policy = resolveCompactionPolicy({
       provider: "openai",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       contextWindow: 272_000,
       accountId: "chatgpt-account",
     });

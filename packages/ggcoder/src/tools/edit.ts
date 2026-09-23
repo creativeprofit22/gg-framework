@@ -19,6 +19,7 @@ import { resolveAnchoredEdit } from "../core/hashline.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import type { EditSource } from "../core/lsp/edit-telemetry.js";
 import { resolveWriteGuard, type WriteGuardSettings } from "../core/workspace-guard.js";
+import { redactedOldTextHint, redactionLossError } from "./redaction-guard.js";
 
 type MutationCallback = (filePath: string) => void | Promise<void>;
 
@@ -197,7 +198,12 @@ function tryMatch(working: string, old: string, next: string, replaceAll: boolea
 
 type FailureKind =
   | { reason: "noop" }
-  | { reason: "not_found"; closestSnippet: string | null; closestLine: number | null }
+  | {
+      reason: "not_found";
+      closestSnippet: string | null;
+      closestLine: number | null;
+      redactedHint: string;
+    }
   | { reason: "ambiguous"; occurrences: number; matchLines: string; more: string }
   | { reason: "stale_anchor" }
   | { reason: "invalid"; detail: string }
@@ -460,6 +466,7 @@ export function createEditTool(
               reason: "not_found",
               closestSnippet: closest?.snippet ?? null,
               closestLine: closest?.topLine ?? null,
+              redactedHint: redactedOldTextHint(normalizedOld),
             },
           };
         } else {
@@ -515,7 +522,8 @@ export function createEditTool(
           `old_text not found in ${fileName}. ` +
           "Text must match verbatim — do not paraphrase. " +
           "Fix this edit's old_text to match the file exactly (re-read the region below if unsure); " +
-          "the file is unchanged, so successful edits and prior reads are still valid.";
+          "the file is unchanged, so successful edits and prior reads are still valid." +
+          f.redactedHint;
         // Build a bounded read suggestion around the closest-match line so the
         // model can re-read just that region (e.g. ±25 lines) instead of the
         // whole file. Skipped when willPersistSuccesses — see comment above.
@@ -554,6 +562,10 @@ export function createEditTool(
               : "";
         throw new Error(header + formatFailures());
       }
+
+      // Never replace real secrets with the placeholder the model was shown.
+      const lossError = redactionLossError(originalNormalized, working, fileName);
+      if (lossError) throw new Error(lossError);
 
       const relPath = path.relative(cwd, resolved);
       const diff = generateDiff(originalNormalized, working, relPath);

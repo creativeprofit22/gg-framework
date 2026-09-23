@@ -253,7 +253,7 @@ async function* runStream(
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in OpenAI's current catalog for your ChatGPT account. " +
-        "Switch to GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, or GPT-5.6 Luna via the model selector.";
+        "Switch to GPT-6 Astra, GPT-6 Sol, or GPT-6 Luna via the model selector.";
     }
 
     throw new ProviderError("openai", message, {

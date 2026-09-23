@@ -689,9 +689,10 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
         )[1]!.split("\nReusable host evidence receipts:")[0]!).scanFacts;
         expect(scanResult.ok).toBe(ending !== "plan");
         if (ending === "plan") expect(scanResult.error.code).toBe("plan-mode-read-only");
+        // The identical second call in the same response is cancelled by the agent loop.
         expect(
           String(results.find((item) => item.toolCallId === "second-scan")?.content),
-        ).toContain("one unchanged");
+        ).toContain("identical call already appeared in this response");
       }
       if (ending === "result" || ending === "plan") {
         expect(String(results.find((item) => item.toolCallId === "result")?.content)).toContain(

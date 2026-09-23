@@ -21,9 +21,7 @@ describe("selectSubAgent", () => {
   it("keeps shell-capable agents on the parent model", () => {
     const shellAgent = agent({ name: "worker", tools: ["read", "bash"], model: "inherit" });
 
-    expect(selectSubAgent([shellAgent], "worker", "openai", "gpt-5.6-sol").model).toBe(
-      "gpt-5.6-sol",
-    );
+    expect(selectSubAgent([shellAgent], "worker", "openai", "gpt-6-sol").model).toBe("gpt-6-sol");
   });
 
   it("keeps a read-only agent on the parent model unless it asks for fast", () => {
@@ -31,15 +29,13 @@ describe("selectSubAgent", () => {
     // routed to the provider's low tier, with no way to override it.
     const readOnly = agent({ name: "researcher", tools: ["read", "grep", "web_fetch"] });
 
-    expect(selectSubAgent([readOnly], "researcher", "openai", "gpt-5.6-sol").model).toBe(
-      "gpt-5.6-sol",
-    );
+    expect(selectSubAgent([readOnly], "researcher", "openai", "gpt-6-sol").model).toBe("gpt-6-sol");
   });
 
   it("downgrades only when the agent declares model: fast", () => {
     const fast = agent({ name: "owl", model: "fast" });
 
-    expect(selectSubAgent([fast], "owl", "openai", "gpt-5.6-sol").model).not.toBe("gpt-5.6-sol");
+    expect(selectSubAgent([fast], "owl", "openai", "gpt-6-sol").model).not.toBe("gpt-6-sol");
   });
 
   it("honours an explicit model id", () => {
@@ -51,7 +47,7 @@ describe("selectSubAgent", () => {
   });
 
   it("falls back to the parent model for an unnamed agent", () => {
-    expect(selectSubAgent([], undefined, "openai", "gpt-5.6-sol").model).toBe("gpt-5.6-sol");
+    expect(selectSubAgent([], undefined, "openai", "gpt-6-sol").model).toBe("gpt-6-sol");
   });
 });
 
@@ -91,21 +87,19 @@ describe("resolveAgentDefinition", () => {
 
 describe("subAgentCacheKey", () => {
   it("shares routing within one model and named-agent family", () => {
-    expect(subAgentCacheKey("parent", "gpt-5.6-luna", "owl")).toBe(
-      "parent:subagent:gpt-5.6-luna:owl",
-    );
-    expect(subAgentCacheKey("parent", "gpt-5.6-luna", "owl")).toBe(
-      subAgentCacheKey("parent", "gpt-5.6-luna", "owl"),
+    expect(subAgentCacheKey("parent", "gpt-6-luna", "owl")).toBe("parent:subagent:gpt-6-luna:owl");
+    expect(subAgentCacheKey("parent", "gpt-6-luna", "owl")).toBe(
+      subAgentCacheKey("parent", "gpt-6-luna", "owl"),
     );
   });
 
   it("partitions unrelated model and prompt families", () => {
-    const owl = subAgentCacheKey("parent", "gpt-5.6-luna", "owl");
-    expect(subAgentCacheKey("parent", "gpt-5.6-sol", "owl")).not.toBe(owl);
-    expect(subAgentCacheKey("parent", "gpt-5.6-luna", "bee")).not.toBe(owl);
+    const owl = subAgentCacheKey("parent", "gpt-6-luna", "owl");
+    expect(subAgentCacheKey("parent", "gpt-6-sol", "owl")).not.toBe(owl);
+    expect(subAgentCacheKey("parent", "gpt-6-luna", "bee")).not.toBe(owl);
   });
 
   it("stays unset when the parent has no stable cache identity", () => {
-    expect(subAgentCacheKey(undefined, "gpt-5.6-luna", "owl")).toBeUndefined();
+    expect(subAgentCacheKey(undefined, "gpt-6-luna", "owl")).toBeUndefined();
   });
 });

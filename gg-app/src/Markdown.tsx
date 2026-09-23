@@ -27,6 +27,7 @@ import {
 import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
+import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
 
 interface Props {
@@ -618,6 +619,8 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const blockRef = useRef<HTMLDivElement>(null);
+  const captureHeight = useAnimatedHeight(blockRef, expanded);
 
   // Raw text drives both the copy fallback and the fold decision. The rendered
   // `children` is the highlighted tree; while folded we deliberately do NOT
@@ -644,7 +647,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
   }, [text]);
 
   return (
-    <div className={`code-block${folded ? " folded" : ""}`}>
+    <div ref={blockRef} className={`code-block${folded ? " folded" : ""}`}>
       <button
         type="button"
         className="code-copy"
@@ -664,7 +667,14 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
         {folded ? preview : children}
       </pre>
       {collapsible && (
-        <button type="button" className="code-expand" onClick={() => setExpanded(!expanded)}>
+        <button
+          type="button"
+          className="code-expand"
+          onClick={() => {
+            captureHeight();
+            setExpanded(!expanded);
+          }}
+        >
           {folded ? `Show full output (${hiddenLines} more lines)` : "Show less"}
         </button>
       )}
@@ -792,6 +802,8 @@ export const Markdown = memo(function Markdown({
 }: Props): React.ReactElement {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
   const [rowExpanded, setRowExpanded] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const captureHeight = useAnimatedHeight(rootRef, rowExpanded);
   // Oversized content mounts only its leading blocks. Fenced-code folding above
   // handles one huge block; this handles the other shape, hundreds of ordinary
   // blocks in a single row, which no per-block rule would catch.
@@ -799,7 +811,7 @@ export const Markdown = memo(function Markdown({
   const rowFolded = !rowExpanded && visibleCount < blocks.length;
   const visible = rowFolded ? blocks.slice(0, visibleCount) : blocks;
   return (
-    <div className="markdown">
+    <div ref={rootRef} className="markdown">
       {visible.map((block, index) => (
         // A ```prompt block reveals its "Send to GG Coder" button as soon as ITS
         // own closing fence arrives (per-block), not when the whole reply ends —
@@ -815,7 +827,14 @@ export const Markdown = memo(function Markdown({
         />
       ))}
       {rowFolded && (
-        <button type="button" className="code-expand" onClick={() => setRowExpanded(true)}>
+        <button
+          type="button"
+          className="code-expand"
+          onClick={() => {
+            captureHeight();
+            setRowExpanded(true);
+          }}
+        >
           {`Show full output (${blocks.length - visibleCount} more blocks)`}
         </button>
       )}

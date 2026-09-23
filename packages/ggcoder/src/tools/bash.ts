@@ -502,7 +502,7 @@ async function executePersistentCommand({
 async function renderStructuredForegroundResult(
   execution: ForegroundCommandExecution,
   persistent: boolean,
-): Promise<{ content: string; details: BashToolResultDetails }> {
+): Promise<{ content: string; details: BashToolResultDetails; isError?: boolean }> {
   const { outcome } = execution;
   const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
   const details: BashToolResultDetails = {
@@ -514,6 +514,9 @@ async function renderStructuredForegroundResult(
         `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}\n\n` +
         diagnostics,
       details,
+      // A shell that never launched is a tool failure, not a successful run
+      // whose output happens to mention an error.
+      isError: true,
     };
   }
 

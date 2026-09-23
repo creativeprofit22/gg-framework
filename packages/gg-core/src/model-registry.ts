@@ -29,8 +29,8 @@ export interface ModelInfo {
   /**
    * Vendor-declared default reasoning level (Codex models.json
    * `default_reasoning_level`). When present, fresh sessions start here rather
-   * than at the ceiling: the deep-reasoning flagships (Astra/Sol ship "low",
-   * Terra/Luna "medium") think dramatically longer per rung, so defaulting to
+   * than at the ceiling: the deep-reasoning flagships (Astra ships "low",
+   * GPT-6 Sol/Luna "medium") think dramatically longer per rung, so defaulting to
    * `maxThinkingLevel` made new sessions pathologically slow.
    */
   defaultThinkingLevel?: ThinkingLevel;
@@ -52,8 +52,8 @@ export interface ModelInfo {
   /**
    * The top reasoning tier this model genuinely uses. Used when thinking is
    * enabled to pick the strongest setting per model:
-   *   - OpenAI GPT-6 Astra: `ultra` (Codex orchestration preset above `max`)
-   *   - OpenAI GPT-5.6-era (Sol/Terra/Luna): `max`
+   *   - OpenAI GPT-6 Astra / Sol: `ultra` (Codex orchestration preset above `max`)
+   *   - OpenAI GPT-6 Luna: `max`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
    *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5.5 and Sonnet 5: `max`
    *     (the Fable / Mythos line uses always-on adaptive thinking, low→max)
@@ -207,35 +207,20 @@ export const MODELS: ModelInfo[] = [
     costTier: "high",
     maxThinkingLevel: "ultra",
   },
-  // GPT-5.6 family — three agentic coding tiers launched July 2026. The public
-  // Responses API advertises a 1.05M context window; OpenAI's Codex product
-  // catalog advertises 272K on the ChatGPT OAuth route (corrected from the
-  // initially advertised 372K — openai/codex PR #33972, Jul 18 2026 hotfix). All three take
-  // text+image input, freeform apply_patch, text+image web search, and parallel
-  // tool calls.
+  // GPT-6 Sol + Luna — released 2026-09-22 below Astra, replacing the whole
+  // GPT-5.6 family (Sol/Terra/Luna; there is no GPT-6 Terra — OpenAI's Codex
+  // catalog upgrades 5.6 Terra to 6 Sol). Both need a Codex client >= 0.155.0
+  // on the ChatGPT OAuth route. Same window split as Astra: 1.05M on the public
+  // Responses API, 272K on the Codex route; 128K output, text+image input,
+  // freeform apply_patch, responses-lite transport. The 5.6 ids are retired —
+  // a saved session on one falls back to the provider default on next start.
   {
-    // Sol — "Latest frontier agentic coding model." (priority 1, default low).
-    // Reasoning ladder: low → medium → high → xhigh → max → ultra. Ultra is a
-    // Codex orchestration preset: the request uses max effort while the local
-    // runtime proactively delegates suitable independent work to subagents.
-    id: "gpt-5.6-sol",
-    name: "GPT-5.6 Sol",
-    provider: "openai",
-    contextWindow: 1_050_000,
-    codexContextWindow: 272_000,
-    maxOutputTokens: 128_000,
-    supportsThinking: true,
-    defaultThinkingLevel: "low",
-    supportsImages: true,
-    supportsVideo: false,
-    costTier: "high",
-    maxThinkingLevel: "ultra",
-  },
-  {
-    // Terra — "Balanced agentic coding model for everyday work." (priority 2,
-    // default medium).
-    id: "gpt-5.6-terra",
-    name: "GPT-5.6 Terra",
+    // Sol — "Workhorse model for coding and everyday work." (Codex priority 2,
+    // default medium). $2/$10 MTok. Ladder low → medium → high → xhigh → max →
+    // ultra; ultra is the Codex orchestration preset (max effort on the wire +
+    // proactive local subagent delegation).
+    id: "gpt-6-sol",
+    name: "GPT-6 Sol",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
@@ -248,10 +233,10 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "ultra",
   },
   {
-    // Luna — "Fast and affordable agentic coding model." (priority 3, default
-    // medium). Reasoning tops out at `max`.
-    id: "gpt-5.6-luna",
-    name: "GPT-5.6 Luna",
+    // Luna — "Fast and affordable model for easier tasks." (Codex priority 3,
+    // default medium). $0.10/$0.50 MTok. Reasoning tops out at `max`.
+    id: "gpt-6-luna",
+    name: "GPT-6 Luna",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,

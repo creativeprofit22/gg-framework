@@ -1044,7 +1044,9 @@ it.each(["result-first", "parallel-scan-first", "parallel-result-first", "denied
       expect(results.find((item) => item.toolCallId === "early-advice")?.isError ?? false).toBe(false);
     }
     if (scenario !== "result-first") {
-      expect(results.find((item) => item.toolCallId === "retry-scan")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
+      // A parallel retry repeats gate-scan within one response, so the agent loop cancels it before the host gate.
+      const retryRejection = parallel ? "identical call already appeared in this response" : "one unchanged";
+      expect(results.find((item) => item.toolCallId === "retry-scan")).toMatchObject({ isError: true, content: expect.stringContaining(retryRejection) });
       expect(results.find((item) => item.toolCallId === "gate-scan")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
       const result = results.find((item) => item.toolCallId === "settled-advice")!;
       if (scenario === "denied") {
@@ -1143,7 +1145,8 @@ it("claims concurrent scans once, preserves completed scan on cancellation and r
     expect(hostFacts(session.getMessages()).scanFacts).toMatchObject({ ok: true, state_path: PROGRAMMATIC_STATE_PATH });
     expect(results.find((item) => item.toolCallId === "scan-first")).toMatchObject({ isError: true, content: expect.stringContaining("one unchanged") });
     expect(results.find((item) => item.toolCallId === "scan-second")?.isError).toBe(true);
-    expect(String(results.find((item) => item.toolCallId === "scan-second")?.content)).toContain("one unchanged");
+    // The second identical call in the same response is cancelled by the agent loop before the host claim.
+    expect(String(results.find((item) => item.toolCallId === "scan-second")?.content)).toContain("identical call already appeared in this response");
     const state = await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH));
     expect(session.getMessages().some((message) => typeof message.content === "string" && message.content.includes("Assessment did not submit a validated result"))).toBe(true);
     session.setSignal(new AbortController().signal);

@@ -3,7 +3,7 @@ import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import { sliceHead } from "@kenkaiiii/gg-ai";
 import { extractToMarkdown } from "./html-extract.js";
 import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
-import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
+import { checkUrlPolicy, withNetworkPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import { stripInvisibleUnicode } from "../utils/text.js";
 import { log } from "../core/logger.js";
 import { safeRetrievalUrl, type RetrievalResource } from "./retrieval-metadata.js";
@@ -461,10 +461,13 @@ async function fetchOne(
   signal: AbortSignal,
   format: FetchFormat,
   getNetworkPolicy?: GetNetworkPolicy,
+  onHop?: (url: string) => void,
 ): Promise<FetchOneResult> {
   let currentUrl = url;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    onHop?.(currentUrl);
+    signal.throwIfAborted();
     // Every hop — the initial request and each redirect target — is checked, so
     // a redirect can never carry the fetch to a disallowed host.
     const blocked = checkUrlPolicy(currentUrl, getNetworkPolicy);
@@ -668,32 +671,51 @@ async function fetchAndProcess(
   }
 
   try {
-    const result = await fetchOne(url, signal, opts.format, opts.getNetworkPolicy);
-    if (!result.ok) return result.error;
+    // Retrieval outcomes are recorded only after the network-policy guard has
+    // accepted the whole fetch, so a mid-fetch revocation never reports a
+    // source as retrieved while the tool returns a denial.
+    const retrieval: { outcome?: RetrievalResource["outcome"]; sourceUrl?: string } = {};
+    const record: FetchOptions["onRetrieval"] = opts.onRetrieval
+      ? (outcome, sourceUrl) => {
+          retrieval.outcome = outcome;
+          retrieval.sourceUrl = sourceUrl;
+        }
+      : undefined;
+    const content = await withNetworkPolicy(
+      url,
+      opts.getNetworkPolicy,
+      signal,
+      async (guardSignal, onHop) => {
+        const result = await fetchOne(url, guardSignal, opts.format, opts.getNetworkPolicy, onHop);
+        if (!result.ok) return result.error;
 
-    const { response } = result;
-    if (!(response.status >= 200 && response.status < 300)) {
-      return `Error: HTTP ${response.status} ${response.statusText}`;
-    }
+        const { response } = result;
+        if (!(response.status >= 200 && response.status < 300)) {
+          return `Error: HTTP ${response.status} ${response.statusText}`;
+        }
 
-    const bytes = await readBoundedBody(
-      response.body,
-      byteLimitForResponse(response.contentType, response.finalUrl),
+        const bytes = await readBoundedBody(
+          response.body,
+          byteLimitForResponse(response.contentType, response.finalUrl),
+        );
+        const head = bytes.slice(0, 4);
+
+        if (looksLikePdf(response.contentType, response.finalUrl, head)) {
+          const pdfResponse: RawResponse = {
+            ...response,
+            body: new Response(bytes.slice().buffer),
+            contentLength: bytes.byteLength,
+          };
+          return await processPdf(pdfResponse, opts.maxLength, record);
+        }
+
+        const text = new TextDecoder().decode(bytes);
+        const processed = await processHtmlOrText(response, text, opts);
+        record?.(processed.trim() ? "retrieved" : "unavailable", response.finalUrl);
+        return processed;
+      },
     );
-    const head = bytes.slice(0, 4);
-
-    if (looksLikePdf(response.contentType, response.finalUrl, head)) {
-      const pdfResponse: RawResponse = {
-        ...response,
-        body: new Response(bytes.slice().buffer),
-        contentLength: bytes.byteLength,
-      };
-      return await processPdf(pdfResponse, opts.maxLength, opts.onRetrieval);
-    }
-
-    const text = new TextDecoder().decode(bytes);
-    const content = await processHtmlOrText(response, text, opts);
-    opts.onRetrieval?.(content.trim() ? "retrieved" : "unavailable", response.finalUrl);
+    if (retrieval.outcome) opts.onRetrieval?.(retrieval.outcome, retrieval.sourceUrl);
     return content;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -835,17 +857,33 @@ async function tryLlmsResource(
   const probes = await runPool(eligibleCandidates, PROBE_CONCURRENCY, async (candidate) => {
     try {
       const probeSignal = AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
-      const result = await fetchOne(candidate.url, probeSignal, "markdown", opts.getNetworkPolicy);
-      if (!result.ok) return null;
-      const { response } = result;
-      if (response.status !== 200) return null;
-      const bytes = await readBoundedBody(response.body);
-      const text = new TextDecoder().decode(bytes);
-      if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
-      return {
-        finalUrl: response.finalUrl,
-        content: `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`,
-      };
+      return await withNetworkPolicy(
+        candidate.url,
+        opts.getNetworkPolicy,
+        probeSignal,
+        async (guardSignal, onHop) => {
+          const result = await fetchOne(
+            candidate.url,
+            guardSignal,
+            "markdown",
+            opts.getNetworkPolicy,
+            onHop,
+          );
+          if (!result.ok) return null;
+          const { response } = result;
+          if (response.status !== 200) return null;
+          const bytes = await readBoundedBody(response.body);
+          const text = new TextDecoder().decode(bytes);
+          if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
+          return {
+            finalUrl: response.finalUrl,
+            content: `[${candidate.label}]
+Source: ${response.finalUrl}
+
+${truncate(text.trim(), opts.maxLength)}`,
+          };
+        },
+      );
     } catch {
       return null;
     }

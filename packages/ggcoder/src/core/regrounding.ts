@@ -21,6 +21,29 @@ export interface RegroundingState {
   alreadyInjected: boolean;
 }
 
+/**
+ * The text of a user message to pin as the original request. Messages with
+ * attachments arrive as content parts; their text parts are the instructions,
+ * and each image/video is noted by kind only — media payloads never enter the
+ * prompt, and their content is not inferred.
+ */
+export function requestTextForRegrounding(message: Message | undefined): string {
+  if (!message || message.role !== "user") return "";
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  const text: string[] = [];
+  const media = { image: 0, video: 0 };
+  for (const part of message.content) {
+    if (part.type === "text") text.push(part.text);
+    else if (part.type === "image" || part.type === "video") media[part.type]++;
+  }
+  const attached = (Object.entries(media) as [keyof typeof media, number][])
+    .filter(([, count]) => count > 0)
+    .map(([kind, count]) => `${count} ${kind}${count === 1 ? "" : "s"}`);
+  const note = attached.length > 0 ? `[Attached: ${attached.join(", ")}]` : "";
+  return [text.join("\n").trim(), note].filter(Boolean).join("\n\n");
+}
+
 export function shouldReground(state: RegroundingState): boolean {
   return state.compactionOccurred && !state.alreadyInjected;
 }

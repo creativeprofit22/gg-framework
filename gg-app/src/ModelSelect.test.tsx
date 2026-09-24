@@ -314,13 +314,13 @@ describe("ModelSelect — in-webview menu", () => {
     const trigger = screen.getByRole("button", { name: "Claude Sonnet 5" });
     const menu = screen.getByRole("menu", { name: "Switch model" });
     const active = screen.getByRole("menuitemradio", { name: "Claude Sonnet 5" });
-    const next = screen.getByRole("menuitemradio", { name: "GPT-5.6 Sol" });
+    const next = screen.getByRole("menuitemradio", { name: "GPT-6 Sol" });
 
     expect(document.activeElement).toBe(active);
     fireEvent.keyDown(menu, { key: "ArrowDown" });
     expect(document.activeElement).toBe(next);
     fireEvent.click(next);
-    expect(onSelect).toHaveBeenCalledWith("gpt-5.6-sol");
+    expect(onSelect).toHaveBeenCalledWith("gpt-6-sol");
     expect(document.activeElement).toBe(trigger);
 
     fireEvent.click(trigger);

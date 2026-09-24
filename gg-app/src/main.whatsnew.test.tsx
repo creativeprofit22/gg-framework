@@ -26,6 +26,8 @@ vi.mock("./Confetti", () => ({ Confetti: () => null }));
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 vi.mock("./agent", () => ({ getVerifiedDecisions: async () => [] }));
 
+const VISIBLE = { ignore: "script, style, .sr-only *" };
+
 let root: Root | undefined;
 afterEach(async () => {
   await act(async () => root?.unmount());
@@ -52,13 +54,16 @@ it("renders queued startup and later native failures through the standalone entr
   expect(consoleError).toHaveBeenCalledWith(
     expect.stringContaining("Native appearance synchronization failed"),
   );
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
   const client = await vi.importActual<typeof ReactDomClient>("react-dom/client");
   root = client.createRoot(container);
   await act(async () => root!.render(mocks.render.mock.calls[0][0] as ReactNode));
   const message =
     "Window appearance could not be updated. The selected theme still applies to content.";
-  expect((await screen.findByRole("status")).textContent).toBe(message);
+  // Error toasts announce through the Toaster's persistent alert region; the
+  // visible toast itself is matched outside that screen-reader mirror.
+  await screen.findByText(message, VISIBLE);
+  expect(screen.getByRole("alert").textContent).toBe(message);
   expect(container.querySelectorAll(".toaster")).toHaveLength(1);
   await screen.findByRole("button", { name: "Got it" });
 
@@ -66,14 +71,16 @@ it("renders queued startup and later native failures through the standalone entr
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
   });
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByText(message, VISIBLE)).toBeNull();
+  expect(screen.getByRole("alert").textContent).toBe("");
 
   mocks.invoke.mockRejectedValueOnce(new Error("permission denied"));
   await act(async () => {
     localStorage.setItem("gg-app:appearance:v1", JSON.stringify({ theme: "dark" }));
     window.dispatchEvent(new StorageEvent("storage", { key: "gg-app:appearance:v1" }));
   });
-  expect((await screen.findByRole("status")).textContent).toBe(message);
+  await screen.findByText(message, VISIBLE);
+  expect(screen.getByRole("alert").textContent).toBe(message);
   expect(mocks.invoke).toHaveBeenLastCalledWith("plugin:window|set_background_color", {
     label: "whatsnew",
     value: "#0f1115",

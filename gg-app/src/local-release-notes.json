@@ -19,7 +19,7 @@
       "title": "Read and move around the app more comfortably",
       "items": [
         "Every button can now explain itself. Hover or tab onto a control and its `tooltip` appears in the app's own style, quickly as you move between buttons, and never when you did not ask for one.",
-        "Always know where you are with the keyboard. Controls show a clear `focus ring`, and popups fade away instead of vanishing. With `Reduce Motion` switched on in your system settings, those animations calm down for you.",
+        "Always know where you are with the keyboard. Controls show a clear `focus ring`, and popups fade away instead of vanishing. Turn off `Animation effects` in Windows settings, or turn on `Reduce motion` on macOS, and those animations calm down for you.",
         "Errors wait for you. They stay on screen until you close them, and any notice holds still while you hover or focus it, so nothing important slips past while you are looking away."
       ]
     },
@@ -28,7 +28,7 @@
       "items": [
         "Swap arrows now appear on every pane in a grid, including the middle column of a `3x2` layout whose dividers were dragged a few pixels apart. Rows that line up by eye are treated as the same row.",
         "See why a task stopped. When a `Tasks` run ends early, the task now says why, such as `Last run stopped: it was cancelled.` Running or deleting a task also reports a clear failure instead of waiting forever when the run cannot start or the save fails.",
-        "Settings and `Radio` tell you what happened. Saving or loading shows its progress and any error, the `New project` folder preview follows a changed projects folder straight away, and pausing the radio on Windows really stops playback."
+        "Settings and `Internet Radio` tell you what happened. Saving or loading shows its progress and any error, the `New project` folder preview follows a changed projects folder straight away, and pausing the radio on Windows really stops playback."
       ]
     },
     {

@@ -5,6 +5,7 @@ mod notes_phase_deletion;
 mod azure_connection;
 mod qwen_cloud_connection;
 use qwen_cloud_connection::{qwen_cloud_connection_status, qwen_cloud_connection_save, qwen_cloud_connection_remove, qwen_cloud_connection_test};
+mod daemon_job;
 mod decisions;
 mod local_patched_update;
 
@@ -154,6 +155,10 @@ struct Daemon {
     predecessor_proof: Mutex<Option<DaemonPredecessorProof>>,
     /// Per-launch bearer token required as `x-gg-token` on every daemon request.
     token: String,
+    /// Kill-on-close job holding the current daemon and every descendant.
+    /// Replacing or dropping it terminates leftovers of that daemon generation.
+    #[cfg(windows)]
+    job: Mutex<Option<daemon_job::DaemonJob>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -9829,6 +9834,20 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         }
     };
     let daemon_pid = child.id();
+    // Contain the daemon before it can start agent tools. It spawns nothing
+    // until its HTTP server accepts a session, which is far later than this.
+    // Containment is cleanup, so a failure is logged and startup continues.
+    #[cfg(windows)]
+    {
+        let job = match daemon_job::DaemonJob::contain(&child) {
+            Ok(job) => Some(job),
+            Err(message) => {
+                log::warn!("{message}; agent tool processes may outlive the app");
+                None
+            }
+        };
+        *app.state::<Daemon>().job.lock().unwrap() = job;
+    }
     log::info!(
         "{}",
         lifecycle_message(
@@ -9948,6 +9967,10 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                         }
                     }
                 }
+                // The daemon is gone; end any tool processes it left running
+                // now, even if the respawn circuit breaker keeps it down.
+                #[cfg(windows)]
+                drop(daemon.job.lock().unwrap().take());
                 if let Some(identity) = daemon.process_identity.lock().unwrap().take() {
                     if identity.process_id == daemon_pid {
                         *daemon.predecessor_proof.lock().unwrap() =

@@ -178,7 +178,15 @@ enum ChatAgent {
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
 const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
-const DAEMON_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+// Restoring several large conversations on a busy machine routinely took
+// 26-35s; a 30s ceiling turned slow starts into failed projects.
+const DAEMON_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+// Daemon boot precedes session creation. Loading the daemon's modules alone
+// took ~20s on a loaded machine, so the old 30s port wait was too tight.
+// The webview's `PANE_STARTUP_TIMEOUT_MS` (gg-app/src/agent.ts) must exceed
+// this plus `DAEMON_SESSION_STARTUP_TIMEOUT`.
+const DAEMON_PORT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+const DAEMON_PORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_SESSION_DISPOSAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One logical pane's session inside the shared daemon.
@@ -1296,16 +1304,23 @@ fn pane_cwd_for(webview: &WebviewWindow, pane_id: &str) -> Option<PathBuf> {
 }
 
 /// Await the daemon's HTTP port (set by its `GG_APP_LISTENING` handshake),
-/// polling up to ~30s. Returns `None` if the daemon never came up. Mirrors the
-/// webview's `waitForReady` poll cadence.
+/// polling until `DAEMON_PORT_WAIT_TIMEOUT` elapses. Returns `None` if the
+/// daemon never came up. Mirrors the webview's `waitForReady` poll cadence.
 async fn await_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
-    for _ in 0..600 {
+    let deadline = daemon_port_wait_deadline(std::time::Instant::now());
+    loop {
         if let Some(p) = *app.state::<Daemon>().port.lock().unwrap() {
             return Some(p);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(DAEMON_PORT_POLL_INTERVAL).await;
     }
-    None
+}
+
+fn daemon_port_wait_deadline(start: std::time::Instant) -> std::time::Instant {
+    start + DAEMON_PORT_WAIT_TIMEOUT
 }
 
 /// Frontend compatibility readiness seam, explicitly routed to one pane.
@@ -11023,6 +11038,16 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_port_wait_outlasts_slow_daemon_boot() {
+        let start = std::time::Instant::now();
+        let deadline = daemon_port_wait_deadline(start);
+        assert_eq!(deadline - start, DAEMON_PORT_WAIT_TIMEOUT);
+        // Measured ~20s daemon module load under load; the old ceiling was 30s.
+        assert!(DAEMON_PORT_WAIT_TIMEOUT >= Duration::from_secs(60));
+        assert!(DAEMON_PORT_POLL_INTERVAL < DAEMON_PORT_WAIT_TIMEOUT);
+    }
 
     #[test]
     fn native_log_override_selects_only_stdout_and_requested_folder() {

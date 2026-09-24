@@ -2977,6 +2977,12 @@ interface PaneLifecycleEvent {
   error?: string;
 }
 
+/** UI-side budget for one pane to become ready. Must exceed the whole native
+ * startup budget in `gg-app/src-tauri/src/lib.rs`: `DAEMON_PORT_WAIT_TIMEOUT`
+ * (90s) plus `DAEMON_SESSION_STARTUP_TIMEOUT` (120s), with margin. Real native
+ * failures still arrive earlier via `agent-pane-error` and status polling. */
+export const PANE_STARTUP_TIMEOUT_MS = 230_000;
+
 /** Wait for one logical pane. Listeners are installed before the first status
  * read, and polling remains active until settlement so status/event races close. */
 export async function waitForPaneReady(
@@ -2986,7 +2992,10 @@ export async function waitForPaneReady(
   return new Promise<PaneStartupStatus>((resolve, reject) => {
     let settled = false;
     let poll: ReturnType<typeof setInterval> | undefined;
-    const timeout = setTimeout(() => fail(`pane '${paneId}' did not start in time`), 30000);
+    const timeout = setTimeout(
+      () => fail(`pane '${paneId}' did not start in time`),
+      PANE_STARTUP_TIMEOUT_MS,
+    );
     const unlisteners: SafeTauriUnlisten[] = [];
 
     const cleanup = async (): Promise<void> => {

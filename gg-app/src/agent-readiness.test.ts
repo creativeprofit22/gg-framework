@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import { waitForPaneReady } from "./agent";
+import { PANE_STARTUP_TIMEOUT_MS, waitForPaneReady } from "./agent";
 
 const pending = { ready: false, error: null, generation: 2, sessionId: null };
 const ready = { ready: true, error: null, generation: 2, sessionId: "session-2" };
@@ -73,5 +73,17 @@ describe("pane readiness", () => {
     await vi.waitFor(() => expect(listeners.has("sidecar-error")).toBe(true));
     listeners.get("sidecar-error")!({ payload: "fatal startup" });
     await expect(promise).rejects.toThrow("agent daemon failed: fatal startup");
+  });
+
+  it("outlasts the native startup budget before timing out", async () => {
+    expect(PANE_STARTUP_TIMEOUT_MS).toBeGreaterThan(90_000 + 120_000);
+    invoke.mockResolvedValue(pending);
+    const settled = vi.fn();
+    const promise = waitForPaneReady("pane-2");
+    promise.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(PANE_STARTUP_TIMEOUT_MS - 31_000 + 1);
+    await expect(promise).rejects.toThrow("pane 'pane-2' did not start in time");
   });
 });

@@ -78,7 +78,9 @@ describe("ReviewDock", () => {
     expect(planBody).not.toMatch(/overscroll-behavior/);
     const reviewSelector = /\.(review-|plan-review|plan-feedback|roadmap-draft)/;
     const contained = [...styles.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-      .filter(([, selector, body]) => reviewSelector.test(selector) && /overscroll-behavior/.test(body))
+      .filter(
+        ([, selector, body]) => reviewSelector.test(selector) && /overscroll-behavior/.test(body),
+      )
       .map(([, selector]) => selector.trim())
       .sort();
     expect(contained).toEqual([".review-content-scroller", ".review-dock-panel"]);

@@ -2554,22 +2554,37 @@ describe("agentLoop truncation handling", () => {
       {
         type: "message_start",
         message: {
-          id: "msg_refusal", type: "message", role: "assistant", model: "claude-opus-5",
-          content: [], stop_reason: null, stop_sequence: null,
+          id: "msg_refusal",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
           usage: { input_tokens: 21, output_tokens: 0, cache_creation_input_tokens: 23254 },
         },
       },
       { type: "message_delta", delta: { stop_reason: "refusal" }, usage: { output_tokens: 0 } },
       { type: "message_stop" },
     ];
-    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(
-      wireEvents.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
-      { headers: { "content-type": "text/event-stream" } },
-    ));
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () =>
+          new Response(
+            wireEvents
+              .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+              .join(""),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
     mockStream.mockImplementation((options) => realStream({ ...options, fetch: fetchMock }));
     const messages: Message[] = [{ role: "user", content: "Reply with exactly OK." }];
     const { events, result } = await collectLoop(messages, {
-      provider: "anthropic", model: "claude-opus-5", apiKey: "test-key", thinking: "xhigh",
+      provider: "anthropic",
+      model: "claude-opus-5",
+      apiKey: "test-key",
+      thinking: "xhigh",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -2577,7 +2592,11 @@ describe("agentLoop truncation handling", () => {
       { type: "truncated", reason: "refusal", continued: false },
     ]);
     expect(events.filter((event) => event.type === "retry")).toEqual([]);
-    expect(result.totalUsage).toMatchObject({ inputTokens: 21, outputTokens: 0, cacheWrite: 23254 });
+    expect(result.totalUsage).toMatchObject({
+      inputTokens: 21,
+      outputTokens: 0,
+      cacheWrite: 23254,
+    });
     expect(messages).toEqual([{ role: "user", content: "Reply with exactly OK." }]);
   });
 
@@ -2741,26 +2760,53 @@ describe("capTurnToolResults", () => {
 // place while the tool_call_end event already carried the FULL preview. The
 // `capped` marker makes that divergence programmatically visible.
 describe("post-cap result preparation", () => {
-  it.each(["parallel", "sequential"] as const)("notifies the host before the next provider request in %s mode", async (executionMode) => {
-    mockStream.mockReset();
-    const prepared = vi.fn();
-    mockStream.mockReturnValueOnce(mockToolCallResult("read", { inputTokens: 1, outputTokens: 1 }) as unknown as ReturnType<typeof stream>);
-    mockStream.mockImplementationOnce((options) => {
+  it.each(["parallel", "sequential"] as const)(
+    "notifies the host before the next provider request in %s mode",
+    async (executionMode) => {
+      mockStream.mockReset();
+      const prepared = vi.fn();
+      mockStream.mockReturnValueOnce(
+        mockToolCallResult("read", { inputTokens: 1, outputTokens: 1 }) as unknown as ReturnType<
+          typeof stream
+        >,
+      );
+      mockStream.mockImplementationOnce((options) => {
+        expect(prepared).toHaveBeenCalledOnce();
+        const result = options.messages.flatMap((message) =>
+          message.role === "tool" ? message.content : [],
+        )[0]!;
+        expect(prepared).toHaveBeenCalledWith(result);
+        expect(result.capped).toEqual({
+          originalChars: 10_000,
+          keptChars: String(result.content).length,
+          scope: "per-turn",
+        });
+        expect(String(result.content)).toContain("per-turn budget");
+        return mockOkResult("done") as unknown as ReturnType<typeof stream>;
+      });
+      await collectLoop([{ role: "user", content: "test" }], {
+        provider: "anthropic",
+        model: "fixture",
+        maxToolResultChars: 5000,
+        maxTurnToolResultChars: 1000,
+        tools: [
+          {
+            name: "read",
+            description: "Fixture",
+            parameters: emptyParams,
+            executionMode,
+            execute: () => {
+              expect(prepared).not.toHaveBeenCalled();
+              return "x".repeat(10_000);
+            },
+            onResultPrepared: prepared,
+          },
+        ],
+      });
+      expect(mockStream).toHaveBeenCalledTimes(2);
       expect(prepared).toHaveBeenCalledOnce();
-      const result = options.messages.flatMap((message) => message.role === "tool" ? message.content : [])[0]!;
-      expect(prepared).toHaveBeenCalledWith(result);
-      expect(result.capped).toEqual({ originalChars: 10_000, keptChars: String(result.content).length, scope: "per-turn" });
-      expect(String(result.content)).toContain("per-turn budget");
-      return mockOkResult("done") as unknown as ReturnType<typeof stream>;
-    });
-    await collectLoop([{ role: "user", content: "test" }], {
-      provider: "anthropic", model: "fixture", maxToolResultChars: 5000, maxTurnToolResultChars: 1000,
-      tools: [{ name: "read", description: "Fixture", parameters: emptyParams, executionMode,
-        execute: () => { expect(prepared).not.toHaveBeenCalled(); return "x".repeat(10_000); }, onResultPrepared: prepared }],
-    });
-    expect(mockStream).toHaveBeenCalledTimes(2);
-    expect(prepared).toHaveBeenCalledOnce();
-  });
+    },
+  );
 });
 
 describe("tool-result cap divergence marker", () => {

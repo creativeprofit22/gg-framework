@@ -1,7 +1,10 @@
 import React from "react";
 import { Text, Box } from "ink";
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
-import { getQwenCloudCapability, getQwenCloudThinkingLabel } from "@kenkaiiii/gg-ai/qwen-cloud-policy";
+import {
+  getQwenCloudCapability,
+  getQwenCloudThinkingLabel,
+} from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { getContextWindow, type ContextWindowOptions } from "../../core/model-registry.js";
@@ -125,7 +128,10 @@ const ShimmerLabel: React.FC<{
   );
 };
 
-export function getThinkingFooterLabel(thinkingLevel: ThinkingLevel | undefined, model?: string): string {
+export function getThinkingFooterLabel(
+  thinkingLevel: ThinkingLevel | undefined,
+  model?: string,
+): string {
   if (model && getQwenCloudCapability(model)) {
     return getQwenCloudThinkingLabel(model, thinkingLevel ?? null);
   }

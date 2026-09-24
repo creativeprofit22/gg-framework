@@ -57,9 +57,27 @@ const GPT_56_CAPABILITIES = {
  * fallback. These entries never reappear in the OpenAI model menu.
  */
 const RETIRED_AZURE_IDENTITIES: readonly AzureIdentityCapabilities[] = [
-  { id: "gpt-5.6-sol", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "low", costTier: "high", maxThinkingLevel: "ultra" },
-  { id: "gpt-5.6-terra", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "medium", costTier: "medium", maxThinkingLevel: "ultra" },
-  { id: "gpt-5.6-luna", ...GPT_56_CAPABILITIES, defaultThinkingLevel: "medium", costTier: "low", maxThinkingLevel: "max" },
+  {
+    id: "gpt-5.6-sol",
+    ...GPT_56_CAPABILITIES,
+    defaultThinkingLevel: "low",
+    costTier: "high",
+    maxThinkingLevel: "ultra",
+  },
+  {
+    id: "gpt-5.6-terra",
+    ...GPT_56_CAPABILITIES,
+    defaultThinkingLevel: "medium",
+    costTier: "medium",
+    maxThinkingLevel: "ultra",
+  },
+  {
+    id: "gpt-5.6-luna",
+    ...GPT_56_CAPABILITIES,
+    defaultThinkingLevel: "medium",
+    costTier: "low",
+    maxThinkingLevel: "max",
+  },
 ];
 
 export function registerConfiguredAzureModel(

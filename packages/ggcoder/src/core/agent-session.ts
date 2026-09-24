@@ -1,6 +1,9 @@
 import { nativeDevAuthFile } from "../app-sidecar-native-auth.js";
 import { assertProviderExecutionAllowed, runUnattended } from "./provider-execution-policy.js";
-import { isProgrammaticAssessment, type ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import {
+  isProgrammaticAssessment,
+  type ProgrammaticAssessment,
+} from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
   agentLoop,
   isAbortError,
@@ -34,12 +37,37 @@ import {
 import { getPromptCommand } from "./prompt-commands.js";
 import { appendCommandArguments, loadCustomCommands } from "./custom-commands.js";
 import { workflowQueuePolicyError } from "./workflow-busy-policy.js";
-import { createProgrammaticReadinessReader, discoverCommands, registryCommandListings, programmaticReadinessGuidance, type ProgrammaticReadiness } from "./command-discovery.js";
-import { buildProgrammaticAdvisoryContext, buildProgrammaticAssessmentContext, parseProgrammaticAssessmentInput, renderProgrammaticAdvisoryContext } from "./programmatic/advisory-context.js";
-import { recheckAssessmentEvidence, type AssessmentEvidenceAuthorization } from "./programmatic/assessment-evidence.js";
-import { AdvisoryEvidence, type ProgrammaticAdvisoryTurn, ADVISORY_READ_TOOLS } from "./programmatic/advisory.js";
-import { DiscoveryReviewBoundary, discoveryEvidencePaths, discoveryReviewPrompt } from "./programmatic/discovery-review.js";
-import type { DiscoveryReviewRequest, DiscoveryReview } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
+import {
+  createProgrammaticReadinessReader,
+  discoverCommands,
+  registryCommandListings,
+  programmaticReadinessGuidance,
+  type ProgrammaticReadiness,
+} from "./command-discovery.js";
+import {
+  buildProgrammaticAdvisoryContext,
+  buildProgrammaticAssessmentContext,
+  parseProgrammaticAssessmentInput,
+  renderProgrammaticAdvisoryContext,
+} from "./programmatic/advisory-context.js";
+import {
+  recheckAssessmentEvidence,
+  type AssessmentEvidenceAuthorization,
+} from "./programmatic/assessment-evidence.js";
+import {
+  AdvisoryEvidence,
+  type ProgrammaticAdvisoryTurn,
+  ADVISORY_READ_TOOLS,
+} from "./programmatic/advisory.js";
+import {
+  DiscoveryReviewBoundary,
+  discoveryEvidencePaths,
+  discoveryReviewPrompt,
+} from "./programmatic/discovery-review.js";
+import type {
+  DiscoveryReviewRequest,
+  DiscoveryReview,
+} from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 import { readRecommendationHistory } from "./programmatic/recommendation-history.js";
 import { recommendationDetail } from "./programmatic/recommendations.js";
 import { createCommandInformationTool } from "../tools/command-information.js";
@@ -47,7 +75,12 @@ import { createProgrammaticAdvisoryResultTool } from "../tools/programmatic-advi
 import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage, NotLoggedInError } from "./auth-storage.js";
-import { dualAuthProvider, parseReferencedFiles, type NotesWorkspaceSnapshotV1, type SlashCommandListing } from "@kenkaiiii/gg-core";
+import {
+  dualAuthProvider,
+  parseReferencedFiles,
+  type NotesWorkspaceSnapshotV1,
+  type SlashCommandListing,
+} from "@kenkaiiii/gg-core";
 import { getClaudeCliUserAgent, noteRequiredClaudeCodeVersion } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { isGrokCliEndpoint } from "./oauth/xai.js";
@@ -112,8 +145,14 @@ import {
 } from "../tools/index.js";
 import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { CommandCreationReviewer } from "./programmatic/command-creation.js";
-import { ProgrammaticAssessmentCoordinator, type ProgrammaticAssessmentOutcome } from "./programmatic/assessment.js";
-import { captureAssessmentHistoryPolicy, saveAssessmentHistory } from "./programmatic/assessment-history.js";
+import {
+  ProgrammaticAssessmentCoordinator,
+  type ProgrammaticAssessmentOutcome,
+} from "./programmatic/assessment.js";
+import {
+  captureAssessmentHistoryPolicy,
+  saveAssessmentHistory,
+} from "./programmatic/assessment-history.js";
 import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
@@ -547,7 +586,8 @@ export class AgentSession {
   private registeredTools = new Map<string, AgentTool>();
   private unavailableToolNames = new Set<string>();
   private advisoryTurn?: ProgrammaticAdvisoryTurn;
-  private pendingAdvisoryPresentation: { turn: ProgrammaticAdvisoryTurn; text: string; signal: AbortSignal } | undefined;
+  private pendingAdvisoryPresentation:
+    { turn: ProgrammaticAdvisoryTurn; text: string; signal: AbortSignal } | undefined;
   private advisoryEvidence = new AdvisoryEvidence();
   private toolCapabilityPolicy: {
     allowedNames: Set<string>;
@@ -581,7 +621,13 @@ export class AgentSession {
   private hookFileEditCounts = new Map<string, number>();
   private hookToolCalls = new Map<
     string,
-    { name: string; args: Record<string, unknown>; revision: number; evidenceRevision: number; evidenceRun: number }
+    {
+      name: string;
+      args: Record<string, unknown>;
+      revision: number;
+      evidenceRevision: number;
+      evidenceRun: number;
+    }
   >();
   private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
@@ -883,26 +929,53 @@ export class AgentSession {
       commandCreation,
       programmaticProfile,
     } = await createTools(this.cwd, {
-      commandDiscovery: this.opts.coderSlashCommands === false ? false : {
-        reservedCommandIdentities: this.opts.reservedCommandIdentities,
-        workspaceActions: this.opts.workspaceCommands,
-        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive, readReadiness: this.readProgrammaticReadiness,
-        getRegistryActions: () => this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
-      },
+      commandDiscovery:
+        this.opts.coderSlashCommands === false
+          ? false
+          : {
+              reservedCommandIdentities: this.opts.reservedCommandIdentities,
+              workspaceActions: this.opts.workspaceCommands,
+              workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
+              readReadiness: this.readProgrammaticReadiness,
+              getRegistryActions: () =>
+                this.opts.advertiseRegistryCommands === false
+                  ? []
+                  : registryCommandListings(this.slashCommands.getAll()),
+            },
       reviewCommandCreation: this.opts.reviewCommandCreation,
       reviewProgrammaticSetup: this.opts.reviewProgrammaticSetup,
       setupOwner: () => `${this.sessionId}:${this.cwd}`,
       assertSetupAllowed: () => {
-        if (this.setupInspection || !this.isToolCapabilityAllowed("programmatic_profile") || this.unavailableToolNames.has("programmatic_profile"))
+        if (
+          this.setupInspection ||
+          !this.isToolCapabilityAllowed("programmatic_profile") ||
+          this.unavailableToolNames.has("programmatic_profile")
+        )
           throw new Error("Setup generation is unavailable under the current invocation policy.");
       },
-      executeReviewedCommand: this.opts.executeReviewedCommand ? async (request) => {
-        if (this.planModeRef.current || this.advisoryTurn || this.discoveryReview || this.opts.coderSlashCommands === false || this.opts.transient || this.opts.allowedTools || this.opts.subagentWorker || this.opts.agentContext === "none")
-          throw new Error("Reviewed execution requires an unrestricted desktop code-mode parent outside plan/advisory mode.");
-        return this.opts.executeReviewedCommand!(request);
-      } : undefined,
-      getAvailableToolNames: () => [...new Set([...this.registeredTools.keys(), ...this.deferredBuiltinTools.keys()])]
-        .filter((name) => this.isPersistentToolCapabilityAllowed(name) && !this.unavailableToolNames.has(name)),
+      executeReviewedCommand: this.opts.executeReviewedCommand
+        ? async (request) => {
+            if (
+              this.planModeRef.current ||
+              this.advisoryTurn ||
+              this.discoveryReview ||
+              this.opts.coderSlashCommands === false ||
+              this.opts.transient ||
+              this.opts.allowedTools ||
+              this.opts.subagentWorker ||
+              this.opts.agentContext === "none"
+            )
+              throw new Error(
+                "Reviewed execution requires an unrestricted desktop code-mode parent outside plan/advisory mode.",
+              );
+            return this.opts.executeReviewedCommand!(request);
+          }
+        : undefined,
+      getAvailableToolNames: () =>
+        [...new Set([...this.registeredTools.keys(), ...this.deferredBuiltinTools.keys()])].filter(
+          (name) =>
+            this.isPersistentToolCapabilityAllowed(name) && !this.unavailableToolNames.has(name),
+        ),
       agents,
       skills: this.skills,
       contextLimits: this.contextLimits,
@@ -1100,12 +1173,13 @@ export class AgentSession {
         helpCmd.execute = async () => {
           const discovery = await discoverCommands(cwd, {
             workspaceActions: this.opts.workspaceCommands,
-        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
+            workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
             registryActions: registryCommandListings(registry.getAll()),
             readReadiness: this.readProgrammaticReadiness,
           });
-          const lines = discovery.entries.map(({ listing: c }) =>
-            `  /${c.name}${c.aliases.length ? ` (${c.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${c.description}`,
+          const lines = discovery.entries.map(
+            ({ listing: c }) =>
+              `  /${c.name}${c.aliases.length ? ` (${c.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${c.description}`,
           );
           return "Available commands:\n" + lines.join("\n");
         };
@@ -1573,7 +1647,14 @@ export class AgentSession {
     content: string,
     includeAdvisory = true,
   ): Promise<
-    { kind: "template"; fullPrompt: string; setupInspection?: boolean; advisory?: ReturnType<typeof buildProgrammaticAdvisoryContext> } | { kind: "command"; result?: string } | null
+    | {
+        kind: "template";
+        fullPrompt: string;
+        setupInspection?: boolean;
+        advisory?: ReturnType<typeof buildProgrammaticAdvisoryContext>;
+      }
+    | { kind: "command"; result?: string }
+    | null
   > {
     const parsedInput = this.slashCommands.parse(content);
     const coderCommands = this.opts.coderSlashCommands !== false;
@@ -1585,7 +1666,11 @@ export class AgentSession {
         : null;
     if (!parsed) return null;
     if (coderCommands && parsed.name === "programmatic-run") {
-      return { kind: "command", result: "Review and select an opportunity in Opportunities, then use its separate task approval. Direct /programmatic-run does not authorize execution." };
+      return {
+        kind: "command",
+        result:
+          "Review and select an opportunity in Opportunities, then use its separate task approval. Direct /programmatic-run does not authorize execution.",
+      };
     }
     if (coderCommands && getPromptCommand(parsed.name)?.name === "programmatic") {
       const guidance = programmaticReadinessGuidance(await this.readProgrammaticReadiness());
@@ -1609,16 +1694,34 @@ export class AgentSession {
     if (!promptText) return { kind: "command" };
     if (builtinPromptCmd?.name === "programmatic") {
       const input = parseProgrammaticAssessmentInput(parsed.args);
-      if (!input.success) return { kind: "command", result: "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed)." };
-      if (!includeAdvisory) return { kind: "template", fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") };
+      if (!input.success)
+        return {
+          kind: "command",
+          result:
+            "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).",
+        };
+      if (!includeAdvisory)
+        return {
+          kind: "template",
+          fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? ""),
+        };
       const discovery = await discoverCommands(this.cwd, {
         workspaceActions: this.opts.workspaceCommands,
         workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
-        registryActions: this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+        registryActions:
+          this.opts.advertiseRegistryCommands === false
+            ? []
+            : registryCommandListings(this.slashCommands.getAll()),
         readReadiness: async () => "current",
       });
       const advisory = buildProgrammaticAdvisoryContext(input.data, discovery);
-      return { kind: "template", advisory, fullPrompt: this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") + renderProgrammaticAdvisoryContext(advisory) };
+      return {
+        kind: "template",
+        advisory,
+        fullPrompt:
+          this.expandResolvedPromptCommand(promptText, input.data.focus ?? "") +
+          renderProgrammaticAdvisoryContext(advisory),
+      };
     }
     return {
       kind: "template",
@@ -1630,50 +1733,120 @@ export class AgentSession {
   private assessmentSequence = 0;
   private assessmentActive = false;
   private discoveryReview?: DiscoveryReviewBoundary;
-  private discoveryCandidates: { owner: string | null; sequence: number; records: NonNullable<ProgrammaticAssessmentOutcome["discoveryRecords"]> } | null = null;
+  private discoveryCandidates: {
+    owner: string | null;
+    sequence: number;
+    records: NonNullable<ProgrammaticAssessmentOutcome["discoveryRecords"]>;
+  } | null = null;
 
   async reviewDiscoveryCandidate(request: DiscoveryReviewRequest): Promise<DiscoveryReview> {
-    const owner = this.sessionId, sequence = this.assessmentSequence;
-    const allowed = () => this.sessionId === owner && this.assessmentSequence === sequence && !this.opts.signal?.aborted &&
-      !this.planModeRef.current && !this.opts.transient && !this.opts.allowedTools && !this.opts.subagentWorker &&
-      this.opts.agentContext !== "none" && this.opts.coderSlashCommands !== false;
-    if (!allowed() || this.assessmentActive || this.advisoryTurn || this.setupInspection || this.discoveryReview)
+    const owner = this.sessionId,
+      sequence = this.assessmentSequence;
+    const allowed = () =>
+      this.sessionId === owner &&
+      this.assessmentSequence === sequence &&
+      !this.opts.signal?.aborted &&
+      !this.planModeRef.current &&
+      !this.opts.transient &&
+      !this.opts.allowedTools &&
+      !this.opts.subagentWorker &&
+      this.opts.agentContext !== "none" &&
+      this.opts.coderSlashCommands !== false;
+    if (
+      !allowed() ||
+      this.assessmentActive ||
+      this.advisoryTurn ||
+      this.setupInspection ||
+      this.discoveryReview
+    )
       throw new Error("Candidate review requires an idle Code session outside plan mode.");
     if (request.source === "history") {
       const loaded = await readRecommendationHistory(this.cwd, { signal: this.opts.signal });
-      const candidate = "history" in loaded ? recommendationDetail(loaded.history, request.candidateId, 0)?.discovery : undefined;
-      if (!allowed() || !candidate || candidate.assessmentId !== request.assessmentId || candidate.revision !== request.expectedRevision)
+      const candidate =
+        "history" in loaded
+          ? recommendationDetail(loaded.history, request.candidateId, 0)?.discovery
+          : undefined;
+      if (
+        !allowed() ||
+        !candidate ||
+        candidate.assessmentId !== request.assessmentId ||
+        candidate.revision !== request.expectedRevision
+      )
         throw new Error("Historical candidate changed or is unavailable. Reload history.");
-      return { status: "reinspection-required", candidate, summary: "Historical evidence cannot restore review authority. Discover opportunities again to obtain current evidence before preparing a proposal." };
+      return {
+        status: "reinspection-required",
+        candidate,
+        summary:
+          "Historical evidence cannot restore review authority. Discover opportunities again to obtain current evidence before preparing a proposal.",
+      };
     }
     const current = this.discoveryCandidates;
-    const record = current?.records.find(({ display }) => display.candidateId === request.candidateId && display.assessmentId === request.assessmentId && display.revision === request.expectedRevision);
-    if (!record || current?.owner !== owner || current.sequence !== sequence) throw new Error("Candidate evidence is previous or belongs to another session. Discover opportunities again.");
+    const record = current?.records.find(
+      ({ display }) =>
+        display.candidateId === request.candidateId &&
+        display.assessmentId === request.assessmentId &&
+        display.revision === request.expectedRevision,
+    );
+    if (!record || current?.owner !== owner || current.sequence !== sequence)
+      throw new Error(
+        "Candidate evidence is previous or belongs to another session. Discover opportunities again.",
+      );
     const candidate = record.display;
-    if (!candidate.nextStep.available) return { status: "unsupported", candidate, summary: candidate.nextStep.reason };
-    const paths = discoveryEvidencePaths(this.advisoryEvidence.list(), record.recommendation.evidence.items.flatMap((item) => "source" in item ? [item.source] : []));
-    const boundary = new DiscoveryReviewBoundary(candidate, paths, record.recommendation.choice,
-      (text) => this.commandCreation?.inspectionEvidence(text));
+    if (!candidate.nextStep.available)
+      return { status: "unsupported", candidate, summary: candidate.nextStep.reason };
+    const paths = discoveryEvidencePaths(
+      this.advisoryEvidence.list(),
+      record.recommendation.evidence.items.flatMap((item) =>
+        "source" in item ? [item.source] : [],
+      ),
+    );
+    const boundary = new DiscoveryReviewBoundary(
+      candidate,
+      paths,
+      record.recommendation.choice,
+      (text) => this.commandCreation?.inspectionEvidence(text),
+    );
     this.discoveryReview = boundary;
     const promoted = new Set<string>();
     try {
-      for (const [name, tool] of this.deferredBuiltinTools) if (boundary.allows(name) && !this.registeredTools.has(name) && this.isToolCapabilityAllowed(name)) {
-        this.registeredTools.set(name, this.guardRegisteredTool(tool)); promoted.add(name);
-      }
+      for (const [name, tool] of this.deferredBuiltinTools)
+        if (
+          boundary.allows(name) &&
+          !this.registeredTools.has(name) &&
+          this.isToolCapabilityAllowed(name)
+        ) {
+          this.registeredTools.set(name, this.guardRegisteredTool(tool));
+          promoted.add(name);
+        }
       this.reconcileRegisteredTools();
-      if (!this.tools.some((tool) => tool.name === "read") || !this.tools.some((tool) => tool.name === "command_information"))
-        throw new Error("Current permissions do not allow the required local and catalog inspection.");
+      if (
+        !this.tools.some((tool) => tool.name === "read") ||
+        !this.tools.some((tool) => tool.name === "command_information")
+      )
+        throw new Error(
+          "Current permissions do not allow the required local and catalog inspection.",
+        );
       this.commandCreation?.cancel();
-      await this.acceptPromptTemplate(discoveryReviewPrompt(candidate), { source: "human", kind: "prompt", visibility: "transcript" }, {});
-      if (!allowed() || this.discoveryReview !== boundary || !boundary.active) throw new Error("Candidate review owner changed or was cancelled.");
-      return { status: boundary.prepared ? "prepared" : "reinspection-required", candidate,
-        summary: boundary.prepared ? "Read-only review is in the transcript. No command was created or run; later changes require separate exact review and approval."
-          : "Review did not establish current local evidence, command resolution or a complete inspected proposal as required for this choice. No actionable proposal is available; retry inspection explicitly." };
+      await this.acceptPromptTemplate(
+        discoveryReviewPrompt(candidate),
+        { source: "human", kind: "prompt", visibility: "transcript" },
+        {},
+      );
+      if (!allowed() || this.discoveryReview !== boundary || !boundary.active)
+        throw new Error("Candidate review owner changed or was cancelled.");
+      return {
+        status: boundary.prepared ? "prepared" : "reinspection-required",
+        candidate,
+        summary: boundary.prepared
+          ? "Read-only review is in the transcript. No command was created or run; later changes require separate exact review and approval."
+          : "Review did not establish current local evidence, command resolution or a complete inspected proposal as required for this choice. No actionable proposal is available; retry inspection explicitly.",
+      };
     } catch (error) {
       this.commandCreation?.cancel();
       throw error;
     } finally {
-      boundary.close(); this.discoveryReview = undefined;
+      boundary.close();
+      this.discoveryReview = undefined;
       for (const name of promoted) this.registeredTools.delete(name);
       this.reconcileRegisteredTools();
     }
@@ -1682,15 +1855,26 @@ export class AgentSession {
   /** Shared host entry for slash commands and desktop callbacks under their existing run claim.
    * Publishes display-only status, independently of transcript and exact setup ownership. */
   async assessProgrammatic(
-    mode: "setup" | "configured", focus?: string,
+    mode: "setup" | "configured",
+    focus?: string,
     provenance: MessageProvenance = { source: "human", kind: "prompt", visibility: "transcript" },
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta; assessmentRequestId?: string } = {},
+    options: {
+      disableTools?: boolean;
+      onAccepted?: () => void | Promise<void>;
+      meta?: PromptMeta;
+      assessmentRequestId?: string;
+    } = {},
   ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
-    if (this.assessmentActive || this.advisoryTurn || this.setupInspection || this.discoveryReview) throw new Error("An assessment or review is already active.");
+    if (this.assessmentActive || this.advisoryTurn || this.setupInspection || this.discoveryReview)
+      throw new Error("An assessment or review is already active.");
     this.assessmentActive = true;
     const { conversationId, sessionId } = this.getConversationIdentity();
-    const identity = { conversationId, sessionId, sequence: ++this.assessmentSequence,
-      ...(options.assessmentRequestId ? { requestId: options.assessmentRequestId } : {}) };
+    const identity = {
+      conversationId,
+      sessionId,
+      sequence: ++this.assessmentSequence,
+      ...(options.assessmentRequestId ? { requestId: options.assessmentRequestId } : {}),
+    };
     const signal = this.opts.signal;
     // Transient internal sessions have no desktop conversation identity.
     const publish = (event: BusEventMap["programmatic_assessment"]) => {
@@ -1698,42 +1882,86 @@ export class AgentSession {
     };
     const host = { id: crypto.randomUUID(), startedAt: new Date().toISOString() };
     const owner = this.sessionId;
-    const allowed = () => !options.disableTools && !this.planModeRef.current && !this.opts.transient &&
-      !this.opts.allowedTools && !this.opts.subagentWorker && this.opts.agentContext !== "none" &&
-      this.opts.coderSlashCommands !== false && this.sessionId === owner &&
-      this.assessmentSequence === identity.sequence && !signal?.aborted &&
-      this.isToolCapabilityAllowed("programmatic_scan") && !this.unavailableToolNames.has("programmatic_scan");
+    const allowed = () =>
+      !options.disableTools &&
+      !this.planModeRef.current &&
+      !this.opts.transient &&
+      !this.opts.allowedTools &&
+      !this.opts.subagentWorker &&
+      this.opts.agentContext !== "none" &&
+      this.opts.coderSlashCommands !== false &&
+      this.sessionId === owner &&
+      this.assessmentSequence === identity.sequence &&
+      !signal?.aborted &&
+      this.isToolCapabilityAllowed("programmatic_scan") &&
+      !this.unavailableToolNames.has("programmatic_scan");
     publish({ ...identity, phase: "started" });
     const historyPolicy = await captureAssessmentHistoryPolicy(this.cwd, mode);
     try {
       const outcome = await this.runProgrammaticAssessment(mode, focus, provenance, options, host);
       // Retain transient accepted candidates independently of history consent or save outcome.
-      if (this.sessionId === owner && this.assessmentSequence === identity.sequence && outcome.discoveryRecords)
-        this.discoveryCandidates = { owner, sequence: identity.sequence, records: outcome.discoveryRecords };
-      outcome.assessment.history = await saveAssessmentHistory(this.cwd, outcome, host, historyPolicy, {
-        signal,
-        assertCurrent: () => { if (!allowed()) throw new Error("Assessment owner changed before rename."); },
-        validateBeforeSave: async () => { await this.opts.validateToolExecution?.(); },
-        onFileMutated: (relative) => {
-          this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
-          this.reviewCoverage.recordChanged(path.resolve(this.cwd, relative));
+      if (
+        this.sessionId === owner &&
+        this.assessmentSequence === identity.sequence &&
+        outcome.discoveryRecords
+      )
+        this.discoveryCandidates = {
+          owner,
+          sequence: identity.sequence,
+          records: outcome.discoveryRecords,
+        };
+      outcome.assessment.history = await saveAssessmentHistory(
+        this.cwd,
+        outcome,
+        host,
+        historyPolicy,
+        {
+          signal,
+          assertCurrent: () => {
+            if (!allowed()) throw new Error("Assessment owner changed before rename.");
+          },
+          validateBeforeSave: async () => {
+            await this.opts.validateToolExecution?.();
+          },
+          onFileMutated: (relative) => {
+            this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
+            this.reviewCoverage.recordChanged(path.resolve(this.cwd, relative));
+          },
         },
-      });
+      );
       if (conversationId && sessionId) outcome.assessment.lifecycle = identity;
-      if (!isProgrammaticAssessment(outcome.assessment)) throw new Error("Invalid host assessment projection.");
+      if (!isProgrammaticAssessment(outcome.assessment))
+        throw new Error("Invalid host assessment projection.");
       publish({ ...identity, phase: "completed", assessment: outcome.assessment });
       return outcome;
     } catch (error) {
       if (this.discoveryCandidates?.sequence === identity.sequence) this.discoveryCandidates = null;
       const assessment: ProgrammaticAssessment = {
-        version: 1, mode, status: signal?.aborted ? "cancelled" : "unavailable",
+        version: 1,
+        mode,
+        status: signal?.aborted ? "cancelled" : "unavailable",
         summary: "The assessment did not finish. No approval is implied.",
         limitations: ["The host could not complete this assessment; no retry was attempted."],
-        coverage: [], observations: [],
-        history: mode === "setup" ? { status: "setup-not-saved" } : !historyPolicy.profileDigest && !historyPolicy.unavailable ? { status: "disabled" }
-          : { status: "unsaved", assessmentId: host.id, reason: "The host did not reach an authorized history save; existing history was retained." },
-        deterministic: mode === "setup" ? { status: "not-run", reason: "setup" }
-          : { status: signal?.aborted ? "cancelled" : "unavailable", reason: "No counted deterministic result is available." },
+        coverage: [],
+        observations: [],
+        history:
+          mode === "setup"
+            ? { status: "setup-not-saved" }
+            : !historyPolicy.profileDigest && !historyPolicy.unavailable
+              ? { status: "disabled" }
+              : {
+                  status: "unsaved",
+                  assessmentId: host.id,
+                  reason:
+                    "The host did not reach an authorized history save; existing history was retained.",
+                },
+        deterministic:
+          mode === "setup"
+            ? { status: "not-run", reason: "setup" }
+            : {
+                status: signal?.aborted ? "cancelled" : "unavailable",
+                reason: "No counted deterministic result is available.",
+              },
       };
       if (conversationId && sessionId) assessment.lifecycle = identity;
       publish({ ...identity, phase: "completed", assessment });
@@ -1744,7 +1972,8 @@ export class AgentSession {
   }
 
   private async runProgrammaticAssessment(
-    mode: "setup" | "configured", focus: string | undefined,
+    mode: "setup" | "configured",
+    focus: string | undefined,
     provenance: MessageProvenance,
     options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta },
     host: { id: string; startedAt: string },
@@ -1759,16 +1988,26 @@ export class AgentSession {
     const discovery = await discoverCommands(this.cwd, {
       workspaceActions: this.opts.workspaceCommands,
       workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
-      registryActions: this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+      registryActions:
+        this.opts.advertiseRegistryCommands === false
+          ? []
+          : registryCommandListings(this.slashCommands.getAll()),
       readReadiness: () => this.readProgrammaticReadiness(),
     });
     const evidenceAuthorization: AssessmentEvidenceAuthorization = {
-      isAllowed: ({ name }) => !options.disableTools && !signal.aborted &&
-        !this.unavailableToolNames.has(name) && this.isToolCapabilityAllowed(name),
+      isAllowed: ({ name }) =>
+        !options.disableTools &&
+        !signal.aborted &&
+        !this.unavailableToolNames.has(name) &&
+        this.isToolCapabilityAllowed(name),
       authorize: async (request) => {
         if (!evidenceAuthorization.isAllowed(request)) return false;
         try {
-          if (this.opts.approveToolExecution && !(await this.opts.approveToolExecution(request.name, request.args, signal))) return false;
+          if (
+            this.opts.approveToolExecution &&
+            !(await this.opts.approveToolExecution(request.name, request.args, signal))
+          )
+            return false;
           if (!evidenceAuthorization.isAllowed(request)) return false;
           await this.opts.validateToolExecution?.();
           return evidenceAuthorization.isAllowed(request);
@@ -1778,7 +2017,10 @@ export class AgentSession {
         }
       },
     };
-    const context = await buildProgrammaticAssessmentContext(input.data, discovery, this.cwd, { signal, authorization: evidenceAuthorization }).catch((error: unknown) => {
+    const context = await buildProgrammaticAssessmentContext(input.data, discovery, this.cwd, {
+      signal,
+      authorization: evidenceAuthorization,
+    }).catch((error: unknown) => {
       if (!signal.aborted) throw error;
       return buildProgrammaticAdvisoryContext(input.data, discovery);
     });
@@ -1797,7 +2039,8 @@ export class AgentSession {
       }
       this.reconcileRegisteredTools();
       coordinator = new ProgrammaticAssessmentCoordinator(this.cwd, context, () => this.tools, {
-        mode, scanAvailable: !options.disableTools && this.supportsToolCall("programmatic_scan", {}),
+        mode,
+        scanAvailable: !options.disableTools && this.supportsToolCall("programmatic_scan", {}),
       });
       const turn = coordinator.scope.turn;
       // Retain session-owned receipts across assessments, never initial samples.
@@ -1811,83 +2054,139 @@ export class AgentSession {
       const information = createCommandInformationTool(this.cwd, {
         workspaceActions: this.opts.workspaceCommands,
         workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
-        registryActions: this.opts.advertiseRegistryCommands === false ? [] : registryCommandListings(this.slashCommands.getAll()),
+        registryActions:
+          this.opts.advertiseRegistryCommands === false
+            ? []
+            : registryCommandListings(this.slashCommands.getAll()),
         readReadiness: () => this.readProgrammaticReadiness(),
       });
-      const freshInformation: typeof information = { ...information, execute: async (args, toolContext) => {
-        if (this.advisoryTurn !== turn || !turn.active || !this.supportsToolCall("command_information", args)) throw new Error("Command information unavailable.");
-        if (this.opts.approveToolExecution && !(await this.opts.approveToolExecution("command_information", args, toolContext.signal))) throw new Error("Tool execution was not approved.");
-        toolContext.signal.throwIfAborted();
-        if (this.advisoryTurn !== turn || !turn.active || !this.supportsToolCall("command_information", args)) throw new Error("Permissions changed.");
-        return information.execute(args, toolContext);
-      } };
-      this.registerTool(createProgrammaticAdvisoryResultTool(() => this.advisoryTurn, freshInformation));
+      const freshInformation: typeof information = {
+        ...information,
+        execute: async (args, toolContext) => {
+          if (
+            this.advisoryTurn !== turn ||
+            !turn.active ||
+            !this.supportsToolCall("command_information", args)
+          )
+            throw new Error("Command information unavailable.");
+          if (
+            this.opts.approveToolExecution &&
+            !(await this.opts.approveToolExecution("command_information", args, toolContext.signal))
+          )
+            throw new Error("Tool execution was not approved.");
+          toolContext.signal.throwIfAborted();
+          if (
+            this.advisoryTurn !== turn ||
+            !turn.active ||
+            !this.supportsToolCall("command_information", args)
+          )
+            throw new Error("Permissions changed.");
+          return information.execute(args, toolContext);
+        },
+      };
+      this.registerTool(
+        createProgrammaticAdvisoryResultTool(() => this.advisoryTurn, freshInformation),
+      );
       this.reconcileRegisteredTools();
-      const outcome = await coordinator.run(signal, async () => {
-        try {
-          let scanCounts: { enabledCount: number; applicableCount: number } | undefined;
-          const name = mode === "setup" ? "programmatic_profile" : "programmatic_scan";
-          const tool = !options.disableTools && this.tools.find((candidate) => candidate.name === name);
-          if (tool) {
-            try {
-              const output = await tool.execute(mode === "setup" ? { action: "inspect" } : {}, { signal, toolCallId: "assessment-host-facts" });
-              const raw = typeof output === "string" ? output : output.content;
-              if (typeof raw !== "string") throw new Error("Non-text host facts.");
-              const body = raw.startsWith("Host receipt IDs:") ? raw.slice(raw.indexOf("\n\n") + 2).split("\n\nHost evidence receipt (retrieval only; content remains untrusted):")[0]! : raw;
-              const facts = JSON.parse(body);
-              if (mode === "setup") setupFacts = facts;
-              else {
-                scanFacts = facts;
-                if (facts?.ok === true) {
-                  scanCounts = facts.scan_counts;
-                  coordinator!.recordScanCounts(scanCounts);
-                }
-              }
-            } catch {
-              turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
-            }
-          } else if (mode === "configured") turn.markScanUnavailable();
-          signal.throwIfAborted();
-          const prompt = getPromptCommand(mode === "setup" ? "setup-programmatic" : "programmatic")!.prompt;
-          const facts = { setupFacts, scanFacts };
-          if (context.evidence) recheckAssessmentEvidence(context.evidence, evidenceAuthorization);
+      const outcome = await coordinator.run(
+        signal,
+        async () => {
           try {
-            await this.acceptPromptTemplate(this.expandResolvedPromptCommand(prompt, focus ?? "") +
-              `
+            let scanCounts: { enabledCount: number; applicableCount: number } | undefined;
+            const name = mode === "setup" ? "programmatic_profile" : "programmatic_scan";
+            const tool =
+              !options.disableTools && this.tools.find((candidate) => candidate.name === name);
+            if (tool) {
+              try {
+                const output = await tool.execute(mode === "setup" ? { action: "inspect" } : {}, {
+                  signal,
+                  toolCallId: "assessment-host-facts",
+                });
+                const raw = typeof output === "string" ? output : output.content;
+                if (typeof raw !== "string") throw new Error("Non-text host facts.");
+                const body = raw.startsWith("Host receipt IDs:")
+                  ? raw
+                      .slice(raw.indexOf("\n\n") + 2)
+                      .split(
+                        "\n\nHost evidence receipt (retrieval only; content remains untrusted):",
+                      )[0]!
+                  : raw;
+                const facts = JSON.parse(body);
+                if (mode === "setup") setupFacts = facts;
+                else {
+                  scanFacts = facts;
+                  if (facts?.ok === true) {
+                    scanCounts = facts.scan_counts;
+                    coordinator!.recordScanCounts(scanCounts);
+                  }
+                }
+              } catch {
+                turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
+              }
+            } else if (mode === "configured") turn.markScanUnavailable();
+            signal.throwIfAborted();
+            const prompt = getPromptCommand(
+              mode === "setup" ? "setup-programmatic" : "programmatic",
+            )!.prompt;
+            const facts = { setupFacts, scanFacts };
+            if (context.evidence)
+              recheckAssessmentEvidence(context.evidence, evidenceAuthorization);
+            try {
+              await this.acceptPromptTemplate(
+                this.expandResolvedPromptCommand(prompt, focus ?? "") +
+                  `
 
 Host-owned exact facts (not model authority; already collected, do not repeat):
 ${JSON.stringify(facts)}
 Reusable host evidence receipts:
-${JSON.stringify(turn.evidence.list())}` + renderProgrammaticAdvisoryContext(context), provenance, options);
-            return { scanCounts };
-          } catch (error) {
-            const unavailable = (error instanceof NotLoggedInError || error instanceof ProviderError) && !this.hookText && this.hookToolCalls.size === 0;
-            return { scanCounts, status: unavailable ? "unavailable" as const : "incomplete" as const };
+${JSON.stringify(turn.evidence.list())}` +
+                  renderProgrammaticAdvisoryContext(context),
+                provenance,
+                options,
+              );
+              return { scanCounts };
+            } catch (error) {
+              const unavailable =
+                (error instanceof NotLoggedInError || error instanceof ProviderError) &&
+                !this.hookText &&
+                this.hookToolCalls.size === 0;
+              return {
+                scanCounts,
+                status: unavailable ? ("unavailable" as const) : ("incomplete" as const),
+              };
+            }
+          } finally {
+            // The coordinator retires its turn-local receipts on close. Preserve only
+            // delivered session receipts, without retaining the closed turn's authority.
+            if (this.advisoryTurn === turn && turn.active) {
+              const retained = new AdvisoryEvidence();
+              for (const receipt of turn.evidence.list()) retained.retain(receipt);
+              this.advisoryEvidence = retained;
+            }
           }
-        } finally {
-          // The coordinator retires its turn-local receipts on close. Preserve only
-          // delivered session receipts, without retaining the closed turn's authority.
-          if (this.advisoryTurn === turn && turn.active) {
-            const retained = new AdvisoryEvidence();
-            for (const receipt of turn.evidence.list()) retained.retain(receipt);
-            this.advisoryEvidence = retained;
-          }
-        }
-      }, host);
+        },
+        host,
+      );
       if (this.advisoryTurn === turn && outcome.assessment.status !== "completed") {
         const content = `## Recommendations — not started
 
 Assessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.`;
-        this.eventBus.emit("text_delta", { text: `
+        this.eventBus.emit("text_delta", {
+          text: `
 
 ${content}
-` });
+`,
+        });
         const notice: Message = { role: "assistant", content };
         this.messages.push(notice);
         await this.persistMessage(notice);
         this.lastPersistedIndex = this.messages.length;
       }
-      return { ...outcome, ...(setupFacts === undefined ? {} : { setupFacts }), ...(scanFacts === undefined ? {} : { scanFacts }) };
+      return {
+        ...outcome,
+        ...(setupFacts === undefined ? {} : { setupFacts }),
+        ...(scanFacts === undefined ? {} : { scanFacts }),
+      };
     } finally {
       coordinator?.scope.close();
       this.advisoryTurn = undefined;
@@ -1898,7 +2197,12 @@ ${content}
       this.pendingAdvisoryPresentation = undefined;
       if (previousResult) this.registeredTools.set("programmatic_advisory_result", previousResult);
       else this.registeredTools.delete("programmatic_advisory_result");
-      for (const name of promoted) if (!this.searchedPromotedBuiltinNames.has(name) && !this.capabilityPromotedBuiltinNames.has(name)) this.registeredTools.delete(name);
+      for (const name of promoted)
+        if (
+          !this.searchedPromotedBuiltinNames.has(name) &&
+          !this.capabilityPromotedBuiltinNames.has(name)
+        )
+          this.registeredTools.delete(name);
       this.reconcileRegisteredTools();
     }
   }
@@ -1977,7 +2281,12 @@ ${content}
     const slash = await this.resolveSlashInput(content);
     if (slash?.kind === "template") {
       if (slash.setupInspection || slash.advisory) {
-        await this.assessProgrammatic(slash.setupInspection ? "setup" : "configured", slash.advisory?.assessment.focus, provenance, options);
+        await this.assessProgrammatic(
+          slash.setupInspection ? "setup" : "configured",
+          slash.advisory?.assessment.focus,
+          provenance,
+          options,
+        );
       } else await this.acceptPromptTemplate(slash.fullPrompt, provenance, options);
       return;
     }
@@ -2316,8 +2625,13 @@ ${content}
   private async publishAdvisoryPresentation(): Promise<void> {
     const pending = this.pendingAdvisoryPresentation;
     this.pendingAdvisoryPresentation = undefined;
-    if (!pending || this.advisoryTurn !== pending.turn || !pending.turn.active ||
-        pending.signal.aborted) return;
+    if (
+      !pending ||
+      this.advisoryTurn !== pending.turn ||
+      !pending.turn.active ||
+      pending.signal.aborted
+    )
+      return;
     // Tool results must precede this assistant message in provider/history order.
     // Consume before awaiting so later checkpoints cannot publish it twice.
     const messages = this.activeLoopMessages ?? this.messages;
@@ -2328,8 +2642,8 @@ ${content}
       await this.persistMessage(messages[this.lastPersistedIndex], true);
       this.lastPersistedIndex++;
     }
-    if (this.advisoryTurn !== pending.turn || !pending.turn.active ||
-        pending.signal.aborted) return;
+    if (this.advisoryTurn !== pending.turn || !pending.turn.active || pending.signal.aborted)
+      return;
     this.eventBus.emit("text_delta", { text: pending.text, standalone: true });
   }
 
@@ -4597,38 +4911,83 @@ ${content}
         let commandReceipt: string | undefined;
         let output: Awaited<ReturnType<AgentTool["execute"]>> | undefined;
         try {
-          output = await executeAdvisoryTool(advisory, this.cwd, executionTarget, args, context, async () => {
-            try {
-              if (
-                this.opts.approveToolExecution &&
-                !(await this.opts.approveToolExecution(tool.name, args, context.signal))
-              ) {
-                throw new Error("Tool execution was not approved.");
+          output = await executeAdvisoryTool(
+            advisory,
+            this.cwd,
+            executionTarget,
+            args,
+            context,
+            async () => {
+              try {
+                if (
+                  this.opts.approveToolExecution &&
+                  !(await this.opts.approveToolExecution(tool.name, args, context.signal))
+                ) {
+                  throw new Error("Tool execution was not approved.");
+                }
+                context.signal.throwIfAborted();
+                if (
+                  this.setupInspection !== setupInspection ||
+                  (setupInspection && !setupInspection.active) ||
+                  this.advisoryTurn !== advisory ||
+                  (advisory && !advisory.active) ||
+                  this.registeredTools.get(tool.name) !== current ||
+                  !this.isToolCapabilityAllowed(tool.name) ||
+                  this.unavailableToolNames.has(tool.name)
+                )
+                  throw new Error("Tool permissions changed before execution.");
+                if (this.discoveryReview !== review || (review && !review.active))
+                  throw new Error("Candidate review owner changed.");
+                commandReceipt = await this.commandCreation?.verification.observeStart(
+                  tool.name,
+                  args,
+                  context,
+                );
+                await this.opts.validateToolExecution?.();
+                context.signal.throwIfAborted();
+                if (
+                  this.discoveryReview !== review ||
+                  (review && !review.active) ||
+                  this.setupInspection !== setupInspection ||
+                  (setupInspection && !setupInspection.active) ||
+                  this.advisoryTurn !== advisory ||
+                  this.registeredTools.get(tool.name) !== current ||
+                  !this.isToolCapabilityAllowed(tool.name) ||
+                  this.unavailableToolNames.has(tool.name)
+                )
+                  throw new Error("Tool permissions changed while observing verification inputs.");
+              } catch (error) {
+                if (advisory && tool.name === "programmatic_scan")
+                  advisory.settleScan(context.signal.aborted ? "cancelled" : "denied");
+                throw error;
               }
-              context.signal.throwIfAborted();
-              if (this.setupInspection !== setupInspection || (setupInspection && !setupInspection.active) || this.advisoryTurn !== advisory || (advisory && !advisory.active) || this.registeredTools.get(tool.name) !== current || !this.isToolCapabilityAllowed(tool.name) || this.unavailableToolNames.has(tool.name)) throw new Error("Tool permissions changed before execution.");
-              if (this.discoveryReview !== review || (review && !review.active)) throw new Error("Candidate review owner changed.");
-              commandReceipt = await this.commandCreation?.verification.observeStart(tool.name, args, context);
-              await this.opts.validateToolExecution?.();
-              context.signal.throwIfAborted();
-              if (this.discoveryReview !== review || (review && !review.active) || this.setupInspection !== setupInspection || (setupInspection && !setupInspection.active) || this.advisoryTurn !== advisory || this.registeredTools.get(tool.name) !== current || !this.isToolCapabilityAllowed(tool.name) || this.unavailableToolNames.has(tool.name)) throw new Error("Tool permissions changed while observing verification inputs.");
-            } catch (error) {
-              if (advisory && tool.name === "programmatic_scan")
-                advisory.settleScan(context.signal.aborted ? "cancelled" : "denied");
-              throw error;
-            }
-          });
+            },
+          );
           if (review && this.discoveryReview === review && review.active && !context.signal.aborted)
             review.observe(this.cwd, tool.name, args, output, context.toolCallId);
           // Do not accept result evidence against content that changed while the tool ran.
           await this.opts.validateToolExecution?.();
         } finally {
-          await this.commandCreation?.verification.observeEnd(commandReceipt, output, context.signal);
+          await this.commandCreation?.verification.observeEnd(
+            commandReceipt,
+            output,
+            context.signal,
+          );
         }
-        if (advisory && tool.name === "programmatic_advisory_result" && advisory.submitted &&
-            this.advisoryTurn === advisory && advisory.active && !context.signal.aborted &&
-            typeof output === "string") {
-          this.pendingAdvisoryPresentation = { turn: advisory, text: output, signal: context.signal };
+        if (
+          advisory &&
+          tool.name === "programmatic_advisory_result" &&
+          advisory.submitted &&
+          this.advisoryTurn === advisory &&
+          advisory.active &&
+          !context.signal.aborted &&
+          typeof output === "string"
+        ) {
+          this.pendingAdvisoryPresentation = {
+            turn: advisory,
+            text: output,
+            signal: context.signal,
+          };
         }
         return output;
       },

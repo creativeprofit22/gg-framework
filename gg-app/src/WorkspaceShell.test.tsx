@@ -492,9 +492,7 @@ describe("middle swap integration", () => {
         screen.queryByRole("button", { name: `Swap with middle: conversation ${side}` }),
       ).toBeNull();
       expect(screen.getByTestId("pane-middle").getAttribute("data-focused")).toBe("true");
-      expect(swapStatus().textContent).toContain(
-        "focused side action can exchange the pair again",
-      );
+      expect(swapStatus().textContent).toContain("focused side action can exchange the pair again");
       fireEvent.click(destination);
       expect(document.activeElement).toBe(
         screen.getByRole("button", { name: `Swap with middle: conversation ${side}` }),
@@ -1044,7 +1042,9 @@ describe("WorkspaceShell", () => {
     expect(
       await screen.findByText(/Pane secondary could not restore its saved session/, VISIBLE),
     ).toBeTruthy();
-    expect(screen.queryByText(/Pane primary could not restore its saved session/, VISIBLE)).toBeNull();
+    expect(
+      screen.queryByText(/Pane primary could not restore its saved session/, VISIBLE),
+    ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   });
 
@@ -1238,9 +1238,9 @@ describe("WorkspaceShell", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
-    expect(screen.getAllByText(/Pane secondary could not restore its saved session/, VISIBLE)).toHaveLength(
-      1,
-    );
+    expect(
+      screen.getAllByText(/Pane secondary could not restore its saved session/, VISIBLE),
+    ).toHaveLength(1);
     expect(lifecycleEffectExecutions.get("secondary")).toBe(1);
   });
 

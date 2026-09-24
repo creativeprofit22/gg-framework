@@ -2287,9 +2287,12 @@ describe("AgentPane Autopilot confirmation", () => {
     );
     expect(
       // Ignore the Toaster's screen-reader mirror; assert the visible notice.
-      screen.getByText("Could not change Autopilot: configuration refresh in progress. Try again.", {
-        ignore: "script, style, .sr-only *",
-      }),
+      screen.getByText(
+        "Could not change Autopilot: configuration refresh in progress. Try again.",
+        {
+          ignore: "script, style, .sr-only *",
+        },
+      ),
     ).toBeTruthy();
     act(() => realToast.dismissToast(nativeMocks.toast.mock.results[0].value));
     vi.mocked(pane.setAutopilot).mockResolvedValueOnce(true);

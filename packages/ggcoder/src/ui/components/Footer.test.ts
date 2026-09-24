@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { doesFooterFitOnOneLine, getFooterContextPercent, getFooterRightLength, getThinkingFooterLabel } from "./Footer.js";
+import {
+  doesFooterFitOnOneLine,
+  getFooterContextPercent,
+  getFooterRightLength,
+  getThinkingFooterLabel,
+} from "./Footer.js";
 
 describe("Footer thinking labels", () => {
-  it.each(["qwen-cloud/qwen3.7-max", "qwen-cloud/qwen3.6-flash"])("shows binary on/off for %s", (model) => {
-    expect(getThinkingFooterLabel("high", model)).toBe("Thinking on");
-    expect(getThinkingFooterLabel(undefined, model)).toBe("Thinking off");
-  });
+  it.each(["qwen-cloud/qwen3.7-max", "qwen-cloud/qwen3.6-flash"])(
+    "shows binary on/off for %s",
+    (model) => {
+      expect(getThinkingFooterLabel("high", model)).toBe("Thinking on");
+      expect(getThinkingFooterLabel(undefined, model)).toBe("Thinking off");
+    },
+  );
 
   it("shows mandatory GLM thinking and preserves direct-provider labels", () => {
     expect(getThinkingFooterLabel(undefined, "qwen-cloud/glm-5.3")).toBe("Thinking high");
@@ -19,7 +27,12 @@ describe("Footer thinking labels", () => {
     ["qwen-cloud/qwen3.6-flash", undefined, "Thinking off"],
     ["qwen-cloud/glm-5.3", undefined, "Thinking high"],
   ] as const)("measures the rendered label for %s", (model, thinkingLevel, thinkingText) => {
-    const rightLength = getFooterRightLength({ barWidth: 8, contextPct: 0, modelName: model, thinkingText });
+    const rightLength = getFooterRightLength({
+      barWidth: 8,
+      contextPct: 0,
+      modelName: model,
+      thinkingText,
+    });
     const columns = "project".length + 2 + rightLength + 2;
     const options = { model, thinkingLevel, tokensIn: 0, cwd: "/project" };
     expect(doesFooterFitOnOneLine({ ...options, columns })).toBe(true);

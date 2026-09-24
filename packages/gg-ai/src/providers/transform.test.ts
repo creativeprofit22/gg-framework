@@ -127,13 +127,15 @@ describe("Anthropic transform", () => {
   it.each(["constructor", "toString", "__proto__"])(
     "keeps own raw field %s and its required status without changing the MCP validator",
     (key) => {
-      const rawInputSchema = JSON.parse(JSON.stringify({
-        oneOf: ["inspect", "takeover"].map((action) => ({
-          type: "object",
-          properties: { action: { const: action }, [key]: { type: "string" } },
-          required: ["action", key],
-        })),
-      }));
+      const rawInputSchema = JSON.parse(
+        JSON.stringify({
+          oneOf: ["inspect", "takeover"].map((action) => ({
+            type: "object",
+            properties: { action: { const: action }, [key]: { type: "string" } },
+            required: ["action", key],
+          })),
+        }),
+      );
       const before = structuredClone(rawInputSchema);
       const parameters = z.record(z.string(), z.unknown());
       const tool = { name: "mcp_members", description: "test", parameters, rawInputSchema };

@@ -288,7 +288,9 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
   // evidence: without it a red suite piped through tail exits 0 and reads green.
   it("reports the failing pipeline stage's exit code, not the limiter's", async () => {
     const tool = createBashTool(tmpHome, new ProcessManager());
-    const out = outputText(await tool.execute({ command: "false | tail -1" }, ctx("posix-pipefail")));
+    const out = outputText(
+      await tool.execute({ command: "false | tail -1" }, ctx("posix-pipefail")),
+    );
     expect(out).toContain("Exit code: 1");
   });
 
@@ -297,9 +299,13 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
     const tool = createBashTool(tmpHome, manager);
     try {
       await tool.execute({ command: "set +o pipefail", persist: true }, ctx("disable-pipefail"));
-      const failed = outputText(await tool.execute({ command: "false | tail -1", persist: true }, ctx("persistent-fail")));
+      const failed = outputText(
+        await tool.execute({ command: "false | tail -1", persist: true }, ctx("persistent-fail")),
+      );
       expect(failed).toContain("Exit code: 1");
-      const passed = outputText(await tool.execute({ command: "echo ok | tail -1", persist: true }, ctx("persistent-pass")));
+      const passed = outputText(
+        await tool.execute({ command: "echo ok | tail -1", persist: true }, ctx("persistent-pass")),
+      );
       expect(passed).toContain("Exit code: 0");
     } finally {
       await manager.shutdownAllAndWait();
@@ -308,7 +314,9 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
 
   it("still exits 0 for a passing command piped through a limiter", async () => {
     const tool = createBashTool(tmpHome, new ProcessManager());
-    const out = outputText(await tool.execute({ command: "echo ok | tail -1" }, ctx("posix-pipe-ok")));
+    const out = outputText(
+      await tool.execute({ command: "echo ok | tail -1" }, ctx("posix-pipe-ok")),
+    );
     expect(out).toContain("ok");
     expect(out).toContain("Exit code: 0");
   });
@@ -366,14 +374,19 @@ describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", 
     expect(out).toContain("Exit code: 4");
   });
 
-  it.each([false, true])("refuses pipelines without pipefail under cmd.exe (persist=%s)", async (persist) => {
-    const tool = createBashTool(tmpHome, new ProcessManager(), undefined, undefined, {
-      exists: () => false,
-    });
-    const out = outputText(await tool.execute({ command: "exit /b 4 | echo ok", persist }, ctx("cmd-pipe")));
-    expect(out).toContain("Error: pipelines require Bash with pipefail");
-    expect(out).not.toContain("Exit code: 0");
-  });
+  it.each([false, true])(
+    "refuses pipelines without pipefail under cmd.exe (persist=%s)",
+    async (persist) => {
+      const tool = createBashTool(tmpHome, new ProcessManager(), undefined, undefined, {
+        exists: () => false,
+      });
+      const out = outputText(
+        await tool.execute({ command: "exit /b 4 | echo ok", persist }, ctx("cmd-pipe")),
+      );
+      expect(out).toContain("Error: pipelines require Bash with pipefail");
+      expect(out).not.toContain("Exit code: 0");
+    },
+  );
 
   it("runs from a cwd containing a space", async () => {
     // `C:\Users\<name>\…` and `C:\Program Files\…` routinely contain spaces;

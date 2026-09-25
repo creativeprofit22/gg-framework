@@ -51,7 +51,6 @@ export function fixtureResponses(state = "completed") {
     agent_pane_restore: 1,
     agent_prompt: state === "variants" ? { queued: true, count: 1, queueId: "q1" } : { queued: false, count: 0 },
     agent_roadmap_phase_draft_get: { status: "ok", draft: null },
-    qwen_cloud_connection_status: { ok: true, status: { provider: "qwen-cloud", credential: "absent", verification: "not-tested", allowance: "unavailable-with-inference-key" } },
     agent_history: { history: state === "empty" ? [] : [
       { role: "user", text: "Compare this long reply without changing the installed app." },
       { role: "assistant", text: representativeReply },

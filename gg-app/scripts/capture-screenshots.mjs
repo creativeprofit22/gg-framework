@@ -182,6 +182,12 @@ export async function assertAstraVisualState(page, scenario) {
   const fastLabel = `Fast ${scenario.state.openAICodexFast ? "on" : "off"} · 2.5× credits`;
   const fastSwitch = controls.getByRole("switch", { name: fastLabel, exact: true });
   assert.equal(await fastSwitch.textContent(), fastLabel);
+  // The app tooltip layer holds a hovered control's `title` aside and puts it
+  // back when the pointer leaves, so move off the switch before reading it.
+  await page.mouse.move(0, 0);
+  await page.waitForFunction(() =>
+    document.querySelector(".astra-fast-toggle")?.hasAttribute("title"),
+  );
   assert.equal(
     await fastSwitch.getAttribute("title"),
     scenario.state.openAICodexFast
@@ -326,6 +332,8 @@ export const responses = {
   agent_progress: progress,
   agent_usage: usage,
   app_auth_status: { providers: authProviders },
+  // authStatus() also reads this native result; null makes it discard the whole provider list.
+  qwen_cloud_connection_status: { ok: true, status: { provider: "qwen-cloud", credential: "absent", verification: "not-tested", allowance: "unavailable-with-inference-key" } },
   app_settings_get: { projectsRoot: "/Users/demo/projects", configured: true },
   agent_serve_status: { running: false, configured: false },
   agent_models: { models },

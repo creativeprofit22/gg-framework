@@ -615,8 +615,11 @@ export async function runWorkspaceNarrowVisualFixture({
         () => document.querySelector(".astra-fast-toggle")?.getAttribute("aria-checked") === "true",
       );
       await fast.hover();
-      assert.equal(
-        await fast.getAttribute("title"),
+      // The app tooltip layer shows a hovered control's `title` in its own
+      // tooltip (and holds the attribute aside), so assert what users see.
+      await page.waitForFunction(
+        (expected) =>
+          document.querySelector('.gg-tooltip[role="tooltip"]')?.textContent === expected,
         "Fast mode is on. Uses 2.5× credits. Click to turn off.",
       );
       const blocks = page.locator(".ken-prompt-block");

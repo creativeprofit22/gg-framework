@@ -175,6 +175,7 @@ import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
 import {
   dropSupersededAsks,
+  isExpiredAskError,
   mergeAskAnswers,
   reconcilePendingAsks,
   type AskAnswerDelta,
@@ -3146,7 +3147,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const pendingAskAnswers = useRef(new Set<number>());
   const handleAskAnswer = useCallback(
-    (itemId: number, promptId: string, delta: AskAnswerDelta): void => {
+    (itemId: number, promptId: string, delta: AskAnswerDelta, sendNow = false): void => {
       const item = items.find((candidate) => candidate.id === itemId);
       if (
         !item ||
@@ -3163,7 +3164,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           candidate === item ? { ...item, answers: merged.answers } : candidate,
         ),
       );
-      if (!merged.complete) return;
+      // `sendNow` is the band's explicit Send: questions left open reach the
+      // agent as "(no answer)" rather than holding the whole turn hostage.
+      if (!merged.complete && !(sendNow && Object.keys(merged.answers).length > 0)) return;
       pendingAskAnswers.current.add(itemId);
       void client
         .answerAskUser(promptId, "answer", merged.answers)
@@ -3179,7 +3182,25 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             ),
           ),
         )
-        .catch((error) => setStatus(`could not answer question: ${String(error)}`))
+        .catch((error: unknown) => {
+          if (isExpiredAskError(error)) {
+            // Nothing is waiting for this answer any more. Say so on the card
+            // rather than leaving buttons that silently do nothing.
+            setItems((current) =>
+              current.map((candidate) =>
+                candidate.kind === "ask" &&
+                candidate.id === itemId &&
+                candidate.prompt.id === promptId &&
+                !candidate.sent
+                  ? { ...candidate, cancelled: true }
+                  : candidate,
+              ),
+            );
+            setStatus("That question expired before your answer arrived.");
+            return;
+          }
+          setStatus(`could not answer question: ${String(error)}`);
+        })
         .finally(() => pendingAskAnswers.current.delete(itemId));
     },
     [client, items],
@@ -5620,7 +5641,12 @@ const TranscriptRow = memo(function TranscriptRow({
 }: {
   item: Item;
   onImageLoad?: () => void;
-  onAskAnswer?: (itemId: number, promptId: string, delta: AskAnswerDelta) => void;
+  onAskAnswer?: (
+    itemId: number,
+    promptId: string,
+    delta: AskAnswerDelta,
+    sendNow?: boolean,
+  ) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
 }): React.ReactElement | null {
   const paneId = useContext(PaneIdContext);
@@ -5889,7 +5915,7 @@ const TranscriptRow = memo(function TranscriptRow({
           answers={item.answers}
           sent={item.sent}
           cancelled={item.cancelled}
-          onAnswer={(delta) => onAskAnswer?.(item.id, item.prompt.id, delta)}
+          onAnswer={(delta, sendNow) => onAskAnswer?.(item.id, item.prompt.id, delta, sendNow)}
           onTypeInstead={(questionId, seed) =>
             onAskType?.(item.id, item.prompt.id, questionId, seed)
           }

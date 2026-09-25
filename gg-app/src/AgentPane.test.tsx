@@ -2030,7 +2030,7 @@ describe("AgentPane question acknowledgement", () => {
     },
   );
 
-  it("does not show sent until acknowledged, and leaves refusal unsent", async () => {
+  it("does not show sent until acknowledged, and leaves a transient refusal retryable", async () => {
     nativeMocks.realMentor = true;
     const pane = client("ask-ack", 1);
     const emit = liveEvents(pane);
@@ -2044,10 +2044,77 @@ describe("AgentPane question acknowledgement", () => {
     fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
     expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".ask-band.is-done")).toBeNull();
-    await act(async () => acknowledgement.reject(new Error("no question is awaiting an answer")));
+    await act(async () => acknowledgement.reject(new Error("session not ready")));
     expect(container.querySelector(".ask-band.is-done")).toBeNull();
     expect(screen.getByRole("button", { name: /Allow action/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Allow action/ }));
+    await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
+  });
+
+  // The daemon's 409 means the tool call is gone (run stopped, timed out,
+  // daemon restarted) and ids are never reused, so a retry can never land.
+  // The card must say so rather than keep offering a button that does nothing.
+  it("marks a question expired when nothing is waiting for the answer", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-expired", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.answerAskUser).mockRejectedValueOnce(
+      new Error("no question is awaiting an answer"),
+    );
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => emit("ask_user", { id: "ask-1", questions: [question] }));
+    fireEvent.click(await screen.findByRole("button", { name: /Allow action/ }));
+    await waitFor(() => expect(container.querySelector(".ask-band.is-closed")).not.toBeNull());
+    expect(container.querySelector(".ask-band.is-done")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+    expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: 2026-09-25 uimaxxxing session. A card with an optional text
+  // question (or a multi-select ticked but not confirmed) could never complete,
+  // had no send control, and the user could only stop the run — which the agent
+  // then saw as an UNKNOWN outcome.
+  it("sends a partly answered band, including unconfirmed multi-select ticks", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-partial", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() =>
+      emit("ask_user", {
+        id: "ask-partial",
+        questions: [
+          {
+            id: "pB",
+            kind: "choice",
+            question: "Chance it works?",
+            options: [{ label: "High" }, { label: "Low" }],
+          },
+          {
+            id: "alone",
+            kind: "multi",
+            question: "Which would you have thought of?",
+            options: [{ label: "Verdict log" }, { label: "Baseline" }],
+          },
+          { id: "extra", kind: "text", question: "Anything to add? (optional)" },
+        ],
+      }),
+    );
+    const send = await screen.findByRole("button", { name: "Send answers" });
+    expect(send).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: /High/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+    // Neither the ticked multi nor the blank optional text commits the band.
+    expect(pane.answerAskUser).not.toHaveBeenCalled();
+    expect(screen.getByText(/2 of 3 answered/)).toBeTruthy();
+    fireEvent.click(send);
+    expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-partial", "answer", {
+      pB: "High",
+      alone: ["Baseline"],
+    });
     await waitFor(() => expect(container.querySelector(".ask-band.is-done")).not.toBeNull());
   });
 

@@ -525,7 +525,29 @@ describe("AskBand", () => {
     expect(sent).toEqual([{ trial: "14 days", proration: "Charge full" }]);
   });
 
-  it("carries no band chrome — options and nothing else", () => {
+  it("carries no chrome on a single question — options and nothing else", () => {
+    render(
+      <AskBand
+        prompt={prompt({
+          id: "a",
+          question: "A?",
+          kind: "choice",
+          options: [{ label: "Yes", recommended: true }, { label: "No" }],
+        })}
+        onAnswer={vi.fn()}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    for (const gone of [/Something else/, /Send answers/, /recommended answer/, /answered/]) {
+      expect(screen.queryByText(gone)).toBeNull();
+    }
+    expect(screen.getAllByRole("button").length).toBe(2);
+  });
+
+  // A band of several questions keeps one Send: without it a question the user
+  // meant to skip left the card with nothing that would send (2026-09-25).
+  it("gives a band of several questions one Send and nothing else", () => {
+    const onAnswer = vi.fn();
     render(
       <AskBand
         prompt={prompt(
@@ -542,15 +564,44 @@ describe("AskBand", () => {
             options: [{ label: "Prorate", recommended: true }, { label: "Charge full" }],
           },
         )}
-        onAnswer={vi.fn()}
+        onAnswer={onAnswer}
         onTypeInstead={onTypeInstead}
       />,
     );
-    for (const gone of [/Something else/, /Send answers/, /recommended answer/, /answered/]) {
+    for (const gone of [/Something else/, /recommended answer/]) {
       expect(screen.queryByText(gone)).toBeNull();
     }
-    // Only the four options are clickable.
-    expect(screen.getAllByRole("button").length).toBe(4);
+    // The four options plus Send, which stays inert until something is picked.
+    expect(screen.getAllByRole("button").length).toBe(5);
+    const send = screen.getByRole("button", { name: "Send answers" });
+    expect(send).toHaveProperty("disabled", true);
+    expect(screen.getByText("0 of 2 answered — the rest are sent as skipped")).toBeTruthy();
+    fireEvent.click(send);
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("sends unconfirmed multi-select ticks with Send, not silently dropped", () => {
+    const onAnswer = vi.fn();
+    render(
+      <AskBand
+        prompt={prompt(
+          {
+            id: "alone",
+            question: "Which would you have thought of?",
+            kind: "multi",
+            options: [{ label: "Verdict log" }, { label: "Baseline" }],
+          },
+          { id: "extra", question: "Anything to add? (optional)", kind: "text" },
+        )}
+        onAnswer={onAnswer}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+    expect(onAnswer).not.toHaveBeenCalled();
+    expect(screen.getByText("1 of 2 answered — the rest are sent as skipped")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
+    expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ alone: ["Baseline"] }, true);
   });
 
   it("shows an already-answered multi-select's picks instead of an empty list", () => {
@@ -758,7 +809,7 @@ describe("AskBand", () => {
   });
 
   // The "Use every recommended answer" shortcut it used to test is gone with the
-  // rest of the band chrome; "carries no band chrome" above asserts its absence.
+  // rest of the band chrome; the chrome tests above assert its absence.
 
   it("collapses in place once answered", () => {
     render(

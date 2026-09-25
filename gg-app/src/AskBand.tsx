@@ -12,10 +12,12 @@ import type { AskAnswerDelta, AskAnswers, AskOption, AskQuestion, AskUserPrompt 
  * read as a different component from a choice laid out as rows, so the chip
  * layout is gone — there is one shape, and two questions cannot disagree.
  *
- * The band is free of chrome too. It offers options and nothing else: no
- * "Something else" link, no send button, no counter. Typing any character still
- * routes to the composer (that is the free-text path, and it never needed a
- * button of its own), and answering the last open question commits the band.
+ * Typing any character routes to the composer (that is the free-text path),
+ * and answering the last open question commits the band. A band of several
+ * questions also keeps one Send control: without it, a question the user
+ * meant to skip (an "optional" text prompt, a multi-select where none apply,
+ * ticks never confirmed) left the card with nothing that would send, and the
+ * user could only stop the run.
  *
  * Until then every pick stays on screen as a filled row, so an answer given
  * early can still be changed while the rest are being decided.
@@ -69,6 +71,7 @@ function Question({
   numbered,
   answer,
   onAnswer,
+  onDraft,
   onTypeInstead,
 }: {
   question: AskQuestion;
@@ -77,6 +80,8 @@ function Question({
   numbered: boolean;
   answer: string | string[] | undefined;
   onAnswer: (value: string | string[] | undefined) => void;
+  /** Unconfirmed multi-select ticks, so the band's Send can include them. */
+  onDraft: (picks: string[]) => void;
   onTypeInstead: () => void;
 }): React.ReactElement {
   const options = question.options ?? [];
@@ -109,6 +114,7 @@ function Question({
   const toggle = (value: string): void => {
     const next = picked.includes(value) ? picked.filter((v) => v !== value) : [...picked, value];
     setDraft(next);
+    onDraft(next);
     // Already confirmed once: keep the committed answer in step with what is on
     // screen, or a later question's answer would commit the band with the stale
     // selection while the rows show the new one.
@@ -227,14 +233,18 @@ export function AskBand({
   sent?: boolean;
   /** The run ended without an answer — the question is dead, say so quietly. */
   cancelled?: boolean;
-  /** Report answered questions. App merges, then settles once none are left. */
-  onAnswer: (delta: AskAnswerDelta) => void;
+  /**
+   * Report answered questions. App merges, then settles once none are left —
+   * or at once when `sendNow` is set, leaving the rest unanswered.
+   */
+  onAnswer: (delta: AskAnswerDelta, sendNow?: boolean) => void;
   /** The user wants to write their own answer: focus the composer, seeded. */
   onTypeInstead: (questionId: string, seed?: string) => void;
 }): React.ReactElement {
   const bandRef = useRef<HTMLDivElement | null>(null);
   const questions = prompt.questions;
   const done = sent === true;
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({});
 
   // A narrower window can wrap the review and move its focused option below
   // the transcript viewport. Preserve visibility, not a new focus or answer.
@@ -337,6 +347,17 @@ export function AskBand({
   // refer to; a lone question needs no "1.".
   const numbered = questions.length > 1;
 
+  // Ticked-but-unconfirmed multi-selects are what the user sees as answered,
+  // so Send includes them rather than silently dropping them.
+  const pendingDrafts: AskAnswerDelta = Object.fromEntries(
+    questions
+      .filter((q) => answers[q.id] === undefined && (drafts[q.id]?.length ?? 0) > 0)
+      .map((q) => [q.id, drafts[q.id]]),
+  );
+  const answeredCount = questions.filter(
+    (q) => answers[q.id] !== undefined || pendingDrafts[q.id] !== undefined,
+  ).length;
+
   return (
     <div
       className="ask-band"
@@ -353,9 +374,28 @@ export function AskBand({
           numbered={numbered}
           answer={answers[q.id]}
           onAnswer={(value) => onAnswer({ [q.id]: value })}
+          onDraft={(picks) => setDrafts((current) => ({ ...current, [q.id]: picks }))}
           onTypeInstead={() => onTypeInstead(q.id)}
         />
       ))}
+      {numbered && (
+        <div className="ask-send">
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            data-ask-send=""
+            disabled={answeredCount === 0}
+            onClick={() => onAnswer(pendingDrafts, true)}
+          >
+            Send answers
+          </button>
+          <span className="ask-send-note" aria-live="polite">
+            {answeredCount === questions.length
+              ? "All questions answered"
+              : `${answeredCount} of ${questions.length} answered — the rest are sent as skipped`}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

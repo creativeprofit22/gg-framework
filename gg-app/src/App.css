@@ -12304,10 +12304,21 @@ select {
 .btn-primary .ask-num {
   color: color-mix(in srgb, var(--on-primary) 70%, var(--primary));
 }
-/* The band's only footer: a multi-select's confirm. Everything else that used
-   to live down here (a free-text link, a send button, an answered counter) is
-   gone — the options are the whole interface. */
+/* A multi-select's confirm. */
 .ask-foot {
   display: flex;
   margin-top: 10px;
+}
+/* A band of several questions can always be sent as it stands, so an optional
+   question left blank never leaves the whole card with nothing to press. */
+.ask-send {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.ask-send-note {
+  font-size: 13px;
+  color: var(--text-muted);
 }

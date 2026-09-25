@@ -22,10 +22,15 @@ export type AskAnswerDelta = Record<string, string | string[] | undefined>;
  * Merge newly answered questions into a band's answers, and report whether the
  * band is now complete.
  *
- * The band is the unit of answer: the parked tool call settles only once EVERY
- * question in it has one, so a half-filled form never lands on the agent. An
- * answer can arrive from a click or from the composer, which is why this rule
- * lives outside the band component.
+ * The band is the unit of answer. `complete` is true only once EVERY question
+ * has an answer, and the band then settles the parked tool call on its own.
+ * A multi-question band's explicit Send (`sendNow`, handled by the pane's ask
+ * answer handler) also settles it early with a partial answer set; each
+ * question left open reaches the agent as "(no answer)" via the daemon's
+ * `formatAskResult`. Keep that partial path: without it a card the user chose
+ * not to finish would sit unsent and the turn would hang. An answer can arrive
+ * from a click or from the composer, which is why this merge lives outside the
+ * band component.
  */
 export function mergeAskAnswers(
   current: AskAnswers | undefined,
@@ -48,6 +53,15 @@ export function mergeAskAnswers(
     answers,
     complete: questions.every((q) => Object.prototype.hasOwnProperty.call(answers, q.id)),
   };
+}
+
+/**
+ * Whether an answer POST failed because nothing is waiting for it any more: the
+ * run was stopped, the question timed out, or the daemon restarted. Retrying
+ * cannot help, so the band must say it expired instead of staying clickable.
+ */
+export function isExpiredAskError(error: unknown): boolean {
+  return /no question is awaiting an answer/i.test(String(error));
 }
 
 /**

@@ -325,8 +325,9 @@ describe("ProcessManager progress notifications", () => {
 
     const started = await instance.start("echo quiet", cwd);
     expect(instance.activeWatchers()).toEqual([]);
-    // The pull path still works exactly as before.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The pull path still works exactly as before. Wait for the exit rather
+    // than a fixed sleep: under full-suite load the shell can take longer.
+    expect(await instance.waitForExitOrWake(started.id, 20_000)).toBe("exited");
     const read = await instance.readOutput(started.id);
     expect(read.output).toContain("quiet");
   }, 30_000);

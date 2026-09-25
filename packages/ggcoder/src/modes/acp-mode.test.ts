@@ -13,6 +13,10 @@ const FIXTURE = path.join(
 );
 const ACP_CLIENT_TIMEOUT_MS = 20_000;
 const ACP_TEST_TIMEOUT_MS = ACP_CLIENT_TIMEOUT_MS + 5_000;
+// The update-failure test boots the whole real CLI from source through tsx.
+// That takes ~5-7 s alone but ~16 s with 8 copies in parallel, so full-suite
+// worker contention can pass the shared 20 s deadline without any hang.
+const REAL_CLI_BOOT_TIMEOUT_MS = 60_000;
 
 // This process-backed file can legitimately wait as long as AcpClient's deadline
 // under worker contention. Keep Vitest alive long enough to report AcpClient's
@@ -264,7 +268,7 @@ it("keeps the real CLI's ACP responsive after an asynchronous pending-update spa
 
   client = new AcpClient("update-failure");
   client.send({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: 1 } });
-  const frames = await client.until("init");
+  const frames = await client.until("init", REAL_CLI_BOOT_TIMEOUT_MS);
   expect(frames.at(-1)?.error).toBeUndefined();
   expect(frames.at(-1)?.result?.protocolVersion).toBe(ACP_PROTOCOL_VERSION);
   await vi.waitFor(() => expect(client!.stderr).toContain("fixture: asynchronous updater ENOENT"));
@@ -273,7 +277,7 @@ it("keeps the real CLI's ACP responsive after an asynchronous pending-update spa
   expect(state.updatePending).toBe(true);
   expect(state.lastUpdateAttempt).toBeUndefined();
   expect(client.stderr).not.toContain("Unhandled 'error' event");
-});
+}, REAL_CLI_BOOT_TIMEOUT_MS + ACP_TEST_TIMEOUT_MS);
 
 /** Session updates only, unwrapped to the `update` payload. */
 function updates(frames: Frame[]): Record<string, unknown>[] {

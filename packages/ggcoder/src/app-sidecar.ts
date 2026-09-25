@@ -7148,6 +7148,7 @@ async function createSession(
             answers?: Record<string, unknown>;
           };
           if (parsed.action !== "answer" && parsed.action !== "cancel") {
+            log("WARN", "ask", "invalid answer body", { id });
             json(res, 400, { error: "action must be answer or cancel" });
             return;
           }
@@ -7166,13 +7167,22 @@ async function createSession(
             result = { action: "answer", answers };
           }
         } catch {
+          log("WARN", "ask", "invalid answer body", { id });
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
+        // Log only the answer count, never the contents: answers are user
+        // text and may carry secrets.
         if (!asks.settle(id, result)) {
+          log("WARN", "ask", "answer for no pending question", { id, action: result.action });
           json(res, 409, { error: "no question is awaiting an answer" });
           return;
         }
+        log("INFO", "ask", "question answered", {
+          id,
+          action: result.action,
+          answered: result.action === "answer" ? Object.keys(result.answers).length : 0,
+        });
         json(res, 200, { ok: true } satisfies AskUserAcknowledgement);
       });
       return;

@@ -30,6 +30,7 @@ The station list has four outcomes, and each looks different:
 ## Ownership
 
 - Shared tokens own recurring visuals: `--meter-*` (volume track, fill and thumb) and `--border-strong` (neutral control border). Dark defaults are in `App.css` and Light overrides in `appearance.css`. See the style pack §4 and §5.
+- Since 2026-09-24 the titlebar usage meter also uses `--meter-track-bg`, `--meter-track-border` and `--meter-fill`, so it follows Light. Its tighter Dark glow stays a literal, and a Light-only rule in `appearance.css` removes it. Dark computed styles are unchanged. Verified by type check, build, format check, the 9 `TitleUsageMeter` tests and an isolated CSS render at 1280×800 and 390×844. The native titlebar was not checked.
 - Feature components own composition and state only. They must not copy theme overrides.
 
 ## Verification (2026-09-23)

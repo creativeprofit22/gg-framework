@@ -945,11 +945,16 @@ select {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  /* When Home is taller than a small window, start at the top and scroll instead
+     of spilling past both edges (plain centering hides the top row under the
+     pane strip and the bottom row off-screen). */
+  justify-content: safe center;
   height: 100%;
   gap: 28px;
   padding: 24px;
   text-align: center;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 /* Ambient constellation backdrop — the lowest layer, under the meme cards and
    all content. Vignette-masked so it fades at the edges. Non-interactive. */
@@ -1595,6 +1600,10 @@ select {
   min-width: 0;
   max-width: 100%;
   border-bottom: 1px solid var(--border);
+  /* Trim only the decorative metal glow that bleeds past the pane's side edge;
+     otherwise the scrolling pane grows a stray horizontal scrollbar. Not a
+     scroll container, and the glow's vertical bleed stays visible. */
+  overflow-x: clip;
 }
 /* Per-project accent identity. `--project-accent` is set inline per window by
    WorkspaceHeader (derived from the project folder name, see projectAccent.ts).
@@ -3827,7 +3836,11 @@ select {
   .chat-head {
     max-height: 12cqh;
     min-height: 0;
-    overflow: auto;
+    /* Scroll wrapped chrome vertically only; the right-most action's metal glow
+       bleeds past the edge and must not add a sideways scrollbar (clip would
+       compute to hidden beside a scrolling axis anyway). */
+    overflow-x: hidden;
+    overflow-y: auto;
     flex-shrink: 0;
   }
   .liveregion {
@@ -5138,17 +5151,28 @@ select {
     color: MarkText;
   }
 }
+/* The scroller owns overflow so the table can stay a real table at full width:
+   `display: block` on the table shrink-wrapped its grid to the first layout's
+   content width, so it never grew or re-flowed when the pane was resized. */
+.markdown .md-table-scroll {
+  margin: 0.5em 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
 .markdown table {
   border-collapse: collapse;
-  margin: 0.5em 0;
-  display: block;
-  overflow-x: auto;
+  width: 100%;
 }
 .markdown th,
 .markdown td {
   border: 1px solid var(--border);
   padding: 4px 9px;
   text-align: left;
+  /* The transcript's inherited `break-word` split short words ("Complet|ed")
+     in narrow panes. Keep words whole; the scroller handles tables that can't
+     wrap any narrower. */
+  word-break: normal;
+  overflow-wrap: normal;
 }
 .markdown th {
   background: var(--surface-1);

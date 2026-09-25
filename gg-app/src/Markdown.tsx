@@ -108,6 +108,19 @@ function ExternalLink({
 }
 
 /**
+ * Tables live inside their own horizontal scroller so the table itself can stay
+ * a real `display: table` at 100% width — it then fills and re-flows with the
+ * pane as it resizes, and only scrolls when its columns can't wrap any narrower.
+ */
+function MarkdownTable({ children }: { children?: React.ReactNode }): React.ReactElement {
+  return (
+    <div className="md-table-scroll">
+      <table>{children}</table>
+    </div>
+  );
+}
+
+/**
  * Select the word under a point, bypassing the host webview's selection
  * granularity. macOS WKWebView (what Tauri renders in) double-clicks a
  * preformatted block by *paragraph*, selecting the entire code block instead
@@ -773,7 +786,7 @@ const MemoizedMarkdownBlock = memo(
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
-          components={{ a: ExternalLink, pre: PreBlock }}
+          components={{ a: ExternalLink, pre: PreBlock, table: MarkdownTable }}
           urlTransform={markdownUrlTransform}
         >
           {normalized}

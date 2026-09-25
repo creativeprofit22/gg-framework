@@ -18,6 +18,33 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
+describe("Markdown tables", () => {
+  afterEach(cleanup);
+
+  it("keeps the table itself a real table inside its own horizontal scroller", () => {
+    // Arrange / Act
+    const { container } = render(<Markdown>{"| A | B |\n| --- | --- |\n| one | two |"}</Markdown>);
+
+    // Assert: overflow lives on the wrapper, so the table can fill and re-flow
+    // with the pane width instead of shrink-wrapping as a block box.
+    const table = container.querySelector("table");
+    expect(table?.parentElement?.className).toBe("md-table-scroll");
+    expect(table?.querySelectorAll("tbody td")).toHaveLength(2);
+  });
+
+  it("carries GFM column alignment onto cells as inline text-align", () => {
+    // Arrange / Act
+    const { container } = render(
+      <Markdown>{"| L | C | R |\n| :-- | :-: | --: |\n| a | b | c |"}</Markdown>,
+    );
+
+    // Assert: react-markdown turns `align` into an inline style, which is what
+    // overrides App.css's default `text-align: left` on table cells.
+    const cells = Array.from(container.querySelectorAll<HTMLElement>("tbody td"));
+    expect(cells.map((cell) => cell.style.textAlign)).toEqual(["left", "center", "right"]);
+  });
+});
+
 describe("Markdown links", () => {
   afterEach(() => {
     vi.clearAllMocks();

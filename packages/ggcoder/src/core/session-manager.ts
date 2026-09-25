@@ -13,6 +13,7 @@ import {
 import { indeterminateOutcomeText, type AgentTurnTiming } from "@kenkaiiii/gg-agent";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import { withFileLock } from "./file-lock.js";
+import { ASK_USER_INTERRUPTED_TEXT } from "./ask-user.js";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
@@ -87,6 +88,15 @@ export interface CustomEntry extends BaseEntry {
   kind: string;
   data: unknown;
 }
+
+/**
+ * Result text for restored tool calls that declare one, by tool name. Mirrors
+ * `AgentTool.interruptedResult` for the tools this package owns; every other
+ * tool keeps the UNKNOWN outcome so side effects are never repeated.
+ */
+const RESTORED_INTERRUPTED_RESULTS: ReadonlyMap<string, string> = new Map([
+  ["ask_user", ASK_USER_INTERRUPTED_TEXT],
+]);
 
 export const DISPLAY_ITEM_CUSTOM_KIND = "display_item";
 export const TURN_METRIC_CUSTOM_KIND = "turn_metric";
@@ -1842,7 +1852,9 @@ export class SessionManager {
 
     // Repair orphaned tool_use blocks that lack matching tool_result messages.
     // This can happen when a session is interrupted mid-tool-execution.
-    return SessionManager.repairToolPairs(messages);
+    // No tool list exists at this layer, so pass the declared results of the
+    // tools this package owns: an open question is known unanswered, not UNKNOWN.
+    return SessionManager.repairToolPairs(messages, RESTORED_INTERRUPTED_RESULTS);
   }
 
   getDisplayItems(entries: SessionEntry[], _leafId?: string | null): CompletedItem[] {
@@ -2038,7 +2050,10 @@ export class SessionManager {
    * message containing matching tool_result entries. Inserts synthetic
    * tool_result messages where needed to prevent Anthropic API 400 errors.
    */
-  static repairToolPairs(messages: Message[]): Message[] {
+  static repairToolPairs(
+    messages: Message[],
+    interruptedResults?: ReadonlyMap<string, string>,
+  ): Message[] {
     const repaired: Message[] = [];
 
     for (let i = 0; i < messages.length; i++) {
@@ -2055,10 +2070,11 @@ export class SessionManager {
       // The transcript stops before the result, so whether the tool ran is
       // unrecoverable here. Say "unknown" rather than "interrupted": a resumed
       // session must not re-run a push or a migration that already landed.
+      // Tools that declare an interrupted result (a question) use it instead.
       const repair = (call: { id: string; name: string }) => ({
         type: "tool_result" as const,
         toolCallId: call.id,
-        content: indeterminateOutcomeText(call.name),
+        content: interruptedResults?.get(call.name) ?? indeterminateOutcomeText(call.name),
         isError: true,
       });
 

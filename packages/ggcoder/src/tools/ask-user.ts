@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
+  ASK_USER_INTERRUPTED_TEXT,
   ASK_USER_TIMEOUT_MS,
   formatAskResult,
   type AskQuestion,
@@ -166,6 +167,10 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
     // default would abort the call while the user is still reading the
     // question, and the answer would land on a tool call that no longer exists.
     timeoutMs: ASK_USER_TIMEOUT_MS + 30_000,
+    // A question cut off by Stop has no side effect to be unsure about. The
+    // generic "outcome UNKNOWN — it may have completed" told the model the user
+    // might have answered, when the answer can only ever arrive through here.
+    interruptedResult: ASK_USER_INTERRUPTED_TEXT,
     async execute({ questions }) {
       const ids = new Set(questions.map((q) => q.id));
       if (ids.size !== questions.length) {

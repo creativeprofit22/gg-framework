@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Message, ToolResult } from "@kenkaiiii/gg-ai";
+import { ASK_USER_INTERRUPTED_TEXT } from "./ask-user.js";
 import {
   SessionManager,
   RequiredSessionPersistenceError,
@@ -927,6 +929,58 @@ describe("SessionManager turn metrics", () => {
     ];
 
     expect(manager.getTurnMetrics(entries)).toEqual([metric]);
+  });
+});
+
+describe("SessionManager.repairToolPairs", () => {
+  const orphaned = (): Message[] => [
+    { role: "user", content: "ship it" },
+    {
+      role: "assistant",
+      content: [
+        { type: "tool_call", id: "q1", name: "ask_user", args: {} },
+        { type: "tool_call", id: "t1", name: "deploy", args: {} },
+      ],
+    },
+  ];
+  const resultFor = (messages: Message[], id: string): string | undefined => {
+    const tool = messages.find((m) => m.role === "tool");
+    const results = Array.isArray(tool?.content) ? (tool.content as ToolResult[]) : [];
+    const content = results.find((r) => r.toolCallId === id)?.content;
+    return typeof content === "string" ? content : undefined;
+  };
+
+  it("uses a declared interrupted result for an orphaned question and UNKNOWN otherwise", () => {
+    const repaired = SessionManager.repairToolPairs(
+      orphaned(),
+      new Map([["ask_user", ASK_USER_INTERRUPTED_TEXT]]),
+    );
+
+    expect(resultFor(repaired, "q1")).toBe(ASK_USER_INTERRUPTED_TEXT);
+    expect(resultFor(repaired, "t1")).toContain("UNKNOWN");
+  });
+
+  it("keeps UNKNOWN for every tool when no interrupted results are declared", () => {
+    const repaired = SessionManager.repairToolPairs(orphaned());
+
+    expect(resultFor(repaired, "q1")).toContain("UNKNOWN");
+    expect(resultFor(repaired, "t1")).toContain("UNKNOWN");
+  });
+
+  it("reports a question open at restore as unanswered, not UNKNOWN", () => {
+    const manager = new SessionManager("/unused");
+    const entries: SessionEntry[] = orphaned().map((message, i) => ({
+      type: "message",
+      id: `m${i}`,
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message,
+    }));
+
+    const repaired = manager.getMessages(entries);
+
+    expect(resultFor(repaired, "q1")).toBe(ASK_USER_INTERRUPTED_TEXT);
+    expect(resultFor(repaired, "t1")).toContain("UNKNOWN");
   });
 });
 

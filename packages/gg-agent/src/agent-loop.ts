@@ -803,7 +803,7 @@ export async function* agentLoop(
       }
 
       // ── Repair tool pairing: ensure every tool_use has an adjacent tool_result ──
-      repairToolPairingAdjacent(messages);
+      repairToolPairingAdjacent(messages, toolMap);
 
       // ── Call LLM with overflow recovery ──
       let response;
@@ -1471,7 +1471,7 @@ export async function* agentLoop(
         if (isToolPairingError(err) && !toolPairingRepaired) {
           toolPairingRepaired = true;
           diag("tool_pairing_repair", { error: errMsg.slice(0, 200) });
-          repairToolPairingAdjacent(messages);
+          repairToolPairingAdjacent(messages, toolMap);
           turn--;
           continue;
         }
@@ -2273,7 +2273,13 @@ async function* executeToolCallsMixed(
     state.finalized = true;
   }
 
-  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
+  const toolResults = buildToolResults(
+    initialToolResults,
+    toolCalls,
+    resultsById,
+    dispatchedIds,
+    options.toolMap,
+  );
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   for (const result of toolResults) {
@@ -2329,7 +2335,13 @@ async function* executeToolCallsParallel(
     state.finalized = true;
   }
 
-  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
+  const toolResults = buildToolResults(
+    initialToolResults,
+    toolCalls,
+    resultsById,
+    dispatchedIds,
+    options.toolMap,
+  );
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   for (const result of toolResults) {
@@ -2370,6 +2382,7 @@ function buildToolResults(
   resultsById: Map<string, ToolExecutionRecord>,
   /** Calls handed to their tool. Absent = we could not tell, so assume dispatched. */
   dispatchedIds?: ReadonlySet<string>,
+  toolMap?: ReadonlyMap<string, AgentTool>,
 ): ToolResult[] {
   const toolResults = [...initialToolResults];
   for (const toolCall of toolCalls) {
@@ -2387,12 +2400,17 @@ function buildToolResults(
       // (nothing ran) or after (effects unknown). Only the dispatch ledger
       // can tell those apart, and the two demand opposite behaviour.
       const dispatched = dispatchedIds?.has(toolCall.id) ?? true;
+      // A tool that declares its interrupted outcome (a question still waiting
+      // on the user) had no side effect to be unsure about.
+      const declared = dispatched ? toolMap?.get(toolCall.name)?.interruptedResult : undefined;
       toolResults.push({
         type: "tool_result",
         toolCallId: toolCall.id,
-        content: dispatched
-          ? indeterminateOutcomeText(toolCall.name)
-          : cancelledBeforeStartText(toolCall.name),
+        content:
+          declared ??
+          (dispatched
+            ? indeterminateOutcomeText(toolCall.name)
+            : cancelledBeforeStartText(toolCall.name)),
         isError: true,
       });
     }
@@ -2591,7 +2609,10 @@ function sanitizeOrphanedServerTools(messages: Message[]): void {
  *
  * Repairs in-place by inserting synthetic tool_result messages where needed.
  */
-function repairToolPairingAdjacent(messages: Message[]): void {
+function repairToolPairingAdjacent(
+  messages: Message[],
+  toolMap?: ReadonlyMap<string, AgentTool>,
+): void {
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!;
     if (msg.role !== "assistant") continue;
@@ -2605,11 +2626,13 @@ function repairToolPairingAdjacent(messages: Message[]): void {
     // A result is missing here after compaction, session restore or abort
     // recovery — all of which discard whether the tool ever ran. Unknown is the
     // only honest answer, and it is the safe one: it stops the model repeating
-    // a side effect that may already have landed.
+    // a side effect that may already have landed. The exception is a tool that
+    // declares its own `interruptedResult` (e.g. a question, whose answer can
+    // only arrive through the tool, so an unfinished call is known unanswered).
     const repaired = (call: { id: string; name: string }): ToolResult => ({
       type: "tool_result",
       toolCallId: call.id,
-      content: indeterminateOutcomeText(call.name),
+      content: toolMap?.get(call.name)?.interruptedResult ?? indeterminateOutcomeText(call.name),
       isError: true,
     });
 

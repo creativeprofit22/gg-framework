@@ -50,6 +50,14 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * Omission retains the finite default for ordinary tools.
    */
   timeoutMs?: number;
+  /**
+   * What the model is told when this call was dispatched but the run was
+   * aborted before it reported back. Omit for tools with side effects: the
+   * loop then says the outcome is UNKNOWN, which stops a repeated push/deploy.
+   * Set it only when an interrupted call provably did nothing (e.g. a question
+   * still waiting on the user), so the model gets a definite answer instead.
+   */
+  interruptedResult?: string;
   /** Host-only notification after both batch result caps, before the next provider request.
    * This describes prepared model input, not provider acknowledgement or tool success.
    */

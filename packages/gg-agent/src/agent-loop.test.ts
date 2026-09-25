@@ -1810,6 +1810,60 @@ describe("agentLoop", () => {
     expect(notifyResult).toContain("notify");
   });
 
+  // Regression: an ask_user card stopped while waiting on the user reached the
+  // model as "outcome UNKNOWN — it may have completed", as if an answer might
+  // exist. A tool that declares its interrupted outcome gets that instead.
+  it("reports a declared interrupted result for an aborted question, not UNKNOWN", async () => {
+    const controller = new AbortController();
+    mockStream.mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "tool_call" as const, id: "q1", name: "ask_user", args: {} }],
+        },
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } as unknown as ReturnType<typeof stream>);
+    const askTool: AgentTool<typeof emptyParams> = {
+      name: "ask_user",
+      description: "waits on a person",
+      parameters: emptyParams,
+      executionMode: "sequential",
+      timeoutMs: 0,
+      interruptedResult: "The question was not answered.",
+      async execute(_args, ctx) {
+        controller.abort();
+        await new Promise((_resolve, reject) => {
+          ctx.signal.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+        return "unreachable";
+      },
+    };
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [askTool],
+      signal: controller.signal,
+    });
+
+    const results = messages.find((m) => m.role === "tool")?.content as ToolResult[];
+    const result = results.find((r) => r.toolCallId === "q1");
+    expect(result?.content).toBe("The question was not answered.");
+    expect(result?.isError).toBe(true);
+  });
+
   it("labels a tool call orphaned by restore as unknown, not as never-ran", async () => {
     // A transcript that stops between the call and its result — what a crash,
     // a compaction or a session restore leaves behind.
@@ -1829,6 +1883,43 @@ describe("agentLoop", () => {
     const results = messages.find((m) => m.role === "tool")?.content as ToolResult[];
     expect(results[0]?.content).toContain("UNKNOWN");
     expect(results[0]?.content).toContain("migrate");
+  });
+
+  it("labels an orphaned question with its declared interrupted result, not unknown", async () => {
+    // A question card was open when the transcript was cut: an answer can only
+    // arrive through the tool, so the call is known unanswered.
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "ship it" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call" as const, id: "q9", name: "ask_user", args: {} },
+          { type: "tool_call" as const, id: "t9", name: "migrate", args: {} },
+        ],
+      },
+      { role: "user", content: "continue" },
+    ];
+    const askTool: AgentTool<typeof emptyParams> = {
+      name: "ask_user",
+      description: "waits on a person",
+      parameters: emptyParams,
+      interruptedResult: "The question was not answered.",
+      async execute() {
+        return "unreachable";
+      },
+    };
+    mockStream.mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop(messages, { provider: "anthropic", model: "test", tools: [askTool] });
+
+    const results = messages.find((m) => m.role === "tool")?.content as ToolResult[];
+    expect(results.find((r) => r.toolCallId === "q9")?.content).toBe(
+      "The question was not answered.",
+    );
+    const undeclared = results.find((r) => r.toolCallId === "t9")?.content;
+    expect(undeclared).toContain("UNKNOWN");
+    expect(undeclared).toContain("migrate");
   });
 
   it("redacts successful tool output before events and provider context", async () => {

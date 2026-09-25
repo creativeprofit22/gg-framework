@@ -6,7 +6,7 @@ import { BackButton } from "./BackButton";
 import { ProviderLoginModal } from "./ProviderLoginModal";
 import { LocalModelsModal } from "./LocalModelsModal";
 import { HfPullModal } from "./HfPullModal";
-import { providerLogo } from "./provider-logos";
+import { isMonochromeProviderLogo, providerLogo } from "./provider-logos";
 
 interface Props {
   onClose: () => void;
@@ -102,7 +102,15 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
                 )}
                 <span className="login-tile-logo">
                   {logo ? (
-                    <img className="login-logo" src={logo} alt="" />
+                    <img
+                      className={
+                        isMonochromeProviderLogo(p.value)
+                          ? "login-logo is-monochrome"
+                          : "login-logo"
+                      }
+                      src={logo}
+                      alt=""
+                    />
                   ) : (
                     <span className="login-logo-fallback">{p.label.charAt(0)}</span>
                   )}

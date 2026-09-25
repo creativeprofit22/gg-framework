@@ -46,13 +46,14 @@ describe("native appearance", () => {
     expect(mocks.invoke.mock.calls).toEqual([
       ["plugin:window|set_theme", { label: "main", value: "light" }, undefined],
       ["plugin:window|set_background_color", { label: "main", value: "#fcfbfd" }, undefined],
+      ["set_window_theme_hint", { theme: "light" }, undefined],
     ]);
     appearance.update({ size: "16" });
     await flush();
-    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.invoke).toHaveBeenCalledTimes(3);
     const second = startNativeAppearance();
     await flush();
-    expect(mocks.invoke).toHaveBeenCalledTimes(4);
+    expect(mocks.invoke).toHaveBeenCalledTimes(6);
     first();
     second();
     stopOwner();
@@ -70,8 +71,10 @@ describe("native appearance", () => {
       expect(mocks.invoke.mock.calls).toEqual([
         ["plugin:window|set_theme", { label, value: "dark" }, undefined],
         ["plugin:window|set_background_color", { label, value: "#0f1115" }, undefined],
+        ["set_window_theme_hint", { theme: "dark" }, undefined],
         ["plugin:window|set_theme", { label, value: "light" }, undefined],
         ["plugin:window|set_background_color", { label, value: "#fcfbfd" }, undefined],
+        ["set_window_theme_hint", { theme: "light" }, undefined],
       ]);
       stop();
       stopOwner();
@@ -88,9 +91,14 @@ describe("native appearance", () => {
     expect(mocks.toast).toHaveBeenCalledOnce();
     appearance.update({ theme: "light" });
     await flush();
-    expect(mocks.invoke).toHaveBeenLastCalledWith(
+    expect(mocks.invoke).toHaveBeenCalledWith(
       "plugin:window|set_background_color",
       { label: "main", value: "#fcfbfd" },
+      undefined,
+    );
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "set_window_theme_hint",
+      { theme: "light" },
       undefined,
     );
     stop();
@@ -109,6 +117,7 @@ describe("native appearance", () => {
         )
         .mockResolvedValue(undefined),
       setBackgroundColor: vi.fn(async () => {}),
+      rememberTheme: vi.fn(async () => {}),
     };
     const sync = createNativeAppearanceSync(target, vi.fn());
     sync.update("dark");
@@ -120,6 +129,7 @@ describe("native appearance", () => {
     await flush();
     expect(target.setTheme.mock.calls.map(([theme]) => theme)).toEqual(["dark", "light"]);
     expect(target.setBackgroundColor.mock.calls).toEqual([["#fcfbfd"]]);
+    expect(target.rememberTheme.mock.calls).toEqual([["light"]]);
     sync.stop();
   });
   it("reports failure without preventing subsequent changes", async () => {
@@ -130,6 +140,7 @@ describe("native appearance", () => {
         .mockRejectedValueOnce(new Error("permission denied"))
         .mockResolvedValue(undefined),
       setBackgroundColor: vi.fn(async () => {}),
+      rememberTheme: vi.fn(async () => {}),
     };
     const sync = createNativeAppearanceSync(target, report);
     sync.update("light");
@@ -150,6 +161,7 @@ describe("native appearance", () => {
           }),
       ),
       setBackgroundColor: vi.fn(async () => {}),
+      rememberTheme: vi.fn(async () => {}),
     };
     const sync = createNativeAppearanceSync(target, vi.fn());
     sync.update("light");
@@ -159,6 +171,28 @@ describe("native appearance", () => {
     sync.update("dark");
     expect(target.setTheme).toHaveBeenCalledOnce();
     expect(target.setBackgroundColor).not.toHaveBeenCalled();
+    expect(target.rememberTheme).not.toHaveBeenCalled();
+  });
+  it("treats a failed startup-theme hint as cosmetic, never a window failure", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const report = vi.fn();
+    const target = {
+      setTheme: vi.fn(async () => {}),
+      setBackgroundColor: vi.fn(async () => {}),
+      rememberTheme: vi
+        .fn<(_: "dark" | "light") => Promise<void>>()
+        .mockRejectedValueOnce(new Error("disk full"))
+        .mockResolvedValue(undefined),
+    };
+    const sync = createNativeAppearanceSync(target, report);
+    sync.update("light");
+    await flush();
+    sync.update("dark");
+    await flush();
+    expect(report).not.toHaveBeenCalled();
+    expect(target.rememberTheme.mock.calls).toEqual([["light"], ["dark"]]);
+    expect(target.setBackgroundColor).toHaveBeenLastCalledWith("#0f1115");
+    sync.stop();
   });
   it("never calls native setters in a regular browser", () => {
     mocks.isTauri.mockReturnValueOnce(false);

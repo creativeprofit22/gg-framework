@@ -81,10 +81,11 @@ it("renders queued startup and later native failures through the standalone entr
   });
   await screen.findByText(message, VISIBLE);
   expect(screen.getByRole("alert").textContent).toBe(message);
-  expect(mocks.invoke).toHaveBeenLastCalledWith("plugin:window|set_background_color", {
+  expect(mocks.invoke).toHaveBeenCalledWith("plugin:window|set_background_color", {
     label: "whatsnew",
     value: "#0f1115",
   });
+  expect(mocks.invoke).toHaveBeenLastCalledWith("set_window_theme_hint", { theme: "dark" });
   expect(document.documentElement.dataset.appearanceTheme).toBe("dark");
   expect(consoleError).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));

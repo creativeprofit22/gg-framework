@@ -16,7 +16,10 @@ vi.mock("./agent", () => ({
   },
 }));
 
-vi.mock("./provider-logos", () => ({ providerLogo: () => null }));
+vi.mock("./provider-logos", () => ({
+  providerLogo: () => null,
+  isMonochromeProviderLogo: () => false,
+}));
 
 // Observe the hub's modal metadata and callback without invoking native auth.
 vi.mock("./ProviderLoginModal", () => ({

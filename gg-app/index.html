@@ -12,7 +12,13 @@
       body {
         background: #0f1115;
       }
+      html[data-appearance-theme="light"],
+      html[data-appearance-theme="light"] body {
+        background: #fcfbfd;
+      }
     </style>
+    <!-- Applies the saved theme before first paint; external to satisfy the CSP. -->
+    <script src="/appearance-boot.js"></script>
   </head>
 
   <body>

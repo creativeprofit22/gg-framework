@@ -7,6 +7,8 @@ type Theme = Appearance["theme"];
 interface NativeAppearanceWindow {
   setTheme(theme: Theme): Promise<void>;
   setBackgroundColor(color: string): Promise<void>;
+  /** Remembers the theme so the next native window opens without a flash. */
+  rememberTheme(theme: Theme): Promise<void>;
 }
 export const NATIVE_APPEARANCE_BACKGROUNDS = { dark: "#0f1115", light: "#fcfbfd" } as const;
 
@@ -29,6 +31,12 @@ export function createNativeAppearanceSync(target: NativeAppearanceWindow, repor
             await target.setBackgroundColor(NATIVE_APPEARANCE_BACKGROUNDS[theme]);
         } catch {
           if (!stopped) report();
+        }
+        if (!stopped && !desired) {
+          // Cosmetic startup hint only: a failure never affects this window.
+          await target.rememberTheme(theme).catch(() => {
+            console.warn("Could not remember the window theme for the next launch.");
+          });
         }
       }
     } finally {
@@ -60,6 +68,7 @@ export function startNativeAppearance(): () => void {
       // `color`, which silently deserializes as None. Hex strings are Rust Color.
       setBackgroundColor: (value) =>
         invoke<void>("plugin:window|set_background_color", { label: target.label, value }),
+      rememberTheme: (theme) => invoke<void>("set_window_theme_hint", { theme }),
     },
     () => {
       // No preference rollback: web content remains usable after native failure.

@@ -8,6 +8,7 @@ use qwen_cloud_connection::{qwen_cloud_connection_status, qwen_cloud_connection_
 mod daemon_job;
 mod decisions;
 mod local_patched_update;
+mod window_theme;
 
 use azure_connection::commands::{
     azure_connection_remove, azure_connection_save, azure_connection_status,
@@ -7136,9 +7137,6 @@ fn clear_local_patched_update_running(app: &tauri::AppHandle) {
     *state.running.lock().unwrap() = false;
 }
 
-/// App background (#111317) painted on the native window + webview BEFORE the
-/// first frame, so opening a new window never flashes white.
-const APP_BG: tauri::window::Color = tauri::window::Color(15, 17, 21, 255);
 
 /// Per-OS window chrome decision. macOS uses the Overlay title bar (webview
 /// draws under the traffic lights); every other OS keeps native decorations.
@@ -7248,18 +7246,51 @@ fn smoke_browser_args() -> Result<Option<String>, String> {
     Ok(Some(format!("--remote-debugging-port={cdp_port}")))
 }
 
+/// How a newly built app window becomes visible.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowReveal {
+    /// Shown by this builder once its page has loaded (see `window_theme`).
+    WhenLoaded,
+    /// Like `WhenLoaded`, but the caller applies the dev-smoke minimized state
+    /// itself — after positioning, since Windows may ignore geometry changes on
+    /// an already-minimized window and restore it at the default rectangle.
+    WhenLoadedCallerMinimizes,
+    /// Left hidden; the caller shows it when its own startup completes.
+    Hidden,
+}
+
 fn build_app_window_with_visibility(
     app: &tauri::AppHandle,
     label: &str,
-    visible: bool,
+    reveal_mode: WindowReveal,
 ) -> Result<WebviewWindow, String> {
-    let minimize_on_launch = visible && phase25_dev_smoke_window_minimized()?;
+    let wants_reveal = matches!(
+        reveal_mode,
+        WindowReveal::WhenLoaded | WindowReveal::WhenLoadedCallerMinimizes
+    );
+    let minimize_on_launch = wants_reveal && phase25_dev_smoke_window_minimized()?;
+    // Paint the saved theme's background and chrome BEFORE the first frame, so
+    // opening a window never flashes the other theme while the page loads.
+    let theme = window_theme::read_hint(&agent_data_root(&app.config().identifier));
+    // A window that should appear stays hidden until its first page load, hiding
+    // WebView2's pre-background frame. Smoke windows that start minimized are shown
+    // (then minimized) immediately, as before.
+    let visible = wants_reveal && minimize_on_launch;
+    let reveal = (wants_reveal && !minimize_on_launch).then(window_theme::RevealOnce::default);
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Supah Coder")
         .inner_size(1024.0, 720.0)
         .min_inner_size(480.0, 360.0)
-        .background_color(APP_BG)
+        .background_color(theme.background())
+        .theme(Some(theme.tauri_theme()))
         .visible(visible);
+    if let Some(reveal) = reveal.clone() {
+        builder = builder.on_page_load(move |window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                reveal.reveal(&window);
+            }
+        });
+    }
     #[cfg(target_os = "windows")]
     if let Some(browser_args) = smoke_browser_args()? {
         builder = builder.additional_browser_args(&browser_args);
@@ -7274,14 +7305,25 @@ fn build_app_window_with_visibility(
         builder = apply_mac_overlay(builder);
     }
     let window = builder.build().map_err(|e| e.to_string())?;
-    if minimize_on_launch {
+    if minimize_on_launch && reveal_mode == WindowReveal::WhenLoaded {
         apply_dev_smoke_window_state(&window)?;
+    }
+    if let Some(reveal) = reveal {
+        let fallback_window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(window_theme::REVEAL_FALLBACK).await;
+            reveal.reveal(&fallback_window);
+        });
     }
     Ok(window)
 }
 
 fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
-    build_app_window_with_visibility(app, label, true)
+    build_app_window_with_visibility(app, label, WindowReveal::WhenLoaded)
+}
+
+fn build_hidden_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    build_app_window_with_visibility(app, label, WindowReveal::Hidden)
 }
 
 /// Open enough new project windows to reach `count` total (each with its own
@@ -7562,7 +7604,7 @@ async fn agent_pane_copy_startup(
         operation.target_label.clone(),
         operation.restore.clone(),
     );
-    let window = match build_app_window_with_visibility(&app, &operation.target_label, false) {
+    let window = match build_hidden_app_window(&app, &operation.target_label) {
         Ok(window) => window,
         Err(error) => {
             let removed = remove_copy_operation(
@@ -10443,7 +10485,14 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
                 },
             );
         }
-        let win = match build_app_window_with_visibility(app, &label, false) {
+        // Revealed once loaded; setup finishes (geometry included) before the event
+        // loop can deliver that page-load, so the window appears already in place.
+        // Dev-smoke minimizing is deferred until the saved geometry is applied.
+        let win = match build_app_window_with_visibility(
+            app,
+            &label,
+            WindowReveal::WhenLoadedCallerMinimizes,
+        ) {
             Ok(win) => win,
             Err(error) => {
                 remove_restore_target(
@@ -10470,7 +10519,6 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
             any_geometry = true;
             let _ = win.set_size(tauri::PhysicalSize::new(w, h));
         }
-        win.show().map_err(|e| e.to_string())?;
         apply_dev_smoke_window_state(&win)?;
     }
     if !any_geometry {
@@ -10609,6 +10657,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             #[cfg(all(debug_assertions, target_os = "windows"))]
             appearance_background_probe::appearance_background_probe,
+            window_theme::set_window_theme_hint,
             sidecar_port,
             agent_pane_status,
             agent_pane_create,

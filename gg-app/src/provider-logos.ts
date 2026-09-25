@@ -40,3 +40,10 @@ export const PROVIDER_LOGOS: Record<string, string> = {
 export function providerLogo(value: string): string | undefined {
   return PROVIDER_LOGOS[value];
 }
+
+// Off-white marks drawn for Dark; Light re-inks them so they stay visible.
+const MONOCHROME_PROVIDER_LOGOS: ReadonlySet<string> = new Set(["openai", "xai", "moonshot"]);
+
+export function isMonochromeProviderLogo(value: string): boolean {
+  return MONOCHROME_PROVIDER_LOGOS.has(value);
+}

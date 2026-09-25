@@ -8178,9 +8178,9 @@ select {
   height: 12px;
   flex: 0 0 auto;
   overflow: hidden;
-  border: 1px solid #313131;
+  border: 1px solid var(--meter-track-border);
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle, #1b2735, #090a0f);
+  background: var(--meter-track-bg);
   box-shadow: var(--shadow-sm);
 }
 .title-usage-fill {
@@ -8188,7 +8188,7 @@ select {
   inset: 0 auto 0 0;
   min-width: 1px;
   border-radius: inherit;
-  background: linear-gradient(90deg, #00f260, #0575e6);
+  background: var(--meter-fill);
   box-shadow:
     0 0 4px #00f260,
     0 0 7px #0575e6;

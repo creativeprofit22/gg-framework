@@ -66,6 +66,14 @@
 :root[data-appearance-theme="light"] body {
   background-color: var(--bg);
 }
+/* Title usage meter keeps its tighter Dark glow literal; Light drops the neon halo. */
+:root[data-appearance-theme="light"] .title-usage-fill {
+  box-shadow: none;
+}
+/* Off-white provider marks (#f4f6f8) are drawn for Dark; invert them to near-ink on Light tiles. */
+:root[data-appearance-theme="light"] .login-logo.is-monochrome {
+  filter: invert(0.88);
+}
 :root[data-appearance-theme="light"] .azure-remove-btn:hover:not(:disabled) {
   color: var(--error);
 }

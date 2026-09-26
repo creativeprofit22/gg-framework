@@ -114,6 +114,7 @@ import { FileMentionMenu } from "./FileMentionMenu";
 import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./ReferencedFiles";
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
+import { isBackgroundTaskRunning } from "./background-task-status";
 import { TasksModal } from "./TasksModal";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import type {
@@ -2796,7 +2797,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
   // Footer background-tasks indicator only shows while something is actually
   // running (exited tasks shouldn't keep the bar item around).
-  const runningTaskCount = tasks.filter((t) => t.exitCode === null).length;
+  const runningTaskCount = tasks.filter(isBackgroundTaskRunning).length;
 
   // True when `text` is a known workflow command invocation (first token).
   function isWorkflowCommand(text: string): boolean {

@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "bash",
-      "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Pipelines run with pipefail — a piped command reports the failing stage's exit code, so piping tests through tail/head cannot mask a failure. Commands run in a non-interactive bash shell with TERM=dumb. Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait for final status without a deadline unless timeout is explicitly set. Let builds finish; do not invent a time limit. Long output is truncated (tail kept). Set run_in_background=true for long-lived or interactive commands (dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns after spawn. Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a foreground session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls. Never sleep to wait for a background process — task_output with wait_ms returns when it exits or a declared wake fires. For dev servers, set a readiness wake.pattern, use task_output with wait_ms, then check HTTP and finish while leaving the server running. Do not use silence as readiness; healthy servers normally go quiet.",
+      "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Pipelines run with pipefail — a piped command reports the failing stage's exit code, so piping tests through tail/head cannot mask a failure. Commands run in a non-interactive bash shell with TERM=dumb. Finite build, test, lint, format, migration, and one-shot commands run in foreground. A command still running after the soft limit (default 2 min, configurable) is handed off to a background task — not killed — and the result gives its ID and output so far; then call task_output with that id and wait_ms, which returns the moment it exits. A command with no output for a long time (default 10 min, configurable) or past the hard limit (default 60 min, configurable) is stopped automatically, including after hand-off. Omit timeout unless you need a hard bound. Long output is truncated (tail kept). Set run_in_background=true for long-lived or interactive commands (dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns after spawn. Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a foreground session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls. Never sleep to wait for a background process — task_output with wait_ms returns when it exits or a declared wake fires. For dev servers, set a readiness wake.pattern, use task_output with wait_ms, then check HTTP and finish while leaving the server running. Do not use silence as readiness; healthy servers normally go quiet.",
       "schema": {
         "type": "object",
         "properties": {
@@ -12,7 +12,7 @@
             "description": "The bash command to execute"
           },
           "timeout": {
-            "description": "Optional foreground timeout in milliseconds; omit for no deadline (also with persist:true). Finite build, test, lint, format, migration, and one-shot commands wait for completion in foreground.",
+            "description": "Optional hard limit in milliseconds. Usually omit it: long commands are handed off to a background task automatically instead of being killed. Setting it keeps the command in the foreground (no hand-off) until it exits, hits this limit, or produces no output for the inactivity limit.",
             "type": "integer",
             "minimum": 1000,
             "maximum": 9007199254740991
@@ -50,7 +50,7 @@
         ],
         "additionalProperties": false
       },
-      "hash": "b30ad598b1ba69f85d835c5d87a6f5ee3211f52c2e29702aaf262314555f66dd"
+      "hash": "6c161dcdc5c61cd6d308b7f3dd07d59e9b891a775774aeccde422b6caf2aa821"
     },
     {
       "name": "code_nav",

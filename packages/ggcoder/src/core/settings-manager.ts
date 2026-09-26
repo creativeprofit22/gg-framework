@@ -83,6 +83,16 @@ const SettingsSchema = z.object({
    * socket is a full bypass of the isolation around it.
    */
   sandboxAllowUnixSockets: z.array(z.string()).default([]),
+  /** Seconds a foreground bash command may run before it is handed off to a
+   *  background task (not killed). 0 disables the hand-off. */
+  bashYieldSeconds: z.number().int().min(0).default(120),
+  /** Seconds with no output before a bash command is stopped as stuck, in the
+   *  foreground or after hand-off. Raise it for legitimately silent steps
+   *  (linkers, quiet docker builds). 0 disables. */
+  bashInactivitySeconds: z.number().int().min(0).default(600),
+  /** Minutes before a bash command is stopped regardless of output — a high
+   *  backstop, not a per-command guess. 0 disables. */
+  bashHardLimitMinutes: z.number().int().min(0).default(60),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
    *  Cuts ~8k tokens/cache-miss turn with two MCP servers connected. */
   deferredMcpTools: z.boolean().default(true),
@@ -154,6 +164,9 @@ export const DEFAULT_SETTINGS: Settings = {
   networkAllow: [],
   sandboxMode: "off",
   sandboxAllowUnixSockets: [],
+  bashYieldSeconds: 120,
+  bashInactivitySeconds: 600,
+  bashHardLimitMinutes: 60,
   deferredMcpTools: true,
   deferredBuiltinTools: true,
   grepUseRipgrep: true,

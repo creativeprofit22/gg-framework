@@ -62,6 +62,7 @@ describe("task_stop tool", () => {
       signal: null,
       lastReadOffset: null,
       logSize: 0,
+      stopReason: null,
     };
     const internals = manager as unknown as {
       processes: Map<string, BackgroundProcess>;

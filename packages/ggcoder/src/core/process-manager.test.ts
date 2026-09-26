@@ -88,6 +88,7 @@ function trackedManager(
     signal: null,
     lastReadOffset: null,
     logSize: 0,
+    stopReason: null,
   };
   const internals = manager as unknown as {
     processes: Map<string, BackgroundProcess>;
@@ -161,7 +162,9 @@ describe("ProcessManager verified shutdown", () => {
     const fixture = await managedStopHarness(undefined);
     let settled = false;
     const shutdown = fixture.manager.shutdownAllAndWait();
-    void shutdown.then(() => { settled = true; });
+    void shutdown.then(() => {
+      settled = true;
+    });
     try {
       expect(fixture.manager.shutdownAllAndWait()).toBe(shutdown);
       await vi.waitFor(() => expect(fixture.cleanupProcessTree).toHaveBeenCalledOnce());
@@ -170,7 +173,9 @@ describe("ProcessManager verified shutdown", () => {
         { requireSettlement: true },
       );
       expect(settled).toBe(false);
-      await expect(fixture.manager.start("must not spawn", "/workspace")).rejects.toThrow("shutting down");
+      await expect(fixture.manager.start("must not spawn", "/workspace")).rejects.toThrow(
+        "shutting down",
+      );
       fixture.fake.emitClose(null, "SIGTERM");
       await Promise.resolve();
       expect(settled).toBe(false);
@@ -186,9 +191,13 @@ describe("ProcessManager verified shutdown", () => {
   });
 
   it("surfaces failed cleanup even if native close later arrives", async () => {
-    const cleanupProcessTree = vi.fn(async () => { throw new Error("survivor"); });
+    const cleanupProcessTree = vi.fn(async () => {
+      throw new Error("survivor");
+    });
     const killProcessTree = vi.fn();
-    const { manager, child, proc } = trackedManager(lifecycle({ cleanupProcessTree, killProcessTree }));
+    const { manager, child, proc } = trackedManager(
+      lifecycle({ cleanupProcessTree, killProcessTree }),
+    );
     await expect(manager.shutdownAllAndWait()).rejects.toThrow("survivor");
     expect(manager.list()[0]?.isRunning).toBe(true);
     child.emit("close", 0, null);
@@ -201,7 +210,9 @@ describe("ProcessManager verified shutdown", () => {
     const manager = new ProcessManager();
     const synchronous = vi.fn();
     let finish!: () => void;
-    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
     const first = vi.fn(() => pending);
     const second = vi.fn(async () => {});
     manager.registerShutdown(synchronous, first);
@@ -448,6 +459,7 @@ describe("ProcessManager retention", () => {
       signal: null,
       lastReadOffset: null,
       logSize: 0,
+      stopReason: null,
     };
     const processes = (manager as unknown as { processes: Map<string, BackgroundProcess> })
       .processes;
@@ -466,6 +478,7 @@ describe("ProcessManager retention", () => {
         signal: record.signal,
         lastReadOffset: record.lastReadOffset,
         logSize: record.logSize,
+        stopReason: null,
         isRunning: false,
       },
     ]);
@@ -492,6 +505,7 @@ describe("ProcessManager retention", () => {
         signal: null,
         lastReadOffset: null,
         logSize: 0,
+        stopReason: null,
       };
       const internals = manager as unknown as {
         processes: Map<string, BackgroundProcess>;

@@ -17,4 +17,6 @@ export const BASH_DIAGNOSTICS_FIXTURE = {
   totalOutputBytes: 12_000_000,
   retainedOutputBytes: 10_000_000,
   droppedOutputBytes: 2_000_000,
+  backgroundTaskId: null,
+  pipesHeldAfterExit: false,
 } as const;

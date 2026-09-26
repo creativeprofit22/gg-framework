@@ -55,6 +55,9 @@ function truncateCommand(command: string, maxLen: number): string {
 export function formatBackgroundTaskStatus(task: BackgroundTaskSnapshot): string {
   if (task.isRunning) return "running";
   if (task.completedAt === null) return "completion pending";
+  // Manager-initiated stops would otherwise read as a crash or user kill.
+  if (task.stopReason === "inactive") return "stopped: no output";
+  if (task.stopReason === "timedOut") return "stopped: time limit";
   if (task.signal) return `signal ${task.signal}`;
   if (task.exitCode !== null) return `exit ${task.exitCode}`;
   return "completed";

@@ -76,6 +76,7 @@ function background(exitCode: number | null): void {
       signal: null,
       lastReadOffset: 0,
       logSize: 0,
+      stopReason: null,
       isRunning: exitCode === null,
     },
   ];

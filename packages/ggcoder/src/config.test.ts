@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  foregroundLimitSettingsFrom,
   loadSavedSettings,
   projectScopeAllowed,
   seedDefaultAgents,
@@ -97,6 +98,66 @@ describe("loadSavedSettings", () => {
 
     expect(settings.provider).toBe("xai");
     expect(settings.model).toBe("grok-4.5");
+  });
+
+  it("loads valid bash foreground limits, including 0 to disable", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        bashYieldSeconds: 0,
+        bashInactivitySeconds: 1800,
+        bashHardLimitMinutes: 90,
+      }),
+      "utf-8",
+    );
+
+    const settings = loadSavedSettings(settingsPath);
+
+    expect(foregroundLimitSettingsFrom(settings)).toEqual({
+      yieldSeconds: 0,
+      inactivitySeconds: 1800,
+      hardLimitMinutes: 90,
+    });
+  });
+
+  it.each([
+    ["negative", -1],
+    ["non-integer", 1.5],
+    ["string", "600"],
+  ])("drops %s bash foreground limits and falls back to defaults", (_label, value) => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        bashYieldSeconds: value,
+        bashInactivitySeconds: value,
+        bashHardLimitMinutes: value,
+      }),
+      "utf-8",
+    );
+
+    const settings = loadSavedSettings(settingsPath);
+
+    expect(settings.bashYieldSeconds).toBeUndefined();
+    expect(settings.bashInactivitySeconds).toBeUndefined();
+    expect(settings.bashHardLimitMinutes).toBeUndefined();
+    expect(foregroundLimitSettingsFrom(settings)).toEqual({
+      yieldSeconds: 120,
+      inactivitySeconds: 600,
+      hardLimitMinutes: 60,
+    });
+  });
+
+  it("falls back per field when only some bash limits are set", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ bashInactivitySeconds: 30 }), "utf-8");
+
+    expect(foregroundLimitSettingsFrom(loadSavedSettings(settingsPath))).toEqual({
+      yieldSeconds: 120,
+      inactivitySeconds: 30,
+      hardLimitMinutes: 60,
+    });
   });
 });
 

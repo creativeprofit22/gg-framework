@@ -174,6 +174,7 @@ describe("interactive background processes (task_send)", () => {
       signal: null,
       lastReadOffset: null,
       logSize: 0,
+      stopReason: null,
     };
     const internals = manager as unknown as {
       processes: Map<string, BackgroundProcess>;

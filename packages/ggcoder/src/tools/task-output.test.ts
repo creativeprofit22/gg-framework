@@ -72,6 +72,7 @@ async function trackedLog(
     signal: null,
     lastReadOffset: null,
     logSize: Buffer.byteLength(content),
+    stopReason: null,
   };
   const internals = manager as unknown as {
     processes: Map<string, BackgroundProcess>;
@@ -87,6 +88,36 @@ afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
   );
+});
+
+describe("task_output automatic stop reason", () => {
+  it.each([
+    ["inactive", "stopped: no output for the inactivity limit (inactive)"],
+    ["timedOut", "stopped: hard time limit reached (timedOut)"],
+  ] as const)("reports a %s stop in the status line and details", async (reason, text) => {
+    const fixture = await trackedLog("out", {}, false);
+    fixture.process.stopReason = reason;
+    fixture.process.exitCode = null;
+    fixture.process.signal = "SIGTERM";
+
+    const result = structuredTaskOutput(
+      await createTaskOutputTool(fixture.manager).execute({ id: fixture.process.id }, toolContext),
+    );
+
+    expect(result.content.split("\n")[0]).toContain(`— ${text}`);
+    expect(result.details.taskOutput.stopReason).toBe(reason);
+  });
+
+  it("omits the stop note for a normal exit", async () => {
+    const fixture = await trackedLog("out", {}, false);
+
+    const result = structuredTaskOutput(
+      await createTaskOutputTool(fixture.manager).execute({ id: fixture.process.id }, toolContext),
+    );
+
+    expect(result.content).not.toContain("stopped:");
+    expect(result.details.taskOutput.stopReason).toBeNull();
+  });
 });
 
 describe("task_output late readers", () => {
@@ -306,6 +337,7 @@ describe("task_output rendering", () => {
     expect(running.content).toContain(`Process ${fixture.process.id}: running`);
     expect(running.content).toContain("(no new output)");
     expect(running.details.taskOutput).toEqual({
+      id: fixture.process.id,
       isRunning: true,
       exitCode: null,
       signal: null,
@@ -316,6 +348,7 @@ describe("task_output rendering", () => {
       remainingBytes: 0,
       logFile: fixture.logFile,
       presentationCapped: false,
+      stopReason: null,
     });
   });
 

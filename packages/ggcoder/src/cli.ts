@@ -71,7 +71,13 @@ import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
-import { ensureAppDirs, getAppPaths, loadSavedSettings, projectScopeAllowed } from "./config.js";
+import {
+  ensureAppDirs,
+  foregroundLimitSettingsFrom,
+  getAppPaths,
+  loadSavedSettings,
+  projectScopeAllowed,
+} from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
@@ -756,6 +762,7 @@ async function runInkTUI(opts: {
       getModel: () => activeModel,
       getThinkingLevel: () => activeThinking,
       getMaxPerModel: () => opts.subagentMaxPerModel,
+      getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
     },
   );
 

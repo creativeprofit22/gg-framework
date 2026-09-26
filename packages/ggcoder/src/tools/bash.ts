@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type { ProcessManager } from "../core/process-manager.js";
+import { AdoptExitedError, type ProcessManager } from "../core/process-manager.js";
 import type {
   BashDiagnostics,
   BashToolResultDetails,
@@ -9,6 +9,15 @@ import type {
 } from "../types.js";
 import type { ProcessTarget } from "../utils/process.js";
 import { log } from "../core/logger.js";
+import { createCommandWatchdog, type CommandWatchdog } from "../core/command-watchdog.js";
+import { watchExitSettle } from "./exit-settle.js";
+import {
+  DEFAULT_EXIT_SETTLE_MS,
+  DEFAULT_FOREGROUND_LIMIT_SETTINGS,
+  resolveForegroundLimits,
+  type ForegroundLimitSettings,
+  type ForegroundLimits,
+} from "./foreground-limits.js";
 import { truncateTail, MAX_BYTES } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 import { writeOverflow } from "./overflow.js";
@@ -45,6 +54,13 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 /** Internal deadline sentinel: omitted bash timeout means no deadline. */
 const NO_DEADLINE = 0;
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
+const FOREGROUND_LIMITS_DESCRIPTION =
+  "Finite build, test, lint, format, migration, and one-shot commands run in foreground. " +
+  "A command still running after the soft limit (default 2 min, configurable) is handed off to a background " +
+  "task — not killed — and the result gives its ID and output so far; then call task_output " +
+  "with that id and wait_ms, which returns the moment it exits. A command with no output for a " +
+  "long time (default 10 min, configurable) or past the hard limit (default 60 min, configurable) is stopped automatically, " +
+  "including after hand-off. Omit timeout unless you need a hard bound. Long output is truncated (tail kept). ";
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 /** A sleep this long guesses completion instead of waiting for a process event. */
 const GUESSED_WAIT_SECONDS = 10;
@@ -101,6 +117,8 @@ function bashDiagnostics(
     totalOutputBytes: output.totalInputBytes,
     retainedOutputBytes: output.retainedBytes,
     droppedOutputBytes: Math.max(0, output.totalInputBytes - output.retainedBytes),
+    backgroundTaskId: outcome.backgroundTaskId,
+    pipesHeldAfterExit: outcome.pipesHeldAfterExit,
   };
 }
 
@@ -130,7 +148,10 @@ function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome, tail: 
 interface ForegroundCommandOptions {
   command: string;
   cwd: string;
+  /** Hard limit used when `limits` is omitted; 0 = none. */
   timeoutMs: number;
+  /** Yield / inactivity / hard limits. Omitted: `timeoutMs` is the only limit. */
+  limits?: ForegroundLimits;
   signal: AbortSignal;
   ops: ToolOperations;
   processManager: ProcessManager;
@@ -154,6 +175,7 @@ export async function executeForegroundCommand({
   command,
   cwd,
   timeoutMs,
+  limits,
   signal,
   ops,
   processManager,
@@ -163,6 +185,13 @@ export async function executeForegroundCommand({
   reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
 }: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
   const startedAt = Date.now();
+  // Without explicit limits, `timeoutMs` alone is the hard limit (0 = none).
+  const effectiveLimits: ForegroundLimits = limits ?? {
+    yieldMs: null,
+    inactivityMs: null,
+    hardMs: timeoutMs > 0 ? timeoutMs : null,
+    exitSettleMs: DEFAULT_EXIT_SETTLE_MS,
+  };
   const foregroundLog = await processManager.allocateForegroundLog();
   const effectiveLaunch: SandboxLaunch = launch ?? {
     ...resolveShell(command),
@@ -170,11 +199,14 @@ export async function executeForegroundCommand({
   };
   const outputTail = new BoundedOutputTail();
   let totalBytes = 0;
+  let lastOutputAt = startedAt;
   let pid: number | null = null;
   let terminalIntent: "interruption" | "completion" | "spawnError" | null = null;
-  let pendingInterruption: "timedOut" | "aborted" | null = null;
+  let pendingInterruption: "timedOut" | "aborted" | "inactive" | null = null;
   let settled = false;
-  let deadlineTimer: NodeJS.Timeout | undefined;
+  let handingOff = false;
+  let watchdog: CommandWatchdog | undefined;
+  let disposeExitSettle: (() => void) | undefined;
   let cleanupGraceTimer: NodeJS.Timeout | undefined;
   let abortListenerRegistered = false;
   let child: ReturnType<ToolOperations["process"]["spawn"]> | null = null;
@@ -235,15 +267,10 @@ export async function executeForegroundCommand({
       });
     };
 
-    const finalize = (
-      reason: ForegroundExecutionReason,
-      exitCode: number | null,
-      closeSignal: NodeJS.Signals | null,
-      error: Error | null = null,
-    ): void => {
-      if (settled) return;
-      settled = true;
-      if (deadlineTimer) clearTimeout(deadlineTimer);
+    /** Stop observing the child; it either finished or now belongs to a background task. */
+    const detachListeners = (): void => {
+      watchdog?.dispose();
+      disposeExitSettle?.();
       if (cleanupGraceTimer) clearTimeout(cleanupGraceTimer);
       if (abortListenerRegistered) signal.removeEventListener("abort", onAbort);
       if (child && onChildClose) child.off("close", onChildClose);
@@ -267,6 +294,18 @@ export async function executeForegroundCommand({
         child?.stdout?.resume();
         child?.stderr?.resume();
       }
+    };
+
+    const finalize = (
+      reason: ForegroundExecutionReason,
+      exitCode: number | null,
+      closeSignal: NodeJS.Signals | null,
+      error: Error | null = null,
+      extra: { backgroundTaskId?: string; pipesHeldAfterExit?: boolean } = {},
+    ): void => {
+      if (settled) return;
+      settled = true;
+      detachListeners();
       const outputSnapshot = outputTail.snapshot();
       const result: ForegroundCommandExecution = {
         outcome: {
@@ -275,7 +314,7 @@ export async function executeForegroundCommand({
             command,
             cwd,
             startedAt,
-            timeoutMs,
+            timeoutMs: effectiveLimits.hardMs ?? 0,
             pid,
             logPath: foregroundLog.logPath,
           },
@@ -284,6 +323,8 @@ export async function executeForegroundCommand({
           signal: closeSignal,
           elapsedMs: Math.max(0, Date.now() - startedAt),
           error,
+          backgroundTaskId: extra.backgroundTaskId ?? null,
+          pipesHeldAfterExit: extra.pipesHeldAfterExit ?? false,
         },
         rawOutput: outputSnapshot.content,
         outputCapped: outputSnapshot.capped,
@@ -302,15 +343,83 @@ export async function executeForegroundCommand({
       });
     };
 
-    const interrupt = (reason: "timedOut" | "aborted"): void => {
+    const interrupt = (reason: "timedOut" | "aborted" | "inactive"): void => {
       if (settled || terminalIntent !== null) return;
       terminalIntent = "interruption";
       pendingInterruption = reason;
+      watchdog?.dispose();
       const target = currentTarget();
       if (target) startCleanup(target);
       cleanupGraceTimer = setTimeout(() => {
         finalize(reason, null, null);
       }, FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS);
+    };
+
+    /** (Re)arm the stuck-command guard, charging time and silence already spent. */
+    const armWatchdog = (yieldMs: number | null): void => {
+      watchdog?.dispose();
+      const now = Date.now();
+      const { inactivityMs, hardMs } = effectiveLimits;
+      watchdog = createCommandWatchdog({
+        yieldMs,
+        inactivityMs,
+        hardMs: hardMs === null ? null : Math.max(0, hardMs - (now - startedAt)),
+        initialInactivityMs:
+          inactivityMs === null ? undefined : Math.max(0, inactivityMs - (now - lastOutputAt)),
+        onFire: (fire) => {
+          if (fire === "yield") void handOff();
+          else interrupt(fire === "inactive" ? "inactive" : "timedOut");
+        },
+      });
+    };
+
+    /** Move a still-running command to a background task instead of killing it. */
+    const handOff = async (): Promise<void> => {
+      const running = child;
+      if (settled || handingOff || terminalIntent !== null || running === null || pid === null) {
+        return;
+      }
+      handingOff = true;
+      const handedOffPid = pid;
+      try {
+        await processManager.adopt({
+          child: running,
+          pid: handedOffPid,
+          command,
+          startedAt,
+          limits: {
+            inactivityMs: effectiveLimits.inactivityMs,
+            hardMs: effectiveLimits.hardMs,
+            exitSettleMs: effectiveLimits.exitSettleMs,
+          },
+          takeOver: (taskId) => {
+            if (settled || terminalIntent !== null) {
+              throw new Error("Command settled before hand-off");
+            }
+            // finalize detaches every foreground listener synchronously, so
+            // the manager's listeners are the only ones from here on.
+            const seedOutput = outputTail.snapshot().content;
+            finalize("backgrounded", null, null, null, { backgroundTaskId: taskId });
+            log("INFO", "bash", "Foreground command handed off to background task", {
+              taskId,
+              pid: String(handedOffPid),
+              elapsedMs: String(Date.now() - startedAt),
+            });
+            return { seedOutput, lastOutputAt };
+          },
+        });
+      } catch (error) {
+        handingOff = false;
+        if (settled || terminalIntent !== null) return;
+        if (!(error instanceof AdoptExitedError)) {
+          log("WARN", "bash", "Foreground hand-off failed; continuing in foreground", {
+            pid: String(handedOffPid),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        // Fail safe: never kill because a hand-off failed, never drop the guard.
+        armWatchdog(null);
+      }
     };
 
     const onAbort = (): void => interrupt("aborted");
@@ -363,6 +472,8 @@ export async function executeForegroundCommand({
         (state: ForegroundOutputStreamState) =>
         (data: Buffer): void => {
           totalBytes += data.length;
+          lastOutputAt = Date.now();
+          watchdog?.noteActivity();
           if (state.binary) {
             state.binaryBytes += data.length;
             return;
@@ -433,7 +544,32 @@ export async function executeForegroundCommand({
       child.on("close", onChildClose);
       child.on("error", onChildError);
 
-      if (timeoutMs > 0) deadlineTimer = setTimeout(() => interrupt("timedOut"), timeoutMs);
+      // `close` waits for every stdio pipe. A leftover helper that inherited
+      // them (dev server, report server) would hang us after the command itself
+      // exited, so settle on `exit` after a short grace period instead.
+      disposeExitSettle = watchExitSettle({
+        child,
+        settleMs: effectiveLimits.exitSettleMs,
+        onSettled: ({ code, signal: exitSignal, pipesHeld }) => {
+          if (!pipesHeld) return;
+          if (terminalIntent === "interruption") {
+            finalize(pendingInterruption ?? "aborted", code, exitSignal, null, {
+              pipesHeldAfterExit: true,
+            });
+            return;
+          }
+          if (terminalIntent !== null) return;
+          terminalIntent = "completion";
+          log("INFO", "bash", "Command exited while a leftover process held its output", {
+            pid: String(pid ?? "unknown"),
+          });
+          finalize(code === 0 ? "completed" : "nonZeroExit", code, exitSignal, null, {
+            pipesHeldAfterExit: true,
+          });
+        },
+      });
+
+      armWatchdog(pid === null ? null : effectiveLimits.yieldMs);
 
       signal.addEventListener("abort", onAbort, { once: true });
       abortListenerRegistered = true;
@@ -448,6 +584,8 @@ interface PersistentCommandOptions {
   command: string;
   cwd: string;
   timeoutMs: number;
+  /** Stop after this long with no output; 0/omitted = never. */
+  inactivityMs?: number;
   signal: AbortSignal;
   processManager: ProcessManager;
   shell: PersistentShell;
@@ -458,6 +596,7 @@ async function executePersistentCommand({
   command,
   cwd,
   timeoutMs,
+  inactivityMs,
   signal,
   processManager,
   shell,
@@ -465,7 +604,14 @@ async function executePersistentCommand({
 }: PersistentCommandOptions): Promise<ForegroundCommandExecution> {
   const startedAt = Date.now();
   const foregroundLog = await processManager.allocateForegroundLog();
-  const result = await shell.run(command, timeoutMs, signal, onUpdate, foregroundLog);
+  const result = await shell.run(
+    command,
+    timeoutMs,
+    signal,
+    onUpdate,
+    foregroundLog,
+    inactivityMs ?? 0,
+  );
   await foregroundLog.close();
   if (foregroundLog.error) {
     log("WARN", "bash", "Persistent foreground log stream failed", {
@@ -491,6 +637,8 @@ async function executePersistentCommand({
       signal: result.signal,
       elapsedMs: Math.max(0, Date.now() - startedAt),
       error: result.error,
+      backgroundTaskId: null,
+      pipesHeldAfterExit: false,
     },
     rawOutput: result.output,
     outputCapped: result.outputSnapshot.capped,
@@ -539,6 +687,18 @@ async function renderStructuredForegroundResult(
       output;
   }
 
+  if (outcome.reason === "backgrounded" && outcome.backgroundTaskId !== null) {
+    const id = outcome.backgroundTaskId;
+    return {
+      content:
+        `Still running after ${formatDuration(outcome.elapsedMs)} — moved to background task ${id} ` +
+        `(not killed). It is still stopped automatically after a long stretch with no output ` +
+        `or at the hard time limit. Call task_output with id="${id}" and wait_ms; it returns ` +
+        `the moment the command exits. Output so far:\n${output}\n\n${diagnostics}`,
+      details,
+    };
+  }
+
   const exitCode =
     outcome.reason === "completed"
       ? "0"
@@ -546,18 +706,38 @@ async function renderStructuredForegroundResult(
         ? `TIMEOUT (${outcome.metadata.timeoutMs}ms)${
             persistent ? " — session shell was reset; cd/env state is gone" : ""
           }`
-        : outcome.reason === "aborted"
-          ? "ABORTED"
-          : outcome.exitCode !== null
-            ? String(outcome.exitCode)
-            : outcome.signal
-              ? `SIGNAL (${outcome.signal})`
-              : "FAILED (no exit code)";
+        : outcome.reason === "inactive"
+          ? `INACTIVE (stopped after ${formatDuration(outcome.elapsedMs)}: no output for the inactivity limit)${
+              persistent ? " — session shell was reset; cd/env state is gone" : ""
+            }`
+          : outcome.reason === "aborted"
+            ? "ABORTED"
+            : outcome.exitCode !== null
+              ? String(outcome.exitCode)
+              : outcome.signal
+                ? `SIGNAL (${outcome.signal})`
+                : "FAILED (no exit code)";
+
+  const leftoverNote = outcome.pipesHeldAfterExit
+    ? "[The command exited, but a process it started is still running and holding its " +
+      "output. It was left running (it may be an intended server or daemon).]\n"
+    : "";
+  const inactiveHint =
+    outcome.reason === "inactive"
+      ? "[Stopped because it printed nothing for too long. If this step is legitimately " +
+        "silent, raise the bashInactivitySeconds setting instead of retrying as-is.]\n"
+      : "";
 
   return {
-    content: `Exit code: ${exitCode}\n${output}\n\n${diagnostics}`,
+    content: `Exit code: ${exitCode}\n${leftoverNote}${inactiveHint}${output}\n\n${diagnostics}`,
     details,
   };
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 120) return `${seconds}s`;
+  return `${Math.round(seconds / 60)} min`;
 }
 
 const BashParams = z.object({
@@ -568,8 +748,10 @@ const BashParams = z.object({
     .min(1000)
     .optional()
     .describe(
-      "Optional foreground timeout in milliseconds; omit for no deadline (also with persist:true). Finite build, test, lint, " +
-        "format, migration, and one-shot commands wait for completion in foreground.",
+      "Optional hard limit in milliseconds. Usually omit it: long commands are handed off to a " +
+        "background task automatically instead of being killed. Setting it keeps the command in " +
+        "the foreground (no hand-off) until it exits, hits this limit, or produces no output for " +
+        "the inactivity limit.",
     ),
   run_in_background: z
     .boolean()
@@ -629,6 +811,7 @@ export function createBashTool(
   shellOpts?: ResolveShellOpts,
   getNetworkPolicy?: GetNetworkPolicy,
   getSandboxPolicy?: () => SandboxPolicy,
+  getForegroundLimitSettings?: () => ForegroundLimitSettings,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), owned by the shared process manager.
@@ -648,8 +831,7 @@ export function createBashTool(
       "Returns exit code and combined stdout/stderr. " +
       "Use cmd.exe syntax (dir, findstr, type, del); POSIX commands and bash syntax " +
       "(ls, grep, cat, &&-chains relying on bash semantics, $(...), single-quoting) will fail. " +
-      "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
-      "for final status without a deadline unless timeout is explicitly set. Let builds finish; do not invent a time limit. Long output is truncated (tail kept). " +
+      FOREGROUND_LIMITS_DESCRIPTION +
       "Set run_in_background=true for long-lived or interactive commands " +
       "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
       "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
@@ -662,8 +844,7 @@ export function createBashTool(
       "Pipelines run with pipefail — a piped command reports the failing stage's exit " +
       "code, so piping tests through tail/head cannot mask a failure. " +
       "Commands run in a non-interactive bash shell with TERM=dumb. " +
-      "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
-      "for final status without a deadline unless timeout is explicitly set. Let builds finish; do not invent a time limit. Long output is truncated (tail kept). " +
+      FOREGROUND_LIMITS_DESCRIPTION +
       "Set run_in_background=true for long-lived or interactive commands " +
       "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
       "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
@@ -686,7 +867,8 @@ export function createBashTool(
       "Do not use silence as readiness; healthy servers normally go quiet.",
     parameters: BashParams,
     executionMode: "sequential",
-    // Bash owns optional per-command deadlines; the loop must not preempt them.
+    // Bash owns its limits (yield hand-off, inactivity, hard backstop); the
+    // loop must not preempt them.
     timeoutMs: 0,
     async execute({ command, timeout: timeoutMs, run_in_background, persist, wake }, context) {
       const commandMode = run_in_background === true ? "background" : "foreground";
@@ -785,11 +967,18 @@ export function createBashTool(
             return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
           }
         }
-        const effectiveTimeout = timeoutMs ?? NO_DEADLINE;
+        const persistentLimits = resolveForegroundLimits({
+          explicitTimeoutMs: timeoutMs,
+          settings: getForegroundLimitSettings?.() ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS,
+          platform: process.platform,
+          mode: "persistent",
+          canHandOff: false,
+        });
         const execution = await executePersistentCommand({
           command,
           cwd,
-          timeoutMs: effectiveTimeout,
+          timeoutMs: persistentLimits.hardMs ?? NO_DEADLINE,
+          inactivityMs: persistentLimits.inactivityMs ?? 0,
           signal: context.signal,
           processManager,
           shell: sessionShell,
@@ -834,7 +1023,13 @@ export function createBashTool(
         );
       }
 
-      const effectiveTimeout = timeoutMs ?? NO_DEADLINE;
+      const limits = resolveForegroundLimits({
+        explicitTimeoutMs: timeoutMs,
+        settings: getForegroundLimitSettings?.() ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS,
+        platform: process.platform,
+        mode: "spawn",
+        canHandOff: true,
+      });
       const shell = resolveShell(command, shellOpts);
       let launch: SandboxLaunch;
       try {
@@ -846,7 +1041,8 @@ export function createBashTool(
       const execution = await executeForegroundCommand({
         command,
         cwd,
-        timeoutMs: effectiveTimeout,
+        timeoutMs: limits.hardMs ?? NO_DEADLINE,
+        limits,
         signal: context.signal,
         ops,
         processManager,

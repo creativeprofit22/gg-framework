@@ -21,7 +21,7 @@ import {
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
-import { ensureAppDirs, loadSavedSettings } from "./config.js";
+import { ensureAppDirs, foregroundLimitSettingsFrom, loadSavedSettings } from "./config.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -55,6 +55,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     provider,
     model,
     authStorage,
+    getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
   });
   const systemPrompt =
     config.systemPrompt ??

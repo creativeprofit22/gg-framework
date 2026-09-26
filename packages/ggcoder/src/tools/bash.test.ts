@@ -3,7 +3,9 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBashTool, renderBashOutput } from "./bash.js";
+import { createBashTool, executeForegroundCommand, renderBashOutput } from "./bash.js";
+import type { ForegroundLimits } from "./foreground-limits.js";
+import { createTaskOutputTool } from "./task-output.js";
 import { getToolOutputRoot } from "./overflow.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { AgentNotificationQueue } from "../core/agent-notifications.js";
@@ -485,4 +487,179 @@ describe("guessed-sleep guard", () => {
     expect(String(result)).not.toContain("wait_ms");
     processManager.shutdownAll();
   });
+});
+
+describe("foreground limits: hand-off, inactivity and held pipes", () => {
+  /** Script file run with node through the real shell; avoids cross-shell quoting. */
+  async function nodeScript(name: string, source: string): Promise<string> {
+    const file = path.join(tmpHome, `${name}.cjs`);
+    await fs.writeFile(file, source);
+    return `node "${file.split(path.sep).join("/")}"`;
+  }
+
+  async function foreground(
+    processManager: ProcessManager,
+    command: string,
+    limits: ForegroundLimits,
+  ): ReturnType<typeof executeForegroundCommand> {
+    return await executeForegroundCommand({
+      command,
+      cwd: tmpHome,
+      timeoutMs: 0,
+      limits,
+      signal: new AbortController().signal,
+      ops: localOperations,
+      processManager,
+    });
+  }
+
+  function waitFor(tool: ReturnType<typeof createTaskOutputTool>, id: string) {
+    return tool.execute(
+      { id, wait_ms: 15_000, from_start: true },
+      { signal: new AbortController().signal, toolCallId: "wait" },
+    );
+  }
+
+  it("hands a silent command to the background, where the inactivity guard stops it", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "silent",
+      "console.log('ready'); setTimeout(() => {}, 60000);",
+    );
+
+    const { outcome, rawOutput } = await foreground(processManager, command, {
+      yieldMs: 500,
+      inactivityMs: 2_500,
+      hardMs: null,
+      exitSettleMs: 500,
+    });
+
+    expect(outcome.reason).toBe("backgrounded");
+    expect(outcome.backgroundTaskId).toEqual(expect.any(String));
+    expect(rawOutput).toContain("ready");
+    const id = outcome.backgroundTaskId ?? "";
+    const waitStarted = Date.now();
+    const result = outputText(await waitFor(createTaskOutputTool(processManager), id));
+    expect(Date.now() - waitStarted).toBeLessThan(10_000);
+    expect(result).toMatch(
+      /exited \(.*\) — stopped: no output for the inactivity limit \(inactive\)/,
+    );
+    expect(result).toContain("ready");
+    await shutdownAndWait(processManager);
+  }, 30_000);
+
+  it("a chatty command past the yield is backgrounded and the wait returns right after exit", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "chatty",
+      "let n = 0; const t = setInterval(() => { console.log('tick ' + n); if (++n === 15) { clearInterval(t); } }, 150);",
+    );
+
+    const { outcome } = await foreground(processManager, command, {
+      yieldMs: 500,
+      inactivityMs: 5_000,
+      hardMs: null,
+      exitSettleMs: 500,
+    });
+
+    expect(outcome.reason).toBe("backgrounded");
+    const waitStarted = Date.now();
+    const result = outputText(
+      await waitFor(createTaskOutputTool(processManager), outcome.backgroundTaskId ?? ""),
+    );
+    expect(Date.now() - waitStarted).toBeLessThan(8_000);
+    expect(result).toMatch(/exited \(code 0/);
+    expect(result).not.toContain("stopped:");
+    expect(result).toContain("tick 14");
+    await shutdownAndWait(processManager);
+  }, 30_000);
+
+  it("stops a silent command in the foreground when hand-off is disabled", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript("stuck", "setTimeout(() => {}, 60000);");
+    const started = Date.now();
+
+    const { outcome } = await foreground(processManager, command, {
+      yieldMs: null,
+      inactivityMs: 800,
+      hardMs: null,
+      exitSettleMs: 500,
+    });
+
+    expect(outcome.reason).toBe("inactive");
+    expect(Date.now() - started).toBeLessThan(8_000);
+    if (outcome.metadata.pid !== null) {
+      await expect.poll(() => isProcessAlive(outcome.metadata.pid ?? 0)).toBe(false);
+    }
+    await shutdownAndWait(processManager);
+  }, 20_000);
+
+  it("returns promptly when a leftover process still holds the output pipes", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "holder",
+      [
+        "const { spawn } = require('node:child_process');",
+        "const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 12000)'], { detached: true, stdio: 'inherit' });",
+        "holder.unref();",
+        "process.stdout.write('holder:' + holder.pid + '\\n', () => process.exit(0));",
+      ].join("\n"),
+    );
+    const started = Date.now();
+
+    const { outcome, rawOutput } = await foreground(processManager, command, {
+      yieldMs: null,
+      inactivityMs: null,
+      hardMs: null,
+      exitSettleMs: 1_000,
+    });
+
+    const holderPid = Number(/holder:(\d+)/.exec(rawOutput)?.[1]);
+    try {
+      expect(outcome).toMatchObject({ reason: "completed", exitCode: 0, pipesHeldAfterExit: true });
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      if (holderPid > 0) {
+        try {
+          process.kill(holderPid);
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+    await shutdownAndWait(processManager);
+  }, 20_000);
+
+  it("renders the hand-off through the bash tool with the task ID", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "slow",
+      "console.log('start'); setTimeout(() => console.log('end'), 12500);",
+    );
+    const tool = createBashTool(
+      tmpHome,
+      processManager,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => ({ yieldSeconds: 1, inactivitySeconds: 60, hardLimitMinutes: 5 }),
+    );
+
+    const result = await tool.execute(
+      { command },
+      { signal: new AbortController().signal, toolCallId: "handoff" },
+    );
+
+    const text = outputText(result);
+    const id = /moved to background task (\S+)/.exec(text)?.[1] ?? "";
+    expect(id).not.toBe("");
+    expect(text).toContain(`task_output with id="${id}"`);
+    expect(text).toContain("start");
+    const waited = outputText(await waitFor(createTaskOutputTool(processManager), id));
+    expect(waited).toMatch(/exited \(code 0/);
+    expect(waited).toContain("end");
+    await shutdownAndWait(processManager);
+  }, 40_000);
 });

@@ -32,6 +32,16 @@ export interface VerificationEvidence {
   reason: string;
 }
 
+/** Foreground reasons that are final outcomes (`backgrounded` is not: it is still running). */
+const TERMINAL_SHELL_REASONS: readonly string[] = [
+  "completed",
+  "nonZeroExit",
+  "spawnError",
+  "timedOut",
+  "inactive",
+  "aborted",
+];
+
 const LONG_RUNNING_FLAGS = new Set([
   "--watch",
   "--watchall",
@@ -665,6 +675,45 @@ interface BashExecutionDiagnostics {
   elapsedMs?: unknown;
   timeoutMs?: unknown;
   logPath?: unknown;
+  backgroundTaskId?: unknown;
+}
+
+interface BackgroundTaskOutputDetails {
+  id?: unknown;
+  isRunning?: unknown;
+  exitCode?: unknown;
+  signal?: unknown;
+  completedAt?: unknown;
+  stopReason?: unknown;
+}
+
+/** Map a finished background task onto the same outcome vocabulary as foreground bash. */
+function backgroundTerminalOutcome(task: BackgroundTaskOutputDetails): {
+  status: RoadmapShellEvidence["status"];
+  reason: string;
+  terminalReason?: string;
+} {
+  if (task.stopReason === "inactive") {
+    return { status: "failed", reason: "stopped after no output", terminalReason: "inactive" };
+  }
+  if (task.stopReason === "timedOut") {
+    return { status: "failed", reason: "timed out", terminalReason: "timedOut" };
+  }
+  if (task.stopReason === null && task.exitCode === 0) {
+    return {
+      status: "passed",
+      reason: "command exited successfully; requirement coverage is not certified",
+      terminalReason: "completed",
+    };
+  }
+  if (typeof task.exitCode === "number" && Number.isInteger(task.exitCode) && task.exitCode !== 0) {
+    return {
+      status: "failed",
+      reason: `failed (exit ${task.exitCode})`,
+      terminalReason: "nonZeroExit",
+    };
+  }
+  return { status: "unavailable", reason: "background task ended without an exit code" };
 }
 
 // simplification: Retain 100 executions; persist per-phase evidence if deeper history is required.
@@ -681,6 +730,8 @@ export class SessionVerificationEvidenceLedger {
     string,
     { generation: number; run: number; evidence: RoadmapShellEvidence }
   >();
+  /** Background task ID → execution ID of a check handed off by the soft yield. */
+  private readonly pendingBackground = new Map<string, string>();
 
   get runId(): number {
     return this.run;
@@ -693,7 +744,11 @@ export class SessionVerificationEvidenceLedger {
   }
 
   runActivity(): { changed: boolean; checked: boolean; evidence: VerificationEvidence[] } {
-    return { changed: this.runChanged, checked: this.runChecked, evidence: this.activityEvidence(this.run) };
+    return {
+      changed: this.runChanged,
+      checked: this.runChecked,
+      evidence: this.activityEvidence(this.run),
+    };
   }
 
   workspaceEvidence(): VerificationEvidence[] {
@@ -709,8 +764,19 @@ export class SessionVerificationEvidenceLedger {
       const current = entry.generation === this.generation;
       evidence.set(entry.evidence.command, {
         command: entry.evidence.command,
-        status: entry.evidence.status === "failed" && classification.accepted ? "failed" : !current || !classification.accepted ? "rejected" : entry.evidence.status === "unclassified" ? "unavailable" : entry.evidence.status,
-        reason: !current ? "Superseded by a later workspace mutation" : !classification.accepted ? classification.reason : entry.evidence.reason,
+        status:
+          entry.evidence.status === "failed" && classification.accepted
+            ? "failed"
+            : !current || !classification.accepted
+              ? "rejected"
+              : entry.evidence.status === "unclassified"
+                ? "unavailable"
+                : entry.evidence.status,
+        reason: !current
+          ? "Superseded by a later workspace mutation"
+          : !classification.accepted
+            ? classification.reason
+            : entry.evidence.reason,
       });
     }
     return [...evidence.values()];
@@ -736,13 +802,22 @@ export class SessionVerificationEvidenceLedger {
       this.generation += 1;
       if (run === this.run) this.runChanged = true;
     }
-    if (input.name !== "bash") return;
-    if (run === this.run && classifyVerificationCommand(String(input.args.command ?? "")).candidate) {
-      this.runChecked = true;
+    if (input.name === "task_output") {
+      this.recordBackgroundCompletion(input.details);
+      return;
     }
+    if (input.name !== "bash") return;
 
     const details = input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined;
     const diagnostics = details?.bashDiagnostics;
+    // A handed-off check counts as run only once its terminal result is recorded.
+    if (
+      run === this.run &&
+      diagnostics?.reason !== "backgrounded" &&
+      classifyVerificationCommand(String(input.args.command ?? "")).candidate
+    ) {
+      this.runChecked = true;
+    }
     const executionId =
       typeof diagnostics?.executionId === "string" ? diagnostics.executionId.trim() : "";
     const command = typeof diagnostics?.command === "string" ? diagnostics.command.trim() : "";
@@ -764,7 +839,15 @@ export class SessionVerificationEvidenceLedger {
 
     const background = input.args.run_in_background === true || input.args.persist === true;
     let evidence: RoadmapShellEvidence;
-    if (background) {
+    if (diagnostics?.reason === "backgrounded") {
+      // Still running when the soft limit handed it to a background task: the
+      // result in this response is not the command's outcome.
+      evidence = {
+        command,
+        status: "unavailable",
+        reason: "handed off to background; final outcome not in this response",
+      };
+    } else if (background) {
       evidence = {
         command,
         status: "unavailable",
@@ -777,9 +860,7 @@ export class SessionVerificationEvidenceLedger {
         command,
         status: passed
           ? "passed"
-          : ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
-                String(diagnostics?.reason),
-              )
+          : TERMINAL_SHELL_REASONS.includes(String(diagnostics?.reason))
             ? "failed"
             : "unavailable",
         reason: passed
@@ -788,17 +869,19 @@ export class SessionVerificationEvidenceLedger {
             ? "launch failed"
             : diagnostics?.reason === "timedOut"
               ? "timed out"
-              : diagnostics?.reason === "aborted"
-                ? "cancelled"
-                : typeof diagnostics?.exitCode === "number" &&
-                    Number.isInteger(diagnostics.exitCode) &&
-                    diagnostics.exitCode !== 0
-                  ? `failed (exit ${diagnostics.exitCode})`
-                  : diagnostics?.reason === "nonZeroExit"
-                    ? "failed (no numeric exit code)"
-                    : diagnostics?.reason === "completed"
-                      ? "inconsistent completion metadata"
-                      : "execution outcome unavailable",
+              : diagnostics?.reason === "inactive"
+                ? "stopped after no output"
+                : diagnostics?.reason === "aborted"
+                  ? "cancelled"
+                  : typeof diagnostics?.exitCode === "number" &&
+                      Number.isInteger(diagnostics.exitCode) &&
+                      diagnostics.exitCode !== 0
+                    ? `failed (exit ${diagnostics.exitCode})`
+                    : diagnostics?.reason === "nonZeroExit"
+                      ? "failed (no numeric exit code)"
+                      : diagnostics?.reason === "completed"
+                        ? "inconsistent completion metadata"
+                        : "execution outcome unavailable",
       };
     }
     Object.assign(evidence, {
@@ -807,11 +890,7 @@ export class SessionVerificationEvidenceLedger {
       cwd,
       safeToolEnvironmentDigest: safeToolEnvironmentDigest(),
     });
-    if (
-      ["completed", "nonZeroExit", "spawnError", "timedOut", "aborted"].includes(
-        String(diagnostics?.reason),
-      )
-    ) {
+    if (TERMINAL_SHELL_REASONS.includes(String(diagnostics?.reason))) {
       evidence.terminalReason = String(diagnostics?.reason);
     }
     if (
@@ -848,10 +927,68 @@ export class SessionVerificationEvidenceLedger {
       run,
       evidence,
     });
+    const backgroundTaskId =
+      typeof diagnostics?.backgroundTaskId === "string" ? diagnostics.backgroundTaskId : "";
+    if (diagnostics?.reason === "backgrounded" && backgroundTaskId) {
+      this.pendingBackground.set(backgroundTaskId, executionId);
+    }
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       const oldestExecutionId = this.entries.keys().next().value;
       if (oldestExecutionId === undefined) break;
       this.entries.delete(oldestExecutionId);
+    }
+    while (this.pendingBackground.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
+      const oldestTaskId = this.pendingBackground.keys().next().value;
+      if (oldestTaskId === undefined) break;
+      this.pendingBackground.delete(oldestTaskId);
+    }
+  }
+
+  /** Upgrade a handed-off check once task_output reports its terminal state. */
+  private recordBackgroundCompletion(details: unknown): void {
+    const task = (details as { taskOutput?: BackgroundTaskOutputDetails } | undefined)
+      ?.taskOutput;
+    if (!task || typeof task.id !== "string" || task.isRunning !== false) return;
+    const executionId = this.pendingBackground.get(task.id);
+    if (executionId === undefined) return;
+    this.pendingBackground.delete(task.id);
+    const entry = this.entries.get(executionId);
+    // Evicted, or the workspace changed after the command started: leave it stale.
+    if (!entry || entry.generation !== this.generation) return;
+
+    const outcome = backgroundTerminalOutcome(task);
+    const evidence: RoadmapShellEvidence = {
+      ...entry.evidence,
+      status: outcome.status,
+      reason: outcome.reason,
+    };
+    if (outcome.terminalReason) evidence.terminalReason = outcome.terminalReason;
+    if (
+      task.exitCode === null ||
+      (typeof task.exitCode === "number" && Number.isSafeInteger(task.exitCode))
+    ) {
+      evidence.exitCode = task.exitCode;
+    }
+    if (
+      task.signal === null ||
+      (typeof task.signal === "string" && /^SIG[A-Z0-9]{1,20}$/.test(task.signal))
+    ) {
+      evidence.signal = task.signal;
+    }
+    const startedAt = evidence.observedAt ? Date.parse(evidence.observedAt) : NaN;
+    if (
+      typeof task.completedAt === "number" &&
+      Number.isFinite(startedAt) &&
+      task.completedAt >= startedAt
+    ) {
+      evidence.elapsedMs = task.completedAt - startedAt;
+    }
+    entry.evidence = evidence;
+    if (
+      entry.run === this.run &&
+      classifyVerificationCommand(entry.evidence.command).candidate
+    ) {
+      this.runChecked = true;
     }
   }
 
@@ -870,6 +1007,7 @@ export class SessionVerificationEvidenceLedger {
     this.generation = 0;
     this.beginRun();
     this.entries.clear();
+    this.pendingBackground.clear();
   }
 }
 

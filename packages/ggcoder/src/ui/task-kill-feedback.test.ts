@@ -21,6 +21,7 @@ describe("background task kill feedback", () => {
       signal: "SIGTERM",
       lastReadOffset: 0,
       logSize: 0,
+      stopReason: null,
       isRunning: false,
     };
 
@@ -37,6 +38,30 @@ describe("background task kill feedback", () => {
         signal: null,
       }),
     ).toBe("completion pending");
+  });
+
+  it.each([
+    ["inactive", "stopped: no output"],
+    ["timedOut", "stopped: time limit"],
+    [null, "signal SIGTERM"],
+  ] as const)("formats manager stop reason %s as %s", (stopReason, expected) => {
+    const task: BackgroundTaskSnapshot = {
+      id: "bg-1",
+      pid: 123,
+      command: "fixture",
+      logFile: "fixture.log",
+      startedAt: 1,
+      completedAt: 2,
+      exitCode: null,
+      signal: "SIGTERM",
+      lastReadOffset: 0,
+      logSize: 0,
+      stopReason,
+      isRunning: false,
+    };
+
+    expect(formatBackgroundTaskStatus(task)).toBe(expected);
+    expect(formatBackgroundTaskStatus({ ...task, isRunning: true })).toBe("running");
   });
 
   it("returns and awaits ProcessManager.stop before the result reaches the UI", async () => {

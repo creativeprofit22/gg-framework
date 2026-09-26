@@ -190,6 +190,18 @@ function inlineSummary(name: string, result: string, details: unknown): string {
       return added > 0 || removed > 0 ? `+${added} \u2212${removed}` : "";
     }
     case "bash": {
+      // Structured daemon diagnostics say what happened even when the text has
+      // no "Exit code:" line (a handed-off command is still running).
+      const diag = (
+        details as
+          | { bashDiagnostics?: { reason?: unknown; backgroundTaskId?: unknown } }
+          | undefined
+      )?.bashDiagnostics;
+      if (diag?.reason === "backgrounded") {
+        const id = typeof diag.backgroundTaskId === "string" ? diag.backgroundTaskId : "";
+        return id ? `moved to background ${shorten(id, 16)}` : "moved to background";
+      }
+      if (diag?.reason === "inactive") return "stopped: no output";
       const exit = result.match(/Exit code: (\S+)/)?.[1];
       return exit ? `exit ${exit}` : "";
     }

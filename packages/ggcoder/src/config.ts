@@ -5,6 +5,10 @@ import { createHash } from "node:crypto";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getAppPaths, type AppPaths } from "@kenkaiiii/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
+import {
+  DEFAULT_FOREGROUND_LIMIT_SETTINGS,
+  type ForegroundLimitSettings,
+} from "./tools/foreground-limits.js";
 
 export const APP_NAME = "ggcoder";
 export const VERSION = "0.0.1";
@@ -51,6 +55,12 @@ export interface SavedSettings {
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
   sessionRetentionDays: number;
+  /** Seconds before a foreground bash command moves to the background; 0 disables. */
+  bashYieldSeconds?: number;
+  /** Seconds without output before a bash command is stopped; 0 disables. */
+  bashInactivitySeconds?: number;
+  /** Minutes before a bash command is stopped regardless of output; 0 disables. */
+  bashHardLimitMinutes?: number;
   /** Speed optimization profile.
    *  - "baseline": current defaults (5-min cache TTL, no pre-warm)
    *  - "optimized": 1-h cache TTL, cache pre-warming on first prompt
@@ -77,6 +87,23 @@ const VALID_PROVIDERS = new Set<Provider>([
 
 function isValidProvider(value: unknown): value is Provider {
   return typeof value === "string" && VALID_PROVIDERS.has(value as Provider);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/** Bash foreground limits from saved settings, falling back per field to the tool defaults. */
+export function foregroundLimitSettingsFrom(
+  saved: Pick<SavedSettings, "bashYieldSeconds" | "bashInactivitySeconds" | "bashHardLimitMinutes">,
+): ForegroundLimitSettings {
+  return {
+    yieldSeconds: saved.bashYieldSeconds ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS.yieldSeconds,
+    inactivitySeconds:
+      saved.bashInactivitySeconds ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS.inactivitySeconds,
+    hardLimitMinutes:
+      saved.bashHardLimitMinutes ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS.hardLimitMinutes,
+  };
 }
 
 /** Load saved settings from the settings file. Returns defaults on missing/invalid file. */
@@ -135,6 +162,11 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     ) {
       result.sessionRetentionDays = raw.sessionRetentionDays;
     }
+    if (isNonNegativeInteger(raw.bashYieldSeconds)) result.bashYieldSeconds = raw.bashYieldSeconds;
+    if (isNonNegativeInteger(raw.bashInactivitySeconds))
+      result.bashInactivitySeconds = raw.bashInactivitySeconds;
+    if (isNonNegativeInteger(raw.bashHardLimitMinutes))
+      result.bashHardLimitMinutes = raw.bashHardLimitMinutes;
     if (raw.speedProfile === "optimized" || raw.speedProfile === "baseline") {
       result.speedProfile = raw.speedProfile;
     }

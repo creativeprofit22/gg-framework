@@ -11,6 +11,9 @@ import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
 import { SANDBOX_ENV_PATCH, type SandboxLaunch } from "./sandbox.js";
 import type { AgentNotificationQueue } from "./agent-notifications.js";
+import { createCommandWatchdog, type CommandWatchdog } from "./command-watchdog.js";
+import { watchExitSettle } from "../tools/exit-settle.js";
+import { log } from "./logger.js";
 
 export interface BackgroundProcess {
   id: string;
@@ -26,7 +29,12 @@ export interface BackgroundProcess {
   wakeReason?: "pattern" | "silence";
   /** Last observed retained-log size, used by completion gates and notifications. */
   logSize: number;
+  /** Why the manager stopped an adopted command on its own; null otherwise. */
+  stopReason: BackgroundStopReason | null;
 }
+
+/** Automatic stop of an adopted command: no output for too long, or hard limit. */
+export type BackgroundStopReason = "inactive" | "timedOut";
 
 /** Serializable process state shared by orchestration and task-status surfaces. */
 export interface BackgroundTaskSnapshot extends BackgroundProcess {
@@ -42,6 +50,42 @@ export interface StartResult {
   wakeArmed: boolean;
 }
 
+/** Limits that keep guarding a foreground command after it is handed off. */
+export interface AdoptedCommandLimits {
+  inactivityMs: number | null;
+  hardMs: number | null;
+  exitSettleMs: number;
+}
+
+export interface AdoptOptions {
+  child: ChildProcess;
+  pid: number;
+  command: string;
+  /** When the foreground command started; the hard limit keeps counting from here. */
+  startedAt: number;
+  limits: AdoptedCommandLimits;
+  /**
+   * Called synchronously right before the manager attaches to the child's
+   * output. The caller detaches its own listeners and returns the output so
+   * far plus when output was last seen (the silence clock carries over).
+   */
+  takeOver: (id: string) => { seedOutput: string; lastOutputAt: number };
+}
+
+/** The child already exited; the caller should settle it in the foreground. */
+export class AdoptExitedError extends Error {
+  constructor() {
+    super("Command exited before it could be handed off");
+    this.name = "AdoptExitedError";
+  }
+}
+
+export function describeStopReason(reason: BackgroundStopReason): string {
+  return reason === "inactive"
+    ? "stopped: no output for the inactivity limit (inactive)"
+    : "stopped: hard time limit reached (timedOut)";
+}
+
 export interface ReadOutputResult {
   id: string;
   isRunning: boolean;
@@ -54,6 +98,7 @@ export interface ReadOutputResult {
   skippedBytes: number;
   remainingBytes: number;
   logFile: string | null;
+  stopReason: BackgroundStopReason | null;
 }
 
 const BG_DIR = path.join(os.homedir(), ".gg", "bg");
@@ -224,6 +269,8 @@ export class ProcessManager {
   private wakeStates = new Map<string, WakeState>();
   /** Log size at the last emitted checkpoint, so a quiet process stays quiet. */
   private watchedSizes = new Map<string, number>();
+  /** Stuck-command guards for adopted (handed-off foreground) tasks only. */
+  private commandWatchdogs = new Map<string, CommandWatchdog>();
   private readonly lifecycle: ProcessLifecycleAdapter;
   private readonly createLogStream: (logFile: string) => Writable;
   private readonly options: ProcessManagerOptions;
@@ -340,9 +387,9 @@ export class ProcessManager {
     void (async () => {
       const size = proc.logSize;
       const tail = size > 0 ? await this.readTail(proc.logFile, size) : "";
-      const terminalStatus = proc.signal
-        ? `signal ${proc.signal}`
-        : `code ${proc.exitCode ?? "unknown"}`;
+      const terminalStatus =
+        (proc.signal ? `signal ${proc.signal}` : `code ${proc.exitCode ?? "unknown"}`) +
+        (proc.stopReason ? ` (${describeStopReason(proc.stopReason)})` : "");
       queue.enqueue(
         "process",
         proc.id,
@@ -515,6 +562,15 @@ export class ProcessManager {
     return [...this.watchers.keys()];
   }
 
+  private disposeCommandWatchdog(id: string): void {
+    this.commandWatchdogs.get(id)?.dispose();
+    this.commandWatchdogs.delete(id);
+  }
+
+  activeCommandWatchdogs(): string[] {
+    return [...this.commandWatchdogs.keys()];
+  }
+
   async allocateForegroundLog(): Promise<ForegroundLogHandle> {
     this.pruneExpiredRecords();
     await this.sweepStaleLogs();
@@ -616,13 +672,12 @@ export class ProcessManager {
     };
   }
 
-  async start(
-    command: string,
-    cwd: string,
-    launch?: SandboxLaunch,
-    wake?: WakeRules,
-  ): Promise<StartResult> {
-    if (this.closing) throw new Error("Process manager is shutting down");
+  /** Reserve a unique background task ID and open its retained log stream. */
+  private async openBackgroundLog(): Promise<{
+    id: string;
+    logFile: string;
+    logStream: Writable;
+  }> {
     this.pruneExpiredRecords();
     await this.sweepStaleLogs();
     const backgroundLogRoot = this.options.backgroundLogRoot ?? BG_DIR;
@@ -648,6 +703,114 @@ export class ProcessManager {
     logStream.once("finish", markLogClosed);
     logStream.once("close", markLogClosed);
     logStream.once("error", markLogClosed);
+    return { id, logFile, logStream };
+  }
+
+  /**
+   * Install the native-close completion bookkeeping for a background child.
+   * `register` publishes the task once its PID is known; a close before that
+   * reports through `onEarlyClose`.
+   */
+  private trackChild(options: {
+    id: string;
+    child: ChildProcess;
+    command: string;
+    logFile: string;
+    logStream: Writable;
+    onEarlyClose: () => void;
+  }): { register(pid: number, startedAt: number): BackgroundProcess; endLog(): void } {
+    const { id, child, command, logFile, logStream } = options;
+    let settleNativeClose!: () => void;
+    const nativeClose = new Promise<void>((resolveNativeClose) => {
+      settleNativeClose = resolveNativeClose;
+    });
+    let proc: BackgroundProcess | undefined;
+    let logEnded = false;
+    let settleCompletion!: () => void;
+    const completion = new Promise<void>((resolveCompletion) => {
+      settleCompletion = resolveCompletion;
+    });
+    let settleLogFlush!: () => void;
+    const logFlushed = new Promise<void>((resolveFlush) => {
+      settleLogFlush = resolveFlush;
+    });
+    logStream.once("finish", settleLogFlush);
+    logStream.once("close", settleLogFlush);
+    logStream.once("error", settleLogFlush);
+
+    const endLog = (): void => {
+      if (logEnded) return;
+      logEnded = true;
+      logStream.end();
+    };
+
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      settleNativeClose();
+      endLog();
+      if (!proc) {
+        options.onEarlyClose();
+        return;
+      }
+
+      const completedProcess = proc;
+      const completedPid = proc.pid;
+      this.children.delete(id);
+      this.disposeWatcher(id);
+      this.disposeCommandWatchdog(id);
+      void logFlushed.then(async () => {
+        // Preserve native child semantics: signal exits have no numeric code.
+        // Consumers use the explicit snapshot isRunning field for liveness.
+        completedProcess.exitCode = code;
+        completedProcess.signal = signal;
+        completedProcess.completedAt = this.now();
+        await this.refreshLogSize(completedProcess);
+        this.scheduleRecordExpiry(id, completedProcess.completedAt);
+        try {
+          if (!this.closing) this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
+        } catch {
+          // Completion is authoritative; wrapper reaping remains best-effort.
+        }
+        if (!this.closing) this.notifyExit(completedProcess);
+        settleCompletion();
+      });
+    };
+    child.on("close", onClose);
+
+    return {
+      endLog,
+      register: (pid, startedAt) => {
+        proc = {
+          id,
+          pid,
+          command,
+          logFile,
+          startedAt,
+          completedAt: null,
+          exitCode: null,
+          signal: null,
+          lastReadOffset: null,
+          logSize: 0,
+          stopReason: null,
+        };
+        this.processes.set(id, proc);
+        this.children.set(id, child);
+        this.completions.set(id, completion);
+        this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
+        child.unref();
+        if (!this.closing) this.armWatcher(proc);
+        return proc;
+      },
+    };
+  }
+
+  async start(
+    command: string,
+    cwd: string,
+    launch?: SandboxLaunch,
+    wake?: WakeRules,
+  ): Promise<StartResult> {
+    if (this.closing) throw new Error("Process manager is shutting down");
+    const { id, logFile, logStream } = await this.openBackgroundLog();
 
     const shell = launch ?? resolveShell(command);
     const environment = launch?.sandboxed
@@ -673,105 +836,42 @@ export class ProcessManager {
     child.stderr?.pipe(logStream, { end: false });
     child.stdin?.on("error", () => {});
 
-    let settleNativeClose!: () => void;
-    const nativeClose = new Promise<void>((resolveNativeClose) => {
-      settleNativeClose = resolveNativeClose;
-    });
-
     const startup = new Promise<StartResult>((resolve, reject) => {
       let startupSettled = false;
-      let proc: BackgroundProcess | undefined;
-      let pid: number | undefined;
-      let logEnded = false;
-      let settleCompletion!: () => void;
-      const completion = new Promise<void>((resolveCompletion) => {
-        settleCompletion = resolveCompletion;
+      const tracking = this.trackChild({
+        id,
+        child,
+        command,
+        logFile,
+        logStream,
+        onEarlyClose: () => {
+          if (!startupSettled) {
+            startupSettled = true;
+            reject(new Error("Background process closed before startup completed"));
+          }
+        },
       });
-      let settleLogFlush!: () => void;
-      const logFlushed = new Promise<void>((resolveFlush) => {
-        settleLogFlush = resolveFlush;
-      });
-      logStream.once("finish", settleLogFlush);
-      logStream.once("close", settleLogFlush);
-      logStream.once("error", settleLogFlush);
-
-      const endLog = (): void => {
-        if (logEnded) return;
-        logEnded = true;
-        logStream.end();
-      };
 
       const onError = (error: Error): void => {
         if (startupSettled) return;
         startupSettled = true;
-        endLog();
+        tracking.endLog();
         reject(error);
         // Keep this listener installed: ChildProcess may emit another error later,
         // and an unhandled error event must never crash the agent host.
       };
 
-      const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
-        settleNativeClose();
-        endLog();
-        if (!proc || pid === undefined) {
-          if (!startupSettled) {
-            startupSettled = true;
-            reject(new Error("Background process closed before startup completed"));
-          }
-          return;
-        }
-
-        const completedProcess = proc;
-        const completedPid = pid;
-        this.children.delete(id);
-        this.disposeWatcher(id);
-        void logFlushed.then(async () => {
-          // Preserve native child semantics: signal exits have no numeric code.
-          // Consumers use the explicit snapshot isRunning field for liveness.
-          completedProcess.exitCode = code;
-          completedProcess.signal = signal;
-          completedProcess.completedAt = this.now();
-          await this.refreshLogSize(completedProcess);
-          this.scheduleRecordExpiry(id, completedProcess.completedAt);
-          try {
-            if (!this.closing)
-              this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
-          } catch {
-            // Completion is authoritative; wrapper reaping remains best-effort.
-          }
-          if (!this.closing) this.notifyExit(completedProcess);
-          settleCompletion();
-        });
-      };
-
       const onSpawn = (): void => {
         if (startupSettled) return;
-        pid = child.pid;
+        const pid = child.pid;
         if (pid === undefined) {
           startupSettled = true;
-          endLog();
+          tracking.endLog();
           reject(new Error("Background process did not provide a PID"));
           return;
         }
 
-        proc = {
-          id,
-          pid,
-          command,
-          logFile,
-          startedAt: this.now(),
-          completedAt: null,
-          exitCode: null,
-          signal: null,
-          lastReadOffset: null,
-          logSize: 0,
-        };
-        this.processes.set(id, proc);
-        this.children.set(id, child);
-        this.completions.set(id, completion);
-        this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
-        child.unref();
-        if (!this.closing) this.armWatcher(proc);
+        const proc = tracking.register(pid, this.now());
         const shouldArmWake =
           !this.closing && (wake?.pattern !== undefined || wake?.silenceMs !== undefined);
         const wakeArmed = shouldArmWake ? this.armWakeWatcher(proc, wake!) : false;
@@ -781,8 +881,8 @@ export class ProcessManager {
 
       // Register all terminal handlers before awaiting startup so fast failures
       // and immediate exits cannot escape or be reported as false success.
+      // trackChild already installed the close handler.
       child.on("error", onError);
-      child.on("close", onClose);
       child.once("spawn", onSpawn);
     });
     this.pendingStarts.add(startup);
@@ -791,6 +891,103 @@ export class ProcessManager {
     } finally {
       this.pendingStarts.delete(startup);
     }
+  }
+
+  /**
+   * Take ownership of a still-running foreground command so the agent can
+   * wait on it as a background task instead of killing it. The stuck-command
+   * guard (inactivity + remaining hard limit) keeps running after hand-off.
+   * Throws `AdoptExitedError` when the command already exited.
+   */
+  async adopt(options: AdoptOptions): Promise<StartResult> {
+    const { child, pid, command, startedAt, limits } = options;
+    const hasExited = (): boolean => child.exitCode !== null || child.signalCode !== null;
+    if (this.closing) throw new Error("Process manager is shutting down");
+    if (hasExited()) throw new AdoptExitedError();
+    const { id, logFile, logStream } = await this.openBackgroundLog();
+    if (this.closing || hasExited()) {
+      logStream.end();
+      if (this.closing) throw new Error("Process manager is shutting down");
+      throw new AdoptExitedError();
+    }
+
+    // Everything below is synchronous: no output event can slip between the
+    // caller detaching its listeners and ours attaching.
+    let takenOver: { seedOutput: string; lastOutputAt: number };
+    try {
+      takenOver = options.takeOver(id);
+    } catch (error) {
+      logStream.end();
+      throw error;
+    }
+    const { seedOutput, lastOutputAt } = takenOver;
+    if (seedOutput) logStream.write(seedOutput);
+    const tracking = this.trackChild({
+      id,
+      child,
+      command,
+      logFile,
+      logStream,
+      onEarlyClose: () => {},
+    });
+    child.on("error", () => {});
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
+    child.stdout?.pipe(logStream, { end: false });
+    child.stderr?.pipe(logStream, { end: false });
+    child.stdout?.resume();
+    child.stderr?.resume();
+    const proc = tracking.register(pid, startedAt);
+
+    // A leftover helper holding the pipes must not keep the task "running"
+    // forever after the command itself exited.
+    watchExitSettle({
+      child,
+      settleMs: limits.exitSettleMs,
+      onSettled: ({ pipesHeld }) => {
+        if (pipesHeld) {
+          log("INFO", "process", "Adopted command exited while its output pipes were held", {
+            id,
+          });
+        }
+      },
+    });
+
+    const now = this.now();
+    const hardMs = limits.hardMs === null ? null : Math.max(0, limits.hardMs - (now - startedAt));
+    const initialInactivityMs =
+      limits.inactivityMs === null
+        ? undefined
+        : Math.max(0, limits.inactivityMs - Math.max(0, now - lastOutputAt));
+    if (!this.closing && (limits.inactivityMs !== null || hardMs !== null)) {
+      const watchdog = createCommandWatchdog({
+        yieldMs: null,
+        inactivityMs: limits.inactivityMs,
+        hardMs,
+        initialInactivityMs,
+        setTimer: (callback, ms) => {
+          const timer = setTimeout(callback, ms);
+          timer.unref?.();
+          return timer;
+        },
+        onFire: (fire) => {
+          this.commandWatchdogs.delete(id);
+          if (!this.children.has(id)) return;
+          proc.stopReason = fire === "inactive" ? "inactive" : "timedOut";
+          log("INFO", "process", "Stopping adopted command automatically", {
+            id,
+            reason: proc.stopReason,
+          });
+          void this.stop(id, { automatic: true });
+        },
+      });
+      const onActivity = (): void => watchdog.noteActivity();
+      child.stdout?.on("data", onActivity);
+      child.stderr?.on("data", onActivity);
+      this.commandWatchdogs.set(id, watchdog);
+    }
+
+    return { id, pid, logFile, wakeArmed: false };
   }
 
   /** Terminal-only observation remains available to evidence owners. */
@@ -853,6 +1050,7 @@ export class ProcessManager {
         skippedBytes: 0,
         remainingBytes: 0,
         logFile: null,
+        stopReason: null,
       };
     }
 
@@ -940,6 +1138,7 @@ export class ProcessManager {
       skippedBytes,
       remainingBytes,
       logFile: proc.logFile,
+      stopReason: proc.stopReason,
     };
   }
 
@@ -1006,9 +1205,12 @@ export class ProcessManager {
     return `${summary} Use task_output with id="${id}" to read the response.`;
   }
 
-  stop(id: string): Promise<string> {
+  stop(id: string, options: { automatic?: boolean } = {}): Promise<string> {
     this.pruneExpiredRecords();
     void this.sweepStaleLogs();
+    // An explicit stop owns the outcome; the stuck-command guard must never
+    // fire later against a finished (or PID-reused) task.
+    if (!options.automatic) this.disposeCommandWatchdog(id);
 
     const existingOperation = this.stopOperations.get(id);
     if (existingOperation) return existingOperation;
@@ -1104,6 +1306,7 @@ export class ProcessManager {
       signal: proc.signal,
       lastReadOffset: proc.lastReadOffset,
       logSize: proc.logSize,
+      stopReason: proc.stopReason,
       isRunning: this.children.has(proc.id),
     }));
   }
@@ -1113,7 +1316,10 @@ export class ProcessManager {
   shutdownAllAndWait(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.closing = true;
-    for (const id of this.processes.keys()) this.disposeWatcher(id);
+    for (const id of this.processes.keys()) {
+      this.disposeWatcher(id);
+      this.disposeCommandWatchdog(id);
+    }
     const settlers = [...this.shutdownDisposers].map((dispose) => {
       const settle = this.shutdownSettlers.get(dispose);
       return Promise.resolve().then(() => {
@@ -1162,6 +1368,7 @@ export class ProcessManager {
         this.lifecycle.killProcessTree(processTarget(proc.pid, child));
       }
       this.disposeWatcher(proc.id);
+      this.disposeCommandWatchdog(proc.id);
     }
   }
 
@@ -1193,6 +1400,7 @@ export class ProcessManager {
       proc.signal = signal;
       proc.completedAt = this.now();
       this.disposeWatcher(id);
+      this.disposeCommandWatchdog(id);
       void this.refreshLogSize(proc).then(() => {
         if (!this.closing) this.notifyExit(proc);
       });

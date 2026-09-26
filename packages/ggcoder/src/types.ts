@@ -22,7 +22,11 @@ export type ForegroundExecutionReason =
   | "nonZeroExit"
   | "timedOut"
   | "aborted"
-  | "spawnError";
+  | "spawnError"
+  /** Still running at the soft limit; handed off to a background task. */
+  | "backgrounded"
+  /** Stopped after producing no output for the inactivity limit. */
+  | "inactive";
 
 export interface ForegroundExecutionMetadata {
   executionId: string;
@@ -41,6 +45,10 @@ export interface ForegroundExecutionOutcome {
   signal: NodeJS.Signals | null;
   elapsedMs: number;
   error: Error | null;
+  /** Background task ID when the command was handed off (`backgrounded`). */
+  backgroundTaskId: string | null;
+  /** True when a leftover process still held the output pipes after exit. */
+  pipesHeldAfterExit: boolean;
 }
 
 /** Stable, serializable diagnostics exposed to hosts for foreground bash runs. */
@@ -61,6 +69,8 @@ export interface BashDiagnostics {
   totalOutputBytes: number;
   retainedOutputBytes: number;
   droppedOutputBytes: number;
+  backgroundTaskId: string | null;
+  pipesHeldAfterExit: boolean;
 }
 
 export interface BashToolResultDetails {

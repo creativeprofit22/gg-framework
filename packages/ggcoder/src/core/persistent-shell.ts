@@ -22,6 +22,7 @@ import {
 import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import type { ForegroundLogHandle } from "./process-manager.js";
 import { log } from "./logger.js";
+import { createCommandWatchdog } from "./command-watchdog.js";
 import { resolveShell, type ResolveShellOpts, type ShellResolution } from "./shell.js";
 
 type PersistentOutputSource = "stdout" | "stderr";
@@ -149,6 +150,8 @@ export class PersistentShell {
     signal: AbortSignal,
     onChunk?: (text: string, totalBytes: number) => void,
     foregroundLog?: ForegroundLogHandle,
+    /** Stop (reason `inactive`) after this long with no output; 0/omitted = never. */
+    inactivityMs = 0,
   ): Promise<PersistentRunResult> {
     const startedAt = Date.now();
     const emptySnapshot = (): BoundedOutputTailSnapshot => ({
@@ -304,7 +307,7 @@ export class PersistentShell {
       ): void => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
+        watchdog.dispose();
         signal.removeEventListener("abort", onAbort);
         child.stdout?.off("data", onStdoutData);
         child.stderr?.off("data", onStderrData);
@@ -345,6 +348,7 @@ export class PersistentShell {
       };
 
       const onStdoutData = (data: Buffer): void => {
+        watchdog.noteActivity();
         if (sentinelFound) {
           sentinelSuffix += data.toString("utf8");
           maybeFinishSentinel();
@@ -373,11 +377,12 @@ export class PersistentShell {
       };
 
       const onStderrData = (data: Buffer): void => {
+        watchdog.noteActivity();
         totalBytes += data.length;
         decodeOutput(stderrState, data);
       };
 
-      const interrupt = (reason: "timedOut" | "aborted"): void => {
+      const interrupt = (reason: "timedOut" | "aborted" | "inactive"): void => {
         if (done) return;
         if (this.child === child) this.child = null;
         if (child.pid !== undefined) {
@@ -414,8 +419,14 @@ export class PersistentShell {
         finish("spawnError", null, child.signalCode, error);
       };
 
-      // Zero is the internal no-deadline sentinel, shared with fresh-shell bash.
-      const timer = timeoutMs > 0 ? setTimeout(() => interrupt("timedOut"), timeoutMs) : undefined;
+      // Zero is the internal "no limit" sentinel, shared with fresh-shell bash.
+      // No yield layer: a session shell cannot be handed off mid-command.
+      const watchdog = createCommandWatchdog({
+        yieldMs: null,
+        inactivityMs: inactivityMs > 0 ? inactivityMs : null,
+        hardMs: timeoutMs > 0 ? timeoutMs : null,
+        onFire: (fire) => interrupt(fire === "inactive" ? "inactive" : "timedOut"),
+      });
 
       child.on("exit", onExit);
       child.on("error", onError);

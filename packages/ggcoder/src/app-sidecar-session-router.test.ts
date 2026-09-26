@@ -203,6 +203,7 @@ describe("session event shape", () => {
       signal: "SIGTERM",
       lastReadOffset: 0,
       logSize: 0,
+      stopReason: null,
       isRunning: false,
     } satisfies BackgroundTaskSnapshot;
     const serialized = sessionEventSseData("session-a", "tasks", { tasks: [task] });
@@ -217,6 +218,7 @@ describe("session event shape", () => {
 
   it("serializes complete task_output metadata in tool_call_end details", () => {
     const taskOutput = {
+      id: "bg-task",
       isRunning: false,
       exitCode: null,
       signal: "SIGTERM",
@@ -227,6 +229,7 @@ describe("session event shape", () => {
       remainingBytes: 128,
       logFile: "/tmp/bg-task.log",
       presentationCapped: true,
+      stopReason: null,
     } satisfies TaskOutputDetails;
     const serialized = sessionEventSseData("session-a", "tool_call_end", {
       toolCallId: "task-output-1",

@@ -384,8 +384,15 @@ export interface BackgroundTask {
   pid: number;
   command: string;
   startedAt: number;
-  /** null while running; a number once the process has exited. */
+  /** Numeric exit code; stays null for signal exits (native child semantics). */
   exitCode: number | null;
+  /** Daemon-owned liveness. Missing only from older daemons. */
+  isRunning?: boolean;
+  /** Terminating signal (e.g. "SIGTERM") when the process was killed. */
+  signal?: string | null;
+  /** Set when the daemon stopped the task itself: silence or hard time limit. */
+  stopReason?: "inactive" | "timedOut" | null;
+  completedAt?: number | null;
 }
 
 export type WorkspaceMode = "code" | "chat";

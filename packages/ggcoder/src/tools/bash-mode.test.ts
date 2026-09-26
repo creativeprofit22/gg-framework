@@ -174,7 +174,8 @@ describe("bash explicit command modes", () => {
           const details = result.details as BashToolResultDetails | undefined;
           expect(details?.bashDiagnostics).toMatchObject({
             command,
-            timeoutMs,
+            // Omitted timeout: the default hard backstop (60 min) is reported.
+            timeoutMs: timeoutMs === 0 ? 60 * 60_000 : timeoutMs,
             reason: "completed",
             exitCode: 0,
           });

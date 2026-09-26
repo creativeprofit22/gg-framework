@@ -14,6 +14,7 @@ import { createUiRegistryTool } from "./ui-registry.js";
 import { createUiAdoptTool } from "./ui-adopt.js";
 import { createEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
+import type { ForegroundLimitSettings } from "./foreground-limits.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
@@ -138,6 +139,8 @@ export interface CreateToolsOptions {
   getNetworkPolicy?: GetNetworkPolicy;
   /** Lazily read the OS command-sandbox mode and allowed network domains. */
   getSandboxPolicy?: () => SandboxPolicy;
+  /** Lazily read bash yield / inactivity / hard-limit settings. Defaults apply when omitted. */
+  getForegroundLimitSettings?: () => ForegroundLimitSettings;
   /**
    * Lazily read whether `grep` may use the external `rg` scanner when present
    * (grepUseRipgrep). Defaults to enabled when omitted.
@@ -211,10 +214,13 @@ export async function createTools(
   // to the plain binary-file notice, never offered to models that can't watch it.
   const videoByteLimit = opts?.model ? getVideoByteLimit(opts.model) : undefined;
   const programmaticProfile = createProgrammaticProfileTool(cwd, {
-    localFilesystem: ops === localOperations, planModeRef,
-    reviewer: opts?.reviewProgrammaticSetup, owner: opts?.setupOwner,
+    localFilesystem: ops === localOperations,
+    planModeRef,
+    reviewer: opts?.reviewProgrammaticSetup,
+    owner: opts?.setupOwner,
     assertAllowed: opts?.assertSetupAllowed,
-    onPreFileMutation: opts?.onPreFileMutation, onFileMutated: opts?.onFileMutated,
+    onPreFileMutation: opts?.onPreFileMutation,
+    onFileMutated: opts?.onFileMutated,
   });
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, videoByteLimit),
@@ -246,6 +252,7 @@ export async function createTools(
       undefined,
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
+      opts?.getForegroundLimitSettings,
     ),
     createTauriPackageTool(cwd, processManager, {
       operations: ops,
@@ -255,9 +262,14 @@ export async function createTools(
       getSandboxPolicy: ops === localOperations ? opts?.getSandboxPolicy : undefined,
     }),
     programmaticProfile,
-    ...(opts?.commandDiscovery === false ? [] : [createCommandInformationTool(cwd, {
-      ...opts?.commandDiscovery, localFilesystem: ops === localOperations,
-    })]),
+    ...(opts?.commandDiscovery === false
+      ? []
+      : [
+          createCommandInformationTool(cwd, {
+            ...opts?.commandDiscovery,
+            localFilesystem: ops === localOperations,
+          }),
+        ]),
     createProgrammaticScanTool(cwd, {
       localFilesystem: ops === localOperations,
       planModeRef,
@@ -280,7 +292,8 @@ export async function createTools(
 
   // Local corpus of real repos; only when the CLI is actually on this machine.
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
-  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin));
+  if (steroidsBin)
+    tools.push(createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin));
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {
@@ -372,19 +385,33 @@ export async function createTools(
   const rebuildReadTool = (model: string): AgentTool =>
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, getVideoByteLimit(model));
 
-  const commandCreation = opts?.commandDiscovery === false || opts?.disableSubagents ? undefined : createProgrammaticCommandTool(cwd, {
-    ...opts?.commandDiscovery,
-    availableTools: () => opts?.getAvailableToolNames?.() ?? tools.map((tool) => tool.name),
-    localFilesystem: ops === localOperations,
-    planModeRef,
-    reviewCreation: opts?.reviewCommandCreation,
-    executeCommand: opts?.executeReviewedCommand,
-    getModel: () => ({ provider: opts?.getProvider?.() ?? opts?.provider ?? "deterministic", model: opts?.getModel?.() ?? opts?.model ?? "no-model" }),
-    onPreFileMutation: opts?.onPreFileMutation,
-    onFileMutated: opts?.onFileMutated,
-  });
+  const commandCreation =
+    opts?.commandDiscovery === false || opts?.disableSubagents
+      ? undefined
+      : createProgrammaticCommandTool(cwd, {
+          ...opts?.commandDiscovery,
+          availableTools: () => opts?.getAvailableToolNames?.() ?? tools.map((tool) => tool.name),
+          localFilesystem: ops === localOperations,
+          planModeRef,
+          reviewCreation: opts?.reviewCommandCreation,
+          executeCommand: opts?.executeReviewedCommand,
+          getModel: () => ({
+            provider: opts?.getProvider?.() ?? opts?.provider ?? "deterministic",
+            model: opts?.getModel?.() ?? opts?.model ?? "no-model",
+          }),
+          onPreFileMutation: opts?.onPreFileMutation,
+          onFileMutated: opts?.onFileMutated,
+        });
   if (commandCreation) tools.push(commandCreation.tool);
-  return { tools, processManager, rebuildReadTool, lspManager, subAgentManager, commandCreation, programmaticProfile };
+  return {
+    tools,
+    processManager,
+    rebuildReadTool,
+    lspManager,
+    subAgentManager,
+    commandCreation,
+    programmaticProfile,
+  };
 }
 
 export { createReadTool } from "./read.js";

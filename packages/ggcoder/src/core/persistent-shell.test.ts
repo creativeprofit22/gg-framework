@@ -54,8 +54,14 @@ d("PersistentShell", () => {
   });
 
   it("enforces pipefail for an explicit launch and restores it before each command", async () => {
-    shell = new PersistentShell(os.tmpdir(), { ...process.env }, 1024 * 1024,
-      localProcessLifecycle, {}, { ...resolveShell(""), args: ["--norc", "--noprofile"] });
+    shell = new PersistentShell(
+      os.tmpdir(),
+      { ...process.env },
+      1024 * 1024,
+      localProcessLifecycle,
+      {},
+      { ...resolveShell(""), args: ["--norc", "--noprofile"] },
+    );
     expect((await shell.run("false | tail -1", 10_000, signal())).exitCode).toBe(1);
     await shell.run("set +o pipefail", 10_000, signal());
     expect((await shell.run("false | tail -1", 10_000, signal())).exitCode).toBe(1);
@@ -86,23 +92,37 @@ d("PersistentShell", () => {
 
   it("shares timeout cleanup with shutdown and waits for confirmed close", async () => {
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const cleanup = vi.fn(async (...args: Parameters<typeof localProcessLifecycle.cleanupProcessTree>) => {
-      await gate;
-      await localProcessLifecycle.cleanupProcessTree(...args);
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
+    const cleanup = vi.fn(
+      async (...args: Parameters<typeof localProcessLifecycle.cleanupProcessTree>) => {
+        await gate;
+        await localProcessLifecycle.cleanupProcessTree(...args);
+      },
+    );
     shell = new PersistentShell(os.tmpdir(), { ...process.env }, 1024 * 1024, {
-      ...localProcessLifecycle, cleanupProcessTree: cleanup,
+      ...localProcessLifecycle,
+      cleanupProcessTree: cleanup,
     });
     await shell.run("echo ready", 10_000, signal());
     await shell.run("while :; do :; done", 50, signal());
     const shutdown = shell.shutdownAndWait();
     let settled = false;
-    void shutdown.then(() => { settled = true; }, () => { settled = true; });
+    void shutdown.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     try {
       await Promise.resolve();
       expect(cleanup).toHaveBeenCalledTimes(1);
-      expect(cleanup).toHaveBeenCalledWith(expect.objectContaining({ pid: expect.any(Number) }), { requireSettlement: true });
+      expect(cleanup).toHaveBeenCalledWith(expect.objectContaining({ pid: expect.any(Number) }), {
+        requireSettlement: true,
+      });
       expect(settled).toBe(false);
     } finally {
       release();
@@ -119,6 +139,28 @@ d("PersistentShell", () => {
     // Fresh shell: the exported var from before the timeout is gone.
     const res = await sh.run('echo "[$GG_PSH_STATE]"', 10_000, signal());
     expect(res.output).toBe("[]\n");
+  });
+
+  it("stops a silent command as inactive; the next call gets a fresh shell", async () => {
+    const sh = make();
+    await sh.run("export GG_PSH_STATE=set", 10_000, signal());
+    const inactive = await sh.run("sleep 30", 10_000, signal(), undefined, undefined, 300);
+    expect(inactive).toMatchObject({ reason: "inactive", exitCode: null, signal: null });
+    const res = await sh.run('echo "[$GG_PSH_STATE]"', 10_000, signal());
+    expect(res.output).toBe("[]\n");
+  });
+
+  it("output keeps re-arming the inactivity limit", async () => {
+    const sh = make();
+    const res = await sh.run(
+      "for i in 1 2 3 4 5 6; do echo tick; sleep 0.2; done",
+      10_000,
+      signal(),
+      undefined,
+      undefined,
+      700,
+    );
+    expect(res).toMatchObject({ reason: "completed", exitCode: 0 });
   });
 
   it("over-cap output still finds the sentinel — no hang, session survives", async () => {

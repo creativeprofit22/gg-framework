@@ -991,6 +991,11 @@ export class AgentSession {
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
       }),
+      getForegroundLimitSettings: () => ({
+        yieldSeconds: this.settingsManager.get("bashYieldSeconds"),
+        inactivitySeconds: this.settingsManager.get("bashInactivitySeconds"),
+        hardLimitMinutes: this.settingsManager.get("bashHardLimitMinutes"),
+      }),
       getSandboxPolicy: () => ({
         mode: this.settingsManager.get("sandboxMode"),
         // networkAllow always applies. Choosing "allowlist" is the user taking

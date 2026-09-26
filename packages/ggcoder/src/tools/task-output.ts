@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { MAX_PROCESS_WAIT_MS, type ProcessManager } from "../core/process-manager.js";
+import {
+  MAX_PROCESS_WAIT_MS,
+  describeStopReason,
+  type BackgroundStopReason,
+  type ProcessManager,
+} from "../core/process-manager.js";
 import { truncateTail } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 
@@ -24,6 +29,8 @@ const TaskOutputParams = z.object({
 });
 
 export interface TaskOutputDetails {
+  /** Background task ID that was read (matches bash `backgroundTaskId`). */
+  id: string;
   isRunning: boolean;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -34,6 +41,8 @@ export interface TaskOutputDetails {
   remainingBytes: number;
   logFile: string | null;
   presentationCapped: boolean;
+  /** Set when the manager stopped a handed-off command automatically. */
+  stopReason: BackgroundStopReason | null;
 }
 
 export interface TaskOutputToolResultDetails {
@@ -81,8 +90,8 @@ export function createTaskOutputTool(
       const status =
         (result.isRunning
           ? "running"
-          : `exited (${terminalDetails.length > 0 ? terminalDetails.join(", ") : "status unavailable"})`) +
-        waitNotice;
+          : `exited (${terminalDetails.length > 0 ? terminalDetails.join(", ") : "status unavailable"})` +
+            (result.stopReason ? ` — ${describeStopReason(result.stopReason)}` : "")) + waitNotice;
       const retainedLogReference = result.logFile ? ` Retained log: ${result.logFile}` : "";
       const rangeNotices = [
         result.skippedBytes > 0
@@ -112,6 +121,7 @@ export function createTaskOutputTool(
       const notices = rangeNotices.length > 0 ? `${rangeNotices.join("\n")}\n` : "";
       const content = `Process ${id}: ${status}\n${notices}${output}`;
       const taskOutput: TaskOutputDetails = {
+        id,
         isRunning: result.isRunning,
         exitCode: result.exitCode,
         signal: result.signal,
@@ -122,6 +132,7 @@ export function createTaskOutputTool(
         remainingBytes: result.remainingBytes,
         logFile: result.logFile,
         presentationCapped,
+        stopReason: result.stopReason,
       };
       return { content, details: { taskOutput } satisfies TaskOutputToolResultDetails };
     },

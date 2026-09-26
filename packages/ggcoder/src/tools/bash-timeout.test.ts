@@ -1026,6 +1026,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(10_000, 2_000_000_001),
         elapsedMs: 25,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
     });
 
@@ -1043,6 +1045,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(20_000, 2_000_000_002),
         elapsedMs: 0,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
     });
 
@@ -1060,6 +1064,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(30_000, 2_000_000_003),
         elapsedMs: 0,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
     });
 
@@ -1084,6 +1090,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(40_000, 2_000_000_004),
         elapsedMs: 0,
         error,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
       expect(fulfillmentCount).toBe(1);
     });
@@ -1121,6 +1129,8 @@ if (selectedProbe !== undefined) {
           metadata: expectedForegroundMetadata(45_000, 2_000_000_007),
           elapsedMs: 15,
           error: null,
+          backgroundTaskId: null,
+          pipesHeldAfterExit: false,
         });
         expect(fulfillmentCount).toBe(1);
       },
@@ -1294,6 +1304,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(50_000, null),
         elapsedMs: 0,
         error,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
       expect(endLog).toHaveBeenCalledOnce();
     });
@@ -1322,6 +1334,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(60_000, 2_000_000_005),
         elapsedMs: 30,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
       expect(fulfillmentCount).toBe(1);
     });
@@ -1351,6 +1365,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(70_000, 2_000_000_006, 1_250),
         elapsedMs: 2_250,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
       expect(fulfillmentCount).toBe(1);
     });
@@ -1416,6 +1432,8 @@ if (selectedProbe !== undefined) {
         metadata: expectedForegroundMetadata(80_000, 2_000_000_009, 300),
         elapsedMs: 340,
         error: null,
+        backgroundTaskId: null,
+        pipesHeldAfterExit: false,
       });
       await Promise.resolve();
       expect(fulfillmentCount).toBe(1);
@@ -1769,6 +1787,8 @@ if (selectedProbe !== undefined) {
           totalOutputBytes: Buffer.byteLength(normalOutput),
           retainedOutputBytes: Buffer.byteLength(normalOutput),
           droppedOutputBytes: 0,
+          backgroundTaskId: null,
+          pipesHeldAfterExit: false,
         },
       });
     });

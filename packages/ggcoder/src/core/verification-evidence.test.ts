@@ -371,6 +371,7 @@ describe("SessionVerificationEvidenceLedger", () => {
     ["spawnError", null, "failed", "launch failed"],
     ["timedOut", null, "failed", "timed out"],
     ["aborted", null, "failed", "cancelled"],
+    ["inactive", null, "failed", "stopped after no output"],
     [undefined, null, "unavailable", "execution outcome unavailable"],
   ])("retains terminal diagnostics for %s", (reason, exitCode, status, explanation) => {
     const ledger = new SessionVerificationEvidenceLedger();
@@ -405,6 +406,225 @@ describe("SessionVerificationEvidenceLedger", () => {
       logPath: "C:/logs/terminal.log",
     });
     expect(evidence).not.toHaveProperty("tail");
+  });
+
+  it.each([
+    ["inactive", "inactive"],
+    ["timedOut", "timedOut"],
+  ])("records %s as a terminal reason", (reason, terminalReason) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit" },
+      isError: true,
+      details: {
+        bashDiagnostics: {
+          executionId: "terminal",
+          command: "tsc --noEmit",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason,
+          exitCode: null,
+          signal: null,
+          elapsedMs: 123,
+          timeoutMs: 0,
+          logPath: "C:/logs/terminal.log",
+        },
+      },
+    });
+    expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ terminalReason });
+  });
+
+  it("treats a command handed off to the background as unavailable, never passed", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit" },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "handed-off",
+          command: "tsc --noEmit",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason: "backgrounded",
+          exitCode: null,
+          signal: null,
+          elapsedMs: 120_000,
+          timeoutMs: 3_600_000,
+          logPath: "C:/logs/handed-off.log",
+          backgroundTaskId: "task-1",
+        },
+      },
+    });
+    const evidence = ledger.snapshot().currentEvidence[0];
+    expect(evidence).toMatchObject({
+      status: "unavailable",
+      reason: "handed off to background; final outcome not in this response",
+    });
+    expect(evidence).not.toHaveProperty("terminalReason");
+  });
+
+  describe("background hand-off completion via task_output", () => {
+    const handOff = (ledger: SessionVerificationEvidenceLedger): void => {
+      ledger.recordToolResult({
+        evidenceRevision: ledger.revision,
+        evidenceRun: ledger.runId,
+        name: "bash",
+        args: { command: "pnpm test" },
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "handed-off",
+            command: "pnpm test",
+            cwd: "C:/project",
+            startedAt: 1000,
+            reason: "backgrounded",
+            exitCode: null,
+            signal: null,
+            elapsedMs: 120_000,
+            timeoutMs: 3_600_000,
+            backgroundTaskId: "task-1",
+          },
+        },
+      });
+    };
+    const readTask = (
+      ledger: SessionVerificationEvidenceLedger,
+      taskOutput: Record<string, unknown>,
+    ): void => {
+      ledger.recordToolResult({
+        name: "task_output",
+        args: { id: "task-1" },
+        isError: false,
+        details: {
+          taskOutput: {
+            id: "task-1",
+            isRunning: false,
+            exitCode: 0,
+            signal: null,
+            completedAt: 301_000,
+            stopReason: null,
+            ...taskOutput,
+          },
+        },
+      });
+    };
+
+    it("does not count a handed-off check as run until it finishes", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      handOff(ledger);
+      expect(ledger.runActivity().checked).toBe(false);
+      readTask(ledger, {});
+      expect(ledger.runActivity().checked).toBe(true);
+    });
+
+    it("does not count a finished non-verification background command as checked", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      // No captured revision: the entry stays current, so only the candidate guard applies.
+      ledger.recordToolResult({
+        evidenceRun: ledger.runId,
+        name: "bash",
+        args: { command: "sleep 200" },
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "sleeper",
+            command: "sleep 200",
+            cwd: "C:/project",
+            startedAt: 1000,
+            reason: "backgrounded",
+            exitCode: null,
+            signal: null,
+            backgroundTaskId: "task-1",
+          },
+        },
+      });
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "passed" });
+      expect(ledger.runActivity().checked).toBe(false);
+    });
+
+    it("records exit code 0 as passed", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence).toEqual([
+        expect.objectContaining({
+          executionId: "handed-off",
+          status: "passed",
+          terminalReason: "completed",
+          exitCode: 0,
+          elapsedMs: 300_000,
+        }),
+      ]);
+    });
+
+    it("records a non-zero exit as failed", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { exitCode: 1 });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "failed",
+        reason: "failed (exit 1)",
+        terminalReason: "nonZeroExit",
+        exitCode: 1,
+      });
+    });
+
+    it.each([
+      ["inactive", "stopped after no output"],
+      ["timedOut", "timed out"],
+    ])("records stopReason %s as failed", (stopReason, reason) => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { exitCode: null, signal: "SIGTERM", stopReason });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "failed",
+        reason,
+        terminalReason: stopReason,
+      });
+    });
+
+    it("keeps a still-running task unavailable", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      handOff(ledger);
+      readTask(ledger, { isRunning: true, exitCode: null, completedAt: null });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "unavailable",
+        reason: "handed off to background; final outcome not in this response",
+      });
+      expect(ledger.runActivity().checked).toBe(false);
+      // A later terminal read still upgrades it.
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "passed" });
+    });
+
+    it("ignores task_output for unrelated task IDs", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { id: "other-task" });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "unavailable" });
+    });
+
+    it("does not upgrade after an intervening workspace edit", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      ledger.recordToolResult({
+        name: "edit",
+        args: { file_path: "src/a.ts" },
+        isError: false,
+      });
+      readTask(ledger, {});
+      const snapshot = ledger.snapshot();
+      expect(snapshot.currentEvidence).toEqual([]);
+      expect(snapshot.staleEvidence).toEqual([
+        expect.objectContaining({ executionId: "handed-off", status: "unavailable" }),
+      ]);
+    });
   });
 
   it("accepts a successful path-qualified Windows Go test as ready evidence", () => {

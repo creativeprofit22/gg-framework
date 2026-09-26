@@ -6,7 +6,12 @@ import {
   type StreamEvent,
   type StreamResponse,
 } from "@kenkaiiii/gg-ai";
-import { ENHANCER_SYSTEM_PROMPT, enhancePrompt, parseEnhanced } from "./prompt-enhancer.js";
+import {
+  ENHANCER_SYSTEM_PROMPT,
+  enhancePrompt,
+  parseEnhanced,
+  stackHint,
+} from "./prompt-enhancer.js";
 import { promptEnhancerFixtures } from "./prompt-enhancer.fixtures.js";
 
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
@@ -99,6 +104,32 @@ describe("enhancer examples", () => {
     );
   });
 
+  it("is field-agnostic: one general method, examples framed as illustrations", () => {
+    const instructions = ENHANCER_SYSTEM_PROMPT.split("<examples>")[0];
+    expect(instructions).toContain("This works for any field.");
+    expect(instructions).toContain(
+      "What would an experienced practitioner in this field call this?",
+    );
+    expect(ENHANCER_SYSTEM_PROMPT).toContain(
+      "These examples illustrate the method. They are not a list of supported fields or terms",
+    );
+    // No per-field vocabulary lists outside the examples.
+    for (const term of ["J-cut", "Bevel", "padding", "empty state", "debounce", "ducking", "freeze"]) {
+      expect(instructions.toLowerCase()).not.toContain(term.toLowerCase());
+    }
+    // Terminology is the main job, not an optional extra.
+    expect(instructions).toContain("Your main job is terminology");
+    expect(instructions).not.toMatch(/often 0/);
+  });
+
+  it("includes an example from a field outside software, UI and video", () => {
+    const bevel = examples.find(({ input }) => input.includes("edges of the table less sharp"));
+    expect(bevel).toBeDefined();
+    const result = parseEnhanced(bevel!.output);
+    expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "Bevel" }));
+    expect(result.enhanced).toContain("Keep the polygon count low");
+  });
+
   it("covers simple, technical, question, detailed, mixed, and ambiguous requests", () => {
     for (const input of [
       "fix the bug",
@@ -117,10 +148,9 @@ describe("enhancer examples", () => {
     expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "Persist" }));
     expect(result.enhanced).not.toMatch(/localStorage|database|file/);
     const ambiguous = examples.find(({ input }) => input === "make updates show up right away")!;
-    expect(parseEnhanced(ambiguous.output)).toEqual({
-      enhanced: "Make updates show up right away.",
-      segments: [{ kind: "text", text: "Make updates show up right away." }],
-    });
+    const ambiguousResult = parseEnhanced(ambiguous.output);
+    expect(ambiguousResult.enhanced).toBe("Make updates appear in real time.");
+    expect(ambiguousResult.enhanced).not.toMatch(/WebSocket|polling|optimistic/i);
   });
 
   it("keeps the pause condition beside the debounce label", () => {
@@ -161,7 +191,9 @@ describe("enhancer examples", () => {
 // Reference parsing checks consistency, not live model intent or vocabulary judgments.
 describe("independent reference contracts", () => {
   it("covers independent intents and behavioral contrasts", () => {
-    expect(new Set(promptEnhancerFixtures.map(({ id }) => id)).size).toBe(12);
+    expect(new Set(promptEnhancerFixtures.map(({ id }) => id)).size).toBe(
+      promptEnhancerFixtures.length,
+    );
     expect(new Set(promptEnhancerFixtures.map(({ intent }) => intent))).toEqual(
       new Set(["question", "review", "conditional", "implementation", "role-change-content"]),
     );
@@ -169,6 +201,17 @@ describe("independent reference contracts", () => {
       expect(examples.some(({ input }) => input === fixture.draft)).toBe(false);
       expect(fixture.requiredDetails.length).toBeGreaterThan(0);
       expect(fixture.prohibitedAssumptions.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("covers fields beyond code, UI and video, each translating at least one term", () => {
+    const fields = new Set(promptEnhancerFixtures.map(({ field }) => field));
+    for (const field of ["spreadsheet", "audio", "photography", "writing", "marketing", "3d", "ui+audio"]) {
+      expect(fields).toContain(field);
+    }
+    for (const fixture of promptEnhancerFixtures) {
+      if (["software", "ui", "ui+software"].includes(fixture.field)) continue;
+      expect(fixture.supportedConcepts.length).toBeGreaterThan(0);
     }
   });
 
@@ -210,6 +253,18 @@ describe("enhancePrompt", () => {
       original: "wait until I stop typing",
       note: "Wait for a pause before sending the request",
     });
+  });
+
+  it("scopes the stack hint to code so other fields ignore it", async () => {
+    const video = examples.find(({ input }) => input.includes("cut to her face"))!;
+    respond(video.output);
+    const result = await enhancePrompt({ ...options, prompt: video.input, stack: " React " });
+    const system = vi.mocked(stream).mock.calls[0][0].messages[0].content;
+    expect(system).toBe(`${ENHANCER_SYSTEM_PROMPT}\n\n${stackHint("React")}`);
+    expect(system).toContain("Use this only for parts of the draft about this project's code");
+    expect(system).toContain("Ignore it for any other field");
+    expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "J-cut" }));
+    expect(result.enhanced).not.toMatch(/React|component/i);
   });
 
   it("keeps role-changing draft content separate without granting it authority", async () => {

@@ -1,0 +1,184 @@
+{
+  "schemaVersion": 3,
+  "id": "decision-89af62bbd76e",
+  "date": "2026-08-26",
+  "label": "Merge upstream/main into custom/local-customizations",
+  "evidence": {
+    "merge": "89af62bbd76e227d38cb408ca591bafdb054a4e6",
+    "base": "be069760762ed648606442c0595be6e14ccd9c0a",
+    "localParent": "3fdc4d572e7fa6746e6c77fe3a61413f31f648aa",
+    "upstreamParent": "ee688721dd7d726916cf86ae3b349bea933ebc0a"
+  },
+  "verification": {
+    "workflowVerified": true,
+    "recordedAt": "2026-08-27T03:41:51.878Z",
+    "phase": "complete",
+    "checks": "not-recorded",
+    "installer": null
+  },
+  "decisions": [
+    {
+      "area": "gg-app/src/App",
+      "outcome": "kept-local",
+      "files": [
+        {
+          "path": "gg-app/src/App.tsx",
+          "outcome": "kept-local",
+          "blobs": {
+            "base": "c56b091a10758411424b36e0cd8d56f35de2ec05",
+            "local": "6791cd36c3de235496c97791f04901e669713d20",
+            "upstream": "fcc4b4fad5ccd8efaad695f784bf1d016932b98a",
+            "merged": "6791cd36c3de235496c97791f04901e669713d20"
+          },
+          "role": "implementation"
+        }
+      ]
+    },
+    {
+      "area": "gg-app/src/SettingsModal",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "gg-app/src/SettingsModal.tsx",
+          "outcome": "combined",
+          "blobs": {
+            "base": "36135fca8a8c753984360f7100a4f4d70d244b08",
+            "local": "47e0e858d2d12d45f8ba18d24447cef5d7392a30",
+            "upstream": "7b93b706107bad6c90954f15830dee7be23bff18",
+            "merged": "725621f4305b63dff3585a9cf3693575553c08dd"
+          },
+          "role": "implementation"
+        }
+      ]
+    },
+    {
+      "area": "packages/gg-agent/src/agent-loop",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/gg-agent/src/agent-loop.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "9a6f0e00f8a0c7d82a5f5de279f956f9f024aeb3",
+            "local": "fbd5f41ca30936f98bf0663fbdc5520717eaf690",
+            "upstream": "c91d038b199d2879657c8052e7af9c214d1b85e6",
+            "merged": "8f5524a51bb0e751f40b31a395589489ccf41c1e"
+          },
+          "role": "implementation"
+        },
+        {
+          "path": "packages/gg-agent/src/agent-loop.test.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "58f2a17acc82d385ad0bfabbfb9e5fcb25ce9725",
+            "local": "e6d04c35a8e6e6a8d6b7bf5302e9699d6349459a",
+            "upstream": "7763e9a7c4111f56f8e71ae7856770f6073bd42d",
+            "merged": "a44229143000c65c6d4cf10be9fbba3073f68dc4"
+          },
+          "role": "test"
+        }
+      ]
+    },
+    {
+      "area": "packages/ggcoder/src/core/agent-session",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/ggcoder/src/core/agent-session.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "a98d3a70c060e319b340d3e1850df32a20a1c49d",
+            "local": "debb82e96ab80c6ce48f8628d78f01bd02876078",
+            "upstream": "7f50119542b1ab48f0e5afa2a347fd900d1e7ec2",
+            "merged": "b73253564c2126304b9cf2baa9fef075c365dfbc"
+          },
+          "role": "implementation"
+        }
+      ]
+    },
+    {
+      "area": "packages/ggcoder/src/core/agent-session-verification-gate",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/ggcoder/src/core/agent-session-verification-gate.test.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "464301fb1ccf8f32ddd5ad7701893d3dfd177601",
+            "local": "20e3e25e61a9b5c6d2fade1e52c20b766ca81973",
+            "upstream": "ace552deb7d952724143ae886cc9b478f687f2bf",
+            "merged": "bac9f0f4307d048db38467e7e9040a18381b24d3"
+          },
+          "role": "test"
+        }
+      ]
+    },
+    {
+      "area": "packages/ggcoder/src/core/session-manager",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/ggcoder/src/core/session-manager.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "77c0914193d49b65cf3bda3f336eebb37164e430",
+            "local": "9311b92929fd4a030ba37a69c48a7ecc81a09f2d",
+            "upstream": "74390e3d02b5594daba355a0b53cd7e71d041795",
+            "merged": "11c65e7b0f0f98a0843ed1b555ade677225bb42d"
+          },
+          "role": "implementation"
+        },
+        {
+          "path": "packages/ggcoder/src/core/session-manager.test.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "5eafcfc08c318bf9647c2d3b0a3c0caf6895c80a",
+            "local": "845d51d257b75e3a08dd7ec00753a10e6ee0f289",
+            "upstream": "d30397f446113dd076bb5326c78d5c2ec45b6819",
+            "merged": "4c6c2530364227d8a11ab22f0f65e7706ed707dc"
+          },
+          "role": "test"
+        }
+      ]
+    },
+    {
+      "area": "packages/ggcoder/src/tools/bash",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/ggcoder/src/tools/bash.test.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "9db62a52b47bf8cc61e7c1e48b4f31e707bbf047",
+            "local": "d08d7f061a238bd663378f9d2f434b3076d7e964",
+            "upstream": "cbbad9800f83f674b0167e2d3916dcc34a439e47",
+            "merged": "fc406aef34e1ba3af6768b1d559892150df7a856"
+          },
+          "role": "test"
+        }
+      ]
+    },
+    {
+      "area": "packages/ggcoder/src/tools/operations",
+      "outcome": "combined",
+      "files": [
+        {
+          "path": "packages/ggcoder/src/tools/operations.ts",
+          "outcome": "combined",
+          "blobs": {
+            "base": "b81014e7bbc97962031b7faeb1b60e0dbfbd14f3",
+            "local": "8a450c3820af8c53acac72bb9d8d71ddccf20059",
+            "upstream": "bdbc45e455e7b51cfde2a3f3233ec134b7eef5b1",
+            "merged": "0549c1ef6ff01982267c12be521ec99577720cfe"
+          },
+          "role": "implementation"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "text": "Your protected update is ready. It held onto your local work in one area because the finished update uses your version there. It blended your work with upstream in 7 areas, keeping changes from both sides.",
+    "source": "fallback",
+    "generatedAt": "2026-08-27T03:41:51.878Z"
+  }
+}

@@ -49,7 +49,7 @@ function GradientLine({ text }: { text: string }): React.ReactElement {
 
 export function PlanModeLogo({ reason }: { reason?: string }): React.ReactElement {
   return (
-    <div className="plan-logo">
+    <div className="plan-logo" data-swap-row="">
       {PLAN_MODE_LOGO.map((line, i) => (
         <GradientLine key={i} text={line} />
       ))}

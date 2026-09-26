@@ -27,21 +27,48 @@ describe("plan mode", () => {
     processManager.shutdownAll();
   });
 
-  it("renders active plan instructions and plan tools", async () => {
-    const prompt = await buildSystemPrompt(os.tmpdir(), [], true, undefined, [
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "enter_plan",
-      "exit_plan",
-    ]);
+  it("renders active plan instructions with plan guidance in the tool schemas", async () => {
+    const { tools, processManager } = await createTools(os.tmpdir(), {
+      onEnterPlan: () => {},
+      onExitPlan: async () => "ok",
+    });
+    try {
+      const prompt = await buildSystemPrompt(
+        os.tmpdir(),
+        [],
+        true,
+        undefined,
+        tools.map((tool) => tool.name),
+      );
 
-    expect(prompt).toContain("## Plan Mode (ACTIVE)");
-    expect(prompt).toContain("draft a structured markdown plan at `.gg/plans/<name>.md`");
-    expect(prompt).not.toContain("1. Explore");
-    expect(prompt).toContain("**enter_plan**");
-    expect(prompt).toContain("**exit_plan**");
+      expect(prompt).toContain("## Plan Mode (ACTIVE)");
+      expect(prompt).toContain("draft a structured markdown plan at `.gg/plans/<name>.md`");
+      expect(prompt).toContain("then call `exit_plan` with that path for user review");
+      expect(prompt).not.toContain("1. Explore");
+      // Live-tool guidance moved out of the prompt, not out of the model's tool catalog.
+      expect(tools.find((tool) => tool.name === "enter_plan")?.description).toContain(
+        "Enter plan mode for safe, read-only exploration before making changes.",
+      );
+      expect(tools.find((tool) => tool.name === "exit_plan")?.description).toContain(
+        "Submit a .gg/plans/ markdown plan for user review",
+      );
+      expect(prompt).not.toContain("**enter_plan**");
+      expect(prompt).not.toContain("**exit_plan**");
+    } finally {
+      processManager.shutdownAll();
+    }
+  });
+
+  it("denies reviewed command publication before asking or touching the filesystem", async () => {
+    const cwd = await makeTempDir();
+    const result = await createTools(cwd, { planModeRef: { current: true },
+      reviewCommandCreation: async () => { throw new Error("review must not be requested in plan mode"); } });
+    try {
+      const tool = result.tools.find((item) => item.name === "programmatic_command")!;
+      expect(await tool.execute({ action: "create", handle: "0283ca0c-d407-4bae-9b7f-74ed60134814" }, toolContext()))
+        .toContain("restricted in plan mode");
+      expect(await fs.readdir(cwd)).toEqual([]);
+    } finally { result.commandCreation?.dispose(); result.processManager.shutdownAll(); result.lspManager?.shutdownAll(); await fs.rm(cwd, { recursive: true, force: true }); }
   });
 
   it("allows write only under .gg/plans while plan mode is active", async () => {
@@ -112,10 +139,11 @@ describe("plan mode", () => {
     const bashTool = tools.find((tool) => tool.name === "bash");
     expect(bashTool).toBeDefined();
 
-    const result = String(await bashTool!.execute({ command: "echo hi" }, toolContext()));
-    expect(result).not.toContain("bash is restricted in plan mode");
-    expect(result).toContain("Exit code: 0");
-    expect(result).toContain("hi");
+    const result = await bashTool!.execute({ command: "echo hi" }, toolContext());
+    expect(result).toMatchObject({
+      content: expect.stringContaining("Exit code: 0"),
+    });
+    expect((result as { content: string }).content).toContain("hi");
 
     processManager.shutdownAll();
   });

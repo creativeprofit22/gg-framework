@@ -1,0 +1,68 @@
+import assert from "node:assert/strict";
+
+export async function exercisePreview(page) {
+  const pane = page.locator('.workspace-pane-slot[data-pane-id="primary"]');
+  const composer = pane.locator("textarea");
+  await composer.fill("Synthetic draft: keep this through resizing.");
+  await composer.focus();
+  const initialViewport = page.viewportSize();
+  const transcript = pane.locator(".transcript");
+  await transcript.evaluate((element) => { element.scrollTop = 100; element.dispatchEvent(new Event("scroll")); });
+  const anchorOffset = () => transcript.evaluate((element) => element.querySelector(".assistant-text p").getBoundingClientRect().top - element.getBoundingClientRect().top);
+  const resizeAnchorBefore = await anchorOffset();
+  const resizeStart = performance.now();
+  await page.setViewportSize({ width: initialViewport.width - 160, height: initialViewport.height - 80 });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await composer.inputValue(), "Synthetic draft: keep this through resizing.");
+  assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
+  const resizeAnchorAfter = await anchorOffset();
+  assert(Math.abs(resizeAnchorAfter - resizeAnchorBefore) <= 2, `Resize moved paragraph anchor: ${resizeAnchorBefore} -> ${resizeAnchorAfter}`);
+  await page.setViewportSize(initialViewport);
+  const resizeMs = performance.now() - resizeStart;
+  const divider = page.getByRole("separator", { name: "Resize horizontal workspace panes" }).first();
+  await divider.focus();
+  const ratioBefore = await divider.getAttribute("aria-valuenow");
+  await divider.press("ArrowRight");
+  const ratioAfter = await divider.getAttribute("aria-valuenow");
+  assert.notEqual(ratioAfter, ratioBefore, "Keyboard divider did not resize");
+  await divider.press("ArrowLeft");
+  const bounds = await divider.boundingBox();
+  assert(bounds);
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 30, bounds.y + bounds.height / 2, { steps: 5 });
+  await page.mouse.up();
+  assert.equal(await composer.inputValue(), "Synthetic draft: keep this through resizing.");
+  await page.keyboard.press("Control+=");
+  await page.waitForFunction(() => document.documentElement.style.zoom === "1.05");
+  await page.keyboard.press("Control+0");
+  await page.waitForFunction(() => document.documentElement.style.zoom === "1");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  assert.equal(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches), true);
+  await transcript.evaluate((element) => { element.scrollTop = 100; element.dispatchEvent(new Event("scroll")); });
+  const before = await transcript.evaluate((element) => element.scrollTop);
+  const streamStart = performance.now();
+  await page.evaluate(() => window.__chatPreview.emit("primary", "run_start"));
+  for (let i = 0; i < 12; i++) {
+    await page.evaluate((i) => window.__chatPreview.emit("primary", "text_delta", { text: `Synthetic streamed paragraph ${i}. The little terminal gremlins are keeping this test honest.\n\n` }), i);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+  }
+  await page.waitForFunction(() => document.querySelector('[data-pane-id="primary"] .transcript')?.textContent.includes("Synthetic streamed paragraph 11"));
+  const after = await transcript.evaluate((element) => element.scrollTop);
+  assert(Math.abs(after - before) <= 2, `Streaming moved reading anchor: ${before} -> ${after}`);
+  const wordAnimations = await pane.locator(".md-word").evaluateAll((elements) => [...new Set(elements.map((element) => getComputedStyle(element).animationName))]);
+  assert.deepEqual(wordAnimations, [], "Reduced motion should omit animated word wrappers (useSmoothText)");
+  await page.evaluate(() => window.__chatPreview.emit("primary", "run_end", {}));
+  assert.equal(await composer.inputValue(), "Synthetic draft: keep this through resizing.");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => window.__chatPreview.emit("primary", "run_start"));
+  await page.evaluate(() => window.__chatPreview.emit("primary", "text_delta", { text: "Animation comparison starts here. " }));
+  await page.waitForFunction(() => document.querySelector('[data-pane-id="primary"] .transcript')?.textContent.includes("Animation comparison starts here."));
+  await page.evaluate(() => window.__chatPreview.emit("primary", "text_delta", { text: "Keep the original reveal available while comparing crisp streamed words. ".repeat(6) }));
+  await pane.locator(".md-word").first().waitFor({ state: "attached" });
+  const normalAnimations = await pane.locator(".md-word").evaluateAll((elements) => [...new Set(elements.map((element) => getComputedStyle(element).animationName))]);
+  const variant = await page.locator("#root").getAttribute("data-chat-preview");
+  assert.deepEqual(normalAnimations, [variant === "original" ? "md-word-in" : "none"]);
+  await page.evaluate(() => window.__chatPreview.emit("primary", "run_end", {}));
+  return { resizeAnchorBefore, resizeAnchorAfter, normalAnimations, resizeDraft: true, resizeFocus: true, keyboardResize: { ratioBefore, ratioAfter }, pointerResizeDraft: true, zoomRoundTrip: true, reducedMotion: true, resizeMs, streamingMs: performance.now() - streamStart, streamingDelivered: true, scrollTopBefore: before, scrollTopAfter: after, wordAnimations };
+}

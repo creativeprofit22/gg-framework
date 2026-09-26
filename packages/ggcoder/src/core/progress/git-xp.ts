@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../../tools/safe-env.js";
 // Detect and score new commits made during an agent run. All failures are silent —
 // progress must never break a run.
 
@@ -12,7 +13,12 @@ const AUTHOR_WINDOW_SLACK_MS = 5 * 60 * 1000;
 
 function git(cwd: string, args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const opts: ExecFileOptions = { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 };
+    const opts: ExecFileOptions = {
+      env: withoutQwenRuntimeSecret(),
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    };
     const child = execFile("git", args, opts, (err, stdout) => {
       if (err) reject(err);
       else resolve(String(stdout));

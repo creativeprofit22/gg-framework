@@ -1,7 +1,26 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/model-registry.ts", "src/paths.ts"],
+  entry: [
+    "src/index.ts",
+    "src/qwen-cloud-token-plan.ts",
+    "src/referenced-files.ts",
+    "src/desktop-session-ux.ts",
+    "src/model-registry.ts",
+    "src/paths.ts",
+    "src/plan-review.ts",
+    "src/project-notes.ts",
+    "src/project-task-contract.ts",
+    "src/programmatic-chat-contract.ts",
+    "src/programmatic-assessment-contract.ts",
+    "src/programmatic-recommendation-contract.ts",
+    "src/project-notes-diagnostics.ts",
+    "src/phase-binding-protocol.ts",
+    "src/phase-start-protocol.ts",
+    "src/roadmap-workflow.ts",
+    "src/slash-command-contract.ts",
+    "src/progress-contract.ts",
+  ],
   format: ["esm", "cjs"],
   dts: true,
   clean: true,

@@ -6,6 +6,7 @@ export type CliSubcommandName =
   | "telegram"
   | "serve"
   | "doctor"
+  | "acp"
   | "agent-home-login"
   | "agent-home";
 
@@ -41,6 +42,7 @@ function isCliSubcommandName(value: string | undefined): value is CliSubcommandN
     value === "telegram" ||
     value === "serve" ||
     value === "doctor" ||
+    value === "acp" ||
     value === "agent-home-login" ||
     value === "agent-home"
   );

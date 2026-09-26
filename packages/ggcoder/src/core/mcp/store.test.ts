@@ -25,6 +25,7 @@ import {
   removeServer,
   getServer,
   fromStoredEntry,
+  toStoredEntry,
   globalMcpPath,
   projectMcpPath,
 } from "./store.js";
@@ -36,12 +37,91 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(tmpProject, { recursive: true, force: true });
   delete process.env.GG_TEST_HOME;
 });
 
+function blockNextAtomicConfigCommit(): {
+  started: Promise<void>;
+  contenderStarted: Promise<void>;
+  release: () => void;
+} {
+  let markStarted!: () => void;
+  let markContenderStarted!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const contenderStarted = new Promise<void>((resolve) => {
+    markContenderStarted = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const realWriteFile = fs.writeFile.bind(fs);
+  let blocked = false;
+  let lockAttempts = 0;
+  vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+    const fileName = String(file);
+    if (fileName === `${globalMcpPath()}.lock`) {
+      lockAttempts += 1;
+      if (lockAttempts === 2) markContenderStarted();
+    }
+    if (!blocked && fileName.startsWith(`${globalMcpPath()}.`) && fileName.endsWith(".tmp")) {
+      blocked = true;
+      markStarted();
+      await gate;
+    }
+    await realWriteFile(file, data, options);
+  });
+  return { started, contenderStarted, release };
+}
 describe("mcp store", () => {
+  for (const shared of [false, true, undefined]) {
+    const sharing = shared === undefined ? {} : { shared };
+
+    it(`round-trips shared=${shared} through both converters`, () => {
+      const config = { name: "stateful", command: "local-fixture", ...sharing };
+      const stored = { type: "stdio" as const, command: "local-fixture", ...sharing };
+      expect(toStoredEntry(config)).toStrictEqual(stored);
+      expect(fromStoredEntry(config.name, stored)).toStrictEqual(config);
+    });
+
+    for (const scope of ["global", "project"] as const) {
+      it(`preserves shared=${shared} in ${scope} persistence and loading`, async () => {
+        const config = {
+          name: "stateful",
+          command: "local-fixture",
+          args: ["--fixture"],
+          env: { FIXTURE: "test" },
+          enabled: false,
+          timeout: 1234,
+          ...sharing,
+        };
+        await expect(addServer(config, scope, tmpProject)).resolves.toEqual({ ok: true });
+        const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
+        const raw = JSON.parse(await fs.readFile(file, "utf-8"));
+        expect(raw.mcpServers.stateful).toStrictEqual(toStoredEntry(config));
+        expect(raw.mcpServers.stateful.shared).toBe(shared);
+        expect(Object.hasOwn(raw.mcpServers.stateful, "shared")).toBe(shared !== undefined);
+        await expect(loadServers(tmpProject)).resolves.toStrictEqual([{ config, scope }]);
+      });
+    }
+  }
+
+  for (const scope of ["global", "project"] as const) {
+    it.each(["false", 0, null, {}, []].map((value) => [value]))(`rejects malformed shared=%j in ${scope} scope`, async (shared) => {
+      const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, JSON.stringify({
+        mcpServers: { stateful: { command: "local-fixture", shared } },
+      }));
+      await expect(loadServers(tmpProject)).rejects.toThrow(/MCP config.+is malformed/);
+    });
+  }
+
   it("round-trips an http server in global scope", async () => {
     const res = await addServer(
       { name: "notion", url: "https://mcp.notion.com/mcp" },
@@ -122,10 +202,53 @@ describe("mcp store", () => {
     expect(await loadServers(tmpProject)).toEqual([]);
   });
 
-  it("tolerates a malformed config file", async () => {
+  it("serializes simultaneous adds without losing either server", async () => {
+    const commit = blockNextAtomicConfigCommit();
+    const addAlpha = addServer(
+      { name: "alpha", url: "https://alpha.example/mcp" },
+      "global",
+      tmpProject,
+    );
+    await commit.started;
+
+    const addBeta = addServer(
+      { name: "beta", url: "https://beta.example/mcp" },
+      "global",
+      tmpProject,
+    );
+    await commit.contenderStarted;
+    commit.release();
+
+    await expect(Promise.all([addAlpha, addBeta])).resolves.toEqual([{ ok: true }, { ok: true }]);
+    const names = (await loadServers(tmpProject)).map((server) => server.config.name).sort();
+    expect(names).toEqual(["alpha", "beta"]);
+  });
+
+  it("serializes add and remove without resurrecting the removed server", async () => {
+    await addServer({ name: "victim", url: "https://victim.example/mcp" }, "global", tmpProject);
+    const commit = blockNextAtomicConfigCommit();
+    const addSurvivor = addServer(
+      { name: "survivor", url: "https://survivor.example/mcp" },
+      "global",
+      tmpProject,
+    );
+    await commit.started;
+
+    const removeVictim = removeServer("victim", "global", tmpProject);
+    await commit.contenderStarted;
+    commit.release();
+
+    await expect(Promise.all([addSurvivor, removeVictim])).resolves.toEqual([{ ok: true }, true]);
+    const names = (await loadServers(tmpProject)).map((server) => server.config.name);
+    expect(names).toEqual(["survivor"]);
+  });
+
+  it("surfaces a malformed config file instead of reporting an empty list", async () => {
     await fs.mkdir(path.dirname(globalMcpPath()), { recursive: true });
     await fs.writeFile(globalMcpPath(), "{ not valid json", "utf-8");
-    expect(await loadServers(tmpProject)).toEqual([]);
+    await expect(loadServers(tmpProject)).rejects.toThrow(
+      /MCP config.+is malformed\. Fix the file, then retry\./,
+    );
   });
 
   it("parses Claude's .mcp.json type field for http and sse", () => {

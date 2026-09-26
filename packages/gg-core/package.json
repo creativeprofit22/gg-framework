@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-core",
-  "version": "5.9.0",
+  "version": "5.64.0",
   "type": "module",
   "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
   "license": "MIT",
@@ -10,10 +10,30 @@
     "directory": "packages/gg-core"
   },
   "exports": {
+    "./qwen-cloud-token-plan": {
+      "types": "./dist/qwen-cloud-token-plan.d.ts",
+      "import": "./dist/qwen-cloud-token-plan.js",
+      "require": "./dist/qwen-cloud-token-plan.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./progress-contract": {
+      "types": "./dist/progress-contract.d.ts",
+      "import": "./dist/progress-contract.js",
+      "require": "./dist/progress-contract.cjs"
+    },
+    "./referenced-files": {
+      "types": "./dist/referenced-files.d.ts",
+      "import": "./dist/referenced-files.js",
+      "require": "./dist/referenced-files.cjs"
+    },
+    "./desktop-session-ux": {
+      "types": "./dist/desktop-session-ux.d.ts",
+      "import": "./dist/desktop-session-ux.js",
+      "require": "./dist/desktop-session-ux.cjs"
     },
     "./models": {
       "types": "./dist/model-registry.d.ts",
@@ -24,6 +44,61 @@
       "types": "./dist/paths.d.ts",
       "import": "./dist/paths.js",
       "require": "./dist/paths.cjs"
+    },
+    "./project-notes": {
+      "types": "./dist/project-notes.d.ts",
+      "import": "./dist/project-notes.js",
+      "require": "./dist/project-notes.cjs"
+    },
+    "./programmatic-recommendation-contract": {
+      "types": "./dist/programmatic-recommendation-contract.d.ts",
+      "import": "./dist/programmatic-recommendation-contract.js",
+      "require": "./dist/programmatic-recommendation-contract.cjs"
+    },
+    "./programmatic-assessment-contract": {
+      "types": "./dist/programmatic-assessment-contract.d.ts",
+      "import": "./dist/programmatic-assessment-contract.js",
+      "require": "./dist/programmatic-assessment-contract.cjs"
+    },
+    "./programmatic-chat-contract": {
+      "types": "./dist/programmatic-chat-contract.d.ts",
+      "import": "./dist/programmatic-chat-contract.js",
+      "require": "./dist/programmatic-chat-contract.cjs"
+    },
+    "./project-task-contract": {
+      "types": "./dist/project-task-contract.d.ts",
+      "import": "./dist/project-task-contract.js",
+      "require": "./dist/project-task-contract.cjs"
+    },
+    "./project-notes-diagnostics": {
+      "types": "./dist/project-notes-diagnostics.d.ts",
+      "import": "./dist/project-notes-diagnostics.js",
+      "require": "./dist/project-notes-diagnostics.cjs"
+    },
+    "./phase-binding-protocol": {
+      "types": "./dist/phase-binding-protocol.d.ts",
+      "import": "./dist/phase-binding-protocol.js",
+      "require": "./dist/phase-binding-protocol.cjs"
+    },
+    "./phase-start-protocol": {
+      "types": "./dist/phase-start-protocol.d.ts",
+      "import": "./dist/phase-start-protocol.js",
+      "require": "./dist/phase-start-protocol.cjs"
+    },
+    "./plan-review": {
+      "types": "./dist/plan-review.d.ts",
+      "import": "./dist/plan-review.js",
+      "require": "./dist/plan-review.cjs"
+    },
+    "./roadmap-workflow": {
+      "types": "./dist/roadmap-workflow.d.ts",
+      "import": "./dist/roadmap-workflow.js",
+      "require": "./dist/roadmap-workflow.cjs"
+    },
+    "./slash-command-contract": {
+      "types": "./dist/slash-command-contract.d.ts",
+      "import": "./dist/slash-command-contract.js",
+      "require": "./dist/slash-command-contract.cjs"
     }
   },
   "main": "./dist/index.cjs",
@@ -41,8 +116,8 @@
     "@kenkaiiii/gg-ai": "workspace:*"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "^3.6.0",
-    "ogg-opus-decoder": "^1.6.13"
+    "@huggingface/transformers": "4.2.0",
+    "ogg-opus-decoder": "^1.7.5"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

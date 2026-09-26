@@ -3,6 +3,7 @@ import {
   FilesetResolver,
   type FaceLandmarkerResult,
 } from "@mediapipe/tasks-vision";
+import { dependencies } from "../../package.json";
 import type { GazeSample, GazeTracker } from "./types";
 
 // Webcam head-pose tracker built on MediaPipe Face Landmarker. We deliberately
@@ -18,7 +19,8 @@ import type { GazeSample, GazeTracker } from "./types";
 // bundle light; a slow/blocked network simply makes the tracker unavailable and
 // the controller falls back without the feature.
 
-const WASM_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+// Keep the SDK pinned exactly: its native runtime must come from the same release.
+const WASM_CDN = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${dependencies["@mediapipe/tasks-vision"]}/wasm`;
 const MODEL_CDN =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 

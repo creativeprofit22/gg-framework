@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-ai",
-  "version": "5.9.0",
+  "version": "5.64.0",
   "type": "module",
   "description": "Unified LLM streaming API for Anthropic, OpenAI, and Gemini",
   "license": "MIT",
@@ -10,6 +10,11 @@
     "directory": "packages/gg-ai"
   },
   "exports": {
+    "./qwen-cloud-policy": {
+      "types": "./dist/qwen-cloud-policy.d.ts",
+      "import": "./dist/qwen-cloud-policy.js",
+      "require": "./dist/qwen-cloud-policy.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
@@ -28,8 +33,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.94.0",
-    "openai": "^6.34.0",
+    "@anthropic-ai/sdk": "^0.124.0",
+    "@bokuweb/zstd-wasm": "^0.0.27",
+    "openai": "^7.13.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

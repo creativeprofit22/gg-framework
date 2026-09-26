@@ -7,8 +7,7 @@
       "@kenkaiiii/gg-ai",
       "@kenkaiiii/gg-agent",
       "@kenkaiiii/gg-core",
-      "@kenkaiiii/ggcoder",
-      "@kenkaiiii/gg-boss"
+      "@kenkaiiii/ggcoder"
     ]
   ],
   "linked": [],

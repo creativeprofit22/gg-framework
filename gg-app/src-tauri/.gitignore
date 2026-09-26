@@ -9,3 +9,4 @@
 # Staged distribution artifacts (built by scripts/stage-node + bundle-sidecar)
 /binaries/
 /sidecar/
+/sidecar.candidate/

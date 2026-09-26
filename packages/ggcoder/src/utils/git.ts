@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 
 export function getGitBranch(cwd: string): Promise<string | null> {
@@ -5,13 +6,31 @@ export function getGitBranch(cwd: string): Promise<string | null> {
     execFile(
       "git",
       ["rev-parse", "--abbrev-ref", "HEAD"],
-      { cwd, timeout: 2000 },
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
       (error, stdout) => {
         if (error) {
           resolve(null);
           return;
         }
         resolve(stdout.trim() || null);
+      },
+    );
+  });
+}
+
+/** Count staged, modified, deleted, renamed, and untracked files. */
+export function getGitDirtyFileCount(cwd: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout.split(/\r?\n/).filter(Boolean).length);
       },
     );
   });
@@ -27,7 +46,7 @@ export function isGitRepo(cwd: string): Promise<boolean> {
     execFile(
       "git",
       ["rev-parse", "--is-inside-work-tree"],
-      { cwd, timeout: 2000 },
+      { env: withoutQwenRuntimeSecret(), cwd, timeout: 2000 },
       (error, stdout) => {
         resolve(!error && stdout.trim() === "true");
       },

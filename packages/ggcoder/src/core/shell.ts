@@ -109,16 +109,19 @@ export function resolveShell(command: string, opts: ResolveShellOpts = {}): Shel
   // Explicit override (power users / tests): treat as a POSIX bash.
   const override = env.GG_BASH?.trim();
   if (override) {
-    return { file: override, args: ["-c", command], isCmdFallback: false };
+    return { file: override, args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
   }
 
   if (platform !== "win32") {
-    return { file: "bash", args: ["-c", command], isCmdFallback: false };
+    // pipefail: a pipeline exits with the failing stage's status, never the
+    // limiter's. Without it `tests | tail -20` reports tail's 0 and a red
+    // suite reads green — both to the agent and to the verification gate.
+    return { file: "bash", args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
   }
 
   const gitBash = findGitBash(env, exists);
   if (gitBash) {
-    return { file: gitBash, args: ["-c", command], isCmdFallback: false };
+    return { file: gitBash, args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
   }
 
   // Last resort: cmd.exe. `/d` skips AutoRun, `/s` + `/c` runs the rest as a

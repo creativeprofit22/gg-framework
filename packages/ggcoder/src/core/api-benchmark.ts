@@ -11,7 +11,7 @@
  *
  * Environment overrides:
  *   GG_BENCH_PROVIDER  — provider name (default: "glm")
- *   GG_BENCH_MODEL     — model id (default: "glm-5.2")
+ *   GG_BENCH_MODEL     — model id (default: "glm-5.3")
  *   GG_BENCH_TURNS     — number of turns (default: 5)
  */
 
@@ -353,7 +353,7 @@ export function formatApiComparison(c: ApiComparisonResult): string {
 
 async function main(): Promise<void> {
   const provider = process.env.GG_BENCH_PROVIDER ?? "glm";
-  const model = process.env.GG_BENCH_MODEL ?? "glm-5.2";
+  const model = process.env.GG_BENCH_MODEL ?? "glm-5.3";
   const turns = parseInt(process.env.GG_BENCH_TURNS ?? "5", 10);
   const mode = process.env.GG_BENCH_MODE ?? "compare"; // "single" or "compare"
 

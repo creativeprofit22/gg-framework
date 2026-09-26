@@ -1,5 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import type { TaskActivity } from "./task-activity";
+import { ThinkingOrb } from "./ActivityOrb";
 import { theme } from "./theme";
+import { ShimmerText } from "./ShimmerText";
+import { outcomePhrase } from "./activity-copy";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
@@ -18,8 +22,31 @@ export const SPINNER_FRAMES = [
   "\u280f",
 ];
 export const SPINNER_FRAME_MS = 80;
-const FRAMES = SPINNER_FRAMES;
-const FRAME_MS = SPINNER_FRAME_MS;
+
+/**
+ * Idle-line variations for the ready state — rotated so the quiet line under
+ * the transcript isn't always the same "Ready for work". Re-rolled each time
+ * the bar returns to the bare idle state (never the same phrase twice in a
+ * row). Tone: deadpan, a little self-deprecating about being an idle AI —
+ * funny like the wake screen, never meme-speak. The original stays first.
+ */
+const READY_PHRASES = [
+  "Ready for work",
+  "Ready when you are",
+  "Your move",
+  "Standing by. Obviously.",
+  "Waiting on you, as usual",
+  "Doing nothing, expertly",
+  "Napping, but professionally",
+  "Polishing my tokens",
+  "Idling at 0 tokens/sec",
+  "Stretching my context window",
+] as const;
+
+function pickReadyPhrase(exclude?: string): string {
+  const pool = exclude ? READY_PHRASES.filter((p) => p !== exclude) : READY_PHRASES;
+  return pool[Math.floor(Math.random() * pool.length)] ?? "Ready for work";
+}
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -39,6 +66,10 @@ export function formatTokenCount(n: number): string {
 
 interface Props {
   running: boolean;
+  /** Event-grounded whole-task progress and final outcome. */
+  activity?: TaskActivity;
+  /** Cancellation was requested and is awaiting provider settlement. */
+  cancelling?: boolean;
   /** Accumulated output tokens for the current/just-finished run. */
   tokens: number;
   /** Done-status phrase shown when a run just finished (e.g. "Brewed up a response in 12s"). */
@@ -96,18 +127,55 @@ function ToolsToggle({
   );
 }
 
-/**
- * Live activity bar beneath the transcript. While running: sparkle spinner +
- * "Working…" + `elapsed · ↓ N tokens` + esc-to-cancel. After a run: a quiet
- * done-status phrase. Otherwise: a quiet ready line.
- */
+// Keep the visible rail terse without discarding the event model's richer context.
+const SHORT_LABELS: Record<string, string> = {
+  "Working on your request…": "Working…",
+  "Working through your request…": "On it…",
+  "Continuing with your request…": "Continuing…",
+  "Reasoning through the next step…": "Reasoning…",
+  "Writing a response…": "Writing…",
+  "Putting the response into words…": "Composing…",
+  "Composing the response…": "Drafting…",
+  "Reading the relevant code…": "Reading code…",
+  "Looking through the code…": "Browsing code…",
+  "Examining the code…": "Examining code…",
+  "Making the changes…": "Editing…",
+  "Editing the code…": "Updating code…",
+  "Applying the changes…": "Applying changes…",
+  "Consulting reference material…": "Reading references…",
+  "Coordinating agent work…": "Agents working…",
+  "Checking background work…": "Checking progress…",
+  "Working through a command…": "Executing…",
+  "Checking the changes…": "Checking…",
+  "Running verification…": "Verifying…",
+  "Reviewing the work…": "Reviewing…",
+  "Applying Ken’s corrections…": "Fixing review notes…",
+  "Preparing Ken’s review…": "Review starting…",
+  "Keeping the task context…": "Saving context…",
+  "Continuing the task…": "Continuing…",
+  "Continuing with your decision…": "Continuing…",
+  "Question closed · checking next step…": "Resuming…",
+  "Your decision needed": "Needs you",
+  "Plan needs your decision": "Approve plan",
+  "Plan ready for review…": "Plan ready",
+  "Plan approved · preparing implementation…": "Starting plan…",
+  "Changed · verification incomplete": "Not verified",
+  "Verification incomplete": "Not verified",
+  "Done · checks passed": "Checks passed",
+  "Stopped · unfinished": "Stopped",
+  "Paused · review limit reached": "Review limit reached",
+  "Reconnected · review latest result": "Check latest result",
+  "Stopping the task…": "Stopping…",
+  "Cancellation failed · task still running": "Stop failed",
+};
+
+/** The existing animated row now represents a whole task, including Ken's review. */
 export function ActivityBar({
   running,
+  activity,
+  cancelling = false,
   tokens,
   doneStatus,
-  isThinking,
-  thinkingStartTs,
-  thinkingAccumMs,
   planTotal = 0,
   planDone = 0,
   onCancel,
@@ -115,140 +183,145 @@ export function ActivityBar({
   hasToolFeed = false,
   onToggleTools,
 }: Props): React.ReactElement {
-  // Show the toggle when there's tool activity to collapse, when the panel is
-  // already hidden (so it can be brought back), or right after a run finishes
-  // (doneStatus) so it stays reachable in the "Built & ran in 4m" bar for the
-  // next run. Only the bare idle "Ready for work" line stays uncluttered.
-  const showToolsToggle =
-    Boolean(onToggleTools) && (hasToolFeed || toolsHidden || Boolean(doneStatus));
-  const [frame, setFrame] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [, setNow] = useState(0);
-  const startRef = useRef(0);
-
+  const [now, setNow] = useState(0);
+  const [fallbackStart, setFallbackStart] = useState(0);
+  const [readyPhrase, setReadyPhrase] = useState(() => pickReadyPhrase());
+  const hasActivity = activity !== undefined && activity.phase !== "idle";
+  const starting = running && typeof activity?.endedAt === "number";
+  const active =
+    starting ||
+    (hasActivity ? activity.phase === "working" || activity.phase === "reviewing" : running);
+  const bareIdle = !active && !hasActivity && !doneStatus;
+  const startedAt = activity?.startedAt;
   useEffect(() => {
-    if (!running) {
-      setElapsed(0);
-      return;
-    }
-    startRef.current = Date.now();
-    setElapsed(0);
-    const spin = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), FRAME_MS);
-    const tick = setInterval(() => {
-      setElapsed(Date.now() - startRef.current);
-      // Repaint so the live thinking timer advances each tick.
-      setNow((n) => n + 1);
-    }, 250);
-    return () => {
-      clearInterval(spin);
-      clearInterval(tick);
-    };
-  }, [running]);
+    if (bareIdle) setReadyPhrase((cur) => pickReadyPhrase(cur));
+  }, [bareIdle]);
+  useEffect(() => {
+    if (!active) return;
+    setFallbackStart(startedAt ?? Date.now());
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, startedAt]);
 
-  // Plan-step progress (amber "Plan Steps n/total"), shown whenever an approved
-  // plan is being implemented — mirrors the ggcoder CLI activity bar.
-  const planBadge =
-    planTotal > 0 ? (
-      <span className="plan-steps-badge">
-        <span style={{ color: theme.warning }}>{"Plan Steps"}</span>{" "}
-        <span style={{ color: theme.textDim }}>
-          {planDone}/{planTotal}
-        </span>
-      </span>
-    ) : null;
-
-  if (!running) {
-    // doneStatus is "{verb} {duration} \u2022 \u2193 N tokens" — mirror the TUI by
-    // coloring the "\u273b {verb} {duration}" head in success and the token tail dim.
-    const [doneHead, ...doneTail] = doneStatus ? doneStatus.split(" \u2022 ") : [];
-    return (
-      <div className="statusrow" style={{ color: theme.textDim }}>
-        {doneStatus ? (
-          <span className="statusrow-left">
-            <span className="statusrow-icon" style={{ color: theme.success }}>
-              {"\u273b"}
-            </span>
-            <span style={{ color: theme.success }}>{doneHead}</span>
-            {doneTail.length > 0 && (
-              <span style={{ color: theme.textDim }}>{` \u2022 ${doneTail.join(" \u2022 ")}`}</span>
-            )}
-          </span>
-        ) : (
-          <span className="statusrow-ready">
-            <span className="statusrow-icon" style={{ color: theme.accent }}>
-              {"\u276f"}
-            </span>
-            <span>Ready for work</span>
-          </span>
-        )}
-        {planBadge && <span style={{ marginLeft: "auto" }}>{planBadge}</span>}
-        {showToolsToggle && onToggleTools && (
-          <span className="statusrow-tools-toggle" style={{ marginLeft: planBadge ? 8 : "auto" }}>
-            <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  // Live ticking timer: the 250ms `setNow` interval above forces this repaint,
-  // and reading the clock during render is what advances the displayed elapsed
-  // time each tick. Intentional, not a purity bug.
-  const liveThinkingDelta =
-    // eslint-disable-next-line react-hooks/purity
-    isThinking && thinkingStartTs ? Date.now() - thinkingStartTs : 0;
-  const thinkingMs = thinkingAccumMs + liveThinkingDelta;
-  const thinkingLabel = isThinking
-    ? thinkingMs >= 1000
-      ? `thinking for ${formatElapsed(thinkingMs)}`
-      : "thinking"
-    : thinkingMs >= 1000
-      ? `thought for ${formatElapsed(thinkingMs)}`
-      : "";
-
-  const meta: { text: string; thinking?: boolean }[] = [{ text: formatElapsed(elapsed) }];
-  if (tokens > 0) meta.push({ text: `\u2193 ${formatTokenCount(tokens)} tokens` });
-  if (thinkingLabel) meta.push({ text: thinkingLabel, thinking: true });
+  const showToolsToggle =
+    Boolean(onToggleTools) && (hasToolFeed || toolsHidden || hasActivity || Boolean(doneStatus));
+  const totalTokens = hasActivity ? activity.tokens : tokens;
+  const elapsed =
+    hasActivity && activity.startedAt !== null
+      ? Math.max(0, (activity.endedAt ?? now) - activity.startedAt)
+      : Math.max(0, now - fallbackStart);
+  const tone = starting
+    ? theme.textMuted
+    : activity?.phase === "failed" || activity?.label === "Cancellation failed · task still running"
+      ? theme.error
+      : activity?.connectionLost ||
+          activity?.label === "Retrying…" ||
+          ["attention", "unverified", "stopped"].includes(activity?.phase ?? "")
+        ? theme.warning
+        : activity?.phase === "done"
+          ? theme.success
+          : theme.textMuted;
+  const fullLabel = cancelling
+    ? "Stopping the task…"
+    : starting
+      ? "Starting…"
+      : hasActivity
+        ? activity.label
+        : active
+          ? "Working on your request…"
+          : doneStatus
+            ? "Response ready"
+            : readyPhrase;
+  const label =
+    (!active && outcomePhrase(fullLabel, activity?.startedAt ?? 0)) ||
+    SHORT_LABELS[fullLabel] ||
+    fullLabel;
+  const canCancel = running || active;
 
   return (
-    <div className="statusrow running" style={{ color: theme.textMuted }}>
-      <span className="statusrow-left">
-        <span className="statusrow-icon spinner" style={{ color: theme.primary }}>
-          {FRAMES[frame]}
-        </span>
-        <span className="working" style={{ color: theme.text }}>
-          {"Working\u2026"}
-        </span>
-        <span style={{ color: theme.textMuted }}>
-          {"("}
-          {meta.map((part, i) => (
-            <span key={i}>
-              {i > 0 ? " \u2022 " : ""}
+    <div className="task-activity" data-phase={activity?.phase ?? (running ? "working" : "idle")}>
+      <div className={`statusrow${active ? " running" : ""}`}>
+        <div className="activity-summary">
+          <span
+            className="statusrow-left"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            title={activity?.detail || undefined}
+          >
+            {active ? (
+              <ThinkingOrb
+                state="listening"
+                size={20}
+                theme="dark"
+                aria-hidden="true"
+                style={{ flexShrink: 0 }}
+              />
+            ) : (
               <span
-                style={{
-                  color: part.thinking
-                    ? isThinking
-                      ? theme.language
-                      : theme.textMuted
-                    : theme.textMuted,
-                }}
+                className="statusrow-icon"
+                aria-hidden="true"
+                style={{ color: bareIdle ? theme.accent : tone }}
               >
-                {part.text}
+                {bareIdle ? "\u276f" : activity?.phase === "done" ? "\u2713" : "\u2022"}
+              </span>
+            )}
+            {/* Remount only the label when its meaning changes. Timer/token
+                updates must not restart the reveal or the running orb. */}
+            <span key={`${active}:${label}`} className="activity-label-reveal" title={label}>
+              {active ? (
+                <ShimmerText base={tone} bright={theme.text}>
+                  {label}
+                </ShimmerText>
+              ) : (
+                <span style={{ color: bareIdle ? theme.textMuted : tone }}>{label}</span>
+              )}
+            </span>
+            {!active && activity?.workspaceWarning && (
+              <span className="activity-workspace-warning" style={{ color: theme.warning }}>
+                {activity.workspaceWarning}
+              </span>
+            )}
+          </span>
+          {(active || hasActivity) && !starting && (
+            <span className="activity-meta">
+              {formatElapsed(elapsed)}
+              {totalTokens > 0 && (
+                <span className="activity-token-count" title="Output tokens">
+                  {` · ${formatTokenCount(totalTokens)} tok`}
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+        {active && planTotal > 0 && planDone < planTotal && (
+          <span className="plan-steps-running">
+            <span className="plan-steps-badge">
+              <span style={{ color: theme.textMuted }}>Plan</span>{" "}
+              <span style={{ color: theme.textMuted }}>
+                {planDone}/{planTotal}
               </span>
             </span>
-          ))}
-          {")"}
-        </span>
-      </span>
-      {planBadge && <span className="plan-steps-running">{planBadge}</span>}
-      <span className="statusrow-right">
-        {showToolsToggle && onToggleTools && (
-          <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
+          </span>
         )}
-        <button className="cancel" style={{ color: theme.error }} onClick={onCancel}>
-          esc to cancel
-        </button>
-      </span>
+        <span className="statusrow-right">
+          {showToolsToggle && onToggleTools && (
+            <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
+          )}
+          {canCancel && (
+            <button
+              className="cancel"
+              style={{ color: cancelling ? theme.textMuted : theme.error }}
+              onClick={onCancel}
+              disabled={cancelling}
+              aria-label={cancelling ? "Cancellation in progress" : "Cancel agent run"}
+            >
+              {cancelling ? "Stopping…" : "Stop"}
+            </button>
+          )}
+        </span>
+      </div>
     </div>
   );
 }

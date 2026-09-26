@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import { detectGlobalUpdateManager } from "./auto-update-install.js";
 import path from "node:path";
+import { resolvePackageManagerLaunch, type UpdatePackageManager } from "./package-manager-launcher.js";
 
 /**
  * Provider-agnostic background self-updater. Each app composes its own instance
@@ -16,15 +18,8 @@ interface UpdateState {
   lastUpdateAttempt?: number;
 }
 
-enum PackageManager {
-  NPM = "npm",
-  PNPM = "pnpm",
-  YARN = "yarn",
-  UNKNOWN = "unknown",
-}
-
 interface InstallInfo {
-  packageManager: PackageManager;
+  packageManager: UpdatePackageManager | null;
   updateCommand: string | null;
 }
 
@@ -66,17 +61,47 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-function performUpdateInBackground(command: string): void {
+function performUpdateInBackground(
+  manager: UpdatePackageManager,
+  packageName: string,
+  onSpawn: () => void,
+  onComplete: (success: boolean) => void,
+): boolean {
   try {
-    const parts = command.split(" ");
-    const child = spawn(parts[0]!, parts.slice(1), {
+    const args = manager === "yarn" ? ["global", "add"] : [manager === "npm" ? "install" : "add", "-g"];
+    args.push(`${packageName}@latest`);
+    const launch = resolvePackageManagerLaunch(manager, args);
+    const child = spawn(launch.command, launch.args, {
+      shell: false,
+      windowsHide: true,
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, npm_config_loglevel: "silent" },
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([name]) => name.toUpperCase() !== "QWEN_CLOUD_TOKEN_PLAN_KEY",
+          ),
+        ),
+        npm_config_loglevel: "silent",
+      },
     });
+    let completed = false;
+    const complete = (success: boolean) => {
+      if (completed) return;
+      completed = true;
+      onComplete(success);
+    };
+    // Spawn failures are asynchronous. Attach before unref, and keep the error
+    // handler after spawn too: an updater must never terminate its ACP parent.
+    child.on("error", () => complete(false));
+    child.once("spawn", onSpawn);
+    child.once("exit", (code) => complete(code === 0));
     child.unref();
+    return true;
   } catch {
-    // Non-fatal — will retry next startup
+    // Resolution and synchronous spawn failures are nonfatal too.
+    onComplete(false);
+    return false;
   }
 }
 
@@ -88,6 +113,7 @@ export function createAutoUpdater(config: AutoUpdateConfig): AutoUpdater {
       `Ken just pushed a fresh update — ${currentVersion} → ${latestVersion}! I'll grab it on next launch (or run ${updateCommand} if you can't wait).`);
 
   let periodicTimer: ReturnType<typeof setInterval> | null = null;
+  let updateInFlight = false;
 
   function stateFilePath(): string {
     return typeof config.stateFilePath === "function"
@@ -115,34 +141,13 @@ export function createAutoUpdater(config: AutoUpdateConfig): AutoUpdater {
   }
 
   function detectInstallInfo(): InstallInfo {
-    const scriptPath = (process.argv[1] ?? "").replace(/\\/g, "/");
-
-    // npx — skip (ephemeral)
-    if (scriptPath.includes("/_npx/")) {
-      return { packageManager: PackageManager.UNKNOWN, updateCommand: null };
-    }
-
-    // pnpm global
-    if (scriptPath.includes("/.pnpm") || scriptPath.includes("/pnpm/global")) {
-      return {
-        packageManager: PackageManager.PNPM,
-        updateCommand: `pnpm add -g ${config.packageName}@latest`,
-      };
-    }
-
-    // yarn global
-    if (scriptPath.includes("/.yarn/") || scriptPath.includes("/yarn/global")) {
-      return {
-        packageManager: PackageManager.YARN,
-        updateCommand: `yarn global add ${config.packageName}@latest`,
-      };
-    }
-
-    // npm global (default)
-    return {
-      packageManager: PackageManager.NPM,
-      updateCommand: `npm install -g ${config.packageName}@latest`,
+    const packageManager = detectGlobalUpdateManager(config.packageName);
+    const commands = {
+      npm: `npm install -g ${config.packageName}@latest`,
+      pnpm: `pnpm add -g ${config.packageName}@latest`,
+      yarn: `yarn global add ${config.packageName}@latest`,
     };
+    return { packageManager, updateCommand: packageManager ? commands[packageManager] : null };
   }
 
   async function fetchLatestVersion(): Promise<string | null> {
@@ -179,22 +184,37 @@ export function createAutoUpdater(config: AutoUpdateConfig): AutoUpdater {
 
   function checkAndAutoUpdate(currentVersion: string): string | null {
     try {
+      if (updateInFlight) return null;
       const state = readState();
-      let message: string | null = null;
 
       // Phase 1: Apply pending update from previous check
       if (state?.updatePending && state.latestVersion) {
         if (compareVersions(state.latestVersion, currentVersion) > 0) {
           const info = detectInstallInfo();
-          if (info.updateCommand) {
-            performUpdateInBackground(info.updateCommand);
-            message = `Ken just shipped ${state.latestVersion}! Installing in the background — takes effect next launch.`;
-            writeState({
-              ...state,
-              lastCheckedAt: Date.now(),
-              updatePending: false,
-              lastUpdateAttempt: Date.now(),
-            });
+          if (info.packageManager) {
+            updateInFlight = true;
+            const started = performUpdateInBackground(
+              info.packageManager,
+              config.packageName,
+              () => {
+                const current = readState();
+                if (current && current.latestVersion === state.latestVersion) {
+                  writeState({ ...current, lastUpdateAttempt: Date.now() });
+                }
+              },
+              (success) => {
+                updateInFlight = false;
+                const current = readState();
+                if (success && current && current.latestVersion === state.latestVersion) {
+                  writeState({ ...current, updatePending: false, lastCheckedAt: Date.now() });
+                }
+              },
+            );
+            // The synchronous API cannot know whether the child has spawned.
+            // Don't claim an install or let a concurrent poll erase pending state.
+            return started
+              ? `Ken just shipped ${state.latestVersion}! Attempting a background update — if successful, it takes effect next launch.`
+              : null;
           }
         } else {
           // Already on latest (user may have updated manually)
@@ -206,7 +226,7 @@ export function createAutoUpdater(config: AutoUpdateConfig): AutoUpdater {
       const shouldCheck = !state || Date.now() - state.lastCheckedAt > CHECK_INTERVAL_MS;
       if (shouldCheck) scheduleBackgroundCheck(currentVersion);
 
-      return message;
+      return null;
     } catch {
       return null;
     }

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
 import { killTask, type BackgroundTask } from "./agent";
+import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 
 /**
  * Footer indicator for background tasks (bash run_in_background) — mirrors the
@@ -56,7 +57,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
     };
   }, [open]);
 
-  const runningCount = tasks.filter((t) => t.exitCode === null).length;
+  const runningCount = tasks.filter(isBackgroundTaskRunning).length;
   // Spinner color while anything runs; muted once all have exited.
   const accent = runningCount > 0 ? theme.warning : theme.textMuted;
 
@@ -91,7 +92,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
               </div>
             )}
             {tasks.map((t) => {
-              const running = t.exitCode === null;
+              const running = isBackgroundTaskRunning(t);
               return (
                 <div key={t.id} className="bgtasks-item">
                   <span
@@ -104,7 +105,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
                     {shortCommand(t.command)}
                   </span>
                   <span className="bgtasks-status" style={{ color: theme.textDim }}>
-                    {running ? `pid ${t.pid}` : `exit ${t.exitCode}`}
+                    {formatBackgroundTaskStatus(t)}
                   </span>
                   {running && (
                     <button

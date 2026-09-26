@@ -39,6 +39,7 @@ export {
   getContextWindow,
   usesOpenAICodexTransport,
   getMaxThinkingLevel,
+  getDefaultThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
@@ -79,6 +80,7 @@ export type {
 export type {
   AgentSessionOptions,
   AgentSessionState,
+  BackgroundTaskSnapshot,
   BusEventMap,
   ContextWindowOptions,
   ModelInfo,

@@ -79,7 +79,7 @@ function normalizeParityLines(kind: CompletedItem["kind"], lines: readonly strin
   if (kind === "session_summary") {
     return lines.map(normalizeSessionSummaryLine).filter((line): line is string => line !== null);
   }
-  if (kind === "style_pack" || kind === "setup_hint" || kind === "update_notice") {
+  if (kind === "style_pack" || kind === "update_notice") {
     return lines.map((line) => line.replace(/─/g, "").replace(/ +(?=│$)/u, ""));
   }
   return [...lines];
@@ -164,56 +164,6 @@ function renderStylePackLive(
         <Text color={itemTheme.text} bold wrap="wrap">
           {names.join(", ")}
         </Text>
-        {item.showSetupHint && (
-          <Box marginTop={1}>
-            <Text wrap="wrap">
-              <Text color={itemTheme.textMuted}>{"Tip: run "}</Text>
-              <Text color={itemTheme.language} bold>
-                {"/setup"}
-              </Text>
-              <Text color={itemTheme.textMuted}>
-                {" to audit this project against the active pack(s)"}
-              </Text>
-            </Text>
-          </Box>
-        )}
-      </Box>
-    </Box>
-  );
-}
-
-function renderSetupHintLive(itemTheme: Theme) {
-  return (
-    <Box paddingLeft={1} marginTop={1} flexShrink={1}>
-      <Box
-        flexShrink={1}
-        flexDirection="column"
-        borderStyle="round"
-        borderColor={itemTheme.language}
-        paddingX={1}
-      >
-        <Text wrap="wrap">
-          <Text color={itemTheme.language} bold>
-            {"◆ "}
-          </Text>
-          <Text color={itemTheme.language} bold>
-            {"NO STYLE PACKS DETECTED"}
-          </Text>
-        </Text>
-        <Text color={itemTheme.textMuted} wrap="wrap">
-          {"This directory has no recognized language manifest at its root."}
-        </Text>
-        <Box marginTop={1}>
-          <Text wrap="wrap">
-            <Text color={itemTheme.textMuted}>{"Tip: run "}</Text>
-            <Text color={itemTheme.language} bold>
-              {"/setup"}
-            </Text>
-            <Text color={itemTheme.textMuted}>
-              {" to audit project hygiene or bootstrap a new project from scratch"}
-            </Text>
-          </Text>
-        </Box>
       </Box>
     </Box>
   );
@@ -326,8 +276,6 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
       return <SubAgentPanel agents={item.agents} aborted={item.aborted} />;
     case "style_pack":
       return renderStylePackLive(item, theme);
-    case "setup_hint":
-      return renderSetupHintLive(theme);
     case "update_notice":
       return renderUpdateNoticeLive(item, theme);
     case "compacting":
@@ -526,7 +474,7 @@ const parityCaseByKind = {
         task: "Inspect widgets",
         status: "done",
         toolUseCount: 2,
-        tokenUsage: { input: 1200, output: 300 },
+        tokenUsage: { input: 1200, output: 300, cacheRead: 2400, cacheWrite: 500 },
         durationMs: 1800,
       },
     ],
@@ -535,9 +483,7 @@ const parityCaseByKind = {
     kind: "style_pack",
     id: "style-pack",
     added: ["typescript"],
-    showSetupHint: true,
   },
-  setup_hint: { kind: "setup_hint", id: "setup-hint" },
   update_notice: {
     kind: "update_notice",
     id: "update-notice",
@@ -621,20 +567,20 @@ const supplementalParityCases: CompletedItem[] = [
   },
   {
     kind: "tool_start",
-    id: "mcp-search-code-start",
-    toolCallId: "mcp-search-code-start",
-    name: "mcp__kencode-search__searchCode",
-    args: { query: "useState(", language: ["TypeScript"] },
+    id: "steroids-search-start",
+    toolCallId: "steroids-search-start",
+    name: "steroids",
+    args: { action: "search", pattern: "useState(", language: "typescript" },
     startedAt: 0,
     animateUntil: 0,
   },
   {
     kind: "tool_done",
-    id: "mcp-search-code-done",
-    name: "mcp__kencode-search__searchCode",
-    args: { query: "useState(", language: ["TypeScript"] },
+    id: "steroids-search-done",
+    name: "steroids",
+    args: { action: "search", pattern: "useState(", language: "typescript" },
     result:
-      'Repo: owner/project (★123, MIT)\nFile: src/App.tsx\nLink: https://github.com/owner/project/blob/main/src/App.tsx\n\n12 │ const [value, setValue] = useState("");',
+      'owner/project src/App.tsx:12\nconst [value, setValue] = useState("");\nomitted: 0 more_available: false',
     isError: false,
     durationMs: 1000,
   },
@@ -643,6 +589,15 @@ const supplementalParityCases: CompletedItem[] = [
 const parityCases = [...Object.values(parityCaseByKind), ...supplementalParityCases];
 
 describe("TUI live/history parity", () => {
+  it("keeps fresh and cached sub-agent usage after terminal-history serialization", () => {
+    const item = parityCaseByKind.subagent_group;
+    const live = renderLive(liveElementFor(item)!);
+    const history = renderHistory(item);
+
+    expect(live.join("\n")).toContain("2.0k tokens · 2.4k cached");
+    expect(history.join("\n")).toContain("2.0k tokens · 2.4k cached");
+  });
+
   it.each(parityCases.map((item) => [item.kind, item] as const))(
     "keeps %s live rendering aligned with terminal history",
     (_kind, item) => {

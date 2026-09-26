@@ -15,6 +15,68 @@ export interface CliConfig {
   outputFormat?: "text" | "json";
 }
 
+// ── Foreground Execution ────────────────────────────────────
+
+export type ForegroundExecutionReason =
+  | "completed"
+  | "nonZeroExit"
+  | "timedOut"
+  | "aborted"
+  | "spawnError"
+  /** Still running at the soft limit; handed off to a background task. */
+  | "backgrounded"
+  /** Stopped after producing no output for the inactivity limit. */
+  | "inactive";
+
+export interface ForegroundExecutionMetadata {
+  executionId: string;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  timeoutMs: number;
+  pid: number | null;
+  logPath: string;
+}
+
+export interface ForegroundExecutionOutcome {
+  metadata: ForegroundExecutionMetadata;
+  reason: ForegroundExecutionReason;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  elapsedMs: number;
+  error: Error | null;
+  /** Background task ID when the command was handed off (`backgrounded`). */
+  backgroundTaskId: string | null;
+  /** True when a leftover process still held the output pipes after exit. */
+  pipesHeldAfterExit: boolean;
+}
+
+/** Stable, serializable diagnostics exposed to hosts for foreground bash runs. */
+export interface BashDiagnostics {
+  executionId: string;
+  pid: number | null;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  timeoutMs: number;
+  reason: ForegroundExecutionReason;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  elapsedMs: number;
+  logPath: string;
+  tail: string;
+  outputCapped: boolean;
+  totalOutputBytes: number;
+  retainedOutputBytes: number;
+  droppedOutputBytes: number;
+  backgroundTaskId: string | null;
+  pipesHeldAfterExit: boolean;
+}
+
+export interface BashToolResultDetails {
+  bashDiagnostics: BashDiagnostics;
+}
+
 // ── Session Persistence ────────────────────────────────────
 
 export interface SessionHeader {
@@ -43,4 +105,11 @@ export interface SessionInfo {
   lastActivity: string;
   cwd: string;
   messageCount: number;
+  /**
+   * First user-authored prompt, for use as a human title. Filled during the
+   * single pass the listing already makes over each file, so a caller that
+   * needs titles does not have to reopen them all. Undefined when the session
+   * has no user prompt of its own.
+   */
+  preview?: string;
 }

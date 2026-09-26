@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { resolvePath } from "./path-utils.js";
+import { extractPlanSteps } from "../utils/plan-steps.js";
 
 const ExitPlanParams = z.object({
   plan_path: z.string().describe("Path to the plan markdown file; must be under .gg/plans/"),
@@ -10,7 +11,7 @@ const ExitPlanParams = z.object({
 
 export function createExitPlanTool(
   cwd: string,
-  onExitPlan: (planPath: string) => Promise<string>,
+  onExitPlan: (planPath: string, content: string) => Promise<string>,
 ): AgentTool<typeof ExitPlanParams> {
   return {
     name: "exit_plan",
@@ -28,16 +29,31 @@ export function createExitPlanTool(
         return `Error: plan_path must be under .gg/plans/. Got: ${plan_path}`;
       }
 
+      let content: string;
       try {
-        const content = await fs.readFile(resolved, "utf-8");
-        if (!content.trim()) {
-          return "Error: Plan file is empty. Write your plan before calling exit_plan.";
-        }
+        content = await fs.readFile(resolved, "utf-8");
       } catch {
         return `Error: Could not read plan file at ${plan_path}. Make sure it exists.`;
       }
+      if (!content.trim()) {
+        return "Error: Plan file is empty. Write your plan before calling exit_plan.";
+      }
 
-      return onExitPlan(resolved);
+      // Fail closed: a plan without extractable steps silently loses the
+      // [DONE:n] progress contract after approval — reject with the exact
+      // remediation so the model can self-repair in the same run (plan mode
+      // allows writing under .gg/plans/).
+      if (extractPlanSteps(content).length === 0) {
+        return (
+          "Plan rejected: no '## Steps' section with numbered steps found. " +
+          "Append a literal '## Steps' heading followed by a flat numbered list " +
+          "(1., 2., …) of concrete implementation steps, then call exit_plan again."
+        );
+      }
+
+      // Carry the exact validated snapshot across the callback boundary; the path
+      // may be edited or removed before a review checkpoint is persisted.
+      return onExitPlan(resolved, content);
     },
   };
 }

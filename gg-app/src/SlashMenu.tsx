@@ -11,8 +11,8 @@ interface Props {
 }
 
 /**
- * Upward command palette anchored to the chat input. Lists workflow slash
- * commands matching the current `/prefix`, with name + description. Keyboard
+ * Upward command palette anchored to the chat input. Lists "plays" — the slash
+ * commands matching the current `/prefix` — with name + description. Keyboard
  * nav (↑/↓/Enter/Esc) lives in the input's onKeyDown; this is presentational.
  */
 export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): React.ReactElement {
@@ -26,7 +26,7 @@ export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): 
   return (
     <div className="slash-menu" style={{ background: theme.surface2, borderColor: theme.border }}>
       <div className="slash-menu-title" style={{ color: theme.textMuted }}>
-        workflows
+        plays
       </div>
       {commands.map((cmd, i) => {
         const active = i === activeIndex;

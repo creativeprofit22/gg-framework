@@ -3,9 +3,11 @@ import type { z } from "zod";
 // ── Providers ──────────────────────────────────────────────
 
 export type Provider =
+  | "qwen-cloud"
   | "anthropic"
   | "xiaomi"
   | "openai"
+  | "azure"
   | "gemini"
   | "glm"
   | "moonshot"
@@ -13,11 +15,16 @@ export type Provider =
   | "deepseek"
   | "openrouter"
   | "sakana"
-  | "palsu";
+  | "xai"
+  | "palsu"
+  /** Hugging Face Inference Providers router (OpenAI-compatible). */
+  | "huggingface"
+  /** Locally hosted OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM). */
+  | "local";
 
 // ── Thinking ───────────────────────────────────────────────
 
-export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 // ── Cache ─────────────────────────────────────────────────
 
@@ -55,7 +62,10 @@ export interface VideoContent {
 
 export interface ToolCall {
   type: "tool_call";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, replayed independently from the public call ID. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -67,6 +77,26 @@ export interface ToolResult {
   toolCallId: string;
   content: ToolResultContent;
   isError?: boolean;
+  /** Display-only generated previews with exact originals; never sent to providers. */
+  imageResult?: {
+    version: 1;
+    images: Array<ImageContent & { path: string }>;
+  };
+  /**
+   * Set when the agent loop trimmed `content` to fit a per-result or per-turn
+   * budget. The provider (model input) and the persistent transcript both see
+   * the trimmed `content`, but the live `tool_call_end` event carried the FULL
+   * preview — so this marker makes that divergence explicit and reconcilable.
+   * Internal metadata only: it is never serialized onto the provider wire.
+   */
+  capped?: {
+    /** Length of the original, untrimmed string content. */
+    originalChars: number;
+    /** Length of the trimmed content actually sent to the model. */
+    keptChars: number;
+    /** Which budget triggered the trim. */
+    scope: "per-result" | "per-turn";
+  };
 }
 
 export interface ServerToolCall {
@@ -101,22 +131,49 @@ export type ContentPart =
 
 // ── Messages ───────────────────────────────────────────────
 
-export interface SystemMessage {
+export type MessageProvenanceSource = "human" | "agent" | "runtime";
+
+export type MessageProvenanceKind =
+  | "prompt"
+  | "steering"
+  | "notification"
+  | "completion_gate"
+  | "review_follow_up"
+  | "continuation"
+  | "model_switch"
+  | "automation"
+  | "compaction_summary"
+  | "compaction_ack";
+
+export type MessageProvenanceVisibility = "transcript" | "hidden" | "summary";
+
+/** Internal message metadata. `stream()` removes it before provider dispatch. */
+export interface MessageProvenance {
+  source: MessageProvenanceSource;
+  kind: MessageProvenanceKind;
+  visibility: MessageProvenanceVisibility;
+}
+
+interface MessageMetadata {
+  provenance?: MessageProvenance;
+}
+
+export interface SystemMessage extends MessageMetadata {
   role: "system";
   content: string;
 }
 
-export interface UserMessage {
+export interface UserMessage extends MessageMetadata {
   role: "user";
   content: string | (TextContent | ImageContent | VideoContent)[];
 }
 
-export interface AssistantMessage {
+export interface AssistantMessage extends MessageMetadata {
   role: "assistant";
   content: string | ContentPart[];
 }
 
-export interface ToolResultMessage {
+export interface ToolResultMessage extends MessageMetadata {
   role: "tool";
   content: ToolResult[];
 }
@@ -164,7 +221,10 @@ export interface ToolCallDeltaEvent {
 
 export interface ToolCallDoneEvent {
   type: "toolcall_done";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, when supplied by the provider. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -211,13 +271,7 @@ export type StreamEvent =
 // ── Stop Reasons ───────────────────────────────────────────
 
 export type StopReason =
-  | "end_turn"
-  | "tool_use"
-  | "max_tokens"
-  | "pause_turn"
-  | "stop_sequence"
-  | "refusal"
-  | "error";
+  "end_turn" | "tool_use" | "max_tokens" | "pause_turn" | "stop_sequence" | "refusal" | "error";
 
 // ── Response ───────────────────────────────────────────────
 
@@ -229,7 +283,10 @@ export interface StreamResponse {
 
 export interface Usage {
   inputTokens: number;
+  /** Total billed output tokens, including reasoning tokens when the provider reports them separately. */
   outputTokens: number;
+  /** Reasoning/thinking-token subset of outputTokens. */
+  reasoningTokens?: number;
   cacheRead?: number;
   cacheWrite?: number;
   serverToolUse?: { webSearchRequests?: number; webFetchRequests?: number };
@@ -256,10 +313,14 @@ export interface StreamOptions {
   cacheRetention?: CacheRetention;
   /** Stable per-session cache routing key for providers that support it (OpenAI, Moonshot, Gemini Code Assist). */
   promptCacheKey?: string;
-  /** OpenAI service tier for latency-sensitive requests. Only sent to first-party OpenAI API calls. */
-  serviceTier?: "auto" | "default" | "flex" | "priority";
+  /** OpenAI service tier for latency-sensitive requests. */
+  serviceTier?: "auto" | "default" | "flex" | "priority" | "fast";
   /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
   accountId?: string;
+  /** Stable conversation identity for Codex transport headers. This is distinct from
+   *  promptCacheKey: sessions with matching prefixes may share a cache key, but must
+   *  retain independent session/thread identities. */
+  transportSessionId?: string;
   /** Google Cloud/Code Assist project ID used by Gemini OAuth transport. */
   projectId?: string;
   /** Enable provider-native web search. Each provider uses its own format:
@@ -276,7 +337,9 @@ export interface StreamOptions {
   clearToolUses?: boolean;
   /** Custom fetch implementation. Useful in non-Node environments (e.g. Expo/React Native)
    *  where the default `globalThis.fetch` doesn't support streaming properly.
-   *  Passed directly to the underlying provider SDK. */
+   *  - Passed directly to the underlying provider SDK where supported.
+   *  - Qwen Cloud Token Plan rejects caller-provided fetch implementations because
+   *    it owns a fixed-endpoint, no-redirect transport boundary. */
   fetch?: typeof globalThis.fetch;
   /** Whether the target model supports image input. When false, image content
    *  in user messages and tool_result messages is downgraded to a text placeholder
@@ -298,9 +361,13 @@ export interface StreamOptions {
    *  version should pass it here. Ignored for non-Anthropic providers and for
    *  Anthropic requests using a regular API key. */
   userAgent?: string;
-  /** Extra HTTP headers attached to every model request. Used by providers
-   *  whose endpoint gates on client identity (e.g. Kimi For Coding requires a
-   *  `User-Agent: kimi-code-cli/...` and `X-Msh-*` device headers). Merged
-   *  into the underlying SDK's default headers. */
+  /** Extra HTTP headers merged into SDK default headers by the OpenAI-compatible
+   *  Chat Completions adapter only (e.g. Kimi For Coding client-identity headers).
+   *  - Supported built-in routes: OpenAI without accountId, Xiaomi, GLM, Moonshot
+   *    (including Kimi For Coding), DeepSeek, OpenRouter, Hugging Face, Sakana,
+   *    xAI, and local OpenAI-compatible servers.
+   *  - Not forwarded by Anthropic (including MiniMax), OpenAI Codex OAuth
+   *    (OpenAI with accountId), Gemini Code Assist, or Azure OpenAI Responses.
+   *  Custom providers define their own support for this option. */
   defaultHeaders?: Record<string, string>;
 }

@@ -1,4 +1,4 @@
-import { basename, plural, shortenValue } from "./tool-group-summary.js";
+import { basename, plural, shortenValue, steroidsQuery } from "./tool-group-summary.js";
 import { getToolTone, type ToolTone } from "./transcript/tool-presentation.js";
 
 const MAX_DETAIL = 44;
@@ -38,12 +38,7 @@ const VERBS: Record<string, VerbPair> = {
   screenshot: { running: "Capturing", done: "Captured" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
-  "mcp__kencode-search__searchCode": { running: "Searching code", done: "Searched code" },
-  "mcp__kencode-search__referenceSources": {
-    running: "Finding references",
-    done: "Found references",
-  },
-  "mcp__kencode-search__discoverRepos": { running: "Discovering repos", done: "Discovered repos" },
+  steroids: { running: "Reading real code", done: "Read real code" },
 };
 
 function humanizeName(name: string): VerbPair {
@@ -84,8 +79,9 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
     case "web_fetch":
       return { text: hostOf(String(args.url ?? "")), quote: false };
     case "web_search":
-    case "mcp__kencode-search__searchCode":
       return { text: shortenValue(String(args.query ?? ""), MAX_DETAIL), quote: true };
+    case "steroids":
+      return { text: shortenValue(steroidsQuery(args), MAX_DETAIL), quote: true };
     case "subagent":
       return { text: shortenValue(String(args.agent ?? ""), MAX_DETAIL), quote: false };
     case "skill":
@@ -95,6 +91,14 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
     default:
       return { text: "", quote: false };
   }
+}
+
+/** Indexing can take minutes; "Reading real code" would look hung. */
+function steroidsVerbs(args: Record<string, unknown>): { running: string; done: string } | null {
+  if (args.action === "add" || (args.action === "discover" && args.add === true)) {
+    return { running: "Indexing repos", done: "Indexed repos" };
+  }
+  return null;
 }
 
 function countNonEmptyLines(result: string): number {
@@ -164,7 +168,7 @@ export function buildToolLineParts(
   args: Record<string, unknown>,
   input: ToolLineInput,
 ): ToolLinePart[] {
-  const verbs = VERBS[name] ?? humanizeName(name);
+  const verbs = steroidsVerbs(args) ?? VERBS[name] ?? humanizeName(name);
   const tone: ToolTone = getToolTone(name);
   const verb = input.done ? verbs.done : verbs.running;
   const { text: detail, quote } = toolDetail(name, args);

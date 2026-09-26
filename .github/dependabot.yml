@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Update the pnpm workspace from its root so package manifests and the shared
+  # lockfile stay in sync. pnpm-workspace.yaml supplies the member directories;
+  # Dependabot does not support updates from workspace subdirectories.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Tauri desktop app (gg-app).
+  - package-ecosystem: cargo
+    directory: /gg-app/src-tauri
+    schedule:
+      interval: weekly

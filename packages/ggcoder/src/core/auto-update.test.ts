@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   checkAndAutoUpdate,
   startPeriodicUpdateCheck,
@@ -11,6 +12,7 @@ import {
 
 // Use a temp directory for state file instead of the real ~/.gg
 const tmpDir = path.join(os.tmpdir(), `gg-update-test-${process.pid}`);
+let child: EventEmitter & { unref: ReturnType<typeof vi.fn> };
 
 // Mock the state file path
 vi.mock("node:os", async () => {
@@ -26,7 +28,8 @@ vi.mock("node:os", async () => {
 
 // Mock spawn so we never actually run install commands
 vi.mock("node:child_process", () => ({
-  spawn: vi.fn(() => ({ unref: vi.fn() })),
+  spawn: vi.fn(),
+  execFileSync: vi.fn(() => "/usr/lib/node_modules"),
 }));
 
 function writeStateFile(state: Record<string, unknown>): void {
@@ -51,6 +54,11 @@ beforeEach(() => {
     // fine
   }
   vi.restoreAllMocks();
+  child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+  vi.mocked(spawn).mockReset().mockReturnValue(child as unknown as ChildProcess);
+  vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+  vi.spyOn(process, "argv", "get").mockReturnValue(["node", "/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js"]);
+  vi.spyOn(fs, "realpathSync").mockImplementation((file) => String(file));
 });
 
 afterEach(() => {
@@ -117,10 +125,16 @@ describe("checkAndAutoUpdate", () => {
     const result = checkAndAutoUpdate("1.0.0");
 
     expect(result).toContain("2.0.0");
-    expect(result).toContain("Installing in the background");
+    expect(result).toContain("Attempting a background update");
     expect(vi.mocked(spawn)).toHaveBeenCalled();
+    expect(readStateFile()?.updatePending).toBe(true);
+    expect(readStateFile()?.lastUpdateAttempt).toBeUndefined();
+    child.emit("spawn");
+    expect(readStateFile()?.lastUpdateAttempt).toBeDefined();
+    expect(readStateFile()?.updatePending).toBe(true);
+    child.emit("exit", 0);
 
-    // Should clear the pending flag
+    // Only a successful install clears the pending flag.
     const state = readStateFile();
     expect(state?.updatePending).toBe(false);
     expect(state?.lastUpdateAttempt).toBeDefined();

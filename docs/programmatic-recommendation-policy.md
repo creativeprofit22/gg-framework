@@ -1,0 +1,39 @@
+# Programmatic recommendation policy
+
+[Workflow index](programmatic-workflow.md) · [Evidence](programmatic-evidence.md) · [History lifecycle](programmatic-recommendation-lifecycle.md)
+
+## Needs-first advice
+
+Setup and configured entry share one focused policy: describe inspected workflows before capability matching, independently of existing automation. Every recommendation states trigger, representative case, inputs, current process, output, success check, affected subproject, mutation boundary and repeatability basis, alongside evidence and uncertainty. Observed recurrence is distinct from inferred repeatability; assumed needs cannot support a positive automation recommendation. Frequency and time savings must not be invented.
+
+Choose **reuse unchanged**, **extend existing automation**, **new capability**, **manual work**, or **needs more evidence**. Positive choices explain at least one plausible alternative; consolidate duplicate proposals. A covered need can yield reuse while a different need justifies a new capability. Partial catalog coverage limits absence claims, not which needs may be discovered; empty advice remains valid.
+
+Reuse, extension bases and concrete available-command alternatives require delivered snapshots and inspected local prerequisite evidence. All positive choices, including new capabilities, require independent local workflow support. Command-definition files retrieved through `read` or `code_search` remain capability evidence, but cannot supply independent support: the host classifies locations against current discovered command owners and canonical file identities, not Markdown content or model labels. Mixed search receipts qualify only through inspected non-command local locations, honoring the cited location when supplied. Unclassified locations do not establish independence; ordinary Markdown workflow documents remain eligible. The model explains relevance; host receipt checks prove provenance, not semantic suitability or working prerequisites. Unresolved extension bases require more evidence. A previously inspected base or alternative that changes before submission remains visibly unavailable, with limited coverage.
+
+Extensions are **proposals only**, requiring a later explicitly authorized edit/review—not an overwrite/update action on `programmatic_command`. New supported commands retain the separate [inspect/create/verify/reviewed-run path](programmatic-capability-extension.md). Missing app/native/tool functionality remains development work, never a generated working command.
+
+## Domain representations and limits
+
+`core/programmatic/contracts.ts` owns extension records and pure validation. Active advisory results/recommendations use V2; legacy V1 exports and transcript text remain unchanged and are not silently enriched. Scanner lifecycle and creation contracts are unchanged. History contracts, opt-in profile V3 and additive display-only history status belong to [Recommendation history lifecycle](programmatic-recommendation-lifecycle.md).
+
+Active V2 recommendations have `kind: advisory`, outcome, rationale, uncertainty, evidence, required workflow and up to four distinct alternatives. Each five-branch choice contains only its relevant fields; unknown authority/lifecycle fields are rejected. Positive automation requires a meaningful alternative and inspected local support. V2 results cap recommendations at 10 and serialized characters at 64,000 including host limitations; coverage is scoped complete or limited with a reason. Legacy V1 compatibility retains its old schema, not an active submission bypass. The actual Responses serializer retains its existing non-strict sampling fallback for nested choice schemas; strict host validation remains mandatory. No shared-provider change is made.
+
+Available reuse currently means **prompt-only identity**, plus referenced local prerequisite inspection. The host does not infer script/app capabilities from prose: script-backed availability is not asserted, and workspace actions stay non-prompt/unassessed. Missing prompt/script/app functionality is a proposal with inputs, outputs, prerequisites, risks and verification needs. Manual work is first-class. Reviewed prompt execution exists but is never authorized by advice or creation. Script-backed advisory availability and arbitrary app-backed execution remain unsupported.
+
+## Worked example: already automated does not mean every need is covered
+
+The synthetic stock/depot/retention example is represented in `packages/ggcoder/src/core/agent-session-programmatic-provider.test.ts`. It reads `operations/WORKFLOW`, `stock.csv`, `ledger.csv`, `consent.csv` and the discovered command bodies. These are different sources of workflow and capability evidence, not a framework-name trigger. This is a worked reasoning example backed by scripted transport, not a claim about live-model quality.
+
+| Inspected need | Decision and comparison | Scope and success check |
+| --- | --- | --- |
+| Weekly stock reconciliation | **Reuse unchanged** `/stock-review`: its inspected body already covers the same inputs, read-only output and discrepancy check. A second stock command duplicates the covered need. | Read stock/ledger inputs; produce the discrepancy review without modifying records. Check the reported discrepancies against those inputs. |
+| Regional depot totals | **Extend existing automation** `/depot-review`: its single-depot procedure partially fits; grouping discrepancies by depot and adding regional totals is the same reconciliation responsibility. Reuse unchanged omits totals; a new reconciliation command duplicates the base. | Propose an explicit later reviewed edit, preserving the read-only boundary. Check depot groups and regional totals against the reconciliation inputs. Discovery does not perform that edit. |
+| Expired customer consent | **New capability**: propose expired consent records for human review. Consent records and retention criteria are distinct from ledger reconciliation; extending depot dispatch would conflate responsibilities. | Inspect the consent input and documented review criteria independently. Propose a review report, not automatic deletion or a claim of legal compliance. The covered stock need must not suppress this separate need. |
+
+A one-off correction can remain **manual**; missing inputs or unsupported repeatability should remain **needs more evidence**. The connected example retains all five choices. For actual projects, cite each need's own delivered workflow locations and exact command snapshots; a generic shared evidence list does not prove every source supports every need. If a prerequisite or base body cannot be inspected, do not claim an available extension.
+
+## Worked example: an honest no-op
+
+Suppose the inspected scope is a completed static documentation example with no recurring unmet process. Record the actual files/workflow reviewed, budgets and unreadable/omitted areas. A completed assessment with `recommendations: []` is appropriate: “No worthwhile need was identified within the inspected scope,” not “the project has no risks.” Do not invent frequency, savings or automation to fill the list.
+
+If prior candidates were dismissed/completed, this result supplies a new bounded assessment/coverage record, not a decision about those candidates. It must not erase observations, reopen decisions or transfer completion. Nor does advisory omission reconcile deterministic scanner history. These retention rules are owned by [history lifecycle](programmatic-recommendation-lifecycle.md#observations-evidence-and-coverage) and the [scanner lifecycle](programmatic-architecture.md#files-and-lifecycle-meanings), rather than by model prose. Unreadable or unfinished inspection belongs in incomplete/limited reporting, not a manufactured successful no-op.

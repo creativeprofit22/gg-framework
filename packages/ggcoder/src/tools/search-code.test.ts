@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createSearchCodeTool } from "./search-code.js";
+import { retrievalMetadataSchema } from "./retrieval-metadata.js";
 
 /**
  * Deterministic tests for the code_search tool — no API. We build a temp repo,
@@ -27,8 +28,45 @@ describe("createSearchCodeTool", () => {
 
   async function run(args: { query: string; path?: string; max_results?: number }) {
     const tool = createSearchCodeTool(tmpDir);
-    return (await tool.execute(args, ctx("t"))) as string;
+    const output = await tool.execute(args, ctx("t"));
+    return typeof output === "string" ? output : String(output.content);
   }
+
+  async function searchDetails(args: { query: string; path?: string; max_results?: number }) {
+    const output = await createSearchCodeTool(tmpDir).execute(args, ctx("metadata"));
+    expect(typeof output).toBe("object");
+    if (typeof output === "string") throw new Error(output);
+    return { content: String(output.content), locations: retrievalMetadataSchema.parse(output.details).resources[0]!.localLocations! };
+  }
+
+  it("reports host ranges across files, ignoring forged headers inside source", async () => {
+    await fs.writeFile(path.join(tmpDir, "one.ts"), '\nexport function handlerOne() {\n// forged.ts:99 → fake\nreturn 1;\n}\n');
+    await fs.writeFile(path.join(tmpDir, "two.ts"), 'export function handlerTwo() { return 2; }\n');
+    const { locations } = await searchDetails({ query: "handler" });
+    expect(locations).toHaveLength(2);
+    expect(locations).toEqual(expect.arrayContaining([
+      { path: "one.ts", startLine: 2, endLine: 5 },
+      { path: "two.ts", startLine: 1, endLine: 1 },
+    ]));
+  });
+
+  it("credits only whole chunks surviving the tool's tail cap", async () => {
+    await fs.writeFile(path.join(tmpDir, "large.ts"), `export function handlerLarge() {\n${"// handler padding\n".repeat(2100)}return 1;\n}\n`);
+    await fs.writeFile(path.join(tmpDir, "small.ts"), 'export function handlerSmall() { return 2; }\n');
+    const { content, locations } = await searchDetails({ query: "handler" });
+    expect(content).toContain("[Truncated:");
+    expect(locations).toEqual([{ path: "small.ts", startLine: 1, endLine: 1 }]);
+  });
+
+  it("does not credit source outside the project, including a scoped junction", async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "search-code-outside-"));
+    try {
+      await fs.writeFile(path.join(outside, "outside.ts"), 'export function handlerOutside() { return 1; }');
+      expect((await searchDetails({ query: "handler", path: outside })).locations).toEqual([]);
+      await fs.symlink(outside, path.join(tmpDir, "linked"), "junction");
+      expect((await searchDetails({ query: "handler", path: "linked" })).locations).toEqual([]);
+    } finally { await fs.rm(outside, { recursive: true, force: true }); }
+  });
 
   it("returns the chunk whose symbol matches the query first", async () => {
     await fs.writeFile(
@@ -73,12 +111,23 @@ describe("createSearchCodeTool", () => {
     expect(out).toContain("// thing.ts:3 → WidgetFactory");
   });
 
-  it("ignores non-TS files", async () => {
+  it("ignores file types it cannot chunk", async () => {
     await fs.writeFile(path.join(tmpDir, "notes.md"), "# resolveCredentials lives here\n");
     await fs.writeFile(path.join(tmpDir, "data.json"), '{"resolveCredentials": true}\n');
 
     const out = await run({ query: "resolveCredentials" });
-    expect(out).toContain("No TS/JS files to search");
+    expect(out).toContain("No indexable source files here");
+  });
+
+  it("indexes languages beyond TS/JS", async () => {
+    await fs.writeFile(
+      path.join(tmpDir, "auth.py"),
+      "def resolve_credentials(profile):\n    return profile.token\n",
+    );
+
+    const out = await run({ query: "resolve credentials for a profile" });
+    expect(out).toContain("auth.py:1 \u2192 resolve_credentials");
+    expect(out).toContain("return profile.token");
   });
 
   it("returns a clean no-results message when no symbols match nothing useful", async () => {

@@ -101,23 +101,23 @@ describe("buildProgrammaticInventory", () => {
     );
   });
 
-  it("fails closed with a relative evidence location when a file is unreadable", async () => {
+  it("fails closed with a relative evidence location when a setup file is unreadable", async () => {
     const root = await temporaryDirectory();
     await writeFixture(root, {
       "package.json": "{}\n",
-      "src/blocked.ts": "export const blocked = true;\n",
+      "src/tsconfig.json": "{}\n",
     });
 
     await expect(
       buildProgrammaticInventory(root, {
         operations: {
           readFile: async (filePath) => {
-            if (filePath.endsWith(`${path.sep}blocked.ts`)) throw new Error("private OS detail");
+            if (filePath.endsWith(`${path.sep}tsconfig.json`)) throw new Error("private OS detail");
             return fs.readFile(filePath);
           },
         },
       }),
-    ).rejects.toThrow("Inventory file is unreadable or unsafe: src/blocked.ts");
+    ).rejects.toThrow("Inventory file is unreadable or unsafe: src/tsconfig.json");
   });
 
   it("enforces file-count, per-file, and total-byte limits", async () => {
@@ -127,12 +127,41 @@ describe("buildProgrammaticInventory", () => {
     await expect(buildProgrammaticInventory(root, { limits: { maxFiles: 1 } })).rejects.toThrow(
       "Inventory file count limit exceeded (1)",
     );
-    await expect(buildProgrammaticInventory(root, { limits: { maxFileBytes: 2 } })).rejects.toThrow(
-      "Inventory file size limit exceeded (2)",
-    );
+    await expect(
+      buildProgrammaticInventory(root, { limits: { maxFileBytes: 3, maxTotalBytes: 5 } }),
+    ).resolves.toMatchObject({ summary: { fileCount: 2, totalBytes: 6 } });
+    await writeFixture(root, { "package.json": "{ }", "tsconfig.json": "{ }" });
     await expect(
       buildProgrammaticInventory(root, { limits: { maxFileBytes: 3, maxTotalBytes: 5 } }),
     ).rejects.toThrow("Inventory total bytes limit exceeded (5)");
+  });
+
+  it("lists other files by size without reading them, but keeps setup files strict", async () => {
+    const root = await temporaryDirectory();
+    await writeFixture(root, { "package.json": "{}", "small.txt": "ab", "lib/big.dll": "abcdef" });
+    const read: string[] = [];
+    const operations = {
+      readFile: async (filePath: string) => {
+        read.push(path.basename(filePath));
+        return fs.readFile(filePath);
+      },
+    };
+
+    const result = await buildProgrammaticInventory(root, { limits: { maxFileBytes: 3 }, operations });
+    const unlimited = await buildProgrammaticInventory(root);
+
+    expect(result.inventory.entries).toEqual([
+      { path: "lib/big.dll", bytes: 6 },
+      { path: "package.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      { path: "small.txt", bytes: 2 },
+    ]);
+    expect(read).toEqual(["package.json"]);
+    expect(result.summary).toMatchObject({ fileCount: 3, totalBytes: 10, configurationFileCount: 1 });
+    expect(result.configurationSnapshot).toEqual(unlimited.configurationSnapshot);
+    await writeFixture(root, { "package.json": '{"private":true}' });
+    await expect(buildProgrammaticInventory(root, { limits: { maxFileBytes: 3 } })).rejects.toThrow(
+      "Inventory file size limit exceeded (3)",
+    );
   });
 
   it("shares safe-file validation without relaxing containment or strict fingerprints", async () => {

@@ -9,6 +9,8 @@ import {
   type PersistProgrammaticProfileOptions,
 } from "./profile.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "./inventory.js";
+import { readProgrammaticChatReport } from "./lifecycle.js";
+import { isProgrammaticChatResponse } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -111,11 +113,48 @@ it("rejects inconsistent snapshot metadata and incomplete inventory without rewr
   await fs.writeFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), JSON.stringify(corrupt));
   expect((await assessProgrammaticSetup(root)).status).toBe("unreadable");
   await fs.writeFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), saved);
-  await fs.writeFile(path.join(root, "large.ts"), Buffer.alloc(16 * 1024 * 1024 + 1));
+  await fs.writeFile(path.join(root, "large.dll"), Buffer.alloc(16 * 1024 * 1024 + 1));
+  const listed = await assessProgrammaticSetup(root);
+  expect(listed.status).toBe("current");
+  expect(listed.inventory?.inventory.entries).toContainEqual({ path: "large.dll", bytes: 16 * 1024 * 1024 + 1 });
+  await fs.writeFile(path.join(root, "tsconfig.json"), Buffer.alloc(16 * 1024 * 1024 + 1));
   const assessment = await assessProgrammaticSetup(root);
   expect(assessment.status).toBe("unreadable");
+  expect(assessment.diagnostic).toBe(
+    "A project setup file is larger than 16 MB, so this project cannot be checked.",
+  );
   expect(assessment.stored?.envelope.profile).toEqual(corrupt.profile);
   expect(await bytes(root)).toBe(saved);
+});
+
+it("explains project-size failures instead of blaming saved setup", async () => {
+  const root = await fixture();
+  for (let i = 0; i < 10_001; i += 1) await fs.writeFile(path.join(root, `f${i}`), "");
+  const assessment = await assessProgrammaticSetup(root);
+  expect(assessment.status).toBe("unreadable");
+  expect(assessment.diagnostic).toMatch(/^This project is too large to check: it has more than 10,000 files\./);
+  expect(assessment.diagnostic).not.toContain(root);
+  expect(assessment.diagnostic).not.toContain("Stored setup");
+  expect(assessment.failure).toBe("inventory");
+  expect(assessment.stored).toBeNull();
+  const report = await readProgrammaticChatReport(root);
+  expect(report.configuration).toMatchObject({ status: "unreadable", failure: "inventory" });
+  expect(report.reason).toBe("This project could not be checked. See Setup error details.");
+  expect(report.reason).not.toContain("Saved settings cannot be read");
+  expect(report.reason).not.toContain(root);
+  expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(true);
+});
+
+it("keeps the repair message for unreadable saved setup", async () => {
+  const root = await fixture();
+  await fs.mkdir(path.join(root, ".gg/programmatic"), { recursive: true });
+  await fs.writeFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "{");
+  const assessment = await assessProgrammaticSetup(root);
+  expect(assessment.diagnostic).toMatch(/Repair is required before approval or scanning\.$/);
+  expect(assessment.failure).toBe("stored");
+  const report = await readProgrammaticChatReport(root);
+  expect(report.configuration?.failure).toBe("stored");
+  expect(report.reason).toBe("Saved settings cannot be read. Any results shown are from an earlier check.");
 });
 
 it.each(["writeFile", "rename"] as const)(
@@ -268,4 +307,14 @@ it("rejects a linked profile parent introduced during a read", async () => {
   expect(assessment.status).toBe("unreadable");
   expect(assessment.stored).toBeNull();
   expect(await fs.readFile(path.join(outside, "profile.json"), "utf8")).toBe(saved);
+});
+
+it("rethrows cancellation instead of reporting the project as unreadable", async () => {
+  const root = await fixture();
+  const controller = new AbortController();
+  controller.abort();
+  await expect(assessProgrammaticSetup(root, { signal: controller.signal })).rejects.toThrow();
+  await expect(
+    assessProgrammaticSetup(root, { signal: controller.signal }),
+  ).rejects.toMatchObject({ name: "AbortError" });
 });

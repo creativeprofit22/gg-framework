@@ -86,6 +86,11 @@ export interface ProgrammaticChatConfiguration {
   refreshAvailable: boolean;
   baselineUnavailable: boolean;
   diagnostic: string | null;
+  /**
+   * Present only for "unreadable": "stored" means saved setup could not be read;
+   * "inventory" means the project itself could not be scanned (saved setup may be absent).
+   */
+  failure?: "stored" | "inventory";
   drift: {
     files: { path: string; kind: "added" | "removed" | "modified"; before: string | null; after: string | null }[];
     policy: { before: number; after: number } | null;
@@ -302,9 +307,10 @@ const configuration: Guard = (value) => {
     status: oneOf("missing", "current", "refresh-required", "unreadable"),
     currentFingerprint: nullable(hash), refreshAvailable: bool, baselineUnavailable: bool,
     diagnostic: nullable(text(1_000)), drift: nullable(drift),
-  })) return false;
+  }, { failure: oneOf("stored", "inventory") })) return false;
   const item = value as ProgrammaticChatConfiguration;
   return item.refreshAvailable === (item.status === "refresh-required") &&
+    (item.failure === undefined || item.status === "unreadable") &&
     (!item.baselineUnavailable || (item.status === "refresh-required" && item.drift === null)) &&
     (item.status === "unreadable" || item.currentFingerprint !== null);
 };

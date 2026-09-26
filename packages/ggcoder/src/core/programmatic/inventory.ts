@@ -5,6 +5,7 @@ import type { Readable } from "node:stream";
 import type {
   ConfigurationSnapshot,
   InventoryEntryV1,
+  InventoryFileEntryV1,
   InventoryV1,
   ProgrammaticProfileEnvelopeV2,
   ProgrammaticProfileEnvelopeV3,
@@ -139,6 +140,7 @@ const CONFIG_FILE_PATTERN =
   /^(?:compose(?:\.[^.]+)?\.ya?ml|docker-compose(?:\.[^.]+)?\.ya?ml|requirements(?:-[^.]+)?\.txt|(?:js|ts)config(?:\.[^.]+)?\.json|(?:eslint|jest|next|nx|playwright|prettier|rollup|storybook|svelte|tailwind|turbo|vite|vitest|webpack)\.config\.(?:c|m)?(?:js|ts)|settings\.gradle(?:\.kts)?|build\.gradle(?:\.kts)?|rust-toolchain(?:\.toml)?)$/;
 const DOT_CONFIG_PATTERN = /^\.(?:eslint|prettier)rc(?:\.(?:c|m)?(?:js|json|ya?ml))?$/;
 
+/** Strict limits. `maxFiles` counts every listed file; byte limits cap only setup files, the only files read and fingerprinted. */
 export interface InventoryLimits {
   maxFiles: number;
   maxFileBytes: number;
@@ -148,6 +150,7 @@ export interface InventoryLimits {
 export interface InventorySummaryV1 {
   version: typeof PROGRAMMATIC_CONTRACT_VERSION;
   fileCount: number;
+  /** Size of all listed files; may exceed `maxTotalBytes`, which caps setup files only. */
   totalBytes: number;
   configurationFileCount: number;
 }
@@ -212,8 +215,39 @@ function isConfigurationInput(repositoryPath: string): boolean {
   );
 }
 
-function limitError(kind: "file count" | "file size" | "total bytes", limit: number): Error {
-  return new Error(`Inventory ${kind} limit exceeded (${limit})`);
+export type InventoryLimitKind = "file count" | "file size" | "total bytes";
+
+export class InventoryLimitError extends Error {
+  constructor(
+    readonly kind: InventoryLimitKind,
+    readonly limit: number,
+  ) {
+    super(`Inventory ${kind} limit exceeded (${limit})`);
+  }
+}
+
+function limitError(kind: InventoryLimitKind, limit: number): Error {
+  return new InventoryLimitError(kind, limit);
+}
+
+function isFileSizeLimit(error: unknown): error is InventoryLimitError {
+  return error instanceof InventoryLimitError && error.kind === "file size";
+}
+
+/** User-facing inventory failure; fixed categories only, never paths or file contents. */
+export function describeInventoryFailure(error: unknown): string {
+  const hint = " Open a smaller project folder, or list large or generated folders in the project's .gitignore.";
+  const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+  if (error instanceof InventoryLimitError) {
+    if (error.kind === "file count")
+      return `This project is too large to check: it has more than ${error.limit.toLocaleString("en-US")} files.${hint}`;
+    if (error.kind === "total bytes")
+      return `This project's setup files add up to more than ${mb(error.limit)} MB, so this project cannot be checked.`;
+    return `A project setup file is larger than ${mb(error.limit)} MB, so this project cannot be checked.`;
+  }
+  if (error instanceof Error && error.message.startsWith("Symbolic links are not supported"))
+    return "This project contains a symbolic link or junction, which saved checks do not support. Remove it or list it in the project's .gitignore.";
+  return "A file in this project could not be read safely, so this project cannot be checked yet.";
 }
 
 export async function* walkProgrammaticPaths(
@@ -282,7 +316,17 @@ export async function validateProgrammaticFile(
   operations: InventoryOperations = localOperations,
   maxFileBytes = Number.MAX_SAFE_INTEGER,
 ): Promise<string> {
+  return (await inspectProgrammaticFile(root, repositoryPath, operations, maxFileBytes)).absolutePath;
+}
+
+async function inspectProgrammaticFile(
+  root: string,
+  repositoryPath: string,
+  operations: InventoryOperations,
+  maxFileBytes: number,
+): Promise<{ absolutePath: string; size: number }> {
   let absolutePath: string;
+  let size: number;
   try {
     absolutePath = containedPath(root, repositoryPath);
     await rejectLinks(root, repositoryPath);
@@ -290,13 +334,14 @@ export async function validateProgrammaticFile(
     if (stat.isSymbolicLink()) throw new Error("link");
     if (!stat.isFile()) throw new Error("not-file");
     if (stat.size > maxFileBytes) throw limitError("file size", maxFileBytes);
+    size = stat.size;
     const canonicalPath = await operations.realpath(absolutePath);
     if (relativeRepositoryPath(root, canonicalPath) !== repositoryPath) throw new Error("escape");
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Inventory file size")) throw error;
+    if (isFileSizeLimit(error)) throw error;
     throw new Error(`Inventory file is unreadable or unsafe: ${repositoryPath}`, { cause: error });
   }
-  return absolutePath;
+  return { absolutePath, size };
 }
 
 async function readInventoryEntry(
@@ -323,6 +368,7 @@ export async function buildProgrammaticInventory(
     limits?: Partial<InventoryLimits>;
     operations?: Partial<InventoryOperations>;
     managedTemporaryPath?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<ProgrammaticInventoryResult> {
   const limits = validatedLimits(options.limits);
@@ -342,18 +388,28 @@ export async function buildProgrammaticInventory(
   const repositoryPaths = (await discoverPaths(root, limits.maxFiles)).filter(
     (repositoryPath) => repositoryPath !== options.managedTemporaryPath,
   );
-  const entries: InventoryEntryV1[] = [];
+  const entries: InventoryFileEntryV1[] = [];
+  const fingerprinted: InventoryEntryV1[] = [];
   let totalBytes = 0;
+  let setupBytes = 0;
   for (const repositoryPath of repositoryPaths) {
+    options.signal?.throwIfAborted();
+    if (!isConfigurationInput(repositoryPath)) {
+      // Listed by size, never opened: no size blocks the scan; large binaries stay visible.
+      const { size } = await inspectProgrammaticFile(root, repositoryPath, operations, Number.MAX_SAFE_INTEGER);
+      totalBytes += size;
+      entries.push({ path: repositoryPath, bytes: size });
+      continue;
+    }
     const result = await readInventoryEntry(root, repositoryPath, operations, limits.maxFileBytes);
     totalBytes += result.bytes;
-    if (totalBytes > limits.maxTotalBytes) throw limitError("total bytes", limits.maxTotalBytes);
+    setupBytes += result.bytes;
+    if (setupBytes > limits.maxTotalBytes) throw limitError("total bytes", limits.maxTotalBytes);
     entries.push(result.entry);
+    fingerprinted.push(result.entry);
   }
 
-  const configurationInputs = entries.filter(
-    (entry) => entry.path !== PROGRAMMATIC_PROFILE_PATH && isConfigurationInput(entry.path),
-  );
+  const configurationInputs = fingerprinted.filter((entry) => entry.path !== PROGRAMMATIC_PROFILE_PATH);
   // Every byte of a recognized setup file is input, including cosmetic manifest edits.
   const configurationSnapshot = configurationSnapshotSchema.parse({
     policyRevision: CONFIG_FINGERPRINT_VERSION,

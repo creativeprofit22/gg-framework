@@ -281,8 +281,13 @@ async function ensureCommitInputsUnchanged(
   inventoryOperations: Partial<InventoryOperations> | undefined,
   expectedProfileBytes: Buffer,
   expectedFingerprint: ConfigurationFingerprintV1,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const assessment = await assessProgrammaticSetup(root, { operations, inventoryOperations });
+  const assessment = await assessProgrammaticSetup(root, {
+    operations,
+    inventoryOperations,
+    ...(signal ? { signal } : {}),
+  });
   if (
     assessment.status !== "current" ||
     !assessment.stored?.bytes.equals(expectedProfileBytes) ||
@@ -326,6 +331,7 @@ export async function accessProgrammaticExecutionRecord(
         options.inventoryOperations,
         profile.bytes,
         fingerprint,
+        options.signal,
       );
     await revalidate();
     const primary = await readStateCandidate(
@@ -474,11 +480,14 @@ export async function settleProgrammaticExecutionRecord(
     try {
       const assessment = await assessProgrammaticSetup(root, {
         operations, inventoryOperations: options.inventoryOperations,
+        ...(options.signal ? { signal: options.signal } : {}),
       });
       configurationRefreshRequired ||=
         assessment.status !== "current" ||
         assessment.inventory?.inventory.configurationFingerprint.sha256 !== fingerprint.sha256;
-    } catch {
+    } catch (error) {
+      // Cancellation leaves the record untouched; it is not a configuration failure.
+      if (options.signal?.aborted) throw error;
       // Unreadable/unsafe configuration cannot prevent cleanup, but must prevent future dispatch.
       configurationRefreshRequired = true;
     }
@@ -574,10 +583,13 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   const state = await readChatState(root, operations);
   const assessment = await assessProgrammaticSetup(root, {
     operations, inventoryOperations: options.inventoryOperations,
+    ...(options.signal ? { signal: options.signal } : {}),
   });
+  // A failed project scan with no saved setup is not a broken saved setup.
+  const scanFailed = assessment.status === "unreadable" && assessment.failure === "inventory";
   const profile = assessment.stored
     ? { status: "valid" as const, ...assessment.stored }
-    : { status: assessment.status === "missing" ? "missing" as const : "invalid" as const };
+    : { status: assessment.status === "missing" || scanFailed ? "missing" as const : "invalid" as const };
   const loaded = state.loaded.status === "valid" ? state.loaded : null;
   // Inspect the full validated snapshot, not the displayed page or selected record.
   const conflictReason = loaded?.state.records.some(
@@ -585,7 +597,9 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   ) ? "A task is running in this project. Choose Refresh results after it finishes." : null;
   let status: ProgrammaticChatReport["status"] = loaded ? "stale" : "setup-required";
   let reason =
-    profile.status === "missing"
+    scanFailed && profile.status === "missing"
+      ? "This project could not be checked. See Setup error details."
+      : profile.status === "missing"
       ? "Choose Review setup to see which checks can be enabled. Reviewing changes no files."
       : "Saved settings cannot be read. Any results shown are from an earlier check.";
   let scanAvailable = false;
@@ -880,6 +894,7 @@ export async function runProgrammaticScan(
   try {
     const inventory = await buildProgrammaticInventory(root, {
       operations: options.inventoryOperations,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     options.signal?.throwIfAborted();
     fingerprint = configurationFingerprintV1Schema.parse(
@@ -943,6 +958,7 @@ export async function runProgrammaticScan(
           options.inventoryOperations,
           loadedProfile.bytes,
           fingerprint,
+          options.signal,
         );
       await revalidateProfile();
       options.signal?.throwIfAborted();

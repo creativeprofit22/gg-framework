@@ -967,6 +967,47 @@ describe("embedded opportunity review", () => {
         .disabled,
     ).toBe(true);
   });
+  it.each([
+    [
+      "inventory",
+      "This project is too large to check: it has more than 10,000 files.",
+      "This project can't be checked yet. Saved checks and their tasks are unavailable; discovery is still available.",
+    ],
+    [
+      "stored",
+      "Stored setup or configuration is unreadable.",
+      "Review setup can inspect this project, but cannot save or repair unreadable settings. Saved checks and their tasks remain unavailable; discovery is still available.",
+    ],
+  ] as const)("explains a %s failure without misattributing its cause", (failure, diagnostic, message) => {
+    const { props, rerender } = fixture();
+    const state = programmaticChatReducer(props.state, {
+      type: "response",
+      generation: "one",
+      epoch: 0,
+      response: {
+        version: 1,
+        action: "report",
+        ok: true,
+        report: {
+          ...props.state.report!,
+          configuration: {
+            status: "unreadable",
+            currentFingerprint: null,
+            refreshAvailable: false,
+            baselineUnavailable: false,
+            diagnostic,
+            failure,
+            drift: null,
+          },
+        },
+      },
+    });
+    rerender(<ProgrammaticChat {...props} state={state} />);
+    expect(screen.getByText(message)).toBeTruthy();
+    if (failure === "inventory") expect(screen.queryByText(/unreadable settings/)).toBeNull();
+    fireEvent.click(screen.getByText("Setup error details"));
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+  });
   it.each(["refresh-required", "unreadable", "missing"] as const)(
     "marks a retained current review historical after a %s report",
     (status) => {

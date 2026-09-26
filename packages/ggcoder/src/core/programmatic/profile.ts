@@ -26,6 +26,7 @@ import {
 import {
   buildProgrammaticInventory,
   compareConfigurationSnapshots,
+  describeInventoryFailure,
   validateProfileConfigurationBaseline,
   type ConfigurationDrift,
   type ProgrammaticInventoryResult,
@@ -303,6 +304,7 @@ export interface ProgrammaticSetupAssessment {
   drift: ConfigurationDrift | null;
   baselineUnavailable: boolean;
   diagnostic: string | null;
+  failure: "stored" | "inventory" | null;
 }
 
 export async function assessProgrammaticSetup(
@@ -312,23 +314,29 @@ export async function assessProgrammaticSetup(
     inventoryOperations?: Partial<InventoryOperations>;
     managedTemporaryPath?: string;
     operations?: Partial<ProgrammaticProfileOperations>;
+    signal?: AbortSignal;
   } = {},
 ): Promise<ProgrammaticSetupAssessment> {
   let stored: StoredProgrammaticProfile | null = null;
   let inventory: ProgrammaticInventoryResult | null = null;
+  let stage = "stored";
   try {
     stored = await loadApprovedProgrammaticProfile(repositoryRoot, options.operations);
+    stage = "inventory";
     inventory =
       options.inventory ??
       (await buildProgrammaticInventory(repositoryRoot, {
         managedTemporaryPath: options.managedTemporaryPath,
         operations: options.inventoryOperations,
+        ...(options.signal && { signal: options.signal }),
       }));
+    stage = "compare";
     const common = {
       stored,
       inventory,
       priorProfileDigest: stored ? sha256(stored.bytes) : null,
       diagnostic: null,
+      failure: null,
     };
     if (!stored) return { ...common, status: "missing", drift: null, baselineUnavailable: false };
     if (stored.envelope.version === 1) {
@@ -349,8 +357,8 @@ export async function assessProgrammaticSetup(
       drift,
       baselineUnavailable: false,
     };
-  } catch {
-    // Do not expose parser payloads, file contents or machine paths in report projections.
+  } catch (error) {
+    if (options.signal?.aborted) throw error; // Cancellation is not unreadable setup.
     return {
       status: "unreadable",
       stored,
@@ -358,8 +366,10 @@ export async function assessProgrammaticSetup(
       priorProfileDigest: stored ? sha256(stored.bytes) : null,
       drift: null,
       baselineUnavailable: false,
-      diagnostic:
-        "Stored setup or configuration is unreadable, unsafe, malformed or unsupported. Repair is required before approval or scanning.",
+      failure: stage === "inventory" ? "inventory" : "stored",
+      // Fixed categories only: no payloads, contents or paths.
+      diagnostic: stage === "inventory" ? describeInventoryFailure(error)
+        : "Stored setup or configuration is unreadable, unsafe, malformed or unsupported. Repair is required before approval or scanning.",
     };
   }
 }
@@ -371,6 +381,7 @@ export function projectProgrammaticConfiguration(assessment: ProgrammaticSetupAs
     refreshAvailable: assessment.status === "refresh-required",
     baselineUnavailable: assessment.baselineUnavailable,
     diagnostic: assessment.diagnostic,
+    ...(assessment.failure && { failure: assessment.failure }),
     drift: assessment.drift,
   };
 }
@@ -408,7 +419,8 @@ export async function persistProgrammaticProfile(
   const operations = { ...localOperations, ...options.operations };
   const root = await canonicalRepositoryRoot(repositoryRoot);
   options.signal?.throwIfAborted();
-  const initial = await assessProgrammaticSetup(root, { operations });
+  const cancel = options.signal && { signal: options.signal };
+  const initial = await assessProgrammaticSetup(root, { operations, ...cancel });
   options.signal?.throwIfAborted();
   if (initial.status === "unreadable" || !initial.inventory) throw new Error(initial.diagnostic!);
   if (!sameValue(fingerprint, initial.inventory.inventory.configurationFingerprint)) {
@@ -424,7 +436,7 @@ export async function persistProgrammaticProfile(
     const temporaryName = `.profile-${process.pid}-${randomUUID()}.tmp`;
     const temporary = path.join(profileDirectory, temporaryName);
     const managedTemporaryPath = `.gg/programmatic/${temporaryName}`;
-    const assess = () => assessProgrammaticSetup(root, { operations, managedTemporaryPath });
+    const assess = () => assessProgrammaticSetup(root, { operations, managedTemporaryPath, ...cancel });
     const current = await assess();
     options.signal?.throwIfAborted();
     const proposal = await buildProfileProposal(root, current);

@@ -199,18 +199,29 @@ it.each(["setup", "configured"] as const)("retains bounded evidence and strict i
   try {
     await session.initialize();
     if (mode === "configured") await configure();
-    // A sparse oversized ordinary source hits the unchanged strict inventory byte
-    // ceiling while the advisory prefix reader can still safely sample it.
+    // Strict inventory caps setup files only; ordinary files are listed by size
+    // without being read. The sparse oversized ordinary source still exceeds the
+    // advisory excerpt budget, so the prefix reader samples it as budget-limited.
     const file = await fs.open(path.join(cwd, "large.unfamiliar"), "w");
     try { await file.write("partial source evidence\n".repeat(1000)); await file.truncate(16 * 1024 * 1024 + 1); }
     finally { await file.close(); }
+    if (mode === "setup") {
+      // An oversized ordinary file alone never blocks a setup proposal.
+      expect((await session.assessProgrammatic(mode)).setupFacts).toHaveProperty("profile");
+      vi.mocked(stream).mockClear();
+    }
+    // A sparse oversized setup file is the strict inventory failure trigger.
+    const setupFile = path.join(cwd, "tsconfig.json");
+    const oversized = await fs.open(setupFile, "w");
+    try { await oversized.write("{}\n"); await oversized.truncate(16 * 1024 * 1024 + 1); }
+    finally { await oversized.close(); }
     if (mode === "configured") {
       await expect(session.assessProgrammatic(mode)).rejects.toThrow("unreadable or unsafe");
       expect(vi.mocked(stream)).not.toHaveBeenCalled();
       await expect(fs.access(path.join(cwd, ".gg/programmatic/state.json"))).rejects.toThrow();
-      // Keep the configured readiness gate strict. With only advisory evidence
-      // truncated (not strict inventory), the real caller can proceed below.
-      await fs.truncate(path.join(cwd, "large.unfamiliar"), 23_000);
+      // Keep the configured readiness gate strict. Once the oversized setup file is
+      // gone, only advisory evidence is truncated and the real caller can proceed.
+      await fs.rm(setupFile);
     }
     const result = await session.assessProgrammatic(mode);
     expect(vi.mocked(stream)).toHaveBeenCalledOnce();

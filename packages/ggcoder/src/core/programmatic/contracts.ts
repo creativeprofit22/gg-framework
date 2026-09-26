@@ -103,6 +103,13 @@ export const inventoryEntryV1Schema = z.strictObject({
   sha256: sha256Schema,
 });
 
+// Setup files are fingerprinted; every other file is listed by name and size only, so
+// no file size can block a scan and file contents are never read for the inventory.
+const inventoryFileEntryV1Schema = z.union([
+  inventoryEntryV1Schema,
+  z.strictObject({ path: repositoryRelativePathSchema, bytes: z.number().int().nonnegative() }),
+]);
+
 function isSafeConfigurationSnapshotPath(value: string): boolean {
   return (
     !value.includes(":") &&
@@ -160,7 +167,7 @@ export const inventoryV1Schema = z
     version: versionSchema,
     configurationFingerprint: configurationFingerprintV1Schema,
     scanners: z.array(scannerProfileV1Schema).max(LIMITS.inventoryScanners),
-    entries: z.array(inventoryEntryV1Schema).max(LIMITS.inventoryEntries),
+    entries: z.array(inventoryFileEntryV1Schema).max(LIMITS.inventoryEntries),
   })
   .superRefine((value, context) => {
     if (!isStrictlyAscending(value.scanners.map((scanner) => scanner.id))) {
@@ -945,6 +952,7 @@ export type ConfigurationFingerprintV1 = z.infer<typeof configurationFingerprint
 export type ProgrammaticProfileV1 = z.infer<typeof programmaticProfileV1Schema>;
 export type ProgrammaticProfileEnvelopeV1 = z.infer<typeof programmaticProfileEnvelopeV1Schema>;
 export type InventoryEntryV1 = z.infer<typeof inventoryEntryV1Schema>;
+export type InventoryFileEntryV1 = z.infer<typeof inventoryFileEntryV1Schema>;
 export type InventoryV1 = z.infer<typeof inventoryV1Schema>;
 export type OpportunityIdentityV1 = z.infer<typeof opportunityIdentityV1Schema>;
 export type DiscoveredOpportunityV1 = z.infer<typeof discoveredOpportunityV1Schema>;

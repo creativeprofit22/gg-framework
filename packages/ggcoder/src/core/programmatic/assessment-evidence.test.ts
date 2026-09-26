@@ -107,7 +107,9 @@ describe("bounded assessment evidence", () => {
     expect(result.excerpts.every((item) => item.truncated)).toBe(true);
     expect(result.diagnostics.map((item) => item.code)).toEqual(expect.arrayContaining(["delivery-limit", "excerpt-truncated"]));
     expect(JSON.stringify(result)).not.toContain("�");
-    await expect(inventory.buildProgrammaticInventory(root, { limits: { maxFileBytes: limits.maxExcerptBytes } })).rejects.toThrow("Inventory file size limit exceeded");
+    const bounded = await inventory.buildProgrammaticInventory(root, { limits: { maxFileBytes: limits.maxExcerptBytes } });
+    expect(bounded.inventory.entries).toHaveLength(12);
+    expect(bounded.inventory.entries.every((entry) => "bytes" in entry && entry.bytes > limits.maxExcerptBytes)).toBe(true);
   });
 
   it("labels only actual prefix truncation at the exact byte boundary", async () => {

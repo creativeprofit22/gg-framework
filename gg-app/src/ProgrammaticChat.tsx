@@ -78,7 +78,9 @@ export function ProgrammaticChat({
       configuration.currentFingerprint !== report.configuration?.currentFingerprint);
   const setupBlockedReason =
     configuration && configuration.status !== "current"
-      ? configuration.status === "unreadable"
+      ? configuration.status === "unreadable" && configuration.failure === "inventory"
+        ? "This project can't be checked yet. Saved checks and their tasks are unavailable; discovery is still available."
+        : configuration.status === "unreadable"
         ? "Review setup can inspect this project, but cannot save or repair unreadable settings. Saved checks and their tasks remain unavailable; discovery is still available."
         : "Review and approve setup before running saved checks or starting their tasks. Discovery does not require setup."
       : undefined;

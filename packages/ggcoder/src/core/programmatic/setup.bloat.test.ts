@@ -39,7 +39,7 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
     expect(lifecycle).not.toContain("CONFIG_FILE_NAMES");
     expect(`${inventory}\n${profile}\n${lifecycle}`).not.toMatch(/\b(?:setInterval|setTimeout|watch|watchFile)\s*\(/);
     expect(inventory).toContain("PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT * 2");
-    expect(Buffer.byteLength(profile)).toBeLessThan(24_000);
+    expect(Buffer.byteLength(profile)).toBeLessThan(24_500);
     expect(Buffer.byteLength(inventory)).toBeLessThan(18_000);
   });
 

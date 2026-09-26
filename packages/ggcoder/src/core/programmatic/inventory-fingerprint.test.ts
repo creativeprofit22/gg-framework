@@ -52,7 +52,7 @@ it("changes fingerprints for setup inputs but ignores source and managed output"
   expect(sourceChanged.inventory.configurationFingerprint).toEqual(
     initial.inventory.configurationFingerprint,
   );
-  expect(sourceChanged.inventory.entries).not.toEqual(initial.inventory.entries);
+  expect(sourceChanged.inventory.entries).toContainEqual({ path: "src/product.ts", bytes: 26 });
 
   await fs.mkdir(path.join(root, ".gg/programmatic"), { recursive: true });
   await fs.writeFile(

@@ -53,5 +53,8 @@ it("returns only bounded summaries, hashes, and repository-relative evidence loc
   expect(configurationSnapshot.exclusions).toEqual([...PROGRAMMATIC_INVENTORY_EXCLUSIONS].sort());
   expect(Object.keys(configurationSnapshot)).toEqual(["policyRevision", "scannerProfileSchemaRevision", "exclusions", "inputs"]);
   expect(Object.keys(result)).toEqual(["inventory", "summary", "configurationInputs", "configurationSnapshot"]);
-  expect(result.inventory.entries.every((entry) => /^[a-f0-9]{64}$/.test(entry.sha256))).toBe(true);
+  expect(result.inventory.entries).toEqual([
+    { path: "package.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+    { path: "src/product.ts", bytes: expect.any(Number) },
+  ]);
 });

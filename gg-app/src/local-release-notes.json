@@ -1,40 +1,34 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-23",
-  "label": "Upstream 0.70.2, with GPT-6 Sol and Luna and a calmer app",
+  "date": "2026-09-26",
+  "label": "Long commands that keep going, and questions you can always finish",
   "sections": [
     {
-      "title": "Pick from OpenAI's newest models",
+      "title": "Let long commands keep running",
       "items": [
-        "`GPT-6 Sol` and `GPT-6 Luna` join `GPT-6 Astra` in the model menu, replacing the `GPT-5.6` family. Sol is a strong coder that reaches up to `ultra` effort, and Luna is the quick, inexpensive choice for lighter work. New OpenAI chats in your Local Fork still start on `GPT-6 Astra` unless you pick otherwise."
+        "A slow build or install is no longer cut off because the agent guessed it would be quick. After two minutes it moves to the `Background tasks` list and keeps running while the agent carries on. A command that prints nothing for ten minutes, or runs past an hour, is stopped as stuck, so a hung step cannot hold your session forever.",
+        "Closing the app on Windows now also closes the commands the agent started, so no stray builds or servers are left running in the background after you quit."
       ]
     },
     {
-      "title": "Keep your secrets where you left them",
+      "title": "Finish every question card",
       "items": [
-        "API keys and passwords were already hidden from the agent. Now it also cannot overwrite a real key in your files with the hidden placeholder it was shown, so a routine edit to your `.env` or config leaves your actual secrets intact."
+        "A card with several questions always has a `Send answers` button that shows how many you have answered. Questions you leave open reach the agent as skipped, and choices you ticked are included, so an optional question never leaves `Stop` as the only way out.",
+        "If a question was no longer waiting when you answered, the card closes and says `That question expired before your answer arrived.` instead of staying clickable. When you stop a run while a question is open, the agent is told you did not answer rather than being left to guess."
       ]
     },
     {
-      "title": "Read and move around the app more comfortably",
+      "title": "Say it the way an expert would",
       "items": [
-        "Every button can now explain itself. Hover or tab onto a control and its `tooltip` appears in the app's own style, quickly as you move between buttons, and never when you did not ask for one.",
-        "Always know where you are with the keyboard. Controls show a clear `focus ring`, and popups fade away instead of vanishing. Turn off `Animation effects` in Windows settings, or turn on `Reduce motion` on macOS, and those animations calm down for you.",
-        "Errors wait for you. They stay on screen until you close them, and any notice holds still while you hover or focus it, so nothing important slips past while you are looking away."
+        "`Enhance?` now focuses on vocabulary. It swaps everyday descriptions for the term a seasoned practitioner would use, in any field from code and design to video, audio, or writing, and highlights each new term next to your own words so you can learn it. Your request, details, and limits stay exactly as you wrote them."
       ]
     },
     {
-      "title": "Arrange and run your work with fewer surprises",
+      "title": "A smoother look in Light and on slow starts",
       "items": [
-        "Swap arrows now appear on every pane in a grid, including the middle column of a `3x2` layout whose dividers were dragged a few pixels apart. Rows that line up by eye are treated as the same row.",
-        "See why a task stopped. When a `Tasks` run ends early, the task now says why, such as `Last run stopped: it was cancelled.` Running or deleting a task also reports a clear failure instead of waiting forever when the run cannot start or the save fails.",
-        "Settings and `Internet Radio` tell you what happened. Saving or loading shows its progress and any error, the `New project` folder preview follows a changed projects folder straight away, and pausing the radio on Windows really stops playback."
-      ]
-    },
-    {
-      "title": "Recover without hiding what went wrong",
-      "items": [
-        "A command that cannot start is now reported as a failure rather than looking like it quietly succeeded, and turning off network access also stops a web fetch that is already following redirects."
+        "`Light` windows open light, with no dark flash on reload, and new windows appear already in place with the right title bar. Provider logos that were nearly invisible on light sign-in tiles are now easy to see.",
+        "Fewer stray scrollbars. Home scrolls when the window is short instead of hiding its top and bottom, and wide tables in chat scroll on their own while fitting the pane, without splitting words in narrow columns.",
+        "A project that is slow to start on a busy machine now gets more time to come up instead of failing to open."
       ]
     }
   ]

@@ -53,10 +53,26 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-23-upstream-0702-gpt6-and-calmer-app",
+    id: "local-2026-09-26-steadier-commands-and-questions",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-23-upstream-0702-gpt6-and-calmer-app",
+    label: "Upstream 0.70.2, with GPT-6 Sol and Luna and a calmer app",
+    date: "2026-09-23",
+    items: [
+      "`GPT-6 Sol` and `GPT-6 Luna` join `GPT-6 Astra` in the model menu, replacing the `GPT-5.6` family. Sol is a strong coder that reaches up to `ultra` effort, and Luna is the quick, inexpensive choice for lighter work. New OpenAI chats in your Local Fork still start on `GPT-6 Astra` unless you pick otherwise.",
+      "API keys and passwords were already hidden from the agent. Now it also cannot overwrite a real key in your files with the hidden placeholder it was shown, so a routine edit to your `.env` or config leaves your actual secrets intact.",
+      "Every button can now explain itself. Hover or tab onto a control and its `tooltip` appears in the app's own style, quickly as you move between buttons, and never when you did not ask for one.",
+      "Always know where you are with the keyboard. Controls show a clear `focus ring`, and popups fade away instead of vanishing. Turn off `Animation effects` in Windows settings, or turn on `Reduce motion` on macOS, and those animations calm down for you.",
+      "Errors wait for you. They stay on screen until you close them, and any notice holds still while you hover or focus it, so nothing important slips past while you are looking away.",
+      "Swap arrows now appear on every pane in a grid, including the middle column of a `3x2` layout whose dividers were dragged a few pixels apart. Rows that line up by eye are treated as the same row.",
+      "See why a task stopped. When a `Tasks` run ends early, the task now says why, such as `Last run stopped: it was cancelled.` Running or deleting a task also reports a clear failure instead of waiting forever when the run cannot start or the save fails.",
+      "Settings and `Internet Radio` tell you what happened. Saving or loading shows its progress and any error, the `New project` folder preview follows a changed projects folder straight away, and pausing the radio on Windows really stops playback.",
+      "A command that cannot start is now reported as a failure rather than looking like it quietly succeeded, and turning off network access also stops a web fetch that is already following redirects.",
+    ],
   },
   {
     // Named 0.66.4 because that build was packaged but never installed; the

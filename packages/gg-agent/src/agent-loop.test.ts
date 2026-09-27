@@ -1179,6 +1179,96 @@ describe("agentLoop", () => {
     }
   }, 30_000);
 
+  it.each([
+    {
+      name: "a pause inside an open tool call",
+      before: [
+        { type: "text_delta" as const, text: "Editing." },
+        { type: "toolcall_delta" as const, id: "t1", name: "edit", argsJson: '{"a":' },
+      ],
+      pauseMs: 240_000,
+    },
+    {
+      name: "silent thinking past five minutes",
+      before: [{ type: "thinking_delta" as const, text: "" }],
+      pauseMs: 400_000,
+    },
+  ])("does not abort $name", async ({ before, pauseMs }) => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          for (const e of before) yield e;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, pauseMs);
+            opts.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              },
+              { once: true },
+            );
+          });
+          yield { type: "text_delta" as const, text: "Done." };
+        },
+        response: Promise.resolve(makeResponse("Done.")),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "go" },
+      ],
+      { provider: "anthropic", model: "test", thinking: "high" },
+    );
+    await vi.advanceTimersByTimeAsync(pauseMs + 1_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "retry")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
+  it("still retries a stall after output when no tool call is open", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      call++;
+      if (call > 1) return mockOkResult("Recovered") as unknown as ReturnType<typeof stream>;
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "text_delta" as const, text: "Partial" };
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+    await vi.advanceTimersByTimeAsync(95_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const retry = events.find((event) => event.type === "retry");
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    // The failed attempt kept the user waiting 90s, so the retry is shown.
+    expect(retry?.type === "retry" ? retry.silent : undefined).toBe(false);
+  });
+
   it("flips to non-streaming fallback after repeated stream stalls", async () => {
     vi.useFakeTimers();
 

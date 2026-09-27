@@ -662,6 +662,13 @@ export async function* agentLoop(
   // false aborts on large `write`/`edit` tool-call streams when the Ink UI lagged
   // tens of seconds behind. 90s matches Claude Code's default idle watchdog.
   const STREAM_IDLE_TIMEOUT_MS = 90_000; // 90s of API silence between events
+  // While a tool call's input is still open (toolcall_delta seen, no
+  // toolcall_done yet), silence is expected: without fine-grained tool
+  // streaming Anthropic buffers and validates tool input server-side, so a
+  // large `write`/`edit` arrives in bursts with multi-minute gaps. 90s here
+  // killed healthy large edits mid-generation and every replay regenerated
+  // the same edit and died the same way.
+  const STREAM_TOOL_INPUT_IDLE_TIMEOUT_MS = 300_000; // 5min idle inside an open tool call
   // Anthropic models can pause 10-20s mid-stream while computing the next chunk
   // (e.g. generating tool call args for a large write).  10s was too aggressive
   // and caused false "stream stalled" errors, especially in plan mode.
@@ -672,14 +679,25 @@ export async function* agentLoop(
   const STREAM_OUTPUT_HARD_TIMEOUT_MS = 300_000; // 5min hard cap once output is flowing
   // Reasoning models (MiMo) can pause 3-5 minutes between thinking and output
   // generation.  Once we've seen thinking events, extend timeouts significantly.
-  const STREAM_THINKING_IDLE_TIMEOUT_MS = 300_000; // 5min idle after thinking
-  const STREAM_THINKING_HARD_TIMEOUT_MS = 600_000; // 10min hard cap with thinking
+  // Adaptive-thinking Anthropic models stream no thinking text by default: a
+  // thinking block opens and then the wire is silent until it closes. Big
+  // planning turns were observed thinking silently for 3.5-4min and past 5min,
+  // so 5min here aborted real work and replayed it from zero.
+  const STREAM_THINKING_IDLE_TIMEOUT_MS = 600_000; // 10min idle after thinking
+  const STREAM_THINKING_HARD_TIMEOUT_MS = 900_000; // 15min hard cap with thinking
   // Non-streaming mode has no per-event idle -- the entire response arrives in
   // one HTTP round-trip. Use a single generous hard cap instead. This matches
   // Claude Code's v2.1.110/111 behaviour: cap non-streaming retries so API
   // unreachability doesn't cause multi-minute hangs, but not so aggressively
   // that slow-but-healthy backends get killed.
   const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
+  // A thinking turn replayed non-streaming must still fit silent thinking plus
+  // the full visible output in one round-trip, so it gets the thinking cap.
+  const nonStreamingHardTimeoutMs =
+    options.thinking != null ? STREAM_THINKING_HARD_TIMEOUT_MS : NON_STREAMING_HARD_TIMEOUT_MS;
+  // A stall retry is announced when the failed attempt already kept the user
+  // waiting this long; quick transient blips stay silent.
+  const VISIBLE_STALL_AFTER_MS = 60_000;
   // Some providers reason silently server-side and emit no reasoning deltas, so
   // their pre-output phase looks like dead air and never earns the dynamic
   // thinking timeout extension below. This is always true for Sakana Fugu and
@@ -845,20 +863,25 @@ export async function* agentLoop(
       //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) -- Opus can
       //    take 30s+ to start on large contexts, that's not a stall.
       //  - After output event (text_delta, server_toolcall): STREAM_IDLE_TIMEOUT_MS
-      //    (90s) -- long tool-call streams can pause while the provider builds args.
-      //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (5min) --
-      //    reasoning models (MiMo) can pause minutes between thinking and output.
+      //    (90s) -- once output is streaming, sustained silence is a stall.
+      //    Inside an open tool call the budget is STREAM_TOOL_INPUT_IDLE_TIMEOUT_MS
+      //    (5min), since buffered tool input legitimately arrives in bursts.
+      //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (10min) --
+      //    thinking can be silent on the wire for minutes before output.
       //
       // In non-streaming fallback mode the entire response arrives in a single
       // HTTP round-trip, so the idle timer is disabled -- only the hard timeout
       // applies. Synthesized events all arrive at once when the response returns.
       let hasReceivedEvent = false;
       let hasReceivedThinking = false;
+      let toolInputOpen = false;
       const resetIdleTimer = () => {
         if (useNonStreamingFallback) return; // no inter-event idle in non-streaming mode
         if (idleTimer) clearTimeout(idleTimer);
         const timeoutMs = hasReceivedEvent
-          ? STREAM_IDLE_TIMEOUT_MS
+          ? toolInputOpen
+            ? STREAM_TOOL_INPUT_IDLE_TIMEOUT_MS
+            : STREAM_IDLE_TIMEOUT_MS
           : hasReceivedThinking
             ? STREAM_THINKING_IDLE_TIMEOUT_MS
             : firstEventTimeoutMs;
@@ -871,7 +894,9 @@ export async function* agentLoop(
             lastEventType,
             maxConsumerLagMs,
             phase: hasReceivedEvent
-              ? "mid_stream"
+              ? toolInputOpen
+                ? "mid_tool_input"
+                : "mid_stream"
               : hasReceivedThinking
                 ? "post_thinking"
                 : "first_event",
@@ -888,7 +913,7 @@ export async function* agentLoop(
       // Non-streaming fallback uses a single larger cap since there's no stream
       // to observe -- just wait for the full response up to the cap.
       let hardTimeoutMs = useNonStreamingFallback
-        ? NON_STREAMING_HARD_TIMEOUT_MS
+        ? nonStreamingHardTimeoutMs
         : initialHardTimeoutMs;
       hardTimer = setTimeout(() => {
         diag("hard_timeout_fired", {
@@ -1015,6 +1040,8 @@ export async function* agentLoop(
           if (firstProviderEventAt === undefined) firstProviderEventAt = pullTime;
           eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
           lastEventType = event.type;
+          if (event.type === "toolcall_delta") toolInputOpen = true;
+          else if (event.type === "toolcall_done") toolInputOpen = false;
 
           // Flip to mid-stream timeout on confirmed output events — text
           // deltas, completed tool calls, and tool call deltas (large file
@@ -1424,7 +1451,7 @@ export async function* agentLoop(
             attempt: stallRetries,
             maxAttempts: MAX_STALL_RETRIES,
             delayMs,
-            silent: stallRetries <= 2,
+            silent: stallRetries <= 2 && Date.now() - streamCallStart < VISIBLE_STALL_AFTER_MS,
             ...(preservedChars > 0 ? { preservedChars } : {}),
           };
           await abortableSleep(delayMs, options.signal);

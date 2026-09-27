@@ -22,6 +22,13 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.70.5",
+    date: "2026-09-27",
+    items: [
+      "Big edits and deep thinking now go all the way through. The AI used to get cut off halfway through writing a large file, then start over and hit the same wall again. I gave big file edits up to `5 minutes` of quiet and deep thinking up to `10 minutes`, so your biggest changes land on the first try. If a retry does happen after a long wait, I now show it on screen instead of hiding it.",
+    ],
+  },
+  {
     version: "0.70.4",
     date: "2026-09-26",
     items: [

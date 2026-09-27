@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.64.3
+
+### Patch Changes
+
+- Stop the stream stall watchdog from killing large tool-call edits and long silent thinking: 5min idle budget inside an open tool call, 10min/15min silent-thinking idle/hard caps, thinking-aware non-streaming fallback cap, and visible retries after a long failed attempt.
+  - @kenkaiiii/gg-ai@5.64.3
+  - @kenkaiiii/gg-agent@5.64.3
+  - @kenkaiiii/gg-core@5.64.3
+
 ## 5.64.2
 
 ### Patch Changes

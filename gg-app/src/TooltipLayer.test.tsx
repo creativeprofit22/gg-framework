@@ -171,6 +171,79 @@ describe("TooltipLayer", () => {
     document.removeEventListener("keydown", outer);
   });
 
+  describe("opt-in tap target", () => {
+    function setupTap(): { term: HTMLElement; plain: HTMLElement } {
+      render(
+        <>
+          <TooltipLayer />
+          <p>
+            <span title="you said: it" data-tooltip-tap="" tabIndex={0}>
+              term
+            </span>
+          </p>
+          <button type="button" title="Installs and restarts">
+            Update
+          </button>
+          <p>plain text</p>
+        </>,
+      );
+      return { term: screen.getByText("term"), plain: screen.getByRole("button", { name: "Update" }) };
+    }
+
+    it.each(["touch", "mouse"])("a %s tap shows it at once, a second tap hides it", (pointerType) => {
+      const { term } = setupTap();
+
+      fireEvent.pointerDown(term, { pointerType });
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toBe("you said: it");
+      expect(term.getAttribute("aria-describedby")).toBe(tip.id);
+
+      fireEvent.pointerDown(term, { pointerType });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(term.getAttribute("title")).toBe("you said: it");
+      expect(term.hasAttribute("aria-describedby")).toBe(false);
+    });
+
+    it("stays open when the touch lifts and closes on a tap elsewhere", () => {
+      const { term } = setupTap();
+
+      fireEvent.pointerDown(term, { pointerType: "touch" });
+      fireEvent.pointerOut(term, { pointerType: "touch", relatedTarget: null });
+      expect(screen.getByRole("tooltip")).toBeTruthy();
+
+      fireEvent.pointerDown(screen.getByText("plain text"), { pointerType: "touch" });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    });
+
+    it("a click keeps an open hover tooltip, and Escape dismisses it", () => {
+      const { term } = setupTap();
+      hover(term);
+      act(() => {
+        vi.advanceTimersByTime(450);
+      });
+
+      fireEvent.pointerDown(term);
+      expect(screen.getByRole("tooltip").textContent).toBe("you said: it");
+
+      fireEvent.keyDown(term, { key: "Escape" });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(term.getAttribute("title")).toBe("you said: it");
+    });
+
+    it("leaves plain titled controls hidden on click", () => {
+      const { plain } = setupTap();
+
+      fireEvent.pointerDown(plain, { pointerType: "touch" });
+      fireEvent.pointerDown(plain);
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(plain.getAttribute("title")).toBe("Installs and restarts");
+    });
+  });
+
   it("does not show on pointer-initiated focus", () => {
     const { labelled } = setup();
 

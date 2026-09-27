@@ -1594,8 +1594,9 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       expect(bubbles[0].classList.contains("user-ken-sent")).toBe(true);
       expect(bubbles[1].classList.contains("user-ken-sent")).toBe(false);
       expect(bubbles[1].querySelector(".enh-term")?.firstChild?.textContent).toBe("TypeScript");
-      expect(bubbles[1].querySelector(".enh-tip-orig")?.textContent).toBe("“type script”");
-      expect(bubbles[1].querySelector(".enh-tip-note")?.textContent).toBe("Language name");
+      expect(bubbles[1].querySelector(".enh-term")?.getAttribute("title")).toBe(
+        "you said: “type script”\nLanguage name",
+      );
       expect(bubbles[2].classList.contains("user-ken-sent")).toBe(true);
       expect(bubbles[2].textContent).toBe(bubbles[0].textContent);
       expect(bubbles[2].textContent).toContain("Sent to");

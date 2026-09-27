@@ -6101,11 +6101,10 @@ select {
 }
 
 /* A corrected technical term — highlighted, with a teaching tooltip on hover.
-   Shared by the preview card and the sent user bubble. A custom CSS tooltip is
-   used instead of the native `title=` attribute, which is unreliable / never
-   appears inside the Tauri webview. */
+   The tooltip is the app-wide .gg-tooltip (TooltipLayer reads the term's
+   `title`), so it is portalled out of the scrolling transcript and kept inside
+   the window instead of being clipped. */
 .enh-term {
-  position: relative;
   background: color-mix(in srgb, var(--secondary) 20%, transparent);
   color: var(--text);
   /* text-decoration hugs the glyphs (and each wrapped fragment) instead of
@@ -6119,8 +6118,8 @@ select {
   outline: none;
 }
 /* ── App-wide tooltip (TooltipLayer) ──
-   Replaces native `title` tooltips. Same surface as .enh-tip so every hint in
-   the app looks alike. Position is set inline by the layer; pointer-events
+   Replaces native `title` tooltips app-wide, including the prompt enhancer's
+   term hints (.enh-term). Position is set inline by the layer; pointer-events
    stay on so the pointer can move onto it (WCAG 1.4.13 hoverable). */
 .gg-tooltip {
   position: fixed;
@@ -6156,64 +6155,6 @@ select {
 .enh-term:focus-visible {
   box-shadow: 0 0 0 2px var(--primary);
 }
-.enh-tip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) translateY(4px);
-  z-index: var(--z-popover);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  width: max-content;
-  max-width: 280px;
-  padding: 7px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-button);
-  box-shadow: var(--shadow-md);
-  font-family: var(--sans);
-  font-size: 12px;
-  line-height: 1.4;
-  white-space: normal;
-  text-align: left;
-  color: var(--text-secondary);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition:
-    opacity var(--t-fast),
-    transform var(--t-fast),
-    visibility var(--t-fast);
-}
-/* Little arrow pointing down at the term. */
-.enh-tip::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: var(--surface-2);
-}
-.enh-term:hover .enh-tip,
-.enh-term:focus .enh-tip,
-.enh-term:focus-visible .enh-tip {
-  opacity: 1;
-  visibility: visible;
-  transform: translateX(-50%) translateY(0);
-}
-/* On --surface-2, so the lowest ink that passes is --text-muted. */
-.enh-tip-said {
-  color: var(--text-muted);
-}
-.enh-tip-orig {
-  color: var(--text);
-}
-.enh-tip-note {
-  color: var(--text-muted);
-}
-
 /* Staged attachment chips above the input. */
 .attach-bar {
   display: flex;

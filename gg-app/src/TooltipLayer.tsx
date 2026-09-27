@@ -19,6 +19,9 @@ import { createPortal } from "react-dom";
  * - WCAG 1.4.13: dismiss with Escape, the pointer can move onto the tooltip
  *   without losing it, and it stays until the pointer or focus leaves.
  * - Clicking hides it, and it stays hidden until the pointer leaves that control.
+ * - Opt-in exception: an element marked `data-tooltip-tap` (e.g. a highlighted
+ *   term that only teaches, with no action of its own) toggles its tooltip on
+ *   tap or click instead, so touch and click users can read it too.
  *
  * Positioning is measured, not assumed: the app zooms with CSS `zoom` on
  * <html>, and engines disagree about the coordinate space that puts
@@ -72,7 +75,8 @@ interface Claim {
   title: string;
   addedLabel: boolean;
   addedDescribedBy: boolean;
-  origin: "pointer" | "focus";
+  /** `tap`: opened by tapping/clicking a `data-tooltip-tap` element. */
+  origin: "pointer" | "focus" | "tap";
   observer: MutationObserver;
 }
 
@@ -151,7 +155,7 @@ export function TooltipLayer(): React.ReactElement | null {
       observer.observe(el, { attributes: true, attributeFilter: ["title"] });
 
       claim = { el, title, addedLabel: needsName, addedDescribedBy, origin, observer };
-      if (origin === "focus" || warm) show();
+      if (origin !== "pointer" || warm) show();
       // A cold hover waits for real movement (onPointerMove starts the delay).
       // Browsers also fire pointerover when the page changes under a still
       // cursor, e.g. a new view mounting a button where the pointer happens to
@@ -184,8 +188,27 @@ export function TooltipLayer(): React.ReactElement | null {
       if (e.relatedTarget === null && claim?.origin === "pointer") hide();
     };
 
-    const onPointerDown = (): void => {
+    const onPointerDown = (e: PointerEvent): void => {
       keyboard = false;
+      const target = e.target instanceof Element ? e.target : null;
+      const tapEl = target?.closest("[data-tooltip-tap]") ?? null;
+      if (tapEl) {
+        if (claim?.el === tapEl) {
+          // Second tap closes it; a click on a hover tooltip keeps it open.
+          if (shown && claim.origin === "tap") {
+            suppressed = tapEl;
+            hide();
+            return;
+          }
+          clearPending();
+          claim.origin = "tap";
+          show();
+          return;
+        }
+        suppressed = null;
+        begin(tapEl, "tap");
+        return;
+      }
       suppressed = claim?.el ?? null;
       hide();
     };

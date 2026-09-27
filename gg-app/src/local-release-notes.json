@@ -1,34 +1,19 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-26",
-  "label": "Long commands that keep going, and questions you can always finish",
+  "date": "2026-09-27",
+  "label": "Upstream 0.70.4, with steadier question cards and big edits",
   "sections": [
     {
-      "title": "Let long commands keep running",
+      "title": "Question cards that stay on screen",
       "items": [
-        "A slow build or install is no longer cut off because the agent guessed it would be quick. After two minutes it moves to the `Background tasks` list and keeps running while the agent carries on. A command that prints nothing for ten minutes, or runs past an hour, is stopped as stuck, so a hung step cannot hold your session forever.",
-        "Closing the app on Windows now also closes the commands the agent started, so no stray builds or servers are left running in the background after you quit."
+        "No more blank window when the agent asks a few quick questions at once. A card with two or more `Yes / No` questions could empty the whole window. The cause is fixed, and your sessions stay right where you left them."
       ]
     },
     {
-      "title": "Finish every question card",
+      "title": "Big edits and long thinking finish",
       "items": [
-        "A card with several questions always has a `Send answers` button that shows how many you have answered. Questions you leave open reach the agent as skipped, and choices you ticked are included, so an optional question never leaves `Stop` as the only way out.",
-        "If a question was no longer waiting when you answered, the card closes and says `That question expired before your answer arrived.` instead of staying clickable. When you stop a run while a question is open, the agent is told you did not answer rather than being left to guess."
-      ]
-    },
-    {
-      "title": "Say it the way an expert would",
-      "items": [
-        "`Enhance?` now focuses on vocabulary. It swaps everyday descriptions for the term a seasoned practitioner would use, in any field from code and design to video, audio, or writing, and highlights each new term next to your own words so you can learn it. Your request, details, and limits stay exactly as you wrote them."
-      ]
-    },
-    {
-      "title": "A smoother look in Light and on slow starts",
-      "items": [
-        "`Light` windows open light, with no dark flash on reload, and new windows appear already in place with the right title bar. Provider logos that were nearly invisible on light sign-in tiles are now easy to see.",
-        "Fewer stray scrollbars. Home scrolls when the window is short instead of hiding its top and bottom, and wide tables in chat scroll on their own while fitting the pane, without splitting words in narrow columns.",
-        "A project that is slow to start on a busy machine now gets more time to come up instead of failing to open."
+        "Large file edits are no longer cut off partway through. While the agent is writing a big change, it can pause for up to five minutes between chunks before the run is treated as stuck. Before this fix, the limit was 90 seconds.",
+        "Models that think quietly for a long time get more room. The agent now waits up to ten minutes of silence after thinking starts, and up to fifteen minutes in total, so a hard problem is not stopped just before the answer arrives."
       ]
     }
   ]

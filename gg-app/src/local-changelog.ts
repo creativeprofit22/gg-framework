@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-26-steadier-commands-and-questions",
+    id: "local-2026-09-27-upstream-0704-steadier-replies",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-26-steadier-commands-and-questions",
+    label: "Long commands that keep going, and questions you can always finish",
+    date: "2026-09-26",
+    items: [
+      "A slow build or install is no longer cut off because the agent guessed it would be quick. After two minutes it moves to the `Background tasks` list and keeps running while the agent carries on. A command that prints nothing for ten minutes, or runs past an hour, is stopped as stuck, so a hung step cannot hold your session forever.",
+      "Closing the app on Windows now also closes the commands the agent started, so no stray builds or servers are left running in the background after you quit.",
+      "A card with several questions always has a `Send answers` button that shows how many you have answered. Questions you leave open reach the agent as skipped, and choices you ticked are included, so an optional question never leaves `Stop` as the only way out.",
+      "If a question was no longer waiting when you answered, the card closes and says `That question expired before your answer arrived.` instead of staying clickable. When you stop a run while a question is open, the agent is told you did not answer rather than being left to guess.",
+      "`Enhance?` now focuses on vocabulary. It swaps everyday descriptions for the term a seasoned practitioner would use, in any field from code and design to video, audio, or writing, and highlights each new term next to your own words so you can learn it. Your request, details, and limits stay exactly as you wrote them.",
+      "`Light` windows open light, with no dark flash on reload, and new windows appear already in place with the right title bar. Provider logos that were nearly invisible on light sign-in tiles are now easy to see.",
+      "Fewer stray scrollbars. Home scrolls when the window is short instead of hiding its top and bottom, and wide tables in chat scroll on their own while fitting the pane, without splitting words in narrow columns.",
+      "A project that is slow to start on a busy machine now gets more time to come up instead of failing to open.",
+    ],
   },
   {
     id: "local-2026-09-23-upstream-0702-gpt6-and-calmer-app",

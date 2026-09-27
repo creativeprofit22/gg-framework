@@ -3858,6 +3858,32 @@ fn parse_sidecar_json_response(
     serde_json::from_str(body).map_err(|error| error.to_string())
 }
 
+/// Marks MCP management errors whose text the daemon wrote for the user
+/// (validation, duplicate names, unknown servers). The webview surfaces only
+/// marked messages; everything else stays behind its generic fallback.
+const MCP_CLIENT_ERROR_PREFIX: &str = "mcp-client-error: ";
+
+fn parse_mcp_management_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if status.is_client_error()
+        && status != reqwest::StatusCode::UNAUTHORIZED
+        && status != reqwest::StatusCode::FORBIDDEN
+    {
+        // The daemon's catch-all route 404 ("not found") is not an MCP outcome.
+        let route_missing = |m: &str| status == reqwest::StatusCode::NOT_FOUND && m == "not found";
+        let message = serde_json::from_str::<serde_json::Value>(body.trim())
+            .ok()
+            .and_then(|json| json.get("error")?.as_str().map(|m| m.trim().to_string()))
+            .filter(|m| !m.is_empty() && !route_missing(m));
+        if let Some(message) = message {
+            return Err(format!("{MCP_CLIENT_ERROR_PREFIX}{message}"));
+        }
+    }
+    parse_sidecar_json_response(status, body)
+}
+
 async fn post_session_json(
     client: &reqwest::Client,
     base_url: &str,
@@ -6413,18 +6439,8 @@ async fn agent_mcp_add(
         .await
         .map_err(|e| e.to_string())?;
     let status = res.status();
-    let body = res
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("failed to add MCP server");
-        return Err(msg.to_string());
-    }
-    Ok(body)
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_mcp_management_response(status, &body)
 }
 
 /// Proxy: remove an MCP server by name. Returns `{ removed: boolean }`.
@@ -6449,7 +6465,7 @@ async fn agent_mcp_remove(
         .map_err(|e| e.to_string())?;
     let status = res.status();
     let body = res.text().await.map_err(|e| e.to_string())?;
-    parse_sidecar_json_response(status, &body)
+    parse_mcp_management_response(status, &body)
 }
 
 /// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.
@@ -6476,18 +6492,8 @@ async fn agent_mcp_login(
         .await
         .map_err(|e| e.to_string())?;
     let status = res.status();
-    let body = res
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("failed to start MCP login");
-        return Err(msg.to_string());
-    }
-    Ok(body)
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_mcp_management_response(status, &body)
 }
 
 /// Proxy: create a new project folder under the configured projects root.
@@ -12578,6 +12584,54 @@ mod tests {
                 "retryable": true,
                 "phaseId": "phase-1"
             })
+        );
+    }
+
+    #[test]
+    fn mcp_management_response_marks_only_daemon_client_errors() {
+        let duplicate = r#"{"error":"A \"docs\" server already exists in global scope. Remove it first or use a different name."}"#;
+        assert_eq!(
+            parse_mcp_management_response(reqwest::StatusCode::BAD_REQUEST, duplicate),
+            Err("mcp-client-error: A \"docs\" server already exists in global scope. Remove it first or use a different name.".to_string())
+        );
+        assert_eq!(
+            parse_mcp_management_response(
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"error":"No \"docs\" server found."}"#,
+            ),
+            Err("mcp-client-error: No \"docs\" server found.".to_string())
+        );
+        // Unmarked: server failures, auth rejections, route-level 404s, non-JSON bodies.
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not add the MCP server. Check the command and try again."}"#,
+                "Could not add the MCP server. Check the command and try again.",
+            ),
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                r#"{"error":"unauthorized"}"#,
+                "unauthorized",
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"error":"not found"}"#,
+                "not found",
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "bad gateway text",
+                "bad gateway text",
+            ),
+        ] {
+            assert_eq!(
+                parse_mcp_management_response(status, body),
+                Err(expected.to_string())
+            );
+        }
+        assert_eq!(
+            parse_mcp_management_response(reqwest::StatusCode::ACCEPTED, r#"{"accepted":true}"#),
+            Ok(serde_json::json!({ "accepted": true }))
         );
     }
 

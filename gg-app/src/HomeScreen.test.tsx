@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { PaneAgentClient } from "./agent";
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
 import { HomeScreen } from "./HomeScreen";
@@ -35,6 +36,9 @@ vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
+// McpModal is mocked above, so HomeScreen only forwards this client.
+const mcpClientStub = {} as PaneAgentClient;
+
 function updateInfo(overrides: Partial<UpdateInfo>): UpdateInfo {
   return {
     update: null,
@@ -62,6 +66,7 @@ async function renderHome(): Promise<void> {
         onLogin={vi.fn()}
         waitForAgentReady={agentMocks.waitForReady}
         loadProgress={agentMocks.getProgress}
+        mcpClient={mcpClientStub}
       />,
     );
   });

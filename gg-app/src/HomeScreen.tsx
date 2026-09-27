@@ -51,7 +51,8 @@ interface Props {
   refreshSignal?: number;
   waitForAgentReady?: () => Promise<unknown>;
   loadProgress?: () => Promise<ProgressSnapshot | null>;
-  mcpClient?: PaneAgentClient;
+  /** Pane-bound client used by the MCP manager; there is no primary-pane fallback. */
+  mcpClient: PaneAgentClient;
 }
 
 /**

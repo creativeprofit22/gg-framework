@@ -5,12 +5,7 @@ import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { ListSkeleton } from "./Skeleton";
 import {
-  listMcpServers,
-  addMcpServer,
-  removeMcpServer,
-  loginMcpServer,
   listProjects,
-  subscribe,
   isMcpAuthDoneEvent,
   type McpServerRow,
   type DiscoveredProject,
@@ -19,23 +14,16 @@ import {
 } from "./agent";
 import { toast } from "./toast";
 
-type McpPaneClient = Pick<
+export type McpPaneClient = Pick<
   PaneAgentClient,
   "listMcpServers" | "addMcpServer" | "loginMcpServer" | "removeMcpServer" | "subscribe"
 >;
 
 interface Props {
   onClose: () => void;
-  client?: McpPaneClient;
+  /** Pane-bound client: MCP management targets this pane's daemon session. */
+  client: McpPaneClient;
 }
-
-const primaryMcpClient: McpPaneClient = {
-  listMcpServers,
-  addMcpServer,
-  loginMcpServer,
-  removeMcpServer,
-  subscribe,
-};
 
 interface McpManagementError {
   message: string;
@@ -52,7 +40,7 @@ interface McpManagementError {
  * selected, since the modal has no inherent project context. Successful changes
  * reload the pane-scoped AgentSession before the management action completes.
  */
-export function McpModal({ onClose, client = primaryMcpClient }: Props): React.ReactElement {
+export function McpModal({ onClose, client }: Props): React.ReactElement {
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [line, setLine] = useState("");
@@ -397,9 +385,9 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
       )}
 
       <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
-        Adding or removing servers here automatically refreshes MCP in this conversation. Tools are
-        available only when the server connects and trust requirements are met. Other open
-        conversations are not automatically refreshed.
+        Changes are saved right away. New conversations use them automatically; conversations that
+        are already open need to be restarted to pick them up. Tools are available only when the
+        server connects and trust requirements are met.
       </div>
 
       <div className="modal-actions">

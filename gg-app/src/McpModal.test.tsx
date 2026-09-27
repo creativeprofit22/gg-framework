@@ -1,17 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  addMcpServer,
-  isMcpAuthDoneEvent,
-  listMcpServers,
-  loginMcpServer,
-  removeMcpServer,
-  listProjects,
-  subscribe,
-  type SidecarEvent,
-} from "./agent";
-import { McpModal } from "./McpModal";
+import { isMcpAuthDoneEvent, listProjects, type SidecarEvent } from "./agent";
+import { McpModal, type McpPaneClient } from "./McpModal";
 import { toast } from "./toast";
 
 let eventHandler: ((event: SidecarEvent) => void) | undefined;
@@ -19,15 +10,7 @@ let eventHandler: ((event: SidecarEvent) => void) | undefined;
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 vi.mock("./agent", () => ({
-  addMcpServer: vi.fn(),
-  loginMcpServer: vi.fn(),
-  removeMcpServer: vi.fn(),
   listProjects: vi.fn(),
-  listMcpServers: vi.fn(),
-  subscribe: vi.fn((handler: (event: SidecarEvent) => void) => {
-    eventHandler = handler;
-    return vi.fn();
-  }),
   isMcpAuthDoneEvent: vi.fn(
     (event: SidecarEvent) =>
       event.type === "mcp_auth_done" &&
@@ -38,12 +21,22 @@ vi.mock("./agent", () => ({
   ),
 }));
 
-const addMcpServerMock = vi.mocked(addMcpServer);
-const listMcpServersMock = vi.mocked(listMcpServers);
-const loginMcpServerMock = vi.mocked(loginMcpServer);
-const removeMcpServerMock = vi.mocked(removeMcpServer);
+const addMcpServerMock = vi.fn<McpPaneClient["addMcpServer"]>();
+const listMcpServersMock = vi.fn<McpPaneClient["listMcpServers"]>();
+const loginMcpServerMock = vi.fn<McpPaneClient["loginMcpServer"]>();
+const removeMcpServerMock = vi.fn<McpPaneClient["removeMcpServer"]>();
+const subscribeMock = vi.fn<McpPaneClient["subscribe"]>((handler) => {
+  eventHandler = handler;
+  return vi.fn();
+});
+const client: McpPaneClient = {
+  listMcpServers: listMcpServersMock,
+  addMcpServer: addMcpServerMock,
+  loginMcpServer: loginMcpServerMock,
+  removeMcpServer: removeMcpServerMock,
+  subscribe: subscribeMock,
+};
 const listProjectsMock = vi.mocked(listProjects);
-const subscribeMock = vi.mocked(subscribe);
 const isMcpAuthDoneEventMock = vi.mocked(isMcpAuthDoneEvent);
 const toastMock = vi.mocked(toast);
 
@@ -84,13 +77,13 @@ const authRow = {
 };
 
 describe("McpModal lifecycle guidance", () => {
-  it("limits automatic add/remove refresh to this conversation and qualifies tool availability", async () => {
-    render(<McpModal onClose={vi.fn()} />);
+  it("explains changes apply to new conversations and qualifies tool availability", async () => {
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("No MCP’s configured.");
 
     expect(
       screen.getByText(
-        "Adding or removing servers here automatically refreshes MCP in this conversation. Tools are available only when the server connects and trust requirements are met. Other open conversations are not automatically refreshed.",
+        "Changes are saved right away. New conversations use them automatically; conversations that are already open need to be restarted to pick them up. Tools are available only when the server connects and trust requirements are met.",
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/next app restart/i)).toBeNull();
@@ -113,7 +106,7 @@ describe("McpModal server status", () => {
           error: "Connection failed: Authorization: Bearer fixture-private-value",
         },
       ]);
-      render(<McpModal onClose={vi.fn()} />);
+      render(<McpModal client={client} onClose={vi.fn()} />);
       expect((await screen.findByText(message)).closest(".mcp-item")?.textContent).toContain(
         "example",
       );
@@ -127,7 +120,7 @@ describe("McpModal server status", () => {
     ["disabled", { ...authRow, enabled: false, failureReason: "trust-blocked" as const }],
   ])("does not show false failures for %s rows", async (_label, row) => {
     listMcpServersMock.mockResolvedValue([{ ...row, error: "private diagnostic" }]);
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("example");
     expect(
       screen.queryByText(/Could not connect|Project server blocked|private diagnostic/),
@@ -142,7 +135,7 @@ describe("McpModal server status", () => {
         error: "Connection failed: [REDACTED]",
       },
     ]);
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     expect(
       await screen.findByText("Could not connect. Check the server settings and availability."),
     ).toBeTruthy();
@@ -153,7 +146,7 @@ describe("McpModal server status", () => {
     "shows disabled servers neutrally (requiresAuth: %s)",
     async (requiresAuth) => {
       listMcpServersMock.mockResolvedValue([{ ...authRow, enabled: false, requiresAuth }]);
-      render(<McpModal onClose={vi.fn()} />);
+      render(<McpModal client={client} onClose={vi.fn()} />);
 
       expect(await screen.findByText("Disabled")).toBeTruthy();
       expect(screen.queryByText("Requires login")).toBeNull();
@@ -175,7 +168,7 @@ describe("McpModal server status", () => {
     ],
   ] as const)("preserves %s presentation", async (_label, row, icon, text) => {
     listMcpServersMock.mockResolvedValue([row]);
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("example");
     expect(document.querySelector(icon)).not.toBeNull();
     expect(screen.queryByText("Disabled")).toBeNull();
@@ -188,7 +181,7 @@ describe("McpModal management failures", () => {
   it("shows an accessible initial-load error instead of an empty success state", async () => {
     listMcpServersMock.mockRejectedValueOnce(new Error("Could not load MCP servers. Retry."));
 
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
 
     expect((await screen.findByRole("alert")).textContent).toContain("Could not load MCP servers");
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(false);
@@ -199,7 +192,7 @@ describe("McpModal management failures", () => {
     listMcpServersMock
       .mockResolvedValueOnce([connectedRow])
       .mockRejectedValueOnce(new Error("Could not refresh MCP servers. Retry."));
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("example");
 
     act(() => {
@@ -217,7 +210,7 @@ describe("McpModal management failures", () => {
     listMcpServersMock.mockRejectedValueOnce(
       new Error("An MCP config file is malformed. Fix it, then retry."),
     );
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
 
     expect((await screen.findByRole("alert")).textContent).toContain(
       "MCP config file is malformed",
@@ -230,7 +223,7 @@ describe("McpModal management failures", () => {
     addMcpServerMock.mockRejectedValueOnce(new Error("Could not add the MCP server."));
     removeMcpServerMock.mockRejectedValueOnce(new Error("Could not remove the MCP server."));
     loginMcpServerMock.mockRejectedValueOnce(new Error("Could not start MCP sign-in."));
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("example");
 
     fireEvent.change(screen.getByPlaceholderText(/claude mcp add/), {
@@ -247,11 +240,27 @@ describe("McpModal management failures", () => {
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(false);
   });
 
+  it("shows the daemon's duplicate-name reason when adding fails", async () => {
+    const duplicate =
+      'A "example" server already exists in global scope. Remove it first or use a different name.';
+    addMcpServerMock.mockRejectedValueOnce(new Error(duplicate));
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    await screen.findByText("No MCP’s configured.");
+
+    fireEvent.change(screen.getByPlaceholderText(/claude mcp add/), {
+      target: { value: "claude mcp add example https://example.test/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(duplicate);
+    expect(screen.queryByText(/Check the command and retry/)).toBeNull();
+  });
+
   it("clears the error only after a successful retry", async () => {
     listMcpServersMock
       .mockRejectedValueOnce(new Error("Could not load MCP servers. Retry."))
       .mockResolvedValueOnce([connectedRow]);
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     const retry = await screen.findByRole("button", { name: "Retry" });
 
     fireEvent.click(retry);
@@ -264,7 +273,7 @@ describe("McpModal management failures", () => {
 
 describe("McpModal OAuth completion", () => {
   it("displays the typed usable tool count from mcp_auth_done", async () => {
-    render(<McpModal onClose={vi.fn()} />);
+    render(<McpModal client={client} onClose={vi.fn()} />);
     await screen.findByText("No MCP’s configured.");
 
     act(() => {

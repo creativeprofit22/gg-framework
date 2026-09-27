@@ -227,11 +227,13 @@ vi.mock("./HomeScreen", () => ({
     onProjects?: () => void;
     waitForAgentReady?: () => Promise<unknown>;
     loadProgress?: () => Promise<unknown>;
+    mcpClient?: { paneId: string };
   }) => (
     <div
       data-testid="home-screen"
       data-has-pane-ready={String(typeof props.waitForAgentReady === "function")}
       data-has-pane-progress={String(typeof props.loadProgress === "function")}
+      data-mcp-pane={props.mcpClient?.paneId ?? "none"}
     >
       <button onClick={props.onProjects}>Open projects</button>
     </div>
@@ -3047,6 +3049,23 @@ describe("AgentPane lifecycle", () => {
     const home = document.querySelector('[data-testid="home-screen"]');
     expect(home?.getAttribute("data-has-pane-ready")).toBe("true");
     expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
+    expect(pane.create).not.toHaveBeenCalled();
+  });
+
+  it("manages MCP from an unstarted home pane through the running catalog client", async () => {
+    const pane = client("pane-3", 1);
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-3"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+
+    const home = await screen.findByTestId("home-screen");
+    expect(home.getAttribute("data-mcp-pane")).toBe("primary");
     expect(pane.create).not.toHaveBeenCalled();
   });
 

@@ -11,15 +11,11 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import {
-  addMcpServer,
-  createPaneAgentClient,
-  listMcpServers,
-  loginMcpServer,
-  removeMcpServer,
-} from "./agent";
+import { createPaneAgentClient } from "./agent";
 
 const ready = { ready: true, error: null, generation: 1, sessionId: "session-1" };
+const paneId = "mcp-fixture-pane";
+const pane = createPaneAgentClient(paneId);
 
 function respondToMcp(command: string, response: unknown, rejected = false): void {
   mocks.invoke.mockImplementation(async (name: string) => {
@@ -37,14 +33,8 @@ beforeEach(() => {
   mocks.listen.mockClear();
 });
 
-describe.each([
-  ["primary", "primary", listMcpServers],
-  [
-    "pane-bound",
-    "mcp-fixture-pane",
-    (cwd?: string) => createPaneAgentClient("mcp-fixture-pane").listMcpServers(cwd),
-  ],
-] as const)("%s MCP status decoding", (_label, paneId, list) => {
+describe("pane MCP status decoding", () => {
+  const list = (cwd?: string): ReturnType<typeof pane.listMcpServers> => pane.listMcpServers(cwd);
   const base = {
     name: "fixture",
     scope: "global",
@@ -104,7 +94,7 @@ describe("desktop MCP client failures", () => {
   it("rejects list proxy failures instead of returning an empty list", async () => {
     respondToMcp("agent_mcp_list", new Error("HTTP 500"), true);
 
-    await expect(listMcpServers()).rejects.toThrow(
+    await expect(pane.listMcpServers()).rejects.toThrow(
       "Could not load MCP servers. Check the desktop connection, then retry.",
     );
   });
@@ -112,7 +102,7 @@ describe("desktop MCP client failures", () => {
   it("rejects malformed list responses", async () => {
     respondToMcp("agent_mcp_list", { servers: [{ name: "missing required fields" }] });
 
-    await expect(listMcpServers()).rejects.toThrow("Could not load MCP servers");
+    await expect(pane.listMcpServers()).rejects.toThrow("Could not load MCP servers");
   });
 
   it("maps malformed config failures to specific safe copy", async () => {
@@ -122,17 +112,22 @@ describe("desktop MCP client failures", () => {
       true,
     );
 
-    await expect(listMcpServers()).rejects.toThrow(
+    await expect(pane.listMcpServers()).rejects.toThrow(
       "An MCP config file is malformed. Fix it, then retry.",
     );
   });
 
   it.each([
-    ["add", () => addMcpServer("claude mcp add bad", "global"), "agent_mcp_add", "Could not add"],
-    ["remove", () => removeMcpServer("bad", "global"), "agent_mcp_remove", "Could not remove"],
+    [
+      "add",
+      () => pane.addMcpServer("claude mcp add bad", "global"),
+      "agent_mcp_add",
+      "Could not add",
+    ],
+    ["remove", () => pane.removeMcpServer("bad", "global"), "agent_mcp_remove", "Could not remove"],
     [
       "OAuth",
-      () => loginMcpServer("bad", "global"),
+      () => pane.loginMcpServer("bad", "global"),
       "agent_mcp_login",
       "Could not start MCP sign-in",
     ],
@@ -144,4 +139,42 @@ describe("desktop MCP client failures", () => {
       await expect(operation()).rejects.toThrow(message);
     },
   );
+
+  const duplicate =
+    'A "docs" server already exists in global scope. Remove it first or use a different name.';
+
+  describe("pane daemon client errors", () => {
+    const add = (): Promise<unknown> => pane.addMcpServer("claude mcp add docs x", "global");
+    const login = (): Promise<unknown> => pane.loginMcpServer("docs", "global");
+    const remove = (): Promise<unknown> => pane.removeMcpServer("docs", "global");
+
+    it.each([
+      ["add", add, "agent_mcp_add", duplicate],
+      ["login", login, "agent_mcp_login", 'No "docs" server found.'],
+      ["login", login, "agent_mcp_login", "Login is only supported for HTTP MCP servers."],
+      ["remove", remove, "agent_mcp_remove", "project scope requires a project (cwd)."],
+    ] as const)("surfaces the %s reason verbatim: %s", async (_op, run, command, reason) => {
+      // Tauri invoke rejects with the proxy's string, not an Error.
+      respondToMcp(command, `mcp-client-error: ${reason}`, true);
+
+      await expect(run()).rejects.toThrow(new Error(reason));
+      expect(mocks.invoke).toHaveBeenCalledWith(command, expect.objectContaining({ paneId }));
+    });
+
+    it.each([
+      ["daemon not ready", "Could not add the MCP server. Check the command and retry."],
+      ["session not ready", "Could not add the MCP server. Check the command and retry."],
+      [
+        "error sending request for url (http://127.0.0.1:1/mcp/add)",
+        "Could not add the MCP server. Check the command and retry.",
+      ],
+      // Unmarked daemon text (e.g. a sanitized 500) stays behind the generic copy.
+      [duplicate, "Could not add the MCP server. Check the command and retry."],
+      ["mcp-client-error:   ", "Could not add the MCP server. Check the command and retry."],
+    ])("keeps transport/unknown failure %s generic", async (raw, message) => {
+      respondToMcp("agent_mcp_add", raw, true);
+
+      await expect(add()).rejects.toThrow(new Error(message));
+    });
+  });
 });

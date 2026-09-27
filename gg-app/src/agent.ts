@@ -2804,8 +2804,16 @@ export interface AddMcpResult {
 
 type McpManagementAction = "load" | "add" | "remove" | "login";
 
+/** Set by the native MCP proxies on daemon 4xx replies: the remainder is a
+ *  user-facing reason (duplicate name, parse error, unknown server). */
+const MCP_CLIENT_ERROR_PREFIX = "mcp-client-error: ";
+
 function mcpManagementError(action: McpManagementAction, cause: unknown): Error {
   const raw = cause instanceof Error ? cause.message : String(cause);
+  if (raw.startsWith(MCP_CLIENT_ERROR_PREFIX)) {
+    const reason = raw.slice(MCP_CLIENT_ERROR_PREFIX.length).trim();
+    if (reason) return new Error(reason);
+  }
   const malformed = /MCP config.+malformed/i.test(raw);
   const messages: Record<McpManagementAction, string> = {
     load: "Could not load MCP servers. Check the desktop connection, then retry.",
@@ -2856,83 +2864,6 @@ function decodeMcpServerRows(response: unknown): McpServerRow[] {
     ...row,
     enabled: row.enabled ?? true,
   }));
-}
-
-/** List configured MCP servers with live connection status + tool counts.
- *  Rejects transport and malformed responses so callers retain their last known list. */
-export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
-  try {
-    await waitForReady();
-    const res = await invoke<unknown>("agent_mcp_list", {
-      paneId: "primary",
-      cwd: cwd ?? null,
-    });
-    return decodeMcpServerRows(res);
-  } catch (e) {
-    await logError(`agent_mcp_list failed: ${String(e)}`);
-    throw mcpManagementError("load", e);
-  }
-}
-
-/** Add an MCP server from a pasted `claude mcp add …` line. `cwd` is required
- *  for project scope (the target project path). Throws with a user-facing
- *  message on parse/save failure. */
-export async function addMcpServer(
-  line: string,
-  scope: "global" | "project",
-  cwd?: string,
-): Promise<AddMcpResult> {
-  try {
-    await waitForReady();
-    return await invoke<AddMcpResult>("agent_mcp_add", {
-      paneId: "primary",
-      line,
-      scope,
-      cwd: cwd ?? null,
-    });
-  } catch (e) {
-    await logError(`agent_mcp_add failed: ${String(e)}`);
-    throw mcpManagementError("add", e);
-  }
-}
-
-/** Begin an interactive OAuth login for a remote (HTTP) MCP server. Returns
- *  immediately; progress + outcome arrive via subscribe() `mcp_auth_*` events.
- *  `cwd` is required for project scope. Throws a user-facing message on failure
- *  to start (e.g. not an HTTP server, server not found). */
-export async function loginMcpServer(
-  name: string,
-  scope: "global" | "project",
-  cwd?: string,
-): Promise<void> {
-  try {
-    await waitForReady();
-    await invoke("agent_mcp_login", { paneId: "primary", name, scope, cwd: cwd ?? null });
-  } catch (e) {
-    await logError(`agent_mcp_login failed: ${String(e)}`);
-    throw mcpManagementError("login", e);
-  }
-}
-
-/** Remove an MCP server by name. `cwd` is required for project scope. Returns
- *  whether it existed. */
-export async function removeMcpServer(
-  name: string,
-  scope: "global" | "project",
-  cwd?: string,
-): Promise<{ removed: boolean }> {
-  try {
-    await waitForReady();
-    return await invoke<{ removed: boolean }>("agent_mcp_remove", {
-      paneId: "primary",
-      name,
-      scope,
-      cwd: cwd ?? null,
-    });
-  } catch (e) {
-    await logError(`agent_mcp_remove failed: ${String(e)}`);
-    throw mcpManagementError("remove", e);
-  }
 }
 
 // Single Tauri listener for the whole app, fanned out to local subscribers.

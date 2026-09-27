@@ -4449,7 +4449,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             refreshSignal={homeRefreshSignal}
             waitForAgentReady={catalogClient.waitForReady}
             loadProgress={catalogClient.getProgress}
-            mcpClient={client}
+            // Home panes have no session yet; the catalog client's daemon session
+            // is running, so MCP management never waits on an unstarted pane.
+            mcpClient={catalogClient}
           />
         ) : entryView === "login" ? (
           <LoginScreen onClose={() => setEntryView("home")} />

@@ -35,6 +35,7 @@ import {
   type PhaseLifecycleRepositoryOutcome,
 } from "./app-sidecar-phase-lifecycle.js";
 import type { ActivePhaseContextV1, ActivePhaseExecutionStage } from "./phase-context.js";
+import { renderActivePhasePackage } from "./phase-context.js";
 import {
   ProjectNotesRepository,
   type NotesDocumentV3,
@@ -991,10 +992,19 @@ describe("production launchBoundPhase orchestration", () => {
       references: [{ id: "ref-1" }],
       session: { sessionId: "session-1" },
     });
-    expect(fixture.currentSession.lastPrompt).toContain('"id": "phase-21"');
-    expect(fixture.currentSession.lastPrompt).toContain('"id": "ref-1"');
-    expect(fixture.currentSession.lastPrompt).not.toContain("unrelated free-form Notes");
-    expect(fixture.currentSession.lastPrompt).not.toContain("another phase");
+    // Phase data reaches the model once, through the system prompt package;
+    // the first turn only points at it.
+    const activeContext = fixture.currentSession.activeContext;
+    if (!activeContext) throw new Error("Expected an active phase context");
+    const phasePackage = renderActivePhasePackage(activeContext).systemPromptSuffix;
+    expect(phasePackage).toContain('"id": "phase-21"');
+    expect(phasePackage).toContain('"id": "ref-1"');
+    for (const text of [phasePackage, fixture.currentSession.lastPrompt]) {
+      expect(text).not.toContain("unrelated free-form Notes");
+      expect(text).not.toContain("another phase");
+    }
+    expect(fixture.currentSession.lastPrompt).not.toContain('"id": "phase-21"');
+    expect(fixture.currentSession.lastPrompt).toContain("Active Roadmap phase section");
     expect(fixture.mutations.owner).toBeNull();
     const promoted = fixture.createdSessions[0]!;
     expect(promoted.disposeCalls).toBe(0);
@@ -1086,7 +1096,10 @@ describe("production launchBoundPhase orchestration", () => {
       }),
     });
     expect(parentFixture.currentSession.activeContext?.phase.sourcePrompt).toBe(sourcePrompt);
-    expect(parentFixture.currentSession.lastPrompt).toContain(sourcePrompt);
+    const parentContext = parentFixture.currentSession.activeContext;
+    if (!parentContext) throw new Error("Expected an active phase context");
+    expect(renderActivePhasePackage(parentContext).systemPromptSuffix).toContain(sourcePrompt);
+    expect(parentFixture.currentSession.lastPrompt).toContain("Active Roadmap phase section");
     parentFixture.currentSession.emitPaneEvent("after-phase-bind");
     expect(parentFixture.paneEvents).toEqual(["before-phase-bind", "after-phase-bind"]);
     expect(parentFixture.events).not.toContain("fresh-session:false");

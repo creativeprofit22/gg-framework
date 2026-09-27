@@ -89,6 +89,7 @@ import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
 import { ReviewCoverageTracker } from "./core/ideal-review.js";
+import { ResearchSourceLedger } from "./core/research-sources.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -731,6 +732,8 @@ async function runInkTUI(opts: {
   // /rewind. The store is created once the session id is known (below).
   const checkpointRef: { current: CheckpointStore | null } = { current: null };
   const reviewCoverageTracker = new ReviewCoverageTracker(cwd);
+  // Corpus code retrieved this session; exit_plan rejects plans that omit it.
+  const researchSources = new ResearchSourceLedger();
   const onPreFileMutation = (filePath: string): Promise<void> =>
     checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
   let activeProvider = provider;
@@ -746,6 +749,7 @@ async function runInkTUI(opts: {
       provider,
       model,
       planModeRef,
+      researchSources,
       onPreFileMutation,
       onFileRead: (filePath) => reviewCoverageTracker.recordRead(filePath),
       onFileMutated: (filePath) => reviewCoverageTracker.recordChanged(filePath),
@@ -1097,6 +1101,7 @@ async function runInkTUI(opts: {
     subAgentManager,
     lspManager,
     reviewCoverageTracker,
+    researchSources,
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,

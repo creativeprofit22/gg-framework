@@ -1923,6 +1923,17 @@ select {
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
+.roadmap-draft-uncited {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.roadmap-draft-uncited strong {
+  color: var(--text);
+  font-weight: 600;
+}
 .roadmap-draft-stale,
 .roadmap-draft-error {
   display: grid;

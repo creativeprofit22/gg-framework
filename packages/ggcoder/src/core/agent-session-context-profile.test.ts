@@ -161,6 +161,63 @@ describe("continuation verification ownership", () => {
     },
   );
 
+  function recordCorpusResearch(session: {
+    researchSources: { recordCorpusResult(args: unknown, output: string): void };
+  }): void {
+    session.researchSources.recordCorpusResult(
+      { action: "search" },
+      JSON.stringify({
+        matches: [{ repo: "a/b", url: "https://github.com/a/b/blob/abcdef1/x.ts#L1" }],
+      }),
+    );
+  }
+
+  it.each([false, true])(
+    "newSession(%s) clears corpus research from the previous conversation",
+    async (preserveConversation) => {
+      const session = await createSession();
+      try {
+        recordCorpusResearch(session);
+        expect(session.researchSources.isEmpty()).toBe(false);
+        await session.newSession(preserveConversation);
+        expect(session.researchSources.isEmpty()).toBe(true);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it("keeps corpus research when a reset fails and the source is restored", async () => {
+    const session = await createSession();
+    const internal = session as unknown as { createNewSession(): Promise<void> };
+    try {
+      recordCorpusResearch(session);
+      vi.spyOn(internal, "createNewSession").mockRejectedValueOnce(
+        new Error("destination unavailable"),
+      );
+      await expect(session.newSession(false)).rejects.toThrow("destination unavailable");
+      expect(session.researchSources.consultedRepos()).toEqual(["a/b"]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("clears corpus research when loading a session or checkpoint", async () => {
+    const session = await createSession();
+    try {
+      await session.prompt("Persist a transcript.");
+      const sessionPath = session.getState().sessionPath;
+      recordCorpusResearch(session);
+      await session.loadSession(sessionPath);
+      expect(session.researchSources.isEmpty()).toBe(true);
+      recordCorpusResearch(session);
+      await session.loadSessionCheckpoint(sessionPath);
+      expect(session.researchSources.isEmpty()).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  });
+
   it("does not admit a delayed source tool result into the fresh checkpoint", async () => {
     const session = await createSession();
     const internal = session as unknown as {

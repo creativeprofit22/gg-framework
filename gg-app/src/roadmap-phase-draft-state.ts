@@ -12,6 +12,7 @@ export function normalizeRoadmapPhaseDraft(value: unknown): RoadmapPhaseDraft | 
   const normalized = {
     ...candidate,
     references: candidate.references ?? [],
+    sourcesNotCited: candidate.sourcesNotCited ?? null,
     phases: candidate.phases.map((phase) =>
       typeof phase === "object" && phase !== null && !Array.isArray(phase)
         ? {

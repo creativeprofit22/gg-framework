@@ -27,6 +27,24 @@ import { runProgrammaticScan, readProgrammaticChatReport, readProgrammaticChatDe
 import { programmaticLifecycleStateV1Schema } from "./contracts.js";
 import { executeProgrammaticOpportunity, createResearchCorpusTool, RESEARCH_TOOLS, EXECUTION_DEADLINE_MS, specialistExecutionDeadlineMs, type ProgrammaticExecutionOptions } from "./execution.js";
 import { TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "../../tools/tauri-package.js";
+import type * as SteroidsModule from "../steroids.js";
+import type * as SteroidsToolModule from "../../tools/steroids.js";
+
+// Opt-in corpus fixture: when `output` is set, the specialist's research_corpus
+// resolves a fake binary and returns this output instead of launching steroids.
+const corpusFixture = vi.hoisted(() => ({ output: undefined as string | undefined }));
+vi.mock("../steroids.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof SteroidsModule>();
+  return { ...actual, findSteroidsBinary: (...args: Parameters<typeof actual.findSteroidsBinary>) =>
+    corpusFixture.output === undefined ? actual.findSteroidsBinary(...args) : "fixture-steroids" };
+});
+vi.mock("../../tools/steroids.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof SteroidsToolModule>();
+  return { ...actual, createSteroidsTool: (bin: string) => {
+    const tool = actual.createSteroidsTool(bin);
+    return bin === "fixture-steroids" ? { ...tool, execute: async () => corpusFixture.output ?? "" } : tool;
+  } };
+});
 
 let home: string;
 let root: string;
@@ -144,6 +162,7 @@ beforeEach(async () => {
   provider();
 });
 afterEach(async () => {
+  corpusFixture.output = undefined;
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -421,6 +440,29 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(onSettled).toHaveBeenCalledTimes(1);
     if (mode === "execution") expect(requests).toHaveLength(0);
     await expect(fs.stat(path.join(root, "not-approved.txt"))).rejects.toThrow();
+  }, 20_000);
+
+  it("rejects an uncited specialist plan after research_corpus retrieved external code", async () => {
+    await fs.writeFile(path.join(home, ".gg/commands/setup-sweep.md"), "---\nname: setup-sweep\ndescription: fixture\n---\nAct only after approval.\n");
+    const seeded = await state();
+    seeded.records.forEach((record) => { record.opportunity.route = { status: "routable", specialistCommand: "setup-sweep" }; });
+    await json(path.join(root, PROGRAMMATIC_STATE_PATH), seeded);
+    const file = path.join(root, ".gg/programmatic/profile.json");
+    const profile = JSON.parse(await fs.readFile(file, "utf8"));
+    profile.profile.scanners[0].specialistCommand = "setup-sweep";
+    await json(file, profile);
+    await fs.mkdir(path.join(root, ".gg/plans"), { recursive: true });
+    await fs.writeFile(path.join(root, ".gg/plans/test.md"), "## Steps\n1. Inspect the manifest.\n");
+    corpusFixture.output = JSON.stringify({ matches: [{ repo: "acme/widgets", url: "https://github.com/acme/widgets/blob/0123456789abcdef/src/a.ts#L1" }] });
+    provider((index) => index === 1 ? responseTool("research_corpus", { action: "search", pattern: "widget" }, "corpus")
+      : index === 2 ? responseTool("exit_plan", { plan_path: ".gg/plans/test.md" }, "plan") : textResponse());
+    const ask = vi.fn(answer);
+    const result = await executeProgrammaticOpportunity(options({ ask }));
+    expect(result.status).not.toBe("succeeded");
+    const planOutput = JSON.stringify(requests[2]);
+    expect(planOutput).toContain("Plan rejected");
+    expect(planOutput).toContain("acme/widgets");
+    expect(ask.mock.calls.some(([request]) => request.questions[0]!.question.startsWith("Approve this task's plan?"))).toBe(false);
   }, 20_000);
 
   it("cancels during real initialization and ignores late completion events", async () => {

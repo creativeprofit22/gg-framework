@@ -2296,6 +2296,9 @@ const ROADMAP_PHASE_DRAFT_KEYS: [&str; 8] = [
     "phases",
     "status",
 ];
+// Mirrors gg-core DRAFT_OPTIONAL_KEYS; legacy drafts omit these.
+const ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS: [&str; 2] = ["references", "sourcesNotCited"];
+const ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH: usize = 1_024;
 const ROADMAP_DRAFT_PHASE_KEYS: [&str; 5] =
     ["phaseId", "title", "goal", "doneWhen", "sourcePrompt"];
 const ROADMAP_PROPOSED_PHASES_MAX_ITEMS: usize = 20;
@@ -2330,6 +2333,18 @@ fn has_roadmap_reference_keys(
         || (object.len() == base.len() + 1
             && object.contains_key(reference_key)
             && base.iter().all(|key| object.contains_key(*key)))
+}
+
+// Mirrors gg-core isRecordWithKeys: every base key required, only listed optional extras.
+fn has_required_and_optional_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    base: &[&str],
+    optional: &[&str],
+) -> bool {
+    base.iter().all(|key| object.contains_key(*key))
+        && object
+            .keys()
+            .all(|key| base.contains(&key.as_str()) || optional.contains(&key.as_str()))
 }
 
 fn roadmap_reference_array(value: Option<&serde_json::Value>) -> Option<&[serde_json::Value]> {
@@ -2451,8 +2466,11 @@ fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    if !has_roadmap_reference_keys(object, &ROADMAP_PHASE_DRAFT_KEYS, "references")
-        || !matches!(
+    if !has_required_and_optional_keys(
+        object,
+        &ROADMAP_PHASE_DRAFT_KEYS,
+        &ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS,
+    ) || !matches!(
             object.get("status").and_then(serde_json::Value::as_str),
             Some("pending" | "stale")
         )
@@ -2467,6 +2485,16 @@ fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
         || normalized_bounded_string(object.get("summary"), 4_096).is_none()
     {
         return false;
+    }
+    match object.get("sourcesNotCited") {
+        None | Some(serde_json::Value::Null) => {}
+        value => {
+            if normalized_bounded_string(value, ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH)
+                .is_none()
+            {
+                return false;
+            }
+        }
     }
 
     let Some(phases) = object.get("phases").and_then(serde_json::Value::as_array) else {
@@ -12010,6 +12038,28 @@ mod tests {
         empty["draft"].as_object_mut().unwrap().remove("references");
         empty["draft"]["phases"][0].as_object_mut().unwrap().remove("referenceIds");
         assert!(validate(&empty).is_ok());
+        let mut uncited = pending.clone();
+        uncited["draft"]["sourcesNotCited"] = serde_json::Value::Null;
+        assert_eq!(validate(&uncited).unwrap(), uncited);
+        uncited["draft"]["sourcesNotCited"] = serde_json::json!("No external sources apply");
+        assert_eq!(validate(&uncited).unwrap(), uncited);
+        uncited["draft"]["sourcesNotCited"] = serde_json::json!("x".repeat(1_024));
+        assert!(validate(&uncited).is_ok());
+        let mut legacy_uncited = empty.clone();
+        legacy_uncited["draft"]["sourcesNotCited"] = serde_json::Value::Null;
+        assert!(validate(&legacy_uncited).is_ok());
+        for replacement in [
+            serde_json::json!(7),
+            serde_json::json!(""),
+            serde_json::json!("  \n "),
+            serde_json::json!("x".repeat(1_025)),
+        ] {
+            uncited["draft"]["sourcesNotCited"] = replacement.clone();
+            assert!(validate(&uncited).is_err(), "accepted sourcesNotCited {replacement}");
+        }
+        uncited["draft"]["sourcesNotCited"] = serde_json::Value::Null;
+        uncited["draft"]["unknown"] = serde_json::json!(true);
+        assert!(validate(&uncited).is_err(), "accepted unknown field beside sourcesNotCited");
         for (pointer, replacement) in [
             ("/draft/references", serde_json::json!({})),
             ("/draft/references", serde_json::json!(vec![pending["draft"]["references"][0].clone(); 21])),
@@ -12524,6 +12574,54 @@ mod tests {
     }
 
     #[test]
+    fn mcp_management_response_marks_only_daemon_client_errors() {
+        let duplicate = r#"{"error":"A \"docs\" server already exists in global scope. Remove it first or use a different name."}"#;
+        assert_eq!(
+            parse_mcp_management_response(reqwest::StatusCode::BAD_REQUEST, duplicate),
+            Err("mcp-client-error: A \"docs\" server already exists in global scope. Remove it first or use a different name.".to_string())
+        );
+        assert_eq!(
+            parse_mcp_management_response(
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"error":"No \"docs\" server found."}"#,
+            ),
+            Err("mcp-client-error: No \"docs\" server found.".to_string())
+        );
+        // Unmarked: server failures, auth rejections, route-level 404s, non-JSON bodies.
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not add the MCP server. Check the command and try again."}"#,
+                "Could not add the MCP server. Check the command and try again.",
+            ),
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                r#"{"error":"unauthorized"}"#,
+                "unauthorized",
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"error":"not found"}"#,
+                "not found",
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "bad gateway text",
+                "bad gateway text",
+            ),
+        ] {
+            assert_eq!(
+                parse_mcp_management_response(status, body),
+                Err(expected.to_string())
+            );
+        }
+        assert_eq!(
+            parse_mcp_management_response(reqwest::StatusCode::ACCEPTED, r#"{"accepted":true}"#),
+            Ok(serde_json::json!({ "accepted": true }))
+        );
+    }
+
+    #[test]
     fn task_proxies_reject_non_success_list_and_delete_responses() {
         for (status, body, expected) in [
             (
@@ -12584,54 +12682,6 @@ mod tests {
                 "retryable": true,
                 "phaseId": "phase-1"
             })
-        );
-    }
-
-    #[test]
-    fn mcp_management_response_marks_only_daemon_client_errors() {
-        let duplicate = r#"{"error":"A \"docs\" server already exists in global scope. Remove it first or use a different name."}"#;
-        assert_eq!(
-            parse_mcp_management_response(reqwest::StatusCode::BAD_REQUEST, duplicate),
-            Err("mcp-client-error: A \"docs\" server already exists in global scope. Remove it first or use a different name.".to_string())
-        );
-        assert_eq!(
-            parse_mcp_management_response(
-                reqwest::StatusCode::NOT_FOUND,
-                r#"{"error":"No \"docs\" server found."}"#,
-            ),
-            Err("mcp-client-error: No \"docs\" server found.".to_string())
-        );
-        // Unmarked: server failures, auth rejections, route-level 404s, non-JSON bodies.
-        for (status, body, expected) in [
-            (
-                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                r#"{"error":"Could not add the MCP server. Check the command and try again."}"#,
-                "Could not add the MCP server. Check the command and try again.",
-            ),
-            (
-                reqwest::StatusCode::UNAUTHORIZED,
-                r#"{"error":"unauthorized"}"#,
-                "unauthorized",
-            ),
-            (
-                reqwest::StatusCode::NOT_FOUND,
-                r#"{"error":"not found"}"#,
-                "not found",
-            ),
-            (
-                reqwest::StatusCode::BAD_REQUEST,
-                "bad gateway text",
-                "bad gateway text",
-            ),
-        ] {
-            assert_eq!(
-                parse_mcp_management_response(status, body),
-                Err(expected.to_string())
-            );
-        }
-        assert_eq!(
-            parse_mcp_management_response(reqwest::StatusCode::ACCEPTED, r#"{"accepted":true}"#),
-            Ok(serde_json::json!({ "accepted": true }))
         );
     }
 

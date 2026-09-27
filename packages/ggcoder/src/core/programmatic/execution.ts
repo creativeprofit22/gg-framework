@@ -9,6 +9,7 @@ import { createResearchCorpusTool } from "../../tools/research-corpus.js";
 export { createResearchCorpusTool } from "../../tools/research-corpus.js";
 import { findSteroidsBinary } from "../steroids.js";
 import { renderResearchPolicy } from "../research-policy.js";
+import { withCorpusSourceRecording } from "../research-sources.js";
 import { TauriPackageParams, TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "../../tools/tauri-package.js";
 import { canonicalRepositoryRoot } from "../tauri-package/paths.js";
 import { accessProgrammaticExecutionRecord, settleProgrammaticExecutionRecord } from "./lifecycle.js";
@@ -298,7 +299,7 @@ async function executeSelectedCommand(options: ExecutionOptions): Promise<Progra
         await session!.setPlanMode(false);
         return "The user approved this plan only. Later tool actions still require separate approval.";
       } : undefined,
-      additionalTools: [createAskUserTool(ask), resultTool, ...(corpus ? [createResearchCorpusTool(corpus)] : []),
+      additionalTools: [createAskUserTool(ask), resultTool, ...(corpus ? [withCorpusSourceRecording(createResearchCorpusTool(corpus), () => session?.researchSources)] : []),
         ...(capabilities.discovery.length ? [createSpecialistDiscoveryTool(capabilities.discovery, () => session!)] : [])],
       validateToolExecution: validateReview,
       approveToolExecution: async (name, args) => {

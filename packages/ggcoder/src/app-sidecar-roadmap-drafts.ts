@@ -103,6 +103,7 @@ export class AppSidecarRoadmapDraftCoordinator {
       summary: validated.value.summary,
       references,
       phases,
+      sourcesNotCited: validated.value.sourcesNotCited ?? null,
       status: "pending",
     };
     this.pendingByProject.set(projectKey, draft);

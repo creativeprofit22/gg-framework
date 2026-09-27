@@ -56,6 +56,11 @@ export function RoadmapPhaseDraftReviewModal({
               {references.length} {references.length === 1 ? "reference" : "references"} · Nothing
               is created until you approve
             </div>
+            {draft.sourcesNotCited && (
+              <div className="roadmap-draft-uncited">
+                <strong>No sources cited:</strong> {draft.sourcesNotCited}
+              </div>
+            )}
           </div>
 
           {stale && (

@@ -13,6 +13,7 @@ import type { Skill } from "../core/skills.js";
 import type { CheckpointStore } from "../core/checkpoint-store.js";
 import type { LspManager } from "../core/lsp/manager.js";
 import type { ReviewCoverageTracker } from "../core/ideal-review.js";
+import type { ResearchSourceLedger } from "../core/research-sources.js";
 import type { TurnMetricPayload } from "../core/session-manager.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { itemHasImagePreviews } from "./app-items.js";
@@ -75,6 +76,8 @@ export interface RenderAppConfig {
   subAgentManager?: SubAgentManager;
   lspManager?: LspManager;
   reviewCoverageTracker?: ReviewCoverageTracker;
+  /** Session corpus-research record behind exit_plan's citation gate; wiped with the session. */
+  researchSources?: ResearchSourceLedger;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -650,6 +653,10 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       sessionStore.doneStatus = null;
       sessionStore.approvedPlanPath = undefined;
       sessionStore.planSteps = [];
+      // Corpus research belongs to the conversation that retrieved it; a fresh
+      // session (/clear, task start, plan approval, conversation rewind) must
+      // not demand citations for repos the next plan never saw.
+      config.researchSources?.clear();
     }
     if (options?.messages) sessionStore.messages = options.messages;
     if (options?.history) {

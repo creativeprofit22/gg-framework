@@ -65,6 +65,7 @@ import {
   extractImageWarnings,
   normalizePromptMeta,
   type PromptMeta,
+  type PromptSegment,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
@@ -366,6 +367,7 @@ import {
 import {
   createAppSidecarChatRoadmapSessionOptions,
   createAppSidecarCodingRoadmapSessionOptions,
+  createPhaseScopedRoadmapWiring,
 } from "./app-sidecar-roadmap-session-options.js";
 import { createRoadmapBindTool } from "./tools/roadmap-bind.js";
 import {
@@ -630,7 +632,7 @@ interface HistoryEntryForWire {
    *  the webview renders the shimmering label instead of the prompt body. */
   kenSent?: boolean;
   /** Enhancer highlight segments for this user prompt (unedited enhanced sends). */
-  enhancements?: unknown[];
+  enhancements?: PromptSegment[];
   /** Plan-mode entry banner (ASCII logo + reason), persisted at plan_enter. */
   plan?: { reason: string };
   /** Task header row (task title), persisted at task_start. */
@@ -2280,6 +2282,7 @@ async function createSession(
     repository: notesRepository,
     drafts: roadmapDrafts,
     getOwningSession: () => session,
+    getActivePhaseId: createPhaseScopedRoadmapWiring(() => session).getActivePhaseId,
   });
   const createCodingSession = (
     sessionPath?: string,
@@ -2336,6 +2339,7 @@ async function createSession(
               : phaseBinding.bind(input, created);
           }),
         ],
+        createPhaseScopedRoadmapWiring(() => created).isPhaseBound,
       ),
     });
     return created;
@@ -5465,6 +5469,7 @@ async function createSession(
                 visibility === "summary" ||
                 (!msg.provenance && !hook && text.startsWith("[Previous conversation summary]"));
               const hint = userHintByCount.get(nonSystemCount);
+              const hintMeta = normalizePromptMeta(hint);
               // The typed invocation persisted alongside the prompt is
               // authoritative. Reversing the expanded body only works while the
               // template is byte-identical, and templates drift (edited
@@ -5505,8 +5510,10 @@ async function createSession(
                   ...(compacted && compactionCounts.length > 0
                     ? { compactionCounts: compactionCounts.pop() }
                     : {}),
-                  ...(hint?.kenSent === true ? { kenSent: true } : {}),
-                  ...(Array.isArray(hint?.enhancements) ? { enhancements: hint.enhancements } : {}),
+                  // Same contract as the live send path: foreign or malformed
+                  // highlight lists are dropped whole rather than rendered.
+                  ...(hintMeta?.kenSent === true ? { kenSent: true } : {}),
+                  ...(hintMeta?.enhancements ? { enhancements: hintMeta.enhancements } : {}),
                 });
                 // Live showed the video-capability warning right after the bubble.
                 if (restored.videoWarning) {

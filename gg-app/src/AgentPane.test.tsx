@@ -314,6 +314,7 @@ const roadmapDraft: RoadmapPhaseDraft = {
   basedOnRevision: 12,
   createdAt: "2026-08-08T12:00:00.000Z",
   createdBySessionId: "research-session",
+  sourcesNotCited: null,
   summary: "Add the researched delivery phase.",
   references: [
     {

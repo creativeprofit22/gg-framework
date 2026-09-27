@@ -37,6 +37,20 @@ describe("tool-call display identity", () => {
   });
 });
 
+describe("exit_plan rejection", () => {
+  it("surfaces the backend rejection's first line on an errored row", () => {
+    const parts = buildToolLineParts(
+      "exit_plan",
+      { plan_path: ".gg/plans/p.md" },
+      { done: true, isError: true, result: "Plan rejected: x\nmore" },
+    );
+
+    const text = parts.map((part) => part.text).join("");
+    expect(text).toContain("Plan rejected: x");
+    expect(text).not.toContain("more");
+  });
+});
+
 describe("bash tool summary", () => {
   const summaryOf = (result: string, details?: unknown): string | undefined => {
     const parts = buildToolLineParts(

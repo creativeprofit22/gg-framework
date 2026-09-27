@@ -3,8 +3,13 @@ import { z } from "zod";
 import { RoadmapInspectParams, createRoadmapInspectTool } from "./roadmap-inspect.js";
 
 describe("RoadmapInspectParams", () => {
-  it("accepts only a strictly empty object", () => {
+  it("accepts an empty object or a known scope and rejects anything else", () => {
     expect(RoadmapInspectParams.parse({})).toEqual({});
+    expect(RoadmapInspectParams.parse({ scope: "roadmap" })).toEqual({ scope: "roadmap" });
+    expect(RoadmapInspectParams.parse({ scope: "active-phase" })).toEqual({
+      scope: "active-phase",
+    });
+    expect(() => RoadmapInspectParams.parse({ scope: "everything" })).toThrow();
     expect(() => RoadmapInspectParams.parse({ unexpected: true })).toThrow();
   });
 });
@@ -20,7 +25,7 @@ describe("createRoadmapInspectTool", () => {
     expect(tool.name).toBe("roadmap_inspect");
   });
 
-  it("exports a strict transform-free empty provider schema and inspection guidance", () => {
+  it("exports a strict transform-free scope-only provider schema and inspection guidance", () => {
     const tool = createRoadmapInspectTool(async () => ({
       status: "missing",
       projectKey: "project-1",
@@ -31,7 +36,9 @@ describe("createRoadmapInspectTool", () => {
     expect(exportedSchema).not.toThrow();
     expect(exportedSchema()).toEqual({
       type: "object",
-      properties: {},
+      properties: {
+        scope: expect.objectContaining({ type: "string", enum: ["active-phase", "roadmap"] }),
+      },
       required: [],
       additionalProperties: false,
     });

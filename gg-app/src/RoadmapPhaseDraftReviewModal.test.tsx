@@ -13,6 +13,7 @@ const draft = {
   basedOnRevision: 12,
   createdAt: "2026-08-05T12:00:00.000Z",
   createdBySessionId: "session-1",
+  sourcesNotCited: null,
   summary: "Split this work into two flat delivery phases.",
   references: [],
   phases: [
@@ -114,6 +115,28 @@ describe("RoadmapPhaseDraftReviewModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open source" }));
     expect(openReferenceUrl).toHaveBeenCalledWith(reference.canonicalUrl);
     expect(screen.getByRole("button", { name: "Create phases with references" })).toBeTruthy();
+  });
+
+  it("shows why the drafter cited none of the sources it researched", () => {
+    renderModal({
+      draft: {
+        ...draft,
+        sourcesNotCited: "Corpus results only confirmed the local design.",
+      },
+    });
+
+    expect(screen.getByText(/2 peer phases · 0 references/)).toBeTruthy();
+    const reason = screen.getByText("Corpus results only confirmed the local design.", {
+      exact: false,
+    });
+    expect(reason.textContent).toBe(
+      "No sources cited: Corpus results only confirmed the local design.",
+    );
+  });
+
+  it("shows no uncited-sources note when the drafter gave no reason", () => {
+    renderModal();
+    expect(screen.queryByText(/No sources cited/)).toBeNull();
   });
 
   it("disables approval when a phase points to an unavailable source", () => {

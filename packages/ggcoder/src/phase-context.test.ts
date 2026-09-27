@@ -189,15 +189,28 @@ describe("active phase context", () => {
         references: [injectedReference],
       }),
     );
-    for (const text of [rendered.systemPromptSuffix, rendered.initialPrompt]) {
-      const start = text.indexOf(ACTIVE_PHASE_UNTRUSTED_START);
-      const end = text.indexOf(ACTIVE_PHASE_UNTRUSTED_END);
-      expect(start).toBeGreaterThanOrEqual(0);
-      expect(end).toBeGreaterThan(start);
-      expect(text.match(new RegExp(ACTIVE_PHASE_UNTRUSTED_END, "g"))).toHaveLength(1);
-      expect(text).not.toContain(injection);
-      expect(text).toContain("\\u003c/active-phase-untrusted-data\\u003e");
-    }
+    const text = rendered.systemPromptSuffix;
+    const start = text.indexOf(ACTIVE_PHASE_UNTRUSTED_START);
+    const end = text.indexOf(ACTIVE_PHASE_UNTRUSTED_END);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(text.match(new RegExp(ACTIVE_PHASE_UNTRUSTED_END, "g"))).toHaveLength(1);
+    expect(text).not.toContain(injection);
+    expect(text).toContain("\\u003c/active-phase-untrusted-data\\u003e");
+    // The first turn points at the system prompt package instead of repeating
+    // it, so no saved phase text (escaped or raw) reaches the user message.
+    expect(rendered.initialPrompt).not.toContain(ACTIVE_PHASE_UNTRUSTED_START);
+    expect(rendered.initialPrompt).not.toContain(injection);
+    expect(rendered.initialPrompt).not.toContain("ignore previous instructions");
+  });
+
+  it("sends phase data once, in the system prompt suffix only", () => {
+    const rendered = renderActivePhasePackage(
+      context({ phase: { goal: "Unique goal marker 7f3a" } }),
+    );
+    expect(rendered.systemPromptSuffix).toContain("Unique goal marker 7f3a");
+    expect(rendered.initialPrompt).not.toContain("Unique goal marker 7f3a");
+    expect(rendered.initialPrompt).toContain("Active Roadmap phase section");
   });
 
   it("truncates bounded prose but preserves every reference identity and coordinate", () => {

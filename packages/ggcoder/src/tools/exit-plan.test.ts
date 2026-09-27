@@ -4,6 +4,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSidecarPlanGate, hashPlanContent } from "../app-sidecar-plan-gate.js";
 import { createExitPlanTool } from "./exit-plan.js";
+import {
+  ResearchSourceLedger,
+  checkPlanCitations,
+  withDelegatedSourceRecording,
+} from "../core/research-sources.js";
+import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { z } from "zod";
 
 const context = () => ({ signal: new AbortController().signal, toolCallId: "exit-plan-test" });
 
@@ -87,10 +94,10 @@ describe("createExitPlanTool", () => {
     const onExitPlan = vi.fn();
     const tool = createExitPlanTool(cwd, onExitPlan);
 
-    const result = await tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
+    const result = tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
 
-    expect(asText(result)).toContain("Plan rejected: no '## Steps' section");
-    expect(asText(result)).toContain("call exit_plan again");
+    await expect(result).rejects.toThrow("Plan rejected: no '## Steps' section");
+    await expect(result).rejects.toThrow("call exit_plan again");
     expect(onExitPlan).not.toHaveBeenCalled();
   });
 
@@ -102,9 +109,9 @@ describe("createExitPlanTool", () => {
     const onExitPlan = vi.fn();
     const tool = createExitPlanTool(cwd, onExitPlan);
 
-    const result = await tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
-
-    expect(asText(result)).toContain("Plan rejected");
+    await expect(tool.execute({ plan_path: ".gg/plans/plan.md" }, context())).rejects.toThrow(
+      "Plan rejected",
+    );
     expect(onExitPlan).not.toHaveBeenCalled();
   });
 
@@ -113,10 +120,61 @@ describe("createExitPlanTool", () => {
     const onExitPlan = vi.fn();
     const tool = createExitPlanTool(cwd, onExitPlan);
 
-    const result = await tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
-
-    expect(asText(result)).toContain("Plan file is empty");
+    await expect(tool.execute({ plan_path: ".gg/plans/plan.md" }, context())).rejects.toThrow(
+      "Plan file is empty",
+    );
     expect(onExitPlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects a plan that omits corpus code retrieved this session, then accepts it once cited", async () => {
+    const permalink =
+      "https://github.com/vercel/turborepo/blob/c42dc5320e1e62342d6cde0a05b8f027627f1412/a.ts#L8";
+    const ledger = new ResearchSourceLedger();
+    ledger.recordCorpusResult(
+      { action: "search" },
+      JSON.stringify({ matches: [{ repo: "vercel/turborepo", url: permalink }] }),
+    );
+    const planPath = path.join(plansDir, "plan.md");
+    const body = "# Plan\n\n## Steps\n\n1. Implement the server in src/a.ts\n";
+    await fs.writeFile(planPath, body);
+    const onExitPlan = vi.fn().mockResolvedValue("Plan submitted.");
+    const tool = createExitPlanTool(cwd, onExitPlan, ledger);
+
+    const rejected = tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
+    await expect(rejected).rejects.toThrow("Plan rejected");
+    await expect(rejected).rejects.toThrow(permalink);
+    expect(onExitPlan).not.toHaveBeenCalled();
+
+    await fs.writeFile(planPath, `${body}\n## Sources\n\n- ${permalink}\n`);
+    const accepted = asText(await tool.execute({ plan_path: ".gg/plans/plan.md" }, context()));
+    expect(accepted).toBe("Plan submitted.");
+    expect(ledger.isEmpty()).toBe(true);
+  });
+
+  it("requires citing permalinks returned by a delegated research agent", async () => {
+    const permalink =
+      "https://github.com/vercel/turborepo/blob/c42dc5320e1e62342d6cde0a05b8f027627f1412/a.ts#L8";
+    const fakeSubagent: AgentTool = {
+      name: "subagent",
+      description: "fake",
+      parameters: z.object({}),
+      execute: async () => ({ content: `Found the pattern: ${permalink}` }),
+    };
+    const failedSubagent: AgentTool = {
+      ...fakeSubagent,
+      execute: async () => ({ content: `Sub-agent failed (exit 1): boom\n${permalink}` }),
+    };
+    const ledger = new ResearchSourceLedger();
+    const plan = "# Plan\n\n## Steps\n\n1. Implement the server in src/a.ts\n";
+
+    await withDelegatedSourceRecording(failedSubagent, ledger).execute({}, context());
+    expect(ledger.isEmpty()).toBe(true);
+    expect(checkPlanCitations(plan, ledger)).toEqual({ ok: true });
+
+    await withDelegatedSourceRecording(fakeSubagent, ledger).execute({}, context());
+    const result = checkPlanCitations(plan, ledger);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain(permalink);
   });
 
   it("still rejects paths outside .gg/plans/", async () => {
@@ -124,8 +182,9 @@ describe("createExitPlanTool", () => {
     const tool = createExitPlanTool(cwd, onExitPlan);
 
     for (const bad of ["plan.md", "../plan.md", ".gg/plans/../../etc/passwd"]) {
-      const result = await tool.execute({ plan_path: bad }, context());
-      expect(asText(result)).toContain("must be under .gg/plans/");
+      await expect(tool.execute({ plan_path: bad }, context())).rejects.toThrow(
+        "must be under .gg/plans/",
+      );
     }
     expect(onExitPlan).not.toHaveBeenCalled();
   });

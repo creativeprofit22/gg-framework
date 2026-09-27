@@ -8,6 +8,7 @@ import {
 import {
   ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
   ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS,
+  ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
   ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
   ROADMAP_PHASE_GOAL_MAX_LENGTH,
   ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH,
@@ -20,6 +21,7 @@ import {
   type RoadmapPhaseDraft,
   type RoadmapPhaseDraftRequest,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
+import { MIN_NO_SOURCES_REASON_LENGTH } from "../core/research-sources.js";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -108,6 +110,10 @@ const roadmapPhaseDraftInputSchema: JsonSchema = {
       type: "array",
       items: roadmapDraftReferenceInputSchema,
       maxItems: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
+    },
+    sources_not_cited: {
+      type: "string",
+      maxLength: ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
     },
   },
   required: ["expected_revision", "summary", "phases"],
@@ -221,6 +227,15 @@ const RoadmapPhaseDraftParamsBase = z
       .array(RoadmapDraftReferenceParams)
       .max(NOTES_ROADMAP_PROPOSALS_MAX_ITEMS)
       .optional(),
+    // A blank reason means "no reason": the citation gate still applies.
+    sources_not_cited: z
+      .string()
+      .transform(normalizeRoadmapWorkflowText)
+      .refine(
+        (value) => Array.from(value).length <= ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
+        `sources_not_cited must contain at most ${ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH} normalized characters`,
+      )
+      .optional(),
   })
   .strict();
 
@@ -266,6 +281,7 @@ function toRoadmapPhaseDraftRequest(
       anchor: reference.anchor,
       relevance: reference.relevance,
     })),
+    ...(input.sources_not_cited ? { sourcesNotCited: input.sources_not_cited } : {}),
   };
 }
 
@@ -273,7 +289,7 @@ export type RoadmapPhaseDraftToolResult =
   | ProjectNotesUnsupportedFormat
   | { status: "drafted"; draft: RoadmapPhaseDraft }
   | { status: "proposal-pending"; draftId: string }
-  | { status: "inspection-required" }
+  | { status: "inspection-required"; message: string }
   | {
       status: "inspection-revision-mismatch";
       inspectedRevision: number;
@@ -282,7 +298,8 @@ export type RoadmapPhaseDraftToolResult =
   | { status: "stale-revision"; expectedRevision: number; currentRevision: number }
   | { status: "notes-missing" }
   | ({ status: "notes-corrupt" } & ProjectNotesCorruption)
-  | { status: "invalid-proposal"; path: string; message: string };
+  | { status: "invalid-proposal"; path: string; message: string }
+  | { status: "citations-required"; message: string };
 
 export function createRoadmapPhaseDraftTool(
   draft: (request: RoadmapPhaseDraftRequest) => Promise<RoadmapPhaseDraftToolResult>,
@@ -291,9 +308,11 @@ export function createRoadmapPhaseDraftTool(
     name: "roadmap_phase_draft",
     description:
       "Draft bounded Roadmap phases for approval; never write Project Notes or files while drafting. " +
-      "Call roadmap_inspect immediately first and pass its revision as expected_revision. Draft only flat peer phases, never nested or parent/child phases. " +
+      'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. Draft only flat peer phases, never nested or parent/child phases. ' +
       "After submitting the draft, stop because it is pending user approval; do not implement it. " +
-      "Use roadmap_status for execution progress on approved phases. Ordinary coding requests need no Roadmap action.",
+      "Use roadmap_status for execution progress on approved phases. Ordinary coding requests need no Roadmap action. " +
+      "Cite external code that informed the phases in proposed_references (commit permalink as canonical_url) and link it via each phase's reference_keys; " +
+      `if corpus code was retrieved this session but did not inform the phases, set sources_not_cited to a reason of at least ${MIN_NO_SOURCES_REASON_LENGTH} characters instead.`,
     parameters: RoadmapPhaseDraftParams,
     rawInputSchema: roadmapPhaseDraftInputSchema,
     executionMode: "sequential",

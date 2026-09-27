@@ -16,6 +16,7 @@ import {
   projectRoadmapInspection,
 } from "./app-sidecar-roadmap-draft-tool-host.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
+import { ResearchSourceLedger } from "./core/research-sources.js";
 
 const timestamp = "2026-08-05T12:00:00.000Z";
 
@@ -113,6 +114,7 @@ const request: RoadmapPhaseDraftRequest = {
 function host(
   load: (cwd: string) => Promise<ProjectNotesLoadOutcome>,
   getSessionId: () => string = () => "session-1",
+  getActivePhaseId?: () => string | undefined,
 ) {
   let sequence = 0;
   const drafts = new AppSidecarRoadmapDraftCoordinator({
@@ -126,9 +128,72 @@ function host(
       repository: { load },
       drafts,
       getOwningSession: () => ({ getState: () => ({ sessionId: getSessionId() }) }),
+      ...(getActivePhaseId ? { getActivePhaseId } : {}),
     }),
   };
 }
+
+describe("bound-phase inspection scope", () => {
+  const twoPhases = (): ProjectNotesLoadOutcome =>
+    loaded(4, [
+      phase({ id: "phase-1", order: 1 }),
+      phase({ id: "phase-2", order: 2, title: "Second phase" }),
+    ]);
+
+  it("returns only the active phase plus the current revision by default", async () => {
+    const { value } = host(
+      async () => twoPhases(),
+      undefined,
+      () => "phase-2",
+    );
+    const result = await value.inspect();
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.inspection.revision).toBe(4);
+    expect(result.inspection.phases.map((candidate) => candidate.id)).toEqual(["phase-2"]);
+  });
+
+  it("returns every phase when the roadmap scope is requested or no phase is bound", async () => {
+    const bound = host(
+      async () => twoPhases(),
+      undefined,
+      () => "phase-2",
+    ).value;
+    const full = await bound.inspect({ scope: "roadmap" });
+    const unbound = await host(
+      async () => twoPhases(),
+      undefined,
+      () => undefined,
+    ).value.inspect({
+      scope: "active-phase",
+    });
+    for (const result of [full, unbound]) {
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") continue;
+      expect(result.inspection.phases.map((candidate) => candidate.id)).toEqual([
+        "phase-1",
+        "phase-2",
+      ]);
+    }
+  });
+
+  it("refuses to draft from an active-phase slice and accepts after a full inspection", async () => {
+    const { value } = host(
+      async () => twoPhases(),
+      undefined,
+      () => "phase-2",
+    );
+    await value.inspect();
+    expect(await value.draft(request)).toEqual({
+      status: "inspection-required",
+      message:
+        'Drafting needs every current phase. Call roadmap_inspect with scope "roadmap", then retry with its revision.',
+    });
+
+    await value.inspect({ scope: "roadmap" });
+    expect((await value.draft(request)).status).toBe("drafted");
+  });
+});
 
 describe("projectRoadmapInspection", () => {
   it.each(["passed", "failed", "exception-requested"] as const)(
@@ -305,7 +370,10 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
     const load = vi.fn(async () => loaded(4));
     const { value, drafts } = host(load);
 
-    await expect(value.draft(request)).resolves.toEqual({ status: "inspection-required" });
+    await expect(value.draft(request)).resolves.toEqual({
+      status: "inspection-required",
+      message: 'Call roadmap_inspect with scope "roadmap" first, then retry with its revision.',
+    });
     await expect(value.inspect()).resolves.toMatchObject({
       status: "ok",
       inspection: { revision: 4 },
@@ -332,7 +400,10 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
       inspection: { revision: 4 },
     });
     sessionId = "session-2";
-    await expect(value.draft(request)).resolves.toEqual({ status: "inspection-required" });
+    await expect(value.draft(request)).resolves.toEqual({
+      status: "inspection-required",
+      message: 'Call roadmap_inspect with scope "roadmap" first, then retry with its revision.',
+    });
     expect(drafts.pending("/work/app")).toBeNull();
 
     await value.inspect();
@@ -358,7 +429,10 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
       currentRevision: 5,
     });
     expect(drafts.pending("/work/app")).toBeNull();
-    await expect(value.draft(request)).resolves.toEqual({ status: "inspection-required" });
+    await expect(value.draft(request)).resolves.toEqual({
+      status: "inspection-required",
+      message: 'Call roadmap_inspect with scope "roadmap" first, then retry with its revision.',
+    });
   });
 
   it("clears inspection on missing or corrupt rechecks", async () => {
@@ -374,7 +448,56 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
       primary: "invalid-envelope",
       backup: "malformed-json",
     });
-    await expect(value.draft(request)).resolves.toEqual({ status: "inspection-required" });
+    await expect(value.draft(request)).resolves.toEqual({
+      status: "inspection-required",
+      message: 'Call roadmap_inspect with scope "roadmap" first, then retry with its revision.',
+    });
+  });
+
+  it("returns drafts that omit corpus code retrieved by the owning session", async () => {
+    const ledger = new ResearchSourceLedger();
+    ledger.recordCorpusResult(
+      { action: "search" },
+      JSON.stringify({
+        matches: [
+          {
+            repo: "vercel/turborepo",
+            url: "https://github.com/vercel/turborepo/blob/c42dc5320e1e62342d6cde0a05b8f027627f1412/a.ts#L8",
+          },
+        ],
+      }),
+    );
+    let sequence = 0;
+    const drafts = new AppSidecarRoadmapDraftCoordinator({
+      createId: () => `generated-${++sequence}`,
+      now: () => timestamp,
+    });
+    const value = new AppSidecarRoadmapDraftToolHost({
+      cwd: "/work/app",
+      repository: { load: async () => loaded(4) },
+      drafts,
+      getOwningSession: () => ({
+        getState: () => ({ sessionId: "session-1" }),
+        researchSources: ledger,
+      }),
+    });
+    await value.inspect();
+
+    const rejected = await value.draft(request);
+    expect(rejected).toMatchObject({ status: "citations-required" });
+    expect(JSON.stringify(rejected)).toContain("vercel/turborepo");
+    expect(drafts.pending("/work/app")).toBeNull();
+
+    await expect(
+      value.draft({
+        ...request,
+        sourcesNotCited: "Corpus results only confirmed the local design.",
+      }),
+    ).resolves.toMatchObject({ status: "drafted" });
+    expect(drafts.pending("/work/app")?.sourcesNotCited).toBe(
+      "Corpus results only confirmed the local design.",
+    );
+    expect(ledger.isEmpty()).toBe(true);
   });
 
   it("states every app-only workflow boundary without keyword interception", () => {
@@ -383,5 +506,6 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("flat peer phases");
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("roadmap_status");
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("ordinary coding requests");
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("proposed_references");
   });
 });

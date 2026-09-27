@@ -102,6 +102,8 @@ export interface RoadmapPhaseDraftRequest {
   summary: string;
   phases: RoadmapProposedPhase[];
   proposedReferences?: RoadmapDraftReferenceProposal[];
+  /** Why external code researched for this draft is deliberately not cited. */
+  sourcesNotCited?: string;
 }
 
 export interface RoadmapDraftPhase extends Omit<RoadmapProposedPhase, "referenceKeys"> {
@@ -118,6 +120,8 @@ export interface RoadmapPhaseDraft {
   summary: string;
   references: NotesReferenceProjection[];
   phases: RoadmapDraftPhase[];
+  /** The drafter's reason for citing none of the external code it researched. */
+  sourcesNotCited: string | null;
   status: "pending" | "stale";
 }
 
@@ -144,7 +148,9 @@ const PROPOSED_PHASE_KEYS = [...PROPOSED_PHASE_BASE_KEYS, "referenceKeys"] as co
 const DRAFT_PHASE_BASE_KEYS = ["phaseId", ...PROPOSED_PHASE_BASE_KEYS] as const;
 const DRAFT_PHASE_KEYS = [...DRAFT_PHASE_BASE_KEYS, "referenceIds"] as const;
 const DRAFT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phases"] as const;
-const DRAFT_REQUEST_KEYS = [...DRAFT_REQUEST_BASE_KEYS, "proposedReferences"] as const;
+const DRAFT_REQUEST_OPTIONAL_KEYS = ["proposedReferences", "sourcesNotCited"] as const;
+const DRAFT_REQUEST_KEYS = [...DRAFT_REQUEST_BASE_KEYS, ...DRAFT_REQUEST_OPTIONAL_KEYS] as const;
+export const ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH = 1_024;
 const DRAFT_BASE_KEYS = [
   "id",
   "projectKey",
@@ -155,7 +161,14 @@ const DRAFT_BASE_KEYS = [
   "phases",
   "status",
 ] as const;
-const DRAFT_KEYS = [...DRAFT_BASE_KEYS.slice(0, 6), "references", "phases", "status"] as const;
+const DRAFT_OPTIONAL_KEYS = ["references", "sourcesNotCited"] as const;
+const DRAFT_KEYS = [
+  ...DRAFT_BASE_KEYS.slice(0, 6),
+  "references",
+  "phases",
+  "sourcesNotCited",
+  "status",
+] as const;
 const REFERENCE_PROJECTION_KEYS = [
   "id",
   "provider",
@@ -185,10 +198,7 @@ export function normalizeRoadmapWorkflowText(value: string): string {
 export function validateRoadmapPhaseDraftRequest(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraftRequest> {
-  if (
-    !isRecordWithExactKeys(value, DRAFT_REQUEST_BASE_KEYS) &&
-    !isRecordWithExactKeys(value, DRAFT_REQUEST_KEYS)
-  ) {
+  if (!isRecordWithKeys(value, DRAFT_REQUEST_BASE_KEYS, DRAFT_REQUEST_OPTIONAL_KEYS)) {
     return invalid("$", `expected exactly: ${DRAFT_REQUEST_KEYS.join(", ")}`);
   }
   if (!isNonNegativeInteger(value.expectedRevision)) {
@@ -200,6 +210,15 @@ export function validateRoadmapPhaseDraftRequest(
     "summary",
   );
   if (!summary.ok) return summary;
+  const sourcesNotCited =
+    value.sourcesNotCited === undefined
+      ? null
+      : normalizedBoundedString(
+          value.sourcesNotCited,
+          ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
+          "sourcesNotCited",
+        );
+  if (sourcesNotCited && !sourcesNotCited.ok) return sourcesNotCited;
 
   const references = validateDraftReferenceProposals(value.proposedReferences ?? []);
   if (!references.ok) return references;
@@ -237,6 +256,7 @@ export function validateRoadmapPhaseDraftRequest(
       summary: summary.value,
       phases,
       proposedReferences: references.value,
+      ...(sourcesNotCited ? { sourcesNotCited: sourcesNotCited.value } : {}),
     },
   };
 }
@@ -248,7 +268,7 @@ export function isRoadmapPhaseDraftRequest(value: unknown): value is RoadmapPhas
 export function validateRoadmapPhaseDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraft> {
-  if (!isRecordWithExactKeys(value, DRAFT_BASE_KEYS) && !isRecordWithExactKeys(value, DRAFT_KEYS)) {
+  if (!isRecordWithKeys(value, DRAFT_BASE_KEYS, DRAFT_OPTIONAL_KEYS)) {
     return invalid("$", `expected exactly: ${DRAFT_KEYS.join(", ")}`);
   }
   const id = boundedIdentifier(value.id, "id");
@@ -267,6 +287,15 @@ export function validateRoadmapPhaseDraft(
     "summary",
   );
   if (!summary.ok) return summary;
+  const sourcesNotCited =
+    value.sourcesNotCited === undefined || value.sourcesNotCited === null
+      ? null
+      : normalizedBoundedString(
+          value.sourcesNotCited,
+          ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
+          "sourcesNotCited",
+        );
+  if (sourcesNotCited && !sourcesNotCited.ok) return sourcesNotCited;
   if (value.status !== "pending" && value.status !== "stale") {
     return invalid("status", 'expected "pending" or "stale"');
   }
@@ -327,6 +356,7 @@ export function validateRoadmapPhaseDraft(
       summary: summary.value,
       references: references.value,
       phases,
+      sourcesNotCited: sourcesNotCited ? sourcesNotCited.value : null,
       status: value.status,
     },
   };
@@ -770,6 +800,19 @@ function isRecordWithExactKeys(
   if (!isRecord(value)) return false;
   const actual = Object.keys(value);
   return actual.length === expected.length && expected.every((key) => actual.includes(key));
+}
+
+/** Requires every `required` key and permits only keys from `required` or `optional`. */
+function isRecordWithKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  return (
+    required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
+  );
 }
 
 function isRecordWithAllowedKeys(

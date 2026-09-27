@@ -303,8 +303,25 @@ describe("createRoadmapPhaseDraftTool", () => {
     expect(tool.name).toBe("roadmap_phase_draft");
   });
 
+  it("carries the uncited-sources reason in the shared request", async () => {
+    const draft = vi.fn(async (_request: RoadmapPhaseDraftRequest) => ({
+      status: "proposal-pending" as const,
+      draftId: "proposal-1",
+    }));
+    const tool = createRoadmapPhaseDraftTool(draft);
+    const parsed = RoadmapPhaseDraftParams.parse({
+      ...input,
+      sources_not_cited: "  Corpus results only confirmed the local design.  ",
+    });
+
+    await tool.execute(parsed, {} as never);
+    expect(draft.mock.calls[0]?.[0].sourcesNotCited).toBe(
+      "Corpus results only confirmed the local design.",
+    );
+  });
+
   it("exports a bounded transform-free provider schema", () => {
-    const tool = createRoadmapPhaseDraftTool(async () => ({ status: "inspection-required" }));
+    const tool = createRoadmapPhaseDraftTool(async () => ({ status: "inspection-required", message: "inspect" }));
     const exportedSchema = (): Record<string, unknown> =>
       tool.rawInputSchema ?? (z.toJSONSchema(tool.parameters) as Record<string, unknown>);
 
@@ -347,6 +364,7 @@ describe("createRoadmapPhaseDraftTool", () => {
   it("states the complete draft-only workflow boundary", () => {
     const description = createRoadmapPhaseDraftTool(async () => ({
       status: "inspection-required",
+      message: "inspect",
     })).description;
 
     expect(description).toContain("never write Project Notes or files");
@@ -354,5 +372,6 @@ describe("createRoadmapPhaseDraftTool", () => {
     expect(description).toContain("pending user approval");
     expect(description).toContain("Use roadmap_status for execution progress");
     expect(description).toContain("Ordinary coding requests need no Roadmap action");
+    expect(description).toContain('Call roadmap_inspect with scope "roadmap" immediately first');
   });
 });

@@ -385,6 +385,23 @@ describe("Roadmap workflow protocol", () => {
     ).toMatchObject({ ok: false, error: { path: "proposedReferences[0].range.endLine" } });
   });
 
+  it("normalizes and bounds the uncited-sources reason", () => {
+    expect(
+      validateRoadmapPhaseDraftRequest({ ...request(), sourcesNotCited: "  Only confirmed.  " }),
+    ).toMatchObject({ ok: true, value: { sourcesNotCited: "Only confirmed." } });
+    const withoutReason = validateRoadmapPhaseDraftRequest(request());
+    expect(withoutReason.ok && "sourcesNotCited" in withoutReason.value).toBe(false);
+    expect(
+      validateRoadmapPhaseDraftRequest({ ...request(), sourcesNotCited: "x".repeat(1_024) }).ok,
+    ).toBe(true);
+    expect(
+      validateRoadmapPhaseDraftRequest({ ...request(), sourcesNotCited: "x".repeat(1_025) }),
+    ).toMatchObject({ ok: false, error: { path: "sourcesNotCited" } });
+    expect(validateRoadmapPhaseDraftRequest({ ...request(), sourcesNotCited: "   " }).ok).toBe(
+      false,
+    );
+  });
+
   it("strictly validates pending drafts and immutable generated IDs", () => {
     const draft = {
       id: "draft-1",
@@ -398,6 +415,9 @@ describe("Roadmap workflow protocol", () => {
       status: "pending",
     };
     expect(isRoadmapPhaseDraft(draft)).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...draft, sourcesNotCited: null })).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...draft, sourcesNotCited: "Only confirmed." })).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...draft, sourcesNotCited: "" })).toBe(false);
     expect(isRoadmapPhaseDraft({ ...draft, phases: [{ ...draft.phases[0], order: 1 }] })).toBe(
       false,
     );

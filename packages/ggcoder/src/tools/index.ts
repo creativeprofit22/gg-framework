@@ -46,6 +46,11 @@ import { createExitPlanTool } from "./exit-plan.js";
 import { createSteroidsTool } from "./steroids.js";
 import { createResearchCorpusTool } from "./research-corpus.js";
 import { findSteroidsBinary } from "../core/steroids.js";
+import {
+  withCorpusSourceRecording,
+  withDelegatedSourceRecording,
+  type ResearchSourceLedger,
+} from "../core/research-sources.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import type { WriteGuardSettings } from "../core/workspace-guard.js";
@@ -152,6 +157,11 @@ export interface CreateToolsOptions {
    * detection happens once.
    */
   steroidsBin?: string | null;
+  /**
+   * Session record of retrieved corpus code. Corpus tools record into it and
+   * exit_plan refuses plans that omit those sources.
+   */
+  researchSources?: ResearchSourceLedger;
   /**
    * Push queue for out-of-band notifications (child completions, background
    * process progress). When provided, producers enqueue here and the session
@@ -292,8 +302,13 @@ export async function createTools(
 
   // Local corpus of real repos; only when the CLI is actually on this machine.
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
-  if (steroidsBin)
-    tools.push(createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin));
+  if (steroidsBin) {
+    const corpusTools = [createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin)];
+    const ledger = opts?.researchSources;
+    tools.push(
+      ...(ledger ? corpusTools.map((tool) => withCorpusSourceRecording(tool, ledger)) : corpusTools),
+    );
+  }
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {
@@ -308,14 +323,21 @@ export async function createTools(
     opts.provider &&
     opts.model
   ) {
+    // Children keep their own research ledgers; permalinks in their reports
+    // are the only way delegated corpus research reaches this session's gate.
+    const ledger = opts.researchSources;
+    const recordDelegated = (tool: AgentTool): AgentTool =>
+      ledger ? withDelegatedSourceRecording(tool, ledger) : tool;
     tools.push(
-      createSubAgentTool(
-        cwd,
-        opts.agents,
-        () => opts.getProvider?.() ?? opts.provider!,
-        () => opts.getModel?.() ?? opts.model!,
-        opts.getCacheKey,
-        planModeRef,
+      recordDelegated(
+        createSubAgentTool(
+          cwd,
+          opts.agents,
+          () => opts.getProvider?.() ?? opts.provider!,
+          () => opts.getModel?.() ?? opts.model!,
+          opts.getCacheKey,
+          planModeRef,
+        ),
       ),
     );
     subAgentManager = new SubAgentManager({
@@ -330,7 +352,11 @@ export async function createTools(
       onState: opts.onSubAgentState,
       notifications: opts.notifications,
     });
-    tools.push(...createSubAgentControlTools(subAgentManager, planModeRef));
+    tools.push(
+      ...createSubAgentControlTools(subAgentManager, planModeRef).map((tool) =>
+        tool.name === "wait_agent" ? recordDelegated(tool) : tool,
+      ),
+    );
   }
 
   if (opts?.skills && opts.skills.length > 0) {
@@ -342,7 +368,7 @@ export async function createTools(
   }
 
   if (opts?.onExitPlan) {
-    tools.push(createExitPlanTool(cwd, opts.onExitPlan));
+    tools.push(createExitPlanTool(cwd, opts.onExitPlan, opts.researchSources));
   }
 
   // Conditionally register the image generation tool — only when OpenAI auth

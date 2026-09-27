@@ -165,6 +165,7 @@ function approvedPhaseDraft(
     basedOnRevision,
     createdAt: NOW,
     createdBySessionId: "session-draft",
+    sourcesNotCited: null,
     summary: "Create approved peer phases",
     status: "pending",
     references: [],

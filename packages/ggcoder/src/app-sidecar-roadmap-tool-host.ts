@@ -264,7 +264,7 @@ export class AppSidecarRoadmapToolHost {
 }
 
 function staleRevisionMessage(expected: number, current: number): string {
-  return `Project Notes revision is stale: expected ${expected}, current ${current}. Reload the current snapshot and retry once with expected_revision=${current}.`;
+  return `Project Notes revision is stale: expected ${expected}, current ${current}. Retry once with expected_revision=${current}; no Roadmap reload is needed.`;
 }
 
 function activePhaseContext(session: AppSidecarRoadmapToolSession):

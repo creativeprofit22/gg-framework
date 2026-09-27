@@ -268,6 +268,7 @@ import fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ResearchSourceLedger } from "./research-sources.js";
 
 /**
  * A run whose tool calls fail more often than this is thrashing, not
@@ -780,6 +781,8 @@ export class AgentSession {
   private activeLanguages = new Set<LanguageId>();
   /** Shared with the tool layer so plan-mode restrictions read live state. */
   private planModeRef = { current: false };
+  /** Corpus code retrieved this session; plans and Roadmap drafts must cite it. */
+  readonly researchSources = new ResearchSourceLedger();
   /** Path of the approved plan currently being implemented, or undefined. When
    *  set, the system prompt carries the `[DONE:n]` progress contract so the
    *  model emits step-completion markers the UI's plan-progress widget reads. */
@@ -1010,6 +1013,7 @@ export class AgentSession {
         allowUnixSockets: this.settingsManager.get("sandboxAllowUnixSockets"),
       }),
       getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
+      researchSources: this.researchSources,
       authStorage: this.authStorage,
       onFileRead: (filePath) => this.reviewCoverage.recordRead(filePath),
       onFileMutated: (filePath) => {
@@ -4411,6 +4415,12 @@ ${content}
       // Only successful reset retires source-checkpoint verification evidence.
       // Preserve conversation/phase identity when requested, never its approval.
       this.verificationEvidenceLedger.clear();
+      // Corpus research is in-memory only and belongs to the source context.
+      // Clear it even for a preserving checkpoint: exit_plan already cleared it
+      // after the approved plan cited it, and anything retrieved afterwards did
+      // not shape that plan. Keeping it would demand citations for repos the
+      // next plan or Roadmap draft never saw.
+      this.researchSources.clear();
       this.hookToolCalls.clear();
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
     } finally {
@@ -4488,6 +4498,8 @@ ${content}
     try {
       await this.loadExistingSession(sessionPath);
       this.verificationEvidenceLedger.clear();
+      // A loaded transcript carries no in-memory corpus record.
+      this.researchSources.clear();
       if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
     } finally {
@@ -4509,6 +4521,8 @@ ${content}
     try {
       await this.loadExistingSession(sessionPath, false, expectedConversationId);
       this.verificationEvidenceLedger.clear();
+      // A loaded transcript carries no in-memory corpus record.
+      this.researchSources.clear();
       if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
       this.eventBus.emit("session_start", { sessionId: this.sessionId });
     } finally {

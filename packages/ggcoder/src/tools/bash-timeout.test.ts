@@ -2261,20 +2261,29 @@ if (selectedProbe !== undefined) {
   });
 
   it.each(["completion", "abort"])(
-    "omitted persistent bash timeout waits for %s",
+    "omitted persistent bash timeout with watchdogs disabled waits for %s",
     async (ending) => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const fake = createPersistentFakeChild();
       const cleanup = vi.fn(async () => {});
       const manager = testProcessManager();
-      const tool = createBashTool(process.cwd(), manager, {
-        ...localOperations,
-        process: {
-          ...localOperations.process,
-          spawn: () => fake.child,
-          cleanupProcessTree: cleanup,
+      const tool = createBashTool(
+        process.cwd(),
+        manager,
+        {
+          ...localOperations,
+          process: {
+            ...localOperations.process,
+            spawn: () => fake.child,
+            cleanupProcessTree: cleanup,
+          },
         },
-      });
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({ yieldSeconds: 120, inactivitySeconds: 0, hardLimitMinutes: 0 }),
+      );
       const controller = new AbortController();
       const written = once(fake.child.stdin!, "data");
       let settled = false;
@@ -2305,6 +2314,45 @@ if (selectedProbe !== undefined) {
       manager.shutdownAll();
     },
   );
+
+  it("omitted persistent bash timeout is stopped by the default inactivity watchdog", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const fake = createPersistentFakeChild();
+    const cleanup = vi.fn(async () => {});
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager, {
+      ...localOperations,
+      process: {
+        ...localOperations.process,
+        spawn: () => fake.child,
+        cleanupProcessTree: cleanup,
+      },
+    });
+    const written = once(fake.child.stdin!, "data");
+    let settled = false;
+    const execution = Promise.resolve(
+      tool.execute(
+        { command: "fixture command", persist: true },
+        { signal: new AbortController().signal, toolCallId: "default-inactivity-persist" },
+      ),
+    ).then((result) => {
+      settled = true;
+      return result;
+    });
+    await written;
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(settled).toBe(false);
+    expect(cleanup).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
+    const result = structuredBashResult(await execution);
+    expect(result.details.bashDiagnostics).toMatchObject({
+      timeoutMs: 3_600_000,
+      reason: "inactive",
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    fake.markExited();
+    manager.shutdownAll();
+  });
 
   it("excludes the private sentinel from persistent progress byte counts", async () => {
     const fake = createPersistentFakeChild();

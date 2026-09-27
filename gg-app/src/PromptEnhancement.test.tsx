@@ -6,7 +6,10 @@ import { TooltipLayer } from "./TooltipLayer";
 
 describe("termHint", () => {
   it.each([
-    { seg: { original: "type script", note: "Language name" }, want: "you said: \u201ctype script\u201d\nLanguage name" },
+    {
+      seg: { original: "type script", note: "Language name" },
+      want: "you said: \u201ctype script\u201d\nLanguage name",
+    },
     { seg: { original: "type script" }, want: "you said: \u201ctype script\u201d" },
   ])("formats $seg.original", ({ seg, want }) => {
     expect(termHint(seg)).toBe(want);
@@ -49,7 +52,9 @@ describe("EnhancedSegments", () => {
       <>
         <TooltipLayer />
         <p>
-          <EnhancedSegments segments={[{ kind: "term", text: "TypeScript", original: "type script" }]} />
+          <EnhancedSegments
+            segments={[{ kind: "term", text: "TypeScript", original: "type script" }]}
+          />
         </p>
       </>,
     );

@@ -194,8 +194,7 @@ function inlineSummary(name: string, result: string, details: unknown): string {
       // no "Exit code:" line (a handed-off command is still running).
       const diag = (
         details as
-          | { bashDiagnostics?: { reason?: unknown; backgroundTaskId?: unknown } }
-          | undefined
+          { bashDiagnostics?: { reason?: unknown; backgroundTaskId?: unknown } } | undefined
       )?.bashDiagnostics;
       if (diag?.reason === "backgrounded") {
         const id = typeof diag.backgroundTaskId === "string" ? diag.backgroundTaskId : "";

@@ -187,22 +187,28 @@ describe("TooltipLayer", () => {
           <p>plain text</p>
         </>,
       );
-      return { term: screen.getByText("term"), plain: screen.getByRole("button", { name: "Update" }) };
+      return {
+        term: screen.getByText("term"),
+        plain: screen.getByRole("button", { name: "Update" }),
+      };
     }
 
-    it.each(["touch", "mouse"])("a %s tap shows it at once, a second tap hides it", (pointerType) => {
-      const { term } = setupTap();
+    it.each(["touch", "mouse"])(
+      "a %s tap shows it at once, a second tap hides it",
+      (pointerType) => {
+        const { term } = setupTap();
 
-      fireEvent.pointerDown(term, { pointerType });
-      const tip = screen.getByRole("tooltip");
-      expect(tip.textContent).toBe("you said: it");
-      expect(term.getAttribute("aria-describedby")).toBe(tip.id);
+        fireEvent.pointerDown(term, { pointerType });
+        const tip = screen.getByRole("tooltip");
+        expect(tip.textContent).toBe("you said: it");
+        expect(term.getAttribute("aria-describedby")).toBe(tip.id);
 
-      fireEvent.pointerDown(term, { pointerType });
-      expect(screen.queryByRole("tooltip")).toBeNull();
-      expect(term.getAttribute("title")).toBe("you said: it");
-      expect(term.hasAttribute("aria-describedby")).toBe(false);
-    });
+        fireEvent.pointerDown(term, { pointerType });
+        expect(screen.queryByRole("tooltip")).toBeNull();
+        expect(term.getAttribute("title")).toBe("you said: it");
+        expect(term.hasAttribute("aria-describedby")).toBe(false);
+      },
+    );
 
     it("stays open when the touch lifts and closes on a tap elsewhere", () => {
       const { term } = setupTap();

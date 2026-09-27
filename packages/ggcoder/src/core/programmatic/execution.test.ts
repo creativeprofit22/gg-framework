@@ -25,7 +25,8 @@ import { createAskUserBridge, type AskUserRequest, type AskUserResult } from "..
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./profile.js";
 import { runProgrammaticScan, readProgrammaticChatReport, readProgrammaticChatDetail, PROGRAMMATIC_STATE_PATH, PROGRAMMATIC_PREVIOUS_STATE_PATH } from "./lifecycle.js";
 import { programmaticLifecycleStateV1Schema } from "./contracts.js";
-import { executeProgrammaticOpportunity, createResearchCorpusTool, RESEARCH_TOOLS, EXECUTION_DEADLINE_MS, type ProgrammaticExecutionOptions } from "./execution.js";
+import { executeProgrammaticOpportunity, createResearchCorpusTool, RESEARCH_TOOLS, EXECUTION_DEADLINE_MS, specialistExecutionDeadlineMs, type ProgrammaticExecutionOptions } from "./execution.js";
+import { TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "../../tools/tauri-package.js";
 
 let home: string;
 let root: string;
@@ -519,6 +520,13 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(await executeProgrammaticOpportunity(options())).toMatchObject({ status: "rejected" });
   });
 
+  it("gives only the Tauri packaging specialist a deadline beyond the cold-build budget", () => {
+    expect(specialistExecutionDeadlineMs("setup-tauri-package")).toBeGreaterThan(TAURI_PACKAGE_BUILD_TIMEOUT_MS);
+    expect(specialistExecutionDeadlineMs("research")).toBe(10 * 60_000);
+    expect(specialistExecutionDeadlineMs("setup-sweep")).toBe(10 * 60_000);
+    expect(EXECUTION_DEADLINE_MS).toBe(10 * 60_000);
+  });
+
   it("exposes bounded Tauri discovery and real inspection to the isolated provider", async () => {
     const seeded = await state();
     seeded.records.forEach((record) => { record.opportunity.route = { status: "routable", specialistCommand: "setup-tauri-package" }; });
@@ -533,7 +541,14 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
       return textResponse();
     });
     const ask = vi.fn(answer);
+    const timers = vi.spyOn(globalThis, "setTimeout");
     await executeProgrammaticOpportunity(options({ ask }));
+    const delays = timers.mock.calls.map(([, delay]) => delay ?? 0);
+    timers.mockRestore();
+    // The run is re-armed with the Tauri build budget, not killed at the 10-minute default.
+    // Tool-level timers use at most the build budget + 30s; only the execution deadline exceeds that.
+    const deadline = specialistExecutionDeadlineMs("setup-tauri-package");
+    expect(delays.some((delay) => delay > deadline - 60_000 && delay <= deadline)).toBe(true);
     const names = (requests[0]!.tools as { name: string }[]).map(({ name }) => name);
     expect(names).toContain("tool_search");
     expect(names).toContain("tauri_package");

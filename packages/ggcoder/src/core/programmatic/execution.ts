@@ -9,7 +9,7 @@ import { createResearchCorpusTool } from "../../tools/research-corpus.js";
 export { createResearchCorpusTool } from "../../tools/research-corpus.js";
 import { findSteroidsBinary } from "../steroids.js";
 import { renderResearchPolicy } from "../research-policy.js";
-import { TauriPackageParams } from "../../tools/tauri-package.js";
+import { TauriPackageParams, TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "../../tools/tauri-package.js";
 import { canonicalRepositoryRoot } from "../tauri-package/paths.js";
 import { accessProgrammaticExecutionRecord, settleProgrammaticExecutionRecord } from "./lifecycle.js";
 import { resolveProgrammaticSpecialist, resolveDirectCommand, type ResolvedDirectCommand, type ResolvedSpecialist } from "./routes.js";
@@ -27,15 +27,22 @@ const APPROVED_RESEARCH_MCP_SERVERS: string[] = [];
 const projectClaims = new Set<string>();
 
 // Host-owned contracts, never tool permissions inferred from untrusted command prose.
+// Tauri calibrate/package runs a cold build (fresh CARGO_TARGET_DIR, ~23 min), bounded by the
+// tool's own budget; the specialist deadline must outlast it plus setup/verify turns.
 const SPECIALIST_CAPABILITIES = {
-  research: { mutates: false, tools: RESEARCH_TOOLS, discovery: [] },
-  "setup-sweep": { mutates: true, tools: [...RESEARCH_TOOLS, ...MUTATION_TOOLS], discovery: [] },
+  research: { mutates: false, tools: RESEARCH_TOOLS, discovery: [], deadlineMs: EXECUTION_DEADLINE_MS },
+  "setup-sweep": { mutates: true, tools: [...RESEARCH_TOOLS, ...MUTATION_TOOLS], discovery: [], deadlineMs: EXECUTION_DEADLINE_MS },
   "setup-tauri-package": {
     mutates: true,
     tools: [...RESEARCH_TOOLS, "tool_search", "tauri_package"],
     discovery: ["tauri_package"],
+    deadlineMs: TAURI_PACKAGE_BUILD_TIMEOUT_MS + 5 * 60_000,
   },
 } as const;
+
+export function specialistExecutionDeadlineMs(name: keyof typeof SPECIALIST_CAPABILITIES): number {
+  return SPECIALIST_CAPABILITIES[name].deadlineMs;
+}
 
 function specialistCapabilities(snapshot: ResolvedSpecialist) {
   const capabilities = SPECIALIST_CAPABILITIES[snapshot.command.name];
@@ -148,7 +155,9 @@ async function executeSelectedCommand(options: ExecutionOptions): Promise<Progra
   projectClaims.add(root);
   const controller = new AbortController();
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, EXECUTION_DEADLINE_MS);
+  const startedAt = Date.now();
+  const expire = () => { timedOut = true; controller.abort(); };
+  let timer = setTimeout(expire, EXECUTION_DEADLINE_MS);
   const abort = () => controller.abort();
   options.signal.addEventListener("abort", abort, { once: true });
   if (options.signal.aborted) abort();
@@ -206,7 +215,13 @@ async function executeSelectedCommand(options: ExecutionOptions): Promise<Progra
       legacy = resolved;
       snapshot = { command: legacy.command, sha256: legacy.sha256, task: legacy.route };
       reason = "specialist-tools-unavailable";
-      capabilities = specialistCapabilities(legacy);
+      const specialist = specialistCapabilities(legacy);
+      capabilities = specialist;
+      if (specialist.deadlineMs !== EXECUTION_DEADLINE_MS) {
+        // Re-arm from the original start so preflight time still counts against the budget.
+        clearTimeout(timer);
+        timer = setTimeout(expire, Math.max(0, specialist.deadlineMs - (Date.now() - startedAt)));
+      }
       start = async () => {
         const current = await accessProgrammaticExecutionRecord(root, options.opportunityId, fingerprint);
         const checked = await resolveProgrammaticSpecialist(root, current.opportunity, fingerprint);

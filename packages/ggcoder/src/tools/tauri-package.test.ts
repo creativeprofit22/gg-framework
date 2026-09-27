@@ -8,7 +8,7 @@ import { commitSupportSet } from "../core/tauri-package/ownership.js";
 import { detectHostTarget, GENERATED_PATHS } from "../core/tauri-package/paths.js";
 import { renderTauriSupport } from "../core/tauri-package/render.js";
 import type { CalibrationBounds } from "../core/tauri-package/types.js";
-import { createTauriPackageTool } from "./tauri-package.js";
+import { createTauriPackageTool, TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "./tauri-package.js";
 import { localOperations } from "./operations.js";
 
 const fixture = path.join(
@@ -71,6 +71,13 @@ afterEach(async () => {
 });
 
 describe("tauri_package tool", () => {
+  it("claims a loop ceiling above its own cold-build budget", () => {
+    const tool = createTauriPackageTool(os.tmpdir(), manager());
+
+    expect(TAURI_PACKAGE_BUILD_TIMEOUT_MS).toBeGreaterThanOrEqual(45 * 60 * 1000);
+    expect(tool.timeoutMs).toBeGreaterThan(TAURI_PACKAGE_BUILD_TIMEOUT_MS);
+  });
+
   it("inspects, sets up, verifies, and records six-file mutation callbacks", async () => {
     const root = await repository();
     const before: string[] = [];

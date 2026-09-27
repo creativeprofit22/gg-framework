@@ -1,5 +1,23 @@
 # @kenkaiiii/ggcoder
 
+## 5.64.2
+
+### Patch Changes
+
+- Fix redaction marking objects shared by siblings as `[CIRCULAR]`, which corrupted `ask_user` frames with several yes/no questions and blanked the desktop app.
+  - @kenkaiiii/gg-ai@5.64.2
+  - @kenkaiiii/gg-agent@5.64.2
+  - @kenkaiiii/gg-core@5.64.2
+
+## 5.64.1
+
+### Patch Changes
+
+- Stop web requests when network access is revoked, prevent duplicate tool calls, and report shell launch failures accurately.
+  - @kenkaiiii/gg-ai@5.64.1
+  - @kenkaiiii/gg-agent@5.64.1
+  - @kenkaiiii/gg-core@5.64.1
+
 ## 5.64.0
 
 ### Minor Changes

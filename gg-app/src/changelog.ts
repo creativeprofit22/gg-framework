@@ -22,6 +22,22 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.70.4",
+    date: "2026-09-26",
+    items: [
+      "No more blank screens when the AI asks you a few quick questions. When a question card had two or more `Yes / No` questions, the whole window could go empty. I fixed the root cause, and now the app sets aside any card it can't draw instead of wiping your screen. Your sessions stay right where you left them.",
+    ],
+  },
+  {
+    version: "0.70.3",
+    date: "2026-09-23",
+    items: [
+      "Your network rules stay in charge even while a page is loading. I made `web fetch` and `web search` stop when you block their destination, instead of letting an already-started request slip through.",
+      "No more accidental double moves. If the AI repeats the exact same `tool call` in one response, I run it once, but I still let it retry when your task actually changes.",
+      "A command that never started now says so. I fixed `shell` launch failures so you and the AI see the error right away instead of a result that looks successful.",
+    ],
+  },
+  {
     version: "0.70.2",
     date: "2026-09-23",
     items: [

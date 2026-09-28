@@ -565,6 +565,17 @@ fn trusted_event_envelope(
     }))
 }
 
+/// The bridge's own notice that a pane's event stream dropped, scoped like a
+/// daemon event so the webview can show a reconnecting state.
+fn connection_lost_envelope(pane_id: &str, session_id: &str) -> Option<serde_json::Value> {
+    let value = serde_json::json!({
+        "sessionId": session_id,
+        "type": "connection_lost",
+        "data": {},
+    });
+    trusted_event_envelope(pane_id, session_id, &value)
+}
+
 /// True once the app has begun quitting. Set on `ExitRequested` so the cascade
 /// of per-window `Destroyed` events during shutdown does NOT prune the workspace
 /// snapshot — the last full snapshot is what we restore next launch.
@@ -8706,8 +8717,7 @@ fn start_event_bridge(
                 }) {
                     return;
                 }
-                let value = serde_json::json!({ "type": "connection_lost", "data": {} });
-                if let Some(trusted) = trusted_event_envelope(&pane_id, &session_id, &value) {
+                if let Some(trusted) = connection_lost_envelope(&pane_id, &session_id) {
                     let _ = app.emit_to(
                         EventTarget::webview_window(label.clone()),
                         "agent-event",
@@ -15404,6 +15414,12 @@ mod tests {
             trusted_event_envelope("chat", "sid", &serde_json::json!({"sessionId": "sid"}))
                 .is_none()
         );
+
+        // The bridge's own disconnect notice must survive its session filter.
+        let lost = connection_lost_envelope("chat", "sid").expect("connection_lost is delivered");
+        assert_eq!(lost["paneId"], "chat");
+        assert_eq!(lost["sessionId"], "sid");
+        assert_eq!(lost["type"], "connection_lost");
     }
 
     #[test]

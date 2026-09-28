@@ -1,57 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { LspManager, type LspManagerOptions } from "./manager.js";
-import { LspClientPool, missingBinaryEvidence } from "./pool.js";
+import type { LspManager, LspManagerOptions } from "./manager.js";
+import { type LspClientPool, missingBinaryEvidence } from "./pool.js";
 import type { LspServerSpec } from "./servers.js";
-import { removeWhenReleased } from "./test-support.js";
-import { setEditTelemetryPathForTests } from "./edit-telemetry.js";
+import { createManagerHarness, fakeServerSpec, type ManagerHarness } from "./test-support.js";
 
-const fixture = fileURLToPath(
-  new URL("../../tools/__fixtures__/fake-lsp-server.mjs", import.meta.url),
-);
 const RUSTUP_MISSING =
   "error: Unknown binary 'rust-analyzer.exe' in official toolchain 'stable-x86_64-pc-windows-msvc'.";
 
-let cwd: string;
+let harness: ManagerHarness;
 let pool: LspClientPool;
-const managers: LspManager[] = [];
 
 beforeEach(async () => {
-  cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gg-late-missing-"));
-  await fs.writeFile(path.join(cwd, "fake-root.json"), "{}");
-  pool = new LspClientPool();
-  setEditTelemetryPathForTests(path.join(cwd, "edit-quality.jsonl"));
+  harness = await createManagerHarness("gg-late-missing-");
+  pool = harness.pool;
 });
-afterEach(async () => {
-  for (const manager of managers.splice(0)) manager.shutdownAll();
-  pool.shutdownAll();
-  setEditTelemetryPathForTests(undefined);
-  await removeWhenReleased(cwd);
-});
+afterEach(() => harness.cleanup());
 
 function fakeServer(args: string[]): LspServerSpec {
-  return {
-    id: "late-fake",
-    extensions: [".fake"],
-    rootMarkers: ["fake-root.json"],
-    languageIdFor: () => "fake",
-    resolveCommand: () => ({ command: process.execPath, args: [fixture, ...args] }),
-  };
+  return fakeServerSpec("late-fake", args);
 }
 
 function manager(spec: LspServerSpec, options: LspManagerOptions = {}): LspManager {
-  const result = new LspManager(cwd, {
-    pool,
-    catalog: [spec],
-    firstBudgetMs: 150,
-    warmBudgetMs: 150,
-    ...options,
-  });
-  managers.push(result);
-  return result;
+  return harness.manager(spec, { firstBudgetMs: 150, warmBudgetMs: 150, ...options });
 }
 
 describe("late diagnostics after the budget", () => {

@@ -1,48 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { LspManager, type LspManagerOptions } from "./manager.js";
-import { LspClientPool } from "./pool.js";
+import type { LspManager, LspManagerOptions } from "./manager.js";
 import type { LspServerSpec } from "./servers.js";
-import { removeWhenReleased } from "./test-support.js";
-import { setEditTelemetryPathForTests } from "./edit-telemetry.js";
+import { createManagerHarness, fakeServerSpec, type ManagerHarness } from "./test-support.js";
 
-const fixture = fileURLToPath(
-  new URL("../../tools/__fixtures__/fake-lsp-server.mjs", import.meta.url),
-);
+let harness: ManagerHarness;
 let cwd: string;
-let pool: LspClientPool;
-const managers: LspManager[] = [];
 
 beforeEach(async () => {
-  cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gg-async-diagnostics-"));
-  await fs.writeFile(path.join(cwd, "fake-root.json"), "{}");
-  pool = new LspClientPool();
-  setEditTelemetryPathForTests(path.join(cwd, "edit-quality.jsonl"));
+  harness = await createManagerHarness("gg-async-diagnostics-");
+  cwd = harness.cwd;
 });
-afterEach(async () => {
-  for (const manager of managers.splice(0)) manager.shutdownAll();
-  pool.shutdownAll();
-  setEditTelemetryPathForTests(undefined);
-  await removeWhenReleased(cwd);
-});
+afterEach(() => harness.cleanup());
 
 function server(args: string[] = []): LspServerSpec {
-  return {
-    id: "async-fake",
-    extensions: [".fake"],
-    rootMarkers: ["fake-root.json"],
-    languageIdFor: () => "fake",
-    resolveCommand: () => ({ command: process.execPath, args: [fixture, ...args] }),
-  };
+  return fakeServerSpec("async-fake", args);
 }
 
-function manager(args: string[] = [], options: LspManagerOptions = {}) {
-  const result = new LspManager(cwd, {
-    pool,
-    catalog: [server(args)],
+function manager(args: string[] = [], options: LspManagerOptions = {}): LspManager {
+  return harness.manager(server(args), {
     firstBudgetMs: 2000,
     warmBudgetMs: 1000,
     // Timeout-semantics tests below need the budget to be final; the late-result
@@ -50,8 +27,6 @@ function manager(args: string[] = [], options: LspManagerOptions = {}) {
     lateGraceMs: 0,
     ...options,
   });
-  managers.push(result);
-  return result;
 }
 
 describe("asynchronous post-edit diagnostics", () => {

@@ -110,6 +110,13 @@ interface QueuedDiagnostics {
   outcome?: LspDiagnosticOutcome;
 }
 
+/** One diagnostics pass's time budget; deadlines are absolute `Date.now()` ms. */
+interface DiagnosticsTiming {
+  readonly budgetMs: number;
+  readonly deadline: number;
+  readonly lateDeadline: number;
+}
+
 /**
  * Per-session view over the process-wide language-server pool (see pool.ts).
  *
@@ -539,7 +546,7 @@ export class LspManager {
     // every wait in here has to fit inside the same deadline or a good answer
     // arrives after the caller has already given up and reported a timeout.
     const deadline = Date.now() + budgetMs;
-    const lateDeadline = deadline + lateGraceMs;
+    const timing: DiagnosticsTiming = { budgetMs, deadline, lateDeadline: deadline + lateGraceMs };
     const resolution = await this.pool.retain(spec, root, this);
     if (this.shutDown) return this.outcome("unavailable", filePath);
     if (resolution.status === "server_missing") {
@@ -553,7 +560,7 @@ export class LspManager {
         hint: resolution.hint,
       };
     }
-    if (Date.now() >= lateDeadline) return this.outcome("timeout", filePath);
+    if (Date.now() >= timing.lateDeadline) return this.outcome("timeout", filePath);
     if (resolution.status !== "ready") return this.outcome(resolution.status, filePath);
     const { client } = resolution;
     if (!client.isAlive) {
@@ -568,18 +575,8 @@ export class LspManager {
     try {
       return await client.withDocumentDiagnostics(filePath, async () => {
         if (this.shutDown) return this.outcome("unavailable", filePath);
-        if (Date.now() >= lateDeadline) return this.outcome("timeout", filePath);
-        return this.collectFrom(
-          client,
-          key,
-          spec,
-          root,
-          filePath,
-          content,
-          budgetMs,
-          deadline,
-          lateDeadline,
-        );
+        if (Date.now() >= timing.lateDeadline) return this.outcome("timeout", filePath);
+        return this.collectFrom(client, key, spec, root, filePath, content, timing);
       });
     } finally {
       endCall();
@@ -594,10 +591,9 @@ export class LspManager {
     root: string,
     filePath: string,
     content: string,
-    budgetMs: number,
-    deadline: number,
-    lateDeadline: number,
+    timing: DiagnosticsTiming,
   ): Promise<LspDiagnosticOutcome> {
+    const { budgetMs, deadline, lateDeadline } = timing;
     // Sampled BEFORE the collect: a cold client is the one that has to load the
     // project, and therefore the only one that can answer prematurely.
     const wasCold = !this.isWarm(key, spec, root);

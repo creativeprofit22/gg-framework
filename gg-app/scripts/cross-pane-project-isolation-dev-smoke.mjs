@@ -85,6 +85,38 @@ function json(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
+// Synthetic assistant reply with diff fences: short, long-line and collapsible.
+function diffReplyText() {
+  const short = [
+    "diff --git a/src/greet.ts b/src/greet.ts",
+    "index 3f2a1c0..9b7e4d2 100644",
+    "--- a/src/greet.ts",
+    "+++ b/src/greet.ts",
+    "@@ -1,5 +1,6 @@",
+    " export function greet(name: string): string {",
+    "-  return 'Hello ' + name;",
+    "+  const trimmed = name.trim();",
+    "+  return `Hello, ${trimmed}!`;",
+    " }",
+  ].join("\n");
+  const wide = [
+    "@@ -10,2 +10,2 @@",
+    `-const message = "${"a long removed line that keeps going ".repeat(6)}";`,
+    `+const message = "${"a long added line that keeps going ".repeat(6)}";`,
+  ].join("\n");
+  const long = ["@@ -1,40 +1,40 @@", ...Array.from({ length: 40 }, (_, i) => `${i % 3 === 0 ? "-" : i % 3 === 1 ? "+" : " "}line ${i}`)].join("\n");
+  return [
+    "I changed the greeting to trim the name first:",
+    "```diff\n" + short + "\n```",
+    "A wide change that should scroll inside its block:",
+    "```diff\n" + wide + "\n```",
+    "A long change that should fold:",
+    "```diff\n" + long + "\n```",
+    "The same code as TypeScript for comparison:",
+    "```ts\nexport function greet(name: string): string {\n  const trimmed = name.trim();\n  return `Hello, ${trimmed}!`;\n}\n```",
+  ].join("\n\n");
+}
+
 function sessionState(sessionId, session) {
   return {
     provider: "anthropic",
@@ -114,11 +146,105 @@ function sessionState(sessionId, session) {
     kenThinkingAccumMs: 0,
     kenTokens: 0,
     contextWindow: 200000,
+    contextTokens: 0,
     gitBranch: null,
     isGitRepo: false,
     gitDirtyFileCount: 0,
     tasks: [],
   };
+}
+
+// Scripted daemon event sequences for native state checks (GG_STATE_SCENE_FIXTURE=1).
+// Prompt text `scene:<name>` selects one; `hold` steps give the driver time to capture.
+const sceneDelay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+function stateScene(name) {
+  const chunks = (text, size = 24) => Array.from({ length: Math.ceil(text.length / size) }, (_, i) => ["text_delta", { text: text.slice(i * size, (i + 1) * size) }]);
+  const streamed = "## Streaming check\n\nThis reply is **arriving in pieces** with a list:\n\n- first item\n- second item\n\n```diff\n@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n```\n\nMIDSTREAM-MARKER and the rest keeps coming";
+  switch (name) {
+    case "stream": return [
+      ["run_start", {}], ["thinking_delta", { text: "thinking" }], ["hold", 1500],
+      ...chunks(streamed), ["hold", 5000],
+      ["tool_call_start", { toolCallId: "t1", name: "bash", args: { command: "pnpm test" } }], ["hold", 2500],
+      ["tool_call_end", { toolCallId: "t1", name: "bash", isError: false, result: "12 passed" }],
+      ["tool_call_start", { toolCallId: "t2", name: "edit", args: { file_path: "src/missing.ts" } }],
+      ["tool_call_end", { toolCallId: "t2", name: "edit", isError: true, result: "File not found: src/missing.ts" }],
+      ...chunks("\n\nFinished after one failed edit. FINAL-MARKER"),
+      ["turn_end", { usage: { outputTokens: 420 } }], ["agent_done", { totalUsage: { outputTokens: 420 } }],
+      ["run_end", { outcome: "completed" }],
+    ];
+    case "fail": return [
+      ["run_start", {}], ...chunks("Starting work before a provider failure…"), ["hold", 800],
+      ["error", { headline: "The provider rejected the request", message: "429 Too Many Requests: rate limit reached for this model. FAIL-MARKER", guidance: "Wait a minute and try again, or switch models." }],
+      ["run_end", { outcome: "failed" }],
+    ];
+    case "cancel": return [
+      ["run_start", {}], ...chunks("Working on something long that will be stopped…"), ["hold", 1500],
+      ["run_cancelling", {}], ["hold", 3000], ["run_end", { outcome: "cancelled", cancelled: true, runState: "idle" }],
+    ];
+    case "ask": return [
+      ["run_start", {}], ...chunks("I need one decision first."),
+      ["ask_user", { id: "fixture-ask", questions: [{ id: "q1", kind: "choice", question: "Which layout should the report use? ASK-MARKER", detail: "This changes how results are grouped.", options: [{ label: "Group by file", recommended: true, hint: "Easier to scan" }, { label: "Group by severity" }] }] }],
+    ];
+    case "compact": return [
+      ["run_start", {}], ["compaction_start", {}], ["hold", 3000],
+      ["compaction_end", { compacted: true, originalCount: 180, newCount: 24 }],
+      ...chunks("Context was compacted. COMPACT-MARKER"), ["run_end", { outcome: "completed" }],
+    ];
+    case "extras": {
+      const agent = (id, name, state, extra = {}) => ["subagent_state", { agent_id: id, task_name: name, state, started_at: 1, updated_at: 2, elapsed_ms: 4200, turn_count: 2, tool_use_count: 3, token_usage: { input: 1200, output: 300 }, ...extra }];
+      const imageFile = process.env.GG_STATE_SCENE_IMAGE;
+      const png = imageFile ? readFileSync(imageFile, "utf8").trim() : "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+      return [
+        ["run_start", {}], ...chunks("Checking a few integrations."),
+        ["tool_call_start", { toolCallId: "m1", name: "mcp__github__create_issue", args: { title: "Fixture issue" } }], ["hold", 800],
+        ["tool_call_end", { toolCallId: "m1", name: "mcp__github__create_issue", isError: true, result: "MCP server 'github' error: 401 Bad credentials. MCPFAIL-MARKER" }],
+        agent("a1", "audit-styles", "running", { current_activity: "Reading App.css" }),
+        agent("a2", "audit-tests", "running", { current_activity: "Running vitest" }), ["hold", 2500],
+        agent("a1", "audit-styles", "completed", { output: "No issues" }),
+        agent("a2", "audit-tests", "failed", { error: "Timed out after 60s" }), ["hold", 1200],
+        ["tool_call_start", { toolCallId: "g1", name: "generate_image", args: { prompt: "a pigeon wearing a tiny hat" } }], ["hold", 2500],
+        ["tool_call_end", { toolCallId: "g1", name: "generate_image", isError: false, result: "Generated 1 image", details: { imagePreviews: [{ mediaType: "image/png", base64: png, path: "pigeon.png" }] } }],
+        ...chunks("Integrations checked. EXTRAS-MARKER"),
+        ["plan_exit", { checkpointId: "fixture-plan", generation: 1, planPath: ".gg/plans/fixture.md", contentHash: "fixture", content: "# Fixture plan\n\n1. Tidy the header\n2. Add a test\n\nPLAN-MARKER" }],
+        ["run_end", { outcome: "completed" }],
+      ];
+    }
+    case "drop": return [
+      ["run_start", {}], ...chunks("Before the connection drops. "), ["hold", 800],
+      ["drop", null], ["hold", 2500], ["await-stream", null], ["hold", 800],
+      ...chunks("After reconnecting the reply continues. DROP-MARKER"), ["run_end", { outcome: "completed" }],
+    ];
+    case "long": return [
+      ["run_start", {}],
+      ...Array.from({ length: 40 }, (_, i) => chunks(`Paragraph ${i + 1} of a long streaming reply that keeps arriving while panes move around.\n\n`, 40)).flat(),
+      ...chunks("LONG-MARKER"), ["run_end", { outcome: "completed" }],
+    ];
+    default: return [];
+  }
+}
+
+async function playStateScene(name, sessionId, session, audit) {
+  audit({ action: "scene-start", scene: name, sessionId });
+  for (const [type, data] of stateScene(name)) {
+    if (type === "hold") { await sceneDelay(data); continue; }
+    if (type === "drop") {
+      for (const stream of session.streams ?? []) stream.end();
+      session.streams?.clear();
+      audit({ action: "scene-drop", sessionId });
+      continue;
+    }
+    if (type === "await-stream") {
+      for (let i = 0; i < 200 && !(session.streams?.size > 0); i += 1) await sceneDelay(50);
+      audit({ action: "scene-reconnected", sessionId, streams: session.streams?.size ?? 0 });
+      continue;
+    }
+    if (type === "run_end") session.running = false;
+    const frame = `data: ${JSON.stringify({ sessionId, type, data })}\n\n`;
+    for (const stream of session.streams ?? []) stream.write(frame);
+    await sceneDelay(type === "text_delta" ? 60 : 150);
+  }
+  audit({ action: "scene-end", scene: name, sessionId });
 }
 
 function createFixtureServer({ auditFile, launchToken }) {
@@ -170,6 +296,9 @@ function createFixtureServer({ auditFile, launchToken }) {
         response.write(
           `data: ${JSON.stringify({ sessionId, type: "ready", data: sessionState(sessionId, session) })}\n\n`,
         );
+        session.streams ??= new Set();
+        session.streams.add(response);
+        response.on("close", () => session.streams?.delete(response));
         return;
       }
       if (request.method === "GET" && url.pathname === "/state") {
@@ -177,10 +306,14 @@ function createFixtureServer({ auditFile, launchToken }) {
         return;
       }
       if (request.method === "POST" && url.pathname === "/prompt") {
-        await readBody(request);
+        const promptBody = await readBody(request);
         session.running = true;
         audit({ action: "prompt-held", sessionId, cwd: session.cwd });
         json(response, 202, { queued: false, count: 0 });
+        const scene = process.env.GG_STATE_SCENE_FIXTURE === "1"
+          ? /scene:([a-z]+)/.exec(String(promptBody.text ?? ""))?.[1]
+          : undefined;
+        if (scene) void playStateScene(scene, sessionId, session, audit);
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
@@ -192,6 +325,9 @@ function createFixtureServer({ auditFile, launchToken }) {
           { role: "assistant", text: "", error: { scope: "error", headline: "Fixture error", message: readingText } },
           { role: "assistant", text: "", autopilot: { phase: "human", reason: readingText } },
           { role: "assistant", text: "Later normal assistant message.\n\n" + readingText },
+        ] : process.env.GG_DIFF_REPLY_FIXTURE === "1" ? [
+          { role: "user", text: "Diff-reply fixture" },
+          { role: "assistant", text: diffReplyText() },
         ] : process.env.GG_LOCAL_LINK_FIXTURE === "1" ? [
           { role: "assistant", text: "[Pane file](same.txt)" },
           { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", path: "same.txt" }] },
@@ -223,6 +359,10 @@ function createFixtureServer({ auditFile, launchToken }) {
         sessions.delete(sessionId);
         audit({ action: "session-disposed", sessionId, cwd: session.cwd });
         json(response, 200, { ok: true });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/roadmap/phase-drafts/pending") {
+        json(response, 200, { status: "ok", draft: null });
         return;
       }
       json(response, 200, {});
@@ -260,7 +400,7 @@ function parseArguments(args) {
   return { identity: values[1] };
 }
 
-export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false, readingAnchors = false, reuseDevServer = false, visual = false, beforeNativeStart, verifyWorkspace, onCleanup, appearanceTheme = process.env.GG_APPEARANCE_SMOKE_THEME }) {
+export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false, readingAnchors = false, diffReplies = false, stateScenes = false, stateSceneImage, reuseDevServer = false, visual = false, beforeNativeStart, verifyWorkspace, onCleanup, appearanceTheme = process.env.GG_APPEARANCE_SMOKE_THEME }) {
   if (appearanceTheme !== undefined && appearanceTheme !== "dark" && appearanceTheme !== "light") throw new Error("Appearance smoke theme must be dark or light");
   if (appearanceTheme) {
     if (!reuseDevServer) throw new Error("Appearance checks require the verified normal-app server");
@@ -313,6 +453,9 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     GG_CROSS_PANE_FIXTURE_AUDIT: auditFile,
     GG_LOCAL_LINK_FIXTURE: localLinks ? "1" : "0",
     GG_PANE_READING_FIXTURE: readingAnchors ? "1" : "0",
+    GG_DIFF_REPLY_FIXTURE: diffReplies ? "1" : "0",
+    GG_STATE_SCENE_FIXTURE: stateScenes ? "1" : "0",
+    ...(stateSceneImage ? { GG_STATE_SCENE_IMAGE: stateSceneImage } : {}),
     GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort),
     GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1",
     GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",

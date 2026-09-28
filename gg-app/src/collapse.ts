@@ -51,6 +51,44 @@ export function collapsedCode(text: string): { preview: string; hiddenLines: num
   };
 }
 
+/** Highlight class a diff line gets, or null for a plain context line. */
+export type DiffLineKind = "meta" | "comment" | "addition" | "deletion";
+
+const DIFF_META =
+  /^(?:@@ +-\d+(?:,\d+)? +\+\d+(?:,\d+)? +@@|\*\*\* +\d+,\d+ +\*\*\*\*$|--- +\d+,\d+ +----$)/;
+const DIFF_COMMENT = /^(?:Index: |index|={3,}|-{3}|\*{3} |\+{3}|diff --git|\*{15}$)/;
+
+/**
+ * Classify one line of a folded `diff` preview so it keeps its added/removed
+ * colours without mounting the highlighter's full tree. Mirrors the line-start
+ * rules of highlight.js's diff grammar, in the same precedence order.
+ */
+export function diffLineKind(line: string): DiffLineKind | null {
+  if (DIFF_META.test(line)) return "meta";
+  if (DIFF_COMMENT.test(line)) return "comment";
+  if (line.startsWith("+") || line.startsWith("!")) return "addition";
+  if (line.startsWith("-")) return "deletion";
+  return null;
+}
+
+/**
+ * Length of the coloured part of a hunk header, or null if the line is not one.
+ * highlight.js's meta rule is a plain `match`, so only `@@ -a,b +c,d @@` is
+ * coloured; trailing context such as a function name stays plain.
+ */
+export function diffMetaEnd(line: string): number | null {
+  const match = DIFF_META.exec(line);
+  return match ? match[0].length : null;
+}
+
+/**
+ * Whether a fence language gets the diff treatment. highlight.js's diff grammar
+ * also answers to `patch`, so both tags must keep their colours when folded.
+ */
+export function isDiffLanguage(lang: string | null): boolean {
+  return lang === "diff" || lang === "patch";
+}
+
 /**
  * How many leading markdown blocks to mount for oversized content.
  *

@@ -63,6 +63,84 @@ describe("oversized output folding", () => {
     expect(screen.getByRole("button", { name: /Show full output/ })).toBeTruthy();
   });
 
+  it("keeps added/removed colours in a folded diff preview without mounting hidden lines", () => {
+    const body = [
+      "diff --git a/x.ts b/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " keep 0",
+      "-old 1",
+      "+new 1",
+      "-old 2",
+      "+new 2",
+      ...Array.from({ length: 30 }, (_, i) => `+hidden ${i}`),
+    ];
+    render(<Markdown>{["```diff", ...body, "```"].join("\n")}</Markdown>);
+    expect(screen.getByRole("button", { name: /Show full output/ })).toBeTruthy();
+
+    const pre = document.querySelector(".code-block.folded pre");
+    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [s.className, s.textContent]);
+    expect(kinds).toEqual([
+      ["hljs-comment", "diff --git a/x.ts b/x.ts"],
+      ["hljs-meta", "@@ -1,40 +1,40 @@"],
+      ["hljs-deletion", "-old 1"],
+      ["hljs-addition", "+new 1"],
+      ["hljs-deletion", "-old 2"],
+      ["hljs-addition", "+new 2"],
+    ]);
+    expect(pre?.querySelector("code")?.className).toContain("language-diff");
+    // Same text as before (context line kept plain), and the rest stays unmounted.
+    expect(pre?.textContent).toBe(body.slice(0, CODE_COLLAPSE_LINE_THRESHOLD).join("\n"));
+    expect(document.body.textContent).not.toContain("hidden 0");
+  });
+
+  it("keeps added/removed colours in a folded patch preview (highlight.js diff alias)", () => {
+    const body = [
+      "diff --git a/x.ts b/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " keep 0",
+      "-old 1",
+      "+new 1",
+      "-old 2",
+      "+new 2",
+      ...Array.from({ length: 30 }, (_, i) => `+hidden ${i}`),
+    ];
+    render(<Markdown>{["```patch", ...body, "```"].join("\n")}</Markdown>);
+    expect(screen.getByRole("button", { name: /Show full output/ })).toBeTruthy();
+
+    const pre = document.querySelector(".code-block.folded pre");
+    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [s.className, s.textContent]);
+    expect(kinds).toEqual([
+      ["hljs-comment", "diff --git a/x.ts b/x.ts"],
+      ["hljs-meta", "@@ -1,40 +1,40 @@"],
+      ["hljs-deletion", "-old 1"],
+      ["hljs-addition", "+new 1"],
+      ["hljs-deletion", "-old 2"],
+      ["hljs-addition", "+new 2"],
+    ]);
+    expect(pre?.querySelector("code")?.className).toContain("language-diff");
+    expect(pre?.textContent).toBe(body.slice(0, CODE_COLLAPSE_LINE_THRESHOLD).join("\n"));
+    expect(document.body.textContent).not.toContain("hidden 0");
+  });
+
+  it("colours only the @@ range of a folded hunk header, like the full highlighter", () => {
+    const body = [
+      "@@ -1,5 +1,6 @@ export function greet",
+      "-old",
+      "+new",
+      ...Array.from({ length: 40 }, (_, i) => `+hidden ${i}`),
+    ];
+    render(<Markdown>{["```diff", ...body, "```"].join("\n")}</Markdown>);
+
+    const pre = document.querySelector(".code-block.folded pre");
+    expect(pre?.querySelector(".hljs-meta")?.textContent).toBe("@@ -1,5 +1,6 @@");
+    expect(pre?.textContent).toBe(body.slice(0, CODE_COLLAPSE_LINE_THRESHOLD).join("\n"));
+  });
+
+  it("keeps a folded non-diff preview as plain text", () => {
+    render(<Markdown>{fence(1000)}</Markdown>);
+    expect(document.querySelector(".code-block.folded pre span")).toBeNull();
+  });
+
   it("leaves an ordinary reply completely untouched", () => {
     render(<Markdown>{"Here is the fix.\n\nIt works now."}</Markdown>);
     expect(document.body.textContent).toContain("It works now.");

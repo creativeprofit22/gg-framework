@@ -3,6 +3,9 @@ import {
   CODE_COLLAPSE_LINE_THRESHOLD,
   ROW_COLLAPSE_CHARS,
   collapsedCode,
+  diffLineKind,
+  diffMetaEnd,
+  isDiffLanguage,
   shouldCollapseCode,
   shouldCollapseRow,
   visibleBlockCount,
@@ -10,6 +13,50 @@ import {
 
 const lines = (count: number): string =>
   Array.from({ length: count }, (_, i) => `line ${i}`).join("\n");
+
+describe("diff preview line kinds (mirrors highlight.js diff grammar)", () => {
+  it.each([
+    ["@@ -1,2 +1,2 @@ fn", "meta"],
+    ["@@ -1 +1 @@", "meta"],
+    ["--- 1,4 ----", "meta"],
+    ["diff --git a/x b/x", "comment"],
+    ["index 3f2a1c0..9b7e4d2 100644", "comment"],
+    ["--- a/x", "comment"],
+    ["+++ b/x", "comment"],
+    ["Index: x", "comment"],
+    ["+added", "addition"],
+    ["!changed", "addition"],
+    ["-removed", "deletion"],
+    [" context", null],
+    ["@@ not a hunk", null],
+    ["", null],
+  ] as const)("%j is %s", (line, kind) => {
+    expect(diffLineKind(line)).toBe(kind);
+  });
+});
+
+describe("diff hunk header colour extent (highlight.js meta is a plain match)", () => {
+  it.each([
+    ["@@ -1,2 +1,2 @@ fn", 15],
+    ["@@ -1 +1 @@", 11],
+    ["--- 1,4 ----", 12],
+    ["+added", null],
+    ["@@ not a hunk", null],
+  ] as const)("%j colours %s chars", (line, end) => {
+    expect(diffMetaEnd(line)).toBe(end);
+  });
+});
+
+describe("diff fence languages", () => {
+  it.each([
+    ["diff", true],
+    ["patch", true],
+    ["ts", false],
+    [null, false],
+  ] as const)("%j is a diff: %s", (lang, expected) => {
+    expect(isDiffLanguage(lang)).toBe(expected);
+  });
+});
 
 describe("fenced-block collapse threshold", () => {
   it("leaves a block at the threshold alone", () => {

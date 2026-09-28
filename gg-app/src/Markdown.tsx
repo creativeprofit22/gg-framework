@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useContext,
@@ -24,7 +25,14 @@ import {
   type KenPromptActionResult,
   type KenPromptSavePreview,
 } from "./ken-prompt-actions";
-import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
+import {
+  collapsedCode,
+  diffLineKind,
+  diffMetaEnd,
+  isDiffLanguage,
+  shouldCollapseCode,
+  visibleBlockCount,
+} from "./collapse";
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
 import { useAnimatedHeight } from "./animated-height";
@@ -623,6 +631,41 @@ function PreBlock({ children }: { children?: React.ReactNode }): React.ReactElem
 }
 
 /**
+ * A folded `diff` preview with one span per coloured line, so added/removed
+ * lines keep their tint while the hidden lines stay unmounted.
+ */
+function DiffPreview({ text }: { text: string }): React.ReactElement {
+  const lines = text.split("\n");
+  return (
+    <code className="hljs language-diff">
+      {lines.map((line, index) => {
+        const kind = diffLineKind(line);
+        const newline = index < lines.length - 1 ? "\n" : "";
+        // Preview lines are static and positional, so the index is a stable key.
+        if (kind === "meta") {
+          // Hunk headers colour only the `@@ … @@` match, like highlight.js.
+          const end = diffMetaEnd(line) ?? line.length;
+          return (
+            <Fragment key={index}>
+              <span className="hljs-meta">{line.slice(0, end)}</span>
+              {line.slice(end) + newline}
+            </Fragment>
+          );
+        }
+        return kind ? (
+          <Fragment key={index}>
+            <span className={`hljs-${kind}`}>{line}</span>
+            {newline}
+          </Fragment>
+        ) : (
+          <Fragment key={index}>{line + newline}</Fragment>
+        );
+      })}
+    </code>
+  );
+}
+
+/**
  * A fenced code block wrapped with a hover-revealed copy button. The raw text
  * is read from the rendered `<pre>` (so it includes the exact code, minus the
  * syntax-highlight markup). Double-click is handled manually (see
@@ -677,7 +720,11 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
           if (selectWordAtPoint(e.clientX, e.clientY)) e.preventDefault();
         }}
       >
-        {folded ? preview : children}
+        {folded ? (
+          isDiffLanguage(codeLanguage(children)) ? <DiffPreview text={preview} /> : preview
+        ) : (
+          children
+        )}
       </pre>
       {collapsible && (
         <button

@@ -2,7 +2,7 @@
 
 Current follow-up: the accepted direction now has production semantic selectors in the [native appearance integration](native-appearance.md). Rank/progress calculations and Autopilot persistence are unchanged. Historical preview interactions below do not prove every native scorecard/Autopilot state; the native handoff records that remaining coverage gap. No real-project Autopilot setting was toggled for appearance review.
 
-The user confirmed a preference for **Light code**, then approved the proposed badge/popup/switch refinements. The user subsequently responded positively to the delivered result ("lovely"). These remain isolated to the browser preview; no installed settings, real ranks or project-wide Autopilot state were changed.
+The user confirmed a preference for **Light code**, then approved the proposed badge/popup/switch refinements. The user subsequently responded positively to the delivered result ("lovely"). At the time, these remained isolated to the browser preview; no installed settings, real ranks or project-wide Autopilot state were changed. Update 2026-09-27: the Light rank badge, scorecard and Autopilot switch treatments now ship as Light-theme rules in the production appearance stylesheet (see the current follow-up above); the preview module files described below are the historical experiment.
 
 ## Delivered
 

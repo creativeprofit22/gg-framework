@@ -523,6 +523,8 @@ describe("pane agent client", () => {
     await expect(client.getRoadmapPhaseDraft()).resolves.toEqual({
       ...draft,
       references: [],
+      // Older daemons omit the field; the client normalizes it to null.
+      sourcesNotCited: null,
       phases: [{ ...draft.phases[0], referenceIds: [] }],
     });
     await expect(client.approveRoadmapPhaseDraft("draft/1")).resolves.toMatchObject({

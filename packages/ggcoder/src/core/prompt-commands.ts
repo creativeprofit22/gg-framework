@@ -125,7 +125,7 @@ Rules:
 - Keep each cell concise but specific enough to be actionable.
 - If no exciting validated features are found, output one row saying no fresh validated features were found.
 
-After the table, ask the user what to do with the \`ask_user\` tool: one \`choice\` question (\`id: "scope"\`, question "What should I do?") with these options, each carrying a one-line hint:
+After the table, ask the user what to do with the \`ask_user\` tool: one \`choice\` question (\`id: "scope"\`, question "What should I do?", and a \`detail\` of one plain sentence saying the table above lists the validated features and that building them in plan mode means you plan first and wait for approval before changing code) with these options, each carrying a one-line hint:
 
 - Build all of these features in plan mode
 - Build only the top priority ones in plan mode
@@ -254,7 +254,7 @@ Clicking \`/commit\` authorizes this entire workflow. Execute directly: never en
 5. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits.
 
 4. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
-5. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
+5. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
 6. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
 7. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits. Never force-push.
 
@@ -459,7 +459,7 @@ Merge the results, drop anything already indexed, and rank by fit with this proj
 
 ## Phase 2: Present and ask
 
-FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. In every repo cell, make the repository name a clickable Markdown link: [owner/name](https://github.com/owner/name). Do not use plain text, inline code, or a separate URL column for repository names. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?") with these options, each with a one-line hint on disk/time cost:
+FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. In every repo cell, make the repository name a clickable Markdown link: [owner/name](https://github.com/owner/name). Do not use plain text, inline code, or a separate URL column for repository names. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?", and a \`detail\` of one plain sentence saying roughly what indexing the chosen repos costs in disk space and time) with these options, each with a one-line hint on disk/time cost:
 
 - All of them
 - Top 10

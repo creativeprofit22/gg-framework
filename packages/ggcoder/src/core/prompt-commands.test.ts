@@ -23,6 +23,8 @@ describe("prompt commands", () => {
     expect(setupCommit?.prompt).toContain("fast review of real bugs");
     expect(setupCommit?.prompt).toContain("findings at least 80");
     expect(setupCommit?.prompt).toContain("one `ask_user` choice");
+    // ask_user requires `detail`; a recipe without it is rejected and retried.
+    expect(setupCommit?.prompt).toContain("a `detail` of one plain sentence naming which review findings are blocking");
     expect(setupCommit?.prompt).toContain("rerun affected checks without another review");
     expect(setupCommit?.prompt).toContain("push exactly once after all commits");
     expect(setupCommit?.prompt).not.toContain("current index tree");
@@ -58,6 +60,7 @@ describe("prompt commands", () => {
     expect(cmd?.prompt).toContain("Profile the project");
     expect(cmd?.prompt).toContain("`discover` queries WITHOUT `add`");
     expect(cmd?.prompt).toContain("`ask_user` tool");
+    expect(cmd?.prompt).toContain("a `detail` of one plain sentence saying roughly what indexing the chosen repos costs");
     expect(cmd?.prompt).toContain("Do not index anything until the user answers");
     expect(cmd?.prompt).toContain("`steroids` `add`");
   });
@@ -132,6 +135,7 @@ describe("prompt commands", () => {
     // question twice, once clickable and once not. Prose is the fallback for
     // hosts that cannot render the card at all.
     expect(expand?.prompt).toContain("`ask_user` tool");
+    expect(expand?.prompt).toContain("a `detail` of one plain sentence saying the table above lists the validated features");
     expect(expand?.prompt).toContain("Build all of these features in plan mode");
     expect(expand?.prompt).toContain("Build only the top priority ones in plan mode");
     expect(expand?.prompt).toContain("The card is the ONLY ask");

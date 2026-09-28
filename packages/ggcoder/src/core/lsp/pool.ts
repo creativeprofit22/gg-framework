@@ -1,6 +1,6 @@
 import { log } from "../logger.js";
 import { LspClient } from "./client.js";
-import type { LspServerSpec } from "./servers.js";
+import { installHintFor, type LspServerSpec } from "./servers.js";
 
 /**
  * Process-wide pool of language-server clients, shared by every `LspManager`
@@ -29,7 +29,24 @@ import type { LspServerSpec } from "./servers.js";
 
 /** Outcome of asking for a client: ready, or why it cannot be used. */
 export type PooledClient =
-  { status: "ready"; client: LspClient } | { status: "unavailable" | "server_failed" };
+  | { status: "ready"; client: LspClient }
+  | { status: "unavailable" | "server_failed" }
+  | { status: "server_missing"; hint: string };
+
+/**
+ * Recognise a server whose binary does not exist, as opposed to one that ran
+ * and failed. rustup installs a `rust-analyzer` proxy even when the component
+ * is absent; the proxy then exits with "Unknown binary". Returns the evidence
+ * line, or null when the failure looks like a genuine server crash.
+ */
+export function missingBinaryEvidence(spawnErrorCode: string | undefined, stderr: string): string | null {
+  if (spawnErrorCode === "ENOENT") return "executable not found (ENOENT)";
+  const rustup = /Unknown binary '[^']+' in (?:official )?toolchain '[^']+'/.exec(stderr);
+  if (rustup) return rustup[0];
+  return null;
+}
+
+const CLOSE_WAIT_MS = 1000;
 
 interface PoolEntry {
   key: string;
@@ -97,6 +114,12 @@ export class LspClientPool {
   private readonly retiring = new Map<PoolEntry, Promise<void>>();
   private readonly heldEntries = new WeakMap<object, Set<PoolEntry>>();
   private readonly releasedHolders = new WeakSet<object>();
+  /**
+   * (spec, root) pairs whose server binary is missing, with the install hint.
+   * Kept outside `entries` so neither idle sweeps nor new sessions respawn a
+   * binary that cannot exist until the user installs it and restarts.
+   */
+  private readonly missing = new Map<string, string>();
 
   private keyFor(spec: LspServerSpec, root: string): string {
     return `${specIdentity(spec)}\u0000${root}`;
@@ -113,12 +136,14 @@ export class LspClientPool {
     const retirements = [...this.retiring].filter(([entry]) => entry.key === key).map(([, cleanup]) => cleanup);
     if (retirements.length) await Promise.all(retirements);
     if (this.releasedHolders.has(holder)) return { status: "unavailable" };
+    const missingHint = this.missing.get(key);
+    if (missingHint !== undefined) return { status: "server_missing", hint: missingHint };
     let entry = this.entries.get(key);
     if (!entry) {
       const native: PoolEntry["native"] = {};
       entry = {
         key,
-        pending: this.spawn(spec, root, native),
+        pending: this.spawn(spec, root, native, key),
         native,
         holders: new Set(),
         activeCalls: 0,
@@ -314,7 +339,29 @@ export class LspClientPool {
     this.sweepTimer = undefined;
   }
 
-  private async spawn(spec: LspServerSpec, root: string, native: PoolEntry["native"]): Promise<PooledClient> {
+  private rememberMissing(key: string, spec: LspServerSpec, root: string, evidence: string): PooledClient {
+    const hint = installHintFor(spec);
+    this.missing.set(key, hint);
+    log("WARN", "lsp", `${spec.id} language server binary missing`, { root, evidence, hint });
+    return { status: "server_missing", hint };
+  }
+
+  /** Wait (bounded) for the process to close so its stderr is fully drained. */
+  private async missingAfterExit(client: LspClient): Promise<string | null> {
+    if (client.isAlive) return null;
+    await Promise.race([
+      client.waitForClose(),
+      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_WAIT_MS).unref()),
+    ]);
+    return missingBinaryEvidence(client.spawnErrorCode, client.stderrTail());
+  }
+
+  private async spawn(
+    spec: LspServerSpec,
+    root: string,
+    native: PoolEntry["native"],
+    key: string,
+  ): Promise<PooledClient> {
     // `client` is declared outside the try so one that fails to initialize can
     // still be killed. `new LspClient` SPAWNS the process, so discarding the
     // reference on a throw leaked the server forever — one orphan per
@@ -325,14 +372,16 @@ export class LspClientPool {
       const command = spec.resolveCommand(root);
       if (!command) {
         native.closed = true;
-        log("INFO", "lsp", `${spec.id} language server not available`, { root });
-        return { status: "unavailable" };
+        return this.rememberMissing(key, spec, root, "executable not found");
       }
       const startedAt = Date.now();
       client = new LspClient(spec, root, command);
       native.client = client;
       await client.initialize(INIT_TIMEOUT_MS);
-      if (!client.isAlive) return { status: "server_failed" };
+      if (!client.isAlive) {
+        const evidence = await this.missingAfterExit(client);
+        return evidence ? this.rememberMissing(key, spec, root, evidence) : { status: "server_failed" };
+      }
       log("INFO", "lsp", `${spec.id} server initialized`, {
         root,
         ms: String(Date.now() - startedAt),
@@ -340,6 +389,11 @@ export class LspClientPool {
       return { status: "ready", client };
     } catch (error) {
       if (!client) native.closed = true;
+      const evidence = client ? await this.missingAfterExit(client) : null;
+      if (evidence) {
+        client?.terminate();
+        return this.rememberMissing(key, spec, root, evidence);
+      }
       log("WARN", "lsp", `${spec.id} server failed to start`, {
         root,
         error: error instanceof Error ? error.message : String(error),

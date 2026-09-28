@@ -30,6 +30,13 @@ export interface LspServerSpec {
   languageIdFor(extension: string): string;
   /** Resolve the server binary for a project root, or null when unavailable. */
   resolveCommand(projectRoot: string): ResolvedCommand | null;
+  /** How a user installs this server when its binary is missing. */
+  installHint?: string;
+}
+
+/** Install guidance for a missing server, falling back to a generic instruction. */
+export function installHintFor(spec: LspServerSpec): string {
+  return spec.installHint ?? `Install the ${spec.id} language server, then restart GG Coder.`;
 }
 
 const WINDOWS_SUFFIXES = [".cmd", ".exe", ".bat"] as const;
@@ -283,6 +290,7 @@ export const LSP_SERVER_CATALOG: readonly LspServerSpec[] = [
       const bin = findExecutable("rust-analyzer", projectRoot);
       return bin ? { command: bin, args: [] } : null;
     },
+    installHint: "Install it with `rustup component add rust-analyzer`, then restart GG Coder.",
   },
   {
     id: "clangd",

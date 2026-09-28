@@ -45,6 +45,9 @@ function manager(args: string[] = [], options: LspManagerOptions = {}) {
     catalog: [server(args)],
     firstBudgetMs: 2000,
     warmBudgetMs: 1000,
+    // Timeout-semantics tests below need the budget to be final; the late-result
+    // tests opt back in explicitly.
+    lateGraceMs: 0,
     ...options,
   });
   managers.push(result);

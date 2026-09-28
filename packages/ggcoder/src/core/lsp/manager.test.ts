@@ -179,20 +179,26 @@ describe("LspManager", () => {
     const manager = makeManager(spec);
     const filePath = path.join(tmpDir, "broken-server.fake");
 
-    expect(await manager.diagnosticsAfterWrite(filePath, "ERROR\n")).toBe("");
+    // The missing binary is reported once, then silently skipped.
+    expect(await manager.diagnosticsAfterWrite(filePath, "ERROR\n")).toContain(
+      "language server is not installed",
+    );
     expect(await manager.diagnosticsAfterWrite(filePath, "ERROR\n")).toBe("");
     expect(resolveCalls).toBe(1);
   });
 
-  it("returns empty string and records unavailable when no server command resolves", async () => {
+  it("reports the missing server once and records server_missing when no command resolves", async () => {
     const spec = fakeSpec([], { resolveCommand: () => null });
     const manager = makeManager(spec);
     const filePath = path.join(tmpDir, "a.fake");
 
     const result = await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
 
-    expect(result).toBe("");
-    expect(manager.getLatestOutcome(filePath)?.kind).toBe("unavailable");
+    expect(result).toContain("a.fake: the fake language server is not installed");
+    expect(await manager.diagnosticsAfterWrite(filePath, "ERROR\n")).toBe("");
+    // A binary that cannot be found is a persistent install problem, reported
+    // once with a hint rather than as a per-edit "unavailable".
+    expect(manager.getLatestOutcome(filePath)?.kind).toBe("server_missing");
   });
 
   it("records initialization failure separately", async () => {

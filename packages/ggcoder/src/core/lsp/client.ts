@@ -305,7 +305,10 @@ export class LspClient {
     });
     this.nativeClose = new Promise((resolve) => this.proc.once("close", () => resolve()));
     this.captureStderr();
-    this.proc.on("error", () => this.markDead());
+    this.proc.on("error", (error: NodeJS.ErrnoException) => {
+      this.spawnErrorCode = error.code;
+      this.markDead();
+    });
     this.proc.on("exit", (code, signal) => {
       if (code !== 0 && code !== null) {
         log("WARN", "lsp", `${spec.id} language server exited`, {
@@ -345,6 +348,9 @@ export class LspClient {
       } else if (progress.value?.kind === "end") this.activeProgressTokens.delete(key);
     });
   }
+
+  /** OS error code when the process could not be spawned at all (e.g. ENOENT). */
+  spawnErrorCode: string | undefined;
 
   get isAlive(): boolean {
     return this.alive;
@@ -610,6 +616,15 @@ export class LspClient {
   /** After a timeout, an unversioned empty publish may belong to an earlier edit. */
   hasUncertainDiagnostics(uri: string): boolean {
     return this.uncertainDiagnostics.has(normalizeUri(uri));
+  }
+
+  /**
+   * Forget uncertainty for a document whose late answer was received while its
+   * diagnostics lock was held and no newer version was synced. Callers must only
+   * do this when the document was NOT already uncertain before that collect.
+   */
+  clearUncertainDiagnostics(uri: string): void {
+    this.uncertainDiagnostics.delete(normalizeUri(uri));
   }
 
   /** Race push against supported pull requests, rejecting superseded document versions. */

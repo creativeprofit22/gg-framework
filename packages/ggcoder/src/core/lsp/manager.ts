@@ -23,6 +23,13 @@ export interface LspManagerOptions {
   /** Maximum number of per-file latest outcomes retained. */
   snapshotLimit?: number;
   /**
+   * Extra time a QUEUED post-edit check keeps listening after its budget, so a
+   * server that answers a little late still produces a real verdict instead of
+   * "timeout". Queued checks never block the edit, so this only delays the
+   * completion-boundary flush, and only for servers that are slow.
+   */
+  lateGraceMs?: number;
+  /**
    * Client pool backing this manager. Defaults to the daemon-wide singleton so
    * sessions share servers; injectable so tests get isolation.
    */
@@ -36,7 +43,8 @@ export type LspOutcomeKind =
   | "timeout"
   | "unsupported"
   | "unavailable"
-  | "server_failed";
+  | "server_failed"
+  | "server_missing";
 
 interface LspOutcomeBase {
   kind: LspOutcomeKind;
@@ -51,7 +59,13 @@ export type LspDiagnosticOutcome =
       formatted: string;
     })
   | (LspOutcomeBase & {
-      kind: Exclude<LspOutcomeKind, "diagnostics">;
+      kind: "server_missing";
+      serverId: string;
+      root: string;
+      hint: string;
+    })
+  | (LspOutcomeBase & {
+      kind: Exclude<LspOutcomeKind, "diagnostics" | "server_missing">;
     });
 
 /**
@@ -85,6 +99,7 @@ const DEFAULT_FIRST_BUDGET_MS = 8000;
  * answer would otherwise have been `clean`.
  */
 const DEFAULT_SETTLE_MS = 1500;
+const DEFAULT_LATE_GRACE_MS = 7000;
 const DEFAULT_SNAPSHOT_LIMIT = 100;
 
 interface QueuedDiagnostics {
@@ -109,7 +124,15 @@ export class LspManager {
   private readonly firstBudgetMs: number;
   private readonly settleMs: number;
   private readonly snapshotLimit: number;
+  private readonly lateGraceMs: number;
   private readonly pool: LspClientPool;
+  /**
+   * Servers whose binary is known missing: key → install guidance. Once a key
+   * is here, edits for it stop queuing diagnostics entirely.
+   */
+  private readonly missingServers = new Map<string, { serverId: string; hint: string }>();
+  /** Missing-server keys whose install hint has been delivered this session. */
+  private readonly reportedMissing = new Set<string>();
   /**
    * Keys that have completed a diagnostics pass, mapped to the pool generation
    * that served it.
@@ -137,6 +160,7 @@ export class LspManager {
     this.firstBudgetMs = options?.firstBudgetMs ?? DEFAULT_FIRST_BUDGET_MS;
     this.settleMs = Math.max(0, options?.settleMs ?? DEFAULT_SETTLE_MS);
     this.snapshotLimit = Math.max(1, options?.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT);
+    this.lateGraceMs = Math.max(0, options?.lateGraceMs ?? DEFAULT_LATE_GRACE_MS);
     this.pool = options?.pool ?? lspClientPool;
   }
 
@@ -144,7 +168,13 @@ export class LspManager {
   queueDiagnosticsAfterWrite(filePath: string, content: string, source?: EditSource): string {
     if (this.shutDown) return "\nDiagnostics unavailable; this change is not verified.";
     const file = path.resolve(this.cwd, filePath);
-    if (!serverForFile(file, this.catalog)) return "";
+    const spec = serverForFile(file, this.catalog);
+    if (!spec) return "";
+    // A known-missing server cannot produce diagnostics; queuing again would
+    // only repeat "not verified" on every edit. Its install hint is delivered
+    // once by drainDiagnostics, independent of this skip.
+    const serverKey = `${spec.id}\u0000${findProjectRoot(file, spec.rootMarkers, this.cwd)}`;
+    if (this.missingServers.has(serverKey)) return "";
     const before = this.errorBaseline(file);
     this.latestOutcomes.delete(file);
     this.diagnosticRequests.delete(file);
@@ -166,7 +196,9 @@ export class LspManager {
           while (job.next && this.queuedDiagnostics.get(file) === job && !this.shutDown) {
             const request = job.next;
             job.next = undefined;
-            const outcome = await this.diagnosticsAfterWriteDetailed(file, request.content);
+            const outcome = await this.diagnosticsAfterWriteDetailed(file, request.content, {
+              lateGraceMs: this.lateGraceMs,
+            });
             if (
               job.next ||
               job.cancelled ||
@@ -250,11 +282,29 @@ export class LspManager {
         continue;
       this.queuedDiagnostics.delete(file);
       if (outcome.kind === "diagnostics" && outcome.formatted) results.push(outcome.formatted);
-      else if (includeUnverified && outcome.kind !== "clean" && outcome.kind !== "unsupported") {
+      else if (outcome.kind === "server_missing") {
+        // Install guidance, not an unverified-silence nag: deliver it once even
+        // when independent checks have already passed.
+        const notice = this.missingServerNoticeOnce(file, outcome);
+        if (notice) results.push(notice);
+      } else if (includeUnverified && outcome.kind !== "clean" && outcome.kind !== "unsupported") {
         results.push(
           `${path.relative(this.cwd, file)}: diagnostics ${outcome.kind}; not verified. Run the project checks; do not infer success from silence.`,
         );
       }
+    }
+    // A missing server whose outcome never reached a drain (e.g. the run was
+    // cancelled) would otherwise stay silent forever, since later edits no
+    // longer queue. Deliver its hint here unless a queued outcome still will.
+    const pendingMissing = new Set<string>();
+    for (const job of this.queuedDiagnostics.values()) {
+      if (!job.cancelled && job.outcome?.kind === "server_missing")
+        pendingMissing.add(`${job.outcome.serverId}\u0000${job.outcome.root}`);
+    }
+    for (const [serverKey, missing] of this.missingServers) {
+      if (this.reportedMissing.has(serverKey) || pendingMissing.has(serverKey)) continue;
+      this.reportedMissing.add(serverKey);
+      results.push(missingServerNotice(missing.serverId, missing.hint));
     }
     if (this.diagnosticsOverflow && !(includeUnverified && options.deferUnverified)) {
       if (includeUnverified)
@@ -266,6 +316,18 @@ export class LspManager {
     return results.length
       ? `Post-edit diagnostics for the latest queued changes:\n${results.join("\n")}\nAddress reported errors before completion. These diagnostics do not replace the project's verification checks.`
       : "";
+  }
+
+  /** Per-file install notice for a missing server, delivered once per server/root per session. */
+  private missingServerNoticeOnce(
+    file: string,
+    missing: { serverId: string; root: string; hint: string },
+  ): string {
+    const serverKey = `${missing.serverId}\u0000${missing.root}`;
+    if (this.reportedMissing.has(serverKey)) return "";
+    this.reportedMissing.add(serverKey);
+    const absolute = path.resolve(this.cwd, file);
+    return `${path.relative(this.cwd, absolute)}: ${missingServerNotice(missing.serverId, missing.hint)}`;
   }
 
   /** Forget a cancelled run's deliveries; bounded in-flight work may still warm its server. */
@@ -301,6 +363,7 @@ export class LspManager {
     // value standing here now is the state as of the previous edit.
     const before = this.errorBaseline(filePath);
     const outcome = await this.diagnosticsAfterWriteDetailed(filePath, content);
+    if (outcome.kind === "server_missing") return this.missingServerNoticeOnce(filePath, outcome);
     if (outcome.kind !== "diagnostics") return "";
     return (
       outcome.formatted +
@@ -350,7 +413,9 @@ export class LspManager {
   async diagnosticsAfterWriteDetailed(
     filePath: string,
     content: string,
+    options: { lateGraceMs?: number } = {},
   ): Promise<LspDiagnosticOutcome> {
+    const lateGraceMs = Math.max(0, options.lateGraceMs ?? 0);
     const normalizedFilePath = path.resolve(this.cwd, filePath);
     if (this.shutDown) return this.outcome("unavailable", normalizedFilePath);
     const request = {};
@@ -371,11 +436,11 @@ export class LspManager {
       const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
       const key = `${spec.id}\u0000${root}`;
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
-      const work = this.collect(key, spec, root, normalizedFilePath, content, budgetMs);
+      const work = this.collect(key, spec, root, normalizedFilePath, content, budgetMs, lateGraceMs);
 
       // Leave slow initialization/indexing alive to warm the next edit. Record
       // its eventual evidence too, but report this call honestly as timed out.
-      const outcome = await withBudget(work, budgetMs, () =>
+      const outcome = await withBudget(work, budgetMs + lateGraceMs, () =>
         this.outcome("timeout", normalizedFilePath),
       );
       if (outcome.kind === "timeout") {
@@ -443,7 +508,7 @@ export class LspManager {
   }
 
   private outcome(
-    kind: Exclude<LspOutcomeKind, "diagnostics">,
+    kind: Exclude<LspOutcomeKind, "diagnostics" | "server_missing">,
     filePath: string,
   ): LspDiagnosticOutcome {
     return { kind, filePath, updatedAt: Date.now() };
@@ -468,14 +533,27 @@ export class LspManager {
     filePath: string,
     content: string,
     budgetMs: number,
+    lateGraceMs: number,
   ): Promise<LspDiagnosticOutcome> {
-    // The caller races this whole function against `budgetMs`, so every wait in
-    // here has to fit inside the same deadline or a good answer arrives after
-    // the caller has already given up and reported a timeout.
+    // The caller races this whole function against `budgetMs + lateGraceMs`, so
+    // every wait in here has to fit inside the same deadline or a good answer
+    // arrives after the caller has already given up and reported a timeout.
     const deadline = Date.now() + budgetMs;
+    const lateDeadline = deadline + lateGraceMs;
     const resolution = await this.pool.retain(spec, root, this);
     if (this.shutDown) return this.outcome("unavailable", filePath);
-    if (Date.now() >= deadline) return this.outcome("timeout", filePath);
+    if (resolution.status === "server_missing") {
+      this.missingServers.set(key, { serverId: spec.id, hint: resolution.hint });
+      return {
+        kind: "server_missing",
+        filePath,
+        updatedAt: Date.now(),
+        serverId: spec.id,
+        root,
+        hint: resolution.hint,
+      };
+    }
+    if (Date.now() >= lateDeadline) return this.outcome("timeout", filePath);
     if (resolution.status !== "ready") return this.outcome(resolution.status, filePath);
     const { client } = resolution;
     if (!client.isAlive) {
@@ -490,8 +568,18 @@ export class LspManager {
     try {
       return await client.withDocumentDiagnostics(filePath, async () => {
         if (this.shutDown) return this.outcome("unavailable", filePath);
-        if (Date.now() >= deadline) return this.outcome("timeout", filePath);
-        return this.collectFrom(client, key, spec, root, filePath, content, budgetMs, deadline);
+        if (Date.now() >= lateDeadline) return this.outcome("timeout", filePath);
+        return this.collectFrom(
+          client,
+          key,
+          spec,
+          root,
+          filePath,
+          content,
+          budgetMs,
+          deadline,
+          lateDeadline,
+        );
       });
     } finally {
       endCall();
@@ -508,13 +596,39 @@ export class LspManager {
     content: string,
     budgetMs: number,
     deadline: number,
+    lateDeadline: number,
   ): Promise<LspDiagnosticOutcome> {
     // Sampled BEFORE the collect: a cold client is the one that has to load the
     // project, and therefore the only one that can answer prematurely.
     const wasCold = !this.isWarm(key, spec, root);
     const uri = client.syncDocument(filePath, content);
     const version = client.documentVersion(uri);
+    // An earlier timeout can leave an unversioned reply in flight; only a
+    // document that was certain beforehand may trust a late unversioned one.
+    const wasUncertain = client.hasUncertainDiagnostics(uri);
     let diagnostics = await client.collectDiagnostics(uri, Math.max(1, deadline - Date.now()));
+    // Budget exceeded, but the server is alive and may simply be slow: keep
+    // listening for THIS version until the late deadline instead of discarding
+    // an answer that arrives moments later.
+    const lateMs = lateDeadline - Date.now();
+    if (
+      diagnostics === null &&
+      lateMs > 0 &&
+      !this.shutDown &&
+      client.isAlive &&
+      client.documentVersion(uri) === version
+    ) {
+      const startedAt = Date.now();
+      diagnostics = await client.collectDiagnostics(uri, lateMs);
+      if (diagnostics !== null && client.documentVersion(uri) === version) {
+        if (!wasUncertain) client.clearUncertainDiagnostics(uri);
+        log("INFO", "lsp", `${spec.id} diagnostics arrived after budget`, {
+          file: filePath,
+          budgetMs,
+          lateMs: Date.now() - startedAt,
+        });
+      }
+    }
     // Record WHICH build of the server went warm, so a later reclamation of it
     // is detectable rather than silently inherited as warm.
     if (this.shutDown) return this.outcome("unavailable", filePath);
@@ -531,6 +645,7 @@ export class LspManager {
       log("WARN", "lsp", `${spec.id} diagnostics timed out`, {
         file: filePath,
         budgetMs,
+        lateGraceMs: Math.max(0, lateDeadline - deadline),
         stderr: client.stderrTail() || "(none)",
       });
       return this.outcome("timeout", filePath);
@@ -543,7 +658,7 @@ export class LspManager {
     // Give it a bounded moment to correct itself. A follow-up that is ALSO empty
     // changes nothing, so a genuinely clean file still lands on `clean`.
     if (diagnostics.length === 0 && wasCold && client.hasReportedProgress && client.isAlive) {
-      const settleMs = Math.min(this.settleMs, deadline - Date.now());
+      const settleMs = Math.min(this.settleMs, Math.max(deadline, lateDeadline) - Date.now());
       if (settleMs > 0) {
         const corrected = await client.awaitNextPublish(uri, settleMs);
         if (corrected !== null && corrected.length > 0) diagnostics = corrected;
@@ -623,6 +738,14 @@ export class LspManager {
 
       const resolution = await this.pool.retain(spec, root, this);
       if (this.shutDown) return { kind: "unavailable", filePath: normalizedFilePath };
+      if (resolution.status === "server_missing") {
+        return {
+          kind: "unavailable",
+          filePath: normalizedFilePath,
+          serverId: spec.id,
+          message: `The ${spec.id} language server is not installed. ${resolution.hint}`,
+        };
+      }
       if (resolution.status !== "ready") {
         return { kind: resolution.status, filePath: normalizedFilePath, serverId: spec.id };
       }
@@ -677,6 +800,10 @@ export class LspManager {
       return { kind: "server_failed", filePath: normalizedFilePath };
     }
   }
+}
+
+function missingServerNotice(serverId: string, hint: string): string {
+  return `the ${serverId} language server is not installed, so ${serverId} edits get no automatic diagnostics this session. ${hint} Until then, run the project checks for these files.`;
 }
 
 /** Race work against a hard budget while allowing it to settle in background. */

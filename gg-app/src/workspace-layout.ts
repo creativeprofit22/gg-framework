@@ -143,9 +143,9 @@ function parseTarget(
     return undefined;
   if (record.sessionPath === undefined && !allowMissingSessionPath) return undefined;
   const mode = record.mode === undefined && allowMissingMode ? "code" : record.mode;
-  if (mode !== "code" && mode !== "chat") return undefined;
+  if (mode !== "code" && mode !== "chat" && mode !== "motion") return undefined;
   if (record.chatAgent !== undefined && !isChatAgentId(record.chatAgent)) return undefined;
-  if (mode === "code" && record.chatAgent !== undefined) return undefined;
+  if (mode !== "chat" && record.chatAgent !== undefined) return undefined;
   return {
     mode,
     cwd: record.cwd,

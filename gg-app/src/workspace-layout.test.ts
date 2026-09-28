@@ -125,9 +125,23 @@ describe("canonical agent-only v9 schema", () => {
     expect(oldChat.layout.panes.primary).toEqual(chatAgent("/chat"));
   });
 
+  it("round-trips GG Motion panes without discarding sibling panes", () => {
+    const motion = { kind: "agent", mode: "motion", cwd: "/motion", sessionPath: "/s.jsonl" };
+    const value = canonical(split(leaf("primary"), leaf("motion")), {
+      primary: agent("/code"),
+      motion,
+    });
+    const parsed = parseWorkspaceLayout(JSON.stringify(value));
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.panes.primary).toEqual(agent("/code"));
+    expect(parsed.layout.panes.motion).toEqual(motion);
+    expect(parsed.layout.panes.motion).not.toHaveProperty("chatAgent");
+  });
+
   it.each([
     { kind: "agent", mode: "chat", chatAgent: "invalid", cwd: "/a", sessionPath: null },
     { kind: "agent", mode: "code", chatAgent: "general", cwd: "/a", sessionPath: null },
+    { kind: "agent", mode: "motion", chatAgent: "general", cwd: "/a", sessionPath: null },
     { kind: "agent", mode: "invalid", cwd: "/a", sessionPath: null },
   ])("rejects invalid current target %#", (descriptor) => {
     expect(

@@ -81,6 +81,20 @@ describe("sidecar error reporter bridge", () => {
     ["edit", "old_text not found in example.ts. Text must match verbatim."],
     ["edit", "old_text found 2 times in example.ts. Include more surrounding context."],
     ["edit", "the file changed since you read it (anchor mismatch)"],
+    ["ask_user", "Error: every question needs a unique `id`."],
+    [
+      "ask_user",
+      'Error: question "store" has no `detail`. Say what you found and why you need their decision — the user may read nothing but this card.',
+    ],
+    ["ask_user", 'Error: question "store" is kind "choice" and needs at least 2 options.'],
+    [
+      "ask_user",
+      'Error: question "store" has multiple recommended options. Select at most one recommendation.',
+    ],
+    [
+      "ask_user",
+      'Error: the option "Something else" asks the user to specify something, but a click sends only that option — they cannot type or elaborate. Replace it with the actual choices, or find the specifics yourself first. (The free-text escape is already built into the UI.)',
+    ],
   ])("filters expected %s validation failures", (toolName, result) => {
     expect(shouldCaptureToolFailure(toolName, result)).toBe(false);
   });
@@ -88,5 +102,6 @@ describe("sidecar error reporter bridge", () => {
   it("keeps unexpected tool failures reportable", () => {
     expect(shouldCaptureToolFailure("edit", "EACCES: permission denied")).toBe(true);
     expect(shouldCaptureToolFailure("bash", "Command exited with code 1")).toBe(true);
+    expect(shouldCaptureToolFailure("ask_user", "Error: bridge closed")).toBe(true);
   });
 });

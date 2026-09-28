@@ -30,6 +30,14 @@ const EXPECTED_TOOL_VALIDATION_FAILURES: Readonly<Partial<Record<string, readonl
     "existing files must be read first before overwriting",
     "file has been modified since it was read",
   ],
+  // Question-card validation rejections are the model's self-correction, not defects.
+  ask_user: [
+    "every question needs a unique `id`",
+    "has no `detail`",
+    "needs at least 2 options",
+    "has multiple recommended options",
+    "click sends only that option",
+  ],
 };
 
 export function shouldCaptureUsagePollingError(error: unknown): boolean {

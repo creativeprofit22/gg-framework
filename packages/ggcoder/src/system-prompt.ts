@@ -61,7 +61,7 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   // fallback only renders for hosts with no one to answer a question.
   const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
     ? `**Every ask is an \`ask_user\` call — never a sentence.** A card never replaces an answer: when the user asks something, answer it; if it is ambiguous, answer the likeliest reading and state your assumption. Ask only when you truly cannot proceed without their decision, and first write what you found and why you need their call. No question? Just end; never invent one. Any question you'd end on — a blocker OR a soft "want me to also…?" — is a tool call, never prose: no asking line, no blockquote, no options restated as text. Offering optional follow-up work counts as a question. Several: one call, each with your pick marked \`recommended\`.`
-    : `**The ask = ONE channel, never two.** No question? Just end; never invent one. Any question — blocker or soft "want me to also…?" — is the last line: \`> **<the ask>?** <your next step>\`. Blockquote nothing else. Several: one numbered list, each with your pick.`;
+    : `**The ask = ONE channel, never two.** A question never replaces an answer: answer first; if unclear, answer the likeliest reading and say so. Ask only if truly blocked, after your findings. No question? Just end; never invent one. Any question — blocker or soft "want me to also…?" — is the last line: \`> **<the ask>?** <your next step>\`. Blockquote nothing else. Several: one numbered list, each with your pick.`;
   return (
     `## How to Talk\n\n` +
     `Write for severe ADHD: fast scanning, low working memory, easy action.\n\n` +

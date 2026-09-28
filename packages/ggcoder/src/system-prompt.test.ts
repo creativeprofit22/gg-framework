@@ -123,6 +123,9 @@ describe("buildSystemPrompt", () => {
     // a `>` in a reply always means "the agent is waiting on you". The rule must
     // not manufacture questions either, so "no question" stays a valid ending.
     expect(prompt).toContain("**The ask = ONE channel, never two.**");
+    // Hosts without question cards still owe the user an answer first.
+    expect(prompt).toContain("A question never replaces an answer: answer first");
+    expect(prompt).toContain("Ask only if truly blocked, after your findings.");
     expect(prompt).toContain("No question? Just end; never invent one.");
     expect(prompt).toContain('Any question — blocker or soft "want me to also…?"');
     expect(prompt).toContain("is the last line: `> **<the ask>?** <your next step>`");
@@ -212,7 +215,7 @@ describe("buildSystemPrompt", () => {
   });
 
   it.each([
-    [[], "ec199ed87e565afc051f0ad55f3102ccbb314791bdf203cfa94bb285f7bb68d2"],
+    [[], "c8797d4af1dae57640e6368927d03b72a08e7e51b202809537833fdf7669b16f"],
     [["ask_user"], "e48103acadfc8c1c66c746c16e591a1db92898021ab92bbd2143158f37bff9b7"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
@@ -290,7 +293,9 @@ describe("buildSystemPrompt", () => {
     expect(talk.match(/exempt/g) ?? []).toHaveLength(0);
 
     // Keep the style instructions compact even though reply length is flexible.
-    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(360);
+    // Raised from 360 for the no-card answer-first rule (~24 words): hosts
+    // without `ask_user` otherwise answer questions with questions.
+    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(390);
 
     // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
     // trigger a message and be cut for not changing the next move.
@@ -578,8 +583,9 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt size measurements: ${JSON.stringify(measurements)}`);
 
     // Extreme workflow-only caps; response policy and safety floors are independently tested.
-    expect(measurements.normal.characters).toBeLessThan(6_500);
-    expect(measurements.planMode.characters).toBeLessThan(8_000);
+    // Raised from 6_500 / 8_000 for the same no-card answer-first rule (~150 chars).
+    expect(measurements.normal.characters).toBeLessThan(6_650);
+    expect(measurements.planMode.characters).toBeLessThan(8_150);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_000);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(

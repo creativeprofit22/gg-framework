@@ -25,7 +25,7 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
       const ask = this.tools.find((tool) => tool.name === "ask_user");
       if (!ask) throw new Error("Fixture ask_user tool missing");
       await ask.execute({ questions: [{ id: "approval", kind: "choice",
-        question: "Allow this action?", options: [{ label: "Allow action", value: "allow" }, { label: "Stop action", value: "stop" }] }] },
+        question: "Allow this action?", detail: "The fixture needs a decision before it continues.", options: [{ label: "Allow action", value: "allow" }, { label: "Stop action", value: "stop" }] }] },
         { signal: new AbortController().signal, toolCallId: "fixture-ask" });
     }
     await generation;

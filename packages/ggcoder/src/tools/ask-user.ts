@@ -62,10 +62,12 @@ const Question = z.object({
     ),
   detail: z
     .string()
-    .optional()
+    .trim()
+    .min(1)
     .describe(
-      "One optional line of context under the question — the background they need to choose, " +
-        "in the same plain language.",
+      "REQUIRED context under the question, in one or two plain sentences: what you found and " +
+        "why you need their decision. The user may read nothing but this card, so it must make " +
+        "sense on its own.",
     ),
   options: z.array(Option).max(MAX_OPTIONS).optional().describe("Required for choice/multi."),
   allowOther: z
@@ -140,6 +142,10 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       "anything the code, docs or a command can answer, to confirm work you were already asked " +
       "to do, or to check in on progress mid-task. No question to ask? Then do not call it — " +
       "just end the reply.\n\n" +
+      "NEVER answer the user's question with a question. When they ask something, answer it; " +
+      "if it is ambiguous, answer the likeliest reading and state your assumption. Call this " +
+      "only when you truly cannot proceed without their decision, and give every question a " +
+      "`detail` saying what you found and why you need their call.\n\n" +
       "Write every question and option so a non-technical person can answer it confidently " +
       "without reading the code: plain words, no jargon, no bare file paths or symbol names, " +
       "each option describing the OUTCOME they get rather than the change you make. If two " +
@@ -153,8 +159,9 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       "need specifics you do not have, either find them yourself first, or list the actual " +
       "candidates as separate options. The free-text escape already exists in the UI — you do " +
       "not need to add an option for it.\n\n" +
-      "This REPLACES writing the question in your reply — do not also end the message with an " +
-      "asking line, and do not restate the options as text.\n\n" +
+      "This REPLACES only the asking line — still write your answer and findings in the reply, " +
+      "but do not also end the message with an asking line, and do not restate the options as " +
+      "text.\n\n" +
       'Good: question "Where should people\'s login sessions be stored?", options "Keep it ' +
       'simple (one file)" [recommended, hint "No extra setup, fine to a few thousand users"] ' +
       'and "Use a real database" [hint "More setup now, handles far more users"].\n' +
@@ -175,6 +182,14 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       const ids = new Set(questions.map((q) => q.id));
       if (ids.size !== questions.length) {
         return "Error: every question needs a unique `id`.";
+      }
+      // The schema requires `detail`, but hosts can call execute directly.
+      const bare = questions.find((q) => !q.detail?.trim());
+      if (bare) {
+        return (
+          `Error: question "${bare.id}" has no \`detail\`. Say what you found and why you need ` +
+          "their decision — the user may read nothing but this card."
+        );
       }
       const missing = questions.find(
         (q) => (q.kind === "choice" || q.kind === "multi") && (q.options?.length ?? 0) < 2,

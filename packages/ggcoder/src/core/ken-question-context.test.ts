@@ -130,7 +130,7 @@ describe("Ken question context", () => {
     const parsed = tool.parameters.parse({
       questions: questions.map((q, index) => ({
         ...q,
-        ...(index === 0 ? { detail: "Reference context. ".repeat(1000) } : {}),
+        detail: index === 0 ? "Reference context. ".repeat(1000) : "Confirms the approach above.",
       })),
     });
     const execution = tool.execute(parsed, {

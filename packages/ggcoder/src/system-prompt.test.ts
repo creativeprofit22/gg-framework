@@ -213,7 +213,7 @@ describe("buildSystemPrompt", () => {
 
   it.each([
     [[], "ec199ed87e565afc051f0ad55f3102ccbb314791bdf203cfa94bb285f7bb68d2"],
-    [["ask_user"], "5304c952de101a0c143fa9f3cbfd755b0e75272037ae576be7a084bb8d2c89f0"],
+    [["ask_user"], "e48103acadfc8c1c66c746c16e591a1db92898021ab92bbd2143158f37bff9b7"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -246,6 +246,9 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("no asking line, no blockquote, no options restated as text");
     expect(prompt).toContain("Offering optional follow-up work counts as a question.");
     expect(prompt).toContain("No question? Just end; never invent one.");
+    // A card never stands in for an answer, and never arrives without context.
+    expect(prompt).toContain("A card never replaces an answer: when the user asks something, answer it");
+    expect(prompt).toContain("first write what you found and why you need their call");
     expect(prompt).not.toContain("the ask is the last line");
     expect(prompt).not.toContain("Blockquote nothing else");
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(0);

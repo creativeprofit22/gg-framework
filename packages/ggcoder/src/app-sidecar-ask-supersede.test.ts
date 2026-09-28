@@ -157,7 +157,7 @@ describe("a typed prompt supersedes a parked question", () => {
     const asks = createAskUserBridge({ broadcast, timeoutMs: 600_000 });
     const tool = createAskUserTool(asks.park);
     const parked = tool.execute(
-      { questions: [{ id: "store", question: "Which store for sessions?", kind: "confirm" }] },
+      { questions: [{ id: "store", question: "Which store for sessions?", kind: "confirm", detail: "Both stores fit; they differ in setup." }] },
       { signal: new AbortController().signal, toolCallId: "t1", onUpdate: () => {} } as never,
     ) as Promise<string>;
     await vi.waitFor(() => expect(broadcast).toHaveBeenCalled());

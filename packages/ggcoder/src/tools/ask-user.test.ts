@@ -23,7 +23,40 @@ function harness() {
   return { bridge, call, prompt, broadcast };
 }
 
+const CONTEXT = "Two options fit what I found; they differ in cost.";
+
 describe("ask_user", () => {
+  // The measured failure: the user asked a question and got back a bare card —
+  // a question with no answer and no context. A card never replaces an answer,
+  // and every card must explain itself.
+  it("tells the model to answer questions instead of asking back", () => {
+    const { description } = createAskUserTool(vi.fn());
+    expect(description).toContain("NEVER answer the user's question with a question.");
+    expect(description).toContain("answer the likeliest reading and state your assumption");
+    expect(description).toContain("still write your answer and findings in the reply");
+  });
+
+  it("rejects a question without context before showing the card", async () => {
+    const { call, broadcast } = harness();
+    expect(() =>
+      call({ questions: [{ id: "go", question: "Ship it?", kind: "confirm" }] }),
+    ).toThrow();
+    expect(() =>
+      call({ questions: [{ id: "go", question: "Ship it?", kind: "confirm", detail: "   " }] }),
+    ).toThrow();
+    // Hosts that bypass schema parsing still get the correction, not a bare card.
+    const ask = vi.fn(async () => ({ action: "cancel" as const }));
+    const tool = createAskUserTool(ask);
+    await expect(
+      tool.execute(
+        { questions: [{ id: "go", question: "Ship it?", kind: "confirm" }] } as never,
+        {} as never,
+      ),
+    ).resolves.toContain('question "go" has no `detail`');
+    expect(ask).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
   // The routing rule is about WHETHER a question exists, not how weighty it is.
   // Scoping the tool to "blocking decisions" left soft closers ("want me to
   // also…?") with nowhere legal to go: the system prompt bans a written asking
@@ -44,7 +77,7 @@ describe("ask_user", () => {
   it("blocks until the user answers, then returns the answer to the model", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "flag", question: "Flip the flag for everyone now?", kind: "confirm" }],
+      questions: [{ id: "flag", question: "Flip the flag for everyone now?", kind: "confirm", detail: CONTEXT }],
     });
     const asked = await prompt();
 
@@ -91,6 +124,7 @@ describe("ask_user", () => {
           id: "steps",
           question: "Which steps should I run?",
           kind: "multi",
+          detail: CONTEXT,
           options: [{ label: "Typecheck" }, { label: "Test suite" }, { label: "Windows smoke" }],
         },
       ],
@@ -106,7 +140,7 @@ describe("ask_user", () => {
   it("passes free text straight through", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "name", question: "What should I call the flag?", kind: "text" }],
+      questions: [{ id: "name", question: "What should I call the flag?", kind: "text", detail: CONTEXT }],
     });
     const asked = await prompt();
     bridge.settle(asked.id, { action: "answer", answers: { name: "retry_uploads" } });
@@ -121,12 +155,14 @@ describe("ask_user", () => {
           id: "trial",
           question: "Trial length before the first charge?",
           kind: "choice",
+          detail: CONTEXT,
           options: [{ label: "14 days", recommended: true }, { label: "No trial" }],
         },
         {
           id: "proration",
           question: "Proration on mid-cycle upgrade?",
           kind: "choice",
+          detail: CONTEXT,
           options: [{ label: "Prorate", recommended: true }, { label: "Charge full" }],
         },
       ],
@@ -146,7 +182,7 @@ describe("ask_user", () => {
   it("tells the model to stop asking when the user never answers", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm" }],
+      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT }],
     });
     await prompt();
     // What an aborted run / closed window does to a parked question.
@@ -160,7 +196,7 @@ describe("ask_user", () => {
   it("releases the turn when the user replies with their own message", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm" }],
+      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT }],
     });
     await prompt();
     bridge.cancelAll({ action: "cancel", superseded: true });
@@ -176,14 +212,14 @@ describe("ask_user", () => {
     const { call, broadcast } = harness();
     await expect(
       call({
-        questions: [{ id: "store", question: "Which store?", kind: "choice", options: [] }],
+        questions: [{ id: "store", question: "Which store?", kind: "choice", detail: CONTEXT, options: [] }],
       }),
     ).resolves.toContain("needs at least 2 options");
     await expect(
       call({
         questions: [
-          { id: "dupe", question: "First?", kind: "confirm" },
-          { id: "dupe", question: "Second?", kind: "confirm" },
+          { id: "dupe", question: "First?", kind: "confirm", detail: CONTEXT },
+          { id: "dupe", question: "Second?", kind: "confirm", detail: CONTEXT },
         ],
       }),
     ).resolves.toContain("unique `id`");
@@ -197,11 +233,12 @@ describe("ask_user", () => {
       const tool = createAskUserTool(ask);
       const parsed = tool.parameters.parse({
         questions: [
-          { id: "first", question: "Continue?", kind: "confirm" },
+          { id: "first", question: "Continue?", kind: "confirm", detail: CONTEXT },
           {
             id: "history",
             question: "Choose the storage policy",
             kind,
+            detail: CONTEXT,
             options: [
               { label: "Keep bounded history", recommended: true },
               { label: "Keep unlimited history", recommended: true },
@@ -228,6 +265,7 @@ describe("ask_user", () => {
               id: "history",
               question: "Choose the storage policy",
               kind,
+              detail: CONTEXT,
               options: [
                 { label: "Keep bounded history", recommended },
                 { label: "Keep unlimited history", recommended: false },
@@ -249,7 +287,7 @@ describe("ask_user", () => {
       const bridge = createAskUserBridge({ broadcast: () => {}, onTimeout, timeoutMs: 1000 });
       const tool = createAskUserTool(bridge.park);
       const result = tool.execute(
-        { questions: [{ id: "q", question: "Ship it?", kind: "confirm" }] },
+        { questions: [{ id: "q", question: "Ship it?", kind: "confirm", detail: CONTEXT }] },
         { signal: new AbortController().signal, toolCallId: "t1", onUpdate: () => {} } as never,
       ) as Promise<string>;
       await vi.advanceTimersByTimeAsync(1001);
@@ -278,6 +316,7 @@ describe("ask_user", () => {
               id: "what",
               question: "What should I work on?",
               kind: "choice",
+              detail: CONTEXT,
               options: [{ label }, { label: "Fix the failing upload test" }],
             },
           ],
@@ -295,6 +334,7 @@ describe("ask_user", () => {
           id: "what",
           question: "What should I fix first?",
           kind: "choice",
+          detail: CONTEXT,
           options: [
             { label: "The failing upload test", recommended: true },
             // "Select" appears here but the option names its own target, so it

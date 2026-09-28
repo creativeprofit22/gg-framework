@@ -25,10 +25,10 @@ const projectSweep = setupSweep.slice(
   setupSweep.indexOf(templateEnd),
 );
 
-test("canonical sweep changes only the five deprecated-tool lines", () => {
+test("canonical sweep bytes are pinned", () => {
   assert.equal(
     createHash("sha256").update(commandBytes).digest("hex"),
-    "1a4741dc27083e21d3ba2ad26195061cd24d4a28e51c3894d4c71892a8c10cd2",
+    "aff046c4a2a36e11ff5a45b708fa888464a2ee765b410fbda765b64db8a8cf7d",
   );
   assert.equal(commandBytes.includes(Buffer.from("\r\n")), false);
 });
@@ -70,6 +70,40 @@ test("standalone sweep keeps local evidence authoritative", () => {
   );
   assert.match(command, /external evidence cannot establish local business rules or behavior/i);
   assert.match(command, /Analyzer output is a lead, not a finding by itself/i);
+});
+
+test("standalone sweep verifies lane findings and honors skips", () => {
+  assert.match(command, /Verify before accepting: re-read the cited lines yourself/i);
+  assert.match(command, /silent failure handling/i);
+  assert.match(command, /matching a `skip` entry in `\.gg\/sweep\.config\.json`/);
+  assert.match(command, /skip if the repo has only one commit/i);
+});
+
+test("standalone sweep hands refactor work to the refactoring skill and /commit", () => {
+  assert.match(command, /Use the `refactoring` skill's smell catalog and thresholds/);
+  assert.match(command, /Follow the refactoring skill: green baseline first/);
+  assert.match(command, /Commit first: run \/commit/);
+  assert.match(command, /The sweep itself never commits/);
+});
+
+test("standalone sweep always tells the user the next step", () => {
+  assert.match(command, /Always end with one `Next:` line/);
+  assert.match(command, /all area sweeps are done\. Run \/sweep --merge/);
+  assert.match(command, /For a whole-codebase pass, run \/sweep --map/);
+  assert.match(
+    command,
+    /For every task, this line: `Before starting, commit any uncommitted changes/,
+  );
+});
+
+test("standalone sweep maps areas and merges fix tasks across sweeps", () => {
+  assert.match(command, /--map \[focus\] \| --merge/);
+  assert.match(command, /Give every source file exactly one owning area/);
+  assert.match(
+    command,
+    /Consider only pending tasks titled `Fix \/sweep:`; never touch other tasks/,
+  );
+  assert.match(command, /already covered by a pending `Fix \/sweep:` task/);
 });
 
 test("standalone sweep removes deprecated research tools", () => {

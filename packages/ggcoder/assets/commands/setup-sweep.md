@@ -23,6 +23,8 @@ This command is globally available; the generated `/sweep` is project-local and 
 
 Read only the project root and obvious config files first. Do not recurse through dependency/build/vendor folders.
 
+Manifests are often nested. Also check workspace members and one or two directory levels below the root (e.g. `packages/*/`, `apps/*/`, `*/src-tauri/Cargo.toml`, `services/*/pyproject.toml`) so a secondary stack is not missed.
+
 Detect:
 
 - Languages and frameworks:
@@ -42,7 +44,8 @@ Detect:
 - Repo scale:
   - approximate source file count by language
   - monorepo/workspace markers
-  - generated/build/vendor folders to exclude
+  - generated/build/vendor folders to exclude, including per-package copies (`**/dist`, `**/node_modules`, `**/target`)
+  - tool state, backups, or snapshot folders that contain copies of source (e.g. `.gg/`), which would otherwise surface as fake duplicates or drift
 
 If no meaningful project files exist, stop and report that there is nothing to configure.
 
@@ -67,7 +70,7 @@ Prompt: "Read the project root and obvious workspace/config files only. Identify
 
 ### Scout B — Analyzer and dependency tooling
 
-Prompt: "Read project package/config files only. Identify existing dead-code, dependency, duplication, import-graph, lint, typecheck, test, build, and schema/codegen tools already available. Suggest optional ephemeral/dev tools only when appropriate for this stack. Do not edit or install. Return exact commands and whether each is safe/non-mutating."
+Prompt: "Read project package/config files only. Identify existing dead-code, dependency, duplication, import-graph, lint, typecheck, test, build, and schema/codegen tools already available. Suggest optional ephemeral/dev tools only when appropriate for this stack. Never propose fix, format-write, or codegen commands as analyzers. Do not edit or install. Return exact commands, whether each is safe/non-mutating, and whether each runs on given files, one package, or the whole repo."
 
 ### Scout C — Verification and CI gates
 
@@ -115,6 +118,8 @@ Suggested analyzer map:
 
 - Checks: `cargo check`, `cargo test`, `cargo clippy` if present/available.
 - Dependency usage: `cargo machete` or `cargo udeps` only if present/approved.
+- Dead code: `dead_code`/`unused_*` warnings from `cargo check`/`cargo clippy` are leads; trace callers with `git grep` on `use crate::<path>`, `mod <name>`, and the symbol name. For Tauri, also check `generate_handler!` registrations and frontend `invoke("...")` names.
+- Always pass `--manifest-path` when `Cargo.toml` is not at the repo root.
 - Verification: existing cargo commands.
 
 ### Ruby / PHP / other
@@ -179,15 +184,17 @@ Use this shape:
   "scopeResolution": {
     "defaultMode": "recent",
     "excludeGlobs": [
-      "node_modules/**",
-      "dist/**",
-      "build/**",
-      "coverage/**",
-      "target/**",
-      ".next/**",
-      ".nuxt/**",
-      ".venv/**",
-      "vendor/**"
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/coverage/**",
+      "**/target/**",
+      "**/.next/**",
+      "**/.nuxt/**",
+      "**/.venv/**",
+      "**/vendor/**",
+      ".gg/**",
+      "<detected tool-state, snapshot, or generated folders>"
     ],
     "sourceGlobs": ["<actual source globs for this project>"],
     "testGlobs": ["<actual test globs for this project>"],
@@ -201,6 +208,7 @@ Use this shape:
         "id": "<stable id>",
         "lane": "prune|refactor|drift|verify|scope",
         "command": "<exact command>",
+        "coverage": "files|package|repo",
         "purpose": "<what evidence it produces>",
         "requiresConfirmation": false
       }
@@ -210,11 +218,13 @@ Use this shape:
         "id": "<stable id>",
         "lane": "prune|refactor|drift",
         "command": "<exact ephemeral command>",
+        "coverage": "files|package|repo",
         "purpose": "<what evidence it produces>",
         "requiresConfirmation": true
       }
     ]
   },
+  "skip": [],
   "verification": {
     "commands": ["<existing lint/typecheck/test/build commands that are safe and relevant>"],
     "notes": "<project-specific caveats, if any>"
@@ -223,6 +233,12 @@ Use this shape:
 ```
 
 Omit empty arrays only if the generated `/sweep` does not depend on them; otherwise use empty arrays explicitly.
+
+Field rules:
+
+- `coverage` says what a command checks: `files` (accepts file paths), `package` (one workspace package), or `repo` (whole repository). Prefer a `files` or `package` variant whenever the tool supports one.
+- Commands that take runtime input use curly placeholders that `/sweep` fills in: `{files}` for scoped paths and `{name}` for a module or symbol name. Never use angle brackets in generated commands.
+- `skip` starts empty. The user adds `{ "path": "<file>", "symbol": "<optional name>", "reason": "<why>" }` entries for findings they have accepted or rejected, so later sweeps do not re-raise them.
 
 ## Step 5: Generate `.gg/commands/sweep.md`
 
@@ -242,7 +258,7 @@ The generated command must include:
 
 ````markdown
 ---
-argument-hint: [natural-language scope | recent | --all]
+argument-hint: [natural-language scope | recent | --all | --map [focus] | --merge]
 description: Sweep this project for dead code, refactor opportunities, and duplicate/drifted implementations; creates concrete task-pane tasks.
 allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user
 ---
@@ -260,14 +276,42 @@ Read `.gg/sweep.config.json`. If it is missing or malformed, stop and tell the u
 
 Use the configured analyzer commands exactly as written. Do not install, download, or run optional commands unless the config marks them optional and the user explicitly confirms.
 
+## Modes: `--map` and `--merge`
+
+These modes replace Steps 1–6. Both are read-only for project files; they only add or remove task-pane tasks.
+
+Whole-codebase workflow: commit → `/sweep --map` → run every `Sweep:` task (read-only, safe back to back) → `/sweep --merge` → run `Fix /sweep:` tasks one at a time, committing after each.
+
+### `--map [optional focus]`
+
+Split the codebase into sweep areas so the user never has to pick scopes. If text follows `--map`, map only that part of the codebase.
+
+1. If `git status --short` shows uncommitted changes, say sweeps should start from committed work and suggest `/commit`; continue anyway.
+2. List candidate areas along package, workspace, and top-level folder boundaries, using the configured source globs and `excludeGlobs` when a config exists. Count source files per area with `git ls-files`. Split any area over ~80 source files; fold areas under ~5 files into a neighbor.
+3. Give every source file exactly one owning area, so shared code is swept once.
+4. Add one `cross-area contracts` area: types, schemas, API/IPC shapes, events, and constants imported by two or more areas. Its sweep focuses on Drift.
+5. Create one task per area with `tasks` action `add`. Title: `Sweep: <area>`. Prompt: `/sweep <plain description of the area> — folders: <globs>. Create tasks only for files this area owns; list findings in other areas' files in the report instead.` Add shared foundations first, then core logic, then app/UI areas, then `cross-area contracts`.
+6. Report a table (area, folders, source files, recent changes from the hotspot count) and the workflow line above. End with: `Next: run the Sweep: tasks (CTRL + T opens the task pane). When the last one finishes, run /sweep --merge.`
+
+### `--merge`
+
+Run once after all area sweeps finish and before fixing anything.
+
+1. `tasks` action `list`. Consider only pending tasks titled `Fix /sweep:`; never touch other tasks. If fewer than two, report and stop.
+2. Group tasks that cite the same files or symbols. Within a group: remove exact duplicates, keeping the most concrete; replace overlapping changes to the same code with one combined task that keeps all evidence and verification commands; turn conflicting directions (e.g. DELETE vs EXTRACT) into one VERIFY-FIRST or DECIDE task. Re-read cited lines and drop tasks whose code no longer exists.
+3. Order survivors by severity, then dependency order, with Prune before Refactor on the same files. The task pane keeps creation order, so if the order changed, remove and re-add the survivors in the final order with their prompts unchanged.
+4. Report before/after counts, each merge with its reason, and the final order. End with: `Run the tasks one at a time and commit after each. Press CTRL + T to open the task pane.`
+
 ## Step 1: Resolve scope
 
 If `$ARGUMENTS` is empty or equals `recent`, resolve scope from:
 
 1. `git status --short`
-2. `git diff --name-only HEAD~1 HEAD`
+2. `git diff --name-only HEAD~1 HEAD` (skip if the repo has only one commit)
 3. the most recently modified `.gg/plans/*.md`
 4. current conversation context
+
+Drop files matching the configured `excludeGlobs`.
 
 If `$ARGUMENTS` is `--all`, use the configured source, route, config, docs, and test globs for a whole-repo sweep. Warn that this is broader and may produce more findings; continue only if the user confirms.
 
@@ -286,9 +330,13 @@ Build a scope map:
 
 If confidence is low, multiple unrelated domains match, or the scope exceeds roughly 80 source files without `--all`, ask a clarifying question before continuing.
 
+Record whether any scoped file has uncommitted changes (`git status --short -- {files}`); Step 6 uses it.
+
+Rank hotspots: count recent changes per scoped file with `git log --since=90.days --format= --name-only -- {files} | sort | uniq -c | sort -rn`. Files that change often and are complex are reviewed first and break severity ties.
+
 ## Step 2: Run safe programmatic evidence collection
 
-Run only safe configured analyzers relevant to the resolved scope. Always capture command, exit code, and concise evidence.
+Run only safe configured analyzers relevant to the resolved scope. Always capture command, exit code, and concise evidence. Fill `{files}` with the scoped files the tool accepts and `{name}` with the module or symbol being traced.
 
 Use these project-configured commands when present:
 
@@ -301,7 +349,8 @@ Optional commands configured for this project:
 Rules:
 
 - Do not let analyzer output become findings by itself. Treat it as leads.
-- If a command is whole-project only, run it only when it is safe and relevant; otherwise note why it was skipped.
+- For a scoped sweep, prefer `coverage: files` or `package` commands. Run `coverage: repo` commands only for `--all` or when no narrower variant exists, and keep only output that touches the resolved scope; otherwise note why it was skipped.
+- An empty result from a tracing command is not proof of absence; confirm the pattern matches a known-used symbol before relying on it.
 - If a command fails because the project is already broken, read enough output to understand whether sweep can continue. Do not claim checks passed.
 
 ## Step 3: Dispatch three audit lanes
@@ -315,6 +364,8 @@ Each lane receives:
 - exact files to read
 - configured framework/language notes
 - the task creation rules below
+
+Each lane returns one finding per entry: classification, suggested severity, `file:line` evidence, what is wrong, fix direction, and verification command. It also lists what it checked when it has no findings.
 
 ### Lane A — Prune
 
@@ -348,6 +399,9 @@ Find structural improvements with concrete payoff, not style preferences:
 - fragile conditional trees or repeated switch/case dispatches
 - repeated API clients, serializers, validators, query keys, permission checks, error mapping
 - circular or high-fan-in modules that create real maintenance risk
+- silent failure handling: empty or log-only catch blocks, swallowed promise rejections, and fallbacks that hide a broken state
+
+Use the `refactoring` skill's smell catalog and thresholds as the yardstick: load the skill before dispatching lanes and pass its thresholds to this lane. Thresholds mark where to look; a finding still needs a concrete payoff. Name the transformation each finding needs (e.g. Extract Function, Introduce Parameter Object).
 
 Classify each finding:
 
@@ -385,6 +439,8 @@ Use Steroids only to avoid false positives around standard external/framework sp
 
 Combine the three lanes before creating tasks.
 
+Verify before accepting: re-read the cited lines yourself and confirm the claim holds. Lane output is evidence, not truth. Assign severity from the scale below, not from the lane's suggestion.
+
 Reject findings that are:
 
 - style-only
@@ -393,6 +449,8 @@ Reject findings that are:
 - missing exact file/line evidence
 - impossible to fix without a product decision, unless classified as DECIDE with concrete options
 - duplicates of a higher-quality finding from another lane
+- matching a `skip` entry in `.gg/sweep.config.json`
+- already covered by a pending `Fix /sweep:` task (check with `tasks` action `list`)
 
 Resolve conflicts:
 
@@ -422,10 +480,12 @@ Each standalone task prompt must include:
 - What is wrong and why it matters
 - Concrete code-level fix direction with actual symbols, filenames, imports, commands, or config keys
 - Files to read before editing
+- For every task, this line: `Before starting, commit any uncommitted changes with /commit; commit this fix before starting the next task.`
+- For Refactor-lane tasks: the named transformation, plus this line: `Follow the refactoring skill: green baseline first, one named transformation per step, revert on red, never edit tests to get green.`
 - Whether any Steroids grounding was used and what pattern/evidence it found
 - Targeted verification command(s) from this project config, or manual verification steps if no command exists
 
-Order tasks by severity, then by dependency order: types/schemas/config → core logic → integrations/routes → UI/docs/tests → cleanup.
+Order tasks by severity, then by dependency order: types/schemas/config → core logic → integrations/routes → UI/docs/tests → cleanup. When tasks touch the same files, Prune tasks come before Refactor tasks so nothing is restructured just before it is deleted.
 
 ## Step 6: Report
 
@@ -455,6 +515,17 @@ Then skipped/rejected items only if useful:
 Skipped: file:line — reason.
 ```
 
+To stop a rejected finding from returning, the user can add it to `skip` in `.gg/sweep.config.json`.
+
+If tasks were created and any scoped file has uncommitted changes, add: `Commit first: run /commit (the commit button in the desktop app) to group uncommitted changes into atomic commits, then run the tasks. The refactoring skill pauses on a dirty tree.` The sweep itself never commits.
+
+Always end with one `Next:` line, chosen by `tasks` action `list`:
+
+- Other `Sweep:` tasks still pending (ignore the one running now): `Next: <N> area sweeps left. Run /sweep --merge after the last one.`
+- This sweep came from a `Sweep:` task and none remain: `Next: all area sweeps are done. Run /sweep --merge, then run the fixes one at a time.`
+- Otherwise, if this was a `recent` or empty-argument sweep: `Next: run the fixes one at a time, committing after each. For a whole-codebase pass, run /sweep --map.`
+- Otherwise: `Next: run the fixes one at a time, committing after each.`
+
 If tasks were created, end with: `Tasks created. Press CTRL + T to open the task pane and run them.`
 ````
 
@@ -463,7 +534,8 @@ If tasks were created, end with: `Tasks created. Press CTRL + T to open the task
 After writing the files:
 
 - Re-read `.gg/sweep.config.json` and `.gg/commands/sweep.md`.
-- Confirm there are no unreplaced placeholders such as `<detected...>` or `<insert...>`.
+- Confirm there are no unreplaced placeholders such as `<detected...>` or `<insert...>`. Runtime `{files}`/`{name}` placeholders are allowed.
+- Run each safe analyzer once (fill runtime placeholders with a known-used file or symbol) and confirm it exits and produces meaningful output. A tracing command must find at least one known importer. Fix or drop any command that fails or silently matches nothing.
 - Confirm optional commands are marked `requiresConfirmation: true`.
 - Confirm no command mutates source, dependencies, lockfiles, DB, or git state without explicit confirmation.
 

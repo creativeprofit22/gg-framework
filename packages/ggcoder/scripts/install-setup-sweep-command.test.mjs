@@ -68,7 +68,7 @@ test("setup-sweep documents Steroids and approval tools for its generated comman
 test("generated sweep template bytes remain exact and independently writable", async () => {
   assert.equal(
     createHash("sha256").update(projectSweepBytes).digest("hex"),
-    "ac58d776744079738f42d7830055e15cc0505ef17338f59247182e0eb77269dd",
+    "1b12b56e08756dcee7cbf8863c84c72c9c45166d9b704a1c3b93b58c50575792",
   );
   assert.equal(projectSweepBytes.includes(Buffer.from("\r\n")), false);
 
@@ -119,6 +119,62 @@ test("generated sweep keeps local evidence authoritative", () => {
     projectSweep,
     /Do not let analyzer output become findings by itself\. Treat it as leads/i,
   );
+});
+
+test("setup-sweep generates scoped, verified analyzers and nested excludes", () => {
+  assert.match(command, /"\*\*\/node_modules\/\*\*"/);
+  assert.match(command, /"\.gg\/\*\*"/);
+  assert.match(command, /"coverage": "files\|package\|repo"/);
+  assert.match(command, /"skip": \[\]/);
+  assert.match(command, /Never use angle brackets in generated commands/i);
+  assert.match(command, /Run each safe analyzer once/i);
+  assert.match(command, /A tracing command must find at least one known importer/i);
+  assert.match(command, /Never propose fix, format-write, or codegen commands as analyzers/i);
+  assert.match(command, /Always pass `--manifest-path`/);
+});
+
+test("generated sweep verifies lane findings and honors skips", () => {
+  assert.match(projectSweep, /Verify before accepting: re-read the cited lines yourself/i);
+  assert.match(
+    projectSweep,
+    /Assign severity from the scale below, not from the lane's suggestion/i,
+  );
+  assert.match(projectSweep, /silent failure handling/i);
+  assert.match(projectSweep, /matching a `skip` entry in `\.gg\/sweep\.config\.json`/);
+  assert.match(projectSweep, /prefer `coverage: files` or `package` commands/i);
+  assert.match(projectSweep, /skip if the repo has only one commit/i);
+});
+
+test("generated sweep hands refactor work to the refactoring skill and /commit", () => {
+  assert.match(projectSweep, /Use the `refactoring` skill's smell catalog and thresholds/);
+  assert.match(projectSweep, /Follow the refactoring skill: green baseline first/);
+  assert.match(projectSweep, /Rank hotspots/);
+  assert.match(projectSweep, /Prune tasks come before Refactor tasks/);
+  assert.match(projectSweep, /Commit first: run \/commit/);
+  assert.match(projectSweep, /The sweep itself never commits/);
+});
+
+test("generated sweep always tells the user the next step", () => {
+  assert.match(projectSweep, /Always end with one `Next:` line/);
+  assert.match(projectSweep, /When the last one finishes, run \/sweep --merge/);
+  assert.match(projectSweep, /all area sweeps are done\. Run \/sweep --merge/);
+  assert.match(projectSweep, /For a whole-codebase pass, run \/sweep --map/);
+  assert.match(
+    projectSweep,
+    /For every task, this line: `Before starting, commit any uncommitted changes/,
+  );
+});
+
+test("generated sweep maps areas and merges fix tasks across sweeps", () => {
+  assert.match(projectSweep, /--map \[focus\] \| --merge/);
+  assert.match(projectSweep, /Give every source file exactly one owning area/);
+  assert.match(projectSweep, /`cross-area contracts`/);
+  assert.match(projectSweep, /Title: `Sweep: <area>`/);
+  assert.match(
+    projectSweep,
+    /Consider only pending tasks titled `Fix \/sweep:`; never touch other tasks/,
+  );
+  assert.match(projectSweep, /already covered by a pending `Fix \/sweep:` task/);
 });
 
 test("setup-sweep and generated sweep remove deprecated research tools", () => {

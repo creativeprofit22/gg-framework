@@ -1,5 +1,5 @@
 ---
-argument-hint: [natural-language scope | recent | --all]
+argument-hint: [natural-language scope | recent | --all | --map [focus] | --merge]
 description: Fallback scoped code-health sweep; asks to run /setup-sweep or uses baseline git/grep evidence to create dead-code/refactor/drift tasks.
 allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user
 ---
@@ -29,12 +29,38 @@ Continue with baseline no-install sweep now? [y/N]
 
 Only continue if the user confirms. Baseline mode may use only `git`, `find`, `grep`, import/path reading, and existing obvious package scripts. Do not install or download anything.
 
+## Modes: `--map` and `--merge`
+
+These modes replace Steps 1–6. Both are read-only for project files; they only add or remove task-pane tasks.
+
+Whole-codebase workflow: commit → `/sweep --map` → run every `Sweep:` task (read-only, safe back to back) → `/sweep --merge` → run `Fix /sweep:` tasks one at a time, committing after each.
+
+### `--map [optional focus]`
+
+Split the codebase into sweep areas so the user never has to pick scopes. If text follows `--map`, map only that part of the codebase.
+
+1. If `git status --short` shows uncommitted changes, say sweeps should start from committed work and suggest `/commit`; continue anyway.
+2. List candidate areas along package, workspace, and top-level folder boundaries, using the configured source globs and `excludeGlobs` when a config exists. Count source files per area with `git ls-files`. Split any area over ~80 source files; fold areas under ~5 files into a neighbor.
+3. Give every source file exactly one owning area, so shared code is swept once.
+4. Add one `cross-area contracts` area: types, schemas, API/IPC shapes, events, and constants imported by two or more areas. Its sweep focuses on Drift.
+5. Create one task per area with `tasks` action `add`. Title: `Sweep: <area>`. Prompt: `/sweep <plain description of the area> — folders: <globs>. Create tasks only for files this area owns; list findings in other areas' files in the report instead.` Add shared foundations first, then core logic, then app/UI areas, then `cross-area contracts`.
+6. Report a table (area, folders, source files, recent changes from the hotspot count) and the workflow line above. End with: `Next: run the Sweep: tasks (CTRL + T opens the task pane). When the last one finishes, run /sweep --merge.`
+
+### `--merge`
+
+Run once after all area sweeps finish and before fixing anything.
+
+1. `tasks` action `list`. Consider only pending tasks titled `Fix /sweep:`; never touch other tasks. If fewer than two, report and stop.
+2. Group tasks that cite the same files or symbols. Within a group: remove exact duplicates, keeping the most concrete; replace overlapping changes to the same code with one combined task that keeps all evidence and verification commands; turn conflicting directions (e.g. DELETE vs EXTRACT) into one VERIFY-FIRST or DECIDE task. Re-read cited lines and drop tasks whose code no longer exists.
+3. Order survivors by severity, then dependency order, with Prune before Refactor on the same files. The task pane keeps creation order, so if the order changed, remove and re-add the survivors in the final order with their prompts unchanged.
+4. Report before/after counts, each merge with its reason, and the final order. End with: `Run the tasks one at a time and commit after each. Press CTRL + T to open the task pane.`
+
 ## Step 1: Resolve conversational scope
 
 If `$ARGUMENTS` is empty or equals `recent`, resolve scope from:
 
 1. `git status --short`
-2. `git diff --name-only HEAD~1 HEAD`
+2. `git diff --name-only HEAD~1 HEAD` (skip if the repo has only one commit)
 3. the most recently modified `.gg/plans/*.md`
 4. current conversation context
 
@@ -55,9 +81,13 @@ Build a scope map:
 
 If confidence is low, multiple unrelated domains match, or the scope exceeds roughly 80 source files without `--all`, ask a clarifying question before continuing.
 
+Record whether any scoped file has uncommitted changes (`git status --short -- {files}`); Step 6 uses it.
+
+Rank hotspots: count recent changes per scoped file with `git log --since=90.days --format= --name-only -- {files} | sort | uniq -c | sort -rn`. Files that change often and are complex are reviewed first and break severity ties.
+
 ## Step 2: Collect baseline/programmatic evidence
 
-Use project-specific `.gg/sweep.config.json` analyzer commands if present. Respect each command’s `requiresConfirmation` value.
+Use project-specific `.gg/sweep.config.json` analyzer commands if present. Respect each command’s `requiresConfirmation` value. For a scoped sweep, prefer commands whose `coverage` is `files` or `package`; fill `{files}` and `{name}` placeholders.
 
 In fallback baseline mode, collect safe evidence only:
 
@@ -71,6 +101,7 @@ In fallback baseline mode, collect safe evidence only:
 Rules:
 
 - Analyzer output is a lead, not a finding by itself.
+- An empty result from a tracing command is not proof of absence; confirm the pattern matches a known-used symbol first.
 - Do not run package installs, `npx --yes`, `uvx`, `pipx`, `go mod tidy`, code generators, migrations, or any mutating command without explicit confirmation.
 - If a check fails because the project is already broken, read enough output to understand whether the sweep can continue. Do not claim checks passed.
 
@@ -78,7 +109,7 @@ Rules:
 
 Use subagents when available. If subagents are unavailable, perform the lanes sequentially yourself.
 
-Each lane receives the scope map, baseline/analyzer evidence, and exact files to read.
+Each lane receives the scope map, baseline/analyzer evidence, and exact files to read. Each lane returns one finding per entry: classification, suggested severity, `file:line` evidence, what is wrong, fix direction, and verification command. It also lists what it checked when it has no findings.
 
 ### Lane A — Prune
 
@@ -112,6 +143,9 @@ Find structural improvements with concrete payoff, not style preferences:
 - fragile conditionals or repeated dispatch trees
 - repeated API clients, serializers, validators, query keys, permission checks, error mapping
 - circular or high-fan-in modules that create real maintenance risk
+- silent failure handling: empty or log-only catch blocks, swallowed promise rejections, and fallbacks that hide a broken state
+
+Use the `refactoring` skill's smell catalog and thresholds as the yardstick: load the skill before dispatching lanes and pass its thresholds to this lane. Thresholds mark where to look; a finding still needs a concrete payoff. Name the transformation each finding needs (e.g. Extract Function, Introduce Parameter Object).
 
 Classify:
 
@@ -149,6 +183,8 @@ Use Steroids only to avoid false positives around standard external/framework sp
 
 Combine all lanes before creating tasks.
 
+Verify before accepting: re-read the cited lines yourself and confirm the claim holds. Lane output is evidence, not truth. Assign severity from the scale below, not from the lane's suggestion.
+
 Reject findings that are:
 
 - style-only
@@ -157,6 +193,8 @@ Reject findings that are:
 - missing exact file/line evidence
 - impossible to fix without a concrete decision path
 - duplicates of a higher-quality finding from another lane
+- matching a `skip` entry in `.gg/sweep.config.json`
+- already covered by a pending `Fix /sweep:` task (check with `tasks` action `list`)
 
 Resolve conflicts:
 
@@ -186,10 +224,12 @@ Each standalone task prompt must include:
 - What is wrong and why it matters
 - Concrete code-level fix direction with actual symbols, filenames, imports, commands, or config keys
 - Files to read before editing
+- For every task, this line: `Before starting, commit any uncommitted changes with /commit; commit this fix before starting the next task.`
+- For Refactor-lane tasks: the named transformation, plus this line: `Follow the refactoring skill: green baseline first, one named transformation per step, revert on red, never edit tests to get green.`
 - Whether any Steroids grounding was used and what pattern/evidence it found
 - Targeted verification command(s), or manual verification steps if no command exists
 
-Order tasks by severity, then dependency order: types/schemas/config → core logic → integrations/routes → UI/docs/tests → cleanup.
+Order tasks by severity, then dependency order: types/schemas/config → core logic → integrations/routes → UI/docs/tests → cleanup. When tasks touch the same files, Prune tasks come before Refactor tasks so nothing is restructured just before it is deleted.
 
 ## Step 6: Report
 
@@ -219,5 +259,14 @@ Then skipped/rejected items only if useful:
 ```text
 Skipped: file:line — reason.
 ```
+
+If tasks were created and any scoped file has uncommitted changes, add: `Commit first: run /commit (the commit button in the desktop app) to group uncommitted changes into atomic commits, then run the tasks. The refactoring skill pauses on a dirty tree.` The sweep itself never commits.
+
+Always end with one `Next:` line, chosen by `tasks` action `list`:
+
+- Other `Sweep:` tasks still pending (ignore the one running now): `Next: <N> area sweeps left. Run /sweep --merge after the last one.`
+- This sweep came from a `Sweep:` task and none remain: `Next: all area sweeps are done. Run /sweep --merge, then run the fixes one at a time.`
+- Otherwise, if this was a `recent` or empty-argument sweep: `Next: run the fixes one at a time, committing after each. For a whole-codebase pass, run /sweep --map.`
+- Otherwise: `Next: run the fixes one at a time, committing after each.`
 
 If tasks were created, end with: `Tasks created. Press CTRL + T to open the task pane and run them.`

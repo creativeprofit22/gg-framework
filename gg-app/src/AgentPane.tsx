@@ -31,6 +31,13 @@ import {
   CLIENT_OWNED_SLASH_COMMANDS,
 } from "@kenkaiiii/gg-core/slash-command-contract";
 import { autosizeComposer } from "./composer-autosize";
+import {
+  COMPACT_IDLE_PLACEHOLDER,
+  COMPACT_RUNNING_PLACEHOLDER,
+  fieldTextBox,
+  fitPlaceholder,
+  type FieldTextBox,
+} from "./composer-placeholder";
 import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
 import {
   initialProgrammaticChatState,
@@ -1469,9 +1476,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     !showPicker &&
     workspaceMode === "code" &&
     input.length === 0;
-  const inputPlaceholder = running
-    ? RUNNING_INPUT_PLACEHOLDERS[placeholderIndex % RUNNING_INPUT_PLACEHOLDERS.length]
-    : INPUT_PLACEHOLDERS[placeholderIndex % INPUT_PLACEHOLDERS.length];
+  // The empty composer is one line tall, so a hint wider than the field is cut
+  // mid-phrase; swap to a short hint instead. Width comes from the field's own
+  // resize observer; text is measured with the field's font on a canvas.
+  const [inputTextBox, setInputTextBox] = useState<FieldTextBox | null>(null);
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const measureHint = useCallback(
+    (text: string): number | null => {
+      if (!inputTextBox) return null;
+      measureCanvasRef.current ??= document.createElement("canvas");
+      const context = measureCanvasRef.current.getContext("2d");
+      if (!context) return null;
+      context.font = inputTextBox.font;
+      return context.measureText(text).width;
+    },
+    [inputTextBox],
+  );
+  const inputPlaceholder = fitPlaceholder(
+    running
+      ? RUNNING_INPUT_PLACEHOLDERS[placeholderIndex % RUNNING_INPUT_PLACEHOLDERS.length]
+      : INPUT_PLACEHOLDERS[placeholderIndex % INPUT_PLACEHOLDERS.length],
+    running ? COMPACT_RUNNING_PLACEHOLDER : COMPACT_IDLE_PLACEHOLDER,
+    inputTextBox?.availablePx ?? null,
+    measureHint,
+  );
   const setAnimatedPlaceholder = useCallback((text: string) => {
     displayPlaceholderRef.current = text;
     setDisplayPlaceholder(text);
@@ -1606,11 +1634,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         inputResizeFrameRef.current = null;
       }
       if (!el || typeof ResizeObserver === "undefined") return;
+      // Zero width means not laid out (jsdom, hidden pane): keep the full hint.
+      const trackTextBox = (): void => {
+        setInputTextBox(el.clientWidth > 0 ? fieldTextBox(el) : null);
+      };
+      trackTextBox();
       let lastWidth = el.clientWidth;
       const observer = new ResizeObserver(() => {
         const width = el.clientWidth;
         if (width === lastWidth) return;
         lastWidth = width;
+        trackTextBox();
         if (inputResizeFrameRef.current !== null) {
           cancelAnimationFrame(inputResizeFrameRef.current);
         }

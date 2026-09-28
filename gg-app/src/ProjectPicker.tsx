@@ -15,7 +15,8 @@ import {
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
-import { Badge, sourceStyle } from "./Badge";
+import { Badge } from "./Badge";
+import { sourceStyle } from "./source-style";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { ListSkeleton } from "./Skeleton";
 import { BackButton } from "./BackButton";

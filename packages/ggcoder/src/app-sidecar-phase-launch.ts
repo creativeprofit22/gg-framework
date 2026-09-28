@@ -79,7 +79,7 @@ export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession
     nextPhaseId: string;
     action: "start-next-phase";
   };
-  mode: "code" | "chat";
+  mode: "code" | "chat" | "motion";
   busyState: AppSidecarSessionBusyState;
   mutations: AppSidecarSessionMutationCoordinator;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;

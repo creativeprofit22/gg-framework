@@ -286,6 +286,11 @@ export class LspClientPool {
     return this.entries.get(this.keyFor(spec, root))?.holders.size ?? 0;
   }
 
+  /** In-flight calls for one (spec, root), or 0 when nothing is pooled. Test/diagnostic use. */
+  activeCallCount(spec: LspServerSpec, root: string): number {
+    return this.entries.get(this.keyFor(spec, root))?.activeCalls ?? 0;
+  }
+
   /**
    * Retained stderr of a server `holder` is using. Diagnostic probe for tests
    * and failure reporting — a server's own last words are usually the only

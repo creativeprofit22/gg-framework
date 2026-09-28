@@ -1353,7 +1353,7 @@ select {
   text-decoration: underline;
 }
 /* ── Home actions ──
-   The two ways in (Code, Chat) as big pills under the banner, and Settings as
+   The three ways in (Code, Chat, Motion) as big pills under the banner, and Settings as
    a gear pinned to the bottom-right corner. */
 .home-actions {
   display: flex;
@@ -7196,6 +7196,19 @@ select {
 }
 .wake-cursor-rest {
   color: var(--secondary);
+}
+/* Motion's one-click starting points: a wrapping row just above the activity
+   bar, aligned to the same rail as the rest of the live region. */
+.motion-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px var(--rail);
+}
+.motion-starter {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
 }
 @media (prefers-reduced-motion: reduce) {
   .wake-cursor {

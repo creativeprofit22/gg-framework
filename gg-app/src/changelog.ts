@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.72.1",
+    date: "2026-09-28",
+    items: [
+      "The `Radio` is ready the moment GG Coder opens. I fixed a startup hiccup where it could ask for your stations before the app had fully woken up, so your music is there from the very first click.",
+      "Typing and sending feels smoother. I tidied up how the chat box resizes itself, so it glides to the right size without tripping over its own feet every time you hit send.",
+    ],
+  },
+  {
     version: "0.72.0",
     date: "2026-09-28",
     items: [

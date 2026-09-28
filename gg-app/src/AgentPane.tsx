@@ -91,6 +91,7 @@ import {
   type AskUserPrompt,
   type PaneAgentClient,
   type PaneSessionTarget,
+  workspaceProductName,
   NewSessionError,
   PlanMutationError,
 } from "./agent";
@@ -133,6 +134,7 @@ import type {
 import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
+import { MotionStarters } from "./MotionStarters";
 import { ConfirmModal } from "./ConfirmModal";
 import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
 import { InitGitModal } from "./InitGitModal";
@@ -160,7 +162,8 @@ import { Confetti } from "./Confetti";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { TitleUsageMeter } from "./TitleUsageMeter";
-import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import { formatWorkspaceTitle } from "./workspace-title";
 import { useProgress } from "./useProgress";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
@@ -1596,7 +1599,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Keep the native window title aligned with the visible title-bar context.
   useEffect(() => {
     if (!ownsWindowGlobals) return;
-    const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME;
+    const fallbackTitle = workspaceProductName(workspaceMode);
     const title =
       !needsProject && !showPicker
         ? formatWorkspaceTitle(
@@ -2864,6 +2867,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const needsGitInit = state?.isGitRepo === false;
   // Default repo name = the project folder name.
   const defaultRepoName = (state?.cwd ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+
+  /** Put text in the composer with the caret at the end, ready to finish and send. */
+  function fillComposer(text: string): void {
+    setInput(text);
+    setCaret(text.length);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(text.length, text.length);
+    });
+  }
 
   /**
    * Fill the interval slot from a preset chip. Replaces an existing interval
@@ -4345,6 +4360,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     },
     [adoptGeneration, client],
   );
+  const bindPickerMotion = useCallback(
+    async (cwd: string, sessionPath: string | undefined): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
+        { mode: "motion", cwd, sessionPath: sessionPath ?? null },
+        generationRef.current ?? 0,
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
+  );
   const handlePickerChosen = useCallback((): void => {
     onUserTargetChange?.();
     onProjectChosen();
@@ -4414,7 +4440,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       sessionTitle: formatWorkspaceTitle(
         state?.cwd,
         state?.gitBranch,
-        workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME,
+        workspaceProductName(workspaceMode),
         state?.gitDirtyFileCount,
       ),
       projectBound: !needsProject && Boolean(state?.cwd ?? target?.cwd),
@@ -4488,6 +4514,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               setWorkspaceMode("chat");
               setEntryView("chats");
             }}
+            onMotion={() => {
+              setWorkspaceMode("motion");
+              setEntryView("motion");
+            }}
             onSettings={(tab) => {
               setSettingsTab(tab ?? "general");
               setEntryView("settings");
@@ -4515,6 +4545,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             waitForCatalogReady={catalogClient.waitForReady}
             discoverSessions={catalogClient.listSessions}
             bindChat={bindPickerChat}
+            showWindowControls={kind === "primary"}
+          />
+        ) : entryView === "motion" ? (
+          <ChatPicker
+            mode="motion"
+            onChosen={handlePickerChosen}
+            onClose={() => setEntryView("home")}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverSessions={catalogClient.listSessions}
+            bindChat={bindPickerMotion}
             showWindowControls={kind === "primary"}
           />
         ) : (
@@ -4561,6 +4601,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             bindChat={bindPickerChat}
             {...pickerProps}
           />
+        ) : workspaceMode === "motion" ? (
+          <ChatPicker mode="motion" bindChat={bindPickerMotion} {...pickerProps} />
         ) : (
           <ProjectPicker
             initialProjectPath={state?.cwd ?? null}
@@ -4693,7 +4735,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
       >
         <BackButton
-          label={workspaceMode === "chat" ? "Back to chats" : "Back to this project's sessions"}
+          label={
+            workspaceMode === "chat"
+              ? "Back to chats"
+              : workspaceMode === "motion"
+                ? "Back to motion sessions"
+                : "Back to this project's sessions"
+          }
           onClick={() => setShowPicker(true)}
         />
         <div className="rank-badge-wrap">
@@ -4710,7 +4758,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             ))}
           </div>
         </div>
-        {workspaceMode === "chat" ? (
+        {workspaceMode !== "code" ? (
           <span className="picker-head-actions">
             {roadmapDraftTrigger}
             <MetalButton
@@ -4719,18 +4767,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               }
               className="btn btn-primary btn-sm"
               disabled={running || autopilotReviewing || newSessionBusy}
-              title="Start a new chat"
+              title={workspaceMode === "motion" ? "Start a new video session" : "Start a new chat"}
               onClick={() => setConfirmNewSession(true)}
             >
               {"+ New"}
             </MetalButton>
-            <button
-              className="btn btn-sm btn-ghost"
-              title="View and curate chat memories and Jiwa"
-              onClick={() => setShowMemories(true)}
-            >
-              Brain
-            </button>
+            {workspaceMode === "chat" && (
+              <button
+                className="btn btn-sm btn-ghost"
+                title="View and curate chat memories and Jiwa"
+                onClick={() => setShowMemories(true)}
+              >
+                Brain
+              </button>
+            )}
             <RadioButton />
             <WindowLayoutButton />
           </span>
@@ -4869,7 +4919,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               <>
                 {items.length === 0 &&
                   (status === "ready" ? (
-                    <WakeScreen chat={workspaceMode === "chat"} />
+                    <WakeScreen chat={workspaceMode === "chat"} motion={workspaceMode === "motion"} />
                   ) : (
                     <div className="line transcript-reveal" style={{ color: theme.textDim }}>
                       {`\u273b ${status}`}
@@ -4934,6 +4984,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       </div>
 
       <div className="liveregion">
+        {/* Motion's starting points sit just above the activity bar and go away
+            once the conversation has its first message. */}
+        {workspaceMode === "motion" && hydrated && items.length === 0 && !running && (
+          <MotionStarters onPick={fillComposer} />
+        )}
         {workspaceMode === "code" && kenRunning && (
           <KenActivityBar
             runStartTs={kenRunStartTs}
@@ -4946,7 +5001,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         )}
         {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
         {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
-        {(workspaceMode === "chat" || running || autopilotReviewing || !kenRunning) && (
+        {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
           <ActivityBar
             running={running}
             activity={activity}
@@ -4956,8 +5011,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             isThinking={isThinking}
             thinkingStartTs={thinkingStartTs}
             thinkingAccumMs={thinkingAccumMs}
-            planTotal={workspaceMode === "chat" ? 0 : planTotal}
-            planDone={workspaceMode === "chat" ? 0 : Math.min(planDone.size, planTotal)}
+            planTotal={workspaceMode !== "code" ? 0 : planTotal}
+            planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
             onCancel={requestCancel}
             toolsHidden={toolsHidden}
             hasToolFeed={liveToolFeed.length > 0}
@@ -5064,7 +5119,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   ? "Approve or dismiss the pending plan to continue…"
                   : workspaceMode === "chat"
                     ? "Ask anything…"
-                    : displayPlaceholder
+                    : workspaceMode === "motion"
+                      ? "Describe a video, paste a link, or drop a PDF…"
+                      : displayPlaceholder
               }
               onPaste={(event) => {
                 if (noInputSlashCommandRef.current) {
@@ -5254,7 +5311,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       )}
 
       <div
-        className={`footer${workspaceMode === "chat" ? " footer-chat" : ""}`}
+        className={`footer${workspaceMode !== "code" ? " footer-chat" : ""}`}
         style={{ color: theme.footerText }}
       >
         {!readyRef.current ? (
@@ -5263,7 +5320,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </span>
         ) : (
           <>
-            {workspaceMode === "chat" ? (
+            {workspaceMode === "motion" ? (
+              <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
+                Motion Agent
+              </span>
+            ) : workspaceMode === "chat" ? (
               <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
                 {state?.chatAgent === "therapist"
                   ? "Therapist Agent"
@@ -5419,7 +5480,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   title={
                     workspaceMode === "chat"
                       ? "Switch GG's model"
-                      : `Switch ${PRODUCT_DISPLAY_NAME}'s model`
+                      : `Switch ${workspaceProductName(workspaceMode)}'s model`
                   }
                 />
               </span>

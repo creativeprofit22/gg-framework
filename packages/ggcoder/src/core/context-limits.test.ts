@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { clampToBytes, CONTEXT_LIMITS, resolveContextLimits } from "./context-limits.js";
+import {
+  clampToBytes,
+  CONTEXT_LIMITS,
+  resolveContextLimits,
+  resolveSessionContextLimits,
+} from "./context-limits.js";
 
 describe("clampToBytes", () => {
   it("returns short text unchanged", () => {
@@ -59,5 +64,27 @@ describe("resolveContextLimits", () => {
     const limits = resolveContextLimits({ skillDescriptionBytes: 2048 });
     expect(limits.skillDescriptionBytes).toBe(2048);
     expect(limits.skillCatalogBytes).toBe(CONTEXT_LIMITS.skillCatalogBytes);
+  });
+});
+
+describe("resolveSessionContextLimits", () => {
+  it("applies a mode's defaults over the global defaults", () => {
+    const limits = resolveSessionContextLimits({ skillCatalogBytes: 32 * 1024 }, undefined);
+
+    expect(limits.skillCatalogBytes).toBe(32 * 1024);
+    expect(limits.skillDescriptionBytes).toBe(CONTEXT_LIMITS.skillDescriptionBytes);
+  });
+
+  it("lets the user's setting win over a mode's defaults", () => {
+    const limits = resolveSessionContextLimits(
+      { skillCatalogBytes: 32 * 1024 },
+      { skillCatalogBytes: 8 * 1024 },
+    );
+
+    expect(limits.skillCatalogBytes).toBe(8 * 1024);
+  });
+
+  it("keeps the global defaults when neither mode nor user sets anything", () => {
+    expect(resolveSessionContextLimits(undefined, undefined)).toEqual(CONTEXT_LIMITS);
   });
 });

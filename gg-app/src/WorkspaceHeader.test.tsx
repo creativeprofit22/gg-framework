@@ -15,7 +15,8 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import { formatWorkspaceTitle } from "./workspace-title";
 import { PaneIdProvider } from "./pane-context";
 
 afterEach(cleanup);

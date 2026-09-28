@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { toast } from "./toast";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
   isProgrammaticChatRequest,
@@ -395,8 +396,13 @@ export interface BackgroundTask {
   completedAt?: number | null;
 }
 
-export type WorkspaceMode = "code" | "chat";
+export type WorkspaceMode = "code" | "chat" | "motion";
 export type ChatAgentId = "general" | "therapist" | "research";
+
+/** Product name shown when a window has no project context to title it. */
+export function workspaceProductName(mode: WorkspaceMode): string {
+  return mode === "chat" ? "GG Chat" : mode === "motion" ? "GG Motion" : PRODUCT_DISPLAY_NAME;
+}
 
 export type MemoryCategory =
   "identity" | "preference" | "project" | "relationship" | "health" | "other";
@@ -2247,10 +2253,13 @@ export async function searchFiles(query: string): Promise<FileHit[]> {
   }
 }
 
-/** List the latest sessions for a project, one chat agent, or every chat agent. */
+/**
+ * List the latest sessions for a project, one chat agent, every chat agent
+ * (`"all"`), or GG Motion (`"motion"`).
+ */
 export async function listSessions(
   cwd: string,
-  chatAgent?: ChatAgentId | "all",
+  chatAgent?: ChatAgentId | "all" | "motion",
 ): Promise<RecentSession[]> {
   try {
     const res = await invoke<{ sessions: RecentSession[] }>("agent_sessions", {
@@ -3096,7 +3105,7 @@ export interface PaneAgentClient extends NotesClient {
   saveSettings(projectsRoot: string): Promise<void>;
   listProjects(): Promise<DiscoveredProject[]>;
   searchFiles(query: string): Promise<FileHit[]>;
-  listSessions(cwd: string, chatAgent?: ChatAgentId | "all"): Promise<RecentSession[]>;
+  listSessions(cwd: string, chatAgent?: ChatAgentId | "all" | "motion"): Promise<RecentSession[]>;
   getTelegramStatus(): Promise<TelegramStatus>;
   saveTelegramConfig(botToken: string, userId: string): Promise<void>;
   getServeStatus(): Promise<ServeStatus>;

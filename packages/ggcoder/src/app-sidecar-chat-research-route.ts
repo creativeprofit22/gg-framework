@@ -21,7 +21,7 @@ export interface AppSidecarChatResearchPromptOptions<Session> {
 
 /** Return the isolated chat catalog, or null so coding command discovery continues unchanged. */
 export function appSidecarChatCommandsResponse(
-  mode: "code" | "chat",
+  mode: "code" | "chat" | "motion",
 ): SlashCommandsResponse | null {
   return mode === "chat"
     ? {

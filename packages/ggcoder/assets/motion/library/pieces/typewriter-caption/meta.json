@@ -1,0 +1,12 @@
+{
+  "id": "typewriter-caption",
+  "name": "Typewriter caption",
+  "kind": "type",
+  "description": "A lowercase sentence typed on character by character with one accent-colored word and a thin caret that blinks once the line is complete. Centred on its final width so it never shifts. Calm product-ad captions.",
+  "tags": ["caption", "typewriter", "typing", "sentence", "accent-word", "ad", "calm", "lowercase"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 1.5,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

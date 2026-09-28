@@ -137,7 +137,7 @@ The only successful endpoint is either a researched draft awaiting explicit appr
  * Attachment incompatibility is reported before busy state so invalid invocations are deterministic.
  */
 export function resolveChatResearchCommandRoute(options: {
-  mode: "code" | "chat";
+  mode: "code" | "chat" | "motion";
   text: string;
   attachmentCount: number;
   busy: boolean;

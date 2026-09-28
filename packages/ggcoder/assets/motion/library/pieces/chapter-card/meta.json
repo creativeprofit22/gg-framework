@@ -1,0 +1,6 @@
+{
+  "id": "chapter-card", "name": "Chapter card", "kind": "frame",
+  "description": "A chapter marker, a drawn rule and a two-line headline with generous editorial space.",
+  "tags": ["chapter", "title", "editorial"], "fonts": [], "duration": 4,
+  "previewAt": 2, "license": "original", "previewLook": "duotone-broadcast"
+}

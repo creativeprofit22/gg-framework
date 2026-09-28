@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { chatAgentSessionsDir } from "./chat-agents/index.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
+import { motionSessionsDir } from "./motion-agent/motion-agent.js";
 import { encodeCwd } from "./core/encode-cwd.js";
 import { archiveColdSession, archiveSessionPath } from "./core/session-storage.js";
 import { importForeignSession } from "./core/foreign-session-import.js";
@@ -184,6 +185,22 @@ describe("gg-app sidecar session listings", () => {
 
     const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, home);
     expect(sessions.some((session) => session.source === "claude-code")).toBe(false);
+  });
+
+  it("lists only Motion's own sessions for the motion query", async () => {
+    await writeSessions(coderSessionsDir, cwd, "coding", 2);
+    await writeSessions(chatAgentSessionsDir(coderSessionsDir, "general"), cwd, "chat", 2);
+    await writeSessions(motionSessionsDir(coderSessionsDir), cwd, "motion", 3);
+
+    const motionSessions = await listSidecarSessions(cwd, "motion", coderSessionsDir);
+    const chatSessions = await listSidecarSessions(cwd, "all", coderSessionsDir);
+
+    expect(motionSessions.map((session) => session.id)).toEqual([
+      "motion-2",
+      "motion-1",
+      "motion-0",
+    ]);
+    expect(chatSessions.some((session) => session.id.startsWith("motion"))).toBe(false);
   });
 
   it("does not mix foreign sessions into a chat-agent listing", async () => {

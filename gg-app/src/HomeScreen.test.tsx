@@ -50,6 +50,7 @@ function updateInfo(overrides: Partial<UpdateInfo>): UpdateInfo {
 }
 
 const onSettings = vi.fn();
+const onMotion = vi.fn();
 
 async function renderHome(): Promise<void> {
   await act(async () => {
@@ -57,6 +58,7 @@ async function renderHome(): Promise<void> {
       <HomeScreen
         onProjects={vi.fn()}
         onChat={vi.fn()}
+        onMotion={onMotion}
         onSettings={onSettings}
         waitForAgentReady={agentMocks.waitForReady}
         loadProgress={agentMocks.getProgress}
@@ -238,5 +240,31 @@ describe("HomeScreen What's New trigger", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "What's new, unread from Upstream" })).toBeTruthy(),
     );
+  });
+});
+
+describe("HomeScreen workspace actions", () => {
+  it("offers Motion beside Code and Chat and opens it once set up", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    agentMocks.authStatus.mockResolvedValue([
+      {
+        value: "anthropic",
+        label: "Anthropic",
+        description: "",
+        methods: [],
+        connected: true,
+        connectedMethods: [],
+      },
+    ]);
+    await renderHome();
+
+    const motion = screen.getByRole("button", { name: "Motion" });
+    expect(screen.getByRole("button", { name: "Code" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Chat" })).toBeDefined();
+    await waitFor(() => expect(motion.getAttribute("aria-disabled")).toBeNull());
+
+    fireEvent.click(motion);
+
+    expect(onMotion).toHaveBeenCalledOnce();
   });
 });

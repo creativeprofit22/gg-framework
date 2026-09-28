@@ -166,6 +166,7 @@ struct Daemon {
 #[serde(rename_all = "lowercase")]
 enum WorkspaceMode {
     Chat,
+    Motion,
     #[default]
     #[serde(other)]
     Code,
@@ -1128,9 +1129,9 @@ fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
 /// `pid|ppid|command` (see `process_snapshot` on Windows). The command field
 /// may contain `|` and spaces — `splitn(3, '|')` captures it verbatim.
 /// Available on all platforms so the parsing can be unit-tested.
-/// `allow(dead_code)`: on Unix its only caller is `#[cfg(not(unix))]`, so the
-/// compiler flags it as dead; on Windows it IS used by `process_snapshot`.
-#[allow(dead_code)]
+/// On Unix its only caller is `#[cfg(not(unix))]`, so outside tests it is dead
+/// there; the allow is scoped to Unix so Windows builds still flag real rot.
+#[cfg_attr(unix, allow(dead_code))]
 fn parse_cim_output(stdout: &str) -> Vec<ProcInfo> {
     stdout
         .lines()
@@ -13094,6 +13095,17 @@ mod tests {
             serde_json::from_str(r#"{ "windows": [{ "mode": "future", "cwd": "/p/a" }] }"#)
                 .unwrap();
         assert_eq!(invalid.windows[0].mode, WorkspaceMode::Code);
+    }
+
+    #[test]
+    fn workspace_restores_motion_mode() {
+        let motion: Workspace =
+            serde_json::from_str(r#"{ "windows": [{ "mode": "motion", "cwd": "/p/a" }] }"#)
+                .unwrap();
+        assert_eq!(motion.windows[0].mode, WorkspaceMode::Motion);
+        assert!(serde_json::to_string(&motion)
+            .unwrap()
+            .contains(r#""mode":"motion""#));
     }
 
     #[test]

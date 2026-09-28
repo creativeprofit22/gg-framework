@@ -3,14 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { build, type Plugin } from "esbuild";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ACP_PROTOCOL_VERSION } from "./acp-mode.js";
 
-const FIXTURE = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "__fixtures__",
-  "acp-stdio-agent.mjs",
-);
+const MODES_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = path.resolve(MODES_DIR, "../..");
+const FIXTURE = path.join(MODES_DIR, "__fixtures__", "acp-stdio-agent.mjs");
 const ACP_CLIENT_TIMEOUT_MS = 20_000;
 const ACP_TEST_TIMEOUT_MS = ACP_CLIENT_TIMEOUT_MS + 5_000;
 // The update-failure test boots the whole real CLI from source through tsx.
@@ -22,6 +21,61 @@ const REAL_CLI_BOOT_TIMEOUT_MS = 60_000;
 // under worker contention. Keep Vitest alive long enough to report AcpClient's
 // diagnostic instead of its unrelated 5-second default.
 vi.setConfig({ testTimeout: ACP_TEST_TIMEOUT_MS });
+
+/**
+ * Keep `import.meta.url` pointing at each ORIGINAL source file inside the
+ * bundle. Several modules locate files relative to themselves (bundled skills,
+ * LSP binaries, MCP launchers); without this they would resolve relative to the
+ * bundle's temp directory and quietly change what the fixture sees.
+ */
+const preserveModuleUrls: Plugin = {
+  name: "preserve-module-urls",
+  setup(pluginBuild) {
+    pluginBuild.onLoad({ filter: /[\\/]src[\\/].*\.(ts|mjs)$/ }, async (args) => {
+      const source = await fs.readFile(args.path, "utf8");
+      return {
+        contents: source.replaceAll(
+          "import.meta.url",
+          JSON.stringify(pathToFileURL(args.path).href),
+        ),
+        loader: args.path.endsWith(".ts") ? "ts" : "js",
+        resolveDir: path.dirname(args.path),
+      };
+    });
+  },
+};
+
+/** Directory holding the prebuilt fixture; removed after the suite. */
+let bundleDir: string;
+/** The fixture, bundled once per run. */
+let agentBundle: string;
+
+// Every test starts a fresh agent process. Loading ~150 source modules through
+// `tsx` cost ~0.8s per start locally and ~3s on Windows CI, which made this the
+// slowest file in the suite. Bundling the fixture's own sources once (third
+// party packages stay external and load from node_modules as usual) roughly
+// halves every start without changing the code under test.
+beforeAll(async () => {
+  // Inside the package's node_modules so the external imports resolve.
+  const cacheDir = path.join(PACKAGE_ROOT, "node_modules", ".cache");
+  await fs.mkdir(cacheDir, { recursive: true });
+  bundleDir = await fs.mkdtemp(path.join(cacheDir, "acp-fixture-"));
+  agentBundle = path.join(bundleDir, "acp-stdio-agent.mjs");
+  await build({
+    entryPoints: [FIXTURE],
+    outfile: agentBundle,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    packages: "external",
+    plugins: [preserveModuleUrls],
+    logLevel: "error",
+  });
+}, 60_000);
+
+afterAll(async () => {
+  if (bundleDir) await fs.rm(bundleDir, { recursive: true, force: true });
+});
 
 interface Frame {
   jsonrpc?: string;
@@ -78,13 +132,14 @@ class AcpClient {
     const args = mode === "update-failure"
       ? ["--import", "tsx", "--import", pathToFileURL(path.join(sourceDir, "__fixtures__", "acp-update-failure-preload.mjs")).href,
         path.join(tmpHome, "global", "node_modules", "@kenkaiiii", "ggcoder", "cli.ts"), "acp", "--cwd", tmpProject]
-      : ["--import", "tsx", FIXTURE, tmpProject, tmpOtherProject];
+      : [agentBundle, tmpProject, tmpOtherProject];
     this.child = spawn(
       process.execPath,
       args,
       {
-        // Run from the package root so `tsx` resolves; the project directory is
-        // passed explicitly rather than inherited from the test runner.
+        // Run from the package root so `tsx` resolves for the real-CLI case; the
+        // project directory is passed explicitly rather than inherited from the
+        // test runner. The default fixture runs from the prebuilt bundle.
         cwd: process.cwd(),
         env: {
           ...process.env,

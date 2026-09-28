@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/ggcoder",
-  "version": "5.65.0",
+  "version": "5.65.1",
   "type": "module",
   "description": "CLI coding agent with OAuth authentication for Anthropic, OpenAI, and Gemini",
   "license": "MIT",
@@ -124,6 +124,7 @@
     "sharp": "^0.35.3",
     "string-width": "^8.2.0",
     "strip-ansi": "^7.2.0",
+    "tslib": "2.8.1",
     "typescript": "^6.0.3",
     "typescript-language-server": "^5.3.0",
     "wrap-ansi": "^10.0.0",
@@ -132,6 +133,7 @@
   "optionalDependencies": {
     "@huggingface/transformers": "4.2.0",
     "@mozilla/readability": "^0.6.0",
+    "hyperframes": "0.8.82",
     "linkedom": "^0.18.12",
     "ogg-opus-decoder": "^1.6.13",
     "playwright": "^1.50.0",
@@ -144,6 +146,7 @@
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/turndown": "^5.0.6",
+    "esbuild": "0.28.2",
     "tsx": "^4.22.3",
     "vitest": "^4.1.4"
   },

@@ -28,6 +28,12 @@ const CHAT_LINES = [
   "Talk to me. I\u2019m listening.",
 ] as const;
 
+const MOTION_LINES = [
+  "Lights\u2026",
+  "Drop in a website, a PDF, or an idea.",
+  "Tell me what to make. Let\u2019s make it move.",
+] as const;
+
 const TYPE_MS = 55; // per-character type speed
 const HOLD_MS = 1400; // pause once a line finishes typing
 const ERASE_MS = 22; // per-character erase speed
@@ -161,9 +167,15 @@ function MatrixRain(): React.ReactElement {
   return <canvas ref={canvasRef} className="wake-rain" aria-hidden="true" />;
 }
 
-export function WakeScreen({ chat = false }: { chat?: boolean }): React.ReactElement {
+export function WakeScreen({
+  chat = false,
+  motion = false,
+}: {
+  chat?: boolean;
+  motion?: boolean;
+}): React.ReactElement {
   const reduced = prefersReducedMotion();
-  const lines = chat ? CHAT_LINES : CODE_LINES;
+  const lines = motion ? MOTION_LINES : chat ? CHAT_LINES : CODE_LINES;
   const [text, setText] = useState(reduced ? lines[lines.length - 1] : "");
   const [done, setDone] = useState(reduced);
 

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="assets/fonts/fonts.css" />
+    <link rel="stylesheet" href="assets/looks/duotone-broadcast.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        background: var(--field);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      class="look-duotone-broadcast"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div id="bg" data-composition-id="dot-grid-field" data-composition-src="compositions/dot-grid-field.html" data-start="0" data-duration="4" data-width="1920" data-height="1080" data-track-index="0"></div>
+      <div id="word" data-composition-id="slam-word" data-composition-src="compositions/slam-word.html" data-start="0" data-duration="3" data-width="1920" data-height="1080" data-track-index="1"></div>
+      <div id="curve" data-composition-id="ease-curve" data-composition-src="compositions/ease-curve.html" data-start="0" data-duration="4" data-width="1920" data-height="1080" data-track-index="2"></div>
+      <div id="frame" data-composition-id="broadcast-frame" data-composition-src="compositions/broadcast-frame.html" data-start="0" data-duration="4" data-width="1920" data-height="1080" data-track-index="3"></div>
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to({}, { duration: 4 });
+      window.__timelines = { main: tl };
+    </script>
+  </body>
+</html>

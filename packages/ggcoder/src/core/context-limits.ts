@@ -34,6 +34,18 @@ export function resolveContextLimits(overrides?: Partial<ContextLimits>): Contex
   return { ...CONTEXT_LIMITS, ...overrides };
 }
 
+/**
+ * A session's limits: global defaults, then the mode's own defaults (e.g.
+ * Motion's larger bundled skill catalog), then the user's `contextLimits`
+ * setting, which always wins.
+ */
+export function resolveSessionContextLimits(
+  modeDefaults?: Partial<ContextLimits>,
+  userSettings?: Partial<ContextLimits>,
+): ContextLimits {
+  return resolveContextLimits({ ...modeDefaults, ...userSettings });
+}
+
 export interface ClampedText {
   text: string;
   truncated: boolean;

@@ -6,12 +6,63 @@ import { stripBom } from "../utils/text.js";
 import { parseFrontmatter } from "./frontmatter.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BUNDLED_SKILLS_DIRS = [
+export const BUNDLED_SKILLS_DIRS: readonly string[] = [
   // Single-file desktop sidecar: resources live beside app-sidecar.mjs.
   path.resolve(MODULE_DIR, "skills"),
   // Source and npm CLI: assets live beside src/ and dist/.
   path.resolve(MODULE_DIR, "../../assets/skills"),
 ];
+
+/**
+ * Motion mode's private bundle: `<root>/plugin.json`, `<root>/skills/<name>/`
+ * and `<root>/bin/hyperframes.mjs`. Deliberately NOT part of
+ * `BUNDLED_SKILLS_DIRS` — Motion skills must never reach coder or chat.
+ */
+const MOTION_BUNDLE_DIRS = [
+  path.resolve(MODULE_DIR, "motion"),
+  path.resolve(MODULE_DIR, "../../assets/motion"),
+];
+
+/** Where Motion mode's skills and HyperFrames launcher live on disk. */
+export interface MotionBundle {
+  root: string;
+  skillsDir: string;
+  launcher: string;
+  version: string;
+}
+
+/**
+ * Locate Motion mode's bundle, or null when this install has none. Validates
+ * the manifest so a half-copied bundle reads as absent, not as a broken mode.
+ */
+export async function findMotionBundle(
+  candidates: readonly string[] = MOTION_BUNDLE_DIRS,
+): Promise<MotionBundle | null> {
+  for (const root of candidates) {
+    try {
+      const manifest = JSON.parse(await fs.readFile(path.join(root, "plugin.json"), "utf-8")) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (manifest.name !== "hyperframes" || typeof manifest.version !== "string") continue;
+      const launcher = path.join(root, "bin", "hyperframes.mjs");
+      await fs.access(launcher);
+      return { root, skillsDir: path.join(root, "skills"), launcher, version: manifest.version };
+    } catch {
+      // Missing or unreadable candidate — try the next layout.
+    }
+  }
+  return null;
+}
+
+/**
+ * Motion mode's skill set: only the bundled Motion skills, sorted by name so
+ * the skill tool's catalog (inside the cached prompt prefix) is byte-stable.
+ */
+export async function loadMotionSkills(bundle: MotionBundle): Promise<Skill[]> {
+  const skills = await loadSkillsFromDir(bundle.skillsDir, "motion");
+  return skills.sort((a, b) => a.name.localeCompare(b.name));
+}
 
 export interface Skill {
   name: string;

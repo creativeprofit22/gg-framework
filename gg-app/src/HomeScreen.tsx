@@ -3,6 +3,7 @@ import {
   CodeIcon,
   ChatCircleTextIcon,
   DownloadSimpleIcon,
+  FilmSlateIcon,
   GearSixIcon,
 } from "@phosphor-icons/react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -38,6 +39,7 @@ import { error as logError } from "@tauri-apps/plugin-log";
 interface Props {
   onProjects: () => void;
   onChat: () => void;
+  onMotion: () => void;
   /** Opens full-screen Settings, optionally on a given tab. */
   onSettings: (tab?: SettingsTabId) => void;
   /**
@@ -52,12 +54,13 @@ interface Props {
 
 /**
  * App entry screen: the shimmering Supah Coder banner over the primary actions.
- * Code and Chat require a configured workspace folder and connected AI provider;
+ * Code, Chat and Motion require a configured workspace folder and connected AI provider;
  * everything else lives in full-screen Settings (the bottom-right gear).
  */
 export function HomeScreen({
   onProjects,
   onChat,
+  onMotion,
   onSettings,
   refreshSignal = 0,
   waitForAgentReady = waitForReady,
@@ -248,6 +251,15 @@ export function HomeScreen({
         >
           <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
           Chat
+        </button>
+        <button
+          type="button"
+          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+          aria-disabled={ready ? undefined : true}
+          onClick={() => handleWorkspace(onMotion)}
+        >
+          <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
+          Motion
         </button>
       </div>
       <button

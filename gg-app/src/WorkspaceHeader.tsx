@@ -1,9 +1,15 @@
 import { useContext, type ReactNode } from "react";
 import { PaneIdContext } from "./pane-context";
-import { openProjectPath, openUrl, type WorkspaceMode, type GitHubCI } from "./agent";
+import {
+  openProjectPath,
+  openUrl,
+  workspaceProductName,
+  type WorkspaceMode,
+  type GitHubCI,
+} from "./agent";
 import { CIIndicator } from "./CIIndicator";
 import { projectAccent } from "./projectAccent";
-import { PRODUCT_DISPLAY_NAME } from "./brand";
+import { formatWorkspaceTitle, pluralize } from "./workspace-title";
 
 interface WorkspaceHeaderProps {
   workspaceMode: WorkspaceMode;
@@ -24,32 +30,6 @@ interface WorkspaceHeaderProps {
   children: ReactNode;
 }
 
-function pluralize(count: number, singular: string, plural: string): string {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
-
-export function formatWorkspaceTitle(
-  cwd: string | undefined,
-  gitBranch: string | null | undefined,
-  fallback: string,
-  gitDirtyFileCount = 0,
-  gitHubIssues: number | null = null,
-  gitHubPRs: number | null = null,
-  additionalRoots: string[] = [],
-): string {
-  const directory = cwd?.split(/[\\/]/).filter(Boolean).pop();
-  if (!directory) return fallback;
-  const segments = [directory];
-  if (additionalRoots.length > 0)
-    segments.push(`+${pluralize(additionalRoots.length, "root", "roots")}`);
-  if (gitBranch) segments.push(`⎇ ${gitBranch}`);
-  if (gitDirtyFileCount > 0) segments.push(`${gitDirtyFileCount} uncommitted`);
-  if (gitHubIssues !== null && gitHubIssues > 0)
-    segments.push(pluralize(gitHubIssues, "issue", "issues"));
-  if (gitHubPRs !== null && gitHubPRs > 0) segments.push(pluralize(gitHubPRs, "PR", "PRs"));
-  return segments.join(" │ ");
-}
-
 /** Shared code/chat titlebar and collapsible workspace navigation. */
 export function WorkspaceHeader({
   workspaceMode,
@@ -67,7 +47,7 @@ export function WorkspaceHeader({
   children,
 }: WorkspaceHeaderProps): React.ReactElement {
   const paneId = useContext(PaneIdContext);
-  const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME;
+  const fallbackTitle = workspaceProductName(workspaceMode);
   const directory = cwd?.split(/[\\/]/).filter(Boolean).pop();
   // Stable per-project colour, so a wall of identical dark windows becomes
   // identifiable at a glance. Published as a CSS variable (not just inlined on

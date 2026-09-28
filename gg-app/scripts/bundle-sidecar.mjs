@@ -33,6 +33,9 @@ const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
 const bundledSkillsSource = join(repoRoot, "packages", "ggcoder", "assets", "skills");
+// Motion mode's private bundle (HyperFrames skills + launcher). Kept apart from
+// `skills/` so its skills never enter coder or chat discovery.
+const motionBundleSource = join(repoRoot, "packages", "ggcoder", "assets", "motion");
 
 // Packages that must NOT be inlined: native addons, lazily-loaded optional
 // heavy deps, and child-process entry points that esbuild cannot discover.
@@ -56,6 +59,9 @@ const EXTERNAL = [
   "typescript",
   // source_path spawns opensrc's CLI by physical path; it is never imported.
   "opensrc",
+  // Motion mode runs the HyperFrames CLI through motion/bin/hyperframes.mjs,
+  // which resolves this package from the sidecar's node_modules at runtime.
+  "hyperframes",
   // Bash launches SRT's physical CLI as a child process for per-session OS
   // sandboxing; keep its platform binaries and CLI files on disk.
   "@anthropic-ai/sandbox-runtime",
@@ -1021,6 +1027,9 @@ async function main() {
   if (!existsSync(bundledSkillsSource)) {
     throw new Error(`bundled skills missing: ${bundledSkillsSource}`);
   }
+  if (!existsSync(join(motionBundleSource, "plugin.json"))) {
+    throw new Error(`motion bundle missing: ${motionBundleSource}`);
+  }
 
   const result = await buildAndPromoteDirectory(
     outDir,
@@ -1028,6 +1037,7 @@ async function main() {
       const stagedOutFile = join(stagedOutDir, "app-sidecar.mjs");
       const stagedNodeModulesOut = join(stagedOutDir, "node_modules");
       cpSync(bundledSkillsSource, join(stagedOutDir, "skills"), { recursive: true });
+      cpSync(motionBundleSource, join(stagedOutDir, "motion"), { recursive: true });
 
       await build({
         entryPoints: [sidecarEntry],

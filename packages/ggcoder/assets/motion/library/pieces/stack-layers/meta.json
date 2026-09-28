@@ -1,0 +1,12 @@
+{
+  "id": "stack-layers",
+  "name": "Stack layers",
+  "kind": "diagram",
+  "description": "An isometric architecture stack: 3–4 slabs drop in and stack bottom-up, each with a flat leader-line label (mono index, display name, mono detail). Then an accent highlight climbs the stack layer by layer. Edit LAYERS (bottom to top) for platforms, tech stacks or tiered offerings.",
+  "tags": ["architecture", "stack", "layers", "isometric", "3d", "platform", "tech-stack", "explainer", "technical"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3.9,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

@@ -8,7 +8,8 @@
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,6 +79,74 @@ function smokeOpenSrc(node) {
   console.log("smoke: bundled opensrc starts cleanly");
 }
 
+/**
+ * Motion mode runs HyperFrames through its own launcher, which resolves the
+ * copied CLI from the sidecar's node_modules. Neither is imported by the
+ * bundle, so a packaging slip would only surface when a user starts a video.
+ */
+function smokeMotionBundle(node) {
+  const motion = join(srcTauri, "sidecar", "motion");
+  for (const rel of [
+    "plugin.json",
+    join("skills", "motion", "SKILL.md"),
+    join("skills", "hyperframes", "SKILL.md"),
+  ]) {
+    if (!existsSync(join(motion, rel))) fail(`bundled Motion file missing: ${rel}`);
+  }
+  const { version } = JSON.parse(readFileSync(join(motion, "plugin.json"), "utf8"));
+  const launcher = join(motion, "bin", "hyperframes.mjs");
+  const reported = execFileSync(node, [launcher, "--version"], { encoding: "utf8" }).trim();
+  if (reported !== version) {
+    fail(`bundled HyperFrames CLI reports ${reported}, Motion skills expect ${version}`);
+  }
+  console.log(`smoke: bundled HyperFrames ${reported} starts through the Motion launcher`);
+
+  // The font library ships as plain files; a packaging filter dropping woff2
+  // would silently fall back to generic fonts in every video.
+  const fonts = JSON.parse(
+    execFileSync(node, [join(motion, "bin", "fonts.mjs"), "list"], { encoding: "utf8" }),
+  );
+  const manifest = JSON.parse(readFileSync(join(motion, "fonts", "fonts.json"), "utf8"));
+  for (const entry of manifest) {
+    for (const file of entry.files) {
+      if (!existsSync(join(motion, "fonts", entry.dir, file.file))) {
+        fail(`bundled Motion font missing: ${entry.dir}/${file.file}`);
+      }
+    }
+  }
+  console.log(`smoke: ${fonts.families.length} bundled Motion font families present`);
+
+  // 3D shots import this vendored Three.js through an importmap; a missing
+  // addon would only surface as a blank canvas mid-render.
+  const three = JSON.parse(readFileSync(join(motion, "vendor", "three", "three.json"), "utf8"));
+  for (const rel of ["build/three.module.min.js", "build/three.core.min.js"]) {
+    if (!existsSync(join(motion, "vendor", "three", rel))) fail(`bundled Three.js missing: ${rel}`);
+  }
+  for (const addon of three.addons) {
+    if (!existsSync(join(motion, "vendor", "three", "addons", addon))) {
+      fail(`bundled Three.js addon missing: ${addon}`);
+    }
+  }
+  console.log(`smoke: bundled Three.js ${three.version} with ${three.addons.length} addon files`);
+
+  // The style library is plain files the agent reads by path; check the
+  // helper lists it and every entry it names actually shipped.
+  const library = JSON.parse(
+    execFileSync(node, [join(motion, "bin", "library.mjs"), "list"], { encoding: "utf8" }),
+  );
+  if (!library.ok) fail(`Motion style library failed to list: ${library.error}`);
+  for (const entry of [...library.looks, ...library.pieces]) {
+    if (!existsSync(entry.preview)) fail(`style library preview missing: ${entry.id}`);
+  }
+  for (const piece of library.pieces) {
+    const source = join(motion, "library", "pieces", piece.id, "piece.html");
+    if (!existsSync(source)) fail(`style library piece missing: ${piece.id}`);
+  }
+  console.log(
+    `smoke: style library with ${library.looks.length} looks and ${library.pieces.length} pieces`,
+  );
+}
+
 /** Bash executes through SRT's copied physical CLI; bundling it is load-bearing. */
 function smokeSandboxRuntime(node) {
   const bin = join(
@@ -126,6 +195,7 @@ async function main() {
   smokeTypescriptLanguageServer(node);
   smokeOpenSrc(node);
   smokeSandboxRuntime(node);
+  smokeMotionBundle(node);
   smokeLeanPayload();
 
   const child = spawn(node, [sidecar], {
@@ -239,6 +309,25 @@ async function main() {
     fail(`/state body missing "ready": ${JSON.stringify(body)}`);
   }
   console.log(`smoke: session ${sessionId.slice(0, 8)} /state 200 ready=${body.ready}`);
+
+  // A Motion session must build from the packaged bundle (skills + prompt).
+  const motionCwd = mkdtempSync(join(tmpdir(), "gg-smoke-motion-"));
+  try {
+    const mk = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-gg-token": token },
+      body: JSON.stringify({ mode: "motion", cwd: join(motionCwd, "GG Motion") }),
+    });
+    const created = await mk.json().catch(() => ({}));
+    if (mk.status !== 200 || !created.sessionId) {
+      child.kill("SIGKILL");
+      fail(`POST /session (motion) returned ${mk.status}: ${JSON.stringify(created)}`);
+    }
+    console.log(`smoke: motion session ${created.sessionId.slice(0, 8)} created`);
+  } catch (err) {
+    child.kill("SIGKILL");
+    fail(`POST /session (motion) failed: ${err.message}`);
+  }
 
   // Clean shutdown: SIGTERM (SIGKILL fallback on Windows) and wait for exit.
   const exited = new Promise((resolve) => child.on("exit", resolve));

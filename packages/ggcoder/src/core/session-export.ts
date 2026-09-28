@@ -29,7 +29,7 @@ export const MAX_TOOL_ARGS_CHARS = 800;
 
 export interface SessionExportMeta {
   /** Workspace mode this session ran in — picks the filename + title wording. */
-  mode: "chat" | "code";
+  mode: "chat" | "code" | "motion";
   cwd: string;
   provider: string;
   model: string;
@@ -85,8 +85,8 @@ export function exportTimestamp(date: Date): string {
  * `your-chat-2026-07-26-1402.md`. Coding sessions say `session` instead of
  * `chat` so a folder of exports stays self-describing.
  */
-export function defaultExportFilename(mode: "chat" | "code", date = new Date()): string {
-  const kind = mode === "chat" ? "chat" : "session";
+export function defaultExportFilename(mode: "chat" | "code" | "motion", date = new Date()): string {
+  const kind = mode === "chat" ? "chat" : mode === "motion" ? "motion-session" : "session";
   return `your-${kind}-${exportTimestamp(date)}.md`;
 }
 
@@ -280,7 +280,12 @@ export function sessionToMarkdown(
   }
 
   const out: string[] = [];
-  const title = meta.mode === "chat" ? "Chat transcript" : "Coding session";
+  const title =
+    meta.mode === "chat"
+      ? "Chat transcript"
+      : meta.mode === "motion"
+        ? "Motion session"
+        : "Coding session";
   out.push(`# ${title}`);
   out.push("");
   const metaLines = [

@@ -381,6 +381,8 @@ const FOLDER_SCAN_IGNORED = new Set([
   "temp",
   "Library",
   "Applications",
+  // GG Motion's video workspace lives in the projects root but is not a codebase.
+  "GG Motion",
 ]);
 
 /**

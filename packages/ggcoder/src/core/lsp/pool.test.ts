@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -282,8 +282,15 @@ describe("LspClientPool", () => {
       path.join(tmpDir, "slow.fake"),
       "has ERROR here\n",
     );
-    // Let the client spawn and the pass register before sweeping.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Sweep only once the pass is registered. A fixed sleep here raced the
+    // spawn on a loaded machine: swept before the pass began, the server was
+    // (correctly) idle and got reclaimed, failing the test for the wrong reason.
+    // The fake server holds its answer 400ms after the pass starts, so the
+    // sweep still lands mid-pass.
+    await vi.waitFor(() => expect(idlePool.activeCallCount(spec, tmpDir)).toBe(1), {
+      timeout: 10_000,
+      interval: 5,
+    });
     idlePool.sweepNow();
     expect(idlePool.size).toBe(1);
 

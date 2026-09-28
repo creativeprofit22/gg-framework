@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.65.1
+
+### Patch Changes
+
+- Expose in-flight LSP call counts on the language-server pool and speed up the ACP and background-process test suites.
+  - @kenkaiiii/gg-ai@5.65.1
+  - @kenkaiiii/gg-agent@5.65.1
+  - @kenkaiiii/gg-core@5.65.1
+
 ## 5.65.0
 
 ### Minor Changes

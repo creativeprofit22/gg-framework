@@ -22,5 +22,9 @@ export default defineConfig({
       "scripts/**/*.test.mjs",
       "scripts/**/*.test.ts",
     ],
+    // Node 25+ ships its own localStorage, which warns without a backing file
+    // and shadows jsdom's. Tests use jsdom's (or stub it), so turn Node's off.
+    // The flag exists since Node 22.4, CI's floor.
+    execArgv: ["--no-experimental-webstorage"],
   },
 });

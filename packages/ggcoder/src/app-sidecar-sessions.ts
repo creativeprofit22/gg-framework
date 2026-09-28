@@ -11,10 +11,12 @@ import {
   listRecentSessions,
   type RecentSession,
 } from "./core/project-discovery.js";
+import { MOTION_SESSIONS_QUERY, motionSessionsDir } from "./motion-agent/motion-agent.js";
 
 /** Keep deep coding histories visible in the project picker without an unbounded scan. */
 const CODING_SESSION_LIMIT = 100;
 const CHAT_SESSION_LIMIT = 30;
+const MOTION_SESSION_LIMIT = 30;
 /** Foreign rows are additive, so keep them a short tail under the native list. */
 const FOREIGN_SESSION_LIMIT = 5;
 
@@ -32,6 +34,9 @@ export async function listSidecarSessions(
   coderSessionsDir: string,
   homeDir?: string,
 ): Promise<SidecarSession[]> {
+  if (requestedAgent === MOTION_SESSIONS_QUERY) {
+    return listRecentSessions(cwd, MOTION_SESSION_LIMIT, motionSessionsDir(coderSessionsDir));
+  }
   if (requestedAgent !== "all") {
     // Chat agents have their own private stores; only the coding list (no
     // requested agent) shares a cwd with Claude Code and Codex.

@@ -1,0 +1,9 @@
+{
+  "id": "data-desk", "name": "Data desk",
+  "description": "Sage paper, forest ink and an editorial chart hierarchy. One large finding leads; axes, units and source notes make the evidence legible.",
+  "tags": ["data", "report", "sage", "chart", "analysis"],
+  "fonts": ["Schibsted Grotesk", "Martian Mono"],
+  "bestFor": ["research summaries", "quarterly reports", "data explainers"],
+  "pieces": ["sparkline-draw", "comparison-bars", "donut-fill", "stat-grid", "counter-number"],
+  "samplePieces": [], "previewAt": 3.2
+}

@@ -516,6 +516,16 @@
   transition-timing-function: ease-out;
 }
 
+/* Question options are full-width rows, not floating pills: keep their edges
+   aligned while hovering/pressing, and preserve dark ink on the selected fill. */
+.ask-options .btn {
+  --glass-hover-scale: 1;
+  --glass-press-scale: 1;
+}
+.ask-options .btn-primary:hover:not(:disabled) {
+  color: var(--on-primary);
+}
+
 /* The chromatic metal rim would sit on top of the glass rim; hide it for the trial. */
 .inputactions-trailing > .action-metal,
 .enhance-pill-host > .action-metal,

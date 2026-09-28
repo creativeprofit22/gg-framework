@@ -1,0 +1,12 @@
+{
+  "id": "cursor-click",
+  "name": "Cursor click",
+  "kind": "ui",
+  "description": "An upgrade card with a primary button; a cursor glides in along an eased bezier curve, presses the button (0.96 squash plus an expanding ripple ring) and the button turns into a success state with a drawn check. The 'one click and it's done' beat.",
+  "tags": ["cursor", "click", "button", "cta", "success", "ripple", "interaction", "saas"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 3.8,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

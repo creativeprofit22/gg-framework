@@ -3952,6 +3952,8 @@ select {
 }
 .review-dock-trigger strong {
   display: block;
+  /* One-line boxes clip overflow; the button's tight line-height cut descenders. */
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3984,6 +3986,7 @@ select {
 }
 .review-dock-summary {
   display: block;
+  line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

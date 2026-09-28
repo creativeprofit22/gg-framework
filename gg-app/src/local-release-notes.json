@@ -1,19 +1,29 @@
 {
   "schemaVersion": 1,
-  "date": "2026-09-27",
-  "label": "Upstream 0.70.5, with steadier question cards and big edits",
+  "date": "2026-09-28",
+  "label": "Upstream 0.72.0, with a Settings screen and clearer questions",
   "sections": [
     {
-      "title": "Question cards that stay on screen",
+      "title": "A fresh look, still your Local Fork",
       "items": [
-        "No more blank window when the agent asks a few quick questions at once. A card with two or more `Yes / No` questions could empty the whole window. The cause is fixed, and your sessions stay right where you left them."
+        "`Settings` now opens as a full screen instead of a popup, with tabs for `General`, `AI Providers`, `Remote`, `MCP` and `Steroids`. The gear on Home takes you there, and going back refreshes Home so your changes show right away.",
+        "Home has a gently moving `dithered wave` behind the Supah Coder banner. It pauses when the window is out of focus, and `Background on` under Settings, Effects turns it off. The app also has a crisper icon set throughout, and the memes button is gone.",
+        "New models arrived with the update: `Kimi K2.8 Preview`, `DeepSeek V4.1 Flash` with screenshot support, Sakana's `Fugu Max`, and `Qwen3.8 Max` as OpenRouter's starting model. Your Kimi sign-in also renews in the background, so it no longer expires mid-session."
       ]
     },
     {
-      "title": "Big edits and long thinking finish",
+      "title": "Questions that make sense on their own",
       "items": [
-        "Large file edits are no longer cut off partway through. While the agent is writing a big change, it can pause for up to five minutes between chunks before the run is treated as stuck. Before this fix, the limit was 90 seconds.",
-        "Models that think quietly for a long time get more room. The agent now waits up to ten minutes of silence after thinking starts, and up to fifteen minutes in total, so a hard problem is not stopped just before the answer arrives."
+        "Every question card now says what the agent found and why it needs your call, so a card makes sense even if you skipped the chat above it. When the agent gets a card wrong and has to redo it, the status reads `Question closed` instead of claiming it is continuing with a decision you never made.",
+        "The agent answers your question first. If what you asked is unclear, it answers the likeliest reading and tells you what it assumed, and only asks when it truly cannot go on without you."
+      ]
+    },
+    {
+      "title": "Steadier panes",
+      "items": [
+        "When a pane loses its connection, it shows `Reconnecting…` again instead of looking frozen.",
+        "Simple housekeeping like `git status` no longer makes the agent ask to re-check work that has not changed.",
+        "Folded code previews keep their green and red diff colours, the message box switches to a shorter hint when the full one would be cut off, and letters like g and y are no longer clipped in the plan review header."
       ]
     }
   ]

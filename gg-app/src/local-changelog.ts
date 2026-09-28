@@ -53,10 +53,20 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-27-upstream-0705-steadier-replies",
+    id: "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-27-upstream-0705-steadier-replies",
+    label: "Upstream 0.70.5, with steadier question cards and big edits",
+    date: "2026-09-27",
+    items: [
+      "No more blank window when the agent asks a few quick questions at once. A card with two or more `Yes / No` questions could empty the whole window. The cause is fixed, and your sessions stay right where you left them.",
+      "Large file edits are no longer cut off partway through. While the agent is writing a big change, it can pause for up to five minutes between chunks before the run is treated as stuck. Before this fix, the limit was 90 seconds.",
+      "Models that think quietly for a long time get more room. The agent now waits up to ten minutes of silence after thinking starts, and up to fifteen minutes in total, so a hard problem is not stopped just before the answer arrives.",
+    ],
   },
   {
     id: "local-2026-09-26-steadier-commands-and-questions",

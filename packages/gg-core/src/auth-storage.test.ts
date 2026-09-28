@@ -15,6 +15,11 @@ import {
 
 const refreshOpenAIToken = vi.hoisted(() => vi.fn());
 vi.mock("./oauth/openai.js", () => ({ refreshOpenAIToken }));
+const refreshKimiToken = vi.hoisted(() => vi.fn());
+vi.mock("./oauth/kimi.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refreshKimiToken,
+}));
 
 async function tempAuthFile(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-core-auth-storage-test-"));
@@ -307,6 +312,29 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
     });
     expect(creds.accessToken).toBe("credits-key");
     expect(creds.baseUrl).toBe("https://api.xiaomimimo.com/v1");
+  });
+
+  it("refreshes an expired OAuth credential reached through storageKeys (Kimi K2.8 Preview)", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials(MOONSHOT_OAUTH_KEY, {
+      accessToken: "stale",
+      refreshToken: "kimi-refresh",
+      expiresAt: Date.now() - 1_000,
+      baseUrl: "https://api.kimi.com/coding/v1",
+    });
+    refreshKimiToken.mockResolvedValueOnce({
+      accessToken: "fresh",
+      refreshToken: "kimi-refresh-2",
+      expiresAt: Date.now() + 1_000_000,
+      baseUrl: "https://api.kimi.com/coding/v1",
+    });
+
+    const creds = await storage.resolveCredentials("moonshot", {
+      storageKeys: [MOONSHOT_OAUTH_KEY],
+    });
+
+    expect(refreshKimiToken).toHaveBeenCalledTimes(1);
+    expect(creds.accessToken).toBe("fresh");
   });
 
   it("resolveCredentials prefers the first storageKey, falling back to the next when only that's configured", async () => {

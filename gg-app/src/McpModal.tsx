@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, XCircle, Lock, CircleMinus } from "lucide-react";
+import { CheckCircleIcon, XCircleIcon, LockIcon, MinusCircleIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { ListSkeleton } from "./Skeleton";
+import { SettingsCard, SettingsSection } from "./settings-section";
+import { SettingsHeaderAction } from "./settings-header";
 import {
   listProjects,
   isMcpAuthDoneEvent,
@@ -41,6 +44,7 @@ interface McpManagementError {
  * reload the pane-scoped AgentSession before the management action completes.
  */
 export function McpModal({ onClose, client }: Props): React.ReactElement {
+  const embedded = useModalEmbedState() === "embed";
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [line, setLine] = useState("");
@@ -216,34 +220,19 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
   // which scope you're managing.
   const visible = servers.filter((s) => s.scope === scope);
 
-  return (
-    <Modal title="MCP servers" onClose={onClose}>
-      {managementError && (
-        <div
-          className="login-status"
-          role="alert"
-          aria-live="assertive"
-          style={{
-            color: theme.error,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            marginBottom: 12,
-          }}
-        >
-          <span>{managementError.message}</span>
-          <button
-            className="modal-btn"
-            style={{ flexShrink: 0, whiteSpace: "nowrap", wordBreak: "normal" }}
-            disabled={retrying}
-            onClick={() => void retryManagementAction()}
-          >
-            {retrying ? "Retrying…" : "Retry"}
-          </button>
-        </div>
-      )}
+  const addButton = (
+    <button
+      // In the Settings header it matches the nav bars' small buttons.
+      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
+      disabled={!line.trim() || busy}
+      onClick={() => void add()}
+    >
+      {busy ? "Adding\u2026" : "Add"}
+    </button>
+  );
 
+  const serverList = (
+    <>
       {loading && servers.length === 0 ? (
         <ListSkeleton rows={3} />
       ) : visible.length === 0 ? (
@@ -269,13 +258,13 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                 }}
               >
                 {!s.enabled ? (
-                  <CircleMinus size={15} />
+                  <MinusCircleIcon size={15} className="mcp-status-disabled" />
                 ) : s.ok ? (
-                  <CheckCircle2 size={15} />
+                  <CheckCircleIcon size={15} className="mcp-status-connected" />
                 ) : s.requiresAuth ? (
-                  <Lock size={14} />
+                  <LockIcon size={14} className="mcp-status-auth" />
                 ) : (
-                  <XCircle size={15} />
+                  <XCircleIcon size={15} className="mcp-status-failed" />
                 )}
               </span>
               <div style={{ flex: "1 1 auto", minWidth: 0 }}>
@@ -324,83 +313,129 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                 title={`Remove "${s.name}"`}
                 onClick={() => void remove(s.name, s.scope)}
               >
-                {"\u00d7"}
+                <XIcon size={12} weight="bold" aria-hidden="true" />
               </button>
             </div>
           ))}
         </div>
       )}
+    </>
+  );
 
-      <div className="modal-label" style={{ color: theme.textMuted, marginTop: 4 }}>
-        Add an MCP
-      </div>
-      <input
-        className="modal-input"
-        style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
-        value={line}
-        placeholder="claude mcp add --transport http notion https://mcp.notion.com/mcp"
-        autoFocus
-        onChange={(e) => setLine(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void add();
-        }}
-      />
-      <div className="mcp-scope-toggle">
-        <button
-          className={`modal-btn${scope === "global" ? " primary" : ""}`}
-          onClick={() => setScope("global")}
+  return (
+    <Modal title="MCP servers" onClose={onClose}>
+      {managementError && (
+        <div
+          className="login-status"
+          role="alert"
+          aria-live="assertive"
+          style={{
+            color: theme.error,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
         >
-          Global
-        </button>
-        <button
-          className={`modal-btn${scope === "project" ? " primary" : ""}`}
-          onClick={() => setScope("project")}
-        >
-          Project
-        </button>
-      </div>
-      {scope === "project" && (
-        <>
-          <input
-            className="modal-input"
-            style={{
-              color: projectPath ? theme.text : theme.textMuted,
-              background: theme.inputBackground,
-              width: "100%",
-              marginTop: 10,
-            }}
-            value={projectPath}
-            placeholder="Type a project path or pick below…"
-            list="mcp-project-paths"
-            onChange={(e) => setProjectPath(e.target.value)}
-          />
-          <datalist id="mcp-project-paths">
-            {projects.map((p) => (
-              <option key={p.path} value={p.path}>
-                {p.name}
-              </option>
-            ))}
-          </datalist>
-        </>
+          <span>{managementError.message}</span>
+          <button
+            className="modal-btn"
+            style={{ flexShrink: 0, whiteSpace: "nowrap", wordBreak: "normal" }}
+            disabled={retrying}
+            onClick={() => void retryManagementAction()}
+          >
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+        </div>
       )}
 
-      <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
-        Changes are saved right away. New conversations use them automatically; conversations that
-        are already open need to be restarted to pick them up. Tools are available only when the
-        server connects and trust requirements are met.
-      </div>
+      {/* Columns only on the Settings screen: servers beside the add form.
+          In the dialog they are transparent (see .settings-cols in App.css). */}
+      <div className="settings-cols">
+        <div className="settings-col">
+          {embedded ? (
+            <SettingsCard title="Servers" description="Extra tools your agent can use.">
+              {serverList}
+            </SettingsCard>
+          ) : (
+            serverList
+          )}
+        </div>
+        <div className="settings-col">
+          {embedded && <SettingsHeaderAction>{addButton}</SettingsHeaderAction>}
+          <SettingsSection
+            title="Add a server"
+            dialogTitle="Add an MCP"
+            description="Paste a claude mcp add command. New conversations pick it up automatically."
+          >
+            <input
+              className="modal-input"
+              style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
+              value={line}
+              placeholder="claude mcp add --transport http notion https://mcp.notion.com/mcp"
+              // A dialog focuses its first field; a Settings page leaves focus on
+              // the tab bar so the arrow keys keep switching tabs.
+              autoFocus={!embedded}
+              onChange={(e) => setLine(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void add();
+              }}
+            />
+            <div className="mcp-scope-toggle">
+              <button
+                className={`modal-btn${scope === "global" ? " primary" : ""}`}
+                onClick={() => setScope("global")}
+              >
+                Global
+              </button>
+              <button
+                className={`modal-btn${scope === "project" ? " primary" : ""}`}
+                onClick={() => setScope("project")}
+              >
+                Project
+              </button>
+            </div>
+            {scope === "project" && (
+              <>
+                <input
+                  className="modal-input"
+                  style={{
+                    color: projectPath ? theme.text : theme.textMuted,
+                    background: theme.inputBackground,
+                    width: "100%",
+                    marginTop: 10,
+                  }}
+                  value={projectPath}
+                  placeholder="Type a project path or pick below…"
+                  list="mcp-project-paths"
+                  onChange={(e) => setProjectPath(e.target.value)}
+                />
+                <datalist id="mcp-project-paths">
+                  {projects.map((p) => (
+                    <option key={p.path} value={p.path}>
+                      {p.name}
+                    </option>
+                  ))}
+                </datalist>
+              </>
+            )}
+          </SettingsSection>
 
-      <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Close
-        </button>
-        <button
-          className="modal-btn primary"
-          disabled={!line.trim() || busy}
-          onClick={() => void add()}
-        >
-          {busy ? "Adding\u2026" : "Add"}
-        </button>
+          <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
+            Changes are saved right away. New conversations use them automatically; conversations
+            that are already open need to be restarted to pick them up. Tools are available only
+            when the server connects and trust requirements are met.
+          </div>
+
+          {/* On the page, Add sits in the screen's header bar instead. */}
+          {!embedded && (
+            <div className="modal-actions">
+              <ModalDismissButton onClick={onClose}>Close</ModalDismissButton>
+              {addButton}
+            </div>
+          )}
+        </div>
       </div>
     </Modal>
   );

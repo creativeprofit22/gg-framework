@@ -16,7 +16,7 @@ const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "max",
   "ultra",
 ];
-// Plain Fugu stops at xhigh; Ultra v1.1 adds max. Slice by the model ceiling.
+// Plain Fugu and Fugu Max stop at xhigh; Ultra adds max. Slice by the model ceiling.
 const SAKANA_THINKING_LEVELS: readonly ThinkingLevel[] = ["high", "xhigh", "max"];
 const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"];
 // Grok reasoning models take reasoning_effort low/medium/high (server default
@@ -83,8 +83,9 @@ function isXaiModel(provider: Provider): boolean {
   return provider === "xai";
 }
 
+// K3 and K2.8 Preview (`kimi-for-coding`) declare the same low/high/max ladder.
 function isMoonshotK3Model(provider: Provider, model: string): boolean {
-  return provider === "moonshot" && model === "kimi-k3";
+  return provider === "moonshot" && (model === "kimi-k3" || model === "kimi-for-coding");
 }
 
 function isGlmModel(provider: Provider): boolean {

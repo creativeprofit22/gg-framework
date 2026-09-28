@@ -162,7 +162,7 @@ import { ScorecardModal } from "./ScorecardModal";
 import { TitleUsageMeter } from "./TitleUsageMeter";
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
-import { LoginScreen } from "./LoginScreen";
+import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
 import { PaneIdContext, PaneIdProvider } from "./pane-context";
 import { TranscriptSkeleton, Skeleton } from "./Skeleton";
@@ -178,7 +178,13 @@ import {
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
-import { ArrowUp, Paperclip, AtSign, GitBranch, Square } from "lucide-react";
+import {
+  ArrowUpIcon,
+  PaperclipIcon,
+  AtIcon,
+  GitBranchIcon,
+  SquareIcon,
+} from "@phosphor-icons/react";
 import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
 import {
@@ -204,6 +210,8 @@ import {
   type KenPromptSavePreview,
 } from "./ken-prompt-actions";
 import "./App.css";
+// Liquid glass layer from upstream. Delete this line to revert.
+import "./glass.css";
 
 const BUILD_IDENTITY = formatBuildIdentity();
 const SESSION_RESET_TIMEOUT_MS = 8_000;
@@ -1028,6 +1036,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(kind === "auxiliary"));
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
@@ -4479,16 +4488,26 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               setWorkspaceMode("chat");
               setEntryView("chats");
             }}
-            onLogin={() => setEntryView("login")}
+            onSettings={(tab) => {
+              setSettingsTab(tab ?? "general");
+              setEntryView("settings");
+            }}
             refreshSignal={homeRefreshSignal}
             waitForAgentReady={catalogClient.waitForReady}
             loadProgress={catalogClient.getProgress}
+          />
+        ) : entryView === "settings" ? (
+          <SettingsScreen
+            initialTab={settingsTab}
             // Home panes have no session yet; the catalog client's daemon session
             // is running, so MCP management never waits on an unstarted pane.
             mcpClient={catalogClient}
+            onClose={() => {
+              setEntryView("home");
+              // Settings may have changed the folder or providers.
+              setHomeRefreshSignal((n) => n + 1);
+            }}
           />
-        ) : entryView === "login" ? (
-          <LoginScreen onClose={() => setEntryView("home")} />
         ) : entryView === "chats" ? (
           <ChatPicker
             onChosen={handlePickerChosen}
@@ -4625,7 +4644,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
       aria-expanded={expandedReview === "roadmap"}
     >
-      <GitBranch size={13} aria-hidden="true" />
+      <GitBranchIcon size={13} aria-hidden="true" />
       <span>Review draft</span>
       <span className="roadmap-draft-trigger-count" aria-hidden="true">
         {roadmapDraftState.draft.phases.length}
@@ -5003,7 +5022,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             disabled={planReview !== null || noAttachmentSlashCommand !== null}
             onClick={() => fileInputRef.current?.click()}
           >
-            <Paperclip size={15} strokeWidth={1.8} />
+            <PaperclipIcon size={15} />
           </button>
           <div className="input-stack">
             {enhanceAnim && (
@@ -5189,7 +5208,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               }
               onClick={running ? requestCancel : submit}
             >
-              {running ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} />}
+              {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
             </button>
           </div>
         </div>
@@ -5746,7 +5765,7 @@ const TranscriptRow = memo(function TranscriptRow({
             <div className="user-files-row">
               {item.files.map((p) => (
                 <span key={p} className="user-file-chip" title={p}>
-                  <AtSign size={11} style={{ color: theme.accent }} />
+                  <AtIcon size={11} style={{ color: theme.accent }} />
                   <span style={{ color: theme.code }}>{p}</span>
                 </span>
               ))}

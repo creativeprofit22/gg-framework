@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { ArrowsClockwiseIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { ListSkeleton } from "./Skeleton";
@@ -187,7 +187,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
                     title={`Remove "${endpoint.label}"`}
                     onClick={() => void remove(endpoint)}
                   >
-                    {"\u00d7"}
+                    <XIcon size={12} weight="bold" aria-hidden="true" />
                   </button>
                 )}
               </div>
@@ -293,7 +293,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
               onClick={() => void scan()}
               title="Re-check every local endpoint"
             >
-              <RefreshCw size={13} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+              <ArrowsClockwiseIcon size={13} style={{ marginRight: 6, verticalAlign: "-2px" }} />
               {scanning ? "Scanning\u2026" : "Scan"}
             </button>
           </>

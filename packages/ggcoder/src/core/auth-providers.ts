@@ -124,7 +124,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "moonshot",
     label: "Moonshot",
-    description: "Kimi K3, K2.7 Code · OAuth or API key",
+    description: "Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code · OAuth or API key",
     methods: ["oauth", "apikey"],
     apiKeyLabel: "Moonshot",
     methodDetails: {
@@ -180,21 +180,21 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "deepseek",
     label: "DeepSeek",
-    description: "DeepSeek V4 Pro, V4 Flash, V4 Flash Vision (Experimental)",
+    description: "DeepSeek V4 Pro, V4.1 Flash",
     methods: ["apikey"],
     apiKeyLabel: "DeepSeek",
   },
   {
     value: "sakana",
     label: "Sakana (Fugu)",
-    description: "Fugu, Fugu Ultra",
+    description: "Fugu, Fugu Max, Fugu Ultra",
     methods: ["apikey"],
     apiKeyLabel: "Sakana",
   },
   {
     value: "openrouter",
     label: "OpenRouter",
-    description: "Qwen3.6-Plus · multi-provider gateway",
+    description: "Qwen3.8 Max · multi-provider gateway",
     methods: ["apikey"],
     apiKeyLabel: "OpenRouter",
   },

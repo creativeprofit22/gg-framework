@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { XIcon } from "@phosphor-icons/react";
 import {
   isManuallyRunnableTaskStatus,
   isRunnableTaskStatus,
@@ -187,7 +188,7 @@ export function TasksModal({
         title={`Delete task: ${task.title}`}
         onClick={() => controller.requestDelete(task.id)}
       >
-        {wide ? "Delete task" : "\u00d7"}
+        {wide ? "Delete task" : <XIcon size={12} weight="bold" aria-hidden="true" />}
       </button>
     );
   }

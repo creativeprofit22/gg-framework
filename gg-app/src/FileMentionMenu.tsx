@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { FileText } from "lucide-react";
+import { FileTextIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { FileHit } from "./agent";
 
@@ -51,12 +51,11 @@ export function FileMentionMenu({
             key={file.path}
             data-idx={i}
             className={`slash-item mention-item${active ? " active" : ""}`}
-            style={{ background: active ? theme.surface1 : "transparent" }}
             onMouseEnter={() => onHover(i)}
             onClick={() => onSelect(file)}
           >
             <span className="mention-icon" style={{ color: theme.textMuted }}>
-              <FileText size={14} />
+              <FileTextIcon size={14} />
             </span>
             <span className="mention-name" style={{ color: theme.text }}>
               {file.name}

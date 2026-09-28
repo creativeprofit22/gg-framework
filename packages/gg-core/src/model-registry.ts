@@ -7,7 +7,7 @@ import {
   getQwenCloudThinkingLevels,
 } from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { isKimiCodingEndpoint } from "./oauth/kimi.js";
-import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
+import { MOONSHOT_OAUTH_KEY, XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 
 export interface ModelInfo {
   id: string;
@@ -250,13 +250,27 @@ export const MODELS: ModelInfo[] = [
   },
   // ── Sakana (Fugu) ──────────────────────────────────────
   // Sakana Fugu is a multi-agent system surfaced as a standard LLM via the
-  // OpenAI-compatible Sakana API (https://api.sakana.ai/v1). Both models take
-  // text + image input. Plain Fugu stops at xhigh; Ultra v1.1 also supports max.
-  // `fugu` routes across all providers; `fugu-ultra` is
-  // the heavier tier (may need larger client timeouts on complex tasks).
+  // OpenAI-compatible Sakana API (https://api.sakana.ai/v1). All three take
+  // text + image input (verified against the live /models list, 2026-09-28).
+  // `fugu` balances latency and quality; `fugu-max` (v1.0, 2026-09-11) is the
+  // cost tier over the largest open-weight pool ($2/$6 per 1M); `fugu-ultra`
+  // is the heavier quality tier (may need larger client timeouts). Plain Fugu
+  // and Fugu Max stop at xhigh — Sakana documents max as the same effort there.
   {
     id: "fugu",
     name: "Fugu",
+    provider: "sakana",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "xhigh",
+  },
+  {
+    id: "fugu-max",
+    name: "Fugu Max",
     provider: "sakana",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -276,7 +290,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: false,
     costTier: "high",
-    // The rolling alias now serves v1.1, which adds a distinct max effort.
+    // The rolling alias now serves v2.0 (2026-09-11), which keeps max effort.
     maxThinkingLevel: "max",
   },
   // ── xAI (Grok) ─────────────────────────────────────────
@@ -420,7 +434,27 @@ export const MODELS: ModelInfo[] = [
     costTier: "high",
     maxThinkingLevel: "max",
   },
-  // Retain the cheaper dedicated coding model as an explicit alternative.
+  // K2.8 Preview (2026-09-11) is served only on the Kimi For Coding OAuth
+  // endpoint, under its rolling `kimi-for-coding` id (live /models, 2026-09-28:
+  // display_name "K2.8 Preview", 1M context, image + video input, efforts
+  // low/high/max default max). The public API-key endpoint does not serve it,
+  // so it resolves from the Kimi sign-in credential only.
+  {
+    id: "kimi-for-coding",
+    name: "Kimi K2.8 Preview",
+    provider: "moonshot",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 100 * 1024 * 1024,
+    costTier: "medium",
+    maxThinkingLevel: "max",
+    authStorageKeys: [MOONSHOT_OAUTH_KEY],
+  },
+  // K2.7 Code is requested by its pinned id (not the `kimi-for-coding` alias
+  // that moved to K2.8), so it stays the real K2.7 on both endpoints.
   {
     id: "kimi-k2.7-code",
     name: "Kimi K2.7 Code",
@@ -551,10 +585,14 @@ export const MODELS: ModelInfo[] = [
     authStorageKeys: [XIAOMI_CREDITS_KEY],
   },
   // ── DeepSeek ───────────────────────────────────────────
+  // The live /models list (2026-09-28) serves exactly `deepseek-flash` and
+  // `deepseek-v4-pro`. V4 Flash and V4 Flash Vision Exp are retired; their old
+  // ids only temporarily route to V4.1 Flash, so they are retired here too.
   {
     // `deepseek-v4-pro` now serves DeepSeek-V4-Pro-0813 (released 2026-08-13,
     // first STABLE V4 Pro — supersedes the April preview; calling name
     // unchanged, same 1.6T/49B MoE). 1M context, text-only, low/high/max effort.
+    // DeepSeek reversed its planned 2026-09-14 retirement, so it stays served.
     // Docs abbreviate output as 384K; use the same conservative 384,000-token
     // application cap across V4 models rather than mixing decimal/binary units.
     id: "deepseek-v4-pro",
@@ -569,21 +607,10 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "max",
   },
   {
-    id: "deepseek-v4-flash",
-    name: "DeepSeek V4 Flash",
-    provider: "deepseek",
-    contextWindow: 1_048_576,
-    maxOutputTokens: 384_000,
-    supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "low",
-    maxThinkingLevel: "max",
-  },
-  // Opt-in experimental vision sibling; never replaces the stable summary model.
-  {
-    id: "deepseek-v4-flash-vision-exp",
-    name: "DeepSeek V4 Flash Vision (Experimental)",
+    // `deepseek-flash` is the rolling alias for the latest Flash — currently
+    // V4.1 Flash (2026-09-10): native image input, 1M context, 384K output.
+    id: "deepseek-flash",
+    name: "DeepSeek V4.1 Flash",
     provider: "deepseek",
     contextWindow: 1_048_576,
     maxOutputTokens: 384_000,
@@ -595,11 +622,13 @@ export const MODELS: ModelInfo[] = [
   },
   // ── OpenRouter ─────────────────────────────────────────
   {
-    id: "qwen/qwen3.6-plus",
-    name: "Qwen3.6-Plus",
+    // Qwen3.8 Max — Alibaba's flagship (live /endpoints, 2026-09-28): 1M
+    // context, 131,072 output, text + image + video input, reasoning on.
+    id: "qwen/qwen3.8-max",
+    name: "Qwen3.8 Max",
     provider: "openrouter",
     contextWindow: 1_000_000,
-    maxOutputTokens: 65_536,
+    maxOutputTokens: 131_072,
     supportsThinking: true,
     supportsImages: true,
     supportsVideo: true,
@@ -732,7 +761,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "deepseek") return MODELS.find((m) => m.id === "deepseek-v4-pro")!;
   if (provider === "huggingface")
     return MODELS.find((m) => m.id === "Qwen/Qwen3-Coder-480B-A35B-Instruct")!;
-  if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
+  if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.8-max")!;
   if (provider === "sakana") return MODELS.find((m) => m.id === "fugu")!;
   if (provider === "xai") return MODELS.find((m) => m.id === "grok-4.7")!;
   if (provider === "azure") return MODELS.find((model) => model.provider === "azure")!;

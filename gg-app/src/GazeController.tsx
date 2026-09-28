@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { EyeIcon, EyeSlashIcon } from "@phosphor-icons/react";
 import { gazeFocus, onGazeTarget, windowLabel } from "./agent";
 import type { SafeTauriUnlisten } from "./tauri-listener";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
@@ -147,7 +147,7 @@ export function GazeController(): React.ReactElement | null {
       {highlight !== "none" && <div className={`gaze-frame gaze-frame-${highlight}`} aria-hidden />}
       {isMain && enabled && (
         <div className="gaze-pill" role="status">
-          {error ? <EyeOff size={13} /> : <Eye size={13} />}
+          {error ? <EyeSlashIcon size={13} /> : <EyeIcon size={13} />}
           <span>{error ? `gaze: ${error}` : `gaze: ${status || "off"}`}</span>
         </div>
       )}

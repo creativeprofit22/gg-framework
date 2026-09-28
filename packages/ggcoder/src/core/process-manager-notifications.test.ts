@@ -120,12 +120,14 @@ describe("ProcessManager progress notifications", () => {
 
   it("surfaces progress on a long-running process before it exits", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = await manager(queue);
+    // 500ms base cadence: same watcher, a tenth of the wait. The production 5s
+    // first tick is pinned by "still reports a short build promptly" below.
+    const instance = await manager(queue, 500);
     const cwd = await tempDir();
 
-    // Logs steadily for ~12s: long enough for at least one 5s checkpoint tick.
+    // Logs steadily for ~6s: long enough for several 500ms checkpoint ticks.
     const started = await instance.start(
-      `for i in $(seq 1 12); do echo "step-$i"; sleep 1; done`,
+      `for i in $(seq 1 30); do echo "step-$i"; sleep 0.2; done`,
       cwd,
     );
     const progress = await waitForNotification(queue, (entry) => !entry.terminal);
@@ -178,30 +180,33 @@ describe("ProcessManager progress notifications", () => {
 
   it("backs off repeated progress checkpoints on a long-lived chatty process", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = await manager(queue);
+    const BASE_MS = 500;
+    const instance = await manager(queue, BASE_MS);
     const cwd = await tempDir();
 
-    // A dev server: logs continuously and never exits on its own. At a flat 5s
-    // this produced a fresh checkpoint for essentially every loop step — the
-    // measured ~2k tokens per minute of overlap that prompted the backoff.
+    // A dev server: logs continuously and never exits on its own. At a flat
+    // interval this produced a fresh checkpoint for essentially every loop step
+    // — the measured ~2k tokens per minute of overlap that prompted the backoff.
     const started = await instance.start(
-      `for i in $(seq 1 400); do echo "[electron] compiled ok $i"; sleep 0.2; done`,
+      `for i in $(seq 1 400); do echo "[electron] compiled ok $i"; sleep 0.1; done`,
       cwd,
     );
 
-    // Drain on the cadence a fast tool batch would, for 30s.
-    let progressCount = 0;
-    const until = Date.now() + 30_000;
-    while (Date.now() < until) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      progressCount += queue.drain().filter((entry) => !entry.terminal).length;
+    // Record when each of the first two checkpoints lands.
+    const arrivals: number[] = [];
+    const deadline = Date.now() + 20_000;
+    while (arrivals.length < 2) {
+      if (Date.now() >= deadline) throw new Error(`only ${arrivals.length} checkpoint(s) arrived`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      for (const entry of queue.drain()) if (!entry.terminal) arrivals.push(Date.now());
     }
     await instance.stop(started.id);
 
-    // Ticks land at 5s, 15s, 35s… so 30s admits at most the first two, plus a
-    // boundary tick. Flat 5s would have produced ~6.
-    expect(progressCount).toBeGreaterThanOrEqual(1);
-    expect(progressCount).toBeLessThanOrEqual(3);
+    // A report doubles the next delay, so the second checkpoint is scheduled a
+    // full 2×BASE after the first; a timer never fires early, so the gap can only
+    // be longer under load. A flat cadence would put them BASE apart.
+    const [first = 0, second = 0] = arrivals;
+    expect(second - first).toBeGreaterThanOrEqual(2 * BASE_MS - 100);
   }, 60_000);
 
   it("still reports a short build promptly, before any backoff matters", async () => {
@@ -222,7 +227,8 @@ describe("ProcessManager progress notifications", () => {
 
   it("stays responsive after an idle stretch instead of drifting to the cap", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = await manager(queue);
+    // 500ms base cadence: the production 5s timings below, scaled by 1/10.
+    const instance = await manager(queue, 500);
     const cwd = await tempDir();
 
     // A dev server that boots, idles, then fails a recompile and KEEPS RUNNING
@@ -232,7 +238,7 @@ describe("ProcessManager progress notifications", () => {
     // `proc.command`, so a marker written inline would also appear in the boot
     // checkpoint's text and match there — which silently made an earlier
     // version of this test assert nothing.
-    const IDLE_MS = 40_000;
+    const IDLE_MS = 4_000;
     const script = path.join(cwd, "server.sh");
     await fs.writeFile(
       script,
@@ -243,25 +249,26 @@ describe("ProcessManager progress notifications", () => {
     const spawnedAt = Date.now();
     const started = await instance.start("sh server.sh", cwd);
 
-    // Consume the boot checkpoint (this one legitimately backs off to 10s).
+    // Consume the boot checkpoint (this one legitimately backs off to 1s).
     const boot = await waitForNotification(queue, (entry) => !entry.terminal);
     expect(boot.text).not.toContain("LATE_RECOMPILE_FAILURE");
 
     await waitForNotification(
       queue,
       (entry) => entry.text.includes("LATE_RECOMPILE_FAILURE"),
-      60_000,
+      30_000,
     );
     // The failure line is written IDLE_MS after spawn; everything past that is
     // watcher latency.
     const latencyMs = Date.now() - (spawnedAt + IDLE_MS);
 
     // Backing off on SILENT ticks would have grown the interval through the
-    // idle window (5→10→20→40…), making this land ~35s late. Damping only
-    // actual reports keeps the interval at 10s, so it lands within one tick.
-    expect(latencyMs).toBeLessThan(15_000);
+    // idle window (0.5→1→2→4s…, ticks at 0.5/1.5/3.5/7.5s), making this land
+    // ~3.5s late. Damping only actual reports keeps the interval at 1s, so it
+    // lands within one tick.
+    expect(latencyMs).toBeLessThan(2_500);
     await instance.stop(started.id);
-  }, 120_000);
+  }, 60_000);
 
   it("stops pushing progress entirely once the report budget is spent", async () => {
     const queue = new AgentNotificationQueue();
@@ -301,18 +308,23 @@ describe("ProcessManager progress notifications", () => {
 
   it("still reports the exit after the progress budget is spent", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = await manager(queue);
+    // 200ms base cadence: the budget is spent by ~1.4s instead of ~35s.
+    const instance = await manager(queue, 200);
     const cwd = await tempDir();
 
     // Chatty enough to burn the budget, then exits non-zero. "It finished, and
     // how" is the one fact the agent cannot get without polling — retiring the
     // progress watcher must never cost it.
     const started = await instance.start(
-      `for i in $(seq 1 200); do echo "line-$i"; sleep 0.2; done; echo BUILD_FAILED; exit 7`,
+      `for i in $(seq 1 30); do echo "line-$i"; sleep 0.2; done; echo BUILD_FAILED; exit 7`,
       cwd,
     );
 
-    const exit = await waitForNotification(queue, (entry) => entry.terminal, 90_000);
+    // Every progress report arrived, and the watcher retired, before the exit.
+    expect(await drainUntilWatcherRetires(instance, queue)).toBe(WATCH_MAX_REPORTS_EXPECTED);
+    expect((await instance.readOutput(started.id)).isRunning).toBe(true);
+
+    const exit = await waitForNotification(queue, (entry) => entry.terminal, 30_000);
     expect(exit.id).toBe(started.id);
     expect(exit.text).toContain("exited with code 7");
     expect(exit.text).toContain("BUILD_FAILED");

@@ -134,6 +134,20 @@ describe("honest reports without stop gates", () => {
     expect(events).not.toContain("verification");
   });
 
+  // Upstream regression: plain git/shell commands must not re-arm a
+  // verification demand or be recorded as verification evidence.
+  it.each([
+    "git status --short && git diff --stat",
+    "rm -r scratch.html && git status --short && echo CLEAN",
+  ])("does not demand verification after ordinary shell work: %s", async (command) => {
+    const { internal, events } = await makeSession();
+    await tool(internal, "edit", { file_path: "subject.mjs" });
+    await tool(internal, "bash", { command }, 0);
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([]);
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events).not.toContain("verification");
+  });
+
   it("accepts format-check evidence without restoring automatic reminders", async () => {
     const { internal, events } = await makeSession();
     await tool(internal, "edit", { file_path: "src/a.test.ts" });

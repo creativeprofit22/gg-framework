@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, ArrowLeftRight } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, ArrowsLeftRightIcon } from "@phosphor-icons/react";
 import { useId, type Ref } from "react";
 
 export interface PaneSwapButtonProps {
@@ -22,7 +22,11 @@ export function PaneSwapButton({
   const unavailableId = useId();
   const name = direction ? `Swap with ${direction} pane: ${label}` : `Swap with middle: ${label}`;
   const Icon =
-    direction === "left" ? ArrowLeft : direction === "right" ? ArrowRight : ArrowLeftRight;
+    direction === "left"
+      ? ArrowLeftIcon
+      : direction === "right"
+        ? ArrowRightIcon
+        : ArrowsLeftRightIcon;
   return (
     <>
       <button

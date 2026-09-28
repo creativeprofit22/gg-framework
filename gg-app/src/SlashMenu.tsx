@@ -35,7 +35,6 @@ export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): 
             key={cmd.name}
             data-idx={i}
             className={`slash-item${active ? " active" : ""}`}
-            style={{ background: active ? theme.surface1 : "transparent" }}
             onMouseEnter={() => onHover(i)}
             onClick={() => onSelect(cmd)}
           >

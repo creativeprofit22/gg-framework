@@ -11,9 +11,12 @@ export function Badge({
   children,
   color,
   title,
+  className,
 }: {
   children: React.ReactNode;
   color?: string;
+  /** Extra class, for callers that style or find a particular badge. */
+  className?: string;
   /** Native tooltip, for badges whose colour carries state worth spelling out. */
   title?: string;
 }): React.ReactElement {
@@ -27,7 +30,7 @@ export function Badge({
       }
     : undefined;
   return (
-    <span className="badge" style={style} title={title}>
+    <span className={className ? `badge ${className}` : "badge"} style={style} title={title}>
       {children}
     </span>
   );

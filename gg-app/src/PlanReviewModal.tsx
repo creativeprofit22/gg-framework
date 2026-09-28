@@ -1,6 +1,6 @@
 import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core/plan-review";
 import { useEffect, useId, useRef, useState } from "react";
-import { FileCheck } from "lucide-react";
+import { SealCheckIcon } from "@phosphor-icons/react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import { Markdown } from "./LazyMarkdown";
@@ -76,7 +76,7 @@ export function PlanReviewModal({
     <section className="plan-review" aria-label="Plan approval required" aria-busy={busy}>
       <div className="plan-review-message review-reading-rail">
         <span className="plan-review-icon" aria-hidden="true">
-          <FileCheck size={20} />
+          <SealCheckIcon size={20} />
         </span>
         <div>
           <strong>Plan approval required</strong>

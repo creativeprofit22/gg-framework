@@ -230,7 +230,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // top-level `reasoning_effort`; the managed endpoint keeps the official
   // CLI's nested shape.
   const isLocal = options.provider === "local";
-  const isKimiK3 = options.provider === "moonshot" && options.model === "kimi-k3";
+  // K2.8 Preview (`kimi-for-coding`) shares K3's effort ladder and wire shape.
+  const isKimiK3 =
+    options.provider === "moonshot" &&
+    (options.model === "kimi-k3" || options.model === "kimi-for-coding");
   const isManagedKimiK3 =
     isKimiK3 && options.baseUrl?.replace(/\/+$/, "").endsWith("/coding/v1") === true;
   // Clamp out-of-ladder levels to the official alias rungs — the session
@@ -348,7 +351,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     );
   }
 
-  // Fugu Ultra v1.1 adds a distinct max tier; plain Fugu still stops at xhigh.
+  // Fugu Ultra keeps a max tier; plain Fugu and Fugu Max stop at xhigh.
   if (
     options.provider === "sakana" &&
     options.model === "fugu-ultra" &&

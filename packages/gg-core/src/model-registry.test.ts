@@ -217,8 +217,18 @@ describe("model registry context windows", () => {
     });
     expect(getModelsForProvider("moonshot").map((model) => model.id)).toEqual([
       "kimi-k3",
+      "kimi-for-coding",
       "kimi-k2.7-code",
     ]);
+    // K2.8 Preview only exists on the Kimi sign-in endpoint, and is never
+    // mislabelled with the K2.7 name it replaced behind the rolling alias.
+    expect(getModel("kimi-for-coding")).toMatchObject({
+      name: "Kimi K2.8 Preview",
+      contextWindow: 1_048_576,
+      maxThinkingLevel: "max",
+      authStorageKeys: ["moonshot-oauth"],
+    });
+    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["moonshot-oauth"]);
     expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
   });
 
@@ -414,29 +424,48 @@ describe("model registry context windows", () => {
     });
   });
 
-  it("adds experimental DeepSeek vision without replacing stable summaries", () => {
-    expect(getModel("deepseek-v4-flash-vision-exp")).toMatchObject({
+  it("serves exactly DeepSeek's live models, with V4.1 Flash reading images", () => {
+    expect(getModelsForProvider("deepseek").map((model) => model.id)).toEqual([
+      "deepseek-v4-pro",
+      "deepseek-flash",
+    ]);
+    expect(getModel("deepseek-flash")).toMatchObject({
+      name: "DeepSeek V4.1 Flash",
       supportsImages: true,
       supportsVideo: false,
       contextWindow: 1_048_576,
       maxOutputTokens: 384_000,
       maxThinkingLevel: "max",
     });
-    expect(getSummaryModel("deepseek", "deepseek-v4-flash-vision-exp").id).toBe(
-      "deepseek-v4-flash",
-    );
+    // Retired V4 Flash ids only route temporarily, so they are not registered.
+    expect(getModel("deepseek-v4-flash")).toBeUndefined();
+    expect(getModel("deepseek-v4-flash-vision-exp")).toBeUndefined();
+    expect(getSummaryModel("deepseek", "deepseek-v4-pro").id).toBe("deepseek-flash");
     expect(
       getModelsForProvider("deepseek").every((model) => model.maxOutputTokens === 384_000),
     ).toBe(true);
   });
 
   it("enables Qwen image/video input with bounded inline video payloads", () => {
-    expect(getModel("qwen/qwen3.6-plus")).toMatchObject({
+    expect(getDefaultModel("openrouter")).toMatchObject({
+      id: "qwen/qwen3.8-max",
       supportsImages: true,
       supportsVideo: true,
       maxVideoBytes: 20 * 1024 * 1024,
       contextWindow: 1_000_000,
-      maxOutputTokens: 65_536,
+      maxOutputTokens: 131_072,
+    });
+  });
+
+  it("registers Sakana's Fugu Max beside Fugu and Fugu Ultra", () => {
+    expect(getModelsForProvider("sakana").map((model) => model.id)).toEqual([
+      "fugu",
+      "fugu-max",
+      "fugu-ultra",
+    ]);
+    expect(getModel("fugu-max")).toMatchObject({
+      supportsImages: true,
+      maxThinkingLevel: "xhigh",
     });
   });
 

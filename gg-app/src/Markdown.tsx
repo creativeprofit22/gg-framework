@@ -13,7 +13,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { toast } from "./toast";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { Check, Copy, CornerDownLeft, FilePlus2, Plus } from "lucide-react";
+import { ArrowElbowDownLeftIcon, CheckIcon, CopyIcon, FilePlusIcon, PlusIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { KenPromptActionContext } from "./ken-prompt-context";
@@ -413,9 +413,9 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
               title={currentSessionBlockedReason ?? undefined}
             >
               {continued ? (
-                <Check size={12} aria-hidden="true" />
+                <CheckIcon size={12} aria-hidden="true" />
               ) : (
-                <CornerDownLeft size={12} aria-hidden="true" />
+                <ArrowElbowDownLeftIcon size={12} aria-hidden="true" />
               )}
               {continued ? "Continued" : "Continue here"}
             </button>
@@ -427,7 +427,7 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
               disabled={disabled || freshSessionBlockedReason !== null}
               title={freshSessionBlockedReason ?? undefined}
             >
-              <Plus size={14} aria-hidden="true" />
+              <PlusIcon size={14} aria-hidden="true" />
               New session
             </button>
             <div className="ken-prompt-local-actions">
@@ -440,7 +440,7 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
                 onClick={() => void prepareSave()}
                 disabled={disabled}
               >
-                <FilePlus2 size={14} aria-hidden="true" />
+                <FilePlusIcon size={14} aria-hidden="true" />
                 Save to Notes
               </button>
               <button
@@ -452,9 +452,9 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
                 onClick={() => void copyPrompt()}
               >
                 {copyStatus === "success" ? (
-                  <Check size={14} aria-hidden="true" />
+                  <CheckIcon size={14} aria-hidden="true" />
                 ) : (
-                  <Copy size={14} aria-hidden="true" />
+                  <CopyIcon size={14} aria-hidden="true" />
                 )}
               </button>
             </div>
@@ -711,7 +711,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
         aria-label={copied ? "Copied" : "Copy code"}
         title={copied ? "Copied" : "Copy code"}
       >
-        {copied ? <Check size={12} /> : <Copy size={12} />}
+        {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
         {copied ? "Copied" : "Copy"}
       </button>
       <pre

@@ -192,10 +192,14 @@ describe("LocalModelsModal", () => {
     expect(screen.getByTitle('Remove "LM Studio"')).toBeTruthy();
   });
 
-  it("keeps the footer to three actions (HF download lives in the Connect-page tile)", () => {
+  it("keeps the footer to three actions (HF download lives in the Connect-page tile)", async () => {
     // The in-modal HF button was removed (it crowded the footer to four
     // buttons); the Connect-page tile is the entry point now.
     render(<LocalModelsModal onClose={vi.fn()} />);
+    // Let the mount-time load and background scan settle so their state
+    // updates land inside the test instead of after it.
+    await screen.findByText("Ollama");
+    await waitFor(() => expect(scanLocalModelsMock).toHaveBeenCalled());
     expect(screen.queryByText("Add from Hugging Face")).toBeNull();
     expect(screen.getByText("Add endpoint")).toBeTruthy();
     expect(screen.getByText("Close")).toBeTruthy();

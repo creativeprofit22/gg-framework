@@ -376,8 +376,14 @@ export function classifyVerificationCommand(command: string): VerificationComman
   });
   const firstRejected = results.find((result) => !result.accepted);
   if (firstRejected) {
+    // Preludes are `accepted` only so a real check may follow them; they are
+    // never checks themselves, so they must not make a chain a check candidate
+    // or qualify it for snapshot comparison.
+    const isPrelude = (entry: VerificationCommandClassification): boolean =>
+      entry.reason === "git status prelude" || entry.reason === "working-directory prelude";
+    const hasRealCheck = results.some((entry) => entry.accepted && !isPrelude(entry));
     const result = rejected(
-      results.some((entry) => entry.candidate),
+      results.some((entry) => entry.candidate && !isPrelude(entry)),
       firstRejected.reason,
       results.some((entry) => entry.mayMutate),
     );
@@ -388,7 +394,7 @@ export function classifyVerificationCommand(command: string): VerificationComman
       result.snapshotEligible = true;
     } else if (
       !result.mayMutate &&
-      results.some((entry) => entry.accepted) &&
+      hasRealCheck &&
       !results.some((entry) => entry.reason === "working-directory prelude") &&
       segments.every((segment) => !hasUnsafeShellSyntax(segment))
     ) {

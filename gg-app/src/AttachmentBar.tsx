@@ -1,4 +1,4 @@
-import { FileText, Film, X } from "lucide-react";
+import { FileTextIcon, FilmStripIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { PendingAttachment } from "./attachments";
 
@@ -22,7 +22,7 @@ export function AttachmentBar({
             <img className="attach-thumb" src={a.previewUrl} alt={a.name} />
           ) : (
             <span className="attach-icon" style={{ color: theme.textMuted }}>
-              {a.kind === "video" ? <Film size={16} /> : <FileText size={16} />}
+              {a.kind === "video" ? <FilmStripIcon size={16} /> : <FileTextIcon size={16} />}
             </span>
           )}
           <span className="attach-name">{a.name}</span>
@@ -31,7 +31,7 @@ export function AttachmentBar({
             aria-label={`Remove ${a.name}`}
             onClick={() => onRemove(a.id)}
           >
-            <X size={13} />
+            <XIcon size={13} />
           </button>
         </div>
       ))}

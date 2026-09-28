@@ -7,9 +7,15 @@ import { ProviderLoginModal } from "./ProviderLoginModal";
 import { LocalModelsModal } from "./LocalModelsModal";
 import { HfPullModal } from "./HfPullModal";
 import { isMonochromeProviderLogo, providerLogo } from "./provider-logos";
+import { SettingsHeaderStatus } from "./settings-header";
+import { SettingsCard } from "./settings-section";
 
 interface Props {
-  onClose: () => void;
+  /**
+   * Shown as its own screen, with a header and Back. Omitted inside the
+   * Settings screen's AI Providers tab, which supplies both.
+   */
+  onClose?: () => void;
 }
 
 /**
@@ -74,112 +80,131 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
 
   const connectedCount = providers.filter((p) => p.connected).length;
 
-  return (
-    <div className="picker">
-      <div className="picker-head" data-tauri-drag-region>
-        <BackButton label="Back" onClick={onClose} />
-        <span className="picker-title">AI Providers</span>
-        {!loading && (
-          <Badge color={connectedCount > 0 ? theme.success : undefined}>
-            {`${connectedCount} connected`}
-          </Badge>
-        )}
-      </div>
+  const connectedBadge = loading ? null : (
+    <Badge color={connectedCount > 0 ? theme.success : undefined}>
+      {`${connectedCount} connected`}
+    </Badge>
+  );
 
-      <div className="login-scroll">
-        <div className="login-grid">
-          {loading && (
-            <div className="picker-empty" style={{ color: theme.textDim }}>
-              {"checking providers\u2026"}
-            </div>
-          )}
-          {providers.map((p) => {
-            const logo = providerLogo(p.value);
-            return (
-              <button key={p.value} className="login-tile" onClick={() => setActive(p)}>
-                {p.connected && (
-                  <span className="login-conn-dot" title="Connected" aria-label="Connected" />
-                )}
-                <span className="login-tile-logo">
-                  {logo ? (
-                    <img
-                      className={
-                        isMonochromeProviderLogo(p.value)
-                          ? "login-logo is-monochrome"
-                          : "login-logo"
-                      }
-                      src={logo}
-                      alt=""
-                    />
-                  ) : (
-                    <span className="login-logo-fallback">{p.label.charAt(0)}</span>
-                  )}
-                </span>
-                <span className="login-tile-name">{p.label}</span>
-                <span className="login-tile-methods">
-                  {p.methods.map((m) => {
-                    // Providers can support two methods and have BOTH connected, so
-                    // colour each badge by its own state instead of the tile's one
-                    // dot: green = this credential is on file. The dot above still
-                    // answers "is this provider usable at all".
-                    const isConnected = (p.connectedMethods ?? []).includes(m);
-                    const isActive = p.activeMethod === m;
-                    const label = m === "oauth" ? "OAuth" : "API key";
-                    return (
-                      <Badge
-                        key={m}
-                        color={isConnected ? theme.success : undefined}
-                        title={
-                          isConnected
-                            ? isActive
-                              ? `${label} — connected, in use`
-                              : `${label} — connected, standby`
-                            : `${label} — not connected`
-                        }
-                      >
-                        {label}
-                      </Badge>
-                    );
-                  })}
-                </span>
-              </button>
-            );
-          })}
-          {/* Ollama's official mark (dark-icon-64 from ollama.com), same 48px
-              logo box as every provider tile. */}
-          {!loading && (
-            <button
-              className="login-tile"
-              onClick={() => setLocalOpen(true)}
-              title="Ollama — models running on this machine"
-            >
-              <span className="login-tile-logo">
-                <img className="login-logo" src={providerLogo("ollama")} alt="" />
-              </span>
-              <span className="login-tile-name">Ollama</span>
-              <span className="login-tile-methods">
-                <Badge>No key needed</Badge>
-              </span>
-            </button>
-          )}
-          {/* The local twin: search the Hub and download models straight into
-              Ollama — no token, no account. */}
-          {!loading && (
-            <button
-              className="login-tile"
-              onClick={() => setHfOpen(true)}
-              title="Hugging Face — download models to Ollama"
-            >
-              <span className="login-tile-logo">
-                <img className="login-logo" src={providerLogo("huggingface")} alt="" />
-              </span>
-              <span className="login-tile-name">Hugging Face</span>
-              <span className="login-tile-methods">
-                <Badge>Download models</Badge>
-              </span>
-            </button>
-          )}
+  const tiles = (
+    <>
+      {loading && (
+        <div className="picker-empty" style={{ color: theme.textDim }}>
+          {"checking providers\u2026"}
         </div>
+      )}
+      {providers.map((p) => {
+        const logo = providerLogo(p.value);
+        return (
+          <button key={p.value} className="login-tile" onClick={() => setActive(p)}>
+            {p.connected && (
+              <span className="login-conn-dot" title="Connected" aria-label="Connected" />
+            )}
+            <span className="login-tile-logo">
+              {logo ? (
+                <img
+                  className={
+                    isMonochromeProviderLogo(p.value) ? "login-logo is-monochrome" : "login-logo"
+                  }
+                  src={logo}
+                  alt=""
+                />
+              ) : (
+                <span className="login-logo-fallback">{p.label.charAt(0)}</span>
+              )}
+            </span>
+            <span className="login-tile-name">{p.label}</span>
+            <span className="login-tile-methods">
+              {p.methods.map((m) => {
+                // Providers can support two methods and have BOTH connected, so
+                // colour each badge by its own state instead of the tile's one
+                // dot: green = this credential is on file. The dot above still
+                // answers "is this provider usable at all".
+                const isConnected = (p.connectedMethods ?? []).includes(m);
+                const isActive = p.activeMethod === m;
+                const label = m === "oauth" ? "OAuth" : "API key";
+                return (
+                  <Badge
+                    key={m}
+                    color={isConnected ? theme.success : undefined}
+                    title={
+                      isConnected
+                        ? isActive
+                          ? `${label} — connected, in use`
+                          : `${label} — connected, standby`
+                        : `${label} — not connected`
+                    }
+                  >
+                    {label}
+                  </Badge>
+                );
+              })}
+            </span>
+          </button>
+        );
+      })}
+      {/* Ollama's official mark (dark-icon-64 from ollama.com), same 48px
+              logo box as every provider tile. */}
+      {!loading && (
+        <button
+          className="login-tile"
+          onClick={() => setLocalOpen(true)}
+          title="Ollama — models running on this machine"
+        >
+          <span className="login-tile-logo">
+            <img className="login-logo" src={providerLogo("ollama")} alt="" />
+          </span>
+          <span className="login-tile-name">Ollama</span>
+          <span className="login-tile-methods">
+            <Badge>No key needed</Badge>
+          </span>
+        </button>
+      )}
+      {/* The local twin: search the Hub and download models straight into
+              Ollama — no token, no account. */}
+      {!loading && (
+        <button
+          className="login-tile"
+          onClick={() => setHfOpen(true)}
+          title="Hugging Face — download models to Ollama"
+        >
+          <span className="login-tile-logo">
+            <img className="login-logo" src={providerLogo("huggingface")} alt="" />
+          </span>
+          <span className="login-tile-name">Hugging Face</span>
+          <span className="login-tile-methods">
+            <Badge>Download models</Badge>
+          </span>
+        </button>
+      )}
+    </>
+  );
+
+  return (
+    <div className={onClose ? "picker" : "settings-panel"}>
+      {onClose ? (
+        <div className="picker-head" data-tauri-drag-region>
+          <BackButton label="Back" onClick={onClose} />
+          <span className="picker-title">AI Providers</span>
+          {connectedBadge}
+        </div>
+      ) : (
+        <>
+          {/* In Settings the screen header names the page; the count joins it. */}
+          <SettingsHeaderStatus>{connectedBadge}</SettingsHeaderStatus>
+        </>
+      )}
+
+      <div className={onClose ? "login-scroll" : undefined}>
+        {/* In Settings the tiles sit in a card like every other page's
+            sections; on the standalone screen they fill it as before. */}
+        {!onClose ? (
+          <SettingsCard title="Providers" description="Sign in to the models your agent can use.">
+            <div className="login-grid">{tiles}</div>
+          </SettingsCard>
+        ) : (
+          <div className="login-grid">{tiles}</div>
+        )}
       </div>
 
       {active && (

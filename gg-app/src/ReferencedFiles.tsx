@@ -1,4 +1,4 @@
-import { AtSign, X } from "lucide-react";
+import { AtIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 
 /**
@@ -22,7 +22,7 @@ export function ReferencedFiles({
           title={p}
           style={{ background: theme.surface1, borderColor: theme.border }}
         >
-          <AtSign size={11} className="mention-chip-at" style={{ color: theme.accent }} />
+          <AtIcon size={11} className="mention-chip-at" style={{ color: theme.accent }} />
           <span className="mention-chip-name" style={{ color: theme.code }}>
             {p}
           </span>
@@ -31,7 +31,7 @@ export function ReferencedFiles({
             aria-label={`Remove ${p}`}
             onClick={() => onRemove(p)}
           >
-            <X size={12} />
+            <XIcon size={12} />
           </button>
         </div>
       ))}

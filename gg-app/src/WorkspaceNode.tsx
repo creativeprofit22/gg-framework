@@ -1,6 +1,11 @@
 /* eslint-disable react-hooks/refs -- The stable lifecycle dispatcher reads its ref only when a child invokes it outside render. */
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import { CopyPlus, GripVertical, PanelBottom, PanelRight } from "lucide-react";
+import {
+  CopyIcon,
+  DotsSixVerticalIcon,
+  SquareSplitHorizontalIcon,
+  SquareSplitVerticalIcon,
+} from "@phosphor-icons/react";
 import { AgentPane, type AgentPaneProps } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";
@@ -247,7 +252,7 @@ function WorkspaceAgentLeaf({
           }}
           onDragEnd={() => onPaneDragEnd(paneId)}
         >
-          <GripVertical size={15} aria-hidden="true" />
+          <DotsSixVerticalIcon size={15} aria-hidden="true" />
         </button>
       )}
       {activePaneDragSourceId && (
@@ -273,7 +278,7 @@ function WorkspaceAgentLeaf({
               disabled={copyingPaneId !== null}
               onClick={() => onCopyPane(paneId)}
             >
-              <CopyPlus size={15} aria-hidden="true" />
+              <CopyIcon size={15} aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -282,7 +287,7 @@ function WorkspaceAgentLeaf({
               disabled={!canSplit}
               onClick={() => onSplitPane(paneId, "horizontal")}
             >
-              <PanelRight size={15} aria-hidden="true" />
+              <SquareSplitHorizontalIcon size={15} aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -291,7 +296,7 @@ function WorkspaceAgentLeaf({
               disabled={!canSplit}
               onClick={() => onSplitPane(paneId, "vertical")}
             >
-              <PanelBottom size={15} aria-hidden="true" />
+              <SquareSplitVerticalIcon size={15} aria-hidden="true" />
             </button>
           </>
         )}

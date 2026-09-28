@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { Badge } from "./Badge";
 import {
   getSettings,
@@ -14,9 +15,10 @@ import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
 import { formatBuildIdentity } from "./build-info";
 import { AzureConnectionSettings } from "./AzureConnectionSettings";
-import { MemesButton } from "./MemesButton";
-import { GgUiButton } from "./GgUiButton";
 import { AppearanceSettings } from "./AppearanceSettings";
+import { HomeBackgroundButton } from "./HomeBackgroundButton";
+import { SettingsSection } from "./settings-section";
+import { SettingsHeaderAction } from "./settings-header";
 
 interface Props {
   onClose: () => void;
@@ -30,6 +32,7 @@ export function SettingsModal({
   onSaved,
   onAzureConnectionChanged,
 }: Props): React.ReactElement {
+  const embedded = useModalEmbedState() === "embed";
   // Only the project folder is an explicitly saved field; Effects and
   // Appearance persist themselves the moment they change.
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -94,6 +97,8 @@ export function SettingsModal({
       // Saved natively in Rust (writes ~/.gg/gg-app.json) — no sidecar round-trip,
       // so this works even while the sidecar is still booting or has crashed.
       await saveSettings(trimmedRoot);
+      // The Settings page stays open after saving; re-baseline Save folder.
+      setSavedRoot(trimmedRoot);
       onSaved?.(trimmedRoot);
       onClose();
     } catch (e) {
@@ -106,91 +111,146 @@ export function SettingsModal({
     }
   }
 
+  // On the Settings screen this is the General tab; the screen already says
+  // "Settings".
+  const saveButton = (
+    <button
+      // In the Settings header it matches the nav bars' small buttons.
+      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
+      disabled={busy || !folderChanged}
+      onClick={() => void save()}
+    >
+      {busy ? "Saving\u2026" : "Save folder"}
+    </button>
+  );
+
   return (
-    <Modal title="Settings" onClose={onClose} className="settings-modal">
-      {permissions?.applicable && (
-        <>
-          <div className="modal-label" style={{ color: theme.textMuted }}>
-            Permissions
-          </div>
-          <div className="modal-row">
-            <button
-              className="modal-btn"
-              onClick={() => void openPermissionsSettings()}
-              disabled={permissions.granted}
-            >
-              {permissions.granted ? "Permissions granted" : "Grant Permissions…"}
-            </button>
-            <Badge color={permissions.granted ? theme.success : theme.textMuted}>
-              {permissions.granted ? "Granted" : "Not granted"}
-            </Badge>
-          </div>
-        </>
-      )}
-      <div className="modal-label" style={{ color: theme.textMuted }}>
-        Effects
-      </div>
-      <div className="modal-hint" style={{ color: theme.textMuted }}>
-        Applies immediately; Cancel does not undo it.
-      </div>
-      <div className="modal-row">
-        <SoundButton variant="settings" />
-        <MemesButton variant="settings" />
-        <GgUiButton />
-      </div>
-      <label className="modal-label" htmlFor={folderId} style={{ color: theme.textMuted }}>
-        Project folder
-      </label>
-      <div id={folderHintId} className="modal-hint" style={{ color: theme.textMuted }}>
-        New projects are created inside this folder. Save folder and Cancel apply only to this
-        field.
-      </div>
-      <div className="modal-row">
-        <input
-          id={folderId}
-          className="modal-input"
-          style={{ color: theme.text, background: theme.inputBackground }}
-          value={projectsRoot}
-          placeholder="/Users/you/gg-projects"
-          aria-describedby={saveError ? `${folderHintId} ${folderErrorId}` : folderHintId}
-          aria-invalid={saveError ? true : undefined}
-          onChange={(e) => {
-            setProjectsRoot(e.target.value);
-            setSaveError(null);
-          }}
-        />
-        <button className="modal-btn" onClick={() => void browse()}>
-          {"Browse\u2026"}
-        </button>
-      </div>
-      {loadError && (
-        <div className="modal-hint" style={{ color: theme.textMuted }}>
-          {"Couldn\u2019t read the saved folder. Enter one and choose Save folder."}
+    <Modal title={embedded ? "General" : "Settings"} onClose={onClose} className="settings-modal">
+      {/* Columns only on the Settings screen; in the dialog they are
+          transparent (see .settings-cols in App.css). */}
+      <div className="settings-cols">
+        <div className="settings-col">
+          {permissions?.applicable && (
+            <SettingsSection title="Permissions" description="Full Disk Access for Supah Coder.">
+              <div className="modal-row">
+                <button
+                  className="modal-btn"
+                  onClick={() => void openPermissionsSettings()}
+                  disabled={permissions.granted}
+                >
+                  {permissions.granted ? "Permissions granted" : "Grant Permissions…"}
+                </button>
+                <Badge color={permissions.granted ? theme.success : theme.textMuted}>
+                  {permissions.granted ? "Granted" : "Not granted"}
+                </Badge>
+              </div>
+            </SettingsSection>
+          )}
+          <SettingsSection
+            title="Effects"
+            description="Sounds, and the home screen's moving background. Applies immediately."
+            dialogHint={
+              <div className="modal-hint" style={{ color: theme.textMuted }}>
+                Applies immediately; Cancel does not undo it.
+              </div>
+            }
+          >
+            <div className="modal-row">
+              <SoundButton variant="settings" />
+              <HomeBackgroundButton />
+            </div>
+          </SettingsSection>
+          {embedded ? (
+            <div className="settings-card">
+              <AppearanceSettings />
+            </div>
+          ) : (
+            <AppearanceSettings />
+          )}
         </div>
-      )}
-      {saveError && (
-        <div id={folderErrorId} className="modal-hint" role="alert" style={{ color: theme.error }}>
-          {saveError}
+        <div className="settings-col">
+          {embedded && <SettingsHeaderAction>{saveButton}</SettingsHeaderAction>}
+          <SettingsSection
+            title="Project folder"
+            description="Where new projects are created. Save folder applies only to this field."
+            // The dialog keeps a real <label> and hint; on the page the card
+            // title is shown and the input is named through aria-label.
+            dialogTitle={null}
+            dialogHint={
+              <>
+                <label className="modal-label" htmlFor={folderId} style={{ color: theme.textMuted }}>
+                  Project folder
+                </label>
+                <div id={folderHintId} className="modal-hint" style={{ color: theme.textMuted }}>
+                  New projects are created inside this folder. Save folder and Cancel apply only to
+                  this field.
+                </div>
+              </>
+            }
+          >
+            <div className="modal-row">
+              <input
+                id={folderId}
+                className="modal-input"
+                style={{ color: theme.text, background: theme.inputBackground }}
+                value={projectsRoot}
+                placeholder="/Users/you/gg-projects"
+                aria-label={embedded ? "Project folder" : undefined}
+                aria-describedby={
+                  embedded
+                    ? saveError
+                      ? folderErrorId
+                      : undefined
+                    : saveError
+                      ? `${folderHintId} ${folderErrorId}`
+                      : folderHintId
+                }
+                aria-invalid={saveError ? true : undefined}
+                onChange={(e) => {
+                  setProjectsRoot(e.target.value);
+                  setSaveError(null);
+                }}
+              />
+              <button className="modal-btn" onClick={() => void browse()}>
+                {"Browse\u2026"}
+              </button>
+            </div>
+            {loadError && (
+              <div className="modal-hint" style={{ color: theme.textMuted }}>
+                {"Couldn\u2019t read the saved folder. Enter one and choose Save folder."}
+              </div>
+            )}
+            {saveError && (
+              <div
+                id={folderErrorId}
+                className="modal-hint"
+                role="alert"
+                style={{ color: theme.error }}
+              >
+                {saveError}
+              </div>
+            )}
+          </SettingsSection>
+          {embedded ? (
+            <div className="settings-card">
+              <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
+            </div>
+          ) : (
+            <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
+          )}
+          {buildIdentity && (
+            <div className="modal-build-identity" style={{ color: theme.textDim }}>
+              {buildIdentity}
+            </div>
+          )}
+          {/* On the page, Save sits in the screen's header bar instead. */}
+          {!embedded && (
+            <div className="modal-actions">
+              <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
+              {saveButton}
+            </div>
+          )}
         </div>
-      )}
-      <AppearanceSettings />
-      <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
-      {buildIdentity && (
-        <div className="modal-build-identity" style={{ color: theme.textDim }}>
-          {buildIdentity}
-        </div>
-      )}
-      <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Cancel
-        </button>
-        <button
-          className="modal-btn primary"
-          disabled={busy || !folderChanged}
-          onClick={() => void save()}
-        >
-          {busy ? "Saving\u2026" : "Save folder"}
-        </button>
       </div>
     </Modal>
   );

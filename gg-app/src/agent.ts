@@ -1847,6 +1847,9 @@ export interface RadioState {
  */
 export async function getRadioState(): Promise<RadioState> {
   try {
+    // The titlebar button asks on mount, which at launch lands before the
+    // daemon is up and would otherwise fail with "daemon not ready".
+    await waitForReady();
     const res = await invoke<RadioState>("agent_radio_state", { paneId: "primary" });
     return {
       stations: res.stations ?? [],

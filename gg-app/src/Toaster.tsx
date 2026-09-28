@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Info, CheckCircle2, AlertTriangle, XCircle, X } from "lucide-react";
+import { InfoIcon, CheckCircleIcon, WarningIcon, XCircleIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import {
   subscribeToasts,
@@ -21,10 +21,10 @@ const TONE_COLOR: Record<ToastTone, string> = {
 };
 
 const TONE_ICON: Record<ToastTone, React.ComponentType<{ size?: number }>> = {
-  info: Info,
-  success: CheckCircle2,
-  warning: AlertTriangle,
-  error: XCircle,
+  info: InfoIcon,
+  success: CheckCircleIcon,
+  warning: WarningIcon,
+  error: XCircleIcon,
 };
 
 /**
@@ -126,7 +126,7 @@ export function Toaster(): React.ReactElement {
             </span>
             <span className="toast-msg">{t.message}</span>
             <button className="toast-close" aria-label="Dismiss" onClick={() => dismissToast(t.id)}>
-              <X size={13} />
+              <XIcon size={13} />
             </button>
           </div>
         );

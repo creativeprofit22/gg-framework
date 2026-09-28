@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { CheckIcon, CaretDownIcon } from "@phosphor-icons/react";
 import { withViewTransition } from "./view-transition";
 
 export interface DropdownOption {
@@ -175,7 +175,7 @@ export function Dropdown({
         onKeyDown={onTriggerKeyDown}
       >
         <span className="dropdown-value">{selected?.label ?? placeholder}</span>
-        <ChevronDown className="dropdown-chevron" size={16} aria-hidden="true" />
+        <CaretDownIcon className="dropdown-chevron" size={16} aria-hidden="true" />
       </button>
       {open && (
         <div
@@ -206,7 +206,7 @@ export function Dropdown({
                 )}
               </span>
               {option.value === value && (
-                <Check className="dropdown-option-check" size={14} aria-hidden="true" />
+                <CheckIcon className="dropdown-option-check" size={14} aria-hidden="true" />
               )}
             </div>
           ))}

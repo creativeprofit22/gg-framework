@@ -13,7 +13,7 @@ describe("localWireModelId", () => {
 
   it("leaves non-local ids untouched", () => {
     expect(localWireModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
-    expect(localWireModelId("qwen/qwen3.6-plus")).toBe("qwen/qwen3.6-plus");
+    expect(localWireModelId("qwen/qwen3.8-max")).toBe("qwen/qwen3.8-max");
   });
 });
 

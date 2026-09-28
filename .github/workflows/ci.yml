@@ -34,9 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # pnpm version comes from package.json's packageManager field.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - uses: actions/setup-node@v7
         with:
@@ -56,6 +55,20 @@ jobs:
       - name: Lint command discovery and desktop refresh
         shell: bash
         run: pnpm lint:command-discovery
+
+      # ripgrep is optional at runtime, but grep-parity.test.ts only compares
+      # the rg path against the in-process scanner when `rg` is on PATH. None of
+      # the runner images ship it, so without this the parity suite skipped on
+      # every OS and proved nothing.
+      - name: Install ripgrep (grep parity test)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y --no-install-recommends ripgrep ;;
+            macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep ;;
+            Windows) choco install ripgrep -y --no-progress ;;
+          esac
+          rg --version
 
       # `shell: bash` on EVERY multi-line step is load-bearing, not cosmetic.
       # On Windows the default shell is PowerShell, which does not abort a
@@ -126,9 +139,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # pnpm version comes from package.json's packageManager field.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - uses: actions/setup-node@v7
         with:

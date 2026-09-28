@@ -2,7 +2,12 @@ import { canonicalProjectKey, isNotesPhasePresent } from "@kenkaiiii/gg-core/pro
 import type { SlashCommand } from "./agent";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
+import {
+  DatabaseIcon,
+  HardDrivesIcon,
+  WarningCircleIcon,
+  WarningIcon,
+} from "@phosphor-icons/react";
 import { DeferredNotesModal } from "./DeferredNotesModal";
 import { RoadmapReminderAlert } from "./RoadmapReminderAlert";
 import type { OpenReferenceUrl } from "./notes-open-source";
@@ -560,12 +565,12 @@ export function NotesPersistenceStatus({
 }: NotesPersistenceStatus): React.ReactElement {
   const Icon =
     tone === "project"
-      ? Database
+      ? DatabaseIcon
       : tone === "local"
-        ? HardDrive
+        ? HardDrivesIcon
         : tone === "warning"
-          ? AlertTriangle
-          : AlertCircle;
+          ? WarningIcon
+          : WarningCircleIcon;
   const urgent = tone === "error";
 
   return (

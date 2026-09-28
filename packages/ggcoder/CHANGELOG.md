@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.65.0
+
+### Minor Changes
+
+- Add Kimi K2.8 Preview (Kimi sign-in), DeepSeek V4.1 Flash with image input, Sakana Fugu Max, and Qwen3.8 Max as the OpenRouter default; retire DeepSeek V4 Flash ids; refresh expired OAuth credentials reached through model storage keys; stop `git status` preludes from re-arming the verification gate.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.65.0
+- @kenkaiiii/gg-agent@5.65.0
+- @kenkaiiii/gg-core@5.65.0
+
 ## 5.64.3
 
 ### Patch Changes

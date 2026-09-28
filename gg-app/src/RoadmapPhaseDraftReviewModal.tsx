@@ -1,4 +1,11 @@
-import { Check, ExternalLink, FileText, GitBranch, ListChecks, X } from "lucide-react";
+import {
+  ArrowSquareOutIcon,
+  CheckIcon,
+  FileTextIcon,
+  GitBranchIcon,
+  ListChecksIcon,
+  XIcon,
+} from "@phosphor-icons/react";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { openReferenceUrl } from "./notes-open-source";
 
@@ -47,7 +54,7 @@ export function RoadmapPhaseDraftReviewModal({
         <div className="review-reading-rail">
           <div className="roadmap-draft-intro">
             <div className="roadmap-draft-kicker">
-              <GitBranch size={14} aria-hidden="true" />
+              <GitBranchIcon size={14} aria-hidden="true" />
               Proposed from Project Notes revision {draft.basedOnRevision}
             </div>
             <p>{draft.summary}</p>
@@ -80,7 +87,7 @@ export function RoadmapPhaseDraftReviewModal({
                   <h3>{phase.title}</h3>
                   <p className="roadmap-draft-goal">{phase.goal}</p>
                   <div className="roadmap-draft-criteria-heading">
-                    <ListChecks size={14} aria-hidden="true" />
+                    <ListChecksIcon size={14} aria-hidden="true" />
                     Completion criteria
                   </div>
                   <ul className="roadmap-draft-criteria">
@@ -91,7 +98,7 @@ export function RoadmapPhaseDraftReviewModal({
                   {referenceIdsForPhase(phase).length > 0 && (
                     <div className="roadmap-draft-references">
                       <div className="roadmap-draft-criteria-heading">
-                        <ExternalLink size={14} aria-hidden="true" />
+                        <ArrowSquareOutIcon size={14} aria-hidden="true" />
                         Reviewed sources
                       </div>
                       <ul>
@@ -127,7 +134,7 @@ export function RoadmapPhaseDraftReviewModal({
                                 onClick={() => void openReferenceUrl(reference.canonicalUrl)}
                               >
                                 Open source
-                                <ExternalLink size={12} aria-hidden="true" />
+                                <ArrowSquareOutIcon size={12} aria-hidden="true" />
                               </button>
                             </li>
                           );
@@ -137,7 +144,7 @@ export function RoadmapPhaseDraftReviewModal({
                   )}
                   <details className="roadmap-draft-source">
                     <summary>
-                      <FileText size={13} aria-hidden="true" />
+                      <FileTextIcon size={13} aria-hidden="true" />
                       Saved phase prompt
                     </summary>
                     <p>{phase.sourcePrompt}</p>
@@ -167,7 +174,7 @@ export function RoadmapPhaseDraftReviewModal({
           onClick={onReject}
           disabled={deciding}
         >
-          <X size={15} aria-hidden="true" />
+          <XIcon size={15} aria-hidden="true" />
           {decision === "rejecting" ? "Rejecting…" : "Reject draft"}
         </button>
         <button
@@ -176,7 +183,7 @@ export function RoadmapPhaseDraftReviewModal({
           onClick={onApprove}
           disabled={deciding || stale || malformedLinks}
         >
-          <Check size={15} aria-hidden="true" />
+          <CheckIcon size={15} aria-hidden="true" />
           {decision === "approving"
             ? "Creating phases…"
             : references.length > 0

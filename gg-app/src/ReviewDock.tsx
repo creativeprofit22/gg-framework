@@ -1,5 +1,10 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Maximize2, Minimize2 } from "lucide-react";
+import {
+  CaretDownIcon,
+  CaretRightIcon,
+  CornersInIcon,
+  CornersOutIcon,
+} from "@phosphor-icons/react";
 
 export interface ReviewDockItem {
   id: "plan" | "roadmap";
@@ -86,9 +91,9 @@ export function ReviewDock({
               onClick={() => changeExpanded(expanded === item.id ? null : item.id)}
             >
               {expanded === item.id ? (
-                <ChevronDown size={16} aria-hidden="true" />
+                <CaretDownIcon size={16} aria-hidden="true" />
               ) : (
-                <ChevronRight size={16} aria-hidden="true" />
+                <CaretRightIcon size={16} aria-hidden="true" />
               )}
               <span>
                 <strong>{item.label}</strong>
@@ -111,9 +116,9 @@ export function ReviewDock({
             onClick={() => setMaximizedIdentity(maximized ? null : activeIdentity)}
           >
             {maximized ? (
-              <Minimize2 size={18} aria-hidden="true" />
+              <CornersInIcon size={18} aria-hidden="true" />
             ) : (
-              <Maximize2 size={18} aria-hidden="true" />
+              <CornersOutIcon size={18} aria-hidden="true" />
             )}
           </button>
         )}

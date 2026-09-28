@@ -1099,6 +1099,9 @@ fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i
 /// Pure parser for `ps -eo pid=,ppid=,pgid=,command=` output (one row per
 /// line). Column padding (multiple spaces) is collapsed by `split_whitespace`.
 /// Available on all platforms so the parsing can be unit-tested.
+/// On Windows its only caller is `#[cfg(unix)]`, so outside tests it is dead
+/// there; the allow is scoped to non-Unix so Unix builds still flag real rot.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
     stdout
         .lines()
@@ -5495,7 +5498,8 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "gemini",
         label: "Gemini",
-        description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
+        description:
+            "Gemini 3.8 Flash, 3.5 Flash Lite, 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
         methods: &["oauth"],
         oauth_key: None,
         oauth_label: None,
@@ -5507,7 +5511,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xai",
         label: "xAI (Grok)",
-        description: "Grok 4.6, Grok 4.5 · OAuth or API key",
+        description: "Grok 4.7 · OAuth or API key",
         methods: &["oauth", "apikey"],
         oauth_key: Some("xai-oauth"),
         oauth_label: Some("Grok OAuth"),
@@ -5534,7 +5538,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "moonshot",
         label: "Moonshot",
-        description: "Kimi K3, K2.7 Code · OAuth or API key",
+        description: "Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code · OAuth or API key",
         methods: &["oauth", "apikey"],
         oauth_key: Some("moonshot-oauth"),
         oauth_label: Some("Kimi OAuth"),
@@ -5586,7 +5590,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         value: "xiaomi",
         label: "Xiaomi (MiMo)",
         description:
-            "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
+            "MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed · Token Plan or API Credits",
         methods: &["apikey"],
         oauth_key: None,
         oauth_label: None,
@@ -5609,7 +5613,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "deepseek",
         label: "DeepSeek",
-        description: "DeepSeek V4 Pro, V4 Flash",
+        description: "DeepSeek V4 Pro, V4.1 Flash",
         methods: &["apikey"],
         oauth_key: None,
         oauth_label: None,
@@ -5621,7 +5625,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "sakana",
         label: "Sakana (Fugu)",
-        description: "Fugu, Fugu Ultra",
+        description: "Fugu, Fugu Max, Fugu Ultra",
         methods: &["apikey"],
         oauth_key: None,
         oauth_label: None,
@@ -5633,7 +5637,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "openrouter",
         label: "OpenRouter",
-        description: "Qwen3.6-Plus · multi-provider gateway",
+        description: "Qwen3.8 Max · multi-provider gateway",
         methods: &["apikey"],
         oauth_key: None,
         oauth_label: None,

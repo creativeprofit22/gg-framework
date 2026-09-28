@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { PaneAgentClient } from "./agent";
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
 import { HomeScreen } from "./HomeScreen";
@@ -27,17 +26,10 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn().mockResolvedValue("1
 vi.mock("./agent", () => agentMocks);
 vi.mock("./update", () => ({ useAppUpdate: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
-vi.mock("./HomeBackdrop", () => ({ HomeBackdrop: () => null }));
-vi.mock("./MemeLayer", () => ({ MemeLayer: () => null }));
-vi.mock("./SettingsModal", () => ({ SettingsModal: () => null }));
-vi.mock("./TelegramSettingsModal", () => ({ TelegramSettingsModal: () => null }));
-vi.mock("./McpModal", () => ({ McpModal: () => null }));
+vi.mock("./HomeDither", () => ({ HomeDither: () => null }));
 vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
-
-// McpModal is mocked above, so HomeScreen only forwards this client.
-const mcpClientStub = {} as PaneAgentClient;
 
 function updateInfo(overrides: Partial<UpdateInfo>): UpdateInfo {
   return {
@@ -57,16 +49,17 @@ function updateInfo(overrides: Partial<UpdateInfo>): UpdateInfo {
   };
 }
 
+const onSettings = vi.fn();
+
 async function renderHome(): Promise<void> {
   await act(async () => {
     render(
       <HomeScreen
         onProjects={vi.fn()}
         onChat={vi.fn()}
-        onLogin={vi.fn()}
+        onSettings={onSettings}
         waitForAgentReady={agentMocks.waitForReady}
         loadProgress={agentMocks.getProgress}
-        mcpClient={mcpClientStub}
       />,
     );
   });
@@ -172,17 +165,16 @@ describe("HomeScreen local-patched update outcomes", () => {
 });
 
 describe("HomeScreen icon-only controls", () => {
-  it("gives the Settings and Telegram setup icons distinct names and glyphs", async () => {
+  it("gives the icon-only Settings control an accessible name and opens Settings", async () => {
     vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
     await renderHome();
 
+    // Telegram setup moved into Settings > Remote; Home keeps one gear.
+    expect(screen.queryByRole("button", { name: "Telegram setup" })).toBeNull();
     const settings = screen.getByRole("button", { name: "Settings" });
-    const telegram = screen.getByRole("button", { name: "Telegram setup" });
-    expect(settings).not.toBe(telegram);
-    // Same-looking icons only told apart by a hover title were ambiguous.
-    expect(settings.querySelector("svg")?.getAttribute("class")).not.toBe(
-      telegram.querySelector("svg")?.getAttribute("class"),
-    );
+    expect(settings.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    fireEvent.click(settings);
+    expect(onSettings).toHaveBeenCalledOnce();
   });
 });
 

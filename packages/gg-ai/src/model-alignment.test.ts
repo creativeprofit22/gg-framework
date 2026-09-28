@@ -47,7 +47,7 @@ describe("model settings on the wire", () => {
     expect(body).not.toHaveProperty("max_completion_tokens");
   });
 
-  it.each(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+  it.each(["deepseek-v4-pro", "deepseek-flash"])(
     "disables DeepSeek thinking explicitly and sends its documented output cap: %s",
     async (model) => {
       const body = await captureRequest({ provider: "deepseek", model, messages, maxTokens: 1234 });
@@ -113,14 +113,27 @@ describe("model settings on the wire", () => {
     expect(body.reasoning_effort).toBe("max");
   });
 
-  it("keeps plain Fugu at xhigh for saved max settings", async () => {
+  it.each(["fugu", "fugu-max"])("keeps %s at xhigh for saved max settings", async (model) => {
     const body = await captureRequest({
       provider: "sakana",
-      model: "fugu",
+      model,
       messages,
       thinking: "max",
     });
     expect(body.reasoning_effort).toBe("xhigh");
+  });
+
+  it("sends K2.8 Preview on the Kimi Code endpoint with K3's nested effort shape", async () => {
+    const body = await captureRequest({
+      provider: "moonshot",
+      model: "kimi-for-coding",
+      baseUrl: "https://api.kimi.com/coding/v1",
+      messages,
+      thinking: "max",
+    });
+    expect(body.model).toBe("kimi-for-coding");
+    expect(body.thinking).toEqual({ type: "enabled", effort: "max", keep: "all" });
+    expect(body).not.toHaveProperty("reasoning_effort");
   });
 
   it.each([false, true])("sends Qwen inline images/video from tools=%s", async (toolResult) => {
@@ -135,7 +148,7 @@ describe("model settings on the wire", () => {
     ];
     const body = await captureRequest({
       provider: "openrouter",
-      model: "qwen/qwen3.6-plus",
+      model: "qwen/qwen3.8-max",
       supportsImages: true,
       supportsVideo: true,
       messages: toolResult

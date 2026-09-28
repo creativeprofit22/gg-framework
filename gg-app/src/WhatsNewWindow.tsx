@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { XIcon } from "@phosphor-icons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
@@ -304,7 +305,7 @@ export function WhatsNewWindow({
           title="Close"
           onClick={closeSelf}
         >
-          {"\u00d7"}
+          <XIcon size={14} weight="bold" aria-hidden="true" />
         </button>
       </div>
       {hasTabs ? (

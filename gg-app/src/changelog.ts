@@ -22,6 +22,24 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.72.0",
+    date: "2026-09-28",
+    items: [
+      "Your home screen now moves. I added a living `dithered wave` background that drifts behind your projects and pauses whenever the window is out of focus, so it never burns your battery. Not your vibe? Turn it off under Settings, Effects.",
+      "Settings got a proper home. Instead of a cramped popup, you now get a full `Settings` screen with tabs for General, AI Providers, Remote, MCP and Steroids, and a tab bar that glides smoothly between them.",
+      "The whole app got a fresh coat of paint. I swapped in a crisper icon set, restyled the sign-in screen, and polished menus, popups and notifications so everything feels cleaner and more consistent.",
+    ],
+  },
+  {
+    version: "0.71.0",
+    date: "2026-09-28",
+    items: [
+      "Four fresh brains just landed in your model picker. Sign in with Kimi and you get `Kimi K2.8 Preview` with a huge 1M memory and video support, `DeepSeek V4.1 Flash` can now look at your screenshots, Sakana's new `Fugu Max` joins the lineup, and OpenRouter now starts on the mighty `Qwen3.8 Max`. Pick the one that fits the job and keep right on going.",
+      "Your Kimi sign-in now stays fresh on its own. When your login quietly expired, the new Kimi model could fail out of nowhere. I made it renew in the background, so you just keep chatting.",
+      "GG Coder stops nagging you after simple housekeeping. Quick commands like `git status` could trick it into thinking your work still needed re-checking. I taught it the difference, so it only asks for proof when something actually changed.",
+    ],
+  },
+  {
     version: "0.70.5",
     date: "2026-09-27",
     items: [

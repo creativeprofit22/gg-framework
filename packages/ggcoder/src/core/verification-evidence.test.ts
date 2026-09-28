@@ -229,6 +229,17 @@ describe("classifyVerificationCommand", () => {
     expect(classifyVerificationCommand(command).accepted).toBe(false);
   });
 
+  it.each([
+    "git status --short && git diff --stat",
+    "rm -r scratch.html examples/ && git status --short && echo CLEAN",
+    "git status && git log -1",
+  ])("does not treat a status prelude as a check needing snapshot comparison: %s", (command) => {
+    const result = classifyVerificationCommand(command);
+    expect(result.accepted).toBe(false);
+    expect(result.candidate).toBe(false);
+    expect(result.snapshotEligible).not.toBe(true);
+  });
+
   it("rejects unknown commands without mislabeling ordinary shell work as verification", () => {
     expect(classifyVerificationCommand("git status --short")).toMatchObject({
       accepted: false,

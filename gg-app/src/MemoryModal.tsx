@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Trash2 } from "lucide-react";
+import { TrashIcon } from "@phosphor-icons/react";
 import {
   deleteJiwa,
   deleteMemory,
@@ -219,7 +219,7 @@ export function MemoryModal({ onClose }: Props): React.ReactElement {
                       disabled={deletingKey === `${activeTab}:${entry.id}`}
                       onClick={() => void remove(activeTab, entry)}
                     >
-                      <Trash2 size={14} aria-hidden="true" />
+                      <TrashIcon size={14} aria-hidden="true" />
                     </button>
                   </td>
                 </tr>

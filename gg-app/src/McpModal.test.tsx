@@ -151,19 +151,19 @@ describe("McpModal server status", () => {
       expect(await screen.findByText("Disabled")).toBeTruthy();
       expect(screen.queryByText("Requires login")).toBeNull();
       expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
-      expect(document.querySelector(".lucide-circle-x")).toBeNull();
+      expect(document.querySelector(".mcp-status-failed")).toBeNull();
       expect(loginMcpServerMock).not.toHaveBeenCalled();
-      expect(document.querySelector(".lucide-circle-minus")).not.toBeNull();
+      expect(document.querySelector(".mcp-status-disabled")).not.toBeNull();
     },
   );
 
   it.each([
-    ["connected", connectedRow, ".lucide-circle-check", "2 tools"],
-    ["auth-required", authRow, ".lucide-lock", "Requires login"],
+    ["connected", connectedRow, ".mcp-status-connected", "2 tools"],
+    ["auth-required", authRow, ".mcp-status-auth", "Requires login"],
     [
       "failed",
       { ...connectedRow, ok: false, toolCount: 0, error: "Connection refused" },
-      ".lucide-circle-x",
+      ".mcp-status-failed",
       null,
     ],
   ] as const)("preserves %s presentation", async (_label, row, icon, text) => {

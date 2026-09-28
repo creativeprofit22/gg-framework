@@ -588,7 +588,17 @@ export class AuthStorage {
     if (opts?.storageKeys && !(opts.storageKeys.length === 1 && opts.storageKeys[0] === provider)) {
       for (const key of opts.storageKeys) {
         const creds = this.data[key];
-        if (creds) return creds;
+        if (!creds) continue;
+        // An OAuth storage key (e.g. Kimi sign-in for an OAuth-only model) must
+        // still refresh, so resolve it as its own provider instead of returning
+        // a possibly expired token.
+        if (key !== provider && dualAuthProviderByOAuthKey(key)) {
+          return await this.resolveCredentials(key, {
+            ...(opts.forceRefresh ? { forceRefresh: true } : {}),
+            ...(opts.rejectedToken !== undefined ? { rejectedToken: opts.rejectedToken } : {}),
+          });
+        }
+        return creds;
       }
       throw new NotLoggedInError(provider);
     }

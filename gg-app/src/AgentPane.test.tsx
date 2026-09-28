@@ -227,15 +227,30 @@ vi.mock("./HomeScreen", () => ({
     onProjects?: () => void;
     waitForAgentReady?: () => Promise<unknown>;
     loadProgress?: () => Promise<unknown>;
-    mcpClient?: { paneId: string };
+    onSettings?: (tab?: string) => void;
   }) => (
     <div
       data-testid="home-screen"
       data-has-pane-ready={String(typeof props.waitForAgentReady === "function")}
       data-has-pane-progress={String(typeof props.loadProgress === "function")}
-      data-mcp-pane={props.mcpClient?.paneId ?? "none"}
     >
       <button onClick={props.onProjects}>Open projects</button>
+      <button onClick={() => props.onSettings?.("mcp")}>Open MCP settings</button>
+    </div>
+  ),
+}));
+vi.mock("./SettingsScreen", () => ({
+  SettingsScreen: (props: {
+    initialTab?: string;
+    mcpClient?: { paneId: string };
+    onClose: () => void;
+  }) => (
+    <div
+      data-testid="settings-screen"
+      data-tab={props.initialTab ?? "general"}
+      data-mcp-pane={props.mcpClient?.paneId ?? "none"}
+    >
+      <button onClick={props.onClose}>Back</button>
     </div>
   ),
 }));
@@ -3066,9 +3081,14 @@ describe("AgentPane lifecycle", () => {
       />,
     );
 
-    const home = await screen.findByTestId("home-screen");
-    expect(home.getAttribute("data-mcp-pane")).toBe("primary");
+    await screen.findByTestId("home-screen");
+    fireEvent.click(screen.getByRole("button", { name: "Open MCP settings" }));
+    const settings = await screen.findByTestId("settings-screen");
+    expect(settings.getAttribute("data-tab")).toBe("mcp");
+    expect(settings.getAttribute("data-mcp-pane")).toBe("primary");
     expect(pane.create).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByTestId("home-screen")).toBeTruthy();
   });
 
   it("renders the local-build identity in the agent footer", async () => {

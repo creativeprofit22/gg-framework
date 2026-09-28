@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { QueuedMessage } from "./agent";
 
@@ -89,7 +90,7 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
               aria-label="Cancel queued message"
               onClick={() => onCancel(single.id)}
             >
-              {"\u00d7"}
+              <XIcon size={12} weight="bold" aria-hidden="true" />
             </button>
           </>
         ) : (
@@ -126,7 +127,7 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
                 aria-label={`Cancel queued message ${i + 1}`}
                 onClick={() => onCancel(m.id)}
               >
-                {"\u00d7"}
+                <XIcon size={12} weight="bold" aria-hidden="true" />
               </button>
             </div>
           ))}

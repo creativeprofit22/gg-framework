@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Volume2, VolumeOff } from "lucide-react";
+import { SpeakerHighIcon, SpeakerSlashIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { isSoundEnabled, setSoundEnabled, playSound } from "./sounds";
 
@@ -36,9 +36,9 @@ export function SoundButton({
       onClick={toggle}
     >
       {on ? (
-        <Volume2 size={settingsVariant ? 16 : 20} aria-hidden="true" />
+        <SpeakerHighIcon size={settingsVariant ? 16 : 20} aria-hidden="true" />
       ) : (
-        <VolumeOff size={settingsVariant ? 16 : 20} aria-hidden="true" />
+        <SpeakerSlashIcon size={settingsVariant ? 16 : 20} aria-hidden="true" />
       )}
       {settingsVariant ? (on ? "Sound on" : "Sound off") : null}
     </button>

@@ -1,5 +1,4 @@
 import { lazy, Suspense, useSyncExternalStore } from "react";
-import { useGgUiEnabled } from "./gg-ui";
 import { appearance } from "./appearance";
 
 const getTheme = () => appearance.getSnapshot().preferences.theme;
@@ -29,14 +28,13 @@ export function ActionMetal({
   windowFocused: boolean;
   variant?: "circle" | "button";
 }): React.ReactElement | null {
-  const ggUiEnabled = useGgUiEnabled();
   const theme = useSyncExternalStore(appearance.subscribe, getTheme);
   const staticAppearance = useSyncExternalStore(
     subscribeStaticAppearance,
     prefersStaticAppearance,
     () => true,
   );
-  if (!active || !ggUiEnabled || staticAppearance) return null;
+  if (!active || staticAppearance) return null;
 
   return (
     <Suspense fallback={null}>

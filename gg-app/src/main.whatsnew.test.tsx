@@ -92,4 +92,6 @@ it("renders queued startup and later native failures through the standalone entr
   fireEvent.click(screen.getByRole("button", { name: "Got it" }));
   fireEvent.keyDown(document, { key: "Escape" });
   expect(mocks.close).toHaveBeenCalledTimes(3);
-});
+  // The cold `import("./main")` above now transforms the whole Phosphor icon
+  // set (~10s on Windows); the default 5s budget measured import cost, not behavior.
+}, 30_000);

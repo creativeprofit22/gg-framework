@@ -19,8 +19,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./toast", () => ({ toast: mocks.toast }));
 // Instant preferences own their own persistence; they are not under test here.
 vi.mock("./SoundButton", () => ({ SoundButton: () => <button>Sound</button> }));
-vi.mock("./MemesButton", () => ({ MemesButton: () => <button>Memes</button> }));
-vi.mock("./GgUiButton", () => ({ GgUiButton: () => <button>GG UI</button> }));
+vi.mock("./HomeBackgroundButton", () => ({
+  HomeBackgroundButton: () => <button>Background</button>,
+}));
 vi.mock("./AppearanceSettings", () => ({ AppearanceSettings: () => null }));
 vi.mock("./AzureConnectionSettings", () => ({ AzureConnectionSettings: () => null }));
 

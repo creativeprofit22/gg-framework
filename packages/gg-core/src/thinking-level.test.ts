@@ -118,6 +118,7 @@ describe("thinking-level helpers", () => {
 
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
+    expect(getSupportedThinkingLevels("sakana", "fugu-max")).toEqual(["high", "xhigh"]);
     expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh", "max"]);
     expect(getNextThinkingLevel("sakana", "fugu-ultra", "xhigh")).toBe("max");
     expect(getNextThinkingLevel("sakana", "fugu-ultra", "max")).toBeUndefined();
@@ -127,7 +128,7 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
   });
 
-  it.each(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+  it.each(["deepseek-v4-pro", "deepseek-flash"])(
     "cycles %s through low, high, max and off",
     (model) => {
       expect(getSupportedThinkingLevels("deepseek", model)).toEqual(["low", "high", "max"]);
@@ -141,6 +142,12 @@ describe("thinking-level helpers", () => {
 
   it("cycles Kimi K3 through its server-declared low, high, max ladder", () => {
     expect(getSupportedThinkingLevels("moonshot", "kimi-k3")).toEqual(["low", "high", "max"]);
+    // K2.8 Preview declares the same ladder as K3.
+    expect(getSupportedThinkingLevels("moonshot", "kimi-for-coding")).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
     expect(getNextThinkingLevel("moonshot", "kimi-k3", undefined)).toBe("low");
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "low")).toBe("high");
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "high")).toBe("max");

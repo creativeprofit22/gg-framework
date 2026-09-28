@@ -52,7 +52,10 @@ describe("ask_user", () => {
         { questions: [{ id: "go", question: "Ship it?", kind: "confirm" }] } as never,
         {} as never,
       ),
-    ).resolves.toContain('question "go" has no `detail`');
+    ).resolves.toEqual({
+      content: expect.stringContaining('question "go" has no `detail`'),
+      isError: true,
+    });
     expect(ask).not.toHaveBeenCalled();
     expect(broadcast).not.toHaveBeenCalled();
   });
@@ -214,7 +217,10 @@ describe("ask_user", () => {
       call({
         questions: [{ id: "store", question: "Which store?", kind: "choice", detail: CONTEXT, options: [] }],
       }),
-    ).resolves.toContain("needs at least 2 options");
+    ).resolves.toEqual({
+      content: expect.stringContaining("needs at least 2 options"),
+      isError: true,
+    });
     await expect(
       call({
         questions: [
@@ -222,7 +228,7 @@ describe("ask_user", () => {
           { id: "dupe", question: "Second?", kind: "confirm", detail: CONTEXT },
         ],
       }),
-    ).resolves.toContain("unique `id`");
+    ).resolves.toEqual({ content: expect.stringContaining("unique `id`"), isError: true });
     expect(broadcast).not.toHaveBeenCalled();
   });
 
@@ -246,9 +252,11 @@ describe("ask_user", () => {
           },
         ],
       });
-      await expect(tool.execute(parsed, {} as never)).resolves.toBe(
-        'Error: question "history" has multiple recommended options. Select at most one recommendation.',
-      );
+      await expect(tool.execute(parsed, {} as never)).resolves.toEqual({
+        content:
+          'Error: question "history" has multiple recommended options. Select at most one recommendation.',
+        isError: true,
+      });
       expect(ask).not.toHaveBeenCalled();
     },
   );
@@ -321,7 +329,10 @@ describe("ask_user", () => {
             },
           ],
         }),
-      ).resolves.toContain("click sends only that option");
+      ).resolves.toEqual({
+        content: expect.stringContaining("click sends only that option"),
+        isError: true,
+      });
     }
     expect(broadcast).not.toHaveBeenCalled();
   });

@@ -179,37 +179,44 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
     // might have answered, when the answer can only ever arrive through here.
     interruptedResult: ASK_USER_INTERRUPTED_TEXT,
     async execute({ questions }) {
+      // Rejections are flagged as tool errors so hosts don't report a card the
+      // user never saw as their decision; the text is the model's correction.
+      const reject = (content: string) => ({ content, isError: true });
       const ids = new Set(questions.map((q) => q.id));
       if (ids.size !== questions.length) {
-        return "Error: every question needs a unique `id`.";
+        return reject("Error: every question needs a unique `id`.");
       }
       // The schema requires `detail`, but hosts can call execute directly.
       const bare = questions.find((q) => !q.detail?.trim());
       if (bare) {
-        return (
+        return reject(
           `Error: question "${bare.id}" has no \`detail\`. Say what you found and why you need ` +
-          "their decision — the user may read nothing but this card."
+            "their decision — the user may read nothing but this card.",
         );
       }
       const missing = questions.find(
         (q) => (q.kind === "choice" || q.kind === "multi") && (q.options?.length ?? 0) < 2,
       );
       if (missing) {
-        return `Error: question "${missing.id}" is kind "${missing.kind}" and needs at least 2 options.`;
+        return reject(
+          `Error: question "${missing.id}" is kind "${missing.kind}" and needs at least 2 options.`,
+        );
       }
       const overRecommended = questions.find(
         (q) => (q.options?.filter((option) => option.recommended === true).length ?? 0) > 1,
       );
       if (overRecommended) {
-        return `Error: question "${overRecommended.id}" has multiple recommended options. Select at most one recommendation.`;
+        return reject(
+          `Error: question "${overRecommended.id}" has multiple recommended options. Select at most one recommendation.`,
+        );
       }
       const deferring = questions.flatMap((q) => q.options ?? []).find(defersBack);
       if (deferring) {
-        return (
+        return reject(
           `Error: the option "${deferring.label}" asks the user to specify something, but a ` +
-          "click sends only that option — they cannot type or elaborate. Replace it with the " +
-          "actual choices, or find the specifics yourself first. (The free-text escape is " +
-          "already built into the UI.)"
+            "click sends only that option — they cannot type or elaborate. Replace it with the " +
+            "actual choices, or find the specifics yourself first. (The free-text escape is " +
+            "already built into the UI.)",
         );
       }
       const normalized = questions.map(normalize);

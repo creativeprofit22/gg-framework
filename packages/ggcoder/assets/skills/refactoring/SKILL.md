@@ -33,12 +33,16 @@ Change the structure of code without changing what it does. Every observable beh
 
 ## Execute loop
 
-1. **Baseline.** Run the suite on unmodified code; record green. If red or absent → mode 3. If the project has no VCS or the working tree is dirty with unrelated changes, say so and stop for direction — a dirty baseline destroys the revert safety.
-2. **Commit checkpoint.** Refactoring is safest with per-step commits on a dedicated branch — ask the user once, up front: "I'll commit each verified step on a branch — good?" If they decline, keep steps small and separable and report the step list for review at the end. Never commit without authorization; without any VCS, or with unrelated uncommitted changes in the tree, say so and stop for direction — a dirty baseline destroys the revert safety.
-3. **Pick one target.** Ranked by risk-adjusted value, not by how interesting it is: security → correctness → structure → duplication → naming. Hotspots first — files where churn (recent edit frequency) meets complexity. Smell catalog and metrics thresholds: `references/smells.md`.
+1. **Baseline.** Run the suite on unmodified code; record green. If red or absent → mode 3. If the project has no VCS, say so and stop for direction. If the working tree is dirty with unrelated changes, see *Dirty tree* below — a dirty baseline destroys the revert safety.
+2. **Commit checkpoint.** Refactoring is safest with per-step commits on a dedicated branch — ask the user once, up front: "I'll commit each verified step on a branch — good?" If they decline, keep steps small and separable and report the step list for review at the end. Never commit without authorization.
+3. **Pick one target.** If you were started from a `Fix /sweep:` task, that task's finding and named transformation are the target — still re-read the cited lines, since code may have moved since the sweep. Otherwise, ranked by risk-adjusted value, not by how interesting it is: security → correctness → structure → duplication → naming. Hotspots first — files where churn (recent edit frequency) meets complexity. Smell catalog and metrics thresholds: `references/smells.md`.
 4. **Apply one named transformation.** Full mechanics per transformation live in `references/smells.md`. Prefer language-aware tooling (IDE rename, AST codemods) over regex edits; at scale (>~10 files or >~500 lines), a codemod is the safe path and regex is the wrong one.
 5. **Verify.** Smallest relevant suite → green ⇒ commit (message = transformation name) → next target. Red ⇒ rule 4 of the governing rules: revert, take a smaller step.
 6. **Close.** Full suite + typecheck + lint, on the same commands CI runs — including every package that imports the code you touched, not just the one you edited (monorepos: respect build order). Report: transformations applied (named), before/after state, smells left and why, anything deferred. Agent-specific drift modes to check before closing: `references/agent-pitfalls.md`.
+
+### Dirty tree
+
+Unrelated uncommitted changes make "revert the step" unsafe. Ask once, with `ask_user`: **commit them first** (recommended) or **stop**. Choosing commit is the authorization: follow the project's `/commit` workflow (project `.gg/commands/commit.md`, else the user's global one) — review and group all uncommitted changes into logical changesets and create one atomic commit per group, using its checks, review gate and push behavior. Then re-check the tree is clean and take the baseline. Never stash, discard, or fold unrelated changes into a refactor commit.
 
 ## Risk levels set the safety net
 

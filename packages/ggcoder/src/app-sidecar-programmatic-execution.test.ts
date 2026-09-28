@@ -5,7 +5,14 @@ import { RunLifecycle } from "./core/run-lifecycle.js";
 import { createRunEndPayload } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { ProgrammaticExecutionOutcome } from "./core/programmatic/execution.js";
 import { executionResultV1Schema } from "./core/programmatic/contracts.js";
-import { handleAppSidecarProgrammaticExecution, parseProgrammaticRunSelection, settleProgrammaticRun } from "./app-sidecar-programmatic-execution.js";
+import {
+  handleAppSidecarProgrammaticExecution,
+  isProgrammaticCodeMode,
+  parseProgrammaticRunSelection,
+  REVIEWED_EXECUTION_UNAVAILABLE,
+  reviewedExecutionBlocked,
+  settleProgrammaticRun,
+} from "./app-sidecar-programmatic-execution.js";
 
 const text = `/programmatic-run ${"a".repeat(64)} ${"b".repeat(64)}`;
 function outcome(status: ProgrammaticExecutionOutcome["status"]): ProgrammaticExecutionOutcome {
@@ -121,6 +128,37 @@ describe("explicit single-opportunity app command", () => {
     });
     expect(options.runAgent).not.toHaveBeenCalled();
     expect(options.execute).not.toHaveBeenCalled();
+  });
+  it.each(["chat", "motion", "unknown"])("returns 400 invalid_programmatic_selection for a %s-mode session", async (mode) => {
+    const options = { ...host(), codeMode: isProgrammaticCodeMode(mode) };
+    expect(await handleAppSidecarProgrammaticExecution(options)).toBe(true);
+    expect(options.respond).toHaveBeenCalledExactlyOnceWith(400, { error: "invalid_programmatic_selection", message: expect.stringContaining("In Code mode") });
+    expect(options.claimStart).not.toHaveBeenCalled();
+    expect(options.execute).not.toHaveBeenCalled();
+  });
+  it("accepts a code-mode session selection", async () => {
+    const options = { ...host(), codeMode: isProgrammaticCodeMode("code") };
+    await handleAppSidecarProgrammaticExecution(options);
+    expect(options.respond).toHaveBeenCalledExactlyOnceWith(202, { queued: false, count: 0 });
+  });
+  it.each([
+    [{ mode: "code", planMode: false, active: false }, false],
+    [{ mode: "chat", planMode: false, active: false }, true],
+    [{ mode: "motion", planMode: false, active: false }, true],
+    [{ mode: "code", planMode: true, active: false }, true],
+    [{ mode: "code", planMode: false, active: true }, true],
+  ])("reviewed execution gate %o blocked=%s", (state, blocked) => {
+    expect(reviewedExecutionBlocked(state)).toBe(blocked);
+  });
+  it("wires both sidecar gates through the Code-only helpers", async () => {
+    const sidecar = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
+    const executor = sidecar.slice(sidecar.indexOf("executeReviewedCommand: (async (request)"), sidecar.indexOf("programmaticExecutionActive = true;"));
+    expect(executor).toContain("reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive })");
+    expect(executor).toContain("throw new Error(REVIEWED_EXECUTION_UNAVAILABLE)");
+    expect(REVIEWED_EXECUTION_UNAVAILABLE).toContain("outside Code mode");
+    const entry = sidecar.slice(sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"), sidecar.indexOf("if (handledProgrammatic) return"));
+    expect(entry).toContain("codeMode: isProgrammaticCodeMode(mode),");
+    expect(sidecar).not.toMatch(/codeMode: mode !== "chat"/);
   });
   it("leaves ordinary planning prompts on the existing parent path", async () => {
     const options = { ...host(), text: "Continue inspecting the plan", planMode: true };

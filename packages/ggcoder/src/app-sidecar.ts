@@ -210,6 +210,9 @@ import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programma
 import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   handleAppSidecarProgrammaticExecution,
+  isProgrammaticCodeMode,
+  REVIEWED_EXECUTION_UNAVAILABLE,
+  reviewedExecutionBlocked,
   settleProgrammaticRun,
 } from "./app-sidecar-programmatic-execution.js";
 import {
@@ -2218,8 +2221,8 @@ async function createSession(
     reviewCommandCreation: commandCreationReviewer(asks),
     reviewProgrammaticSetup: commandCreationReviewer(asks),
     executeReviewedCommand: (async (request) => {
-      if (mode === "chat" || session.getPlanMode() || programmaticExecutionActive)
-        throw new Error("Reviewed execution is unavailable in chat, plan mode, or while another command runs.");
+      if (reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive }))
+        throw new Error(REVIEWED_EXECUTION_UNAVAILABLE);
       programmaticExecutionActive = true;
       const scopedAbort = new AbortController();
       const review = commandCreationReviewer(asks);
@@ -4694,7 +4697,7 @@ async function createSession(
     () => ({
       identity: programmaticChatIdentity(session.getConversationIdentity()),
       cwd,
-      codeMode: mode === "code",
+      codeMode: isProgrammaticCodeMode(mode),
       planMode: session.getPlanMode(),
       busy: isAppSidecarSessionBusy(sessionBusyState()) || planGateConflict() !== null,
     }),
@@ -5835,7 +5838,7 @@ async function createSession(
                 attachmentCount: attachments.length,
                 busy: isAppSidecarSessionBusy(sessionBusyState()),
                 automated: meta?.kenSent === true,
-                codeMode: mode !== "chat",
+                codeMode: isProgrammaticCodeMode(mode),
                 planMode: session.getPlanMode(),
                 claimStart: () => {
                   if (runClaim.active) return false;

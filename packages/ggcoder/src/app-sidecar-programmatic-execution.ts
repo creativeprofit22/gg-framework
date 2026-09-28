@@ -20,6 +20,19 @@ export function settleProgrammaticRun(result: ProgrammaticExecutionOutcome | voi
   };
 }
 
+/** Only Code workspaces run programmatic/reviewed commands; Chat, Motion and unknown modes fail closed. */
+export function isProgrammaticCodeMode(mode: string): boolean {
+  return mode === "code";
+}
+
+export const REVIEWED_EXECUTION_UNAVAILABLE =
+  "Reviewed execution is unavailable outside Code mode, in plan mode, or while another command runs.";
+
+/** Gate for the parent session's reviewed-command executor. */
+export function reviewedExecutionBlocked(state: { mode: string; planMode: boolean; active: boolean }): boolean {
+  return !isProgrammaticCodeMode(state.mode) || state.planMode || state.active;
+}
+
 export type ProgrammaticRunSelection = { opportunityId: string; configurationSha256: string };
 
 /** Raw app command only: no template lookup, steering, attachments, or model authorization. */

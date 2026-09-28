@@ -7,6 +7,7 @@ import { resolveChatResearchCommandRoute } from "./app-sidecar-chat-research-han
 import { handleAppSidecarChatResearchPrompt } from "./app-sidecar-chat-research-route.js";
 import { withRealSidecar } from "./test-support/real-sidecar.js";
 import { isAppSidecarSessionBusy } from "./app-sidecar-session-mutation.js";
+import { isProgrammaticCodeMode } from "./app-sidecar-programmatic-execution.js";
 
 it.each(["research", "attachment", "accepted"] as const)(
   "controller supersession follows acceptance: %s",
@@ -93,7 +94,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         asks, programmaticExecutionActive: false, text: "Change direction", attachments: [{}],
         running: true, runClaim: { active: false }, taskSweepClaim: { active: false }, autopilotActive: false, mode: "code", meta: undefined,
         runLifecycle: { running: true, generation: 1, state, isCancellationRequested: () => state !== "new-question" },
-        handleAppSidecarProgrammaticExecution: async () => false,
+        handleAppSidecarProgrammaticExecution: async () => false, isProgrammaticCodeMode,
         resolveChatResearchCommandRoute, handleAppSidecarChatResearchPrompt,
         runAgent: vi.fn(), session: { getPlanMode: () => false, queueInputPolicyError: () => undefined, queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
         res: {}, json, broadcast: vi.fn(), cwd: ".",

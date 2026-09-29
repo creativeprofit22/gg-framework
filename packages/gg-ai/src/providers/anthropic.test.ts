@@ -543,6 +543,71 @@ describe("streamAnthropic request shaping", () => {
   });
 });
 
+describe("streamAnthropic forced tool choice", () => {
+  const tool = {
+    name: "lookup",
+    description: "Look something up",
+    parameters: z.object({ q: z.string() }),
+  };
+  const endTurn = [
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ];
+
+  it.each([
+    ["required", "required" as const],
+    ["named tool", { name: "lookup" }],
+  ])("fails fast on claude-sonnet-5-5 with %s, sending no request", async (_label, toolChoice) => {
+    createMock.mockClear();
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [tool],
+      toolChoice,
+      apiKey: "sk-ant-test",
+    });
+    await expect(result.response).rejects.toBeInstanceOf(ProviderError);
+    await expect(result.response).rejects.toMatchObject({
+      provider: "anthropic",
+      statusCode: 400,
+      message: expect.stringMatching(/claude-sonnet-5-5 does not support forced tool use.*'auto'/),
+    });
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["claude-sonnet-5-5", "auto" as const, { type: "auto" }],
+    ["claude-sonnet-5-5", "none" as const, { type: "none" }],
+    ["claude-opus-5-5", "required" as const, { type: "any" }],
+    ["claude-opus-5-5", { name: "lookup" }, { type: "tool", name: "lookup" }],
+  ])("%s sends toolChoice %j unchanged", async (model, toolChoice, expected) => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = endTurn;
+    createMock.mockClear();
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [tool],
+      toolChoice,
+      apiKey: "sk-ant-test",
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const params = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(params.tool_choice).toEqual(expected);
+  });
+});
+
 describe("streamAnthropic non-streaming fallback", () => {
   it("sets a client timeout (bypassing the SDK long-request guard) and synthesizes a response", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");

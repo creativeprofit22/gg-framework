@@ -299,6 +299,11 @@ export interface StreamOptions {
   model: string;
   messages: Message[];
   tools?: Tool[];
+  /**
+   * How the model may use `tools`. Note: Anthropic Claude Sonnet 5.5 accepts only
+   * `"auto"`/`"none"`; forced choices (`"required"` or `{ name }`) fail fast with
+   * a `ProviderError` before any request is sent.
+   */
   toolChoice?: ToolChoice;
   serverTools?: ServerToolDefinition[];
   maxTokens?: number;

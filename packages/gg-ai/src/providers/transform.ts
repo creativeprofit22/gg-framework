@@ -652,6 +652,20 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 }
 
 /**
+ * Anthropic models that reject forced tool use (`tool_choice` type `any` or
+ * `tool`) with a 400 `invalid_request_error`; they accept only `auto`/`none`.
+ * Currently Claude Sonnet 5.5 (dashed or dotted id forms).
+ */
+export function rejectsForcedToolChoice(model: string): boolean {
+  return /sonnet-5[-.]5/.test(model);
+}
+
+/** True when the choice forces a tool call (`"required"` or a named tool). */
+export function isForcedToolChoice(choice: ToolChoice): boolean {
+  return choice !== "auto" && choice !== "none";
+}
+
+/**
  * Anthropic models with built-in adaptive thinking (Fable 5.x, Mythos 5.x,
  * Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5). Matches both dashed (`opus-4-8`) and
  * dotted (`opus-4.8`) forms so callers don't have to enumerate variants. These

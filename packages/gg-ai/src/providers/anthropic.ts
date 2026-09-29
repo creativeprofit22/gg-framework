@@ -28,6 +28,8 @@ import {
   toAnthropicToolChoice,
   toAnthropicTools,
   isAdaptiveThinkingModel,
+  isForcedToolChoice,
+  rejectsForcedToolChoice,
 } from "./transform.js";
 import { isJsonObject } from "../utils/json.js";
 
@@ -208,6 +210,21 @@ export function streamAnthropic(options: StreamOptions): StreamResult {
 }
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
+  // Fail fast instead of letting the API return an opaque 400: some models
+  // (Sonnet 5.5) reject forced tool use outright.
+  if (
+    options.toolChoice &&
+    options.tools?.length &&
+    isForcedToolChoice(options.toolChoice) &&
+    rejectsForcedToolChoice(options.model)
+  ) {
+    throw new ProviderError(
+      "anthropic",
+      `${options.model} does not support forced tool use; use toolChoice 'auto' and ask for the tool in the prompt.`,
+      { statusCode: 400 },
+    );
+  }
+
   const client = createClient(options);
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
   const useStreaming = options.streaming !== false;
@@ -301,7 +318,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
 
-  // Adaptive thinking models (Fable 5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5)
+  // Adaptive thinking models (Fable 5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5)
   // don't need the interleaved-thinking beta — they have it built in.
   const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 

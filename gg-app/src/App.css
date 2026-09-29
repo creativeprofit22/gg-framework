@@ -1331,6 +1331,16 @@ select {
   margin-top: -12px;
   font-size: 13px;
   color: var(--text);
+  /* A dark backing keeps the line readable where the dot field is brightest;
+     the text-shadow halo alone lost to dense stretches of dots. */
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .home-tagline {
+    background: var(--bg);
+  }
 }
 .home-byline {
   margin-top: -18px;
@@ -1357,6 +1367,11 @@ select {
    a gear pinned to the bottom-right corner. */
 .home-actions {
   display: flex;
+  /* Narrow windows: wrap onto a second centred row instead of clipping the
+     outer pills past both edges (.home hides horizontal overflow). */
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 100%;
   gap: 12px;
 }
 .home-action {

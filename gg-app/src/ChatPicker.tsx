@@ -18,6 +18,7 @@ import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { MetalButton } from "./MetalButton";
 import { useWindowFocused } from "./useWindowFocused";
+import { describeOpenFailure } from "./open-failure";
 
 interface Props {
   onChosen: (cwd: string) => void;
@@ -73,7 +74,12 @@ export function ChatPicker({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectionError, setSelectionError] = useState<string | null>(null);
+  // `retry` is data, not a closure, so Retry runs this render's `busy` guard.
+  const [selectionError, setSelectionError] = useState<{
+    summary: string;
+    detail: string | null;
+    retry: RecentSession | null;
+  } | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -128,11 +134,7 @@ export function ChatPicker({
       .then(() => onChosen(projectsRoot))
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? reason.message : String(reason);
-        setSelectionError(
-          message
-            .replace(/Run ["'`]?ggcoder login["'`]?/gi, "Use AI Providers to sign in")
-            .replace(/ggcoder login/gi, "AI Providers"),
-        );
+        setSelectionError({ ...describeOpenFailure(message), retry: session ?? null });
         setBusy(false);
       });
   }
@@ -164,7 +166,21 @@ export function ChatPicker({
       <div className="picker-list">
         {selectionError && (
           <div className="picker-error" role="alert">
-            {selectionError}
+            <div>{selectionError.summary}</div>
+            {selectionError.detail && (
+              <details className="picker-error-detail">
+                <summary>Details</summary>
+                <code>{selectionError.detail}</code>
+              </details>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm picker-error-retry"
+              disabled={busy}
+              onClick={() => choose(selectionError.retry ?? undefined)}
+            >
+              Retry
+            </button>
           </div>
         )}
         {loading && <ListSkeleton rows={5} />}

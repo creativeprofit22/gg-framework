@@ -14,6 +14,7 @@ import {
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
+import { describeOpenFailure } from "./open-failure";
 import { ProjectPicker } from "./ProjectPicker";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -392,5 +393,94 @@ describe("ProjectPicker session list", () => {
     // `busy` must be released, or every later click is silently ignored.
     const row = screen.getByText(FOREIGN_SESSION.preview).closest("button");
     expect(row?.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("explains an internal startup failure in plain words and retries the same session", async () => {
+    bindProjectMock
+      .mockRejectedValueOnce(new Error("pane 'primary' generation 3 was superseded"))
+      .mockResolvedValueOnce(undefined);
+    await renderSessionList([NATIVE_SESSION]);
+
+    fireEvent.click(screen.getByText(NATIVE_SESSION.preview));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Couldn’t open this session. Please try again.")).toBeDefined();
+    // The internal cause is kept for bug reports, but only under Details.
+    const detail = within(alert).getByText("pane 'primary' generation 3 was superseded");
+    expect(detail.closest("details")).not.toBeNull();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(bindProjectMock).toHaveBeenCalledTimes(2));
+    expect(bindProjectMock).toHaveBeenLastCalledWith(PROJECT.path, NATIVE_SESSION.path);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+});
+
+describe("describeOpenFailure", () => {
+  it.each([
+    [
+      "pane 'primary' did not start in time",
+      "This session took too long to start. Please try again.",
+      "pane 'primary' did not start in time",
+    ],
+    [
+      "pane 'p2' generation 4 was superseded",
+      "Couldn’t open this session. Please try again.",
+      "pane 'p2' generation 4 was superseded",
+    ],
+    [
+      "Not signed in. Run `ggcoder login` first.",
+      "Couldn’t open this session: Not signed in. Use AI Providers to sign in first.",
+      null,
+    ],
+    ["", "Couldn’t open this session. Please try again.", null],
+    [
+      "pane 'primary' failed to start: Not signed in. Use the Login to AI Providers button.",
+      "Couldn’t open this session: Not signed in. Use the Login to AI Providers button.",
+      null,
+    ],
+    [
+      "pane 'primary' failed to start: Not signed in. Run `ggcoder login`\nthen retry.",
+      "Couldn’t open this session: Not signed in. Use AI Providers to sign in\nthen retry.",
+      null,
+    ],
+    [
+      "pane 'p2' failed to start: unknown error",
+      "Couldn’t open this session. Please try again.",
+      "pane 'p2' failed to start: unknown error",
+    ],
+    [
+      "pane 'primary' generation 2 was superseded during startup",
+      "Couldn’t open this session. Please try again.",
+      "pane 'primary' generation 2 was superseded during startup",
+    ],
+    [
+      "pane 'primary' failed to start: pane 'primary' generation 2 was superseded during startup",
+      "Couldn’t open this session. Please try again.",
+      "pane 'primary' failed to start: pane 'primary' generation 2 was superseded during startup",
+    ],
+    [
+      "pane 'chat' generation 42 startup ended without settlement",
+      "Couldn’t open this session. Please try again.",
+      "pane 'chat' generation 42 startup ended without settlement",
+    ],
+    [
+      "pane 'p3' does not exist",
+      "Couldn’t open this session. Please try again.",
+      "pane 'p3' does not exist",
+    ],
+    [
+      "pane 'p3' generation is stale",
+      "Couldn’t open this session. Please try again.",
+      "pane 'p3' generation is stale",
+    ],
+    [
+      "failed to listen for pane 'p4' readiness: Error: denied",
+      "Couldn’t open this session. Please try again.",
+      "failed to listen for pane 'p4' readiness: Error: denied",
+    ],
+  ])("maps %j", (message, summary, detail) => {
+    expect(describeOpenFailure(message)).toEqual({ summary, detail });
   });
 });

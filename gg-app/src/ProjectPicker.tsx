@@ -25,6 +25,7 @@ import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
 import { MetalButton } from "./MetalButton";
 import { useWindowFocused } from "./useWindowFocused";
+import { describeOpenFailure } from "./open-failure";
 
 /**
  * Does this row point at another tool's transcript rather than a GG Coder
@@ -43,6 +44,15 @@ function projectPathKey(projectPath: string): string {
   const windowsPath = /^[a-z]:[\\/]/i.test(normalized) || normalized.startsWith("\\\\");
   normalized = normalized.replace(/\\/g, "/").replace(/\/+$/, "");
   return windowsPath ? normalized.toLowerCase() : normalized;
+}
+
+/** A failed open, split into what the user reads and what support needs. */
+interface ResumeFailure {
+  summary: string;
+  /** Technical cause, shown collapsed; null when the summary already says it. */
+  detail: string | null;
+  /** What to reopen. Data, not a closure, so Retry runs this render's `busy` guard. */
+  retry: { cwd: string; sessionPath?: string } | { cwd: string; session: RecentSession };
 }
 
 interface Props {
@@ -93,7 +103,7 @@ export function ProjectPicker({
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [resumeError, setResumeError] = useState<string | null>(null);
+  const [resumeError, setResumeError] = useState<ResumeFailure | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
@@ -219,11 +229,10 @@ export function ProjectPicker({
       .then(() => onChosen(cwd))
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? reason.message : String(reason);
-        setResumeError(
-          message
-            .replace(/Run ["'`]?ggcoder login["'`]?/gi, "Use AI Providers to sign in")
-            .replace(/ggcoder login/gi, "AI Providers"),
-        );
+        setResumeError({
+          ...describeOpenFailure(message),
+          retry: sessionPath === undefined ? { cwd } : { cwd, sessionPath },
+        });
         setBusy(false);
       });
   }
@@ -245,7 +254,11 @@ export function ProjectPicker({
     void importTranscript(session.path, cwd)
       .then((result) => {
         if (!result.ok) {
-          setResumeError(`Could not import that conversation: ${result.error}`);
+          setResumeError({
+            summary: `Could not import that conversation: ${result.error}`,
+            detail: null,
+            retry: { cwd, session },
+          });
           setBusy(false);
           return;
         }
@@ -254,11 +267,13 @@ export function ProjectPicker({
         choose(cwd, result.sessionPath);
       })
       .catch((reason: unknown) => {
-        setResumeError(
-          `Could not import that conversation: ${
+        setResumeError({
+          summary: `Could not import that conversation: ${
             reason instanceof Error ? reason.message : String(reason)
           }`,
-        );
+          detail: null,
+          retry: { cwd, session },
+        });
         setBusy(false);
       });
   }
@@ -471,7 +486,25 @@ export function ProjectPicker({
         <div className="picker-list">
           {resumeError && (
             <div className="picker-error" role="alert">
-              {resumeError}
+              <div>{resumeError.summary}</div>
+              {resumeError.detail && (
+                <details className="picker-error-detail">
+                  <summary>Details</summary>
+                  <code>{resumeError.detail}</code>
+                </details>
+              )}
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm picker-error-retry"
+                disabled={busy}
+                onClick={() => {
+                  const target = resumeError.retry;
+                  if ("session" in target) chooseSession(target.cwd, target.session);
+                  else choose(target.cwd, target.sessionPath);
+                }}
+              >
+                Retry
+              </button>
             </div>
           )}
           {sessionsLoading && <ListSkeleton rows={4} />}

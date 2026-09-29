@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   getSettings,
   listSessions,
@@ -142,9 +142,11 @@ describe("ChatPicker", () => {
     const chat = await screen.findByRole("button", { name: /Plan my week/ });
     fireEvent.click(chat);
 
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "Startup failed. Use AI Providers to sign in first.",
+    const alert = await screen.findByRole("alert");
+    expect(alert.firstElementChild?.textContent).toBe(
+      "Couldn\u2019t open this session: Startup failed. Use AI Providers to sign in first.",
     );
+    expect(alert.querySelector("details")).toBeNull();
     expect(screen.getByText("Plan my week")).toBeDefined();
     expect((chat as HTMLButtonElement).disabled).toBe(false);
     expect(onChosen).not.toHaveBeenCalled();
@@ -152,6 +154,43 @@ describe("ChatPicker", () => {
     fireEvent.click(chat);
     await waitFor(() => expect(bindChat).toHaveBeenCalledTimes(2));
     expect(onChosen).not.toHaveBeenCalled();
+  });
+
+  it("explains an internal startup failure and retries the same session", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([session]);
+    let finishRetry: () => void = () => {};
+    const bindChat = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("pane 'primary' generation 3 was superseded"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const onChosen = vi.fn();
+
+    render(<ChatPicker onChosen={onChosen} bindChat={bindChat} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Plan my week/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Couldn\u2019t open this session. Please try again.")).toBeDefined();
+    const details = alert.querySelector("details.picker-error-detail");
+    expect(details?.querySelector("code")?.textContent).toBe(
+      "pane 'primary' generation 3 was superseded",
+    );
+    expect(alert.firstElementChild?.textContent).not.toContain("generation");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(bindChat).toHaveBeenCalledTimes(2);
+    expect(bindChat).toHaveBeenNthCalledWith(2, "/workspaces", "/sessions/chat-1.jsonl", "therapist");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    finishRetry();
+    await waitFor(() => expect(onChosen).toHaveBeenCalledWith("/workspaces"));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("opens Motion in its own folder and lists only Motion sessions", async () => {

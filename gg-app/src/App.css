@@ -3865,6 +3865,27 @@ select {
   font-size: 13px;
   line-height: 1.45;
 }
+/* The internal cause stays available for bug reports without leading the
+   message; it wraps so long IDs never widen the banner. */
+.picker-error-detail {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.picker-error-detail > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.picker-error-detail > code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.picker-error-retry {
+  margin-top: 8px;
+}
 /* Row + its hover-revealed hide affordance. The hide control can't nest inside
    .picker-item (button-in-button is invalid), so it's an absolutely positioned
    sibling. */

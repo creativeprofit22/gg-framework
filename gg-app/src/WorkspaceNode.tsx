@@ -232,9 +232,9 @@ function WorkspaceAgentLeaf({
         if (!isPaneDragHandle(event.target)) onFocusPane(paneId);
       }}
     >
-      <div className="workspace-pane-body">
-        {renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}
-      </div>
+      {/* Pane chrome precedes the body in the DOM so keyboard users reach the
+          controls at the top of the pane before its transcript and composer.
+          Every chrome element is absolutely positioned, so order is visual-neutral. */}
       {rearrangementEnabled && (
         <button
           type="button"
@@ -363,6 +363,9 @@ function WorkspaceAgentLeaf({
           <span aria-hidden="true">×</span>
         </button>
       )}
+      <div className="workspace-pane-body">
+        {renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}
+      </div>
     </section>
   );
 }

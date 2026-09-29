@@ -9218,6 +9218,11 @@ select {
 .workspace-pane-slot.pane-focused {
   outline-color: var(--primary);
 }
+/* With one pane there is nothing to distinguish it from, so the accent frame
+   only read as a stray bordered strip under the toolbar. */
+.workspace-grid[data-pane-count="1"] .workspace-pane-slot.pane-focused {
+  outline-color: transparent;
+}
 .workspace-pane-body,
 .workspace-pane-body > .agent-pane,
 .workspace-pane-body > .app {
@@ -9370,10 +9375,9 @@ select {
 .workspace-pane-close:focus-visible {
   border-color: var(--primary);
   color: var(--text);
-  outline: none;
 }
-.workspace-pane-actions button:focus-visible,
-.workspace-pane-close:focus-visible,
+/* Pane chrome keeps the shared 2px keyboard ring (see :focus-visible): a 1px
+   border tint alone was too faint to track while tabbing between panes. */
 .workspace-rearrangement-toggle:focus-visible {
   box-shadow: 0 0 0 1px var(--primary);
 }
@@ -9387,7 +9391,7 @@ select {
   container-name: conversation-pane;
 }
 @container conversation-pane (max-width: 200px) {
-  .workspace-pane-body:has(~ .workspace-pane-actions .pane-swap-button) {
+  .workspace-pane-actions:has(.pane-swap-button) ~ .workspace-pane-body {
     padding-top: 92px;
   }
 }
@@ -9441,7 +9445,7 @@ select {
     padding-right: 0;
     padding-top: 35px;
   }
-  .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) {
+  .workspace-pane-actions:has([data-pane-swap-direction]) ~ .workspace-pane-body {
     padding-top: 128px;
   }
 }
@@ -9487,7 +9491,7 @@ select {
       padding-right: 0;
       padding-top: 47px;
     }
-    .workspace-pane-body:has(~ .workspace-pane-actions [data-pane-swap-direction]) {
+    .workspace-pane-actions:has([data-pane-swap-direction]) ~ .workspace-pane-body {
       padding-top: 144px;
     }
   }

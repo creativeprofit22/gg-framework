@@ -68,6 +68,9 @@ outcome remain unknown rather than invented.
   inspect, reuse, propose, approve consequential preparation, configure, verify, resume.
   Carry the original request separately from setup facts; never infer re-adoption,
   downloads, replacement files, or implementation authority.
+- Need a motion or expressive-effect exemplar → grep `C:/ggcoder-projects/uimaxxxing/library/`
+  first (category index → per-source registry). Hits are exemplars, not approval;
+  reuse must pass the library's conformance checklist and the motion gate.
 
 ### Local setup and verification
 

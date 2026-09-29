@@ -47,7 +47,7 @@ test("trace preserves gap classifications, task policy, and report format", () =
     "Do not create vague tasks",
     "Traced: <capability inferred or provided>",
     "Gaps found: <N> (<N Critical, N High, N Medium, N Low>)",
-    "Tasks created. Press CTRL + T to open the task pane and run them.",
+    "Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.",
   );
 });
 

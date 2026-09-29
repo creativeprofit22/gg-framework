@@ -1,18 +1,70 @@
 ---
-argument-hint: [interface, module, or scope — optional]
+argument-hint: [interface, module, natural-language scope, path, or recent — optional]
 description: Audit interfaces, types, abstract classes, CLI flags, and documented APIs against their implementations. Find accepted-but-ignored options, half-implemented abstractions, promised-but-missing features — then create one prioritised task per gap.
-allowed-tools: tasks, Bash, Read, Write, Edit, Grep, Glob, steroids, ask_user
+allowed-tools: tasks, Bash, Read, Grep, Glob, steroids, ask_user
 ---
 
 # Contract
 
 Find where the promise doesn't match the reality. When a type says `proxy?: string` but the function never reads it, that's a broken contract. When a base class defines 5 abstract methods but a subclass implements 3, that's a broken contract. Create one actionable task per gap. Do not edit any files.
 
+## Audit family rules
+
+This section is identical in `/trace`, `/parity`, `/contract`, `/flow`, and `/ship`. Change it in all five or none.
+
+**Ownership.** Every finding has one owner command:
+
+| Command     | Owns                                                                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/trace`    | Internal wiring with no frontend ↔ backend boundary: config, options, adapters, schemas, and events between internal layers            |
+| `/parity`   | Frontend ↔ backend agreement: routes, request/response shapes, validation, permissions, errors, cache, events, and surfaced capability |
+| `/contract` | Public promises vs implementation: types, abstract classes, exports, CLI flags, documented APIs, config schemas, and error types       |
+| `/flow`     | User journeys exercised with a live driver: feedback, dead ends, navigation, undo, and empty states                                    |
+| `/ship`     | Release blockers from any lane above, plus build, runtime, config, CI, and regression risk                                             |
+
+Outside `/ship`, when a confirmed finding belongs to another command, do not create a task for it here. List it under `Routed` in the report with the owner command and one line of evidence. `/ship` may task any release blocker but names the owner lane.
+
+**Canonical type.** Keep this command's own gap label, and also tag every finding and task prompt with exactly one canonical type:
+
+| Canonical type    | Covers                                                                                       |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `DROPPED-INPUT`   | Option, flag, field, config, or env value accepted but never consumed, or silently defaulted |
+| `PARTIAL-WIRING`  | Works through one real path or entry point but not another                                   |
+| `SHAPE-DRIFT`     | Two sides disagree on fields, names, types, optionality, or schema                           |
+| `GATE-DRIFT`      | Validation, permission, or confirmation check missing or mismatched                          |
+| `STALE-STATE`     | A successful change is not reflected in cache, UI, or subscribers                            |
+| `EVENT-DRIFT`     | Emitter, listener, channel, or payload disagree, or one side is missing                      |
+| `UNREACHABLE`     | Capability exists but no user, caller, or consumer can reach it                              |
+| `UNIMPLEMENTED`   | Stub, facade, documented-only feature, or missing handler                                    |
+| `DOC-DRIFT`       | Docs, help text, fixtures, tests, or generated clients describe old behavior                 |
+| `JOURNEY-GAP`     | User is left without feedback, a next step, a way back, or an empty state                    |
+| `RELEASE-BLOCKER` | Build, runtime, config, migration, CI, or regression failure                                 |
+| `VERIFY-FIRST`    | Plausible and specific, but needs an exact check before fixing                               |
+
+**Severity baseline.** A command's own severity section may add detail but must not contradict this baseline:
+
+- **Critical** — broken core behavior, data loss, security or permission bypass, crash, or a public promise that is a flat lie.
+- **High** — silent wrong behavior on a real path, partial wiring across real entry points, stale state after a successful change, or an unreachable capability users need.
+- **Medium** — edge-case failure, validation or error drift, missing feedback, or drift that can mislead future fixes.
+- **Low** — latent drift or minor cleanup.
+
+**Low findings.** Create tasks for Low findings only when they are objective. Opinion calls — naming, wording, layout, empty-state design — go under `Needs decision`; after the report, use `ask_user` with kind `multi` to ask which ones to convert into tasks. Ask every question with `ask_user`, never as plain text. Put at most 6 items in one question; split more across up to 5 questions in one `ask_user` call, grouped by type. If there are more than 30, ask about the 30 highest-impact items and list the rest in the report.
+
+**Task titles carry the dedupe key.** Every task title must end with ` [<CANONICAL-TYPE> <file>:<line>]`, where `<file>:<line>` is the source end of the finding — for example `Fix /trace: drop of timeout option [DROPPED-INPUT src/cli.ts:120]`. The `tasks` list output shows only titles, so this suffix is the only place other audit commands can see the canonical type and boundary.
+
+**No duplicate tasks.** Before adding tasks, call `tasks` with `action: "list"`. An open task is the same finding when its bracketed `[<CANONICAL-TYPE> <file>:<line>]` title suffix matches the new finding exactly, ignoring the `Fix /<command>:` prefix, whichever audit command created it. Do not add a second task; list it under `Already tracked` with the existing task title.
+
+**Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol. For empty or `recent`, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`, then conversation context. If confidence is low or unrelated areas match, ask with `ask_user` before proceeding.
+
+**Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
+
+**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
 ## Step 1: Determine what to audit
 
-If `$ARGUMENTS` is provided, use it as the interface, module, or boundary to audit.
+If `$ARGUMENTS` is provided and is not `recent`, treat it as an exact interface, module, path, or symbol, or as a natural-language scope such as `the CLI flags` or `plugin hooks`. Resolve natural-language scopes by searching filenames, type names, exported symbols, flag names, config keys, and docs headings for its terms. Do not require exact paths.
 
-If `$ARGUMENTS` is empty, infer scope from context — in this order:
+If `$ARGUMENTS` is empty or equals `recent`, infer scope from context — in this order:
 
 - **Git diff** — `git diff --name-only HEAD~1 HEAD` and `git status --short` for recently changed type/interface/CLI/API files
 - **Active plan** — most recently modified file in `.gg/plans/`
@@ -23,7 +75,7 @@ From that, extract:
 - The contract surface in scope (which interfaces, which abstract classes, which CLI surface, which documented API)
 - The implementation files that should fulfill those contracts
 
-If nothing can be inferred, ask the user what to audit. Do not proceed blind.
+If nothing can be inferred, ask the user what to audit with `ask_user`. Do not proceed blind.
 
 ## Step 2: Identify contract boundaries
 
@@ -90,6 +142,8 @@ Do NOT track:
 - Private internals — only public boundaries (exported types, CLI surface, documented APIs, abstract methods)
 - Style, naming, code quality
 - Theoretical mismatches that can't actually be triggered
+- Internal wiring between private layers; route it to `/trace`
+- Frontend ↔ backend request, response, cache, or permission mismatches; route them to `/parity`
 
 **Note on PARTIAL fulfillment:** A feature that works in 3 of 5 cases is more dangerous than one that doesn't exist at all — users assume it works everywhere. Treat PARTIAL gaps as High severity by default.
 
@@ -114,10 +168,13 @@ If you can't tell whether a gap should be wired or trimmed, mark the task as nee
 
 For every gap, add one task to the task pane using the `tasks` tool (action: `add`).
 
+Task title format: `Fix /contract: <specific gap> [<CANONICAL-TYPE> <file>:<line>]` (suffix required by the Audit family rules).
+
 Each task must be self-contained — a fix agent in a separate chat must execute it with no extra context. Include:
 
 - Severity label (Critical / High / Medium / Low)
 - Gap type (IGNORED / PARTIAL / STUB / DOCUMENTED-ONLY / PHANTOM / FACADE)
+- Canonical type from the Audit family rules
 - Decision (WIRE / TRIM / DOCUMENT) — or "needs decision" with both options spelled out
 - Exact `file:line` for both contract and implementation
 - A plain-english description of the gap
@@ -155,5 +212,7 @@ Then any skipped gaps:
 ```
 Skipped: file:line — reason a concrete fix couldn't be written
 ```
+
+Then the Audit family rules report footer.
 
 Keep the report tight. The detail lives in the tasks.

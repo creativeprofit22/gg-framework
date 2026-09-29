@@ -48,6 +48,14 @@ jobs:
       - name: Release CI gate fixtures
         run: pnpm test:release-ci-gate
 
+      # Bundled slash-command assets and the shared Audit family rules. These
+      # node:test suites are offline and import only node builtins plus their
+      # sibling installers. The glob keeps new *.test.mjs files covered; the
+      # ggcoder package test (vitest) never runs them.
+      - name: Slash-command asset tests
+        shell: bash
+        run: node --test packages/ggcoder/scripts/*.test.mjs
+
       - name: Lint ggcoder programmatic sources
         shell: bash
         run: pnpm --filter @kenkaiiii/ggcoder lint:programmatic

@@ -41,13 +41,14 @@ test("flow automatically discovers corpus gaps but gates repository additions", 
 });
 
 test("flow preserves previous policy outside the semantic migration", () => {
-  assert.match(
-    command,
-    /allowed-tools: tasks, Bash, Read, Write, Edit, Grep, Glob, steroids, ask_user/,
-  );
+  assert.match(command, /allowed-tools: tasks, Bash, Read, Grep, Glob, steroids, ask_user\r?\n/);
   assert.match(command, /Do not edit any files/i);
   assert.match(command, /Do not guess ports or start servers without explicit confirmation/i);
   assert.match(command, /For Low findings .* do NOT auto-create tasks/i);
+  assert.match(command, /There is no static-only mode/i);
+  assert.doesNotMatch(command, /Driver: <[^>]*static-only/i);
+  assert.doesNotMatch(command, /\[y\] install/i);
+  assert.match(command, /use `ask_user` with kind `multi` to ask which ones to convert/i);
   assert.match(command, /Do not create vague tasks/i);
 });
 

@@ -1,12 +1,64 @@
 ---
-argument-hint: [feature area or scope — optional]
+argument-hint: [feature area, natural-language scope, path, or recent — optional]
 description: Audit user flows end-to-end through UI, IPC, backend, DB, and events. Find broken mechanics, disconnected features, missing agent/UI parity, dead-end journeys, and silent failures — then create one prioritised task per gap.
-allowed-tools: tasks, Bash, Read, Write, Edit, Grep, Glob, steroids, ask_user
+allowed-tools: tasks, Bash, Read, Grep, Glob, steroids, ask_user
 ---
 
 # Flow
 
 Trace every user journey through the full stack (UI → IPC → backend → DB → events → back to UI). Find where flows break, disconnect, go silent, or confuse users. This is a UX audit grounded in code, not opinions. Create one actionable task per gap. Do not edit any files.
+
+## Audit family rules
+
+This section is identical in `/trace`, `/parity`, `/contract`, `/flow`, and `/ship`. Change it in all five or none.
+
+**Ownership.** Every finding has one owner command:
+
+| Command     | Owns                                                                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/trace`    | Internal wiring with no frontend ↔ backend boundary: config, options, adapters, schemas, and events between internal layers            |
+| `/parity`   | Frontend ↔ backend agreement: routes, request/response shapes, validation, permissions, errors, cache, events, and surfaced capability |
+| `/contract` | Public promises vs implementation: types, abstract classes, exports, CLI flags, documented APIs, config schemas, and error types       |
+| `/flow`     | User journeys exercised with a live driver: feedback, dead ends, navigation, undo, and empty states                                    |
+| `/ship`     | Release blockers from any lane above, plus build, runtime, config, CI, and regression risk                                             |
+
+Outside `/ship`, when a confirmed finding belongs to another command, do not create a task for it here. List it under `Routed` in the report with the owner command and one line of evidence. `/ship` may task any release blocker but names the owner lane.
+
+**Canonical type.** Keep this command's own gap label, and also tag every finding and task prompt with exactly one canonical type:
+
+| Canonical type    | Covers                                                                                       |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `DROPPED-INPUT`   | Option, flag, field, config, or env value accepted but never consumed, or silently defaulted |
+| `PARTIAL-WIRING`  | Works through one real path or entry point but not another                                   |
+| `SHAPE-DRIFT`     | Two sides disagree on fields, names, types, optionality, or schema                           |
+| `GATE-DRIFT`      | Validation, permission, or confirmation check missing or mismatched                          |
+| `STALE-STATE`     | A successful change is not reflected in cache, UI, or subscribers                            |
+| `EVENT-DRIFT`     | Emitter, listener, channel, or payload disagree, or one side is missing                      |
+| `UNREACHABLE`     | Capability exists but no user, caller, or consumer can reach it                              |
+| `UNIMPLEMENTED`   | Stub, facade, documented-only feature, or missing handler                                    |
+| `DOC-DRIFT`       | Docs, help text, fixtures, tests, or generated clients describe old behavior                 |
+| `JOURNEY-GAP`     | User is left without feedback, a next step, a way back, or an empty state                    |
+| `RELEASE-BLOCKER` | Build, runtime, config, migration, CI, or regression failure                                 |
+| `VERIFY-FIRST`    | Plausible and specific, but needs an exact check before fixing                               |
+
+**Severity baseline.** A command's own severity section may add detail but must not contradict this baseline:
+
+- **Critical** — broken core behavior, data loss, security or permission bypass, crash, or a public promise that is a flat lie.
+- **High** — silent wrong behavior on a real path, partial wiring across real entry points, stale state after a successful change, or an unreachable capability users need.
+- **Medium** — edge-case failure, validation or error drift, missing feedback, or drift that can mislead future fixes.
+- **Low** — latent drift or minor cleanup.
+
+**Low findings.** Create tasks for Low findings only when they are objective. Opinion calls — naming, wording, layout, empty-state design — go under `Needs decision`; after the report, use `ask_user` with kind `multi` to ask which ones to convert into tasks. Ask every question with `ask_user`, never as plain text. Put at most 6 items in one question; split more across up to 5 questions in one `ask_user` call, grouped by type. If there are more than 30, ask about the 30 highest-impact items and list the rest in the report.
+
+**Task titles carry the dedupe key.** Every task title must end with ` [<CANONICAL-TYPE> <file>:<line>]`, where `<file>:<line>` is the source end of the finding — for example `Fix /trace: drop of timeout option [DROPPED-INPUT src/cli.ts:120]`. The `tasks` list output shows only titles, so this suffix is the only place other audit commands can see the canonical type and boundary.
+
+**No duplicate tasks.** Before adding tasks, call `tasks` with `action: "list"`. An open task is the same finding when its bracketed `[<CANONICAL-TYPE> <file>:<line>]` title suffix matches the new finding exactly, ignoring the `Fix /<command>:` prefix, whichever audit command created it. Do not add a second task; list it under `Already tracked` with the existing task title.
+
+**Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol. For empty or `recent`, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`, then conversation context. If confidence is low or unrelated areas match, ask with `ask_user` before proceeding.
+
+**Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
+
+**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
 
 ## Step 0: Feasibility & driver gate
 
@@ -35,32 +87,25 @@ Do not proceed. Do not install anything.
 
 If found → skip to 0e.
 
-**0d. Ask before installing.** Never auto-install. Show the user:
+**0d. Ask before installing.** Never auto-install. Use `ask_user` with kind `choice`, stating the detected project class, the recommended driver, the exact package and version to add as a devDependency, and that browser binaries are about 200MB. Options:
 
-> Project class: **[detected class]**
-> Recommended driver: **[Playwright / Detox]** — not currently installed.
-> Install **[exact package + version]** as a devDependency? Browser binaries are ~200MB.
-> [y] install [n] skip and bail [m] I'll install manually, retry after
+- **Install the driver** — install it, then continue.
+- **Skip this audit** — bail with the same not-applicable message as 0b.
+- **I'll install it myself** — stop and wait; the user reruns `/flow` afterwards.
 
-Only proceed on `y`. On `n`, bail with the same not-applicable message as 0b. On `m`, stop and wait.
+Only proceed after the install option is chosen and the install succeeds.
 
-**0e. Confirm dev server / app entry.** Most flow tracing needs the app actually running. Ask:
-
-> Driver ready. To trace flows I need the app running.
->
-> - Web: dev server URL (e.g. http://localhost:3000) — start it now or paste URL
-> - Electron: path to built app or `npm start` command
-> - RN: simulator/device + bundler running
+**0e. Confirm dev server / app entry.** Flow tracing needs the app actually running. First look for an already-running app or a documented dev command. If none is confirmed, use `ask_user` for the dev server URL (web), the built app path or start command (Electron), or confirmation that a simulator/device and bundler are running (React Native).
 
 Do not guess ports or start servers without explicit confirmation.
 
-Only after 0a–0e succeed, continue to Step 1.
+Only after 0a–0e succeed, continue to Step 1. There is no static-only mode: if no live driver can run, stop and point the user to `/trace`, `/parity`, or `/contract`.
 
 ## Step 1: Determine what to audit
 
-If `$ARGUMENTS` is provided, use it as the feature area or scope.
+If `$ARGUMENTS` is provided and is not `recent`, treat it as an exact path or a natural-language feature area such as `scheduling flow` or `draft creation`. Resolve it by searching routes, views, components, handlers, and event names for its terms. Do not require exact paths.
 
-If `$ARGUMENTS` is empty, infer scope from context — in this order:
+If `$ARGUMENTS` is empty or equals `recent`, infer scope from context — in this order:
 
 - **Git diff** — `git diff --name-only HEAD~1 HEAD` and `git status --short` to find recently changed UI/IPC/handler files
 - **Active plan** — most recently modified file in `.gg/plans/`
@@ -68,7 +113,7 @@ If `$ARGUMENTS` is empty, infer scope from context — in this order:
 
 From that, extract the feature area (e.g. "scheduling flow", "draft creation", "agent repurpose") and the entry points in scope.
 
-If nothing can be inferred, ask the user. Do not proceed blind.
+If nothing can be inferred, ask the user with `ask_user`. Do not proceed blind.
 
 ## Step 2: Map the feature surface
 
@@ -157,18 +202,21 @@ Do NOT report:
 - Theoretical problems that can't actually be triggered
 - Missing features that were never started (only features that are half-wired)
 - Accessibility — that's `/wcag-audit`'s job
+- Wiring or shape gaps found only by reading code, with no journey symptom seen in the live driver; route them to `/trace` (internal) or `/parity` (frontend ↔ backend)
 - Things that work correctly end-to-end
 
 ## Step 6: Severity
 
 - **Critical** — BROKEN. Mechanic literally doesn't work.
-- **High** — DISCONNECTED, ASYMMETRIC, DEAD-END. User gets stranded or a feature is unreachable.
-- **Medium** — SILENT, STALE, DUPLICATE-PATH, ONE-WAY. Works but degrades or confuses in real use.
+- **High** — DISCONNECTED, ASYMMETRIC, DEAD-END, STALE, DUPLICATE-PATH. User gets stranded, a feature is unreachable, state is stale after a successful change, or real entry points behave differently.
+- **Medium** — SILENT, ONE-WAY. Works but degrades or confuses in real use.
 - **Low** — CONFUSING, EMPTY. Polish — usually opinion-laden.
 
 ## Step 7: Create tasks
 
 For Critical / High / Medium findings, add one task to the task pane using the `tasks` tool (action: `add`). One task per gap.
+
+Task title format: `Fix /flow: <specific finding> [<CANONICAL-TYPE> <file>:<line>]` (suffix required by the Audit family rules).
 
 **For Low findings (CONFUSING / EMPTY): do NOT auto-create tasks.** These are opinion calls — "Cold Upload should be renamed" needs user buy-in before a task is burned on it. List them inline in the report (Step 8) under a `Needs decision` section. After reporting, ask the user which Low findings to convert into tasks.
 
@@ -176,6 +224,7 @@ Each task must be self-contained — a fix agent in a separate chat must execute
 
 - Severity label (Critical / High / Medium)
 - Finding type (BROKEN / DISCONNECTED / etc.)
+- Canonical type from the Audit family rules
 - The flow being fixed (e.g. "Schedule post → Calendar update")
 - Exact `file:line` for both ends (UI element + handler/event/destination)
 - A plain-english description of what's broken in the journey
@@ -193,7 +242,7 @@ Reply inline with:
 
 ```
 Audited: <feature area in scope>
-Driver: <Playwright / Detox / static-only>
+Driver: <Playwright / Detox>
 Flows traced: <N>
 Findings: <N> (<N> Critical, <N> High, <N> Medium, <N> Low)
 Tasks created: <N> (Critical/High/Medium auto-tasked)
@@ -224,8 +273,8 @@ Then any skipped gaps:
 Skipped: file:line — reason a concrete fix couldn't be written
 ```
 
-After the report, ask:
+Then the Audit family rules report footer.
 
-> Convert any of the `Needs decision` items into tasks? List the IDs or say `none`.
+If there are `Needs decision` items, use `ask_user` with kind `multi` to ask which ones to convert into tasks, following the Audit family rules limits.
 
 Keep the report tight. The detail lives in the tasks.

@@ -43,7 +43,7 @@ test("ship preserves release lanes, classifications, task policy, and report for
     "Do not create vague tasks",
     "Ship scope: <resolved scope>",
     "Ship status: <BLOCKED|VERIFY FIRST|TRACK ITEMS|CLEAR>",
-    "Tasks created. Press CTRL + T to open the task pane and run them.",
+    "Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.",
   ]) {
     assert.match(command, new RegExp(preserved.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   }

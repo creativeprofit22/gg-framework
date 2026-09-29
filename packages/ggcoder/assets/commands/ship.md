@@ -10,7 +10,61 @@ Run a production-readiness gate for recent work or a scoped release. Default to 
 
 `/ship` is the boss gate: it combines deterministic project checks with agentic judgment about release risk. It should create one task-pane task per confirmed blocker or release-risk gap.
 
+## Audit family rules
+
+This section is identical in `/trace`, `/parity`, `/contract`, `/flow`, and `/ship`. Change it in all five or none.
+
+**Ownership.** Every finding has one owner command:
+
+| Command     | Owns                                                                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/trace`    | Internal wiring with no frontend ↔ backend boundary: config, options, adapters, schemas, and events between internal layers            |
+| `/parity`   | Frontend ↔ backend agreement: routes, request/response shapes, validation, permissions, errors, cache, events, and surfaced capability |
+| `/contract` | Public promises vs implementation: types, abstract classes, exports, CLI flags, documented APIs, config schemas, and error types       |
+| `/flow`     | User journeys exercised with a live driver: feedback, dead ends, navigation, undo, and empty states                                    |
+| `/ship`     | Release blockers from any lane above, plus build, runtime, config, CI, and regression risk                                             |
+
+Outside `/ship`, when a confirmed finding belongs to another command, do not create a task for it here. List it under `Routed` in the report with the owner command and one line of evidence. `/ship` may task any release blocker but names the owner lane.
+
+**Canonical type.** Keep this command's own gap label, and also tag every finding and task prompt with exactly one canonical type:
+
+| Canonical type    | Covers                                                                                       |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `DROPPED-INPUT`   | Option, flag, field, config, or env value accepted but never consumed, or silently defaulted |
+| `PARTIAL-WIRING`  | Works through one real path or entry point but not another                                   |
+| `SHAPE-DRIFT`     | Two sides disagree on fields, names, types, optionality, or schema                           |
+| `GATE-DRIFT`      | Validation, permission, or confirmation check missing or mismatched                          |
+| `STALE-STATE`     | A successful change is not reflected in cache, UI, or subscribers                            |
+| `EVENT-DRIFT`     | Emitter, listener, channel, or payload disagree, or one side is missing                      |
+| `UNREACHABLE`     | Capability exists but no user, caller, or consumer can reach it                              |
+| `UNIMPLEMENTED`   | Stub, facade, documented-only feature, or missing handler                                    |
+| `DOC-DRIFT`       | Docs, help text, fixtures, tests, or generated clients describe old behavior                 |
+| `JOURNEY-GAP`     | User is left without feedback, a next step, a way back, or an empty state                    |
+| `RELEASE-BLOCKER` | Build, runtime, config, migration, CI, or regression failure                                 |
+| `VERIFY-FIRST`    | Plausible and specific, but needs an exact check before fixing                               |
+
+**Severity baseline.** A command's own severity section may add detail but must not contradict this baseline:
+
+- **Critical** — broken core behavior, data loss, security or permission bypass, crash, or a public promise that is a flat lie.
+- **High** — silent wrong behavior on a real path, partial wiring across real entry points, stale state after a successful change, or an unreachable capability users need.
+- **Medium** — edge-case failure, validation or error drift, missing feedback, or drift that can mislead future fixes.
+- **Low** — latent drift or minor cleanup.
+
+**Low findings.** Create tasks for Low findings only when they are objective. Opinion calls — naming, wording, layout, empty-state design — go under `Needs decision`; after the report, use `ask_user` with kind `multi` to ask which ones to convert into tasks. Ask every question with `ask_user`, never as plain text. Put at most 6 items in one question; split more across up to 5 questions in one `ask_user` call, grouped by type. If there are more than 30, ask about the 30 highest-impact items and list the rest in the report.
+
+**Task titles carry the dedupe key.** Every task title must end with ` [<CANONICAL-TYPE> <file>:<line>]`, where `<file>:<line>` is the source end of the finding — for example `Fix /trace: drop of timeout option [DROPPED-INPUT src/cli.ts:120]`. The `tasks` list output shows only titles, so this suffix is the only place other audit commands can see the canonical type and boundary.
+
+**No duplicate tasks.** Before adding tasks, call `tasks` with `action: "list"`. An open task is the same finding when its bracketed `[<CANONICAL-TYPE> <file>:<line>]` title suffix matches the new finding exactly, ignoring the `Fix /<command>:` prefix, whichever audit command created it. Do not add a second task; list it under `Already tracked` with the existing task title.
+
+**Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol. For empty or `recent`, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`, then conversation context. If confidence is low or unrelated areas match, ask with `ask_user` before proceeding.
+
+**Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
+
+**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
 ## Step 0: Safety model
+
+If the project keeps a verification status handoff (for example `.gg/verification/current-status.md`) or its project instructions require reading one before a release gate, read it and the linked evidence first. Treat it as historical evidence to reconcile with current results, not as a current pass.
 
 Do not mutate the project unless the user explicitly approves a specific command.
 
@@ -174,6 +228,17 @@ Classify findings:
 - **API-CLIENT-DRIFT** — generated/manual client contract is stale.
 - **ERROR-UX-BLOCKER** — production failure path leaves users stranded or misled.
 
+### Lane C2 — Contract and journey risk
+
+For public surfaces in scope, check whether promises still hold: documented CLI flags, exported types, config schemas, and public APIs the release changes or depends on. If the release has a UI, a live driver is already available, and the change affects a user journey, smoke the primary journey end-to-end; otherwise record the journey check as skipped with a reason. Do not install drivers or start servers without approval.
+
+This lane overlaps with `/contract` and `/flow`, but `/ship` only tasks gaps that affect shipping.
+
+Classify findings:
+
+- **CONTRACT-BLOCKER** — a public promise used by the release is ignored, stubbed, or documented-only.
+- **JOURNEY-BLOCKER** — the primary release journey breaks, dead-ends, or gives no feedback.
+
 ### Lane D — Regression blast radius
 
 Ask: what could the scoped change have broken elsewhere?
@@ -227,6 +292,7 @@ Resolve overlaps:
 
 - If Build lane and Trace lane point to the same root cause, create one combined blocker task.
 - If Parity lane and Regression lane point to stale client/consumer drift, create one combined task.
+- If an open task from `/trace`, `/parity`, `/contract`, or `/flow` already covers the finding, do not duplicate it; list it under `Already tracked` and, if it blocks release, say so in the ship status.
 - If a fix spans more than 3–4 files or multiple concerns, split into ordered tasks.
 
 Severity:
@@ -247,14 +313,15 @@ Ship decision labels:
 
 For every accepted finding, add one task to the task pane using `tasks` action `add`. Do not ask for confirmation after the release blocker/risk is confirmed.
 
-Task title format: `Fix /ship: <specific blocker>`.
+Task title format: `Fix /ship: <specific blocker> [<CANONICAL-TYPE> <file>:<line>]` (suffix required by the Audit family rules).
 
 Every task prompt must be standalone and include:
 
 - Ship decision: BLOCK / FIX-BEFORE-SHIP / VERIFY-BEFORE-SHIP / TRACK
 - Severity: Critical / High / Medium / Low
-- Lane: Build/runtime / Trace wiring / Parity / Regression / Combined
-- Classification: BUILD-BLOCKER / RUNTIME-BLOCKER / CONFIG-BLOCKER / CI-GAP / WIRING-BLOCKER / PARTIAL-SHIP / DATA-SHAPE-RISK / GATE-RISK / PARITY-BLOCKER / STALE-UI / API-CLIENT-DRIFT / ERROR-UX-BLOCKER / REGRESSION-RISK / CONSUMER-DRIFT / UNTESTED-BLAST-RADIUS / VERIFY-FIRST
+- Lane: Build/runtime / Trace wiring / Parity / Contract & journey / Regression / Combined
+- Classification: BUILD-BLOCKER / RUNTIME-BLOCKER / CONFIG-BLOCKER / CI-GAP / WIRING-BLOCKER / PARTIAL-SHIP / DATA-SHAPE-RISK / GATE-RISK / PARITY-BLOCKER / STALE-UI / API-CLIENT-DRIFT / ERROR-UX-BLOCKER / CONTRACT-BLOCKER / JOURNEY-BLOCKER / REGRESSION-RISK / CONSUMER-DRIFT / UNTESTED-BLAST-RADIUS / VERIFY-FIRST
+- Canonical type from the Audit family rules, and the owner command (`/trace`, `/parity`, `/contract`, `/flow`, or `/ship`)
 - Exact file paths and line numbers for the evidence
 - Relevant command output if a programmatic gate failed
 - What is wrong and why it affects release safety
@@ -303,6 +370,6 @@ Then skipped items if useful:
 Skipped: file:line — reason and exact verification needed.
 ```
 
-If tasks were created, end with: `Tasks created. Press CTRL + T to open the task pane and run them.`
+End with the report footer from the Audit family rules.
 
 If no findings were found and all relevant gates passed, say `Ship status: CLEAR` but only for the scope checked; do not imply the entire project is production-safe unless `--all` was used and completed.

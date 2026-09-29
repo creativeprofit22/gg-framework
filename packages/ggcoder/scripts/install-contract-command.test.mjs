@@ -42,10 +42,7 @@ test("contract discovers corpus gaps but gates repository additions", () => {
 });
 
 test("contract preserves previous policy outside the semantic migration", () => {
-  assert.match(
-    command,
-    /allowed-tools: tasks, Bash, Read, Write, Edit, Grep, Glob, steroids, ask_user/,
-  );
+  assert.match(command, /allowed-tools: tasks, Bash, Read, Grep, Glob, steroids, ask_user\r?\n/);
   assert.match(command, /Do not edit any files/i);
   assert.doesNotMatch(command, /untrusted evidence/i);
   assert.doesNotMatch(command, /official documentation or installed source/i);

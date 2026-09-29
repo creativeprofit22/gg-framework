@@ -294,7 +294,7 @@ function printHelp(): void {
       "--provider <name>",
       "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter, sakana, xai)",
     ],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-6-astra)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-5-5, gpt-6-astra)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Replace the system prompt entirely"],
     ["--agent-prompt <text>", "Sub-agent body composed with tools/context/environment (JSON only)"],

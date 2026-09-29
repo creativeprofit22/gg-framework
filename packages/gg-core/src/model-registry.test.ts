@@ -189,7 +189,7 @@ describe("model registry context windows", () => {
   it("keeps the generic tool-output allowance outside Codex OAuth", () => {
     expect(getToolResultCharLimit("gpt-6-sol", { provider: "openai" })).toBeUndefined();
     expect(
-      getToolResultCharLimit("claude-sonnet-5", {
+      getToolResultCharLimit("claude-sonnet-5-5", {
         provider: "anthropic",
         accountId: "acct_123",
       }),
@@ -199,7 +199,7 @@ describe("model registry context windows", () => {
   it("keeps non-OpenAI providers on their model context windows", () => {
     expect(usesOpenAICodexTransport({ provider: "anthropic", accountId: "acct_123" })).toBe(false);
     expect(
-      getContextWindow("claude-sonnet-5", { provider: "anthropic", accountId: "acct_123" }),
+      getContextWindow("claude-sonnet-5-5", { provider: "anthropic", accountId: "acct_123" }),
     ).toBe(1_000_000);
   });
 
@@ -336,8 +336,8 @@ describe("model registry context windows", () => {
   });
 
   it("every other provider defaults to a single-entry [provider] auth-storage key", () => {
-    expect(getAuthStorageKeys("anthropic", "claude-sonnet-5")).toEqual(["anthropic"]);
-    expect(getAuthStorageKey("anthropic", "claude-sonnet-5")).toBe("anthropic");
+    expect(getAuthStorageKeys("anthropic", "claude-sonnet-5-5")).toEqual(["anthropic"]);
+    expect(getAuthStorageKey("anthropic", "claude-sonnet-5-5")).toBe("anthropic");
   });
 
   it("defaults Xiaomi to the full-modal MiMo-V2.6-Pro and retires the V2.5 ids", () => {

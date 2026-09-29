@@ -30,7 +30,7 @@
  *   npx tsx src/core/hashline-edit-benchmark.ts
  *
  * Env overrides:
- *   GG_HL_PROVIDER / GG_HL_MODEL   (default anthropic / claude-sonnet-5)
+ *   GG_HL_PROVIDER / GG_HL_MODEL   (default anthropic / claude-sonnet-5-5)
  *   GG_HL_AUTH_KEY                 (auth.json key when it differs from the provider name,
  *                                   e.g. `xiaomi-credits` for provider `xiaomi`)
  *   GG_HL_REPEAT                   (runs per task, default 1 — raise to average noise)
@@ -511,7 +511,7 @@ interface Row {
 
 async function main(): Promise<void> {
   const provider = process.env.GG_HL_PROVIDER ?? "anthropic";
-  const model = process.env.GG_HL_MODEL ?? "claude-sonnet-5";
+  const model = process.env.GG_HL_MODEL ?? "claude-sonnet-5-5";
   const repeat = Math.max(1, parseInt(process.env.GG_HL_REPEAT ?? "1", 10));
 
   const auth = new AuthStorage();

@@ -55,7 +55,7 @@ export interface ModelInfo {
    *   - OpenAI GPT-6 Astra / Sol: `ultra` (Codex orchestration preset above `max`)
    *   - OpenAI GPT-6 Luna: `max`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
-   *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5.5 and Sonnet 5: `max`
+   *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5.5 and Sonnet 5.5: `max`
    *     (the Fable / Mythos line uses always-on adaptive thinking, low→max)
    *   - Claude Haiku 4.5: `high` (no adaptive `max` tier)
    *   - Kimi K3: `max` (always-on reasoning; currently the only API effort)
@@ -158,8 +158,15 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "max",
   },
   {
-    id: "claude-sonnet-5",
-    name: "Claude Sonnet 5",
+    // Released 2026-09-28 (API ID `claude-sonnet-5-5`). Same $2/$10 MTok pricing
+    // as Sonnet 5, ~30% faster output and fewer tokens/tool calls per task.
+    // Adaptive thinking is on by default and `thinking: disabled` returns a
+    // 400 — gg-ai never sends `disabled` (it omits `thinking` instead), and
+    // the `sonnet-5` adaptive-model match already covers this ID. Sonnet 5 is
+    // retired here — a session that still has it saved falls back to the
+    // provider default on next start.
+    id: "claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -772,7 +779,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "local") {
     return getModelsForProvider("local")[0] ?? PLACEHOLDER_LOCAL_MODEL;
   }
-  return MODELS.find((m) => m.id === "claude-sonnet-5")!;
+  return MODELS.find((m) => m.id === "claude-sonnet-5-5")!;
 }
 
 /**
@@ -880,7 +887,7 @@ export function getDefaultThinkingLevel(
 
 /**
  * Get the model to use for compaction summarization.
- * - Anthropic: always Sonnet 5
+ * - Anthropic: always Sonnet 5.5
  * - OpenAI: cheapest (Codex Mini)
  * - Gemini: use the current model
  * - GLM: GLM-5.3-Flash (the registered low-cost sibling)
@@ -889,7 +896,7 @@ export function getDefaultThinkingLevel(
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_SUMMARY_MODEL_ID)!;
   if (provider === "anthropic") {
-    return MODELS.find((m) => m.id === "claude-sonnet-5")!;
+    return MODELS.find((m) => m.id === "claude-sonnet-5-5")!;
   }
   if (
     provider === "openai" ||

@@ -50,10 +50,11 @@ describe("getNextThinkingLevel", () => {
       "xhigh",
       "max",
     ]);
-    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5")).toEqual([
+    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5-5")).toEqual([
       "low",
       "medium",
       "high",
+      "xhigh",
       "max",
     ]);
     expect(isThinkingLevelSupported("anthropic", "claude-opus-5-5", "max")).toBe(true);

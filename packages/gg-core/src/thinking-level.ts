@@ -25,8 +25,12 @@ const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"
 // rung (docs: low/medium/high default/xhigh); each model slices this ladder
 // by its registry maxThinkingLevel.
 const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh"];
-// Opus 5.x / 4.7 expose the full ladder including xhigh ("extended capability for
-// long-horizon work"). Other adaptive Anthropic models omit xhigh and would 400.
+// Opus 5.x / 4.8 / 4.7 and Sonnet 5.5 expose the full ladder including xhigh, per
+// the "Effort levels" table at
+// https://platform.claude.com/docs/en/build-with-claude/effort (Sonnet 5.5 also
+// verified live). The docs list xhigh for Sonnet 5 and Fable/Mythos 5.x too, but
+// those stay on the ladder without xhigh until checked live. Keep this set in
+// sync with `supportsAnthropicXhighEffort` in gg-ai's providers/transform.ts.
 const ANTHROPIC_XHIGH_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -93,7 +97,9 @@ function isGlmModel(provider: Provider): boolean {
 }
 
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
-  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7/.test(model);
+  // Explicit `sonnet-5-5`: a bare `sonnet-5` would also match Sonnet 5.5 and
+  // widen the set to the unregistered Sonnet 5.
+  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7|sonnet-5-5/.test(model);
 }
 
 function isAnthropicAdaptiveModel(provider: Provider, model: string): boolean {

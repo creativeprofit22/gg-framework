@@ -232,7 +232,7 @@ providerRegistry.register("local", {
  *
  * ```ts
  * // Stream events
- * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-5", messages })) {
+ * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-5-5", messages })) {
  *   if (event.type === "text_delta") process.stdout.write(event.text);
  * }
  *

@@ -26,7 +26,7 @@ import { buildSystemPrompt } from "../system-prompt.js";
 import { DEFAULT_TOOL_NAMES } from "../tools/prompt-hints.js";
 import { AuthStorage } from "./auth-storage.js";
 
-const MODEL = "claude-sonnet-5";
+const MODEL = "claude-sonnet-5-5";
 
 /**
  * Rigid task wording (dsh's pattern): literal single-sentence instructions

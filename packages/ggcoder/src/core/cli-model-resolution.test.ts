@@ -22,8 +22,12 @@ describe("CLI model resolution", () => {
     );
   });
 
+  it("moves a saved retired Sonnet 5 selection to the Anthropic default", () => {
+    expect(resolveSavedCliModel("anthropic", "claude-sonnet-5")).toBe("claude-sonnet-5-5");
+  });
+
   it("gives a valid explicit interactive model precedence over saved settings", () => {
-    expect(resolveInteractiveCliModel("anthropic", "claude-opus-5-5", "claude-sonnet-5")).toBe(
+    expect(resolveInteractiveCliModel("anthropic", "claude-opus-5-5", "claude-sonnet-5-5")).toBe(
       "claude-opus-5-5",
     );
   });
@@ -41,7 +45,7 @@ describe("CLI model resolution", () => {
 
   it("shows Astra rather than GPT-5.5 in CLI model guidance", () => {
     const cliSource = fs.readFileSync(new URL("../cli.ts", import.meta.url), "utf8");
-    expect(cliSource).toContain("Model to use (e.g. claude-sonnet-5, gpt-6-astra)");
-    expect(cliSource).not.toContain("Model to use (e.g. claude-sonnet-5, gpt-5.5)");
+    expect(cliSource).toContain("Model to use (e.g. claude-sonnet-5-5, gpt-6-astra)");
+    expect(cliSource).not.toContain("gpt-5.5)");
   });
 });

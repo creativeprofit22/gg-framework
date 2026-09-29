@@ -676,7 +676,7 @@ import { stream, StreamResult } from "@kenkaiiii/gg-ai";
 describe("compact", () => {
   const baseOptions = {
     provider: "anthropic" as const,
-    model: "claude-sonnet-5",
+    model: "claude-sonnet-5-5",
     apiKey: "test-key",
     contextWindow: 200_000,
   };
@@ -835,7 +835,7 @@ describe("compact", () => {
       model: "claude-opus-5",
       transportModel: "active-transport-alias",
     });
-    expect(mockStream.mock.calls.at(-1)?.[0].model).toBe("claude-sonnet-5");
+    expect(mockStream.mock.calls.at(-1)?.[0].model).toBe("claude-sonnet-5-5");
   });
 
   it("feeds query-relevant older evidence to the summarizer when its prompt budget is constrained", async () => {

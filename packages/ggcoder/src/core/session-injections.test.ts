@@ -81,7 +81,7 @@ describe("model-visible injections persist to the session log", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "palsu",
-      model: "claude-sonnet-5", // real id so registry lookups succeed; palsu ignores it
+      model: "claude-sonnet-5-5", // real id so registry lookups succeed; palsu ignores it
       cwd: tmpProject,
       systemPrompt: "test system prompt",
     });

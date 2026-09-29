@@ -794,6 +794,12 @@ describe("toAnthropicThinking", () => {
     }
   });
 
+  it("passes xhigh through unchanged for Sonnet 5.5", () => {
+    const result = toAnthropicThinking("xhigh", 128000, "claude-sonnet-5-5");
+    expect(result.outputConfig?.effort).toBe("xhigh");
+    expect((result.thinking as { type: string }).type).toBe("adaptive");
+  });
+
   it("clamps xhigh to high on adaptive Anthropic models that do not support xhigh", () => {
     expect(toAnthropicThinking("xhigh", MAX_TOKENS, "claude-sonnet-5").outputConfig).toEqual({
       effort: "high",

@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
+    id: "local-2026-09-28-upstream-0721-motion-and-sonnet-55",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
+    label: "Upstream 0.72.0, with a Settings screen and clearer questions",
+    date: "2026-09-28",
+    items: [
+      "`Settings` now opens as a full screen instead of a popup, with tabs for `General`, `AI Providers`, `Remote`, `MCP` and `Steroids`. The gear on Home takes you there, and going back refreshes Home so your changes show right away.",
+      "Home has a gently moving `dithered wave` behind the Supah Coder banner. It pauses when the window is out of focus, and `Background on` under Settings, Effects turns it off. The app also has a crisper icon set throughout, and the memes button is gone.",
+      "New models arrived with the update: `Kimi K2.8 Preview`, `DeepSeek V4.1 Flash` with screenshot support, Sakana's `Fugu Max`, and `Qwen3.8 Max` as OpenRouter's starting model. Your Kimi sign-in also renews in the background, so it no longer expires mid-session.",
+      "Every question card now says what the agent found and why it needs your call, so a card makes sense even if you skipped the chat above it. When the agent gets a card wrong and has to redo it, the status reads `Question closed` instead of claiming it is continuing with a decision you never made.",
+      "The agent answers your question first. If what you asked is unclear, it answers the likeliest reading and tells you what it assumed, and only asks when it truly cannot go on without you.",
+      "When a pane loses its connection, it shows `Reconnecting…` again instead of looking frozen.",
+      "Simple housekeeping like `git status` no longer makes the agent ask to re-check work that has not changed.",
+      "Folded code previews keep their green and red diff colours, the message box switches to a shorter hint when the full one would be cut off, and letters like g and y are no longer clipped in the plan review header.",
+    ],
   },
   {
     id: "local-2026-09-27-upstream-0705-steadier-replies",

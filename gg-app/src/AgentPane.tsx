@@ -171,7 +171,12 @@ import { PaneIdContext, PaneIdProvider } from "./pane-context";
 import { TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
-import { MENTOR_DISPLAY_NAME, MENTOR_HANDLE, PRODUCT_DISPLAY_NAME } from "./brand";
+import {
+  MENTOR_DISPLAY_NAME,
+  MENTOR_HANDLE,
+  MENTOR_HANDLE_ALTERNATION,
+  PRODUCT_DISPLAY_NAME,
+} from "./brand";
 import {
   LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
   LOCAL_UPDATE_CONFIRMATION_MESSAGE,
@@ -297,6 +302,14 @@ function notesPromptActionResult(
     preview: latestPreview,
   };
 }
+
+// Mentor-handle patterns, built from brand.ts so renames stay in sync.
+// Case-insensitive with a word boundary so `@kennedy.ts` still picks files.
+const MENTOR_HANDLE_PREFIX_RE = new RegExp(`^@${MENTOR_HANDLE_ALTERNATION}\\b`, "i");
+// Overlay split: leading whitespace, then the literal handle token.
+const MENTOR_HANDLE_OVERLAY_RE = new RegExp(`^(\\s*)(@${MENTOR_HANDLE_ALTERNATION})`, "i");
+// Submit routing: handle, optional colon, trailing whitespace.
+const MENTOR_HANDLE_SUBMIT_RE = new RegExp(`^@${MENTOR_HANDLE_ALTERNATION}\\b:?\\s*`, "i");
 
 const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
 const INPUT_PLACEHOLDERS = [
@@ -2827,12 +2840,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // with it (case-insensitive, word-boundary so `@kennedy.ts` still picks files),
   // Ken is "active": the file picker is suppressed and the input is tinted in
   // Ken's color with a shimmering marker, so it's obvious the message goes to Ken.
-  const kenActive = workspaceMode === "code" && /^@(ken|supah)\b/i.test(input.trimStart());
+  const kenActive = workspaceMode === "code" && MENTOR_HANDLE_PREFIX_RE.test(input.trimStart());
   // Split the input for the `@Ken` highlight overlay: any leading whitespace,
   // the literal `@Ken` token (preserving the user's casing), then the rest. Only
   // the token shimmers; lead+rest render in the normal input color.
   const kenInputParts = (() => {
-    const m = /^(\s*)(@(ken|supah))/i.exec(input);
+    const m = MENTOR_HANDLE_OVERLAY_RE.exec(input);
     if (!m) return null;
     return { lead: m[1], token: m[2], rest: input.slice(m[1].length + m[2].length) };
   })();
@@ -3901,7 +3914,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!identity) return;
     const isCurrent = captureKenOperation();
     void cancelKen(identity).catch((error: unknown) => {
-      if (isCurrent()) pushItem({ kind: "error", id: nextId(), text: `Supah: ${String(error)}` });
+      if (isCurrent()) pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
     });
   }
 
@@ -3920,7 +3933,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const composerDraft = input;
     recordHistory(trimmedAddressedText);
     stickToBottomRef.current = true;
-    pushItem({ kind: "user", id: nextId(), text: trimmedAddressedText, ken: true });
+    // Display the canonical handle (not the raw typed alias/case/colon) so the live
+    // bubble matches the daemon's reloaded `@Ken <question>` row. History above
+    // still recalls exactly what the user typed.
+    pushItem({ kind: "user", id: nextId(), text: `${MENTOR_HANDLE} ${trimmedQuestion}`, ken: true });
     if (!preserveComposer) {
       setInput("");
       setSlashIndex(0);
@@ -3930,7 +3946,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     }
     void sendKenPrompt(trimmedQuestion, kenTarget).catch((error: unknown) => {
       if (!isCurrent()) return;
-      pushItem({ kind: "error", id: nextId(), text: `Supah: ${String(error)}` });
+      pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
       // Recover a rejected typed question without overwriting work entered while it was pending.
       if (!preserveComposer) setInput((current) => current || composerDraft);
     });
@@ -4011,7 +4027,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // `@Ken <prompt>` (case-insensitive, optional colon) routes to Ken Kai, the
     // read-only mentor agent — NOT GG Coder. Ken runs concurrently with any
     // build run; his reply streams into a magenta bubble via ken_* events.
-    const kenMatch = workspaceMode === "code" ? /^@(ken|supah)\b:?\s*/i.exec(trimmed) : null;
+    const kenMatch = workspaceMode === "code" ? MENTOR_HANDLE_SUBMIT_RE.exec(trimmed) : null;
     if (kenMatch) {
       const question = trimmed.slice(kenMatch[0].length).trim();
       sendToKen(question, trimmed);
@@ -5232,7 +5248,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     : "Ask Ken what to do next"
               }
               disabled={kenRunning || planReview !== null}
-              onClick={() => sendToKen("next?", "@Ken next?", true)}
+              onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
             >
               Ken, next?
             </button>

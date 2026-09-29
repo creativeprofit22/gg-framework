@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { XIcon } from "@phosphor-icons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
-import { PRODUCT_DISPLAY_NAME } from "./brand";
+import { escapeRegExp, LEGACY_MENTOR_HANDLE, MENTOR_HANDLE, PRODUCT_DISPLAY_NAME } from "./brand";
 import { appBuildInfo } from "./build-info";
 import { theme } from "./theme";
 import { Confetti } from "./Confetti";
@@ -48,19 +48,16 @@ const HIGHLIGHT_TERMS = [
   "Autopilot",
   "Scorecard",
   "Enhance",
-  "@Supah",
+  MENTOR_HANDLE,
+  LEGACY_MENTOR_HANDLE,
   "Radio",
   "Windows",
   "Notes",
   "MCP",
 ] as const;
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 const highlightPattern = new RegExp(
-  `\`([^\`]+)\`|(${HIGHLIGHT_TERMS.map(escapeRegex).join("|")})|\\b(\\d+(?:\\.\\d+)?(?:K|M| MB| tokens?| minutes?| hour| updates?))\\b`,
+  `\`([^\`]+)\`|(${HIGHLIGHT_TERMS.map(escapeRegExp).join("|")})|\\b(\\d+(?:\\.\\d+)?(?:K|M| MB| tokens?| minutes?| hour| updates?))\\b`,
   "g",
 );
 

@@ -326,7 +326,7 @@ function completionReview(
     id: "completion-review-ui",
     reviewer: "ken-autopilot",
     decision: "accepted",
-    evidence: ["Autopilot Supah reviewed the completion gates."],
+    evidence: ["Autopilot Ken reviewed the completion gates."],
     reason: null,
     implementationCheckpointId: "checkpoint-ui",
     verificationStatusUpdateId: "verification-ui-passed",
@@ -1996,7 +1996,7 @@ describe("ProjectNotes", () => {
     selectPhaseView("Activity");
 
     expect(screen.getByRole("heading", { name: "Latest report" })).toBeTruthy();
-    expect(screen.getAllByText("Autopilot Supah").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Autopilot Ken").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Repository reconciliation is implemented.").length).toBeGreaterThan(
       0,
     );

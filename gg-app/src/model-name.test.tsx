@@ -52,7 +52,7 @@ describe("ModelSelect (native dropdown)", () => {
     expect(screen.queryByText("gemini-3-flash")).toBeNull();
   });
 
-  it("shows the follow choice as selected when Supah follows Supah Coder", () => {
+  it("shows the follow choice as selected when Ken follows Supah Coder", () => {
     render(
       <ModelSelect
         models={MODELS}

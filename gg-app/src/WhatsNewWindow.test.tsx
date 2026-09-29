@@ -140,6 +140,16 @@ describe("releaseText", () => {
     expect(html).toContain(">GPT-5.6</strong>");
     expect(html).toContain(">90 MB</strong>");
   });
+
+  it("highlights both the current and legacy reviewer handles", () => {
+    const html = renderToStaticMarkup(
+      <>{releaseText("Ask @Ken for a review; older notes mention @Supah.")}</>,
+    );
+
+    expect(html.match(/class="whatsnew-highlight"/g)).toHaveLength(2);
+    expect(html).toContain(">@Ken</strong>");
+    expect(html).toContain(">@Supah</strong>");
+  });
 });
 
 describe("WhatsNewWindow", () => {

@@ -5323,6 +5323,8 @@ async function createSession(
           if (!turns) return;
           kenByCount.delete(count);
           for (const turn of turns) {
+            // Must equal gg-app/src/brand.ts MENTOR_HANDLE: the webview renders live
+            // mentor bubbles as `${MENTOR_HANDLE} ${question}` and reload must match.
             history.push({ role: "user", text: `@Ken ${turn.question}`, ken: true });
             history.push({ role: "assistant", text: turn.reply, ken: true });
           }

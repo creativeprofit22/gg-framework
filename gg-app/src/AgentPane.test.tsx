@@ -18,6 +18,7 @@ import type * as ToastModule from "./toast";
 import { Toaster } from "./Toaster";
 import { progressTransition } from "./test-fixtures/progress-transition";
 import { playSound } from "./sounds";
+import { MENTOR_HANDLE } from "./brand";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
@@ -5497,7 +5498,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.restore).toHaveBeenCalledWith(recoverTarget));
   });
 
-  it.each(["@Supah question", "@Ken question"])(
+  it.each(["@Supah question", "@Ken question", "@KEN: question", "  @supah:question"])(
     "routes %s to the mentor client",
     async (prompt) => {
       const pane = client("pane-1", 1);
@@ -5515,8 +5516,40 @@ describe("AgentPane lifecycle", () => {
         }),
       );
       expect(pane.sendPrompt).not.toHaveBeenCalled();
+      // Live bubble shows the canonical handle so it matches the reloaded history row.
+      expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe(
+        `${MENTOR_HANDLE} question`,
+      );
     },
   );
+
+  it("renders a reloaded mentor question exactly like the live question bubble", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: "@Ken question", ken: true },
+    ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() =>
+      expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe(
+        `${MENTOR_HANDLE} question`,
+      ),
+    );
+  });
+
+  it("does not route a handle-prefixed file mention like @kennedy.ts to the mentor", async () => {
+    const pane = client("pane-1", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: "@kennedy.ts question" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalled());
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
 
   it("keeps reset authority over pending initial hydration and reconnects to the announced run", async () => {
     nativeMocks.realMentor = true;
@@ -5690,7 +5723,7 @@ describe("AgentPane lifecycle", () => {
     );
     expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe("@Ken next?");
+    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe(`${MENTOR_HANDLE} next?`);
   });
 
   it("preserves the current draft and attachments when asking Ken what is next", async () => {

@@ -5,7 +5,7 @@ import {
   fitPlaceholder,
 } from "./composer-placeholder";
 
-const FULL = "Type a message, / commands, @ files, @Supah for help";
+const FULL = "Type a message, / commands, @ files, @Ken for help";
 const perChar = (px: number) => (text: string): number => text.length * px;
 
 describe("fitPlaceholder", () => {

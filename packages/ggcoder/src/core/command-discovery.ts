@@ -125,6 +125,7 @@ export async function discoverCommands(
       name: custom.name, aliases: [],
       description: (custom.description.startsWith("Custom command from ")
         ? "Custom command" : custom.description).slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
+      ...(custom.argumentHint ? { argumentHint: custom.argumentHint } : {}),
       input: { ...SLASH_COMMAND_INPUT_ALL }, source: "custom",
       origin: custom.scope === "project" ? "project-custom" : "global-custom",
       invocationKind: "prompt",
@@ -164,12 +165,13 @@ export function projectAdvisoryCommands(discovery: CommandDiscovery, offset = 0)
       name: listing.name, aliases: listing.aliases, description: listing.description.slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
       input: listing.input, source: listing.source, origin: listing.origin, invocationKind: listing.invocationKind,
       ...(listing.usage ? { usage: listing.usage } : {}),
+      ...(listing.argumentHint ? { argumentHint: listing.argumentHint } : {}),
       ...(!supported ? { bodyUnavailableReason: "Identity is unsupported for advisory body lookup." } : {}),
     };
     // A single legal UI row can exceed a whole advisory page after JSON escaping.
     // Keep the executable identity intact, disclose omitted metadata, and always advance.
     if (JSON.stringify({ ...page, entries: [row] }).length > 31_900) {
-      row = { ...row, aliases: [], description: "Metadata omitted to fit the advisory page limit.", usage: undefined, metadataLimited: true };
+      row = { ...row, aliases: [], description: "Metadata omitted to fit the advisory page limit.", usage: undefined, argumentHint: undefined, metadataLimited: true };
       page.limitedCoverage = true;
     }
     const candidate = { ...page, entries: [...page.entries, row], nextOffset: index + 1, limitedCoverage: true };

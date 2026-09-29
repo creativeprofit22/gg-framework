@@ -41,6 +41,15 @@ export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): 
             <span className="slash-name" style={{ color: theme.commandColor }}>
               /{cmd.name}
             </span>
+            {active && cmd.argumentHint && (
+              <span
+                className="slash-hint"
+                style={{ color: theme.textMuted }}
+                title={cmd.argumentHint}
+              >
+                {cmd.argumentHint}
+              </span>
+            )}
             <span className="slash-desc" style={{ color: theme.textMuted }}>
               {cmd.description}
             </span>

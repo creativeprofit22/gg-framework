@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { normalizeSlashCommandArgumentHint } from "@kenkaiiii/gg-core";
 import { getAppPaths } from "../config.js";
-import { parseSkillFile } from "./skills.js";
+import { stripBom } from "../utils/text.js";
+import { parseFrontmatter } from "./frontmatter.js";
 
 export type CustomCommandScope = "global" | "project";
 
@@ -16,6 +18,8 @@ export interface CustomCommand {
   prompt: string;
   filePath: string;
   scope: CustomCommandScope;
+  /** Normalized `argument-hint` frontmatter; shown in menus only, never sent to the model. */
+  argumentHint?: string;
 }
 
 function windowsHomeToWslMount(home: string): string | null {
@@ -67,13 +71,16 @@ async function loadCommandsFromDir(
 
     try {
       const raw = await fs.readFile(filePath, "utf-8");
-      const parsed = parseSkillFile(raw, scope);
+      // A BOM before `---` would otherwise silently kill frontmatter parsing.
+      const { fields, body } = parseFrontmatter(stripBom(raw));
+      const argumentHint = normalizeSlashCommandArgumentHint(fields["argument-hint"]);
       commands.push({
-        name: parsed.name || path.basename(file, ".md"),
-        description: parsed.description || `Custom command from ${commandsDir}/${file}`,
-        prompt: parsed.content,
+        name: fields.name || path.basename(file, ".md"),
+        description: fields.description || `Custom command from ${commandsDir}/${file}`,
+        prompt: body,
         filePath,
         scope,
+        ...(argumentHint ? { argumentHint } : {}),
       });
     } catch {
       // Skip unreadable files

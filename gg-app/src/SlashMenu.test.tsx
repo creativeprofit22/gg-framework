@@ -61,4 +61,19 @@ describe("SlashMenu", () => {
     const active = document.querySelectorAll(".slash-item")[1];
     expect(active?.className).toContain("active");
   });
+
+  it("shows a custom command's argument hint on the highlighted row only", () => {
+    const hinted: SlashCommand[] = [
+      {
+        ...COMMANDS[1],
+        name: "contract",
+        source: "custom",
+        argumentHint: "[path or recent — optional]",
+      },
+      { ...COMMANDS[1], name: "flow", source: "custom", argumentHint: "[feature area — optional]" },
+    ];
+    render(<SlashMenu commands={hinted} activeIndex={0} onSelect={vi.fn()} onHover={vi.fn()} />);
+    expect(screen.getByText("[path or recent — optional]")).toBeTruthy();
+    expect(screen.queryByText("[feature area — optional]")).toBeNull();
+  });
 });

@@ -4,7 +4,9 @@ import {
   CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES,
   isSlashCommandsResponse,
   isValidProgrammaticFocus,
+  normalizeSlashCommandArgumentHint,
   PROGRAMMATIC_FOCUS_MAX_LENGTH,
+  SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH,
   type SlashCommandsResponse,
 } from "./slash-command-contract.js";
 
@@ -56,6 +58,7 @@ describe("slash-command discovery contract", () => {
       { source: "built-in", invocationKind: "workspace-action" },
       { source: "custom", origin: "project-custom", invocationKind: "prompt" },
       { source: "custom", origin: "global-custom" },
+      { source: "custom", argumentHint: "[path or recent — optional]" },
     ])
       expect(
         isSlashCommandsResponse({ commands: [{ ...response.commands[0], ...metadata }] }),
@@ -74,6 +77,8 @@ describe("slash-command discovery contract", () => {
       { aliases: Array(51).fill("alias") },
       { aliases: ["x".repeat(101)] },
       { usage: "x".repeat(4_001) },
+      { argumentHint: "x".repeat(SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH + 1) },
+      { argumentHint: 42 },
       { origin: null },
       { invocationKind: null },
     ])
@@ -81,6 +86,16 @@ describe("slash-command discovery contract", () => {
         isSlashCommandsResponse({ commands: [{ ...response.commands[0], ...metadata }] }),
       ).toBe(false);
   });
+  it("normalizes argument hints to one bounded display line", () => {
+    expect(normalizeSlashCommandArgumentHint("  <path>\n  [focus] ")).toBe("<path> [focus]");
+    expect(normalizeSlashCommandArgumentHint("   ")).toBeUndefined();
+    expect(normalizeSlashCommandArgumentHint(undefined)).toBeUndefined();
+    expect(normalizeSlashCommandArgumentHint("a\u0007b")).toBeUndefined();
+    const long = normalizeSlashCommandArgumentHint("x".repeat(500));
+    expect(long?.length).toBe(SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH);
+    expect(long?.endsWith("…")).toBe(true);
+  });
+
   it("requires explicit text, reference, and attachment policies", () => {
     expect(isSlashCommandsResponse(response)).toBe(true);
     for (const input of [

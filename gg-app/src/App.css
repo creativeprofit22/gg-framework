@@ -6623,6 +6623,9 @@ select {
   z-index: var(--z-popover);
   max-height: 44vh;
   overflow-y: auto;
+  /* Width comes from left/right insets, so size containment is safe; lets the
+     row layout respond to the pane width rather than the window. */
+  container: slash-menu / inline-size;
 }
 .slash-menu-title {
   font-size: 11px;
@@ -6657,6 +6660,36 @@ select {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* Author-declared argument placeholder; shown on the highlighted row only so
+   inactive rows keep their full description width. */
+.slash-hint {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-style: italic;
+  flex: 0 1 auto;
+  max-width: 45%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* In narrow panes, splitting one line three ways leaves both the hint and the
+   description as unreadable stubs; give the hint its own line instead. */
+@container slash-menu (max-width: 560px) {
+  .slash-item:has(.slash-hint) {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  /* Zero basis keeps the description beside the name rather than wrapping. */
+  .slash-item:has(.slash-hint) .slash-desc {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .slash-hint {
+    order: 3;
+    flex-basis: 100%;
+    max-width: 100%;
+  }
 }
 
 /* ── @-mention file picker (reuses .slash-menu chrome) ── */

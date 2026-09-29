@@ -2517,6 +2517,7 @@ export function App(props: AppProps) {
         name: cmd.name,
         aliases: [] as string[],
         description: cmd.description,
+        ...(cmd.argumentHint ? { argumentHint: cmd.argumentHint } : {}),
         sectionTitle: "custom",
       })),
       {

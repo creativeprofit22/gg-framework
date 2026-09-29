@@ -7631,6 +7631,52 @@ select {
 .model-button:disabled {
   cursor: default;
 }
+
+/* Footer controls read as plain text at rest, so give them a visible
+   affordance: a faint pill in the control's own hue on hover/focus, and a
+   small chevron on the pickers (which open a menu; thinking cycles, so it
+   gets no chevron). Every text-look select picker (model and Codex context)
+   shares the `.model-picker > .model-select` structure, so key off that
+   rather than a per-picker class. Padding is cancelled by an equal negative
+   margin, so the pill never shifts footer layout. */
+.thinking-toggle,
+.model-button,
+.model-picker:has(> .model-select) {
+  padding: 3px 6px;
+  margin: -3px -6px;
+  border-radius: var(--radius-sm);
+  transition:
+    color var(--t-fast),
+    filter var(--t-fast),
+    background-color var(--t-fast);
+}
+.thinking-toggle:is(:hover, :focus-visible):not(:disabled),
+.model-button:is(:hover, :focus-visible):not(:disabled),
+.model-picker:has(> .model-select:not(:disabled)):is(:hover, :has(:focus-visible)) {
+  background-color: color-mix(in srgb, currentColor 12%, transparent);
+}
+.model-select-text::after,
+.model-button::after {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-left: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-3px) rotate(45deg);
+  opacity: 0.55;
+  transition: opacity var(--t-fast);
+}
+.model-button:is(:hover, :focus-visible):not(:disabled)::after,
+.model-picker:has(> .model-select:not(:disabled)):is(:hover, :has(:focus-visible))
+  .model-select-text::after {
+  opacity: 1;
+}
+.model-button:disabled::after,
+.model-picker:has(.model-select:disabled) .model-select-text::after {
+  opacity: 0.25;
+}
 .model-menu {
   /* Portaled to body so responsive footer overflow cannot clip the popup. The
      viewport-clamped horizontal and trigger-relative bottom coordinates are inline. */
@@ -9596,8 +9642,15 @@ select {
     align-items: center;
   }
 
+  /* Keep the shared hover-pill pairing: horizontal padding stays cancelled by
+     the equal negative margin, so the pill has its inset and the text never
+     bleeds into neighbours. Vertical margin is 0 so the full 28px touch target
+     occupies real layout space in the wrapped rows. The context picker
+     shares the same pairing so both wrapped controls match. */
+  .astra-control-group .model-picker,
   .astra-fast-toggle {
-    padding: 4px 0;
+    padding: 4px 6px;
+    margin: 0 -6px;
   }
 
   .pane-drop-zone-left,

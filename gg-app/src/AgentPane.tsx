@@ -5385,12 +5385,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   <span className="astra-control-group" aria-busy={astraControlsBusy}>
                     <label
                       className="model-picker"
+                      style={{ color: theme.secondary }}
                       title={
                         contextProfileLockReason ??
                         "OpenAI Codex context window: stable 272K or experimental 872K"
                       }
                     >
-                      <span className="model-select-text" style={{ color: theme.secondary }}>
+                      <span className="model-select-text">
                         Context {state.openAICodexContextProfile}
                       </span>
                       <select

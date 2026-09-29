@@ -570,6 +570,12 @@
   backdrop-filter: var(--glass-backdrop);
   box-shadow: var(--glass-surface-shadow);
 }
+/* Dense reading text over the chat: solid fill instead of the see-through float tint. */
+.slash-menu {
+  background: var(--surface-2) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
 .modal {
   background: var(--glass-modal) !important;
   border-color: transparent !important;

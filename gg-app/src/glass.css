@@ -333,9 +333,10 @@
 
 /* Tables: a rounded glass card. Grid lines become hairlines (outer edge on
    the card), the header row a lit strip, and the zebra a whisper of white. */
+/* Width is owned by App.css (`100%`, inside the `.md-table-scroll` scroller).
+   Never set `max-content` here: cells then can't wrap, so every wide table
+   forces a horizontal scrollbar in narrow chat panes. */
 .markdown table {
-  width: max-content;
-  max-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   border-radius: var(--radius-card);

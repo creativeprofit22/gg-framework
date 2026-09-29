@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+const glassCss = readFileSync(new URL("./glass.css", import.meta.url), "utf8");
 const asciiLogoSource = readFileSync(new URL("./AsciiLogo.tsx", import.meta.url), "utf8");
 
 describe("narrow-window layout contracts", () => {
@@ -22,6 +23,23 @@ describe("narrow-window layout contracts", () => {
       expect(fontSize * logoWidthEm).toBeLessThanOrEqual(viewportWidth - horizontalGutter);
     }
     expect(Math.min(12, (1164 - horizontalGutter) / logoWidthEm)).toBe(12);
+  });
+
+  it("keeps Markdown tables fluid so chat panes wrap cells instead of scrolling sideways", () => {
+    // Every `.markdown table { … }` width, in cascade order (App.css, then the
+    // glass theme layered on top). Regression: glass.css once set
+    // `width: max-content`, overriding the fluid width on every wide table.
+    const declared: string[] = [];
+    for (const css of [appCss, glassCss]) {
+      for (const rule of css.matchAll(/^\.markdown table\s*\{([^}]*)\}/gm)) {
+        for (const decl of (rule[1] ?? "").matchAll(/(?:^|;|\*\/)\s*width\s*:\s*([^;]+);/g)) {
+          declared.push((decl[1] ?? "").trim());
+        }
+      }
+    }
+    expect(declared.length).toBeGreaterThan(0);
+    expect(declared.at(-1)).toBe("100%");
+    expect(declared).not.toContain("max-content");
   });
 
   it("keeps the portaled model menu fixed above responsive footer clipping", () => {

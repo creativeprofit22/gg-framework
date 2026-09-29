@@ -164,7 +164,9 @@ describe("What's New feeds", () => {
   });
 
   it("preserves the prior shipped Local Fork identities and dates", () => {
-    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-09-28-upstream-0720-settings-and-clearer-questions");
+    expect(LOCAL_CHANGELOG[1].id).toBe(
+      "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
+    );
     expect(LOCAL_CHANGELOG[1].date).toBe("2026-09-28");
     expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[1])).digest("hex")).toBe(
       "7ee71544b1d581396b70ad90db7e7ac6261baf5c2714f660fddd6cd28d466e1f",

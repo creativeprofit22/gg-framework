@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core";
 import { common, createLowlight } from "lowlight";
 import type { Element, ElementContent, Root, RootContent, Text as HastText } from "hast";
 import stripAnsi from "strip-ansi";
@@ -371,6 +372,13 @@ export function renderMarkdownToAnsiLines({
     const hrMatch = line.match(hrRegex);
     const tableRowMatch = line.match(tableRowRegex);
     const tableSeparatorMatch = line.match(tableSeparatorRegex);
+
+    // The desktop app collapses the /steroids table after this marker; the
+    // terminal has no such affordance, so the exact marker line is dropped.
+    if (line.trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER) {
+      if (inTable) flushTable();
+      return;
+    }
 
     if (codeFenceMatch) {
       inCodeBlock = true;

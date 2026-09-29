@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { ArrowElbowDownLeftIcon, CheckIcon, CopyIcon, FilePlusIcon, PlusIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { KenPromptActionContext } from "./ken-prompt-context";
 import { PaneIdContext } from "./pane-context";
@@ -115,15 +116,35 @@ function ExternalLink({
   );
 }
 
+const CollapsibleTableContext = createContext(false);
+
 /**
  * Tables live inside their own horizontal scroller so the table itself can stay
  * a real `display: table` at 100% width — it then fills and re-flows with the
  * pane as it resizes, and only scrolls when its columns can't wrap any narrower.
  */
 function MarkdownTable({ children }: { children?: React.ReactNode }): React.ReactElement {
-  return (
-    <div className="md-table-scroll">
+  const collapsible = useContext(CollapsibleTableContext);
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const table = (
+    <div className="md-table-scroll" id={panelId}>
       <table>{children}</table>
+    </div>
+  );
+  if (!collapsible) return table;
+  return (
+    <div className="md-table-collapsible">
+      <button
+        type="button"
+        className="code-expand"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? "Hide table" : "Show table"}
+      </button>
+      {open && table}
     </div>
   );
 }
@@ -814,10 +835,12 @@ const MemoizedMarkdownBlock = memo(
     content,
     promptReady,
     animate,
+    collapseTable,
   }: {
     content: string;
     promptReady: boolean;
     animate: boolean;
+    collapseTable: boolean;
   }): React.ReactElement {
     const normalized = content.replace(/^\n+|\n+$/g, "");
     const sourceFence = promptSourceFence(content);
@@ -830,6 +853,7 @@ const MemoizedMarkdownBlock = memo(
     }
     return (
       <PromptReadyContext.Provider value={promptReady}>
+        <CollapsibleTableContext.Provider value={collapseTable}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
@@ -838,13 +862,15 @@ const MemoizedMarkdownBlock = memo(
         >
           {normalized}
         </ReactMarkdown>
+        </CollapsibleTableContext.Provider>
       </PromptReadyContext.Provider>
     );
   },
   (prev, next) =>
     prev.content === next.content &&
     prev.promptReady === next.promptReady &&
-    prev.animate === next.animate,
+    prev.animate === next.animate &&
+    prev.collapseTable === next.collapseTable,
 );
 
 /**
@@ -884,6 +910,7 @@ export const Markdown = memo(function Markdown({
           // Only the trailing block is still growing, so only it needs word
           // spans; earlier blocks stay memoized and span-free.
           animate={animate && index === visible.length - 1}
+          collapseTable={index > 0 && visible[index - 1].trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER}
         />
       ))}
       {rowFolded && (

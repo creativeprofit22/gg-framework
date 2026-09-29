@@ -7,6 +7,9 @@ export const CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES: readonly string[] = Objec
   Object.values(CLIENT_OWNED_SLASH_COMMANDS).flatMap(({ name, aliases }) => [name, ...aliases]),
 );
 
+/** Line /steroids prints before its candidate table; the desktop app collapses the table that follows it. */
+export const STEROIDS_COLLAPSIBLE_TABLE_MARKER = "<!-- gg:collapsible-table -->";
+
 /** Listing field limits measured in UTF-16 code units, matching string.length. */
 export const SLASH_COMMAND_NAME_MAX_LENGTH = 100;
 export const SLASH_COMMAND_DESCRIPTION_MAX_LENGTH = 4_000;

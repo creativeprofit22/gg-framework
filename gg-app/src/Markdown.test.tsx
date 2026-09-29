@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
 import { KenPromptActionProvider, Markdown } from "./Markdown";
 import type {
   KenPromptAction,
@@ -30,6 +31,22 @@ describe("Markdown tables", () => {
     const table = container.querySelector("table");
     expect(table?.parentElement?.className).toBe("md-table-scroll");
     expect(table?.querySelectorAll("tbody td")).toHaveLength(2);
+  });
+
+  it("collapses only the table that follows the /steroids marker, and expands on click", () => {
+    const table = "| A | B |\n| --- | --- |\n| one | two |";
+    const { container } = render(
+      <Markdown>{`${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${table}\n\nmiddle\n\n${table}`}</Markdown>,
+    );
+
+    expect(container.querySelectorAll("table")).toHaveLength(1);
+    const toggle = screen.getByRole("button", { name: "Show table" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(toggle);
+
+    expect(container.querySelectorAll("table")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Hide table" })).toBeTruthy();
   });
 
   it("carries GFM column alignment onto cells as inline text-align", () => {

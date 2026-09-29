@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core";
 import { getPromptCommand, PROMPT_COMMANDS } from "./prompt-commands.js";
 
 describe("prompt commands", () => {
@@ -63,6 +64,7 @@ describe("prompt commands", () => {
     expect(cmd?.prompt).toContain("a `detail` of one plain sentence saying roughly what indexing the chosen repos costs");
     expect(cmd?.prompt).toContain("Do not index anything until the user answers");
     expect(cmd?.prompt).toContain("`steroids` `add`");
+    expect(cmd?.prompt).toContain(STEROIDS_COLLAPSIBLE_TABLE_MARKER);
   });
 
   it("routes real-code comparison through the native steroids tool", () => {

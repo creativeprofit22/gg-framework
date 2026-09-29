@@ -96,6 +96,25 @@ describe("sidecar optional dependency selection", () => {
     );
   });
 
+  it("keeps only the host esbuild binary package on every host", () => {
+    const esbuildOptionalDependencies = {
+      "@esbuild/aix-ppc64": "0.28.2",
+      "@esbuild/darwin-arm64": "0.28.2",
+      "@esbuild/linux-x64": "0.28.2",
+      "@esbuild/win32-arm64": "0.28.2",
+      "@esbuild/win32-x64": "0.28.2",
+    };
+    expect(
+      selectedOptionalDependencies("esbuild", esbuildOptionalDependencies, "win32", "x64"),
+    ).toEqual(["@esbuild/win32-x64"]);
+    expect(
+      selectedOptionalDependencies("esbuild", esbuildOptionalDependencies, "darwin", "arm64"),
+    ).toEqual(["@esbuild/darwin-arm64"]);
+    expect(() =>
+      selectedOptionalDependencies("esbuild", esbuildOptionalDependencies, "freebsd", "x64"),
+    ).toThrow("esbuild has no host binary package for freebsd/x64");
+  });
+
   it("preserves existing Sharp behavior on other supported hosts", () => {
     expect(
       selectedOptionalDependencies("sharp", sharpOptionalDependencies, "darwin", "arm64"),

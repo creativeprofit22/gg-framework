@@ -487,9 +487,10 @@ function packageRoot(name, fromRequire, fromDir) {
 }
 
 /**
- * Sharp publishes every platform binary as an optional dependency. Windows x64
- * installers need only their host binary; unrelated packages retain npm's normal
- * optional-dependency behavior.
+ * Sharp and esbuild publish every platform binary as an optional dependency.
+ * Windows x64 installers need only Sharp's host binary, and every target needs
+ * only esbuild's host binary (Motion's HyperFrames pulls in ~26 foreign ones,
+ * ~250 MiB). Unrelated packages retain npm's normal optional-dependency behavior.
  */
 export function selectedOptionalDependencies(
   packageName,
@@ -498,6 +499,13 @@ export function selectedOptionalDependencies(
   arch = process.arch,
 ) {
   const names = Object.keys(optionalDependencies || {});
+  if (packageName === "esbuild") {
+    const host = `@esbuild/${platform}-${arch}`;
+    if (!names.includes(host)) {
+      throw new Error(`esbuild has no host binary package for ${platform}/${arch}`);
+    }
+    return [host];
+  }
   if (packageName !== "sharp" || platform !== "win32") return names;
   if (arch !== "x64") {
     throw new Error(`sharp has no supported Windows host selection for ${platform}/${arch}`);

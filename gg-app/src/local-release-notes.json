@@ -1,29 +1,14 @@
 {
   "schemaVersion": 1,
   "date": "2026-09-28",
-  "label": "Upstream 0.72.1, with Motion videos and Sonnet 5.5",
+  "label": "Tables that fit your pane, and a clearer slash menu",
   "sections": [
     {
-      "title": "Make videos with Motion",
+      "title": "Easier reading in chat",
       "items": [
-        "Home has a new `Motion` button beside Code and Chat. It opens a workspace for short videos like product launches, feature demos, social ads and explainers, with its own session list and a `+ New video` button. An empty Motion screen offers starters such as `Launch my product` and `Make a social ad`, which fill in the message box so you can add your link or files before sending.",
-        "Motion panes now come back when you reopen a saved layout instead of quietly disappearing. Reviewed command runs only start inside Code workspaces, so they cannot fire from Chat or Motion by accident."
-      ]
-    },
-    {
-      "title": "Smarter models and commands",
-      "items": [
-        "`Claude Sonnet 5.5` replaces Sonnet 5 as Anthropic's starting model, and you can push its thinking up to the extra-deep `xhigh` level. If you had Sonnet 5 picked, you move to 5.5 automatically.",
-        "Custom commands can now show what to type after them. Highlight a command in the `/` menu and its hint appears on that row, wrapping underneath in narrow panes.",
-        "`/sweep --map` splits a whole codebase into areas to check, and `/sweep --merge` gathers the results into fix tasks you run one at a time. `/trace`, `/parity`, `/contract`, `/flow` and `/ship` now share one set of rules, so they stay read-only, avoid filing the same task twice, and ask their questions as clickable cards.",
-        "When the code checker for a language is missing, the agent tells you once how to install it instead of going quiet or repeating itself."
-      ]
-    },
-    {
-      "title": "Smoother everyday use",
-      "items": [
-        "The `Radio` is ready as soon as the app opens, so your stations load on the first click.",
-        "The message box resizes more smoothly while you type and send."
+        "Wide tables in chat now wrap their text to fit the pane instead of pushing out a sideways scrollbar. A table only scrolls sideways when its columns truly cannot get any narrower.",
+        "The `/` menu has a solid background, so command names and their hints stay easy to read over the chat behind it.",
+        "`/steroids` folds its list of suggested repos under a `Show table` button, so the question about how many to index stays in view. Open it to compare the ranked picks, and `Hide table` tucks it away again."
       ]
     }
   ]

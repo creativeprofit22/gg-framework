@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-28-upstream-0721-motion-and-sonnet-55",
+    id: "local-2026-09-28-readable-tables-and-slash-menu",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-28-upstream-0721-motion-and-sonnet-55",
+    label: "Upstream 0.72.1, with Motion videos and Sonnet 5.5",
+    date: "2026-09-28",
+    items: [
+      "Home has a new `Motion` button beside Code and Chat. It opens a workspace for short videos like product launches, feature demos, social ads and explainers, with its own session list and a `+ New video` button. An empty Motion screen offers starters such as `Launch my product` and `Make a social ad`, which fill in the message box so you can add your link or files before sending.",
+      "Motion panes now come back when you reopen a saved layout instead of quietly disappearing. Reviewed command runs only start inside Code workspaces, so they cannot fire from Chat or Motion by accident.",
+      "`Claude Sonnet 5.5` replaces Sonnet 5 as Anthropic's starting model, and you can push its thinking up to the extra-deep `xhigh` level. If you had Sonnet 5 picked, you move to 5.5 automatically.",
+      "Custom commands can now show what to type after them. Highlight a command in the `/` menu and its hint appears on that row, wrapping underneath in narrow panes.",
+      "`/sweep --map` splits a whole codebase into areas to check, and `/sweep --merge` gathers the results into fix tasks you run one at a time. `/trace`, `/parity`, `/contract`, `/flow` and `/ship` now share one set of rules, so they stay read-only, avoid filing the same task twice, and ask their questions as clickable cards.",
+      "When the code checker for a language is missing, the agent tells you once how to install it instead of going quiet or repeating itself.",
+      "The `Radio` is ready as soon as the app opens, so your stations load on the first click.",
+      "The message box resizes more smoothly while you type and send.",
+    ],
   },
   {
     id: "local-2026-09-28-upstream-0720-settings-and-clearer-questions",

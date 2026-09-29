@@ -2142,7 +2142,8 @@ select {
   font-family: var(--sans);
   font-size: 12px;
   padding: 4px 10px;
-  outline: none;
+  /* No outline reset: the shared :focus-visible ring marks keyboard focus,
+     which the 1px border tint alone did not do visibly. */
   transition:
     border-color var(--t-fast),
     background-color var(--t-fast);
@@ -2153,6 +2154,21 @@ select {
 .picker-search:focus {
   border-color: var(--primary);
   background: var(--surface-2);
+}
+/* Touch: header controls reach the 44px target floor, and the search input
+   stays at 16px so focusing it does not zoom the page. Fine pointers keep the
+   existing compact .btn-sm/icon sizing. */
+@media (pointer: coarse) {
+  .picker-head :is(.btn-sm, .btn-icon) {
+    min-height: 44px;
+  }
+  .picker-head .btn-icon {
+    min-width: 44px;
+  }
+  .picker-search {
+    min-height: 44px;
+    font-size: 16px;
+  }
 }
 /* Match the titlebar nav buttons (.commit-button / .btn-nav-icon): same
    font-size, weight, and padding so every chrome control reads uniformly. */
@@ -3836,6 +3852,13 @@ select {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+/* Cap row width on wide windows so a name and its timestamp stay within one
+   eye span instead of sitting at opposite edges of the window. */
+.picker-list > :not(.picker-empty, .picker-reveal),
+.picker-reveal > * {
+  width: 100%;
+  max-width: 760px;
 }
 /* Empty/loading state: fill the list and center its content both axes, with a
    clear gap between the message and any action button. */

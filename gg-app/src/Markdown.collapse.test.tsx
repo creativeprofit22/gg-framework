@@ -78,7 +78,10 @@ describe("oversized output folding", () => {
     expect(screen.getByRole("button", { name: /Show full output/ })).toBeTruthy();
 
     const pre = document.querySelector(".code-block.folded pre");
-    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [s.className, s.textContent]);
+    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [
+      s.className,
+      s.textContent,
+    ]);
     expect(kinds).toEqual([
       ["hljs-comment", "diff --git a/x.ts b/x.ts"],
       ["hljs-meta", "@@ -1,40 +1,40 @@"],
@@ -108,7 +111,10 @@ describe("oversized output folding", () => {
     expect(screen.getByRole("button", { name: /Show full output/ })).toBeTruthy();
 
     const pre = document.querySelector(".code-block.folded pre");
-    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [s.className, s.textContent]);
+    const kinds = [...(pre?.querySelectorAll("span") ?? [])].map((s) => [
+      s.className,
+      s.textContent,
+    ]);
     expect(kinds).toEqual([
       ["hljs-comment", "diff --git a/x.ts b/x.ts"],
       ["hljs-meta", "@@ -1,40 +1,40 @@"],

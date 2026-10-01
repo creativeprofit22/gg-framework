@@ -27,8 +27,7 @@ const PROBLEM_TEXT: Readonly<Record<CommandProblem["reason"], string>> = {
 function matches(command: SlashCommand, query: string): boolean {
   if (!query) return true;
   return (
-    command.name.toLowerCase().includes(query) ||
-    command.description.toLowerCase().includes(query)
+    command.name.toLowerCase().includes(query) || command.description.toLowerCase().includes(query)
   );
 }
 
@@ -205,7 +204,10 @@ export function CommandPalette({
                           {command.argumentHint}
                         </span>
                       )}
-                      <span className="slash-desc command-palette-desc" style={{ color: theme.textMuted }}>
+                      <span
+                        className="slash-desc command-palette-desc"
+                        style={{ color: theme.textMuted }}
+                      >
                         {command.description}
                       </span>
                       <span className="command-palette-tags">
@@ -228,7 +230,11 @@ export function CommandPalette({
           );
         })}
         {options.length === 0 && (
-          <div role="presentation" className="command-palette-empty" style={{ color: theme.textMuted }}>
+          <div
+            role="presentation"
+            className="command-palette-empty"
+            style={{ color: theme.textMuted }}
+          >
             {commands.length === 0 ? "No collection commands could be loaded." : "No matches"}
           </div>
         )}

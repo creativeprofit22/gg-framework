@@ -15,11 +15,9 @@ function command(name: string, extra: Partial<SlashCommand> = {}): SlashCommand 
 
 describe("menuCommands", () => {
   it("adds /schedule first and hides the commit commands", () => {
-    const names = menuCommands([
-      command("commit"),
-      command("setup-commit"),
-      command("review"),
-    ]).map((c) => c.name);
+    const names = menuCommands([command("commit"), command("setup-commit"), command("review")]).map(
+      (c) => c.name,
+    );
     expect(names).toEqual(["schedule", "review"]);
   });
 });
@@ -37,7 +35,9 @@ describe("paletteCommands", () => {
   });
 
   it("returns nothing when no command declares a collection", () => {
-    expect(paletteCommands([command("plain"), command("help", { source: "built-in" })])).toEqual([]);
+    expect(paletteCommands([command("plain"), command("help", { source: "built-in" })])).toEqual(
+      [],
+    );
   });
 });
 

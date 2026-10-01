@@ -10,8 +10,8 @@ export function escapeRegExp(value: string): string {
 }
 
 /** Mentor handle names without the leading `@`, current handle first. */
-const MENTOR_HANDLE_NAMES: readonly string[] = [MENTOR_HANDLE, LEGACY_MENTOR_HANDLE].map(
-  (handle) => handle.replace(/^@/, ""),
+const MENTOR_HANDLE_NAMES: readonly string[] = [MENTOR_HANDLE, LEGACY_MENTOR_HANDLE].map((handle) =>
+  handle.replace(/^@/, ""),
 );
 
 /** Regex alternation (escaped, non-capturing) matching any mentor handle name. */

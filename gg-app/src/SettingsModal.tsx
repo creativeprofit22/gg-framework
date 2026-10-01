@@ -178,7 +178,11 @@ export function SettingsModal({
             dialogTitle={null}
             dialogHint={
               <>
-                <label className="modal-label" htmlFor={folderId} style={{ color: theme.textMuted }}>
+                <label
+                  className="modal-label"
+                  htmlFor={folderId}
+                  style={{ color: theme.textMuted }}
+                >
                   Project folder
                 </label>
                 <div id={folderHintId} className="modal-hint" style={{ color: theme.textMuted }}>

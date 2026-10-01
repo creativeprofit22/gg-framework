@@ -57,7 +57,9 @@ function optionNames(): string[] {
 
 function activeName(input: HTMLElement): string | undefined {
   const id = input.getAttribute("aria-activedescendant");
-  return id ? document.getElementById(id)?.querySelector(".slash-name")?.textContent ?? undefined : undefined;
+  return id
+    ? (document.getElementById(id)?.querySelector(".slash-name")?.textContent ?? undefined)
+    : undefined;
 }
 
 function row(name: string): HTMLElement {
@@ -92,7 +94,8 @@ describe("CommandPalette", () => {
 
   it("shows an effect badge only when the command declares an effect", () => {
     renderPalette();
-    const effect = (name: string) => row(name).querySelector(".command-palette-effect")?.textContent;
+    const effect = (name: string) =>
+      row(name).querySelector(".command-palette-effect")?.textContent;
     expect(effect("/kit")).toBe("plans");
     expect(effect("/beta")).toBe("edits");
     expect(effect("/alpha")).toBe("reads");
@@ -147,7 +150,9 @@ describe("CommandPalette", () => {
     const panel = screen.getByRole("region", { name: "1 command file has a problem" });
     expect(within(panel).getByText(".md")).toBeTruthy();
     expect(
-      within(panel).getByText("Its name is empty or longer than 100 characters, so it isn't listed."),
+      within(panel).getByText(
+        "Its name is empty or longer than 100 characters, so it isn't listed.",
+      ),
     ).toBeTruthy();
     expect(within(panel).queryByText(/too long to use/)).toBeNull();
   });
@@ -169,7 +174,9 @@ describe("CommandPalette", () => {
     expect(input.getAttribute("autocomplete")).toBe("off");
     expect(document.activeElement).toBe(input);
     expect(activeName(input)).toBe("/kit");
-    const selected = screen.getAllByRole("option").filter((o) => o.getAttribute("aria-selected") === "true");
+    const selected = screen
+      .getAllByRole("option")
+      .filter((o) => o.getAttribute("aria-selected") === "true");
     expect(selected).toHaveLength(1);
     expect(selected[0]?.id).toBe(input.getAttribute("aria-activedescendant"));
   });

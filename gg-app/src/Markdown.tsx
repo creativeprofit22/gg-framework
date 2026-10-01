@@ -13,7 +13,13 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { toast } from "./toast";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowElbowDownLeftIcon, CheckIcon, CopyIcon, FilePlusIcon, PlusIcon } from "@phosphor-icons/react";
+import {
+  ArrowElbowDownLeftIcon,
+  CheckIcon,
+  CopyIcon,
+  FilePlusIcon,
+  PlusIcon,
+} from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
@@ -742,7 +748,11 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
         }}
       >
         {folded ? (
-          isDiffLanguage(codeLanguage(children)) ? <DiffPreview text={preview} /> : preview
+          isDiffLanguage(codeLanguage(children)) ? (
+            <DiffPreview text={preview} />
+          ) : (
+            preview
+          )
         ) : (
           children
         )}
@@ -854,14 +864,14 @@ const MemoizedMarkdownBlock = memo(
     return (
       <PromptReadyContext.Provider value={promptReady}>
         <CollapsibleTableContext.Provider value={collapseTable}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
-          components={{ a: ExternalLink, pre: PreBlock, table: MarkdownTable }}
-          urlTransform={markdownUrlTransform}
-        >
-          {normalized}
-        </ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
+            components={{ a: ExternalLink, pre: PreBlock, table: MarkdownTable }}
+            urlTransform={markdownUrlTransform}
+          >
+            {normalized}
+          </ReactMarkdown>
         </CollapsibleTableContext.Provider>
       </PromptReadyContext.Provider>
     );
@@ -910,7 +920,9 @@ export const Markdown = memo(function Markdown({
           // Only the trailing block is still growing, so only it needs word
           // spans; earlier blocks stay memoized and span-free.
           animate={animate && index === visible.length - 1}
-          collapseTable={index > 0 && visible[index - 1].trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER}
+          collapseTable={
+            index > 0 && visible[index - 1].trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER
+          }
         />
       ))}
       {rowFolded && (

@@ -9,6 +9,7 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeDither } from "./HomeDither";
+import { HomeCritters } from "./HomeCritters";
 import { useHomeBackgroundEnabled } from "./home-background";
 import type { SettingsTabId } from "./SettingsScreen";
 import {
@@ -279,6 +280,9 @@ export function HomeScreen({
       >
         <GearSixIcon size={20} weight="bold" aria-hidden="true" />
       </button>
+      {/* Along the bottom edge: every critter, out playing. The byline and the
+        version corner sit just above their lane. */}
+      <HomeCritters />
       {/* Bottom centre: the Local Fork byline (upstream's author links are not shown). */}
       <div className="home-byline home-links">Built for shipping real projects fast</div>
       {/* Bottom left: the version, or the update button when one is ready. */}

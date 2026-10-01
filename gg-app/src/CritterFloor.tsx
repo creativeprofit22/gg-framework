@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import { createCritterFloor, type CritterFloorController, type FloorAgent } from "./critter-floor";
+import { CritterTerrain } from "./CritterTerrain";
+import { TERRAIN_CLOSE_MS, TERRAIN_LAND_MS } from "./critter-terrain";
 import { displayName, formatSubAgentTokens, type SubAgentLine } from "./SubAgentFeed";
+import { useRandomBiome } from "./use-random-biome";
 
 /** The transcript's sub-agent groups, as far as the floor cares. */
 export interface CritterGroup {
@@ -41,6 +44,8 @@ export function collectFloorAgents(groups: readonly CritterGroup[]): FloorAgent[
 interface Props {
   /** Every sub-agent group in the transcript, oldest first. */
   groups: readonly CritterGroup[];
+  /** Injected for tests; defaults to Math.random. */
+  random?: () => number;
 }
 
 const sameGroups = (a: readonly CritterGroup[], b: readonly CritterGroup[]): boolean =>
@@ -52,12 +57,19 @@ const sameGroups = (a: readonly CritterGroup[], b: readonly CritterGroup[]): boo
  * tall when nobody is out and eases open when the first critter is summoned,
  * which shrinks the transcript so the chat slides up instead of being covered;
  * the transcript's resize observer keeps the newest message pinned meanwhile.
+ * The critters stand on a pixel terrain (meadow, beach, desert…), a fresh random
+ * one each time the lane opens: it rises out of the floor, the first critter
+ * beams in once the ground is up, and it sinks back after the last one leaves.
  *
  * Decorative: the chat line and the activity bar carry the same information
  * for assistive tech, so the lane is hidden from it.
  */
-export function CritterFloor({ groups }: Props): React.ReactElement {
+export function CritterFloor({ groups, random = Math.random }: Props): React.ReactElement {
   const laneRef = useRef<HTMLDivElement>(null);
+  // rerollBiome is stable, so the floor below is still created only once.
+  const [biome, rerollBiome] = useRandomBiome(random);
+  // The first opening keeps the terrain picked on mount.
+  const openedRef = useRef(false);
   const controllerRef = useRef<CritterFloorController | null>(null);
   const syncedRef = useRef<readonly CritterGroup[] | null>(null);
 
@@ -67,14 +79,22 @@ export function CritterFloor({ groups }: Props): React.ReactElement {
     const reducedMotion =
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const controller = createCritterFloor(lane, { reducedMotion });
+    const controller = createCritterFloor(lane, {
+      reducedMotion,
+      landAfterMs: TERRAIN_LAND_MS,
+      closeAfterMs: TERRAIN_CLOSE_MS,
+      onLaneOpen: () => {
+        if (openedRef.current) rerollBiome();
+        openedRef.current = true;
+      },
+    });
     controllerRef.current = controller;
     return () => {
       controller.destroy();
       controllerRef.current = null;
       syncedRef.current = null;
     };
-  }, []);
+  }, [rerollBiome]);
 
   // The transcript re-renders on every streamed token, but group objects only
   // change identity when an agent actually changes (items update immutably),
@@ -88,5 +108,11 @@ export function CritterFloor({ groups }: Props): React.ReactElement {
     controller.sync(collectFloorAgents(groups));
   }, [groups]);
 
-  return <div className="critter-lane" ref={laneRef} aria-hidden="true" />;
+  // The terrain is the lane's first child, so the floor the engine appends
+  // after it (critters, tooltip) paints on top.
+  return (
+    <div className="critter-lane with-terrain" ref={laneRef} aria-hidden="true">
+      <CritterTerrain biome={biome} />
+    </div>
+  );
 }

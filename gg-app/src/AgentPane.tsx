@@ -144,6 +144,7 @@ import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
+import { KenFace } from "./KenFace";
 import { ExportChatButton } from "./ExportChatButton";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
@@ -811,6 +812,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     captureKenRun,
     captureKenOperation,
   } = useKenMentor({ setItems, nextId });
+  // Ken's face talks on the reply he is streaming right now: the last row,
+  // while his run is live. Only that row's props change, so memo holds.
+  const lastItem = items[items.length - 1];
+  const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
   // compact transcript markers + a "Ken reviewing…" flag. Separate hook, same
   // shared setItems/nextId pattern as useKenMentor.
@@ -5016,6 +5021,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     createElement(TranscriptRow, {
                       key: it.id,
                       item: it,
+                      kenTalking: it.id === talkingKenId,
                       onImageLoad: maybeScrollToBottom,
                       onAskAnswer: handleAskAnswer,
                       onAskType: handleAskType,
@@ -5857,11 +5863,14 @@ function StreamingMarkdown({
 // instead of O(transcript length).
 const TranscriptRow = memo(function TranscriptRow({
   item,
+  kenTalking = false,
   onImageLoad,
   onAskAnswer,
   onAskType,
 }: {
   item: Item;
+  /** This is the Ken reply currently streaming in, so his face talks. */
+  kenTalking?: boolean;
   onImageLoad?: () => void;
   onAskAnswer?: (
     itemId: number,
@@ -5970,14 +5979,14 @@ const TranscriptRow = memo(function TranscriptRow({
       );
     }
     case "ken":
-      // Ken Kai's reply: the whole bubble is tinted in Ken's color (dot + all
-      // text), which is the ONLY differentiator from a normal GG Coder reply.
-      // No badge, no byline. The Markdown component special-cases ```prompt
-      // fences into a "Send to GG Coder" button.
+      // Ken Kai's reply: led by his little pixel face (it talks while the reply
+      // streams in) instead of the dot, framed by a teal rule. No badge, no
+      // byline. The Markdown component special-cases ```prompt fences into a
+      // "Send to GG Coder" button.
       return (
         <div className="assistant-msg ken-msg" data-swap-row={item.id}>
-          <span className="assistant-dot" style={{ color: theme.ken }}>
-            {DOT}
+          <span className="assistant-dot ken-face-slot">
+            <KenFace mood="chat" talking={kenTalking} />
           </span>
           <div className="assistant-text">
             <StreamingMarkdown text={item.text} onGrow={onImageLoad} />
@@ -5985,8 +5994,8 @@ const TranscriptRow = memo(function TranscriptRow({
         </div>
       );
     case "autopilot": {
-      // Autopilot Ken's verdict, rendered like a normal @Ken reply (Ken-tinted
-      // dot + text) rather than its own marker style. The text is his verdict as
+      // Autopilot Ken's verdict, rendered like a normal @Ken reply (his face +
+      // teal-framed text) rather than its own marker style. The text is his verdict as
       // prose: for a PROMPT he shows what he sent GG Coder back to do; the
       // terminal verdicts read as short Ken one-liners. `done` rotates through
       // several casual Ken lines (picked deterministically off the item's
@@ -6010,8 +6019,8 @@ const TranscriptRow = memo(function TranscriptRow({
       };
       return (
         <div className="assistant-msg ken-msg" data-swap-row={item.id}>
-          <span className="assistant-dot" style={{ color: theme.ken }}>
-            {DOT}
+          <span className="assistant-dot ken-face-slot">
+            <KenFace mood="chat" />
           </span>
           <div className="assistant-text">
             <Markdown>{copy[item.phase]}</Markdown>

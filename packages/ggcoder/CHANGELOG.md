@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.67.1
+
+### Patch Changes
+
+- Fix Autopilot review: list the files changed this turn, keep the corpus warning on the verdict line, frame reviews as machine reviews, and stop unrecognized read-only checks from leaving verified work stuck Unverified.
+  - @kenkaiiii/gg-ai@5.67.1
+  - @kenkaiiii/gg-agent@5.67.1
+  - @kenkaiiii/gg-core@5.67.1
+
 ## 5.67.0
 
 ### Minor Changes

@@ -1075,8 +1075,38 @@ select {
     animation: none;
   }
 }
-/* Edges: Settings top-right, your links bottom-centre, the version (or the
-   update button) bottom-left. */
+/* Edges: Settings top-right, the critters and their terrain along the bottom,
+   and above their lane your byline (centre) and the version or update button
+   (left). The critter lane sits on the window's bottom edge with its terrain
+   inside (.critter-lane.with-terrain), so the ground rises out of the edge
+   just like it does in chat. --home-critter-floor is the ground's depth, the
+   height the critters' feet stand at; --home-above-critters clears the
+   lane's full open height (sprite + headroom for bubbles, see
+   .critter-lane.open), so nothing they show runs into the byline. */
+.home {
+  --home-terrain-px: 2px;
+  --home-critter-floor: calc(var(--home-terrain-px) * 8);
+  --home-above-critters: calc(var(--home-critter-floor) + 28px + 48px + 6px);
+}
+.home > .home-critters {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--home-above-critters);
+  z-index: 1;
+  pointer-events: none;
+}
+.home-critters > .critter-lane {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+/* Ambient hover card: just the name, so no stats-sized minimum. */
+.home-critters .critter-tooltip {
+  min-width: 0;
+}
 /* Centred with auto margins between gutters that clear the version corner,
    rather than translate(-50%): the entry animation (reveal-up) owns
    transform. Shrinks to its text so the backing hugs it, and wraps instead of
@@ -1087,7 +1117,7 @@ select {
   z-index: 1;
   left: 76px;
   right: 76px;
-  bottom: 18px;
+  bottom: var(--home-above-critters);
   width: fit-content;
   margin: 0 auto;
   justify-content: center;
@@ -1101,7 +1131,7 @@ select {
   position: absolute;
   z-index: 1;
   left: 20px;
-  bottom: 18px;
+  bottom: var(--home-above-critters);
   display: flex;
   align-items: center;
 }
@@ -1309,7 +1339,15 @@ select {
   text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
   white-space: pre;
   text-align: center;
+  /* Ken's face (KenFace mood on/off) leads the words. */
+  display: flex;
+  align-items: center;
+  gap: 12px;
   animation: ken-power-flash 1150ms var(--ease-out) both;
+}
+.ken-power-banner .ken-face {
+  width: 28px;
+  height: 28px;
 }
 /* Scale-and-fade "power flash": pops in slightly undersized (like the zoom
    HUD), rests at full size while held, then grows a touch further as it
@@ -5379,6 +5417,188 @@ select {
   color: var(--ken);
   text-decoration-color: color-mix(in srgb, var(--ken) 50%, transparent);
 }
+
+/* ── Ken's face (ken-face.ts, KenFace.tsx) ──
+   A 14×14 pixel portrait. Each expression is its own image stacked on the
+   first; the upper layers sit hidden and keyframes flick them on, so blinking,
+   talking and the banner's wake-up / nod-off are pure CSS. */
+.ken-face {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  transform-origin: 50% 100%;
+}
+.ken-face-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+}
+.ken-face-layer + .ken-face-layer {
+  opacity: 0;
+}
+/* In the reply gutter: one cell per CSS px, centred on the first text line
+   (assistant text is 15px at line-height 1.55), where the dot used to sit. */
+.ken-face-slot {
+  display: inline-flex;
+  align-items: center;
+  height: calc(15px * 1.55);
+}
+.ken-face-chat .ken-face-blink {
+  animation: ken-face-blink 4.6s steps(1, end) infinite;
+}
+.ken-face-chat .ken-face-talk {
+  animation: ken-face-flap 0.34s steps(1, end) infinite;
+}
+.ken-face-chat.ken-face-talking {
+  animation: ken-face-chatter 0.68s var(--ease-in-out) infinite;
+}
+@keyframes ken-face-blink {
+  0% {
+    opacity: 0;
+  }
+  94% {
+    opacity: 1;
+  }
+  97% {
+    opacity: 0;
+  }
+}
+@keyframes ken-face-flap {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes ken-face-chatter {
+  0%,
+  100% {
+    transform: none;
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+/* "Ken is on.": eyes shut, then they pop open happy and he hops. Timed
+   against the banner's 1150ms flash (it is fully in by 16%). */
+.ken-face-on {
+  animation: ken-face-hop 1150ms var(--ease-out) both;
+}
+.ken-face-on .ken-face-happy {
+  animation: ken-face-wake 1150ms steps(1, end) both;
+}
+@keyframes ken-face-wake {
+  0% {
+    opacity: 0;
+  }
+  30%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes ken-face-hop {
+  0%,
+  30% {
+    transform: none;
+  }
+  40% {
+    transform: translateY(-5px) scale(0.94, 1.06);
+  }
+  52% {
+    transform: none;
+  }
+  58% {
+    transform: translateY(-2px);
+  }
+  64%,
+  100% {
+    transform: none;
+  }
+}
+/* "Ken is off.": a drowsy blink, eyes shut, he sinks and tilts, a "z" rises. */
+.ken-face-off {
+  animation: ken-face-sink 1150ms var(--ease-in-out) both;
+}
+.ken-face-off .ken-face-sleepy {
+  animation: ken-face-doze 1150ms steps(1, end) both;
+}
+.ken-face-z {
+  position: absolute;
+  top: -8px;
+  right: -9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ken);
+  text-shadow: none;
+  opacity: 0;
+  animation: ken-face-z 1150ms var(--ease-out) both;
+}
+@keyframes ken-face-doze {
+  0% {
+    opacity: 0;
+  }
+  22% {
+    opacity: 1;
+  }
+  30% {
+    opacity: 0;
+  }
+  40%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes ken-face-sink {
+  0%,
+  40% {
+    transform: none;
+  }
+  70%,
+  100% {
+    transform: translateY(3px) rotate(-8deg);
+  }
+}
+@keyframes ken-face-z {
+  0%,
+  45% {
+    opacity: 0;
+    transform: translate(0, 4px) scale(0.7);
+  }
+  60% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 0.9;
+    transform: translate(6px, -8px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(7px, -10px) scale(1);
+  }
+}
+/* Reduced motion: no blinking, talking or hopping; the banner just shows
+   where each beat ends (awake and happy, or asleep). */
+@media (prefers-reduced-motion: reduce) {
+  .ken-face,
+  .ken-face.ken-face-talking,
+  .ken-face .ken-face-layer,
+  .ken-face .ken-face-z {
+    animation: none;
+  }
+  .ken-face-on .ken-face-happy,
+  .ken-face-off .ken-face-sleepy {
+    opacity: 1;
+  }
+}
 /* Ken's activity bar reuses the GG Coder ActivityBar's running statusrow as-is
    (same top border, padding, spinner, layout, meta readout) so it's the same
    control aligned to what we have, just tinted to Ken. Only the spinner glow is
@@ -6084,6 +6304,464 @@ select {
   inset: 0;
   pointer-events: none;
 }
+
+/* ── Critter terrain (critter-terrain.ts, CritterTerrain.tsx) ──
+   A little pixel world inside the critter lane, drawn at the critters' pixel
+   size. It fills the lane and is clipped to it, so the land rises out of the
+   floor line rather than sliding over whatever sits below. Paint order:
+     sky   weather particles and passing travelers (gull, tumbleweed…)
+     land  the repeating ground strip, plus props sunk into it (craters)
+     props everything standing on the ground or floating in the sky
+
+   Choreography, keyed off the lane's classes (critter-floor.ts):
+   .open (scenery comes out, ground up):
+        0ms  the land starts rising (440ms)
+      220ms  ground props sprout, a wave sweeping left to right (~650ms)
+      360ms  the first critter beams in (TERRAIN_LAND_MS)
+      420ms  sky props drift down into place, same wave
+      700ms  weather fades in; travelers start passing a little later
+   .closing (the last critter has left; the exact reverse, top down):
+        0ms  weather and travelers fade out
+       60ms  sky props lift away, right to left
+      140ms  ground props shrink back into the ground, right to left
+      520ms  the land sinks (240ms)
+      780ms  the lane collapses (TERRAIN_CLOSE_MS) and the terrain hides,
+             so the next one can be swapped in unseen
+   Entrances and exits are transitions, so a critter arriving mid-close just
+   turns everything around. Idle motion (sway, twinkle, bob…) and weather
+   only run while the lane is open. */
+.critter-terrain {
+  --terrain-px: 2px;
+  /* Ground depth: the floor the critters stand on. */
+  --terrain-floor: calc(var(--terrain-px) * 8);
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
+}
+.critter-lane.open > .critter-terrain {
+  visibility: visible;
+}
+.terrain-sky,
+.terrain-props,
+.terrain-weather {
+  position: absolute;
+  inset: 0;
+}
+.terrain-land {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--terrain-px) * 20);
+}
+.terrain-ground {
+  position: absolute;
+  inset: 0;
+  background-repeat: repeat-x;
+  background-position: left bottom;
+  background-size: calc(var(--terrain-px) * 64) 100%;
+  image-rendering: pixelated;
+}
+.terrain-prop {
+  position: absolute;
+  transform-origin: 50% 100%;
+}
+.terrain-prop-art {
+  position: absolute;
+  inset: 0;
+  background: var(--img) no-repeat 0 0 / 100% 100%;
+  image-rendering: pixelated;
+  transform-origin: 50% 100%;
+}
+
+/* With a terrain the lane opens taller by the ground's depth, and the
+   critters (and their hover card) stand on top of it. */
+.critter-lane.with-terrain {
+  --critter-ground: calc(var(--critter-px) * 8);
+}
+.critter-lane.with-terrain.open {
+  height: calc(var(--critter-size) + 48px + var(--critter-ground));
+}
+.critter-lane.with-terrain > .critter-floor {
+  bottom: var(--critter-ground);
+}
+.critter-lane.with-terrain > .critter-tooltip {
+  bottom: calc(var(--critter-size) + 14px + var(--critter-ground));
+}
+
+/* Packed away (shut or .closing), with the exit timings; then out (.open)
+   with the entrance timings. --wave is a prop's 0–1 place left to right. */
+.terrain-land {
+  transform: translateY(100%);
+  transition: transform 240ms var(--ease-in) 520ms;
+}
+.terrain-prop.on-ground {
+  opacity: 0;
+  transform: scale(0.4, 0);
+  transition:
+    transform 200ms var(--ease-in) calc(140ms + (1 - var(--wave)) * 280ms),
+    opacity 120ms linear calc(220ms + (1 - var(--wave)) * 280ms);
+}
+.terrain-prop.on-sky {
+  opacity: 0;
+  transform: translateY(-10px);
+  transition:
+    transform 200ms var(--ease-in) calc(60ms + (1 - var(--wave)) * 160ms),
+    opacity 200ms var(--ease-in) calc(60ms + (1 - var(--wave)) * 160ms);
+}
+.terrain-weather,
+.terrain-traveler {
+  opacity: 0;
+  transition: opacity 180ms var(--ease-in);
+}
+.critter-lane.open:not(.closing) .terrain-land {
+  transform: none;
+  transition: transform 440ms var(--ease-out);
+}
+.critter-lane.open:not(.closing) .terrain-prop.on-ground {
+  opacity: 1;
+  transform: none;
+  transition:
+    transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1) calc(220ms + var(--wave) * 360ms),
+    opacity 80ms linear calc(220ms + var(--wave) * 360ms);
+}
+.critter-lane.open:not(.closing) .terrain-prop.on-sky {
+  opacity: 1;
+  transform: none;
+  transition:
+    transform 520ms var(--ease-out) calc(420ms + var(--wave) * 360ms),
+    opacity 520ms var(--ease-out) calc(420ms + var(--wave) * 360ms);
+}
+.critter-lane.open:not(.closing) .terrain-weather,
+.critter-lane.open:not(.closing) .terrain-traveler {
+  opacity: 1;
+  transition: opacity 600ms var(--ease-out) 700ms;
+}
+
+/* Idle motion while the lane is open; each prop starts at a different point
+   (from --wave) so a row of flowers doesn't sway in lockstep. */
+.critter-lane.open .terrain-prop-art {
+  animation-delay: calc(var(--wave) * -7s);
+}
+.critter-lane.open .m-sway > .terrain-prop-art {
+  animation-name: terrain-sway;
+  animation-duration: 3.4s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.critter-lane.open .m-twinkle > .terrain-prop-art {
+  animation: terrain-twinkle 1.9s ease-in-out infinite alternate;
+  animation-delay: calc(var(--wave) * -5s);
+}
+.critter-lane.open .m-bob > .terrain-prop-art {
+  animation: terrain-bob 2.6s ease-in-out infinite alternate;
+  animation-delay: calc(var(--wave) * -5s);
+}
+.critter-lane.open .m-glow > .terrain-prop-art {
+  animation: terrain-glow 2.2s ease-in-out infinite alternate;
+  animation-delay: calc(var(--wave) * -4s);
+}
+.critter-lane.open .m-scuttle > .terrain-prop-art {
+  animation: terrain-scuttle 6s ease-in-out infinite;
+  animation-delay: calc(var(--wave) * -6s);
+}
+.critter-lane.open .m-wave > .terrain-prop-art {
+  transform-origin: 0 30%;
+  animation: terrain-flag 1.3s ease-in-out infinite alternate;
+}
+@keyframes terrain-sway {
+  from {
+    rotate: -3deg;
+  }
+  to {
+    rotate: 3deg;
+  }
+}
+@keyframes terrain-twinkle {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+  to {
+    opacity: 0.25;
+    scale: 0.7;
+  }
+}
+@keyframes terrain-bob {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 0 -4px;
+  }
+}
+@keyframes terrain-glow {
+  from {
+    filter: brightness(1);
+  }
+  to {
+    filter: brightness(1.45);
+  }
+}
+/* A crab: shuffle right, pause, shuffle back. */
+@keyframes terrain-scuttle {
+  0%,
+  15%,
+  100% {
+    translate: 0 0;
+  }
+  30%,
+  50% {
+    translate: 8px 0;
+  }
+  65%,
+  85% {
+    translate: -6px 0;
+  }
+}
+@keyframes terrain-flag {
+  from {
+    transform: skewY(-5deg);
+  }
+  to {
+    transform: skewY(5deg);
+  }
+}
+
+/* Weather: one dot per particle, placed and timed by weatherParticles().
+   --fall is how far snow drops: from the top of the open lane down to the
+   ground's surface (the lane is critter-size + 48px of air over the ground). */
+.terrain-weather {
+  --fall: calc(var(--critter-size) + 48px - 2px);
+}
+.wx {
+  position: absolute;
+  top: 0;
+  opacity: 0;
+}
+.critter-lane.open .wx {
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+/* Snow falls the lane's full height and melts into the ground, wobbling. */
+.critter-lane.open .wx-snow .wx {
+  animation-name: wx-fall;
+}
+@keyframes wx-fall {
+  0% {
+    opacity: 0;
+    translate: 0 -4px;
+  }
+  8% {
+    opacity: 1;
+  }
+  35% {
+    translate: calc(var(--drift) * 0.6) calc(var(--fall) * 0.35);
+  }
+  70% {
+    translate: calc(var(--drift) * -0.3) calc(var(--fall) * 0.7);
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    translate: var(--drift) var(--fall);
+  }
+}
+/* Pollen drifts lazily through the air above the flowers. */
+.wx-pollen .wx {
+  top: calc(25% + var(--y) * 55%);
+}
+.critter-lane.open .wx-pollen .wx {
+  animation-name: wx-float;
+  animation-timing-function: ease-in-out;
+}
+@keyframes wx-float {
+  0% {
+    opacity: 0;
+    translate: 0 0;
+  }
+  25% {
+    opacity: 0.9;
+  }
+  50% {
+    translate: calc(var(--drift) * 0.5) -6px;
+  }
+  75% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    translate: var(--drift) 2px;
+  }
+}
+/* Dust skims along just above the sand on the wind. */
+.wx-dust .wx {
+  top: calc(62% + var(--y) * 22%);
+}
+.critter-lane.open .wx-dust .wx {
+  animation-name: wx-blow;
+}
+@keyframes wx-blow {
+  0% {
+    opacity: 0;
+    translate: 0 0;
+  }
+  15% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 0;
+    translate: var(--drift) -5px;
+  }
+}
+/* Space: far-off stars glinting on and off. */
+.wx-sparkle .wx {
+  top: calc(var(--y) * 70%);
+}
+.critter-lane.open .wx-sparkle .wx {
+  animation-name: wx-twinkle;
+  animation-timing-function: ease-in-out;
+}
+@keyframes wx-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+    scale: 0.4;
+  }
+  50% {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+/* Travelers cross the lane now and then, then wait off-stage for the rest of
+   their loop (--period), starting --start after the scenery is out. */
+.terrain-traveler {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+.terrain-traveler-art {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--from);
+  background: no-repeat 0 0 / 100% 100%;
+  image-rendering: pixelated;
+}
+.critter-lane.open .terrain-traveler-art {
+  animation:
+    terrain-cross var(--period) linear calc(var(--start) + 900ms) infinite both,
+    var(--hop) var(--hop-time) ease-in-out infinite alternate;
+}
+.tr-flutter {
+  --hop: terrain-flutter;
+  --hop-time: 0.45s;
+}
+.tr-glide {
+  --hop: terrain-glide;
+  --hop-time: 1.6s;
+}
+.tr-roll {
+  --hop: terrain-roll;
+  --hop-time: 0.32s;
+}
+.critter-lane.open .tr-roll > .terrain-traveler-art {
+  animation:
+    terrain-cross var(--period) linear calc(var(--start) + 900ms) infinite both,
+    terrain-roll 0.32s ease-out infinite alternate,
+    terrain-spin 0.9s linear infinite;
+}
+.critter-lane.open .tr-streak > .terrain-traveler-art {
+  animation: terrain-streak var(--period) var(--ease-in) calc(var(--start) + 900ms) infinite both;
+}
+@keyframes terrain-cross {
+  0% {
+    left: var(--from, -20px);
+  }
+  55%,
+  100% {
+    left: 100%;
+  }
+}
+@keyframes terrain-flutter {
+  from {
+    translate: 0 0;
+    scale: 1 1;
+  }
+  to {
+    translate: 0 -7px;
+    scale: 1 0.55;
+  }
+}
+@keyframes terrain-glide {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 0 4px;
+  }
+}
+@keyframes terrain-roll {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 0 -5px;
+  }
+}
+@keyframes terrain-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+/* A shooting star: a quick dash down-right, then a long wait. */
+@keyframes terrain-streak {
+  0% {
+    left: var(--from, -20px);
+    translate: 0 0;
+    opacity: 0;
+  }
+  2% {
+    opacity: 1;
+  }
+  12% {
+    opacity: 1;
+  }
+  16%,
+  100% {
+    left: 100%;
+    translate: 0 26px;
+    opacity: 0;
+  }
+}
+
+/* Reduced motion: the scenery just appears and disappears, standing still,
+   with no weather or travelers. */
+@media (prefers-reduced-motion: reduce) {
+  .terrain-land,
+  .terrain-prop,
+  .critter-lane.open:not(.closing) .terrain-land,
+  .critter-lane.open:not(.closing) .terrain-prop.on-ground,
+  .critter-lane.open:not(.closing) .terrain-prop.on-sky {
+    transition: none;
+  }
+  .critter-lane.open .terrain-prop-art {
+    animation: none;
+  }
+  .terrain-weather,
+  .terrain-traveler {
+    display: none;
+  }
+}
 .critter {
   position: absolute;
   bottom: 0;
@@ -6260,6 +6938,10 @@ select {
 .critter-badge-err {
   color: var(--error);
 }
+.critter-badge-zz {
+  color: var(--text-muted);
+  font-size: 10px;
+}
 .critter-badge-yikes {
   color: var(--warning);
   font-size: 13px;
@@ -6269,6 +6951,343 @@ select {
     transform: translateX(-50%) scale(0.4);
     opacity: 0;
   }
+}
+
+/* ── Alive critters: reaction wrapper, props, particles, overlays ── */
+/* Jolts, props and overlays live on .critter-react; .critter-body inside it is
+   what the behaviour scripts squash and tilt. */
+.critter-react {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 100%;
+  transition:
+    opacity 240ms ease,
+    filter 240ms ease;
+}
+.critter {
+  z-index: 2;
+}
+/* Passing behind a busy critter instead of through it reads as depth. */
+.critter.behind {
+  z-index: 1;
+}
+.critter.behind .critter-react {
+  opacity: 0.72;
+  filter: brightness(0.75);
+}
+.critter.phasing .critter-react {
+  opacity: 0.3;
+}
+.critter.sooty .critter-flip img {
+  filter: brightness(0.35) saturate(0.3);
+}
+.critter.sitting .critter-body {
+  transform: translateY(var(--critter-px)) scale(1.08, 0.86);
+}
+
+.critter-prop {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+.critter-prop img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* Particles are positioned by their centre; scripts animate `transform`. */
+.critter-pt {
+  position: absolute;
+  z-index: 3;
+  translate: -50% 50%;
+  pointer-events: none;
+}
+.critter-pt-dot {
+  width: var(--critter-px);
+  height: var(--critter-px);
+  background: var(--critter-pc, #fff);
+  box-shadow: 0 0 3px var(--critter-pc, #fff);
+}
+.critter-pt-txt {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: calc(var(--critter-px) * 5);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--critter-pc, #fff);
+  text-shadow: 0 0 4px color-mix(in srgb, var(--critter-pc, #fff) 55%, transparent);
+}
+.critter-pt-small {
+  font-size: calc(var(--critter-px) * 4);
+}
+.critter-pt-puff {
+  width: calc(var(--critter-px) * 2);
+  height: calc(var(--critter-px) * 2);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+}
+.critter-pt-steam {
+  background: rgba(225, 232, 245, 0.5);
+  filter: blur(0.5px);
+}
+.critter-pt-drop {
+  width: 3px;
+  height: 4px;
+  border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%;
+  background: #7fd8ff;
+}
+.critter-pt-blub {
+  width: calc(var(--critter-px) * 2);
+  height: calc(var(--critter-px) * 2);
+  border-radius: 50%;
+  border: 1px solid #a8e9ff;
+  background: rgba(168, 233, 255, 0.15);
+}
+
+/* Thought cloud: "…" dots bobbing in a bubble, with two trail puffs. */
+.critter-thought {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 62%;
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  pointer-events: none;
+  animation: critter-pop-plain 200ms cubic-bezier(0.3, 1.6, 0.6, 1) both;
+}
+.critter-thought::before,
+.critter-thought::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.critter-thought::before {
+  width: 5px;
+  height: 5px;
+  left: 2px;
+  bottom: -6px;
+}
+.critter-thought::after {
+  width: 3px;
+  height: 3px;
+  left: -2px;
+  bottom: -10px;
+}
+.critter-thought span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: critter-think-dot 1.1s ease-in-out infinite;
+}
+.critter-thought span:nth-child(2) {
+  animation-delay: 0.18s;
+}
+.critter-thought span:nth-child(3) {
+  animation-delay: 0.36s;
+}
+@keyframes critter-think-dot {
+  0%,
+  60%,
+  100% {
+    transform: none;
+    opacity: 0.45;
+  }
+  30% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+}
+@keyframes critter-pop-plain {
+  from {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+}
+
+/* Dizzy stars circling the head. */
+.critter-dizzy {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - var(--critter-px) * 3);
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.critter-dizzy i {
+  position: absolute;
+  font-style: normal;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: calc(var(--critter-px) * 4.5);
+  line-height: 1;
+  translate: -50% 50%;
+  color: #ffe14d;
+  text-shadow: 0 0 4px rgba(255, 225, 77, 0.6);
+  animation: critter-circle-head 0.9s linear infinite;
+}
+.critter-dizzy i:nth-child(2) {
+  animation-delay: -0.3s;
+}
+.critter-dizzy i:nth-child(3) {
+  animation-delay: -0.6s;
+}
+@keyframes critter-circle-head {
+  0% {
+    transform: translate(calc(var(--critter-px) * -7), 0) scale(0.8);
+    opacity: 0.7;
+  }
+  25% {
+    transform: translate(0, calc(var(--critter-px) * 1.5)) scale(1.1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(calc(var(--critter-px) * 7), 0) scale(0.8);
+    opacity: 0.7;
+  }
+  75% {
+    transform: translate(0, calc(var(--critter-px) * -1.5)) scale(0.6);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate(calc(var(--critter-px) * -7), 0) scale(0.8);
+    opacity: 0.7;
+  }
+}
+
+/* Signal arcs radiating from the head (web tools). */
+.critter-arcs,
+.critter-arcs::before,
+.critter-arcs::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - var(--critter-px) * 2);
+  width: calc(var(--critter-px) * 8);
+  height: calc(var(--critter-px) * 8);
+  margin-left: calc(var(--critter-px) * -4);
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: #8fdcff;
+  pointer-events: none;
+  animation: critter-arc-out 1.2s ease-out infinite;
+}
+.critter-arcs::before,
+.critter-arcs::after {
+  content: "";
+  bottom: auto;
+  top: -2px;
+  margin-left: calc(var(--critter-px) * -4 - 2px);
+}
+.critter-arcs::before {
+  animation-delay: 0.4s;
+}
+.critter-arcs::after {
+  animation-delay: 0.8s;
+}
+@keyframes critter-arc-out {
+  from {
+    transform: scale(0.4);
+    opacity: 1;
+  }
+  to {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+/* Hamster wheel behind the critter (run tools). */
+.critter-wheel {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--critter-px) * -1);
+  width: calc(var(--critter-px) * 20);
+  height: calc(var(--critter-px) * 20);
+  margin-left: calc(var(--critter-px) * -10);
+  border-radius: 50%;
+  border: var(--critter-px) solid #8c93ab;
+  background: repeating-conic-gradient(rgba(140, 147, 171, 0.35) 0 5deg, transparent 5deg 45deg);
+  pointer-events: none;
+  animation: critter-wheel-spin 0.7s linear infinite;
+}
+@keyframes critter-wheel-spin {
+  to {
+    rotate: -360deg;
+  }
+}
+
+/* Robot scan beam: a red fan from the eye down to the floor, sweeping. */
+.critter-scan {
+  position: absolute;
+  left: calc(var(--critter-px) * 10);
+  bottom: 0;
+  width: calc(var(--critter-px) * 9);
+  height: calc(var(--critter-px) * 9);
+  background: linear-gradient(to right, rgba(255, 90, 80, 0.55), rgba(255, 90, 80, 0.1));
+  clip-path: polygon(0 0, 100% 75%, 100% 100%, 0 12%);
+  transform-origin: 0 0;
+  pointer-events: none;
+  animation: critter-scan-sweep 0.7s ease-in-out infinite alternate;
+}
+.critter-scan.left {
+  left: auto;
+  right: calc(var(--critter-px) * 10);
+  transform-origin: 100% 0;
+  scale: -1 1;
+}
+@keyframes critter-scan-sweep {
+  from {
+    transform: rotate(-6deg);
+  }
+  to {
+    transform: rotate(10deg);
+  }
+}
+
+/* Frog tongue: scripts stretch it with scaleX from the mouth. */
+.critter-tongue {
+  position: absolute;
+  left: calc(var(--critter-px) * 12);
+  bottom: calc(var(--critter-px) * 6.5);
+  width: calc(var(--critter-px) * 9);
+  height: var(--critter-px);
+  border-radius: 0 var(--critter-px) var(--critter-px) 0;
+  background: #ff7aa8;
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  pointer-events: none;
+}
+.critter-tongue.left {
+  left: auto;
+  right: calc(var(--critter-px) * 12);
+  transform-origin: 100% 50%;
+  border-radius: var(--critter-px) 0 0 var(--critter-px);
+}
+
+/* Knight sword swoosh. */
+.critter-slash {
+  position: absolute;
+  left: calc(var(--critter-px) * 6);
+  bottom: var(--critter-px);
+  width: calc(var(--critter-px) * 14);
+  height: calc(var(--critter-px) * 14);
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.9);
+  border-right-color: rgba(255, 255, 255, 0.5);
+  opacity: 0;
+  pointer-events: none;
+}
+.critter-slash.left {
+  left: auto;
+  right: calc(var(--critter-px) * 6);
+  scale: -1 1;
 }
 
 /* Hover card with the stats the old in-chat feed showed. */
@@ -6330,6 +7349,19 @@ select {
   .critter.fallen .critter-body {
     transform: none;
     transition: none;
+  }
+  .critter-react {
+    transition: none;
+  }
+  .critter-thought,
+  .critter-thought span,
+  .critter-dizzy i,
+  .critter-arcs,
+  .critter-arcs::before,
+  .critter-arcs::after,
+  .critter-wheel,
+  .critter-scan {
+    animation: none;
   }
 }
 
@@ -7529,7 +8561,7 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 4px 2px 0;
+  /* padding: see "Composer chip bars" below. */
 }
 .mention-chip {
   /* Pinned: inheriting the app's 1.55 body line-height made the label's line
@@ -7567,6 +8599,124 @@ select {
 }
 .mention-chip-remove:hover {
   color: var(--text, #f4f6f8);
+}
+
+/* ── Composer chip bars: enter / exit ──
+   Same motion as the queued strip (.queued-bar): a bar grows open from under
+   the composer and folds shut on the way out; chips pop in and collapse
+   sideways so their neighbours glide over. AttachmentBar / ReferencedFiles keep
+   leaving chips mounted for EXIT_MS (220ms) via usePresenceList, and pinSize
+   writes each element's real size to --pin-w / --pin-h so the max-width /
+   max-height collapse starts from it instead of a guessed cap.
+
+   The bars clip (overflow: hidden) so a growing bar never shows chips spilling
+   over the input row. 3px of padding, cancelled by an equal negative margin,
+   keeps the chips' soft drop shadow and pop-in scale inside the clip. */
+.attach-bar,
+.mention-bar {
+  box-sizing: border-box;
+  overflow: hidden;
+  margin: -3px;
+  animation: ggchipbarin 260ms var(--ease-out);
+}
+.attach-bar {
+  padding: 3px;
+}
+.mention-bar {
+  /* Resting 4px 2px 0, plus the 3px shadow room on every side. */
+  padding: 7px 5px 3px;
+}
+.attach-bar.leaving,
+.mention-bar.leaving {
+  animation: ggchipbarout 220ms var(--ease-in) forwards;
+  pointer-events: none;
+}
+/* Collapsed state: no height, no padding, and a bottom margin that also soaks
+   up the composer's 8px flex gap (-3 top + -5 bottom + 8 gap = 0), so the
+   composer moves smoothly rather than snapping by the gap. --pin-h is measured
+   with the padding already at 0, hence the slack on the enter target. */
+@keyframes ggchipbarin {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-bottom: -5px;
+  }
+  to {
+    max-height: calc(var(--pin-h, 160px) + 12px);
+  }
+}
+@keyframes ggchipbarout {
+  from {
+    max-height: var(--pin-h, 160px);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-bottom: -5px;
+  }
+}
+.attach-chip,
+.mention-chip {
+  animation: ggchipin 200ms var(--ease-out);
+}
+.attach-chip {
+  --chip-gap: 8px; /* .attach-bar gap */
+}
+.mention-chip {
+  --chip-gap: 6px; /* .mention-bar gap */
+}
+.attach-chip.leaving,
+.mention-chip.leaving {
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+  animation: ggchipout 220ms var(--ease-in) forwards;
+}
+@keyframes ggchipin {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+}
+/* Shrink to nothing, including the flex gap after the chip (negative right
+   margin), so the chips after it slide left instead of jumping. */
+@keyframes ggchipout {
+  from {
+    /* No fallback on purpose: until pinSize sets it, this resolves to `none`,
+       so the measurement sees the chip's natural width. */
+    max-width: var(--pin-w);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.88);
+    max-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-left-width: 0;
+    border-right-width: 0;
+    margin-right: calc(-1 * var(--chip-gap));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .attach-bar,
+  .mention-bar,
+  .attach-chip,
+  .mention-chip {
+    animation: none;
+  }
+  /* No exit animation to watch, so don't leave a dead chip up for EXIT_MS. */
+  .attach-bar.leaving,
+  .mention-bar.leaving,
+  .attach-chip.leaving,
+  .mention-chip.leaving {
+    display: none;
+  }
 }
 
 .inputwrap .prompt {

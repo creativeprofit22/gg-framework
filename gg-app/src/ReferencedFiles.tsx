@@ -1,9 +1,17 @@
+import { useLayoutEffect, useRef } from "react";
 import { AtIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
+import { pinSize, usePresenceList } from "./usePresenceList";
+
+/** Exit-animation duration. Must match `.mention-bar.leaving` / `.mention-chip.leaving` in App.css. */
+const EXIT_MS = 220;
+
+const keyOf = (p: string): string => p;
 
 /**
  * Inline-code-styled chips for each `@`-referenced file. The paths are tracked
  * in state (not in the textarea text); removing a chip drops it from that state.
+ * Chips animate in and out the same way as the attachment chips.
  */
 export function ReferencedFiles({
   paths,
@@ -12,13 +20,23 @@ export function ReferencedFiles({
   paths: readonly string[];
   onRemove: (path: string) => void;
 }): React.ReactElement | null {
-  if (paths.length === 0) return null;
+  const shown = usePresenceList(paths, keyOf, EXIT_MS);
+  const empty = shown.length === 0;
+  const barLeaving = !empty && shown.every((s) => s.leaving);
+  const barRef = useRef<HTMLDivElement>(null);
+  // Measure on mount (enter grows to this height) and again when the bar starts
+  // leaving (exit folds from it).
+  useLayoutEffect(() => pinSize(barRef.current), [barLeaving, empty]);
+
+  if (empty) return null;
   return (
-    <div className="mention-bar">
-      {paths.map((p) => (
+    <div ref={barRef} className={`mention-bar${barLeaving ? " leaving" : ""}`}>
+      {shown.map(({ item: p, key, leaving }) => (
         <div
-          key={p}
-          className="mention-chip"
+          key={key}
+          ref={leaving ? pinSize : undefined}
+          className={`mention-chip${leaving ? " leaving" : ""}`}
+          inert={leaving}
           title={p}
           style={{ background: theme.surface1, borderColor: theme.border }}
         >

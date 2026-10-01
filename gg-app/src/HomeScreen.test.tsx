@@ -27,6 +27,7 @@ vi.mock("./agent", () => agentMocks);
 vi.mock("./update", () => ({ useAppUpdate: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeDither", () => ({ HomeDither: () => null }));
+vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
 vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));

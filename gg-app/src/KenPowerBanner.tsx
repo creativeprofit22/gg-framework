@@ -8,7 +8,11 @@
 // tinted in Ken's teal. Pops in with the same scale+fade "flash" the app uses
 // for its zoom-level HUD, holds briefly, then dissolves back out — quick,
 // decorative, non-interactive, no lateral motion. Self-removes via `onDone`
-// once the animation finishes so the caller can just stop rendering it.
+// once the animation finishes so the caller can just stop rendering it. Ken's
+// pixel face leads the block text and acts it out: he wakes up for "on" and
+// nods off for "off".
+import { KenFace } from "./KenFace";
+
 const KEN_IS_ON = [
   "██╗  ██╗███████╗███╗   ██╗     ██████╗ ███╗   ██╗",
   "██║ ██╔╝██╔════╝████╗  ██║    ██╔═══██╗████╗  ██║",
@@ -37,17 +41,24 @@ export function KenPowerBanner({ mode, onDone }: Props): React.ReactElement {
   const lines = mode === "on" ? KEN_IS_ON : KEN_IS_OFF;
   return (
     <div className="ken-power-overlay" aria-hidden="true">
-      {/* Keyed on `mode` so rapid toggles restart the complete animation. */}
+      {/* Keyed on `mode` so rapid toggles restart the complete animation.
+          The face animates inside the banner and animationend bubbles, so
+          only the banner's own flash may end it. */}
       <div
         key={mode}
         className={`ken-power-banner ken-power-banner-${mode}`}
-        onAnimationEnd={onDone}
+        onAnimationEnd={(e) => {
+          if (e.target === e.currentTarget) onDone();
+        }}
       >
-        {lines.map((line, index) => (
-          <div className="ken-power-banner-line" key={index}>
-            {line}
-          </div>
-        ))}
+        <KenFace mood={mode} />
+        <div className="ken-power-banner-text">
+          {lines.map((line, index) => (
+            <div className="ken-power-banner-line" key={index}>
+              {line}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

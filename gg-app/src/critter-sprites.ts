@@ -527,21 +527,27 @@ function frameRows(critter: CritterDef, frame: 0 | 1): readonly string[] {
 }
 
 /**
- * One frame of a critter as an SVG data URL, one unit per cell (scaled up with
- * `image-rendering: pixelated`). Horizontal runs of one colour merge into a
- * single rect so a sprite stays a few hundred bytes. Pass `fill` to paint every
- * opaque cell one colour: the white silhouette used by the summon glow.
- * SVG rather than canvas so it is pure, deterministic and testable.
+ * A pixel grid as an SVG data URL, one unit per cell (scaled up with
+ * `image-rendering: pixelated`). Same legend as the sprites: `.` is
+ * transparent, anything else is a palette key. Horizontal runs of one colour
+ * merge into a single rect so the image stays small. Pass `fill` to paint every
+ * opaque cell one colour. SVG rather than canvas so it is pure, deterministic
+ * and testable.
  */
-export function renderCritterFrame(critter: CritterDef, frame: 0 | 1, fill?: string): string {
+export function renderPixelGrid(
+  rows: readonly string[],
+  palette: Readonly<Record<string, string>>,
+  size: { readonly width: number; readonly height: number },
+  fill?: string,
+): string {
   const rects: string[] = [];
-  frameRows(critter, frame).forEach((row, y) => {
+  rows.forEach((row, y) => {
     let x = 0;
     while (x < row.length) {
       const ch = row[x];
       let end = x + 1;
       while (end < row.length && row[end] === ch) end++;
-      const color = ch === undefined || ch === "." ? undefined : (fill ?? critter.palette[ch]);
+      const color = ch === undefined || ch === "." ? undefined : (fill ?? palette[ch]);
       if (color) {
         rects.push(`<rect x="${x}" y="${y}" width="${end - x}" height="1" fill="${color}"/>`);
       }
@@ -549,9 +555,22 @@ export function renderCritterFrame(critter: CritterDef, frame: 0 | 1, fill?: str
     }
   });
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CRITTER_CELLS} ${CRITTER_CELLS}" ` +
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size.width} ${size.height}" ` +
     `shape-rendering="crispEdges">${rects.join("")}</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+/**
+ * One frame of a critter (see renderPixelGrid). Pass `fill` for the white
+ * silhouette used by the summon glow.
+ */
+export function renderCritterFrame(critter: CritterDef, frame: 0 | 1, fill?: string): string {
+  return renderPixelGrid(
+    frameRows(critter, frame),
+    critter.palette,
+    { width: CRITTER_CELLS, height: CRITTER_CELLS },
+    fill,
+  );
 }
 
 /**

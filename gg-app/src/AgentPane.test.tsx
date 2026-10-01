@@ -3766,8 +3766,11 @@ describe("AgentPane lifecycle", () => {
         vi.mocked(pane.sendPrompt).mock.calls[0],
       );
       await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
-      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+      // Cleared chips play a short exit animation before they unmount.
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+      });
     },
   );
 
@@ -4001,8 +4004,12 @@ describe("AgentPane lifecycle", () => {
       fireEvent.click(await screen.findByText(`/${name}`));
       await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
 
-      expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      // The picker is still open (unresolved); cleared chips only need their
+      // short exit animation to finish before they unmount.
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Remove src/context.ts" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "Remove file.txt" })).toBeNull();
+      });
       expect(document.querySelector(".inputwrap.dragover")).toBeNull();
       expect((input as HTMLTextAreaElement).value).toBe("");
       expect(pane.sendPrompt).not.toHaveBeenCalled();

@@ -22,6 +22,15 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.75.0",
+    date: "2026-10-02",
+    items: [
+      "Ken finally has a face. His replies now open with a little animated pixel portrait of me that blinks and talks while he types. Flip `Autopilot` on and he wakes up with a happy hop, flip it off and he nods off with a sleepy `z`.",
+      "Your home screen is alive. The whole critter crew now beams in along the bottom on a fresh world every visit, from a sunny `meadow` to a beach, a desert, snow or deep `space`. Watch them wander, meet up and play, and give one a click to make it jump.",
+      "`Autopilot` reviews are sharper and never quietly stall. Ken now sees exactly which files changed before he signs off, and he tells you plainly when he couldn't double-check against real-world code. I also fixed a check that could leave finished work stuck on `Unverified` and stop him reviewing altogether.",
+    ],
+  },
+  {
     version: "0.74.0",
     date: "2026-10-01",
     items: [

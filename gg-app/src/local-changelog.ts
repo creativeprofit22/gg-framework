@@ -53,10 +53,20 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-09-28-readable-tables-and-slash-menu",
+    id: "local-2026-10-01-upstream-0740-critters-and-palette",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-09-28-readable-tables-and-slash-menu",
+    label: "Tables that fit your pane, and a clearer slash menu",
+    date: "2026-09-28",
+    items: [
+      "Wide tables in chat now wrap their text to fit the pane instead of pushing out a sideways scrollbar. A table only scrolls sideways when its columns truly cannot get any narrower.",
+      "The `/` menu has a solid background, so command names and their hints stay easy to read over the chat behind it.",
+      "`/steroids` folds its list of suggested repos under a `Show table` button, so the question about how many to index stays in view. Open it to compare the ranked picks, and `Hide table` tucks it away again.",
+    ],
   },
   {
     id: "local-2026-09-28-upstream-0721-motion-and-sonnet-55",

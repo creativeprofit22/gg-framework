@@ -1,7 +1,11 @@
+import { useEffect, useRef, useState } from "react";
 import { theme } from "./theme";
 
 interface Props {
-  /** True while the transcript area is hovered — drives the fade/slide in. */
+  /**
+   * Keep the pill shown regardless of hover — e.g. while a save is in flight, so
+   * it doesn't vanish mid-click when the native dialog steals the pointer.
+   */
   visible: boolean;
   /** True while the save dialog / write is in flight. */
   busy: boolean;
@@ -16,14 +20,34 @@ interface Props {
  * second the user is just reading. It fades + lifts in on hover of the chat
  * area and back out on leave.
  *
+ * The button tracks hover of its parent (the chat area) itself, so the reveal
+ * re-renders only this pill — not the whole pane and its transcript.
+ *
  * Always mounted (never conditionally rendered) so the exit animation can
  * actually play — unmounting on `visible: false` would make it vanish instantly.
  * `pointer-events: none` while hidden keeps it from swallowing clicks meant for
  * the transcript underneath.
  */
-export function ExportChatButton({ visible, busy, onExport }: Props): React.ReactElement {
+export function ExportChatButton({ visible: pinned, busy, onExport }: Props): React.ReactElement {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [hovered, setHovered] = useState(false);
+  useEffect(() => {
+    const area = buttonRef.current?.parentElement;
+    if (!area) return;
+    const enter = (): void => setHovered(true);
+    const leave = (): void => setHovered(false);
+    area.addEventListener("mouseenter", enter);
+    area.addEventListener("mouseleave", leave);
+    return () => {
+      area.removeEventListener("mouseenter", enter);
+      area.removeEventListener("mouseleave", leave);
+    };
+  }, []);
+  const visible = pinned || hovered;
+
   return (
     <button
+      ref={buttonRef}
       className={`export-chat${visible ? " visible" : ""}`}
       onClick={onExport}
       disabled={busy}

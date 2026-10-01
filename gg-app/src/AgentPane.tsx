@@ -1137,11 +1137,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // folder is remembered so the second export lands where the first one did —
   // stored per-machine, not per-project, because that's how people organise
   // exports (one "agent transcripts" folder, many projects).
+  // The export pill tracks hover of the chat area itself (re-rendering only the
+  // pill); `exporting` pins it while a save is in flight.
   const [exporting, setExporting] = useState(false);
-  // The export pill only exists while the pointer is over the chat area. Kept
-  // true while a save is in flight so the button doesn't vanish mid-click when
-  // the native dialog steals the pointer and fires mouseleave.
-  const [chatHovered, setChatHovered] = useState(false);
   const exportTranscript = useCallback(async () => {
     setExporting(true);
     try {
@@ -4988,11 +4986,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
       <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
-        <div
-          className="transcript-frame"
-          onMouseEnter={() => setChatHovered(true)}
-          onMouseLeave={() => setChatHovered(false)}
-        >
+        <div className="transcript-frame">
           {workspaceMode === "code" && kenPowerBanner && (
             <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
           )}
@@ -5059,7 +5053,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </div>
           {items.length > 0 && (
             <ExportChatButton
-              visible={chatHovered || exporting}
+              visible={exporting}
               busy={exporting}
               onExport={() => void exportTranscript()}
             />

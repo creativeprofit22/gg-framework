@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ExportChatButton } from "./ExportChatButton";
 
@@ -20,6 +20,26 @@ describe("ExportChatButton", () => {
     expect(button.getAttribute("aria-hidden")).toBe("false");
     expect(button.tabIndex).toBe(0);
     expect(screen.getByText("Export chat")).toBeTruthy();
+  });
+
+  it("reveals itself while its chat area is hovered, without a parent re-render", () => {
+    render(
+      <div data-testid="chat-area">
+        <p>Transcript</p>
+        <ExportChatButton visible={false} busy={false} onExport={vi.fn()} />
+      </div>,
+    );
+    const area = screen.getByTestId("chat-area");
+    const button = screen.getByRole("button", { hidden: true });
+    expect(button.className).not.toContain("visible");
+
+    fireEvent.mouseEnter(area);
+    expect(button.className).toContain("visible");
+    expect(button.tabIndex).toBe(0);
+
+    fireEvent.mouseLeave(area);
+    expect(button.className).not.toContain("visible");
+    expect(button.tabIndex).toBe(-1);
   });
 
   it("fires the handler on click", () => {

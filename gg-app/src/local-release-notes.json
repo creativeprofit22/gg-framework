@@ -1,34 +1,14 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-01",
-  "label": "Upstream 0.74.0, with helper critters",
+  "label": "Upstream 0.75.0, with Ken's face and a lively Home",
   "sections": [
     {
-      "title": "From upstream 0.74.0",
+      "title": "From upstream 0.75.0",
       "items": [
-        "Helper agents now show up as little pixel critters above the chat. They beam in, wander around, hop with each new task and now and then say what they are doing, then wave goodbye when they finish. Click one to see how it reacts.",
-        "Chat stays where you scroll. While the agent is still typing, scrolling up to reread something no longer pulls you back to the bottom, and scrolling back down turns following back on.",
-        "Signed in with `ChatGPT`? Long replies no longer stop mid-sentence, because the agent picks up where the reply was cut off. `GPT-6.1 Sol` replaces GPT-6 Sol in the model list, and `GPT-6 Astra` stays your default.",
-        "A command like `npm run dev &` no longer leaves the agent waiting for two minutes. Helpers that hit their time limit now bring back what they found, and the agent has to read the rest of a big file before it can rewrite the whole thing.",
-        "Passwords inside database links, like the ones `Redis` uses, are now hidden from the agent. Invisible text tucked into files like `AGENTS.md` is removed before the agent reads them, and tooltips fade out gently instead of blinking away.",
-        "`GG Motion` checks every video for harmful flashing. Your project list leaves out hidden tool folders and projects you never worked in, and on `Windows` the window layout menu no longer opens behind the chat."
-      ]
-    },
-    {
-      "title": "Finding sessions and commands",
-      "items": [
-        "Press `Ctrl+K` (`Cmd+K` on Mac) to open a `Commands` palette with your collection commands, grouped into Everyday, Specialist, Setup and Other. Type to search. If a command file could not be read, the palette tells you why instead of quietly leaving it out.",
-        "The session pickers now show each session's last reply and model, so you can tell sessions apart at a glance. If a session will not open, the picker explains why in plain words, with `Details` for the full message. In narrow windows, the picker's header actions fold into a `More actions` menu.",
-        "A `/command` you send while the agent is busy now reaches it as the command's full instructions, not just its name, and the queue still shows what you typed. If the app cannot take a message right then, it asks you to wait for the current work to finish instead of failing quietly."
-      ]
-    },
-    {
-      "title": "Smoother everyday use",
-      "items": [
-        "Your mentor is called Ken again. Both `@Ken` and `@Supah` still reach him, and his replies show the same name live as they do when you reopen a session.",
-        "Pane controls come first when you move around with Tab and keep a visible focus ring. A single pane no longer has a frame drawn around it.",
-        "Controls under the message box show a hover label, plus a small arrow where they open a picker. Picker buttons are bigger and easier to hit, the search box shows a clear focus ring, and rows no longer stretch across very wide windows.",
-        "The tagline on Home stays readable over the dotted background, and the Home buttons wrap in narrow windows. The radio and window layout buttons have new headphones and grid icons."
+        "Ken has a face. His replies now open with a little animated pixel portrait that blinks and talks while he types. Flip `Autopilot` on and he wakes up with a happy hop beside the big `KEN ON` banner; flip it off and he nods off with a sleepy `z`.",
+        "Your Home screen is alive. The whole critter crew beams in along the bottom on a fresh world each visit, from a sunny meadow to a beach, a desert, snow or deep space. Watch them wander, meet up and play, and click one to make it jump.",
+        "File chips under the message box now slide in when you attach or `@`-mention a file, and fold away smoothly when you remove them or send, instead of popping in and out."
       ]
     }
   ]

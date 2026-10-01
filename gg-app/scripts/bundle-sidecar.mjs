@@ -207,7 +207,7 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@anthropic-ai/sandbox-runtime",
-    version: "0.0.75",
+    version: "0.0.78",
     requiredPaths: [
       "package.json",
       "LICENSE",

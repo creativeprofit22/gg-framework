@@ -346,8 +346,8 @@ importers:
   packages/ggcoder:
     dependencies:
       '@anthropic-ai/sandbox-runtime':
-        specifier: 0.0.75
-        version: 0.0.75
+        specifier: 0.0.78
+        version: 0.0.78
       '@jridgewell/trace-mapping':
         specifier: ^0.3.25
         version: 0.3.31
@@ -486,8 +486,8 @@ packages:
     resolution: {integrity: sha512-3NX/MpTdroi0aKz134A6RC2Gb2iXVECN4QaAXnvCIxxIm3C3AVB1mkUe8NaaiyvOpDfsrqWhYtj+Q6a62RrTsw==}
     engines: {node: '>=18'}
 
-  '@anthropic-ai/sandbox-runtime@0.0.75':
-    resolution: {integrity: sha512-oqAKi6QtkT2DpLwFoDCDD757zw2i6ftpLTyV8rNSV9QWF53q2m1JxEs0RYXv2CIXtCoje4RGYQylagn15RKmww==}
+  '@anthropic-ai/sandbox-runtime@0.0.78':
+    resolution: {integrity: sha512-YAIcybXTp7MZkBjasnkR1E3yxnf7u6kUkyW0vZrtsAZ9tyJGMaugWETmquPZs0YvW0sR0VnZeMfS0gsN/wQiVQ==}
     engines: {node: '>=20.11.0'}
     hasBin: true
 
@@ -6099,7 +6099,7 @@ snapshots:
       ansi-styles: 6.2.3
       is-fullwidth-code-point: 5.1.0
 
-  '@anthropic-ai/sandbox-runtime@0.0.75':
+  '@anthropic-ai/sandbox-runtime@0.0.78':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0

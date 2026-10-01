@@ -2,16 +2,39 @@ import path from "node:path";
 import { AgentSession, type AgentSessionOptions } from "../core/agent-session.js";
 import { findMotionBundle, loadMotionSkills, type MotionBundle } from "../core/skills.js";
 import { MOTION_SYSTEM_PROMPT } from "./motion-prompt.js";
+import { createMotionCheckTool } from "./motion-check-tool.js";
+import { motionStudioPrompt, readMotionStudioContext } from "./motion-studio-context.js";
 
 /**
  * Motion's skill-catalog budget: double the default. The 16 KB default guards
  * against bloated untrusted skills; Motion only ever loads its own bundled
- * set, which already fills ~15 KB, so it gets room to grow.
+ * set. Retain headroom for future skills without loading their bodies.
  */
 export const MOTION_SKILL_CATALOG_BYTES = 32 * 1024;
 
 /** Reserved `chatAgent` query value the app uses to list Motion sessions. */
 export const MOTION_SESSIONS_QUERY = "motion";
+
+/** Direct video work and sourcing only; no delegation, developer catalogs or MCP. */
+export const MOTION_TOOL_NAMES = [
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "find",
+  "grep",
+  "ls",
+  "skill",
+  "ask_user",
+  "task_output",
+  "task_send",
+  "task_stop",
+  "web_search",
+  "web_fetch",
+  "screenshot",
+  "generate_image",
+  "motion_check",
+] as const;
 
 /** Motion's private session store, beside coder's `sessions/` and chat's `chat-sessions/`. */
 export function motionSessionsDir(coderSessionsDir: string): string {
@@ -34,6 +57,9 @@ export type MotionAgentOptions = Omit<
   | "globalSubagents"
   | "loadExtensions"
   | "orchestrationPrompt"
+  | "completionReview"
+  | "allowedTools"
+  | "allowedMcpServers"
 > & {
   /** Coder's sessions dir; Motion's store is derived beside it. */
   sessionsDir: string;
@@ -66,18 +92,18 @@ export function buildMotionAgentPrompt(bundle: MotionBundle, nodePath = process.
     .replaceAll("{{HF_VERSION}}", bundle.version);
 }
 
-/** The shared licensed music library (shipped inside brag, used by every video type). */
+/** Shared licensed music, independent of the creative skill catalog. */
 export function motionMusicDir(bundle: MotionBundle): string {
-  return path.join(bundle.skillsDir, "brag", "assets", "music");
+  return path.join(bundle.root, "assets", "music");
 }
 
-/** The shared CC0 sound-effects library (shipped inside brag, used by every video type). */
+/** Shared CC0 sound effects, independent of the creative skill catalog. */
 export function motionSfxDir(bundle: MotionBundle): string {
-  return path.join(bundle.skillsDir, "brag", "assets", "sfx");
+  return path.join(bundle.root, "assets", "sfx");
 }
 
 /**
- * Create a Motion session: the full GG toolset, Motion's own prompt, and only
+ * Create a Motion session: focused tools, Motion's own prompt, and only
  * the bundled Motion skills. Project/global skills, extensions and coder
  * slash commands stay out so the mode is predictable for every user.
  */
@@ -95,10 +121,19 @@ export async function createMotionAgentSession(options: MotionAgentOptions): Pro
       ? requestedSession
       : undefined;
 
+  const studio = await readMotionStudioContext(options.cwd, options.signal);
+  const studioPrompt = motionStudioPrompt(studio);
   return new AgentSession({
     ...sessionOptions,
+    completionReview: undefined,
+    additionalTools: [
+      ...(sessionOptions.additionalTools ?? []),
+      createMotionCheckTool(options.cwd, bundle),
+    ],
+    allowedTools: [...MOTION_TOOL_NAMES],
+    allowedMcpServers: [],
     sessionId: resumableSession,
-    agentPrompt: buildMotionAgentPrompt(bundle),
+    agentPrompt: buildMotionAgentPrompt(bundle) + studioPrompt,
     agentRole: "primary",
     // Motion folders hold videos, not codebases; coder conventions do not apply.
     agentContext: "none",
@@ -109,7 +144,7 @@ export async function createMotionAgentSession(options: MotionAgentOptions): Pro
     coderSlashCommands: false,
     selfCorrectionHooks: false,
     projectCustomization: false,
-    globalSubagents: true,
+    globalSubagents: false,
     loadExtensions: false,
     orchestrationPrompt: false,
   });

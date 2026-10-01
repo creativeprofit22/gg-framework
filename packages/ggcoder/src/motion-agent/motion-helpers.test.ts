@@ -18,9 +18,12 @@ async function binPath(script: string): Promise<string> {
 async function runHelper(
   script: string,
   args: string[],
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   try {
-    const { stdout, stderr } = await run(process.execPath, [await binPath(script), ...args]);
+    const { stdout, stderr } = await run(process.execPath, [await binPath(script), ...args], {
+      env,
+    });
     return { code: 0, stdout, stderr };
   } catch (error) {
     const e = error as { code?: number; stdout?: string; stderr?: string };
@@ -95,6 +98,206 @@ describe("score-synth", () => {
 
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain(message);
+  });
+});
+
+describe("motion-check rendered-pixel gate", () => {
+  const progress = "frame=80\nout_time_us=10000000\nprogress=end\n";
+
+  async function analyze(
+    text: string,
+    slideshowRequested = false,
+    holds: unknown = [],
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const script = `
+      import { pathToFileURL } from 'node:url';
+      const { parseMotionOutput } = await import(pathToFileURL(process.argv[1]).href);
+      const { text, slideshowRequested, holds } = JSON.parse(process.argv[2]);
+      const result = parseMotionOutput(text, slideshowRequested, holds);
+      console.log(JSON.stringify(result));
+      process.exitCode = result.ok ? 0 : 1;
+    `;
+    try {
+      const { stdout, stderr } = await run(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          script,
+          await binPath("motion-check.mjs"),
+          JSON.stringify({ text, slideshowRequested, holds }),
+        ],
+        { timeout: 10_000 },
+      );
+      return { code: 0, stdout, stderr };
+    } catch (error) {
+      const e = error as { code?: number; stdout?: string; stderr?: string };
+      return { code: e.code ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+    }
+  }
+
+  it("accepts a complete moving-pixel decode without a DOM motion spec", async () => {
+    const result = await analyze(progress);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      method: "rendered-pixels",
+      samples: 80,
+      duration: 10,
+      visualReviewRequired: true,
+    });
+  });
+
+  it("rejects a frozen opening even when the rest moves", async () => {
+    const result = await analyze(
+      "lavfi.freezedetect.freeze_start=0\nlavfi.freezedetect.freeze_duration=3\nlavfi.freezedetect.freeze_end=3\n" +
+        progress,
+    );
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      freezes: [{ start: 0, end: 3, duration: 3 }],
+    });
+  });
+
+  it("rejects a frozen ending with no freeze_end event", async () => {
+    const result = await analyze("lavfi.freezedetect.freeze_start=7\n" + progress);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      freezes: [{ start: 7, end: 10, duration: 3 }],
+    });
+  });
+
+  it.each([
+    "",
+    "frame=0\nout_time_us=0\nprogress=end\n",
+    "frame=80\nout_time_us=10000000\nprogress=continue\n",
+    "frame=NaN\nout_time_us=10000000\nprogress=end\n",
+    "lavfi.freezedetect.freeze_start=oops\n" + progress,
+    "lavfi.freezedetect.freeze_start=20\n" + progress,
+    "lavfi.freezedetect.freeze_duration=3\n" + progress,
+    "lavfi.freezedetect.freeze_end=3\n" + progress,
+    "frame=80\nout_time_us=1000000000\nprogress=end\n",
+    JSON.stringify({ ok: true, motion: { enabled: false, samples: 0 } }),
+  ])("rejects missing, truncated or malformed evidence (%#)", async (text) => {
+    const result = await analyze(text);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toHaveProperty("error");
+  });
+
+  it("allows an explicitly requested slideshow but never skipped analysis", async () => {
+    const allowed = await analyze("lavfi.freezedetect.freeze_start=0\n" + progress, true);
+    expect(allowed.code).toBe(0);
+    expect(JSON.parse(allowed.stdout)).toMatchObject({
+      slideshowRequested: true,
+      freezes: [{ start: 0, end: 10, duration: 10 }],
+    });
+    const skipped = await analyze("", true);
+    expect(skipped.code).toBe(1);
+  });
+
+  it("accepts a declared reading pause and reports it without hiding pixel evidence", async () => {
+    const hold = { start: 7, end: 10, reason: "Read the final phrase" };
+    const result = await analyze("lavfi.freezedetect.freeze_start=7\n" + progress, false, [hold]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      holds: [hold],
+      freezes: [{ start: 7, end: 10, duration: 3 }],
+      unexpectedFreezes: [],
+      visualReviewRequired: true,
+    });
+  });
+
+  it("still rejects a freeze outside a declared hold", async () => {
+    const result = await analyze("lavfi.freezedetect.freeze_start=5\n" + progress, false, [
+      { start: 7, end: 10, reason: "Read the final phrase" },
+    ]);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      unexpectedFreezes: [{ start: 5, end: 10, duration: 5 }],
+    });
+  });
+
+  it.each([
+    null,
+    [{ start: 7, end: 10, reason: "" }],
+    [{ start: 7, end: 10, reason: "  " }],
+    [{ start: "7", end: 10, reason: "Read" }],
+    [{ start: 7, end: 11, reason: "Read" }],
+    [{ start: -1, end: 10, reason: "Read" }],
+    [{ start: 0, end: 10, reason: "Everything is a hold" }],
+    [{ start: 10, end: 7, reason: "Read" }],
+    [{ start: 7, end: 10, reason: "Read", ignoreAll: true }],
+    [
+      { start: 6, end: 9, reason: "Read" },
+      { start: 7, end: 10, reason: "Read" },
+    ],
+  ])("rejects malformed, unbounded or overlapping hold declarations (%#)", async (holds) => {
+    const result = await analyze("lavfi.freezedetect.freeze_start=7\n" + progress, false, holds);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toHaveProperty("error");
+  });
+
+  it("names a stale hold and where pixels actually freeze so the plan is fixed once", async () => {
+    const stale = { start: 1, end: 2.5, reason: "Read the premise" };
+    const kept = { start: 6, end: 10, reason: "Final payoff" };
+    const result = await analyze("lavfi.freezedetect.freeze_start=5.5\n" + progress, false, [
+      stale,
+      kept,
+    ]);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: false,
+      error: "Stale hold declaration: no detected freeze overlaps its window",
+      staleHolds: [stale],
+      freezes: [{ start: 5.5, end: 10, duration: 4.5 }],
+    });
+  });
+
+  it("rejects stale hold declarations and incomplete analysis even with holds", async () => {
+    const holds = [{ start: 7, end: 10, reason: "Read the final phrase" }];
+    for (const text of [progress, "frame=80\nout_time_us=10000000\nprogress=continue\n"]) {
+      const result = await analyze(text, false, holds);
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stdout)).toHaveProperty("error");
+    }
+  });
+
+  it.each([
+    ["{", "JSON"],
+    [" ".repeat(64 * 1024 + 1), "exceeds 64 KiB"],
+    [JSON.stringify({ version: 2, holds: [] }), "Expected hold plan version 1"],
+    [
+      JSON.stringify({
+        version: 1,
+        videoSha256: "0".repeat(64),
+        holds: [{ start: 7, end: 10, reason: "Read" }],
+      }),
+      "different render",
+    ],
+  ])("rejects invalid or wrong-render hold files before decoding (%#)", async (content, error) => {
+    const video = path.join(tmp, "render.mp4");
+    const holds = path.join(tmp, "holds.json");
+    await fs.writeFile(video, "not decoded in this boundary test");
+    await fs.writeFile(holds, content);
+    // If validation accidentally reaches FFmpeg, Node cannot decode this input.
+    // The assertion requires the specific pre-decode validation error instead.
+    const result = await runHelper("motion-check.mjs", [video, "--holds", holds], {
+      ...process.env,
+      HYPERFRAMES_FFMPEG_PATH: process.execPath,
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(error);
+  });
+
+  it("rejects missing files and the obsolete report/spec interface", async () => {
+    const missing = await runHelper("motion-check.mjs", [path.join(tmp, "missing.mp4")]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("Motion verification failed");
+    const obsolete = await runHelper("motion-check.mjs", ["check.json", "index.motion.json"]);
+    expect(obsolete.code).toBe(1);
+    expect(obsolete.stderr).toContain("usage: motion-check.mjs");
   });
 });
 
@@ -191,8 +394,9 @@ describe("fonts", () => {
     ok: boolean;
     error?: string;
     specimen?: string;
-    families?: Array<{ family: string }>;
+    families?: Array<{ family: string; use?: string }>;
     installed?: string[];
+    head?: string;
   };
   const parse = (stdout: string): FontsResult => JSON.parse(stdout) as FontsResult;
 
@@ -219,6 +423,10 @@ describe("fonts", () => {
     }
     const list = parse((await runHelper("fonts.mjs", ["list"])).stdout);
     expect(list.families?.map((f) => f.family)).toEqual(manifest.map((f) => f.family));
+    // Title, body and handwritten faces the product asked for, each with a usage hint.
+    for (const family of ["Unbounded", "Sora", "Short Stack", "Finger Paint"]) {
+      expect(list.families?.find((f) => f.family === family)?.use).toBeTruthy();
+    }
     await expect(fs.access(list.specimen ?? "")).resolves.toBeUndefined();
   });
 
@@ -228,6 +436,13 @@ describe("fonts", () => {
 
     expect(first.code).toBe(0);
     expect(parse(second.stdout).installed).toEqual(["Mona Sans", "Fraunces", "Martian Mono"]);
+    // The page-ready block uses paths from the project folder and covers every installed family.
+    const head = parse(second.stdout).head ?? "";
+    expect(head).toMatch(/^<style>\n[\s\S]*\n<\/style>$/);
+    expect(head).toContain('url("assets/fonts/fraunces/fraunces-italic.woff2")');
+    for (const family of ["Mona Sans", "Fraunces", "Martian Mono"]) {
+      expect(head).toContain(`font-family: "${family}";`);
+    }
     const css = await fs.readFile(path.join(tmp, "assets", "fonts", "fonts.css"), "utf8");
     expect(css).toContain('font-family: "Mona Sans";');
     expect(css).toContain("font-stretch: 75% 125%;");

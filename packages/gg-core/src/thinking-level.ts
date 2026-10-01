@@ -6,8 +6,9 @@ import {
 import { getDefaultThinkingLevel, getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
-// GPT-5.6 and GPT-6 share the six-rung Codex ladder (low → ultra); older GPT
-// models only expose medium/high/xhigh.
+// GPT-5.6 and GPT-6.x (gpt-6-*, plus point releases like gpt-6.1-sol) share the
+// six-rung Codex ladder (low → ultra); older GPT models only expose
+// medium/high/xhigh.
 const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -74,8 +75,11 @@ function isOpenAIGptModel(provider: Provider, model: string): boolean {
   const identity = resolvedModelIdentity(model);
   return (
     (provider === "openai" && identity.startsWith("gpt-")) ||
-    // Azure deployments mapped to a GPT-5.6 or GPT-6 identity share its effort ladder.
-    (provider === "azure" && (identity.startsWith("gpt-5.6-") || identity.startsWith("gpt-6-")))
+    // Azure deployments mapped to a GPT-5.6 or GPT-6.x identity share its effort ladder.
+    (provider === "azure" &&
+      (identity.startsWith("gpt-5.6-") ||
+        identity.startsWith("gpt-6-") ||
+        identity.startsWith("gpt-6.")))
   );
 }
 
@@ -97,9 +101,9 @@ function isGlmModel(provider: Provider): boolean {
 }
 
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
-  // Explicit `sonnet-5-5`: a bare `sonnet-5` would also match Sonnet 5.5 and
-  // widen the set to the unregistered Sonnet 5.
-  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7|sonnet-5-5/.test(model);
+  // Explicit `sonnet-5[-.]5` (dashed or dotted id): a bare `sonnet-5` would also
+  // match Sonnet 5.5 and widen the set to the unregistered Sonnet 5.
+  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5/.test(model);
 }
 
 function isAnthropicAdaptiveModel(provider: Provider, model: string): boolean {
@@ -167,7 +171,9 @@ export function getSupportedThinkingLevels(
 
   const identity = resolvedModelIdentity(model);
   const levels =
-    identity.startsWith("gpt-5.6-") || identity.startsWith("gpt-6-")
+    identity.startsWith("gpt-5.6-") ||
+    identity.startsWith("gpt-6-") ||
+    identity.startsWith("gpt-6.")
       ? OPENAI_GPT_56_THINKING_LEVELS
       : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);

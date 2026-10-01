@@ -339,12 +339,13 @@ export class SubAgentManager {
 
   /** Explicit per-spawn overrides. Used by harness-owned children (the
    * independent Ideal reviewer): a read-only tool list and/or a forced model —
-   * bypassing agent-definition routing entirely. */
+   * bypassing agent-definition routing entirely — and a shorter turn time
+   * limit, after which the child answers from what it has gathered. */
   async spawn(
     taskName: string,
     task: string,
     agentName?: string,
-    overrides?: { model?: string; tools?: readonly string[] },
+    overrides?: { model?: string; tools?: readonly string[]; turnTimeoutMs?: number },
   ): Promise<SubAgentSnapshot> {
     this.assertAvailable();
     if (!taskName.trim()) throw new Error("task_name is required");
@@ -427,6 +428,7 @@ export class SubAgentManager {
             selection.agentDef?.name ?? "default",
           ),
           sessionRootDir: this.sessionRootDir,
+          turnTimeoutMs: overrides?.turnTimeoutMs,
         },
       });
       record.child_session_id =

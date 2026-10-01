@@ -205,5 +205,61 @@
         "stretch": "75% 112.5%"
       }
     ]
+  },
+  {
+    "family": "Unbounded",
+    "dir": "unbounded",
+    "license": "OFL-1.1",
+    "use": "Wide, rounded display face for big titles.",
+    "files": [
+      {
+        "file": "unbounded-normal.woff2",
+        "style": "normal",
+        "weight": "200 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Sora",
+    "dir": "sora",
+    "license": "OFL-1.1",
+    "use": "Clean geometric sans for body text and captions.",
+    "files": [
+      {
+        "file": "sora-normal.woff2",
+        "style": "normal",
+        "weight": "100 800",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Short Stack",
+    "dir": "short-stack",
+    "license": "OFL-1.1",
+    "use": "Casual handwritten feel.",
+    "files": [
+      {
+        "file": "short-stack-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Finger Paint",
+    "dir": "finger-paint",
+    "license": "OFL-1.1",
+    "use": "Playful painted, childlike handwritten feel.",
+    "files": [
+      {
+        "file": "finger-paint-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
   }
 ]

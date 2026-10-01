@@ -36,10 +36,12 @@ describe("AUTH_PROVIDERS descriptions match the model registry", () => {
     const retired = [
       "Fable 5,",
       "Opus 5,",
+      "Sonnet 5,",
       "Opus 4.8",
       "Opus 4.7",
       "Opus 4.6",
       "GPT-5.4",
+      "GPT-6 Sol",
       "Grok 4.4",
     ];
     for (const { value, description } of AUTH_PROVIDERS) {

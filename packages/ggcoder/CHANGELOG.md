@@ -1,5 +1,59 @@
 # @kenkaiiii/ggcoder
 
+## 5.66.4
+
+### Patch Changes
+
+- Project discovery no longer lists folders the user never worked in. A hidden folder, or a folder inside one, is never inferred as a projects root, so tool folders like `<repo>/.gg` stop filling the picker with their `uploads`, `plans`, `skills` and PR worktrees; roots configured in settings are still always scanned. A GG Coder session store only counts once one of its sessions records a message (the rule `listRecentSessions` already used), so sessions that were started but never used no longer add projects or refresh a project's last-active time. The sub-agent worker now finishes writing its durable turn record before announcing the turn as done, so an adopting parent never sees a finished turn with no record behind it.
+  - @kenkaiiii/gg-ai@5.66.4
+  - @kenkaiiii/gg-agent@5.66.4
+  - @kenkaiiii/gg-core@5.66.4
+
+## 5.66.3
+
+### Patch Changes
+
+- 946c459: Close six gaps found in the ecosystem scan. Secret redaction now hides the whole password in URLs with no username (`redis://:pw@host`) or an `@` inside the password, both of which previously leaked. ChatGPT-login replies cut off at the output limit now report `max_tokens` (so the agent continues them) instead of passing as finished, a stream that ends early is retried instead of running a tool call with cut-off arguments, and reasoning that only led into a dropped call is no longer replayed. `write` now refuses to overwrite a file the model has only partly read (offset/limit or the 2000-line cap) and names the unread lines, and clearing, rewinding, branching or resuming a conversation makes the model re-read files before changing them. `bash` no longer runs a command whose Stop arrived during sandbox setup, and no longer hangs until the timeout when a command leaves a process running with `&`. Invisible characters are stripped from AGENTS.md/CLAUDE.md, skills, agent files and custom commands before they reach the model. The OS sandbox library is updated to 0.0.78, which fixes a Linux race that could leave a protected file unprotected.
+- Updated dependencies [946c459]
+  - @kenkaiiii/gg-ai@5.66.3
+  - @kenkaiiii/gg-agent@5.66.3
+  - @kenkaiiii/gg-core@5.66.3
+
+## 5.66.2
+
+### Patch Changes
+
+- Sub-agents that reach their time limit now answer from what they gathered instead of coming back empty. The independent Ideal reviewer gets its own 2-minute turn limit followed by the tool-free recovery turn, rather than being killed by the parent's wait with no verdict, and the recovery turn is capped at the plan-mode effort ceiling, since at full effort it could spend its 60 seconds thinking and return nothing. `motion_check` adds a `spot: true` mode that runs the layout audit on only the rendered frames inside the given windows (at most 240) and never counts as delivery verification, reuses a passing source audit while the project source is unchanged, lists every distinct error that fits the report instead of only the first 15, and names stale holds alongside the freezes it detected so a hold plan is fixed in one step.
+  - @kenkaiiii/gg-ai@5.66.2
+  - @kenkaiiii/gg-agent@5.66.2
+  - @kenkaiiii/gg-core@5.66.2
+
+## 5.66.1
+
+### Patch Changes
+
+- Updated dependencies [7dd643f]
+  - @kenkaiiii/gg-ai@5.66.1
+  - @kenkaiiii/gg-agent@5.66.1
+  - @kenkaiiii/gg-core@5.66.1
+
+## 5.66.0
+
+### Minor Changes
+
+- Add GG Motion, the desktop app's video workspace: it plans, designs and renders MP4 videos from a prompt, using bundled fonts, music, sound effects, a style library and 3D, and designs every video from a shared motion-language guide rather than fixed templates. Motion is still a work in progress; `max` thinking gives the best results. Replace Claude Sonnet 5 with Claude Sonnet 5.5 (same 1M context and 128K output, now with `xhigh`) as the Anthropic default and compaction model. Sub-agent turns that stop on a loop error now fail instead of passing the child's mid-task narration off as its answer, and the `read` tool's error explains that `offset` takes one line number, not a range.
+- 331e868: Replace GPT-6 Sol with GPT-6.1 Sol (`gpt-6.1-sol`, released 2026-09-29). It keeps Sol's shape — 1.05M context on the public Responses API, 272K on the ChatGPT OAuth/Codex route, 128K output, text+image input, $2/$10 per MTok (cached input $0.10) — but now starts at `low` effort, matching OpenAI's Codex catalog. It runs the full ladder up to `ultra`, where it gets the proactive async-subagent orchestration prompt.
+
+  GPT-6.1 Sol is the new OpenAI default (registry, CLI, benchmarks), and GPT-6 Luna stays the fast subagent model. The login hub, footer names, README, and the "not in catalog" error hint now say GPT-6.1 Sol. `gpt-6-sol` is retired: a saved session still on it falls back to the provider default on next start. GPT-6 ids with a point release (`gpt-6.1-*`) now get the Codex responses-lite transport and the six-rung effort ladder; a bare `gpt-6-` prefix check would have missed them.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [331e868]
+  - @kenkaiiii/gg-ai@5.66.0
+  - @kenkaiiii/gg-core@5.66.0
+  - @kenkaiiii/gg-agent@5.66.0
+
 ## 5.65.1
 
 ### Patch Changes

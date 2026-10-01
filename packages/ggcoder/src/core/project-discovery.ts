@@ -203,7 +203,7 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
   // had dozens of session stores.
   const results = await mapConcurrent(entries, async (entry): Promise<DiscoveredProject | null> => {
     const dir = path.join(sessionsDir, entry);
-    const mtime = await maxGgcoderSessionMtime(dir);
+    const mtime = await lastUsedGgcoderSessionMtime(dir);
     if (mtime === null) return null;
 
     const rawCwd =
@@ -390,9 +390,10 @@ const FOLDER_SCAN_IGNORED = new Set([
  * Which directories should be scanned for project folders: the configured root,
  * plus any parent that already holds several known projects.
  *
- * Scanning the home directory or a filesystem/temp root would list mail, music
- * and scratch dirs as "projects", so those are never roots no matter how many
- * sessions point inside them.
+ * Scanning the home directory, a filesystem/temp root or a hidden tool folder
+ * would list mail, music, scratch dirs and tool state as "projects", so those
+ * are never inferred as roots no matter how many sessions point inside them.
+ * Roots the user configured are always scanned.
  */
 function resolveProjectRoots(
   projectsRoot: string | undefined,
@@ -424,6 +425,10 @@ function resolveProjectRoots(
 }
 
 function isUnscannableRoot(dir: string): boolean {
+  // Hidden folders hold tool state, not projects: GG Coder's own `.gg` keeps
+  // uploads, plans and throwaway PR worktrees. Sessions in a few of those
+  // worktrees must not list every folder beside them as a project.
+  if (isInsideHiddenFolder(dir)) return true;
   const resolved = resolveExistingPath(dir);
   if (resolved === resolveExistingPath(path.parse(resolved).root)) return true;
   if (resolved === resolveExistingPath(os.homedir())) return true;
@@ -434,6 +439,19 @@ function isUnscannableRoot(dir: string): boolean {
   // Only the temp dir itself is barred — a real projects folder below it is
   // still scannable.
   return resolved === resolveExistingPath(os.tmpdir());
+}
+
+/**
+ * Is `dir` a dot-folder or inside one (`.gg`, `.cache/checkouts`)? Checks the
+ * path as discovered rather than symlink-resolved, so it matches what the
+ * picker shows. Splits on both separators because Claude Code and Codex cwds
+ * are raw transcript strings.
+ */
+function isInsideHiddenFolder(dir: string): boolean {
+  return path
+    .resolve(dir)
+    .split(/[\\/]/)
+    .some((segment) => segment.startsWith("."));
 }
 
 function resolveExistingPath(dir: string): string {
@@ -506,11 +524,22 @@ async function maxJsonlMtime(dir: string): Promise<number | null> {
   return max > 0 ? max : null;
 }
 
-async function maxGgcoderSessionMtime(dir: string): Promise<number | null> {
+/**
+ * Last activity in a ggcoder session store, counting only sessions that
+ * recorded a message. A session writes its header as soon as it starts, so a
+ * header-only file means the project was opened, not worked in; the same rule
+ * `listRecentSessions` applies. Compaction checkpoints re-save their messages,
+ * so compacted conversations still count.
+ */
+async function lastUsedGgcoderSessionMtime(dir: string): Promise<number | null> {
   if (!(await isDirectory(dir))) return null;
   const files = await collectGgcoderSessionFiles(dir, 2);
-  if (files.length === 0) return null;
-  return Math.max(...files.map((file) => file.mtime));
+  // Newest first: the first used file is also the latest real activity.
+  files.sort((a, b) => b.mtime - a.mtime);
+  for (const file of files) {
+    if (await readFirstFromGgcoderFile(file.path, ggcoderMessageExtractor)) return file.mtime;
+  }
+  return null;
 }
 
 /**
@@ -618,6 +647,17 @@ const ggcoderCwdExtractor: LineExtractor = (line) => {
   return null;
 };
 
+// Hits on the first message entry; a session counts as used once it has one.
+const ggcoderMessageExtractor: LineExtractor = (line) => {
+  try {
+    const parsed = JSON.parse(line) as { type?: unknown };
+    if (parsed.type === "message") return "message";
+  } catch {
+    // skip malformed
+  }
+  return null;
+};
+
 const CODEX_CWD_RE = /<cwd>([^<]+)<\/cwd>/;
 const codexCwdExtractor: LineExtractor = (line) => {
   // Current format (openai/codex protocol.rs, late-2025+): RolloutLine wraps
@@ -662,24 +702,37 @@ async function readFirstFromGgcoderDir(
   const files = await collectGgcoderSessionFiles(dir, 2);
   files.sort((a, b) => b.mtime - a.mtime);
   for (const file of files) {
+    const value = await readFirstFromGgcoderFile(file.path, extractor);
+    if (value) return value;
+  }
+  return null;
+}
+
+/**
+ * Stream one ggcoder session file, plain or archived, and return the first
+ * non-null extractor result. Line-capped like {@link readFirstFromFile}.
+ */
+async function readFirstFromGgcoderFile(
+  file: string,
+  extractor: LineExtractor,
+): Promise<string | null> {
+  try {
+    const { stream, close } = await openSessionReadStream(file);
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     try {
-      const { stream, close } = await openSessionReadStream(file.path);
-      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-      try {
-        let lines = 0;
-        for await (const line of rl) {
-          if (++lines > 200) break;
-          const value = extractor(line);
-          if (value) return value;
-        }
-      } finally {
-        // Always via close(): destroying the gunzip alone strands the source fd.
-        rl.close();
-        close();
+      let lines = 0;
+      for await (const line of rl) {
+        if (++lines > 200) break;
+        const value = extractor(line);
+        if (value) return value;
       }
-    } catch {
-      // A corrupt archive must not hide otherwise valid projects in this store.
+    } finally {
+      // Always via close(): destroying the gunzip alone strands the source fd.
+      rl.close();
+      close();
     }
+  } catch {
+    // A corrupt archive must not hide otherwise valid projects in this store.
   }
   return null;
 }

@@ -5,16 +5,21 @@ import { isUnattendedWorker } from "../core/provider-execution-policy.js";
 import { isModelUnavailableError } from "../tools/subagent.js";
 import {
   boundSubAgentOutput,
+  promptSubAgent,
   SUB_AGENT_MAX_TURN_EXTENSIONS,
   SUB_AGENT_TIMEOUT_MS,
+  SUB_AGENT_TIMEOUT_RECOVERY_MS,
 } from "../tools/subagent-shared.js";
 import { writeTurnRecord } from "../core/subagent-turn-record.js";
 
-const TIMEOUT_RECOVERY_GRACE_MS = 60_000;
 const TIMEOUT_RECOVERY_PROMPT = `Your execution time limit was reached and the active operation was stopped.
-You have one final 60-second recovery turn. Do not call any tools. Immediately return the best concise answer you can from the evidence already in this conversation. Clearly state what remains incomplete or unverified.`;
+You have one final 60-second recovery turn. Do not call any tools. Immediately return the best concise answer you can from the evidence already in this conversation, in the format your task asked for. Clearly state what remains incomplete or unverified.`;
 
-/** One bounded, tool-free chance to turn the durable transcript into a useful result. */
+/**
+ * One bounded, tool-free chance to turn the durable transcript into a useful
+ * result. Effort is capped: at max effort a model can still be thinking when
+ * the 60 seconds run out, and the whole run then comes back with nothing.
+ */
 export async function recoverTimedOutTurn(
   activeSession: Pick<AgentSession, "prompt" | "setSignal">,
   currentOutput: () => string,
@@ -24,12 +29,12 @@ export async function recoverTimedOutTurn(
   const recoveryController = new AbortController();
   setController(recoveryController);
   activeSession.setSignal(recoveryController.signal);
-  const recoveryTimer = setTimeout(() => recoveryController.abort(), TIMEOUT_RECOVERY_GRACE_MS);
+  const recoveryTimer = setTimeout(() => recoveryController.abort(), SUB_AGENT_TIMEOUT_RECOVERY_MS);
   try {
     await activeSession.prompt(
       TIMEOUT_RECOVERY_PROMPT,
       { source: "runtime", kind: "completion_gate", visibility: "hidden" },
-      { disableTools: true },
+      { disableTools: true, capThinking: true },
     );
     return (
       !recoveryController.signal.aborted &&
@@ -40,6 +45,56 @@ export async function recoverTimedOutTurn(
   } finally {
     clearTimeout(recoveryTimer);
   }
+}
+
+export type AbortReason = "timeout" | "interrupt" | "shutdown" | "stdin_closed";
+
+/**
+ * A turn's time limit. The spawner may shorten the default (the independent
+ * reviewer does) but never extend it; anything unusable falls back to it.
+ */
+export function resolveTurnTimeLimit(requested: unknown): number {
+  return typeof requested === "number" && Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, SUB_AGENT_TIMEOUT_MS)
+    : SUB_AGENT_TIMEOUT_MS;
+}
+
+function timeoutError(timeLimitMs: number): string {
+  const unit =
+    timeLimitMs % 60_000 === 0 ? { ms: 60_000, name: "minute" } : { ms: 1000, name: "second" };
+  const count = Math.max(1, Math.round(timeLimitMs / unit.ms));
+  return `Timed out after ${count} ${unit.name}${count === 1 ? "" : "s"}; recovery summary failed`;
+}
+
+export interface TurnOutcome {
+  status: "completed" | "interrupted" | "failed";
+  error?: string;
+  recovered_after_timeout?: true;
+}
+
+/**
+ * Settle a turn whose prompt resolved instead of throwing. A timeout or an
+ * interrupt explains the stop better than whatever the loop reported on its
+ * way out, so they win; after that, `loopError` (the error the loop stopped
+ * on — see promptSubAgent) must still fail a turn that otherwise looks done.
+ */
+export function classifyResolvedTurn(turn: {
+  aborted: boolean;
+  abortReason: AbortReason | undefined;
+  recoveredAfterTimeout: boolean;
+  loopError: string | undefined;
+  /** The limit the turn ran under, for the timeout message. Defaults to SUB_AGENT_TIMEOUT_MS. */
+  timeLimitMs?: number;
+}): TurnOutcome {
+  if (turn.recoveredAfterTimeout) return { status: "completed", recovered_after_timeout: true };
+  if (turn.abortReason === "timeout") {
+    return { status: "failed", error: timeoutError(turn.timeLimitMs ?? SUB_AGENT_TIMEOUT_MS) };
+  }
+  if (turn.aborted || turn.abortReason !== undefined) {
+    return { status: "interrupted", error: "Interrupted" };
+  }
+  if (turn.loopError !== undefined) return { status: "failed", error: turn.loopError };
+  return { status: "completed" };
 }
 
 export interface SubagentWorkerInitialize {
@@ -61,6 +116,12 @@ export interface SubagentWorkerInitialize {
   promptCacheKey?: string;
   sessionRootDir: string;
   childSessionPath?: string;
+  /**
+   * Per-turn time limit, shorter than SUB_AGENT_TIMEOUT_MS. Reaching it ends
+   * the turn the same way the default limit does: one tool-free recovery turn
+   * that answers from what the child has gathered.
+   */
+  turnTimeoutMs?: number;
 }
 
 type WorkerCommand =
@@ -112,7 +173,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
   let controller = new AbortController();
   let activeTurn: Promise<void> | undefined;
   let turnTimer: ReturnType<typeof setTimeout> | undefined;
-  let abortReason: "timeout" | "interrupt" | "shutdown" | "stdin_closed" | undefined;
+  let abortReason: AbortReason | undefined;
   let output = "";
   let recoveryOutput = "";
   let recoveringAfterTimeout = false;
@@ -165,7 +226,12 @@ export async function runSubagentWorkerMode(): Promise<void> {
   };
 
   const createSession = async (options: SubagentWorkerInitialize): Promise<AgentSession> => {
-    const { fallbackModel: _fallbackModel, childSessionPath, ...sessionOptions } = options;
+    const {
+      fallbackModel: _fallbackModel,
+      childSessionPath,
+      turnTimeoutMs: _turnTimeoutMs,
+      ...sessionOptions
+    } = options;
     const next = new AgentSession({
       ...sessionOptions,
       unattended: isUnattendedWorker(),
@@ -193,13 +259,15 @@ export async function runSubagentWorkerMode(): Promise<void> {
     controller = new AbortController();
     session.setSignal(controller.signal);
     setState("running");
+    const timeLimitMs = resolveTurnTimeLimit(initializeOptions?.turnTimeoutMs);
     turnTimer = setTimeout(() => {
       abortReason = "timeout";
       controller.abort();
-    }, SUB_AGENT_TIMEOUT_MS);
+    }, timeLimitMs);
     activeTurn = (async () => {
+      let loopError: Error | undefined;
       try {
-        await session!.prompt(task);
+        loopError = await promptSubAgent(session!, task);
       } catch (error) {
         const message = errorMessage(error);
         const fallbackModel = initializeOptions?.fallbackModel;
@@ -221,7 +289,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
             fallbackModel: undefined,
           };
           session = await createSession(initializeOptions);
-          await session.prompt(task);
+          loopError = await promptSubAgent(session, task);
         } else {
           throw error;
         }
@@ -247,41 +315,30 @@ export async function runSubagentWorkerMode(): Promise<void> {
         }
       }
 
-      const interrupted =
-        controller.signal.aborted || (abortReason !== undefined && abortReason !== "timeout");
-      const timedOut = abortReason === "timeout" && !recoveredAfterTimeout;
-      setState(interrupted && !timedOut ? "interrupted" : "idle");
-      completeTurn({
-        status: recoveredAfterTimeout
-          ? "completed"
-          : timedOut
-            ? "failed"
-            : interrupted
-              ? "interrupted"
-              : "completed",
+      const outcome = classifyResolvedTurn({
+        aborted: controller.signal.aborted,
+        abortReason,
+        recoveredAfterTimeout,
+        loopError: loopError?.message,
+        timeLimitMs,
+      });
+      setState(outcome.status === "interrupted" ? "interrupted" : "idle");
+      await completeTurn({
+        ...outcome,
         output: boundSubAgentOutput(output),
-        ...(recoveredAfterTimeout
-          ? { recovered_after_timeout: true }
-          : timedOut
-            ? {
-                error: `Timed out after ${Math.round(SUB_AGENT_TIMEOUT_MS / 60_000)} minutes; recovery summary failed`,
-              }
-            : interrupted
-              ? { error: "Interrupted" }
-              : {}),
         model: initializeOptions?.model,
       });
     })()
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         clearTimeout(turnTimer);
         const interrupted = controller.signal.aborted;
         const timedOut = abortReason === "timeout";
         setState(interrupted && !timedOut ? "interrupted" : "idle");
-        completeTurn({
+        await completeTurn({
           status: timedOut ? "failed" : interrupted ? "interrupted" : "failed",
           output: boundSubAgentOutput(output),
           error: timedOut
-            ? `Timed out after ${Math.round(SUB_AGENT_TIMEOUT_MS / 60_000)} minutes; recovery summary failed`
+            ? timeoutError(timeLimitMs)
             : interrupted
               ? "Interrupted"
               : errorMessage(error),
@@ -294,9 +351,11 @@ export async function runSubagentWorkerMode(): Promise<void> {
   };
 
   /** Durably record the turn, then announce it. Record FIRST: an adopting
-   * parent must never observe a terminal frame with no record behind it. */
-  const completeTurn = (frame: Record<string, unknown>): void => {
-    void writeTurnRecord(initializeOptions?.childSessionPath, {
+   * parent must never observe a terminal frame with no record behind it.
+   * Awaited inside the turn, so anything that waits for the turn (shutdown,
+   * stdin closing) also waits for the record. */
+  const completeTurn = async (frame: Record<string, unknown>): Promise<void> => {
+    await writeTurnRecord(initializeOptions?.childSessionPath, {
       status: (frame.status as "completed" | "interrupted" | "failed") ?? "failed",
       output: typeof frame.output === "string" ? frame.output : undefined,
       error: typeof frame.error === "string" ? frame.error : undefined,
@@ -380,8 +439,8 @@ export async function runSubagentWorkerMode(): Promise<void> {
   if (activeTurn) {
     // Stdin closed mid-turn: the parent is gone. Finish the turn so its
     // result lands in the durable turn record (the rehydrated parent adopts
-    // it); emit() is a no-op by then. The turn's own SUB_AGENT_TIMEOUT_MS
-    // still bounds it — the process cannot linger past that.
+    // it); emit() is a no-op by then. The turn's own time limit still
+    // bounds it — the process cannot linger past that.
     orphaned = true;
     await activeTurn.catch(() => undefined);
   } else {

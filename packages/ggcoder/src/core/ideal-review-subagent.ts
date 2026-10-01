@@ -1,4 +1,5 @@
 import type { Message } from "@kenkaiiii/gg-ai";
+import { SUB_AGENT_TIMEOUT_RECOVERY_MS } from "../tools/subagent-shared.js";
 import type { IdealReviewStats } from "./ideal-review.js";
 
 /**
@@ -14,13 +15,28 @@ import type { IdealReviewStats } from "./ideal-review.js";
  * verdict injects nothing, so a passing review costs one bounded wait and no
  * extra turn. On spawn failure or timeout the in-thread review remains the
  * fallback — the feature degrades, never blocks.
+ *
+ * The reviewer's time is capped by its OWN worker, not by the harness killing
+ * it: on reaching REVIEWER_TURN_TIMEOUT_MS it gets one tool-free turn to give
+ * its verdict on what it has examined. Killing it from outside discarded all
+ * of that — large reviews ended "Interrupted" with no verdict at all.
  */
 
 /** Read-only toolset — the reviewer examines, it never repairs. */
 export const REVIEWER_TOOLS = ["read", "grep", "find", "ls", "code_search", "source_path"] as const;
 
-/** Bounded wait for the reviewer child. Matches the subagent default wait. */
-export const REVIEWER_WAIT_MS = 120_000;
+/**
+ * How long the reviewer may examine the work before it must give its verdict.
+ * Reviews of large changes (a dozen or more files, ~1,000 changed lines) need
+ * longer to read everything; a verdict on the most central files beats none.
+ */
+export const REVIEWER_TURN_TIMEOUT_MS = 120_000;
+
+/**
+ * Harness backstop: the reviewer's working time, its recovery turn, and
+ * headroom for the result to arrive. Reached only if the child hangs.
+ */
+export const REVIEWER_WAIT_MS = REVIEWER_TURN_TIMEOUT_MS + SUB_AGENT_TIMEOUT_RECOVERY_MS + 20_000;
 
 /**
  * Ideal review score at which the independent reviewer is worth its latency.
@@ -61,6 +77,8 @@ export function buildReviewerTask(input: ReviewerTaskInput): string {
       "environment (missing package.json, tooling not installed, unrelated files) unless the request " +
       "itself demanded those.",
     "You are READ-ONLY: do not edit, write, or run commands. Judge only what is on disk.",
+    "Your time is limited: examine the files most central to the task first. If time runs out " +
+      "you will be asked for your verdict on what you have examined so far.",
     "",
     "BEGIN your reply with EXACTLY this format (elaborate only after it):",
     "VERDICT: CLEAN",

@@ -218,8 +218,31 @@ describe("WorkspaceHeader", () => {
 
     expect(screen.getByText("gg-coder")).toBeDefined();
     expect(screen.getByText("⎇ feature/titlebar")).toBeDefined();
-    expect(screen.getByText("3 uncommitted")).toBeDefined();
+    expect(screen.getByTitle("3 files not committed").textContent).toBe("3 uncommitted");
     expect(screen.getByTitle("gg-coder │ ⎇ feature/titlebar │ 3 uncommitted")).toBeDefined();
     expect(screen.queryByText("GG Coder")).toBeNull();
+  });
+
+  it("keeps the uncommitted count apart from its word so narrow windows can drop just the word", () => {
+    render(
+      <WorkspaceHeader
+        workspaceMode="code"
+        cwd="/work/app"
+        gitDirtyFileCount={12}
+        navHidden
+        onToggleNav={() => {}}
+      >
+        <button>New session</button>
+      </WorkspaceHeader>,
+    );
+
+    const chip = screen.getByTitle("12 files not committed");
+    const word = screen.getByText("uncommitted");
+
+    expect(chip.contains(word)).toBe(true);
+    expect(chip.textContent).toBe("12 uncommitted");
+    // Tauri starts a window drag only from the element carrying the attribute,
+    // so without its own the word would stop working as a drag handle.
+    expect(word.hasAttribute("data-tauri-drag-region")).toBe(true);
   });
 });

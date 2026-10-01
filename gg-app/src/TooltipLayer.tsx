@@ -22,6 +22,8 @@ import { createPortal } from "react-dom";
  * - Opt-in exception: an element marked `data-tooltip-tap` (e.g. a highlighted
  *   term that only teaches, with no action of its own) toggles its tooltip on
  *   tap or click instead, so touch and click users can read it too.
+ * - Hiding fades it out: the last hint stays on screen for EXIT_MS, out of
+ *   the accessibility tree and letting the pointer through.
  *
  * Positioning is measured, not assumed: the app zooms with CSS `zoom` on
  * <html>, and engines disagree about the coordinate space that puts
@@ -32,6 +34,8 @@ import { createPortal } from "react-dom";
 const SHOW_DELAY_MS = 450;
 /** Moving to another titled control within this window skips the delay. */
 const WARM_WINDOW_MS = 300;
+/** How long a hidden tooltip stays on screen fading out. Keep equal to --dur-exit (App.css). */
+const EXIT_MS = 120;
 const GAP = 6;
 const MARGIN = 8;
 
@@ -67,6 +71,8 @@ export function placeTooltip(anchor: Box, tip: Size, viewport: Size): Placement 
 interface Active {
   target: Element;
   text: string;
+  /** Hidden, but held on screen for EXIT_MS while it fades out. */
+  leaving: boolean;
 }
 
 /** Everything the layer changed on the element, so release can undo exactly that. */
@@ -119,13 +125,16 @@ export function TooltipLayer(): React.ReactElement | null {
       release();
       if (shown) lastHiddenAt = Date.now();
       shown = false;
-      setActive(null);
+      // Keep it mounted and let it fade; the exit timer below removes it. A
+      // show() in the same event replaces it outright, so moving straight to
+      // the next control never leaves a ghost behind.
+      setActive((prev) => (prev && !prev.leaving ? { ...prev, leaving: true } : prev));
     };
 
     const show = (): void => {
       if (!claim) return;
       shown = true;
-      setActive({ target: claim.el, text: claim.title });
+      setActive({ target: claim.el, text: claim.title, leaving: false });
     };
 
     const begin = (el: Element, origin: Claim["origin"]): void => {
@@ -150,7 +159,7 @@ export function TooltipLayer(): React.ReactElement | null {
         if (next === null) return;
         claim.title = next;
         el.removeAttribute("title");
-        if (shown) setActive({ target: el, text: next });
+        if (shown) setActive({ target: el, text: next, leaving: false });
       });
       observer.observe(el, { attributes: true, attributeFilter: ["title"] });
 
@@ -268,9 +277,18 @@ export function TooltipLayer(): React.ReactElement | null {
     };
   }, [tipId]);
 
+  useEffect(() => {
+    if (!active?.leaving) return;
+    const timer = setTimeout(() => {
+      setActive((prev) => (prev?.leaving ? null : prev));
+    }, EXIT_MS);
+    return () => clearTimeout(timer);
+  }, [active]);
+
   useLayoutEffect(() => {
     const tip = tipRef.current;
-    if (!active || !tip) return;
+    // A leaving tooltip fades where it stands; its anchor may already be gone.
+    if (!active || active.leaving || !tip) return;
     const s = tip.style;
     const at = (left: string, top: string, right: string, bottom: string): DOMRect => {
       s.left = left;
@@ -302,8 +320,19 @@ export function TooltipLayer(): React.ReactElement | null {
   }, [active]);
 
   if (!active) return null;
+  // While leaving it is only a fading picture of the last hint: release()
+  // already dropped the aria-describedby pointing at it, so it gives up its
+  // role and id (the next hint may claim that id) and hides from assistive tech.
+  const { leaving } = active;
   return createPortal(
-    <div ref={tipRef} id={tipId} className="gg-tooltip" role="tooltip">
+    <div
+      ref={tipRef}
+      id={leaving ? undefined : tipId}
+      className="gg-tooltip"
+      role={leaving ? undefined : "tooltip"}
+      aria-hidden={leaving ? true : undefined}
+      data-leaving={leaving ? "" : undefined}
+    >
       {active.text}
     </div>,
     document.body,

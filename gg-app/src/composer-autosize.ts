@@ -21,8 +21,8 @@ export function autosizeComposer(
   // briefly-taller viewport, the browser clamps its scrollTop toward 0; the
   // scroll event that follows reads as "the user scrolled up", drops App's
   // stick-to-bottom pin for good, and from then on the growing composer covers
-  // the newest messages instead of pushing them up. It only shows past ~3 line
-  // breaks, where the lost distance clears the pin's 48px threshold. Snapshot
+  // the newest messages instead of pushing them up. Any upward move un-pins
+  // (transcript-pin.ts), so even one line of lost distance would. Snapshot
   // and restore around the measurement so the collapse stays invisible: both
   // writes land in the same task, so the browser fires at most one scroll
   // event, carrying the restored offset.

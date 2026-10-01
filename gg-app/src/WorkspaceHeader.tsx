@@ -126,11 +126,17 @@ export function WorkspaceHeader({
                     {"│"}
                   </span>
                   <span
-                    className="chat-head-dirty"
+                    className="chat-head-dirty chat-head-uncommitted"
                     data-tauri-drag-region
                     title={`${gitDirtyFileCount} file${gitDirtyFileCount === 1 ? "" : "s"} not committed`}
                   >
-                    {`${gitDirtyFileCount} uncommitted`}
+                    {gitDirtyFileCount}
+                    {/* Its own element so narrow windows can drop the word and
+                        keep the count (App.css). It carries the drag attribute
+                        too: Tauri drags only from the element that has it. */}
+                    <span className="chat-head-uncommitted-label" data-tauri-drag-region>
+                      {" uncommitted"}
+                    </span>
                   </span>
                 </>
               )}

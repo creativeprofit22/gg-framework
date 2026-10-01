@@ -120,6 +120,25 @@ jobs:
           pnpm --filter @kenkaiiii/gg-agent test
           pnpm --filter @kenkaiiii/gg-core test
 
+      # Motion's media regressions decode real clips on every OS. CI-only
+      # provisioning is intentional; never skip these tests when a tool is absent.
+      - name: Ensure FFmpeg and ffprobe for Motion media tests
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              Linux)
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends ffmpeg
+                ;;
+              macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg ;;
+              Windows) choco install ffmpeg --version=8.0.1 -y --no-progress ;;
+              *) echo "Unsupported media-test runner: $RUNNER_OS" >&2; exit 1 ;;
+            esac
+          fi
+          ffmpeg -version
+          ffprobe -version
+
       # Blocking on every OS, Windows included. This started as a 72-failure
       # Windows backlog that had been invisible because the default PowerShell
       # shell swallowed it (see above); it is now zero, so the leg is a real

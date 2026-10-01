@@ -49,7 +49,7 @@ function manager(
     cwd: options.cwd ?? process.cwd(),
     agents: options.agentDefs ?? agents,
     getProvider: () => "openai",
-    getModel: () => "gpt-6-sol",
+    getModel: () => "gpt-6.1-sol",
     getThinkingLevel: () => "ultra",
     getCacheKey: () => "parent-cache",
     getMaxPerModel: () => options.maxPerModel,
@@ -87,18 +87,21 @@ describe("SubAgentManager", () => {
     );
 
     // The independent Ideal reviewer: read-only tools, forced ACTIVE model —
-    // agent-definition routing ("fake" would use the fast model) is bypassed.
+    // agent-definition routing ("fake" would use the fast model) is bypassed —
+    // and its own shorter time limit, which the worker enforces.
     await instance.spawn("reviewer", "review the work", undefined, {
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       tools: ["read", "grep", "find", "ls"],
+      turnTimeoutMs: 120_000,
     });
 
     const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
     expect(initializeCall?.[2]).toMatchObject({
       options: {
-        model: "gpt-6-sol",
+        model: "gpt-6.1-sol",
         allowedTools: ["read", "grep", "find", "ls"],
-        promptCacheKey: "parent-cache:subagent:gpt-6-sol:default",
+        promptCacheKey: "parent-cache:subagent:gpt-6.1-sol:default",
+        turnTimeoutMs: 120_000,
       },
     });
   });
@@ -125,15 +128,23 @@ describe("SubAgentManager", () => {
 
   it("returns after launch and overlaps eight child turns", async () => {
     const instance = manager();
+    // "hold" turns run until released, so all eight are provably still active
+    // when the ninth spawn hits the cap. A timed turn raced process startup:
+    // on a loaded runner the first child finished before the last one
+    // launched, which freed a slot for the ninth.
     const children = await Promise.all(
-      [1, 2, 3, 4, 5, 6, 7, 8].map((number) => instance.spawn(`task-${number}`, "slow", "fake")),
+      [1, 2, 3, 4, 5, 6, 7, 8].map((number) => instance.spawn(`task-${number}`, "hold", "fake")),
     );
     // Returning every child in the running state proves spawn resolves on the
     // start acknowledgement rather than waiting for the turn to complete.
     // Avoid a wall-clock threshold here: process startup is scheduler-dependent
     // under the full parallel workspace suite.
     expect(children.every((child) => child.state === "running")).toBe(true);
-    await expect(instance.spawn("ninth", "slow", "fake")).rejects.toThrow("At most 8");
+    await expect(instance.spawn("ninth", "hold", "fake")).rejects.toThrow("At most 8");
+    // A queued message releases each held turn.
+    for (const child of children) {
+      expect(await instance.sendMessage(child.agent_id, "release")).toBe(1);
+    }
     const result = await instance.wait(
       children.map((child) => child.agent_id),
       "all",
@@ -186,7 +197,7 @@ describe("SubAgentManager", () => {
 
   it("enforces the per-model cap against the resolved child model", async () => {
     // The "fake" agent declares model: fast (gpt-6-luna); an agent with no
-    // model policy inherits the parent model (gpt-6-sol).
+    // model policy inherits the parent model (gpt-6.1-sol).
     const shellAgent: AgentDefinition = {
       name: "sheller",
       description: "Shell-capable worker",
@@ -206,7 +217,7 @@ describe("SubAgentManager", () => {
 
     // A different resolved model is unaffected by the luna cap.
     const other = await instance.spawn("parent-model", "slow", "sheller");
-    expect(other.model).toBe("gpt-6-sol");
+    expect(other.model).toBe("gpt-6.1-sol");
   });
 
   it("names the available agents when asked for one that does not exist", async () => {
@@ -358,7 +369,7 @@ describe("SubAgentManager", () => {
       token_usage: { input: 2, output: 3 },
       agent_name: "fake",
       provider: "openai",
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       child_session_id: "child-session",
       child_session_path: path.join(sessionRootDir, "project", "child.jsonl"),
       collected: false,

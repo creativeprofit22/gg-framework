@@ -90,7 +90,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "openai",
     label: "OpenAI",
-    description: "GPT-6 Astra, GPT-6 Sol, GPT-6 Luna",
+    description: "GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna",
     methods: ["oauth"],
   },
   {

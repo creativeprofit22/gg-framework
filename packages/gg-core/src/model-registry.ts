@@ -29,8 +29,8 @@ export interface ModelInfo {
   /**
    * Vendor-declared default reasoning level (Codex models.json
    * `default_reasoning_level`). When present, fresh sessions start here rather
-   * than at the ceiling: the deep-reasoning flagships (Astra ships "low",
-   * GPT-6 Sol/Luna "medium") think dramatically longer per rung, so defaulting to
+   * than at the ceiling: the deep-reasoning models (Astra and GPT-6.1 Sol ship
+   * "low", GPT-6 Luna "medium") think dramatically longer per rung, so defaulting to
    * `maxThinkingLevel` made new sessions pathologically slow.
    */
   defaultThinkingLevel?: ThinkingLevel;
@@ -52,7 +52,7 @@ export interface ModelInfo {
   /**
    * The top reasoning tier this model genuinely uses. Used when thinking is
    * enabled to pick the strongest setting per model:
-   *   - OpenAI GPT-6 Astra / Sol: `ultra` (Codex orchestration preset above `max`)
+   *   - OpenAI GPT-6 Astra / GPT-6.1 Sol: `ultra` (Codex orchestration preset above `max`)
    *   - OpenAI GPT-6 Luna: `max`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
    *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5.5 and Sonnet 5.5: `max`
@@ -158,9 +158,10 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "max",
   },
   {
-    // Released 2026-09-28 (API ID `claude-sonnet-5-5`). Same $2/$10 MTok pricing
-    // as Sonnet 5, ~30% faster output and fewer tokens/tool calls per task.
-    // Adaptive thinking is on by default and `thinking: disabled` returns a
+    // Released 2026-09-28 (API ID `claude-sonnet-5-5`) — replaces Sonnet 5 at
+    // the same $2/$10 MTok pricing and 1M context / 128K output, ~30% faster
+    // output and fewer tokens/tool calls per task. Adaptive thinking (now
+    // including xhigh) is on by default and `thinking: disabled` returns a
     // 400 — gg-ai never sends `disabled` (it omits `thinking` instead), and
     // the `sonnet-5` adaptive-model match already covers this ID. Sonnet 5 is
     // retired here — a session that still has it saved falls back to the
@@ -191,7 +192,7 @@ export const MODELS: ModelInfo[] = [
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
     // GPT-6 Astra — "Our most capable model for complex, demanding work."
-    // (Codex catalog priority 1, listed for every ChatGPT plan, requires a
+    // (Codex catalog priority 2, listed for every ChatGPT plan, requires a
     // Codex client >= 0.153.0 — see CODEX_CLIENT_VERSION). Same split as 5.6:
     // 1.05M on the public Responses API, 272K on the ChatGPT OAuth route
     // (openai/codex models.json, `gpt-6-astra`). Reasoning ladder low → medium
@@ -216,32 +217,36 @@ export const MODELS: ModelInfo[] = [
   },
   // GPT-6 Sol + Luna — released 2026-09-22 below Astra, replacing the whole
   // GPT-5.6 family (Sol/Terra/Luna; there is no GPT-6 Terra — OpenAI's Codex
-  // catalog upgrades 5.6 Terra to 6 Sol). Both need a Codex client >= 0.155.0
-  // on the ChatGPT OAuth route. Same window split as Astra: 1.05M on the public
-  // Responses API, 272K on the Codex route; 128K output, text+image input,
-  // freeform apply_patch, responses-lite transport. The 5.6 ids are retired —
-  // a saved session on one falls back to the provider default on next start.
+  // catalog upgrades 5.6 Terra to 6 Sol). GPT-6.1 Sol (2026-09-29) then replaced
+  // GPT-6 Sol. Same window split as Astra: 1.05M on the public Responses API,
+  // 272K on the Codex route; 128K output, text+image input, freeform
+  // apply_patch, responses-lite transport. The GPT-5.6 ids and `gpt-6-sol` are
+  // retired — a saved session on one falls back to the provider default on
+  // next start.
   {
-    // Sol — "Workhorse model for coding and everyday work." (Codex priority 2,
-    // default medium). $2/$10 MTok. Ladder low → medium → high → xhigh → max →
-    // ultra; ultra is the Codex orchestration preset (max effort on the wire +
-    // proactive local subagent delegation).
-    id: "gpt-6-sol",
-    name: "GPT-6 Sol",
+    // GPT-6.1 Sol — "Latest workhorse model for coding and everyday work."
+    // (Codex priority 1, default low). The catalog says Codex client >= 0.153.0,
+    // but the ChatGPT backend only serves it from 0.159.0 (see
+    // CODEX_CLIENT_VERSION). $2/$10 MTok, cached input $0.10. Ladder low →
+    // medium → high → xhigh → max → ultra; ultra is the Codex orchestration
+    // preset (max effort on the wire + proactive local subagent delegation).
+    id: "gpt-6.1-sol",
+    name: "GPT-6.1 Sol",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
-    defaultThinkingLevel: "medium",
+    defaultThinkingLevel: "low",
     supportsImages: true,
     supportsVideo: false,
     costTier: "medium",
     maxThinkingLevel: "ultra",
   },
   {
-    // Luna — "Fast and affordable model for easier tasks." (Codex priority 3,
-    // default medium). $0.10/$0.50 MTok. Reasoning tops out at `max`.
+    // Luna — "Fast and affordable model for easier tasks." (Codex priority 4,
+    // default medium, needs a Codex client >= 0.155.0). $0.10/$0.50 MTok.
+    // Reasoning tops out at `max`.
     id: "gpt-6-luna",
     name: "GPT-6 Luna",
     provider: "openai",
@@ -760,6 +765,8 @@ export function getVideoByteLimit(modelId: string): number | undefined {
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_DEFAULT_MODEL_ID)!;
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.6-pro")!;
+  // Local Fork override (c21bc827): GPT-6 Astra stays the OpenAI default;
+  // upstream defaults to GPT-6.1 Sol.
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-6-astra")!;
   if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.3")!;

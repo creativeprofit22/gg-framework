@@ -250,7 +250,7 @@ describe("compaction thresholds across all models", () => {
 
   const openAITransportCases = [
     { id: "gpt-6-astra", publicWindow: 1_050_000, codexWindow: 272_000 },
-    { id: "gpt-6-sol", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-6.1-sol", publicWindow: 1_050_000, codexWindow: 272_000 },
     { id: "gpt-6-luna", publicWindow: 1_050_000, codexWindow: 272_000 },
   ] as const;
 

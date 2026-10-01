@@ -49,6 +49,8 @@ export interface ForegroundExecutionOutcome {
   backgroundTaskId: string | null;
   /** True when a leftover process still held the output pipes after exit. */
   pipesHeldAfterExit: boolean;
+  /** True when that leftover's process group was stopped (POSIX only). */
+  leftoverStopped?: boolean;
 }
 
 /** Stable, serializable diagnostics exposed to hosts for foreground bash runs. */

@@ -16,12 +16,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { autosizeComposer } from "./composer-autosize";
+import { pinAfterScroll } from "./transcript-pin";
 
 const SHELL = 700; // window height
 const CHROME = 123; // chat head + live region + footer + composer padding
 const ROW = 21; // 14px × 1.5 line-height
 const CONTENT = 541; // transcript scrollHeight: just taller than the viewport
-const PIN_THRESHOLD = 48; // must match App's onTranscriptScroll
 
 /** A transcript whose viewport is whatever the composer leaves it. */
 function makeShell() {
@@ -84,10 +84,12 @@ function typeLineBreaks(breaks: number) {
   // App's stick-to-bottom pin, updated by every scroll event exactly as
   // onTranscriptScroll does.
   let pinned = true;
+  let lastTop = 0;
   const observeScrolls = () => {
     while (shell.scrollEvents.length) {
       shell.scrollEvents.shift();
-      pinned = shell.distanceFromBottom() <= PIN_THRESHOLD;
+      pinned = pinAfterScroll(pinned, lastTop, shell.transcript);
+      lastTop = shell.transcript.scrollTop;
     }
   };
 
@@ -104,7 +106,11 @@ function typeLineBreaks(breaks: number) {
     // ResizeObserver runs; anything left for the RO to correct is a frame of
     // visible bounce while typing.
     if (wasPinned) offBottomAfterAutosize.push(shell.distanceFromBottom());
-    if (pinned) shell.transcript.scrollTop = CONTENT; // ResizeObserver re-pin
+    if (pinned) {
+      // ResizeObserver re-pin: scrollToBottom, which records its own offset.
+      shell.transcript.scrollTop = CONTENT;
+      lastTop = shell.transcript.scrollTop;
+    }
     observeScrolls();
   }
   return { pinned, shell, el, offBottomAfterAutosize };
@@ -126,8 +132,9 @@ describe("autosizeComposer", () => {
   });
 
   // The regression itself: without the scrollTop snapshot/restore inside
-  // autosizeComposer the pin is lost here and never comes back, so the composer
-  // overlaps the newest messages from the 4th break on.
+  // autosizeComposer the pin is lost and never comes back, so the composer
+  // overlaps the newest messages. Under the old 48px pin that began at the 4th
+  // break; the direction-based pin (transcript-pin.ts) loses it on the first.
   it("keeps the transcript pinned past 3 line breaks", () => {
     const { pinned, shell } = typeLineBreaks(6);
     expect(pinned).toBe(true);

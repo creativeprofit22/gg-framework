@@ -4,7 +4,7 @@ import { isAbortError } from "@kenkaiiii/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
 import { isUnattendedWorker } from "../core/provider-execution-policy.js";
-import { SUB_AGENT_MAX_TURN_EXTENSIONS } from "../tools/subagent-shared.js";
+import { promptSubAgent, SUB_AGENT_MAX_TURN_EXTENSIONS } from "../tools/subagent-shared.js";
 
 export interface JsonModeOptions {
   message: string;
@@ -164,9 +164,10 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
     emitJson({ type: "error", message: error.message });
   });
 
+  let loopError: Error | undefined;
   try {
     await session.initialize();
-    await session.prompt(options.message);
+    loopError = await promptSubAgent(session, options.message);
   } catch (err) {
     if (isAbortError(err)) {
       emitJson({ type: "error", message: "Interrupted" });
@@ -178,6 +179,15 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
     process.removeListener("SIGINT", onSigint);
     await session.dispose();
     closeLogger();
+  }
+
+  // The loop stopped on an error yet returned normally (see promptSubAgent).
+  // Exit non-zero with the reason on stderr — the parent's failure path — so
+  // the child's mid-task narration is never passed off as its answer.
+  if (loopError) {
+    process.stderr.write(formatUserError(loopError) + "\n");
+    exitAfterFlush(1);
+    return;
   }
 
   // Success path: dispose() released this session's own resources, but the host

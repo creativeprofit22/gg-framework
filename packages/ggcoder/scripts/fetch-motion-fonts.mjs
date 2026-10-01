@@ -12,7 +12,10 @@
 // only recompressed to woff2 (a format change, not a modification). That step
 // needs fontTools with brotli: `pip install fonttools brotli`.
 //
+// `use` is an optional one-line hint shown by `fonts.mjs list`.
+//
 // Run: node scripts/fetch-motion-fonts.mjs
+// Then refresh the preview image: node scripts/build-motion-font-specimen.mjs
 import { execFileSync } from "node:child_process";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -59,6 +62,30 @@ const FAMILIES = [
   { name: "Gloock", ofl: "gloock", spec: "Gloock" },
   { name: "Young Serif", ofl: "youngserif", spec: "Young+Serif" },
   { name: "Martian Mono", ofl: "martianmono", spec: "Martian+Mono:wdth,wght@75..112.5,100..800" },
+  {
+    name: "Unbounded",
+    ofl: "unbounded",
+    spec: "Unbounded:wght@200..900",
+    use: "Wide, rounded display face for big titles.",
+  },
+  {
+    name: "Sora",
+    ofl: "sora",
+    spec: "Sora:wght@100..800",
+    use: "Clean geometric sans for body text and captions.",
+  },
+  {
+    name: "Short Stack",
+    ofl: "shortstack",
+    full: { ttf: "ShortStack-Regular.ttf", weight: "400", stretch: null },
+    use: "Casual handwritten feel.",
+  },
+  {
+    name: "Finger Paint",
+    ofl: "fingerpaint",
+    full: { ttf: "FingerPaint-Regular.ttf", weight: "400", stretch: null },
+    use: "Playful painted, childlike handwritten feel.",
+  },
 ];
 
 const slug = (name) => name.toLowerCase().replace(/\s+/g, "-");
@@ -90,7 +117,9 @@ function latinFaces(css) {
 const manifest = [];
 await mkdir(OUT, { recursive: true });
 for (const entry of await readdir(OUT)) {
-  if (entry !== "README.md") await rm(join(OUT, entry), { recursive: true, force: true });
+  if (entry !== "README.md" && entry !== "specimen.jpg") {
+    await rm(join(OUT, entry), { recursive: true, force: true });
+  }
 }
 for (const family of FAMILIES) {
   const dir = join(OUT, slug(family.name));
@@ -113,6 +142,7 @@ for (const family of FAMILIES) {
       family: family.name,
       dir: slug(family.name),
       license: "OFL-1.1",
+      ...(family.use ? { use: family.use } : {}),
       files: [{ file, style: "normal", weight, stretch }],
     });
     process.stdout.write(`${family.name}: full font\n`);
@@ -131,7 +161,13 @@ for (const family of FAMILIES) {
     await writeFile(join(dir, file), await get(face.url));
     files.push({ file, style: face.style, weight: face.weight, stretch: face.stretch ?? null });
   }
-  manifest.push({ family: family.name, dir: slug(family.name), license: "OFL-1.1", files });
+  manifest.push({
+    family: family.name,
+    dir: slug(family.name),
+    license: "OFL-1.1",
+    ...(family.use ? { use: family.use } : {}),
+    files,
+  });
   process.stdout.write(`${family.name}: ${files.length} file(s)\n`);
 }
 await writeFile(join(OUT, "fonts.json"), `${JSON.stringify(manifest, null, 2)}\n`);

@@ -93,6 +93,67 @@ describe("Qwen Token Plan redaction", () => {
   });
 });
 
+describe("redactText credentials in URLs", () => {
+  // The userinfo part of a URL ends at its LAST "@" (the WHATWG URL parser
+  // agrees), so a password may itself contain "@", and Redis-style URLs carry a
+  // password with no username at all. Every one of these must hide the whole
+  // password, never a prefix of it.
+  it.each([
+    [
+      "a password with no username (Redis)",
+      "REDIS_URL=redis://:hunter2hunter2@cache:6379",
+      `REDIS_URL=redis://${REDACTION_MARKER}@cache:6379`,
+    ],
+    [
+      "a password containing @",
+      "postgres://app:S3cr@tP@ss@db.example.com:5432/app",
+      `postgres://${REDACTION_MARKER}@db.example.com:5432/app`,
+    ],
+    [
+      "a percent-encoded @",
+      "postgres://app:S3cr%40tP%40ss@db:5432/app",
+      `postgres://${REDACTION_MARKER}@db:5432/app`,
+    ],
+    [
+      "a compose entry with no username and an @ in the password",
+      "      - CACHE=redis://:p@ssword1@redis:6379/0",
+      `      - CACHE=redis://${REDACTION_MARKER}@redis:6379/0`,
+    ],
+    [
+      "a multi-host connection string",
+      "mongodb://svc:pa@ss@h1:27017,h2:27017/prod",
+      `mongodb://${REDACTION_MARKER}@h1:27017,h2:27017/prod`,
+    ],
+    [
+      "a URL inside minified JSON, stopping at its closing quote",
+      '{"db":"postgres://u:pw@db","owner":"ops@example.com"}',
+      `{"db":"postgres://${REDACTION_MARKER}@db","owner":"ops@example.com"}`,
+    ],
+    [
+      "a password holding a raw ?",
+      "postgres://app:pa?ss1234@db:5432/app",
+      `postgres://${REDACTION_MARKER}@db:5432/app`,
+    ],
+    [
+      "a password holding a raw quote",
+      'postgres://app:pa"ss1234@db:5432/app',
+      `postgres://${REDACTION_MARKER}@db:5432/app`,
+    ],
+  ])("hides the whole password for %s", (_label, input, expected) => {
+    expect(redactText(input)).toBe(expected);
+    expect(redactText(expected)).toBe(expected);
+  });
+
+  it.each([
+    "ssh://git@github.com/org/repo.git",
+    "http://[::1]:8080/health",
+    "https://example.com:8443/path?next=/a@b",
+    "Contact ops@example.com or visit https://status.example.com/",
+  ])("leaves a URL without a password untouched: %s", (input) => {
+    expect(redactText(input)).toBe(input);
+  });
+});
+
 describe("environmentSecrets", () => {
   it("collects only long values under sensitive names", () => {
     expect(

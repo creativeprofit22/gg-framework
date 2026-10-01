@@ -5,8 +5,13 @@ import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats } from "./ideal-review.js";
-import { REVIEWER_TOOLS, REVIEWER_WAIT_MS } from "./ideal-review-subagent.js";
-import { SubAgentManager } from "./subagent-manager.js";
+import {
+  REVIEWER_TOOLS,
+  REVIEWER_TURN_TIMEOUT_MS,
+  REVIEWER_WAIT_MS,
+} from "./ideal-review-subagent.js";
+import { SUB_AGENT_TIMEOUT_RECOVERY_MS } from "../tools/subagent-shared.js";
+import { MAX_WAIT_MS, SubAgentManager } from "./subagent-manager.js";
 import { fileURLToPath } from "node:url";
 import { createReadTool } from "../tools/read.js";
 
@@ -238,6 +243,24 @@ describe("AgentSession independent Ideal reviewer", () => {
     const messages = await internal.getHookFollowUpMessages();
     expect(messages?.length).toBe(1);
     expect(messages?.[0]?.content).toContain("Ideal?");
+  });
+
+  it("lets the reviewer's own time limit end it, with room for its verdict", async () => {
+    const manager = fakeManager("VERDICT: CLEAN");
+    const internal = makeSession(highStakesStats, manager);
+
+    await internal.getHookFollowUpMessages();
+
+    const overrides = manager.spawn.mock.calls[0]?.[3] as { turnTimeoutMs?: number };
+    expect(overrides.turnTimeoutMs).toBe(REVIEWER_TURN_TIMEOUT_MS);
+    // Waiting any less kills the reviewer mid-review, before its recovery
+    // turn can answer — the "Interrupted" reviews this replaced.
+    expect(manager.wait).toHaveBeenCalledWith(["reviewer-1"], "all", REVIEWER_WAIT_MS);
+    expect(REVIEWER_WAIT_MS).toBeGreaterThan(
+      REVIEWER_TURN_TIMEOUT_MS + SUB_AGENT_TIMEOUT_RECOVERY_MS,
+    );
+    // The manager silently caps longer waits, which would cut the budget short.
+    expect(REVIEWER_WAIT_MS).toBeLessThanOrEqual(MAX_WAIT_MS);
   });
 
   it("times out, collects the straggler, and falls back without blocking", async () => {

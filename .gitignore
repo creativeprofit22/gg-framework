@@ -18,6 +18,10 @@ coverage/
 !/.gg/commands/release.md
 !/.gg/commands/cleanup.md
 
+# After Effects source projects never belong in the repo.
+*.[aA][eE][pP]
+*.[aA][eE][pP][xX]
+
 # Scratch / ad-hoc test files
 test_*.mjs
 test_*.js

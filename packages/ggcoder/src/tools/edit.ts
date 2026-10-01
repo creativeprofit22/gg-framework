@@ -579,7 +579,7 @@ export function createEditTool(
         // Snapshot the pre-mutation on-disk state for /rewind before writing.
         await onPreFileMutation?.(resolved);
         await ops.writeFile(resolved, finalContent);
-        await recordWrite(readFiles, resolved, finalContent, ops);
+        await recordWrite(readFiles, resolved, finalContent, ops, "edit");
         await mutationCallback?.(resolved);
         // recordWrite refreshed the tracker to the just-written content, so the
         // next edit (including retries of the skipped ones) validates against an

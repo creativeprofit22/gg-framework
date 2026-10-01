@@ -2686,6 +2686,10 @@ describe("AgentPane swap reading anchors", () => {
         },
       });
       try {
+        // The pin follows scroll direction: the reader starts at the newest
+        // line (as a live pane does) and scrolls up to the paragraph.
+        scroll.scrollTop = 4800;
+        fireEvent.scroll(scroll);
         scroll.scrollTop = 300;
         fireEvent.scroll(scroll);
         const narrow = view!.capture();
@@ -5752,7 +5756,9 @@ describe("AgentPane lifecycle", () => {
     );
     expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe(`${MENTOR_HANDLE} next?`);
+    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe(
+      `${MENTOR_HANDLE} next?`,
+    );
   });
 
   it("preserves the current draft and attachments when asking Ken what is next", async () => {
@@ -7163,7 +7169,9 @@ describe("command palette (Ctrl/Cmd+K)", () => {
     const nextCatalog = deferred<AgentModule.CommandCatalog | null>();
     let onNextTarget = false;
     const { pane, view } = await renderPane(tagged.slice(2), {}, (p) => {
-      p.listCommandCatalog = vi.fn(async () => (onNextTarget ? nextCatalog.promise : brokenCatalog));
+      p.listCommandCatalog = vi.fn(async () =>
+        onNextTarget ? nextCatalog.promise : brokenCatalog,
+      );
     });
     pressCtrlK();
     await screen.findByRole("region", { name: "1 command file has a problem" });
@@ -7171,9 +7179,7 @@ describe("command palette (Ctrl/Cmd+K)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     onNextTarget = true;
-    view.rerender(
-      <AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />,
-    );
+    view.rerender(<AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />);
     await act(async () => {});
     // The new target's catalog has not arrived: the old broken file is gone.
     pressCtrlK();
@@ -7201,9 +7207,7 @@ describe("command palette (Ctrl/Cmd+K)", () => {
       );
     });
     onNextTarget = true;
-    view.rerender(
-      <AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />,
-    );
+    view.rerender(<AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />);
     await act(async () => {});
     await act(async () => {
       late.resolve(brokenCatalog);
@@ -7280,14 +7284,18 @@ describe("command palette (Ctrl/Cmd+K)", () => {
     expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
     // A collection command without a group sits under Other, never hidden.
     expect(
-      within(screen.getByRole("group", { name: "Other" })).getByRole("option", { name: /\/ungrouped/ }),
+      within(screen.getByRole("group", { name: "Other" })).getByRole("option", {
+        name: /\/ungrouped/,
+      }),
     ).toBeTruthy();
     // Ordinary commands stay in the slash menu, not the palette.
     expect(screen.queryByRole("option", { name: /\/ordinary/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /\/schedule/ })).toBeNull();
     expect(screen.getAllByRole("option")).toHaveLength(2);
     expect(
-      within(screen.getByRole("group", { name: "Everyday" })).getByRole("option", { name: /\/demo.*reads.*project/ }),
+      within(screen.getByRole("group", { name: "Everyday" })).getByRole("option", {
+        name: /\/demo.*reads.*project/,
+      }),
     ).toBeTruthy();
     await waitFor(() =>
       expect(vi.mocked(pane.listCommands).mock.calls.length).toBeGreaterThan(before),

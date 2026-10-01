@@ -7,7 +7,7 @@
 //
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -89,9 +89,31 @@ function smokeMotionBundle(node) {
   for (const rel of [
     "plugin.json",
     join("skills", "motion", "SKILL.md"),
-    join("skills", "hyperframes", "SKILL.md"),
+    join("skills", "brand-kit", "SKILL.md"),
+    join("skills", "source-ingest", "SKILL.md"),
+    join("skills", "video-qa", "SKILL.md"),
+    join("references", "runtime", "minimal-composition.md"),
+    join("references", "motion-language.md"),
+    join("assets", "sfx", "sfx-analysis.md"),
   ]) {
     if (!existsSync(join(motion, rel))) fail(`bundled Motion file missing: ${rel}`);
+  }
+  const skillNames = readdirSync(join(motion, "skills")).sort();
+  if (
+    JSON.stringify(skillNames) !==
+    JSON.stringify(["brand-kit", "motion", "source-ingest", "video-qa"])
+  ) {
+    fail(`unexpected Motion skill catalog: ${skillNames.join(", ")}`);
+  }
+  if (existsSync(join(motion, "guidance")) || existsSync(join(motion, "references", "authoring"))) {
+    fail("obsolete guidance or After Effects authoring material leaked into the runtime bundle");
+  }
+  const music = join(motion, "assets", "music");
+  const tracks = readdirSync(music).filter((name) => name.endsWith(".mp3"));
+  if (tracks.length === 0) fail("shared Motion music is missing");
+  for (const track of tracks) {
+    if (!existsSync(join(music, "cues", track.replace(/\.mp3$/, ".music-cues.json"))))
+      fail(`missing music cue map: ${track}`);
   }
   const { version } = JSON.parse(readFileSync(join(motion, "plugin.json"), "utf8"));
   const launcher = join(motion, "bin", "hyperframes.mjs");
@@ -100,6 +122,15 @@ function smokeMotionBundle(node) {
     fail(`bundled HyperFrames CLI reports ${reported}, Motion skills expect ${version}`);
   }
   console.log(`smoke: bundled HyperFrames ${reported} starts through the Motion launcher`);
+
+  const motionGate = spawnSync(node, [join(motion, "bin", "motion-check.mjs")], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (motionGate.status !== 1 || !motionGate.stderr?.includes("usage: motion-check.mjs")) {
+    fail("bundled motion verification gate failed to load or accepted missing evidence");
+  }
+  console.log("smoke: bundled motion verification gate rejects missing evidence");
 
   // The font library ships as plain files; a packaging filter dropping woff2
   // would silently fall back to generic fonts in every video.

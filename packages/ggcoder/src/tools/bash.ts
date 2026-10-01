@@ -62,6 +62,32 @@ const FOREGROUND_LIMITS_DESCRIPTION =
   "long time (default 10 min, configurable) or past the hard limit (default 60 min, configurable) is stopped automatically, " +
   "including after hand-off. Omit timeout unless you need a hard bound. Long output is truncated (tail kept). ";
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
+
+/**
+ * Result for a call whose Stop arrived while the launch was still being
+ * prepared. Wording matches the agent loop's result for a tool call that never
+ * reached its tool.
+ */
+const CANCELLED_BEFORE_START =
+  "Exit code: CANCELLED\n`bash` was cancelled before it started, so it had no effect. Safe to retry.";
+
+/**
+ * SIGKILL what is left of the process group the shell led, returning whether
+ * anything was there to stop. Group-only: once the shell has exited its lone
+ * pid may already belong to an unrelated process. Windows has no process
+ * groups, and taskkill /T cannot find the tree of a parent that already
+ * exited, so leftovers there are left running.
+ */
+function killLeftoverGroup(pid: number): boolean {
+  if (process.platform === "win32") return false;
+  try {
+    process.kill(-pid, "SIGKILL");
+    return true;
+  } catch {
+    // The group is empty: whatever still holds the output left it (setsid).
+    return false;
+  }
+}
 /** A sleep this long guesses completion instead of waiting for a process event. */
 const GUESSED_WAIT_SECONDS = 10;
 
@@ -301,7 +327,11 @@ export async function executeForegroundCommand({
       exitCode: number | null,
       closeSignal: NodeJS.Signals | null,
       error: Error | null = null,
-      extra: { backgroundTaskId?: string; pipesHeldAfterExit?: boolean } = {},
+      extra: {
+        backgroundTaskId?: string;
+        pipesHeldAfterExit?: boolean;
+        leftoverStopped?: boolean;
+      } = {},
     ): void => {
       if (settled) return;
       settled = true;
@@ -325,6 +355,7 @@ export async function executeForegroundCommand({
           error,
           backgroundTaskId: extra.backgroundTaskId ?? null,
           pipesHeldAfterExit: extra.pipesHeldAfterExit ?? false,
+          ...(extra.leftoverStopped ? { leftoverStopped: true } : {}),
         },
         rawOutput: outputSnapshot.content,
         outputCapped: outputSnapshot.capped,
@@ -560,11 +591,18 @@ export async function executeForegroundCommand({
           }
           if (terminalIntent !== null) return;
           terminalIntent = "completion";
+          // Upstream parity: stop what is left of the group the shell led so a
+          // stray `cmd &` is not orphaned untracked (POSIX only; see
+          // killLeftoverGroup). A setsid/detached helper escapes the group and
+          // keeps running, which the result note reports.
+          const leftoverStopped = pid !== null && killLeftoverGroup(pid);
           log("INFO", "bash", "Command exited while a leftover process held its output", {
             pid: String(pid ?? "unknown"),
+            leftover: leftoverStopped ? "stopped" : "not stopped",
           });
           finalize(code === 0 ? "completed" : "nonZeroExit", code, exitSignal, null, {
             pipesHeldAfterExit: true,
+            leftoverStopped,
           });
         },
       });
@@ -719,8 +757,12 @@ async function renderStructuredForegroundResult(
                 : "FAILED (no exit code)";
 
   const leftoverNote = outcome.pipesHeldAfterExit
-    ? "[The command exited, but a process it started is still running and holding its " +
-      "output. It was left running (it may be an intended server or daemon).]\n"
+    ? `[The command exited, but a process it left running in the background (& or nohup) ` +
+      `still held its output after it finished, ` +
+      (outcome.leftoverStopped
+        ? "so it was stopped. "
+        : "so its later output was not captured; it may still be running. ") +
+      "Use run_in_background=true for anything that should keep running.]\n"
     : "";
   const inactiveHint =
     outcome.reason === "inactive"
@@ -974,6 +1016,7 @@ export function createBashTool(
           mode: "persistent",
           canHandOff: false,
         });
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const execution = await executePersistentCommand({
           command,
           cwd,
@@ -1000,6 +1043,7 @@ export function createBashTool(
         } catch (error) {
           return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
         }
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const result = await processManager.start(command, cwd, launch, wakeRules);
         return (
           `Background process started.\n` +
@@ -1037,6 +1081,9 @@ export function createBashTool(
       } catch (error) {
         return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
       }
+      // Stop may have landed while the launch was being prepared. The abort
+      // listener below would never fire for an already-aborted signal.
+      if (context.signal.aborted) return CANCELLED_BEFORE_START;
 
       const execution = await executeForegroundCommand({
         command,

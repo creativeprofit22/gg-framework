@@ -85,6 +85,8 @@ export interface RenderAppConfig {
   skills?: Skill[];
   checkpointStore?: CheckpointStore;
   rebuildReadTool?: (model: string) => AgentTool;
+  /** Forgets every file read; run when a reset replaces the conversation. */
+  clearReadTracker?: () => void;
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
   onRuntimeStateChange?: (updates: Partial<RuntimeState>) => void;
   planCallbacks?: {
@@ -646,6 +648,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // Wipe everything session-scoped FIRST. Other options below can then
       // re-seed specific fields (e.g. plan accept wipes the chat then sets
       // approvedPlanPath + planSteps for the implementation phase).
+      // Every wipe replaces the conversation (/clear, /rewind, new task, plan
+      // accept), so the reads it recorded are gone from the model's context.
+      config.clearReadTracker?.();
       terminalHistoryPrinter.clear();
       sessionStore.history = [{ kind: "banner", id: "banner" }];
       sessionStore.turnMetrics = [];

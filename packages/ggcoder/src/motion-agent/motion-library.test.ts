@@ -33,6 +33,7 @@ type Result = {
   kept?: string[];
   mount?: string[];
   importmap?: string;
+  head?: string[];
   results?: Array<{ id: string }>;
   looks?: Array<{ id: string; preview: string }>;
   pieces?: Array<{ id: string; kind: string; preview: string }>;
@@ -176,6 +177,12 @@ describe("Motion style library", () => {
     expect(css).toContain(".look-duotone-broadcast");
     const fonts = await fs.readFile(path.join(tmp, "assets", "fonts", "fonts.css"), "utf8");
     expect(fonts).toContain('font-family: "Archivo";');
+    // Fonts go in the page itself; `hf check` reports fonts from a linked fonts.css as missing.
+    const [fontBlock, tokens] = result.out.head ?? [];
+    expect(fontBlock).toMatch(/^<style>\n[\s\S]*font-family: "Archivo";[\s\S]*\n<\/style>$/);
+    expect(fontBlock).toContain('url("assets/fonts/archivo/');
+    expect(tokens).toBe('<link rel="stylesheet" href="assets/looks/duotone-broadcast.css" />');
+    expect(result.out.head?.join("\n")).not.toContain("fonts.css");
   });
 
   it("adds pieces without clobbering edited copies and carries MIT notices and 3D setup", async () => {

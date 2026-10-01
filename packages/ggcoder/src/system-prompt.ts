@@ -4,7 +4,8 @@ import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
 import { clampToBytes, CONTEXT_LIMITS, type ContextLimits } from "./core/context-limits.js";
 import { TOOL_PROMPT_HINTS, buildToolSteering, DEFAULT_TOOL_NAMES } from "./tools/prompt-hints.js";
 import type { LanguageId } from "./core/language-detector.js";
-import { stripBom } from "./utils/text.js";
+import { cleanInstructionText } from "./utils/text.js";
+import { log } from "./core/logger.js";
 import { renderResearchPolicy } from "./core/research-policy.js";
 import { resolveShell } from "./core/shell.js";
 import { renderStylePacksSection } from "./core/style-packs/index.js";
@@ -238,7 +239,8 @@ function renderToolsSection(
  *
  * Walks from cwd up to the filesystem root picking at most ONE instruction
  * file per directory (CONTEXT_FILES priority order, first match wins), skips
- * empty files, strips BOMs, and renders root-first (broad → narrow) so the
+ * empty files, strips BOMs and invisible characters (a cloned repo controls
+ * these files), and renders root-first (broad → narrow) so the
  * nearest file lands last — where LLM recency bias weights it most. A 32 KiB
  * combined budget is filled nearest-first (the nearest instructions are the
  * most binding); files dropped by the cap are reported in a one-line note.
@@ -262,7 +264,19 @@ export async function collectProjectContext(
       } catch {
         continue; // File doesn't exist — try the next candidate name.
       }
-      const trimmed = stripBom(content).trim();
+      const cleaned = cleanInstructionText(content);
+      if (cleaned.stripped > 0) {
+        log(
+          "WARN",
+          "system-prompt",
+          "Stripped invisible characters from a project instruction file",
+          {
+            file: filePath,
+            stripped: cleaned.stripped,
+          },
+        );
+      }
+      const trimmed = cleaned.text.trim();
       const relPath = path.relative(cwd, filePath) || name;
       // Empty/whitespace-only files still claim the directory slot — an empty
       // AGENTS.override.md deliberately silences the directory's instructions.

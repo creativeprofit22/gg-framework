@@ -740,9 +740,8 @@ async function runInkTUI(opts: {
   let activeModel = model;
   let activeThinking = opts.thinkingLevel;
 
-  const { tools, processManager, rebuildReadTool, lspManager, subAgentManager } = await createTools(
-    cwd,
-    {
+  const { tools, processManager, rebuildReadTool, clearReadTracker, lspManager, subAgentManager } =
+    await createTools(cwd, {
       commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
       agents,
       skills,
@@ -767,8 +766,7 @@ async function runInkTUI(opts: {
       getThinkingLevel: () => activeThinking,
       getMaxPerModel: () => opts.subagentMaxPerModel,
       getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
-    },
-  );
+    });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -1110,6 +1108,7 @@ async function runInkTUI(opts: {
     checkpointStore: checkpointRef.current ?? undefined,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
+    clearReadTracker,
     connectInitialMcpTools,
     planCallbacks: planToolCallbacks,
     onRuntimeStateChange: (updates) => {
@@ -1645,9 +1644,7 @@ async function resolveActiveProvider(
   }
 
   if (providerWasExplicit) {
-    throw new Error(
-      `Not logged in to ${preferred}. Run "ggcoder login" to authenticate.`,
-    );
+    throw new Error(`Not logged in to ${preferred}. Run "ggcoder login" to authenticate.`);
   }
 
   // Preferred provider isn't authenticated — fall back to the first one

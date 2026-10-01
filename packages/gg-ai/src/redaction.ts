@@ -29,6 +29,21 @@ const ENV_SECRET_ASSIGNMENT =
   /\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|TOKEN|KEY|AUTH|AUTHORIZATION|BEARER|CREDENTIALS?|PASSWORD|PASSWD|SECRET))\b(\s*[=:]\s*)(["']?)(?!\$|process\.env|os\.environ|import\.meta|env\.)(?=[^\s,"';}]*\d)([^\s,"';}=$][^\s,"';}]{7,})\3/g;
 const COMPACT_SECRET_ASSIGNMENT =
   /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|auth|authorization|credentials?|password|passwd|secret)|(?:[a-z0-9]+[_-])+key)=(["']?)(?!\$)([^\s,"'&;}=][^\s,"'&;}]{7,})\2/gi;
+/**
+ * `user:password@` in a URL. The userinfo ends at the LAST "@" of the authority
+ * (as the WHATWG URL parser reads it), so a password may itself contain "@",
+ * and Redis-style URLs carry a password with no username (`redis://:pw@host`).
+ * The authority ends at "/", "?", "#", whitespace, or a quote or angle bracket
+ * delimiting the URL in text, which keeps a later "@" out of it — such as an
+ * email address in the next field of minified JSON.
+ */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@:"'`<>]*:[^\s/?#"'`<>]+@/gi;
+/**
+ * Floor for passwords holding a raw quote, "?" or "#", which stop
+ * {@link URL_USERINFO} before any "@": hide them up to their first "@" rather
+ * than not at all.
+ */
+const URL_USERINFO_TO_FIRST_AT = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi;
 
 export interface RedactionOptions {
   /** Exact secret values to remove in addition to high-confidence formats. */
@@ -72,7 +87,8 @@ export function redactText(text: string, options: RedactionOptions = {}): string
     REDACTED,
   );
   // Credentials embedded in URLs.
-  result = result.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, `$1${REDACTED}@`);
+  result = result.replace(URL_USERINFO, `$1${REDACTED}@`);
+  result = result.replace(URL_USERINFO_TO_FIRST_AT, `$1${REDACTED}@`);
   // Authorization headers and inline auth values.
   result = result.replace(
     /\b(authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\s,;]+/gi,

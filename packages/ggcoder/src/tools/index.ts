@@ -188,6 +188,12 @@ export interface CreateToolsResult {
    */
   rebuildReadTool: (model: string) => AgentTool;
   /**
+   * Forget every file read. Call whenever the conversation is replaced or
+   * rewound: the reads it recorded are no longer in the model's context, so
+   * the model must read a file again before editing or overwriting it.
+   */
+  clearReadTracker: () => void;
+  /**
    * Local language-server pool backing navigation and, when enabled, edit/write
    * diagnostics. Present only for local filesystem operations; callers wire
    * `shutdownAll()` into cleanup alongside processManager.
@@ -306,7 +312,9 @@ export async function createTools(
     const corpusTools = [createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin)];
     const ledger = opts?.researchSources;
     tools.push(
-      ...(ledger ? corpusTools.map((tool) => withCorpusSourceRecording(tool, ledger)) : corpusTools),
+      ...(ledger
+        ? corpusTools.map((tool) => withCorpusSourceRecording(tool, ledger))
+        : corpusTools),
     );
   }
 
@@ -429,10 +437,13 @@ export async function createTools(
           onFileMutated: opts?.onFileMutated,
         });
   if (commandCreation) tools.push(commandCreation.tool);
+  const clearReadTracker = (): void => readFiles.clear();
+
   return {
     tools,
     processManager,
     rebuildReadTool,
+    clearReadTracker,
     lspManager,
     subAgentManager,
     commandCreation,

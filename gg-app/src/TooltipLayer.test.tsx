@@ -260,4 +260,47 @@ describe("TooltipLayer", () => {
 
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
+
+  it("fades out after the pointer leaves, then removes the hint", () => {
+    const { labelled } = setup();
+    hover(labelled);
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+
+    fireEvent.pointerOver(screen.getByText("plain text"));
+
+    // Still on screen for the exit, but no longer a tooltip to assistive tech.
+    const fading = document.querySelector(".gg-tooltip");
+    expect(fading?.hasAttribute("data-leaving")).toBe(true);
+    expect(fading?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(120);
+    });
+
+    expect(document.querySelector(".gg-tooltip")).toBeNull();
+  });
+
+  it("shows the next hint in place of a fading one", () => {
+    const { icon, labelled } = setup();
+    hover(icon);
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    fireEvent.pointerOver(screen.getByText("plain text"));
+
+    fireEvent.pointerOver(labelled);
+
+    const tips = document.querySelectorAll(".gg-tooltip");
+    expect(tips).toHaveLength(1);
+    expect(tips[0]?.hasAttribute("data-leaving")).toBe(false);
+    expect(screen.getByRole("tooltip").textContent).toBe("Installs and restarts");
+    // The pending exit must not remove the hint that replaced it.
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.getByRole("tooltip").textContent).toBe("Installs and restarts");
+  });
 });

@@ -682,12 +682,12 @@ export function isAdaptiveThinkingModel(model: string): boolean {
  * Opus 5.x / 4.8 / 4.7 and Sonnet 5.5, per the "Effort levels" table at
  * https://platform.claude.com/docs/en/build-with-claude/effort (Sonnet 5.5 also
  * verified live). The docs also list Sonnet 5 and Fable/Mythos 5.x; those still
- * clamp to high until checked live. `sonnet-5-5` is explicit because a bare
- * `sonnet-5` would widen the set to Sonnet 5. Keep in sync with
+ * clamp to high until checked live. `sonnet-5[-.]5` (dashed or dotted id) is
+ * explicit because a bare `sonnet-5` would widen the set to Sonnet 5. Keep in sync with
  * `isAnthropicXhighModel` in gg-core's thinking-level.ts (gg-ai must not import gg-core).
  */
 function supportsAnthropicXhighEffort(model: string): boolean {
-  return /opus-5|opus-4-8|opus-4-7|sonnet-5-5/.test(model);
+  return /opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -703,8 +703,8 @@ export function toAnthropicThinking(
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 5.x / 4.8 / 4.7 / 4.6 and Sonnet 5.x.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is limited to supportsAnthropicXhighEffort models (clamped to high
-    // elsewhere); max is supported by every adaptive model.
+    // xhigh is limited to supportsAnthropicXhighEffort models (Opus 5.x / 4.8 /
+    // 4.7 and Sonnet 5.5; clamped to high elsewhere); all support max.
     let effort: string = level;
     if (effort === "xhigh" && !supportsAnthropicXhighEffort(model)) {
       effort = "high";

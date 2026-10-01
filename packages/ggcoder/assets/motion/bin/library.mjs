@@ -46,14 +46,16 @@ async function projectDir(arg) {
   return dir;
 }
 
+/** Returns the installed families and fonts.mjs's page-ready <style> block. */
 function installFonts(project, families) {
-  if (families.length === 0) return [];
+  if (families.length === 0) return { installed: [], head: [] };
   const out = execFileSync(process.execPath, [join(BIN, "fonts.mjs"), "add", project, ...families], {
     encoding: "utf8",
   });
   const result = JSON.parse(out);
   if (!result.ok) fail(`Font install failed: ${result.error}`);
-  return result.installed;
+  // Inline, not a linked fonts.css: `hf check` only sees @font-face written in the page.
+  return { installed: result.installed, head: [result.head] };
 }
 
 const summary = (entry, type) => ({
@@ -135,11 +137,9 @@ if (command === "look") {
     ok: true,
     look: look.id,
     tokens: css,
-    fonts,
-    head: [
-      '<link rel="stylesheet" href="assets/fonts/fonts.css" />',
-      `<link rel="stylesheet" href="assets/looks/${look.id}.css" />`,
-    ],
+    fonts: fonts.installed,
+    head: [...fonts.head, `<link rel="stylesheet" href="assets/looks/${look.id}.css" />`],
+    use: "Paste head into the composition <head>, replacing any earlier fonts block.",
     root: `add class="look-${look.id}" to the root composition element`,
     spec: join(LIBRARY, "looks", look.id, "look.md"),
   });
@@ -196,7 +196,7 @@ if (command === "add") {
     ok: true,
     added,
     kept,
-    fonts,
+    fonts: fonts.installed,
     ...(importmap ? { importmap, note: "put importmap in index.html <head> before any module script" } : {}),
     mount: pieces.map(
       (p) =>

@@ -102,3 +102,5 @@ project's `CREDITS.md` when added.
   2–3 scene recipes.
 - `sample.html`: a one-scene composition that shows the look, used for its
   preview. It links `assets/fonts/fonts.css` and `assets/looks/<id>.css`.
+  Videos should instead paste the `head` that `library.mjs look` returns: it
+  declares the fonts in the page, which `hf check` requires.

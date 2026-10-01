@@ -891,7 +891,7 @@ describe("SessionManager turn metrics", () => {
     version: 1,
     turn: 1,
     provider: "openai",
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     stopReason: "end_turn",
     usage: { inputTokens: 100, outputTokens: 25, cacheRead: 50 },
     timing: {
@@ -908,7 +908,7 @@ describe("SessionManager turn metrics", () => {
   it("persists and reads validated metrics without putting them on the message DAG", async () => {
     const sessionsDir = await makeTempDir();
     const manager = new SessionManager(sessionsDir);
-    const created = await manager.create("/project", "openai", "gpt-6-sol");
+    const created = await manager.create("/project", "openai", "gpt-6.1-sol");
     await manager.appendTurnMetric(created.path, metric);
     const loaded = await manager.load(created.path);
 

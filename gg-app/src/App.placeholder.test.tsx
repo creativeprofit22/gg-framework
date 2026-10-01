@@ -1,17 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from "@testing-library/react";
 import { clearMocks, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentPane as AgentPaneComponent } from "./AgentPane";
-
-let AgentPane: typeof AgentPaneComponent;
-
-beforeAll(async () => {
-  mockWindows("main");
-  mockIPC(() => new Promise(() => {}));
-  AgentPane = (await import("./AgentPane")).AgentPane;
-});
+// Install native mocks before importing the real pane. Keep its module loading in
+// collection, outside the hook timeout: cold Windows imports can exceed 10s.
+mockWindows("main");
+mockIPC(() => new Promise(() => {}));
+const { AgentPane } = await import("./AgentPane");
 
 beforeEach(() => {
   vi.useFakeTimers();

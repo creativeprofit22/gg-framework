@@ -875,6 +875,13 @@ select {
   position: relative;
   z-index: 1;
 }
+/* An in-webview menu (the Windows/Linux window-layout fallback) is trapped in
+   its section's stacking context, so the transcript and footer painted over it
+   and took its clicks. Lift the section holding an open menu to menu level;
+   .menu-backdrop only exists while a menu is open. */
+.app > :has(.menu-backdrop) {
+  z-index: var(--z-menu);
+}
 @media (prefers-reduced-transparency: reduce) {
   .app::before {
     display: none;
@@ -1011,6 +1018,7 @@ select {
 }
 .home-version-row,
 .home-tagline,
+.home-action-note,
 .home-links,
 .home-version-corner {
   text-shadow:
@@ -1355,12 +1363,17 @@ select {
 }
 .home-link {
   color: #fff;
-  text-decoration: none;
+  /* The underline is always drawn but clear at rest, so hover fades it in and
+     out (as .markdown a does); switching the line on would snap. */
+  text-decoration: underline;
+  text-decoration-color: transparent;
   cursor: pointer;
-  transition: color var(--t-fast);
+  transition:
+    color var(--t-fast),
+    text-decoration-color var(--t-fast);
 }
 .home-link:hover {
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 /* ── Home actions ──
    The three ways in (Code, Chat, Motion) as big pills under the banner, and Settings as
@@ -1380,6 +1393,29 @@ select {
   height: 44px;
   padding: 0 22px;
   font-size: 15px;
+}
+/* A pill with a caption hung under it (Motion's "Still in process"). The
+   caption is out of flow, so the three pills stay level and the home column
+   keeps its centring. */
+.home-action-slot {
+  position: relative;
+  display: flex;
+}
+.home-action-note {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 8px;
+  /* Flex centring keeps an over-long caption centred instead of spilling right. */
+  display: flex;
+  justify-content: center;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.3;
+  /* Full-strength ink like the tagline and byline: dimmer text got lost over
+     bright stretches of the waves. Size keeps it secondary. */
+  color: var(--text);
 }
 .home-settings {
   position: absolute;
@@ -1967,6 +2003,12 @@ select {
   white-space: nowrap;
   display: flex;
   align-items: baseline;
+  /* Queried by the uncommitted-count steps below, which need the room the
+     title actually has: the window width minus the macOS traffic-light gutter,
+     the usage meter and the window pill. (Its width never depended on its
+     content anyway: it is the strip's only growing item, so it always fills
+     what's left.) */
+  container: chat-head-title / inline-size;
   font-family: var(--sans);
   font-size: 13px;
   font-weight: 500;
@@ -2017,9 +2059,10 @@ select {
   /* Quad-tile widths: the folder had already shrunk to nothing, leaving the
      accent dot and a leading separator. Drop it and that separator explicitly
      so the whole counts get the room. (The separator to drop is the one not
-     preceded by a count chip; the dirty count before it is hidden at 520px.) */
+     preceded by a count chip; the uncommitted count before it goes too.) */
   /* Direct children only: the CI indicator keeps its own separator. */
   .chat-head-cwd,
+  .chat-head-uncommitted,
   .chat-head-title > .chat-head-sep:not(.chat-head-github + .chat-head-sep) {
     display: none;
   }
@@ -2028,9 +2071,34 @@ select {
   /* Near the 480px minimum window the strip also carries the macOS traffic-light
      gutter and the usage meter; folder + dirty + issues + PRs don't fit, and the
      issues chip was hard-clipped mid-word. Keep identity (folder, elastic) +
-     the GitHub counts. */
-  .chat-head-dirty,
-  .chat-head-sep:has(+ .chat-head-dirty) {
+     the GitHub counts: the added-roots chip drops whole. */
+  .chat-head-dirty:not(.chat-head-uncommitted),
+  .chat-head-sep:has(+ .chat-head-dirty:not(.chat-head-uncommitted)) {
+    display: none;
+  }
+}
+/* The uncommitted count gives way in two steps, and only to make room for the
+   other counts (issues, PRs, CI); beside the folder alone it stays whole.
+   First it condenses to its number ("12 uncommitted" → "12", ~80px back),
+   then it drops. The widths are tuned on typical counts ("4 issues │ 1 PR")
+   so the folder name keeps a few readable characters at each step. The word
+   stays readable to screen readers (the .sr-only pattern), and the tooltip
+   still spells it out. */
+@container chat-head-title (max-width: 290px) {
+  .chat-head-title:has(.chat-head-github) .chat-head-uncommitted-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+@container chat-head-title (max-width: 190px) {
+  .chat-head-title:has(.chat-head-github) > .chat-head-uncommitted,
+  .chat-head-title:has(.chat-head-github) > .chat-head-sep:has(+ .chat-head-uncommitted) {
     display: none;
   }
 }
@@ -2047,6 +2115,7 @@ select {
   font: inherit;
   cursor: pointer;
   text-align: left;
+  transition: color var(--t-fast);
 }
 .chat-head-link:hover:not(:disabled) {
   color: var(--text);
@@ -2066,6 +2135,7 @@ select {
   font: inherit;
   color: var(--text-muted);
   cursor: pointer;
+  transition: color var(--t-fast);
   /* Compact, high-signal counts — never truncate or wrap; the narrow-window
      cascade above drops other segments whole so these stay readable. */
   flex: none;
@@ -3067,6 +3137,10 @@ select {
   color: var(--text);
   font-size: 14px;
   cursor: pointer;
+  transition:
+    color var(--t-fast),
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
 /* Hover and keyboard both land on `.active`, so the pointer and the arrow keys
    can never highlight two different rows at once. */
@@ -3576,6 +3650,7 @@ select {
   gap: 8px;
   padding: 6px 6px;
   border-radius: var(--radius-button);
+  transition: background-color var(--t-fast);
 }
 .tasks-item:hover,
 .tasks-item.is-viewed {
@@ -3799,6 +3874,8 @@ select {
   border-radius: var(--radius-button);
   font-size: 12px;
   cursor: pointer;
+  /* HfPullModal sets the highlighted row's border colour inline. */
+  transition: border-color var(--t-fast);
 }
 .hf-result-name {
   overflow: hidden;
@@ -3873,6 +3950,9 @@ select {
   gap: 8px;
   padding: 6px 6px;
   border-radius: var(--radius-button);
+  transition:
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .mcp-item:hover {
   background: var(--surface-1);
@@ -4027,9 +4107,9 @@ select {
   transition:
     opacity var(--t-fast),
     color var(--t-fast),
-    background-color var(--t-fast);
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
-.picker-item-wrap:hover .picker-hide,
 /* Small dismiss buttons holding the drawn X icon (hide, delete, cancel):
    centre the icon exactly, whatever padding each button carries. */
 :is(.picker-hide, .mcp-delete, .tasks-delete, .queued-cancel) {
@@ -4037,6 +4117,7 @@ select {
   align-items: center;
   justify-content: center;
 }
+.picker-item-wrap:hover .picker-hide,
 .picker-hide:focus-visible {
   opacity: 1;
 }
@@ -4061,7 +4142,8 @@ select {
   transition:
     color var(--t-fast),
     background-color var(--t-fast),
-    border-color var(--t-fast);
+    border-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .picker-item:hover {
   background: var(--surface-1);
@@ -4525,6 +4607,7 @@ select {
     background var(--t-fast),
     border-color var(--t-fast),
     color var(--t-fast),
+    box-shadow var(--t-fast),
     visibility 0s linear var(--dur-enter);
 }
 .export-chat.visible {
@@ -4538,6 +4621,7 @@ select {
     background var(--t-fast),
     border-color var(--t-fast),
     color var(--t-fast),
+    box-shadow var(--t-fast),
     visibility 0s;
 }
 .export-chat.visible:hover {
@@ -4555,16 +4639,25 @@ select {
   color: var(--text-muted);
 }
 @media (prefers-reduced-motion: reduce) {
+  /* No travel; the fade and the hover colours stay. */
   .export-chat {
     transform: none;
     transition:
       opacity var(--dur-enter) var(--ease-out),
+      background var(--t-fast),
+      border-color var(--t-fast),
+      color var(--t-fast),
+      box-shadow var(--t-fast),
       visibility 0s linear var(--dur-enter);
   }
   .export-chat.visible {
     transform: none;
     transition:
       opacity var(--dur-enter) var(--ease-out),
+      background var(--t-fast),
+      border-color var(--t-fast),
+      color var(--t-fast),
+      box-shadow var(--t-fast),
       visibility 0s;
   }
 }
@@ -6583,9 +6676,20 @@ select {
 .gg-tooltip[data-side="bottom"] {
   --enter-y: -3px;
 }
+/* Leaving: TooltipLayer holds the last hint for EXIT_MS (keep equal to
+   --dur-exit) so it sinks back toward its control instead of vanishing.
+   Clicks and hovers go straight through it. */
+.gg-tooltip[data-leaving] {
+  --exit-y: var(--enter-y);
+  pointer-events: none;
+  animation: surface-out var(--dur-exit) var(--ease-in) forwards;
+}
 @media (prefers-reduced-motion: reduce) {
   .gg-tooltip {
     animation-name: fade-in;
+  }
+  .gg-tooltip[data-leaving] {
+    animation-name: fade-out;
   }
 }
 
@@ -6718,6 +6822,7 @@ select {
 }
 .img-card-clickable {
   cursor: pointer;
+  transition: border-color var(--t-fast);
 }
 .img-card-clickable:hover,
 .img-card-clickable:focus-visible {
@@ -6792,7 +6897,8 @@ select {
   cursor: pointer;
   transition:
     color var(--t-fast),
-    background-color var(--t-fast);
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .slash-name {
   font-family: var(--sans);
@@ -7133,14 +7239,18 @@ select {
   font-size: 13px;
   cursor: pointer;
   padding: 0;
-  transition: color var(--t-fast);
+  /* Underline drawn clear at rest so hover fades it (see .home-link). */
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition:
+    color var(--t-fast),
+    text-decoration-color var(--t-fast);
 }
 .cancel:hover:not(:disabled) {
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 .cancel:disabled {
   cursor: wait;
-  text-decoration: none;
 }
 
 /* App-update banner — its own row below the footer so it reads as a distinct,
@@ -7372,11 +7482,16 @@ select {
   color: var(--text);
   cursor: pointer;
   letter-spacing: -0.005em;
-  transition: color var(--t-fast);
+  /* Underline drawn clear at rest so hover fades it (see .home-link). */
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition:
+    color var(--t-fast),
+    text-decoration-color var(--t-fast);
 }
 .home-whatsnew:hover {
   color: #fff;
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 .home-whatsnew:focus-visible {
   color: var(--text);
@@ -8267,6 +8382,7 @@ select {
   overflow: visible;
   transition:
     filter var(--t-fast),
+    background-color var(--t-fast),
     box-shadow var(--t-fast),
     color var(--t-fast);
 }
@@ -9049,6 +9165,10 @@ select {
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
+  transition:
+    color var(--t-fast),
+    background-color var(--t-fast),
+    border-color var(--t-fast);
 }
 .memory-delete:hover:not(:disabled) {
   border-color: var(--border);

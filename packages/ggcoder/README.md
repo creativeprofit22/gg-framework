@@ -67,17 +67,17 @@ You can still add your own MCPs if you need them. But start with less. You'll ge
 
 Switch mid-conversation with `/model`. Not locked to anyone.
 
-| Provider          | Models                                                             | Auth             |
-| ----------------- | ------------------------------------------------------------------ | ---------------- |
-| **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 4.5                  | OAuth            |
-| **OpenAI**        | GPT-6 Astra, GPT-6 Sol, GPT-6 Luna                                 | OAuth            |
-| **Moonshot**      | Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code                    | OAuth or API key |
-| **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash (image)                                     | API key          |
-| **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |
-| **Xiaomi (MiMo)** | MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed           | API key          |
-| **DeepSeek**      | DeepSeek V4 Pro, V4.1 Flash (image)                                | API key          |
-| **Sakana (Fugu)** | Fugu, Fugu Max, Fugu Ultra (image)                                 | API key          |
-| **OpenRouter**    | Qwen3.8 Max (image + video) + multi-provider gateway               | API key          |
+| Provider          | Models                                                   | Auth             |
+| ----------------- | -------------------------------------------------------- | ---------------- |
+| **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 4.5        | OAuth            |
+| **OpenAI**        | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna                     | OAuth            |
+| **Moonshot**      | Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code          | OAuth or API key |
+| **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash (image)                           | API key          |
+| **MiniMax**       | MiniMax M3 (image + video)                               | API key          |
+| **Xiaomi (MiMo)** | MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed | API key          |
+| **DeepSeek**      | DeepSeek V4 Pro, V4.1 Flash (image)                      | API key          |
+| **Sakana (Fugu)** | Fugu, Fugu Max, Fugu Ultra (image)                       | API key          |
+| **OpenRouter**    | Qwen3.8 Max (image + video) + multi-provider gateway     | API key          |
 
 The same conversation, the same tools, the same project context — only the model changes. Use a strong reasoning model when you need it, swap to a fast cheap one for grunt work, never restart your session.
 
@@ -161,7 +161,7 @@ Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub rep
 
 `subagent` remains blocking. The async suite launches persistent NDJSON worker processes, so a parent can start up to four active child turns, keep working, steer them, and wait for any or all results. Up to eight idle workers remain available for follow-up; bounded snapshots retain the latest 20 agents.
 
-Only GPT-6 Astra/Sol at **Ultra** delegates proactively. Lower Astra/Sol levels use async agents only when the user or project/skill instructions request delegation; other models receive no proactive policy.
+Only GPT-6 Astra and GPT-6.1 Sol at **Ultra** delegate proactively. Lower Astra/Sol levels use async agents only when the user or project/skill instructions request delegation; other models receive no proactive policy.
 
 Children share the parent working directory, not isolated worktrees. Parallel writes must target disjoint files or subsystems. Async fan-out is one level deep, child output is bounded, idle workers reap after 10 minutes, and workers are not resumable after a CLI/app restart.
 

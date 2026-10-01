@@ -25,6 +25,7 @@ import { availableWhatsNewFeeds, type WhatsNewEntry } from "./whats-new";
 const HIGHLIGHT_TERMS = [
   "MiMo-V2.5-Pro-UltraSpeed",
   "GPT-6 Astra",
+  "GPT-6.1 Sol",
   "GPT-6 Sol",
   "GPT-6 Luna",
   "GPT-5.6 Ultra",

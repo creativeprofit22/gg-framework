@@ -30,6 +30,12 @@ import {
   type ContinuationReviewRecord,
 } from "./continuation-review-context.js";
 import {
+  COMPLETION_REVIEW_STATE_KIND,
+  type CompletionReview,
+  type CompletionReviewRequest,
+  type CompletionReviewResponse,
+} from "./completion-review.js";
+import {
   SlashCommandRegistry,
   createBuiltinCommands,
   type SlashCommandContext,
@@ -242,6 +248,7 @@ import {
   INDEPENDENT_REVIEW_SCORE_THRESHOLD,
   parseReviewerFindings,
   REVIEWER_TOOLS,
+  REVIEWER_TURN_TIMEOUT_MS,
   REVIEWER_WAIT_MS,
 } from "./ideal-review-subagent.js";
 import { buildEnvDeltaMessage } from "./env-delta.js";
@@ -302,6 +309,14 @@ function isTerminalSubAgentState(state: SubAgentState): boolean {
     state === "closed" ||
     state === "reaped"
   );
+}
+
+/** Per-prompt run controls. */
+export interface PromptRunOptions {
+  /** Offer the model no tools for this prompt. */
+  disableTools?: boolean;
+  /** Hold reasoning effort at the plan-mode ceiling for this prompt. */
+  capThinking?: boolean;
 }
 
 export interface AgentSessionOptions {
@@ -489,6 +504,8 @@ export interface AgentSessionOptions {
   validateToolExecution?: () => Promise<void>;
   /** Host-provided broadcast hook fired after the `tasks` tool adds, completes, or removes a task. */
   onTasksChanged?: () => void;
+  /** Mode-owned completion policy; absent in Coder/chat/worker sessions. */
+  completionReview?: CompletionReview;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -630,6 +647,9 @@ export class AgentSession {
    *  creation). Called from switchModel so video-capable models get the
    *  read-tool's native-video path after a mid-session model change. */
   private rebuildReadTool: ((model: string) => AgentTool) | undefined;
+  /** Forgets every file read; called whenever the conversation is replaced or
+   *  rewound, so the model must re-read a file before changing it. */
+  private clearReadTracker: (() => void) | undefined;
   private skills: Skill[] = [];
   private cacheKeyLogged = false;
   // ── Self-correction hook state (mirrors the TUI's useAgentLoop refs) ──
@@ -966,6 +986,7 @@ export class AgentSession {
       tools: builtInTools,
       processManager,
       rebuildReadTool,
+      clearReadTracker,
       lspManager,
       subAgentManager,
       commandCreation,
@@ -1118,6 +1139,7 @@ export class AgentSession {
       this.registerTools(allowedTools);
     }
     this.rebuildReadTool = rebuildReadTool;
+    this.clearReadTracker = clearReadTracker;
     this.processManager = processManager;
     this.lspManager = lspManager;
     this.commandCreation = commandCreation;
@@ -2309,6 +2331,8 @@ ${content}
 
   /**
    * Process user input. Handles slash commands or runs agent loop.
+   * `capThinking` holds reasoning effort at the plan-mode ceiling for this
+   * prompt — for turns that must answer quickly from what is already known.
    */
   async prompt(
     content: string,
@@ -2317,8 +2341,7 @@ ${content}
       kind: "prompt",
       visibility: "transcript",
     },
-    options: {
-      disableTools?: boolean;
+    options: PromptRunOptions & {
       onAccepted?: () => void | Promise<void>;
       meta?: PromptMeta;
     } = {},
@@ -2493,6 +2516,7 @@ ${content}
   private resetHookState(originalRequest: string): void {
     this.verificationEvidenceLedger.beginRun();
     this.semanticLoop.controller?.abort();
+    this.opts.completionReview?.begin(originalRequest);
     this.lspManager?.clearPendingDiagnostics();
     this.hookStats = {
       changedLines: 0,
@@ -2566,6 +2590,10 @@ ${content}
    * ideal-review decisions match across the CLI and the app.
    */
   private async trackHookEvent(event: AgentEvent): Promise<void> {
+    if (this.opts.completionReview) {
+      await this.opts.completionReview.track(event);
+      if (event.type === "checkpoint") await this.persistCompletionReviewState();
+    }
     switch (event.type) {
       case "text_delta":
         this.hookText += event.text;
@@ -2587,10 +2615,10 @@ ${content}
         const args = call?.args;
         if (call) {
           const command = typeof call.args.command === "string" ? call.args.command : "";
+          const verificationCandidate =
+            call.name === "bash" && classifyVerificationCommand(command).candidate;
           const workspace =
-            call.name === "bash" &&
-            classifyVerificationCommand(command).candidate &&
-            this.opts.captureVerificationWorkspace
+            verificationCandidate && this.opts.captureVerificationWorkspace
               ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
               : undefined;
           if (this.hookToolCalls.get(event.toolCallId) !== call) break;
@@ -2600,6 +2628,9 @@ ${content}
             details: event.details,
             workspace,
           });
+          // Upstream saves completion-review state whenever verification state
+          // changes; the evidence ledger replaced that save point here.
+          if (verificationCandidate) await this.persistCompletionReviewState();
         }
         this.hookStats.toolCalls += 1;
         if (event.isError) this.hookStats.toolFailures += 1;
@@ -2966,6 +2997,63 @@ ${content}
     })();
   }
 
+  /** Fresh image-only critique context, using the active transport and auth routing. */
+  private async callCompletionReviewer(
+    request: CompletionReviewRequest,
+    signal: AbortSignal,
+  ): Promise<CompletionReviewResponse> {
+    const model = this.model;
+    const provider = this.provider;
+    const thinking = this.thinkingLevel;
+    const configuredBaseUrl = this.baseUrl;
+    if (getModel(model)?.supportsImages !== true)
+      throw new Error("Active model has no confirmed image support");
+    signal.throwIfAborted();
+    try {
+      const creds = await this.authStorage.resolveCredentials(provider, {
+        storageKeys: this.currentAuthStorageKeys(),
+      });
+      const baseUrl = configuredBaseUrl ?? creds.baseUrl;
+      const result = stream({
+        provider,
+        model,
+        messages: [
+          { role: "system", content: request.instruction },
+          { role: "user", content: [{ type: "text", text: request.context }, ...request.images] },
+        ],
+        maxTokens: 4000,
+        thinking,
+        apiKey: creds.accessToken,
+        accountId: creds.accountId,
+        projectId: creds.projectId,
+        baseUrl,
+        signal,
+        transportSessionId: this.sessionId || this.transportSessionId,
+        defaultHeaders:
+          provider === "moonshot" && isKimiCodingEndpoint(baseUrl)
+            ? kimiCodingHeaders()
+            : undefined,
+        userAgent: provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
+        supportsImages: true,
+      });
+      const response = await result.response;
+      const content = response.message.content;
+      const text =
+        typeof content === "string"
+          ? content
+          : content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n");
+      if (text.length > 32_768) throw new Error("Review response exceeded its limit");
+      return { text, model, provider, thinking };
+    } catch {
+      // Provider errors may contain transport details; never copy them to tools/artifacts.
+      signal.throwIfAborted();
+      throw new Error("Active model review unavailable or invalid; no verdict recorded");
+    }
+  }
+
   /** One-shot judge call on the session's ACTIVE model — deliberately not a
    *  cheaper routing: judging a model's own failure patterns with a weaker
    *  model swaps false negatives for false positives. */
@@ -3027,9 +3115,12 @@ ${content}
         triggerReasons: decision.reasons,
       });
       // Active model forced at spawn time — never routed to a fast/review model.
+      // The reviewer's own time limit ends it with a verdict on what it read;
+      // the wait below is only a backstop against a hung child.
       const snapshot = await this.subAgentManager.spawn(taskName, task, undefined, {
         model: this.model,
         tools: REVIEWER_TOOLS,
+        turnTimeoutMs: REVIEWER_TURN_TIMEOUT_MS,
       });
       agentId = snapshot.agent_id;
       const waited = await this.subAgentManager.wait([agentId], "all", REVIEWER_WAIT_MS);
@@ -3045,7 +3136,11 @@ ${content}
       }
       const findings = parseReviewerFindings(agent.output ?? "");
       if (!findings) {
-        log("WARN", "ideal", "Independent reviewer output unparseable; falling back", { agentId });
+        log("WARN", "ideal", "Independent reviewer output unparseable; falling back", {
+          agentId,
+          state: agent.state,
+          ...(agent.error ? { error: agent.error } : {}),
+        });
         return [];
       }
       if (findings.clean) {
@@ -3126,6 +3221,7 @@ ${content}
    * the flash, so this errs toward arming.
    */
   private wouldInjectIdealReview(): boolean {
+    if (this.opts.completionReview?.armed) return true;
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
     // Mid-review a stop still injects: the coverage follow-up while files are
     // unread, or its escalation once the budget is spent. Both make the model
@@ -3216,6 +3312,25 @@ ${content}
 
     if (diagnosticMessages.length > 0) return diagnosticMessages;
 
+    if (this.opts.completionReview) {
+      const followUp = await this.opts.completionReview.followUp(
+        (request, signal) => this.callCompletionReviewer(request, signal),
+        this.opts.signal,
+      );
+      await this.persistCompletionReviewState();
+      if (followUp) {
+        this.eventBus.emit("hook", { kind: "ideal" });
+        this.refreshHookArming();
+        return [
+          {
+            role: "user",
+            content: followUp,
+            provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+          },
+        ];
+      }
+      this.refreshHookArming();
+    }
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return null;
 
     if (this.idealReviewPhase === "reviewing") {
@@ -3345,13 +3460,13 @@ ${content}
   }
 
   /** Auto-compact if needed, run agent loop with auth retry, and persist messages. */
-  private async runLoop(options: { disableTools?: boolean } = {}): Promise<void> {
+  private async runLoop(options: PromptRunOptions = {}): Promise<void> {
     return this.opts.unattended
       ? runUnattended(() => this.runLoopInternal(options))
       : this.runLoopInternal(options);
   }
 
-  private async runLoopInternal(options: { disableTools?: boolean }): Promise<void> {
+  private async runLoopInternal(options: PromptRunOptions): Promise<void> {
     assertProviderExecutionAllowed(this.provider, this.opts.unattended);
     // Languages are re-detected at each task boundary so a project scaffolded
     // during the previous turn gets its packs; the prompt is rebuilt only when
@@ -3493,10 +3608,12 @@ ${content}
         // Plan mode caps effort at medium (Codex `plan_mode_reasoning_effort`
         // preset): read-only exploration doesn't need xhigh/max reasoning, and
         // deep-reasoning models left at the ceiling burn enormous thinking
-        // budgets re-deriving context they cannot act on.
-        thinking: this.planModeRef.current
-          ? clampThinkingForPlanMode(this.thinkingLevel)
-          : this.thinkingLevel,
+        // budgets re-deriving context they cannot act on. A capped prompt
+        // (a sub-agent's timed answer) gets the same ceiling for the same reason.
+        thinking:
+          this.planModeRef.current || options.capThinking
+            ? clampThinkingForPlanMode(this.thinkingLevel)
+            : this.thinkingLevel,
         serviceTier,
         ...(serviceTier ? { serviceTierRequiresAccountId: true } : {}),
         apiKey,
@@ -4082,6 +4199,7 @@ ${content}
     await this.rePersistAutopilotMarkers();
     await this.rePersistApprovedPlanConsumption();
     await this.rePersistAppMarkers();
+    await this.persistCompletionReviewState();
     await this.persistAppMarker("compaction", {
       originalCount: result.originalCount,
       newCount: result.newCount,
@@ -4510,6 +4628,7 @@ ${content}
     const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
+    this.clearReadTracker?.();
     // Fresh conversation — new entries must not chain onto the old DAG's leaf.
     this.currentLeafId = null;
     // Transient sessions (Ken chat/autopilot, subagent spawns) never touch the
@@ -4627,6 +4746,8 @@ ${content}
     this.messages = [systemMsg, ...branchMessages];
     this.lastPersistedIndex = this.messages.length;
     this.verificationEvidenceLedger.clear();
+    // Reads made in the dropped messages are no longer in the model's context.
+    this.clearReadTracker?.();
 
     this.eventBus.emit("branch_created", {
       leafId: this.currentLeafId,
@@ -4798,10 +4919,11 @@ ${content}
     }
     const queued = this.queuePromptChain.then(async () => {
       // Attachment prompts skip slash expansion when idle too.
-      const resolved =
-        attachments.length === 0 ? await this.resolveSlashInput(text, false) : null;
+      const resolved = attachments.length === 0 ? await this.resolveSlashInput(text, false) : null;
       const modelText =
-        resolved?.kind === "template" && !resolved.setupInspection ? resolved.fullPrompt : undefined;
+        resolved?.kind === "template" && !resolved.setupInspection
+          ? resolved.fullPrompt
+          : undefined;
       const count = this.enqueue(text, attachments, meta, modelText);
       return { count, id: `q${this.queueSeq}` };
     });
@@ -5849,6 +5971,18 @@ ${content}
     }
   }
 
+  private async persistCompletionReviewState(): Promise<void> {
+    if (!this.sessionPath || !this.opts.completionReview) return;
+    await this.sessionManager.appendEntry(this.sessionPath, {
+      type: "custom",
+      kind: COMPLETION_REVIEW_STATE_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: this.opts.completionReview.snapshot(),
+    });
+  }
+
   /**
    * Record one autopilot verdict marker (prompted / done / human / capped)
    * against this build session. Kept in memory for the live transcript and
@@ -6313,6 +6447,12 @@ ${content}
     );
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
+    const savedCompletionReview = [...loaded.entries]
+      .reverse()
+      .find((entry) => entry.type === "custom" && entry.kind === COMPLETION_REVIEW_STATE_KIND);
+    this.opts.completionReview?.restore(
+      savedCompletionReview?.type === "custom" ? savedCompletionReview.data : null,
+    );
     this.hookToolCalls.clear();
     this.checkpointGeneration = loaded.header.generation ?? 0;
     const restoredConversationId = loaded.header.conversationId ?? loaded.header.id;
@@ -6379,6 +6519,8 @@ ${content}
     // not fail when Anthropic's stricter many-image limit activates later.
     const systemMsg = this.messages[0]; // Already built
     this.messages = [systemMsg, ...loadedMessages];
+    // Reads recorded for the previous conversation don't carry over.
+    this.clearReadTracker?.();
     const normalizedImageCount = await normalizeMessageImages(this.messages);
     if (normalizedImageCount > 0) {
       log("INFO", "session", `Resized ${normalizedImageCount} restored session image(s)`);

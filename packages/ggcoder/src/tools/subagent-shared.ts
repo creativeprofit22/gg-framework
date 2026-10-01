@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
+import type { AgentSession } from "../core/agent-session.js";
 import { getFastModel } from "../core/model-registry.js";
 import { truncateTail } from "./truncate.js";
 import { getTrustedAgentEnv } from "./safe-env.js";
@@ -18,6 +19,11 @@ export const SUB_AGENT_MAX_OUTPUT_CHARS = 100_000;
 export const SUB_AGENT_MAX_OUTPUT_LINES = 500;
 export const SUB_AGENT_MAX_STDERR_CHARS = 10_000;
 export const SUB_AGENT_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * The single tool-free turn a timed-out worker gets to answer from what it has
+ * gathered. Anyone waiting on a time-limited child must allow for it.
+ */
+export const SUB_AGENT_TIMEOUT_RECOVERY_MS = 60_000;
 export const SUB_AGENT_DEPTH_ENV = "GG_SUBAGENT_DEPTH";
 export const MAX_BLOCKING_SUBAGENT_DEPTH = 3;
 
@@ -122,6 +128,34 @@ export function childSubAgentEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.P
 export function resolveSubAgentCliEntry(): string {
   const cliPath = fileURLToPath(new URL("../cli.js", import.meta.url));
   return existsSync(cliPath) ? cliPath : process.argv[1];
+}
+
+/**
+ * Run one sub-agent prompt and resolve to the error the agent loop stopped on,
+ * if it stopped on one.
+ *
+ * `prompt()` resolving is not proof the child finished. The loop ends some runs
+ * by emitting an `error` event and then returning normally — repeated invalid
+ * tool arguments, a provider that stopped responding, a tool call that never
+ * closed — because an interactive user sees that error and simply sends
+ * another message. A sub-agent has nobody to do that, so its host must treat
+ * the event as a failed turn; otherwise the parent receives the child's
+ * mid-task narration ("Let me re-read…") as if it were the final report.
+ */
+export async function promptSubAgent(
+  session: Pick<AgentSession, "prompt" | "eventBus">,
+  task: string,
+): Promise<Error | undefined> {
+  let stoppedOn: Error | undefined;
+  const unsubscribe = session.eventBus.on("error", ({ error }) => {
+    stoppedOn = error;
+  });
+  try {
+    await session.prompt(task);
+  } finally {
+    unsubscribe();
+  }
+  return stoppedOn;
 }
 
 export function boundSubAgentOutput(raw: string): string {

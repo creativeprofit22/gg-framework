@@ -58,3 +58,15 @@ export function stripInvisibleUnicode(text: string): { text: string; stripped: n
   });
   return { text: cleaned, stripped };
 }
+
+/**
+ * Clean an instruction file a cloned repo can ship (AGENTS.md, CLAUDE.md, and
+ * .gg skills, agents and commands) before any of it reaches the model: drop a
+ * leading BOM, then every invisible character. These files land in the most
+ * trusted part of the prompt, so hidden text there is the highest-value
+ * injection. `stripped` excludes the BOM, which is harmless, so callers can
+ * warn only about real hidden characters.
+ */
+export function cleanInstructionText(raw: string): { text: string; stripped: number } {
+  return stripInvisibleUnicode(stripBom(raw));
+}

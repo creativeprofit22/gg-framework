@@ -54,6 +54,19 @@ async function writeSession(dir: string, cwd: string): Promise<void> {
   await fs.writeFile(path.join(dir, "session.jsonl"), `${header}\n${message}\n`, "utf-8");
 }
 
+/** Start a session through the real writer, then record one user message. */
+async function createUsedSession(cwd: string): Promise<void> {
+  const manager = new SessionManager(state.sessionsDir);
+  const session = await manager.create(cwd, "anthropic", "claude-sonnet-5");
+  await manager.appendEntry(session.path, {
+    type: "message",
+    id: "33333333-3333-3333-3333-333333333333",
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    message: { role: "user", content: "hi" },
+  });
+}
+
 async function writeSessionRecords(
   cwd: string,
   fileName: string,
@@ -270,6 +283,37 @@ describe("discoverProjects (ggcoder store)", () => {
     expect(found?.lastActiveMs).toBeLessThan(Date.now() - 24 * 60 * 60 * 1000);
   });
 
+  it("lists a project only once one of its sessions records a message", async () => {
+    // A session writes its header as soon as it starts, before anything is
+    // typed, so a header-only store means the folder was opened, not used.
+    const openedOnly = path.join(tmp, "projects", "opened-only");
+    const used = path.join(tmp, "projects", "used");
+    await fs.mkdir(openedOnly, { recursive: true });
+    await fs.mkdir(used, { recursive: true });
+    await new SessionManager(state.sessionsDir).create(openedOnly, "anthropic", "claude-sonnet-5");
+    await createUsedSession(used);
+
+    const projects = await discoverProjects();
+
+    expect(projects.some((p) => p.path === openedOnly)).toBe(false);
+    expect(projects.some((p) => p.path === used)).toBe(true);
+  });
+
+  it("does not let a newer never-used session refresh a project's recency", async () => {
+    const projectPath = path.join(tmp, "projects", "reopened");
+    await fs.mkdir(projectPath, { recursive: true });
+    const store = path.join(state.sessionsDir, encodeCwd(projectPath));
+    await writeSession(store, projectPath);
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    await fs.utimes(path.join(store, "session.jsonl"), old, old);
+    await new SessionManager(state.sessionsDir).create(projectPath, "anthropic", "claude-sonnet-5");
+
+    const projects = await discoverProjects();
+
+    const found = projects.find((p) => p.path === projectPath);
+    expect(found?.lastActiveMs).toBeLessThan(Date.now() - 24 * 60 * 60 * 1000);
+  });
+
   it("infers an extra project root from several known projects sharing a parent", async () => {
     const other = path.join(tmp, "elsewhere");
     for (const name of ["one", "two", "three"]) {
@@ -304,6 +348,30 @@ describe("discoverProjects (ggcoder store)", () => {
     const projects = await discoverProjects();
 
     expect(projects.some((project) => project.path === unrelatedFolder)).toBe(false);
+  });
+
+  it("does not infer a hidden folder, or a folder inside one, as a project root", async () => {
+    // Throwaway checkouts often live inside tool folders, e.g. PR worktrees at
+    // `<repo>/.gg/pr62`. Several sessions there must not turn the tool folder
+    // into a projects root and list its uploads/plans/skills as projects.
+    const toolFolder = path.join(tmp, "repo", ".gg");
+    const insideHidden = path.join(tmp, ".cache", "checkouts");
+    for (const parent of [toolFolder, insideHidden]) {
+      for (const name of ["pr1", "pr2", "pr3"]) {
+        const projectPath = path.join(parent, name);
+        await fs.mkdir(projectPath, { recursive: true });
+        await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+      }
+      await fs.mkdir(path.join(parent, "uploads"), { recursive: true });
+    }
+
+    const projects = await discoverProjects();
+
+    // Checkouts that really had sessions stay listed; the tool folder's other
+    // contents do not.
+    expect(projects.some((p) => p.path === path.join(toolFolder, "pr1"))).toBe(true);
+    expect(projects.some((p) => p.path === path.join(toolFolder, "uploads"))).toBe(false);
+    expect(projects.some((p) => p.path === path.join(insideHidden, "uploads"))).toBe(false);
   });
 
   it("does not infer a root from too few projects, nor scan the home directory", async () => {
@@ -879,8 +947,7 @@ describe.skipIf(process.platform !== "win32")("real Windows session round-trip",
     const projectPath = path.join(tmp, "My Projects", "gg_app");
     await fs.mkdir(projectPath, { recursive: true });
 
-    const manager = new SessionManager(state.sessionsDir);
-    await manager.create(projectPath, "anthropic", "claude-sonnet-5");
+    await createUsedSession(projectPath);
 
     const projects = await discoverProjects();
     expect(projects.find((p) => p.path === projectPath)?.name).toBe("gg_app");
@@ -895,9 +962,8 @@ describe.skipIf(process.platform !== "win32")("real Windows session round-trip",
     const projectPath = path.join(tmp, "projects", "extended");
     await fs.mkdir(projectPath, { recursive: true });
 
-    const manager = new SessionManager(state.sessionsDir);
-    await manager.create(`\\\\?\\${projectPath}`, "anthropic", "claude-sonnet-5");
-    await manager.create(projectPath, "anthropic", "claude-sonnet-5");
+    await createUsedSession(`\\\\?\\${projectPath}`);
+    await createUsedSession(projectPath);
 
     const projects = await discoverProjects();
     expect(projects.filter((p) => p.path === projectPath)).toHaveLength(1);

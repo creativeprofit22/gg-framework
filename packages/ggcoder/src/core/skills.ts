@@ -2,8 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { clampToBytes, CONTEXT_LIMITS, type ContextLimits } from "./context-limits.js";
-import { stripBom } from "../utils/text.js";
+import { cleanInstructionText } from "../utils/text.js";
 import { parseFrontmatter } from "./frontmatter.js";
+import { log } from "./logger.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const BUNDLED_SKILLS_DIRS: readonly string[] = [
@@ -55,10 +56,7 @@ export async function findMotionBundle(
   return null;
 }
 
-/**
- * Motion mode's skill set: only the bundled Motion skills, sorted by name so
- * the skill tool's catalog (inside the cached prompt prefix) is byte-stable.
- */
+/** Load only Motion's authored skills; keep their contracts intact and catalog order stable. */
 export async function loadMotionSkills(bundle: MotionBundle): Promise<Skill[]> {
   const skills = await loadSkillsFromDir(bundle.skillsDir, "motion");
   return skills.sort((a, b) => a.name.localeCompare(b.name));
@@ -156,10 +154,19 @@ async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> 
  * Frontmatter values may be quoted or YAML block scalars (`description: >`).
  */
 export function parseSkillFile(rawInput: string, source: string): Skill {
-  // A BOM before `---` would otherwise silently kill frontmatter parsing.
-  const { fields, body: content } = parseFrontmatter(stripBom(rawInput));
+  // A BOM before `---` would otherwise silently kill frontmatter parsing, and a
+  // skill or command shipped in a repo can hide instructions in invisible text.
+  const cleaned = cleanInstructionText(rawInput);
+  const { fields, body: content } = parseFrontmatter(cleaned.text);
   const name = fields.name ?? "";
   const description = fields.description ?? "";
+  if (cleaned.stripped > 0) {
+    log("WARN", "skills", "Stripped invisible characters from a skill file", {
+      name,
+      source,
+      stripped: cleaned.stripped,
+    });
+  }
 
   return { name, description, content, source };
 }

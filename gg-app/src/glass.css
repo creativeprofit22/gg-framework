@@ -503,6 +503,20 @@
     transform var(--glass-spring-open-duration) var(--glass-spring-open),
     scale var(--glass-spring-open-duration) var(--glass-spring-open);
 }
+/* The composer's circles also get a resting list in App.css, which outranks
+   the one above; without `scale` in it their swell grew smoothly but snapped
+   back when the pointer left. Same list, keeping App.css's reflow fade. */
+.inputrow .icon-circle {
+  transition:
+    background-color var(--glass-motion),
+    border-color var(--glass-motion),
+    color var(--glass-motion),
+    filter var(--glass-motion),
+    box-shadow var(--glass-motion),
+    opacity var(--t-composer),
+    transform var(--glass-spring-open-duration) var(--glass-spring-open),
+    scale var(--glass-spring-open-duration) var(--glass-spring-open);
+}
 :is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile):hover:not(:disabled) {
   scale: var(--glass-hover-scale);
 }
@@ -960,18 +974,35 @@
     scale: none;
     transform: none;
   }
+  /* The composer circles also skip their reflow fade here, as App.css's
+     reduced rule intends; the list above would otherwise bring it back. */
+  .inputrow .icon-circle {
+    transition:
+      background-color var(--glass-motion),
+      border-color var(--glass-motion),
+      color var(--glass-motion),
+      filter var(--glass-motion),
+      box-shadow var(--glass-motion);
+  }
   /* Sliders and switches: no bead swell; the switch thumb jumps instead of
-     sliding. Progress bars snap to each value and drop the sheen. The
-     vendor-prefixed thumb stays in its own rule: an unknown selector would
-     void a combined list. */
+     sliding and a tick appears without its pop. Their hover glow and colours
+     still fade, like the buttons above. Progress bars snap to each value and
+     drop the sheen. The vendor-prefixed thumb stays in its own rule: an
+     unknown selector would void a combined list. */
   .radio-volume-input::-webkit-slider-thumb {
-    transition: none;
+    transition: box-shadow var(--glass-motion);
     scale: none;
   }
-  .cl-switch > span::after,
-  .cl-switch > span::before,
-  .modal-radio input:is([type="checkbox"], [type="radio"]) {
+  .cl-switch > span::before {
     transition: none;
+  }
+  .cl-switch > span::after {
+    transition: box-shadow var(--glass-motion);
+  }
+  .modal-radio input:is([type="checkbox"], [type="radio"]) {
+    transition:
+      background-color var(--glass-motion),
+      border-color var(--glass-motion);
   }
   .cl-switch:hover > input:not(:disabled) + span::after,
   .cl-switch > input:active:not(:disabled) + span::after {

@@ -33,7 +33,7 @@ const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
 const bundledSkillsSource = join(repoRoot, "packages", "ggcoder", "assets", "skills");
-// Motion mode's private bundle (HyperFrames skills + launcher). Kept apart from
+// Motion mode's runtime bundle (authored skills + launcher). Kept apart from
 // `skills/` so its skills never enter coder or chat discovery.
 const motionBundleSource = join(repoRoot, "packages", "ggcoder", "assets", "motion");
 
@@ -1045,7 +1045,14 @@ async function main() {
       const stagedOutFile = join(stagedOutDir, "app-sidecar.mjs");
       const stagedNodeModulesOut = join(stagedOutDir, "node_modules");
       cpSync(bundledSkillsSource, join(stagedOutDir, "skills"), { recursive: true });
-      cpSync(motionBundleSource, join(stagedOutDir, "motion"), { recursive: true });
+      cpSync(motionBundleSource, join(stagedOutDir, "motion"), {
+        recursive: true,
+        filter: (source) => {
+          const parts = relative(motionBundleSource, source).split(sep);
+          // Scratch files and After Effects sources are never release assets.
+          return !(parts.includes("__pycache__") || /\.(?:aep|aepx|pyc)$/i.test(source));
+        },
+      });
 
       await build({
         entryPoints: [sidecarEntry],

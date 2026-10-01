@@ -322,6 +322,88 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
     expect(out).toContain("ok");
     expect(out).toContain("Exit code: 0");
   });
+
+  // `cmd &` leaves a process holding the shell's stdout/stderr, so the pipes
+  // stay open after the shell exits. The call must finish shortly after the
+  // shell does, not when the leftover exits or the timeout fires.
+  it("finishes shortly after the shell exits when a backgrounded child holds the output", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    // Windows has no process groups, so the leftover is reported rather than
+    // stopped there; keep it short so it is gone before tmpHome is removed.
+    const leftoverSeconds = process.platform === "win32" ? 5 : 30;
+    const started = Date.now();
+    const out = outputText(
+      await tool.execute(
+        { command: `sleep ${leftoverSeconds} & echo "leftover=$!"`, timeout: 60_000 },
+        ctx("posix-leftover"),
+      ),
+    );
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(out).toContain("Exit code: 0");
+    expect(out).toContain("run_in_background");
+    const leftoverPid = Number(out.match(/leftover=(\d+)/)?.[1]);
+    expect(leftoverPid).toBeGreaterThan(0);
+    if (process.platform === "win32") {
+      // `$!` is an MSYS pid, not a Windows one: wait for the leftover to exit.
+      expect(out).toContain("may still be running");
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, leftoverSeconds * 1000 - (Date.now() - started) + 500)),
+      );
+      return;
+    }
+    // The leftover is stopped rather than orphaned untracked.
+    for (let attempt = 0; attempt < 100 && isProcessAlive(leftoverPid); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(isProcessAlive(leftoverPid)).toBe(false);
+  }, 20_000);
+
+  it("keeps a short-lived child's trailing output", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = outputText(
+      await tool.execute({ command: "(sleep 0.2; echo later) & echo now" }, ctx("posix-trailing")),
+    );
+
+    expect(out).toContain("now");
+    expect(out).toContain("later");
+    expect(out).not.toContain("run_in_background");
+  });
+
+  // Stop can land while the command is still being prepared (sandbox setup is
+  // async). A listener added to an already-aborted signal never fires, so
+  // without a check the command would start and run to the end.
+  describe("Stop pressed before the command starts", () => {
+    async function runCancelledDuringSetup(params: {
+      command: string;
+      persist?: boolean;
+      run_in_background?: boolean;
+    }): Promise<string> {
+      const manager = new ProcessManager();
+      const tool = createBashTool(tmpHome, manager);
+      const controller = new AbortController();
+      const pending = tool.execute(params, { signal: controller.signal, toolCallId: "stop" });
+      // execute() is now awaiting launch preparation.
+      controller.abort();
+      const out = outputText(await pending);
+      // Anything wrongly started gets time to act before the check below.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await shutdownAndWait(manager);
+      return out;
+    }
+
+    it.each([
+      ["a normal call", {}],
+      ["a persistent-shell call", { persist: true }],
+      ["a background call", { run_in_background: true }],
+    ])("does not run %s", async (_label, mode) => {
+      const marker = path.join(tmpHome, "ran.txt");
+      const out = await runCancelledDuringSetup({ command: `touch ${marker}`, ...mode });
+
+      expect(out).toContain("cancelled before it started");
+      expect(existsSync(marker)).toBe(false);
+    });
+  });
 });
 
 describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", () => {

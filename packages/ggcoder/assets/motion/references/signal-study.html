@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>GG study — attention follows a changing path</title>
+<style>
+  html, body { margin: 0; background: #142033; overflow: hidden; }
+  svg { display: block; width: 960px; height: 540px; }
+</style>
+<svg viewBox="0 0 960 540" role="img" aria-label="A signal traces a path; the framing follows it before revealing the complete route">
+  <g id="world">
+    <path id="route" d="M100 330 C260 330 230 150 430 160 S630 410 840 280 S1050 70 1250 200 S1450 450 1650 270" fill="none" stroke="#95e0c0" stroke-width="12" stroke-linecap="round"/>
+    <circle id="head" r="22" fill="#f7e7ae"/>
+    <circle id="halo" r="38" fill="none" stroke="#f7e7ae" stroke-width="2"/>
+  </g>
+</svg>
+<script>
+// GG-authored reduction of the local Follow the Signal study (1.5–6.3s).
+// Transfer the coupled path-progress/framing mechanism, not palette or camera rules.
+const route = document.getElementById('route');
+const length = route.getTotalLength();
+route.style.strokeDasharray = length;
+const smooth = (p) => p * p * (3 - 2 * p);
+window.seekStudy = (seconds) => {
+  const progress = Math.max(0, Math.min(1, seconds / 4));
+  const point = route.getPointAtLength(progress * length);
+  route.style.strokeDashoffset = (1 - progress) * length;
+  for (const id of ['head', 'halo']) {
+    document.getElementById(id).setAttribute('cx', point.x);
+    document.getElementById(id).setAttribute('cy', point.y);
+  }
+  const resolve = smooth(Math.max(0, (progress - .65) / .35));
+  const zoom = 1.15 - .64 * resolve;
+  const x = (480 - point.x * zoom) * (1 - resolve) + 40 * resolve;
+  const y = (270 - point.y * zoom) * (1 - resolve) + 125 * resolve;
+  document.getElementById('world').setAttribute('transform', `translate(${x} ${y}) scale(${zoom})`);
+};
+window.seekStudy(0);
+</script>
+</html>

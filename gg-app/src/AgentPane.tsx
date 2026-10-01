@@ -32,6 +32,7 @@ import {
 import { menuCommands, paletteCommands } from "./menu-commands";
 import { CommandPalette } from "./CommandPalette";
 import { autosizeComposer } from "./composer-autosize";
+import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
 import {
   COMPACT_IDLE_PLACEHOLDER,
   COMPACT_RUNNING_PLACEHOLDER,
@@ -1345,9 +1346,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // Whether the transcript is "pinned" to the bottom. Auto-scroll only runs
   // while pinned. The user scrolling up un-pins it — so they can read freely
-  // even while the agent keeps streaming — and scrolling back to the bottom
-  // re-pins. Default true so a fresh transcript follows the newest output.
+  // even while the agent keeps streaming — and scrolling back down to the
+  // bottom re-pins (rules in transcript-pin.ts). Default true so a fresh
+  // transcript follows the newest output.
   const stickToBottomRef = useRef(true);
+  // The transcript's offset as last seen by a scroll event or left by our own
+  // scrollToBottom — the baseline that tells an up-scroll from a down-scroll.
+  const lastScrollTopRef = useRef(0);
   const { ignoreRestoredScroll } = usePaneSwapViewState({
     paneId,
     scrollRef,
@@ -1361,7 +1366,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // onLoad to keep the newest content visible.
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight });
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight });
+    // A reader's scroll landing in this same frame shares one scroll event with
+    // this jump; measuring it from the pre-jump offset would read up as down.
+    lastScrollTopRef.current = el.scrollTop;
   }, []);
 
   // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
@@ -1369,16 +1378,34 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (stickToBottomRef.current) scrollToBottom();
   }, [scrollToBottom]);
 
-  // Track the user's scroll intent. Any real scroll that lands more than a
-  // small threshold above the bottom un-pins; returning to (near) the bottom
-  // re-pins. Our own programmatic scrollToBottom lands at the bottom, so it
-  // simply keeps the pin set — no need to distinguish it from a user scroll.
+  // Track the user's scroll intent by direction, not distance: while a reply
+  // streams, every commit re-pins, so any "near the bottom" allowance snapped a
+  // small scroll up straight back down. The wheel handler runs before the
+  // scroll it causes, so a commit landing in between can't erase the move.
+  // A pane-swap/appearance restore is layout, not the reader: it keeps the pin
+  // it restored but still becomes the baseline for the next direction check.
   const onTranscriptScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || ignoreRestoredScroll()) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = distanceFromBottom <= 48;
+    if (!el) return;
+    if (!ignoreRestoredScroll()) {
+      stickToBottomRef.current = pinAfterScroll(
+        stickToBottomRef.current,
+        lastScrollTopRef.current,
+        el,
+      );
+    }
+    lastScrollTopRef.current = el.scrollTop;
   }, [ignoreRestoredScroll]);
+  const onTranscriptWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (el) stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
+  }, []);
+  // The transcript remounts when a picker/home view takes over the pane; seed
+  // the direction baseline from the new node so its first scroll reads right.
+  const attachTranscript = useCallback((el: HTMLDivElement | null) => {
+    scrollRef.current = el;
+    if (el) lastScrollTopRef.current = el.scrollTop;
+  }, []);
 
   // Native drag leave/drop can be lost when the pointer exits the webview.
   useEffect(() => {
@@ -3938,7 +3965,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!identity) return;
     const isCurrent = captureKenOperation();
     void cancelKen(identity).catch((error: unknown) => {
-      if (isCurrent()) pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
+      if (isCurrent())
+        pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
     });
   }
 
@@ -3960,7 +3988,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // Display the canonical handle (not the raw typed alias/case/colon) so the live
     // bubble matches the daemon's reloaded `@Ken <question>` row. History above
     // still recalls exactly what the user typed.
-    pushItem({ kind: "user", id: nextId(), text: `${MENTOR_HANDLE} ${trimmedQuestion}`, ken: true });
+    pushItem({
+      kind: "user",
+      id: nextId(),
+      text: `${MENTOR_HANDLE} ${trimmedQuestion}`,
+      ken: true,
+    });
     if (!preserveComposer) {
       setInput("");
       setSlashIndex(0);
@@ -4952,14 +4985,22 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           {workspaceMode === "code" && kenPowerBanner && (
             <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
           )}
-          <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
+          <div
+            className="transcript"
+            ref={attachTranscript}
+            onScroll={onTranscriptScroll}
+            onWheel={onTranscriptWheel}
+          >
             {!hydrated && items.length === 0 ? (
               <TranscriptSkeleton />
             ) : (
               <>
                 {items.length === 0 &&
                   (status === "ready" ? (
-                    <WakeScreen chat={workspaceMode === "chat"} motion={workspaceMode === "motion"} />
+                    <WakeScreen
+                      chat={workspaceMode === "chat"}
+                      motion={workspaceMode === "motion"}
+                    />
                   ) : (
                     <div className="line transcript-reveal" style={{ color: theme.textDim }}>
                       {`\u273b ${status}`}

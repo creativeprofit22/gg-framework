@@ -3723,12 +3723,15 @@ fn parse_prompt_submission_response(
                     (400, "invalid_programmatic_selection") |
                     (400, "command_input_not_allowed") |
                     (409, "programmatic_execution_busy") |
-                    (403, "programmatic_execution_plan_mode"));
+                    (403, "programmatic_execution_plan_mode") |
+                    (409, "session_mutation_in_progress") |
+                    (409, "workflow_busy"));
                 if known {
-                    let fallback = if code == "command_input_not_allowed" {
-                        "Command input rejected before execution. Check the command’s allowed text, references and attachments before sending again."
-                    } else {
-                        "Opportunity run rejected before execution. Refresh the report before retrying."
+                    let fallback = match code {
+                        "command_input_not_allowed" => "Command input rejected before execution. Check the command’s allowed text, references and attachments before sending again.",
+                        "session_mutation_in_progress" => "Another change to this session was still finishing, so this message wasn't sent. Send it again.",
+                        "workflow_busy" => "Wait for the current work to finish, then try again. This request was not added to a waiting list.",
+                        _ => "Opportunity run rejected before execution. Refresh the report before retrying.",
                     };
                     let message = value.get("message").and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
@@ -12429,6 +12432,30 @@ mod tests {
         assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, "not json"), Err(PromptSubmissionFailure::Unknown(_))));
         assert!(matches!(parse_prompt_submission_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":"programmatic_execution_busy","message":"Wait"}"#), Err(PromptSubmissionFailure::Unknown(_))));
+    }
+
+    #[test]
+    fn parse_prompt_submission_maps_session_and_workflow_busy_conflicts_to_rejected() {
+        // The mutation-lock conflict carries only an owner, never a user message.
+        let body = r#"{"error":"session_mutation_in_progress","owner":{"operationId":"op-1","kind":"prompt-start"}}"#;
+        let failure = parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, body).unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
+            "category": "rejected", "code": "session_mutation_in_progress",
+            "message": "Another change to this session was still finishing, so this message wasn't sent. Send it again."
+        }));
+        let body = r#"{"error":"workflow_busy","message":"Wait for the current work to finish, then try again. This request was not added to a waiting list."}"#;
+        let failure = parse_prompt_submission_response(reqwest::StatusCode::CONFLICT, body).unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap(), serde_json::json!({
+            "category": "rejected", "code": "workflow_busy",
+            "message": "Wait for the current work to finish, then try again. This request was not added to a waiting list."
+        }));
+        // Only the 409 pairing is definitive.
+        for status in [reqwest::StatusCode::BAD_REQUEST, reqwest::StatusCode::INTERNAL_SERVER_ERROR] {
+            for code in ["session_mutation_in_progress", "workflow_busy"] {
+                let body = serde_json::json!({"error": code, "message": "Wait."}).to_string();
+                assert!(matches!(parse_prompt_submission_response(status, &body), Err(PromptSubmissionFailure::Unknown(_))));
+            }
+        }
     }
 
     #[test]

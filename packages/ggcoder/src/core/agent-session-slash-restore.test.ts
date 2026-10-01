@@ -10,6 +10,8 @@ import { getPromptCommand } from "./prompt-commands.js";
 import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { STEERING_PREFIX } from "./steering.js";
+import { WORKFLOW_BUSY_MESSAGE } from "./workflow-busy-policy.js";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
 
@@ -338,6 +340,126 @@ describe("slash-command restore", () => {
     expect(session.getMessages().filter((m) => m.role === "user")).toHaveLength(0);
     expect(agentLoopMock).not.toHaveBeenCalled();
     await session.dispose();
+  }, 20_000);
+
+  // A command queued while the agent works must reach the model as its
+  // instructions, exactly as an idle send would, not as the bare `/name`.
+  it("expands a queued prompt command into steering while keeping the typed text for display", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("shipit", "Ship the release now.");
+    const session = new AgentSession({
+      provider: "anthropic", model: "claude-test", cwd: tmpProject,
+      systemPrompt: "sys", transient: true,
+    });
+    const internals = session as unknown as {
+      getHookSteeringMessages(): Message[] | null;
+      promptHints: WeakMap<Message, Record<string, unknown>>;
+    };
+    try {
+      await session.initialize();
+      expect(await session.queuePrompt("/shipit patch only", [], { kenSent: true })).toEqual({ count: 1, id: "q1" });
+      expect(await session.queuePrompt("/help")).toEqual({ count: 2, id: "q2" });
+      expect(await session.queuePrompt("also check the tests")).toEqual({ count: 3, id: "q3" });
+      // The queue shows what was typed, never the template body.
+      expect(session.listQueuedMessages().map((m) => m.text)).toEqual([
+        "/shipit patch only", "/help", "also check the tests",
+      ]);
+
+      const steering = internals.getHookSteeringMessages();
+      expect(steering).toHaveLength(3);
+      const expanded = steering![0]!.content as string;
+      expect(expanded.startsWith(STEERING_PREFIX)).toBe(true);
+      expect(expanded).toContain("Ship the release now.");
+      expect(expanded).toContain("patch only");
+      expect(expanded).not.toBe(`${STEERING_PREFIX}/shipit patch only`);
+      // The typed invocation travels as the display hint, with existing meta kept.
+      expect(internals.promptHints.get(steering![0]!)).toEqual({
+        kenSent: true, command: "/shipit patch only",
+      });
+      // Action commands and plain text keep the old steering behaviour.
+      expect(steering![1]!.content).toBe(`${STEERING_PREFIX}/help`);
+      expect(internals.promptHints.get(steering![1]!)).toBeUndefined();
+      expect(steering![2]!.content).toBe(`${STEERING_PREFIX}also check the tests`);
+      expect(session.getQueuedCount()).toBe(0);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("restores the typed command on cancel and keeps the busy workflow refusal", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("shipit", "Ship the release now.");
+    const session = new AgentSession({
+      provider: "anthropic", model: "claude-test", cwd: tmpProject,
+      systemPrompt: "sys", transient: true,
+    });
+    try {
+      await session.initialize();
+      await session.queuePrompt("/shipit");
+      // Cancel hands back what the user typed, not the expanded body.
+      expect(session.drainQueue()).toBe("/shipit");
+      await expect(session.queuePrompt("/programmatic")).rejects.toThrow(WORKFLOW_BUSY_MESSAGE);
+      expect(session.getQueuedCount()).toBe(0);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  // Expanding a command reads the command folder; a plain message sent right
+  // after must not overtake it, and each call must get its own entry's id.
+  it("keeps arrival order and exact ids when a command and a plain message are queued back-to-back", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("shipit", "Ship the release now.");
+    const session = new AgentSession({
+      provider: "anthropic", model: "claude-test", cwd: tmpProject,
+      systemPrompt: "sys", transient: true,
+    });
+    const internals = session as unknown as { getHookSteeringMessages(): Message[] | null };
+    try {
+      await session.initialize();
+      // Neither call is awaited before the next starts, as with two quick sends.
+      const first = session.queuePrompt("/shipit patch only");
+      const second = session.queuePrompt("plain follow-up");
+      const third = session.queuePrompt("/shipit again");
+      const results = await Promise.all([first, second, third]);
+      expect(results).toEqual([
+        { count: 1, id: "q1" }, { count: 2, id: "q2" }, { count: 3, id: "q3" },
+      ]);
+      expect(session.listQueuedMessages()).toEqual([
+        { id: "q1", text: "/shipit patch only" },
+        { id: "q2", text: "plain follow-up" },
+        { id: "q3", text: "/shipit again" },
+      ]);
+      const steering = internals.getHookSteeringMessages();
+      expect(steering).toHaveLength(3);
+      const [command, plain, again] = steering!.map((m) => m.content as string);
+      expect(command).toContain("Ship the release now.");
+      expect(command).toContain("patch only");
+      expect(plain).toBe(`${STEERING_PREFIX}plain follow-up`);
+      expect(again).toContain("Ship the release now.");
+      expect(again).toContain("again");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("a refused queued prompt does not block or reorder later ones", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("shipit", "Ship the release now.");
+    const session = new AgentSession({
+      provider: "anthropic", model: "claude-test", cwd: tmpProject,
+      systemPrompt: "sys", transient: true,
+    });
+    try {
+      await session.initialize();
+      const refused = session.queuePrompt("/programmatic");
+      const accepted = session.queuePrompt("/shipit");
+      await expect(refused).rejects.toThrow(WORKFLOW_BUSY_MESSAGE);
+      expect(await accepted).toEqual({ count: 1, id: "q1" });
+      expect(session.listQueuedMessages()).toEqual([{ id: "q1", text: "/shipit" }]);
+    } finally {
+      await session.dispose();
+    }
   }, 20_000);
 
   // The reported bug: after a template is edited, body matching can no longer

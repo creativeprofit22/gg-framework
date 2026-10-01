@@ -179,7 +179,7 @@ describe("a typed prompt supersedes a parked question", () => {
       'if (method === "POST" && url === "/prompt") {',
     );
     const released = block.indexOf("superseded: true");
-    const queued = block.indexOf("session.queueMessage(");
+    const queued = block.indexOf("session.queuePrompt(");
     const started = block.indexOf("runClaim.claim()");
 
     expect(released).toBeGreaterThan(-1);

@@ -5832,7 +5832,7 @@ async function createSession(
                 ? session.queueInputPolicyError(text)
                 : null;
               if (busyWorkflowError) {
-                json(res, 409, { error: busyWorkflowError });
+                json(res, 409, { error: "workflow_busy", message: busyWorkflowError });
                 return;
               }
               const handledProgrammatic = await handleAppSidecarProgrammaticExecution({
@@ -5941,7 +5941,7 @@ async function createSession(
               if (isAppSidecarSessionBusy(sessionBusyState())) {
                 const queuePolicyError = session.queueInputPolicyError(text);
                 if (queuePolicyError) {
-                  json(res, 409, { error: queuePolicyError });
+                  json(res, 409, { error: "workflow_busy", message: queuePolicyError });
                   return;
                 }
                 // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
@@ -5952,13 +5952,22 @@ async function createSession(
                 // path as a non-queued attachment prompt when it drains.
                 const prepared =
                   attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-                const count = session.queueMessage(text, prepared, meta);
+                // A prompt-template command is expanded before queueing so the model
+                // gets its instructions as steering, matching an idle send; the queue
+                // still shows the typed `/name`.
+                const { count, id: queueId } = await session.queuePrompt(text, prepared, meta);
                 // Queue before releasing the blocked ask; awaiting the run would deadlock.
                 supersedeCapturedAsks();
                 const messages = session.listQueuedMessages();
-                const queueId = messages[count - 1]!.id;
-                broadcast("queued", { count, messages });
+                broadcast("queued", { count: messages.length, messages });
                 json(res, 202, { queued: true, count, queueId });
+                // Preparing the entry awaited; if the run ended meanwhile, its
+                // final drain already passed, so hand the entry to the stranded drain.
+                if (!isAppSidecarSessionBusy(sessionBusyState())) {
+                  void runStrandedQueue().catch((error) => {
+                    broadcastError("error", "queued prompt failed after the run ended", error);
+                  });
+                }
                 return;
               }
               // Claim the run NOW, synchronously. Everything below this line may

@@ -547,11 +547,20 @@ import {
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 interface QueuedPrompt {
+  /** Display identity: what the user typed, shown in the queue and restored on cancel. */
   id: string;
   text: string;
   attachments: SessionAttachment[];
   meta?: PromptMeta;
+  /**
+   * Set when `text` is a prompt-template command: the expanded body the model
+   * receives as steering, matching what an idle send would run.
+   */
+  modelText?: string;
 }
+
+/** Display hints persisted with a consumed user message; `command` restores the `/name` chip. */
+type PromptHint = PromptMeta & { command?: string };
 
 export interface AgentSessionState {
   provider: Provider;
@@ -723,7 +732,9 @@ export class AgentSession {
   private userQueue: QueuedPrompt[] = [];
   // Associate hints with the exact consumed object, never with enqueue-time offsets
   // or model-visible fields. Weak keys also release abandoned run messages.
-  private promptHints = new WeakMap<Message, PromptMeta>();
+  private promptHints = new WeakMap<Message, PromptHint>();
+  /** Serializes {@link queuePrompt} so entries are queued in arrival order. */
+  private queuePromptChain: Promise<unknown> = Promise.resolve();
   private queueSeq = 0;
   private processManager?: ProcessManager;
   private lspManager?: LspManager;
@@ -2796,8 +2807,16 @@ ${content}
           visibility: "transcript",
         };
         if (m.attachments.length === 0) {
-          const message: Message = { role: "user", content: wrapSteeringText(m.text), provenance };
-          if (m.meta) this.promptHints.set(message, m.meta);
+          const message: Message = {
+            role: "user",
+            content: wrapSteeringText(m.modelText ?? m.text),
+            provenance,
+          };
+          // An expanded command records its typed `/name` so a reopened session
+          // shows the chip instead of the template body, as idle sends do.
+          const hint: PromptHint | undefined =
+            m.modelText !== undefined ? { ...m.meta, command: m.text.trim() } : m.meta;
+          if (hint) this.promptHints.set(message, hint);
           return message;
         }
         // Queued attachments ride the same native-block path as a non-queued
@@ -4750,11 +4769,61 @@ ${content}
    *  as steering. Returns the new queue length. No-op semantics are the caller's
    *  concern. */
   queueMessage(text: string, attachments: SessionAttachment[] = [], meta?: PromptMeta): number {
+    this.assertQueueable(text, attachments);
+    return this.enqueue(text, attachments, meta);
+  }
+
+  /**
+   * Queue like {@link queueMessage}, but a prompt-template command (`/name args`)
+   * is expanded now, so the model receives its instructions as steering rather
+   * than the bare name. The queue still shows and restores what was typed.
+   * Action commands and plain text queue unchanged.
+   *
+   * Calls are serialized: each entry is pushed in arrival order, and only once
+   * fully prepared, so a mid-run drain never sees a half-prepared item and a
+   * slow command expansion cannot be overtaken by a later plain message.
+   * Returns the queue length after the push and the pushed entry's own id.
+   */
+  queuePrompt(
+    text: string,
+    attachments: SessionAttachment[] = [],
+    meta?: PromptMeta,
+  ): Promise<{ count: number; id: string }> {
+    // Policy errors reject this call immediately (as a rejection, not a
+    // synchronous throw) and never hold up the chain.
+    try {
+      this.assertQueueable(text, attachments);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const queued = this.queuePromptChain.then(async () => {
+      // Attachment prompts skip slash expansion when idle too.
+      const resolved =
+        attachments.length === 0 ? await this.resolveSlashInput(text, false) : null;
+      const modelText =
+        resolved?.kind === "template" && !resolved.setupInspection ? resolved.fullPrompt : undefined;
+      const count = this.enqueue(text, attachments, meta, modelText);
+      return { count, id: `q${this.queueSeq}` };
+    });
+    // A failed expansion rejects only its own call; later calls still run.
+    this.queuePromptChain = queued.catch(() => undefined);
+    return queued;
+  }
+
+  private assertQueueable(text: string, attachments: SessionAttachment[]): void {
     const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
     if (inputPolicyError) throw new Error(inputPolicyError);
     const queuePolicyError = this.queueInputPolicyError(text);
     if (queuePolicyError) throw new Error(queuePolicyError);
     if (attachments.length > 0) this.buildAttachmentParts(text, attachments);
+  }
+
+  private enqueue(
+    text: string,
+    attachments: SessionAttachment[],
+    meta: PromptMeta | undefined,
+    modelText?: string,
+  ): number {
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
     const displayMeta = normalizePromptMeta(meta);
@@ -4763,6 +4832,7 @@ ${content}
       text,
       attachments,
       ...(displayMeta ? { meta: displayMeta } : {}),
+      ...(modelText !== undefined ? { modelText } : {}),
     });
     return this.userQueue.length;
   }

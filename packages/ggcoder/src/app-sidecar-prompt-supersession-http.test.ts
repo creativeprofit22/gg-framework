@@ -87,7 +87,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
     const queued = vi.fn(() => {
       // The blocked tool has not resumed before its replacement enters the queue.
       expect(settled.mock.calls).toEqual(state === "new-question" ? [[{ id: originalId, action: "answer" }]] : []);
-      return 1;
+      return { count: 1, id: "q1" };
     });
     try {
       await promptController({
@@ -96,7 +96,8 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         runLifecycle: { running: true, generation: 1, state, isCancellationRequested: () => state !== "new-question" },
         handleAppSidecarProgrammaticExecution: async () => false, isProgrammaticCodeMode,
         resolveChatResearchCommandRoute, handleAppSidecarChatResearchPrompt,
-        runAgent: vi.fn(), session: { getPlanMode: () => false, queueInputPolicyError: () => undefined, queueMessage: queued, listQueuedMessages: () => [{ id: "q1" }] },
+        runAgent: vi.fn(), session: { getPlanMode: () => false, queueInputPolicyError: () => undefined, queuePrompt: async () => queued(), listQueuedMessages: () => [{ id: "q1" }] },
+        runStrandedQueue: vi.fn(async () => {}), broadcastError: vi.fn(),
         res: {}, json, broadcast: vi.fn(), cwd: ".",
         prepareAttachments: async () => {
           asks.settle(originalId, { action: "answer", answers: { q: "yes" } });

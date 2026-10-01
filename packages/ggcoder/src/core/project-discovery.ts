@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
 import { encodeCwd, stripExtendedLengthPrefix } from "./encode-cwd.js";
+import { getModel } from "@kenkaiiii/gg-core/models";
 import { getUserSessionPrompt } from "./session-preview.js";
 import { isSessionPath, openSessionReadStream, resolveSessionPath } from "./session-storage.js";
 import { parseForeignTranscript } from "./foreign-session-import.js";
@@ -551,6 +552,7 @@ async function collectJsonlFiles(
 async function collectGgcoderSessionFiles(
   dir: string,
   maxDepth: number,
+  options: { failOnUnreadableRoot?: boolean } = {},
 ): Promise<{ path: string; mtime: number }[]> {
   const byResolvedPath = new Map<string, { path: string; mtime: number }>();
   await walk(dir, 0);
@@ -560,7 +562,10 @@ async function collectGgcoderSessionFiles(
     let entries;
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      // A missing root just means "no sessions yet"; any other root failure
+      // (permissions, I/O) must not masquerade as an empty history.
+      if (depth === 0 && options.failOnUnreadableRoot && !isMissingPathError(err)) throw err;
       return;
     }
     for (const entry of entries) {
@@ -578,6 +583,11 @@ async function collectGgcoderSessionFiles(
       }
     }
   }
+}
+
+function isMissingPathError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 type LineExtractor = (line: string) => string | null;
@@ -759,6 +769,42 @@ export interface RecentSession {
    * own transcript, which the host imports before opening.
    */
   source?: ProjectSource;
+  /** Start of the last assistant reply (≤100 chars, whitespace collapsed). */
+  lastReply?: string;
+  /** Display name of the model last in use; absent for foreign sessions. */
+  model?: string;
+}
+
+const LAST_REPLY_MAX = 100;
+
+/**
+ * Visible reply text only. Thinking blocks also carry `text`, so the generic
+ * extractor would leak hidden reasoning into the picker snippet.
+ */
+function visibleReplyText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const { type, text } = block as { type?: unknown; text?: unknown };
+    if (type === "text" && typeof text === "string" && text) parts.push(text);
+  }
+  return parts.join(" ");
+}
+
+/** One-line snippet of an assistant message, or undefined when it has no text. */
+function replySnippet(content: unknown): string | undefined {
+  const text = visibleReplyText(content).replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > LAST_REPLY_MAX
+    ? `${text.slice(0, LAST_REPLY_MAX - 1).trimEnd()}\u2026`
+    : text;
+}
+
+/** Registry display name for a model id, falling back to the raw id. */
+function modelDisplayName(id: string): string {
+  return getModel(id)?.name ?? id;
 }
 
 /**
@@ -772,7 +818,7 @@ export async function listRecentSessions(
   sessionsDir = getAppPaths().sessionsDir,
 ): Promise<RecentSession[]> {
   const dir = path.join(sessionsDir, encodeCwd(cwd));
-  const files = await collectGgcoderSessionFiles(dir, 1);
+  const files = await collectGgcoderSessionFiles(dir, 1, { failOnUnreadableRoot: true });
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
 
@@ -903,12 +949,18 @@ async function readForeignSessionSummary(
   try {
     const parsed = parseForeignTranscript(text, source === "codex" ? "codex" : "claude");
     if (parsed.messages.length === 0) return null;
+    let lastReply: string | undefined;
+    for (let i = parsed.messages.length - 1; i >= 0 && lastReply === undefined; i -= 1) {
+      const message = parsed.messages[i];
+      if (message?.role === "assistant") lastReply = replySnippet(message.content);
+    }
     return {
       id: path.basename(file).replace(/\.jsonl$/, ""),
       path: file,
       preview: parsed.preview ?? "(no prompt)",
       messageCount: parsed.messages.length,
       source,
+      ...(lastReply ? { lastReply } : {}),
     };
   } catch {
     // An unreadable transcript is skipped, never surfaced as a broken row.
@@ -934,6 +986,8 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
     let preview = "";
     let label = "";
     let cwd = "";
+    let modelId = "";
+    let lastReply: string | undefined;
     let valid = false;
 
     try {
@@ -948,6 +1002,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
             preview?: unknown;
             timestamp?: string;
             label?: unknown;
+            model?: unknown;
             message?: { role?: string; content?: unknown };
           };
           if (!valid) {
@@ -956,6 +1011,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
             id = entry.id ?? "";
             conversationId = entry.conversationId ?? id;
             cwd = typeof entry.cwd === "string" ? entry.cwd : "";
+            if (typeof entry.model === "string") modelId = entry.model;
             if (typeof entry.preview === "string") {
               headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
             }
@@ -964,12 +1020,18 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
           }
           if (entry.type === "label" && typeof entry.label === "string" && entry.label.trim()) {
             label = entry.label.replace(/\s+/g, " ").trim().slice(0, 80);
+          } else if (entry.type === "model_change" && typeof entry.model === "string") {
+            modelId = entry.model;
           } else if (entry.type === "message") {
             messageCount += 1;
             if (entry.timestamp) lastActivity = entry.timestamp;
             if (!preview && entry.message?.role === "user") {
               const text = getUserSessionPrompt(entry.message.content);
               if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
+            }
+            if (entry.message?.role === "assistant") {
+              // A tool-only reply has no text; keep the last one that did.
+              lastReply = replySnippet(entry.message.content) ?? lastReply;
             }
           }
         } catch {
@@ -990,6 +1052,8 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
           preview: label || headerPreview || preview,
           lastActiveDisplay: rel(lastActivity),
           messageCount,
+          ...(lastReply ? { lastReply } : {}),
+          ...(modelId ? { model: modelDisplayName(modelId) } : {}),
         }
       : null;
   } catch {

@@ -1821,6 +1821,11 @@ select {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* Named so the narrow-header rules respond to this pane's width (a split
+     pane and a phone-width window behave alike) without matching any other
+     container query in the app. */
+  container-type: inline-size;
+  container-name: picker;
 }
 .picker-head {
   position: relative;
@@ -1845,6 +1850,29 @@ select {
    buttons (same role the .chat-head strip plays in the chat view). */
 .platform-macos .picker-head {
   padding: 40px 20px 12px;
+}
+/* The page's own controls (back, title, count, search, actions) share the
+   list's 760px row column, so on wide windows the actions end where the rows
+   end instead of at the far window edge. Rows end at 12px list padding + 760px;
+   the head starts after its 20px padding, hence the calc. flex-basis 0 means
+   the column never pushes the window controls onto a new line. */
+.picker-head-main {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: calc(12px + 760px - 20px);
+  gap: 14px;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+/* Window-level controls (radio, layout) stay pinned at the window's edge. */
+.picker-head-window {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 .picker-title {
   font-size: 15px;
@@ -2147,7 +2175,10 @@ select {
    fill slack but shrinks down (min-width:0) and, once the row is full, wraps to
    its own line via the head's flex-wrap rather than deforming. */
 .picker-search {
-  flex: 1 1 200px;
+  /* A 120px basis lets back + title + count + search + actions share one
+     line inside the 752px page column (keeping the locked 81px header);
+     the box then grows toward 260px with whatever room is left. */
+  flex: 1 1 120px;
   min-width: 0;
   max-width: 260px;
   background: var(--surface-1);
@@ -2173,11 +2204,53 @@ select {
 /* Touch: header controls reach the 44px target floor, and the search input
    stays at 16px so focusing it does not zoom the page. Fine pointers keep the
    existing compact .btn-sm/icon sizing. */
+/* Secondary header actions: inline on wide panes, folded into More on narrow
+   ones. display:none also drops the hidden variant from the a11y tree. */
+.picker-actions-wide {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.picker-actions-narrow {
+  display: none;
+}
+@container picker (max-width: 560px) {
+  .picker-actions-wide {
+    display: none;
+  }
+  .picker-actions-narrow {
+    display: flex;
+  }
+  /* No room for a separate page column here: let its children flow in the
+     head's own wrap so search can span the full header width, and put the
+     actions at the start of their row with the window controls at its end. */
+  .picker-head-main {
+    display: contents;
+  }
+  .picker-head-actions {
+    margin-left: 0;
+  }
+  /* Search takes its own full-width row under the title line. */
+  .picker-search {
+    flex-basis: 100%;
+    max-width: none;
+    order: 10;
+  }
+}
+/* The More trigger sits at the left of the narrow header, so its menu opens
+   rightward and keeps each action on one line. */
+.picker-more .winlayout-menu {
+  left: 0;
+  right: auto;
+}
+.picker-more .winlayout-item {
+  white-space: nowrap;
+}
 @media (pointer: coarse) {
   .picker-head :is(.btn-sm, .btn-icon) {
     min-height: 44px;
   }
-  .picker-head .btn-icon {
+  .picker-head :is(.btn-icon, .picker-more .btn-nav-icon) {
     min-width: 44px;
   }
   .picker-search {
@@ -4062,6 +4135,19 @@ select {
 .picker-preview {
   flex: 1;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Start of the session's last assistant reply: one muted line under the meta,
+   so a session can be recognised by where it ended, not just how it began. */
+.picker-snippet {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

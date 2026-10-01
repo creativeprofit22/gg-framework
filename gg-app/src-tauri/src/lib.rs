@@ -6623,9 +6623,19 @@ async fn agent_projects(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to load projects")
+            .to_string());
+    }
+    Ok(body)
 }
 
 /// Proxy: list recent sessions for a project cwd.
@@ -6651,9 +6661,19 @@ async fn agent_sessions(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("failed to load sessions")
+            .to_string());
+    }
+    Ok(body)
 }
 
 /// Proxy: search project files for the chat input's `@` picker. Empty `query`

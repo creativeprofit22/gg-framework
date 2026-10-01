@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
@@ -25,7 +25,9 @@ import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
 import { MetalButton } from "./MetalButton";
 import { useWindowFocused } from "./useWindowFocused";
-import { describeOpenFailure } from "./open-failure";
+import { describeActionFailure, describeOpenFailure, type FailureCopy } from "./open-failure";
+import { PickerError } from "./PickerError";
+import { PickerMoreMenu } from "./PickerMoreMenu";
 
 /**
  * Does this row point at another tool's transcript rather than a GG Coder
@@ -47,12 +49,13 @@ function projectPathKey(projectPath: string): string {
 }
 
 /** A failed open, split into what the user reads and what support needs. */
-interface ResumeFailure {
-  summary: string;
-  /** Technical cause, shown collapsed; null when the summary already says it. */
-  detail: string | null;
+interface ResumeFailure extends FailureCopy {
   /** What to reopen. Data, not a closure, so Retry runs this render's `busy` guard. */
-  retry: { cwd: string; sessionPath?: string } | { cwd: string; session: RecentSession };
+  retry:
+    | { cwd: string; sessionPath?: string; row?: RecentSession }
+    | { cwd: string; session: RecentSession };
+  /** The session row the failure belongs to; the error renders beneath it. */
+  rowId?: string;
 }
 
 interface Props {
@@ -96,14 +99,15 @@ export function ProjectPicker({
   const windowFocused = useWindowFocused();
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
-  const [projectsError, setProjectsError] = useState<string | null>(null);
-  const [folderError, setFolderError] = useState<string | null>(null);
+  const [projectsError, setProjectsError] = useState<FailureCopy | null>(null);
+  const [folderError, setFolderError] = useState<FailureCopy | null>(null);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [sessionsError, setSessionsError] = useState<FailureCopy | null>(null);
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<ResumeFailure | null>(null);
+  const resumeErrorId = useId();
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
@@ -158,8 +162,8 @@ export function ProjectPicker({
           setSessions(nextSessions);
           setSessionsLoading(false);
         })
-        .catch(() => {
-          setSessionsError("Couldn’t load sessions. Please try again.");
+        .catch((reason: unknown) => {
+          setSessionsError(describeActionFailure("load sessions", reason));
           setSessionsLoading(false);
         });
     },
@@ -183,8 +187,8 @@ export function ProjectPicker({
         );
         if (match) openProject(match);
       }
-    } catch {
-      setProjectsError("Couldn’t load projects. Please try again.");
+    } catch (reason: unknown) {
+      setProjectsError(describeActionFailure("load projects", reason));
     } finally {
       setLoading(false);
     }
@@ -219,7 +223,12 @@ export function ProjectPicker({
     });
   }
 
-  function choose(cwd: string, sessionPath?: string): void {
+  /**
+   * Bind this window to `cwd` (+ optional session). `row` is the list row the
+   * user clicked, if any — an imported session opens by a new path, so the row
+   * is carried separately to keep a failure beside what was clicked.
+   */
+  function choose(cwd: string, sessionPath?: string, row?: RecentSession): void {
     if (busy) return;
     setBusy(true);
     setResumeError(null);
@@ -230,8 +239,13 @@ export function ProjectPicker({
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? reason.message : String(reason);
         setResumeError({
-          ...describeOpenFailure(message),
-          retry: sessionPath === undefined ? { cwd } : { cwd, sessionPath },
+          ...describeOpenFailure(message, row?.preview),
+          retry: {
+            cwd,
+            ...(sessionPath === undefined ? {} : { sessionPath }),
+            ...(row ? { row } : {}),
+          },
+          ...(row ? { rowId: row.id } : {}),
         });
         setBusy(false);
       });
@@ -246,7 +260,7 @@ export function ProjectPicker({
   function chooseSession(cwd: string, session: RecentSession): void {
     if (busy) return;
     if (!isForeignSession(session)) {
-      choose(cwd, session.path);
+      choose(cwd, session.path, session);
       return;
     }
     setBusy(true);
@@ -255,24 +269,22 @@ export function ProjectPicker({
       .then((result) => {
         if (!result.ok) {
           setResumeError({
-            summary: `Could not import that conversation: ${result.error}`,
-            detail: null,
+            ...describeActionFailure("import that conversation", result.error),
             retry: { cwd, session },
+            rowId: session.id,
           });
           setBusy(false);
           return;
         }
         // Re-enter the normal resume path with the freshly written session.
         setBusy(false);
-        choose(cwd, result.sessionPath);
+        choose(cwd, result.sessionPath, session);
       })
       .catch((reason: unknown) => {
         setResumeError({
-          summary: `Could not import that conversation: ${
-            reason instanceof Error ? reason.message : String(reason)
-          }`,
-          detail: null,
+          ...describeActionFailure("import that conversation", reason),
           retry: { cwd, session },
+          rowId: session.id,
         });
         setBusy(false);
       });
@@ -311,103 +323,136 @@ export function ProjectPicker({
           setQuery("");
           await reloadProjects();
         } catch (reason: unknown) {
-          const detail = reason instanceof Error ? reason.message : String(reason);
-          setFolderError(`Couldn’t add that projects folder: ${detail}`);
+          setFolderError(describeActionFailure("add that projects folder", reason));
         } finally {
           setBusy(false);
         }
       })
       .catch((reason: unknown) => {
-        const detail = reason instanceof Error ? reason.message : String(reason);
-        setFolderError(`Couldn’t open the folder picker: ${detail}`);
+        setFolderError(describeActionFailure("open the folder picker", reason));
       });
   }
+
+  // A failed open sits directly under the row that was clicked; a new session
+  // or a direct folder open has no row, so its error stays at the top.
+  const failedRowId = resumeError?.rowId;
+  const failedRowShown =
+    !sessionsLoading && failedRowId !== undefined && sessions.some((s) => s.id === failedRowId);
+  const resumeErrorBlock = resumeError && (
+    <PickerError
+      id={resumeErrorId}
+      summary={resumeError.summary}
+      detail={resumeError.detail}
+      retryDisabled={busy}
+      onRetry={() => {
+        const target = resumeError.retry;
+        if ("session" in target) chooseSession(target.cwd, target.session);
+        else choose(target.cwd, target.sessionPath, target.row);
+      }}
+    />
+  );
 
   return (
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
-        {selected ? (
-          <BackButton label="All projects" onClick={() => setSelected(null)} />
-        ) : onClose ? (
-          <BackButton label="Back" onClick={onClose} />
-        ) : null}
-        <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
-        {!selected && !loading && <Badge>{projects.length}</Badge>}
-        {!selected && !loading && projects.length > 0 && (
-          <input
-            className="picker-search"
-            type="text"
-            placeholder={"Search projects\u2026"}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search projects"
-          />
-        )}
-        <span className="picker-head-actions">
+        {/* The page's own controls share the list's column; window controls stay at the edge. */}
+        <div className="picker-head-main" data-tauri-drag-region>
           {selected ? (
-            <MetalButton
-              windowFocused={windowFocused}
-              className="btn btn-primary btn-sm"
-              disabled={busy}
-              onClick={() => choose(selected.path)}
-            >
-              {"+ New session"}
-            </MetalButton>
-          ) : (
-            <>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={addProjectsFolder}
-              >
-                {"Add projects folder"}
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={openExisting}
-              >
-                {"Open project directly"}
-              </button>
+            <BackButton label="All projects" onClick={() => setSelected(null)} />
+          ) : onClose ? (
+            <BackButton label="Back" onClick={onClose} />
+          ) : null}
+          <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
+          {!selected && !loading && <Badge>{projects.length}</Badge>}
+          {!selected && !loading && projects.length > 0 && (
+            <input
+              className="picker-search"
+              type="text"
+              placeholder={"Search projects\u2026"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search projects"
+            />
+          )}
+          <span className="picker-head-actions" data-tauri-drag-region>
+            {selected ? (
               <MetalButton
                 windowFocused={windowFocused}
                 className="btn btn-primary btn-sm"
-                onClick={() => setShowNew(true)}
+                disabled={busy}
+                onClick={() => choose(selected.path)}
               >
-                {"+ New project"}
+                {"+ New session"}
               </MetalButton>
-            </>
-          )}
-          {showWindowControls && (
-            <>
-              <RadioButton />
-              <WindowLayoutButton />
-            </>
-          )}
-        </span>
+            ) : (
+              <>
+                {/* Wide panes show the secondary actions inline; narrow panes
+                    (container query in App.css) fold them into More. */}
+                <span className="picker-actions-wide" data-tauri-drag-region>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={busy}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={addProjectsFolder}
+                  >
+                    {"Add projects folder"}
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={busy}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={openExisting}
+                  >
+                    {"Open project directly"}
+                  </button>
+                </span>
+                <span className="picker-actions-narrow">
+                  <PickerMoreMenu
+                    disabled={busy}
+                    items={[
+                      { label: "Add projects folder", onSelect: addProjectsFolder },
+                      { label: "Open project directly", onSelect: openExisting },
+                    ]}
+                  />
+                </span>
+                <MetalButton
+                  windowFocused={windowFocused}
+                  className="btn btn-primary btn-sm"
+                  onClick={() => setShowNew(true)}
+                >
+                  {"+ New project"}
+                </MetalButton>
+              </>
+            )}
+          </span>
+        </div>
+        {showWindowControls && (
+          <span className="picker-head-window" data-tauri-drag-region>
+            <RadioButton />
+            <WindowLayoutButton />
+          </span>
+        )}
       </div>
 
       {!selected ? (
         <div className="picker-list">
+          {/* "Open project directly" fails here, with no row to sit under. */}
+          {resumeError && resumeErrorBlock}
           {loading && <ListSkeleton rows={6} />}
           {!loading && projectsError && (
-            <div className="picker-error" role="alert">
-              <div>{projectsError}</div>
-              <button
-                className="btn btn-ghost btn-sm"
-                style={{ marginTop: 8 }}
-                onClick={() => void reloadProjects()}
-              >
-                Retry
-              </button>
-            </div>
+            <PickerError
+              summary={projectsError.summary}
+              detail={projectsError.detail}
+              onRetry={() => void reloadProjects()}
+            />
           )}
           {!loading && folderError && (
-            <div className="picker-error" role="alert">
-              {folderError}
-            </div>
+            <PickerError
+              summary={folderError.summary}
+              detail={folderError.detail}
+              retryDisabled={busy}
+              onRetry={addProjectsFolder}
+            />
           )}
           {!loading && !projectsError && projects.length === 0 && (
             <div className="picker-empty">
@@ -484,41 +529,14 @@ export function ProjectPicker({
         </div>
       ) : (
         <div className="picker-list">
-          {resumeError && (
-            <div className="picker-error" role="alert">
-              <div>{resumeError.summary}</div>
-              {resumeError.detail && (
-                <details className="picker-error-detail">
-                  <summary>Details</summary>
-                  <code>{resumeError.detail}</code>
-                </details>
-              )}
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm picker-error-retry"
-                disabled={busy}
-                onClick={() => {
-                  const target = resumeError.retry;
-                  if ("session" in target) chooseSession(target.cwd, target.session);
-                  else choose(target.cwd, target.sessionPath);
-                }}
-              >
-                Retry
-              </button>
-            </div>
-          )}
+          {resumeError && !failedRowShown && resumeErrorBlock}
           {sessionsLoading && <ListSkeleton rows={4} />}
           {!sessionsLoading && sessionsError && (
-            <div className="picker-error" role="alert">
-              <div>{sessionsError}</div>
-              <button
-                className="btn btn-ghost btn-sm"
-                style={{ marginTop: 8 }}
-                onClick={() => openProject(selected)}
-              >
-                Retry
-              </button>
-            </div>
+            <PickerError
+              summary={sessionsError.summary}
+              detail={sessionsError.detail}
+              onRetry={() => openProject(selected)}
+            />
           )}
           {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
@@ -536,35 +554,42 @@ export function ProjectPicker({
           {!sessionsLoading && sessions.length > 0 && (
             <div className="picker-reveal">
               {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  className="picker-item"
-                  disabled={busy}
-                  onClick={() => chooseSession(selected.path, s)}
-                  title={
-                    isForeignSession(s)
-                      ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
-                      : undefined
-                  }
-                >
-                  <span className="picker-row">
-                    <span className="picker-name picker-preview" style={{ color: theme.text }}>
-                      {s.preview || "(no preview)"}
+                <Fragment key={s.id}>
+                  <button
+                    className="picker-item"
+                    disabled={busy}
+                    aria-describedby={
+                      failedRowShown && s.id === failedRowId ? resumeErrorId : undefined
+                    }
+                    onClick={() => chooseSession(selected.path, s)}
+                    title={
+                      isForeignSession(s)
+                        ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
+                        : undefined
+                    }
+                  >
+                    <span className="picker-row">
+                      <span className="picker-name picker-preview" style={{ color: theme.text }}>
+                        {s.preview || "(no preview)"}
+                      </span>
+                      <Badge>{s.lastActiveDisplay}</Badge>
                     </span>
-                    <Badge>{s.lastActiveDisplay}</Badge>
-                  </span>
-                  <span className="picker-meta" style={{ color: theme.textMuted }}>
-                    {isForeignSession(s) && (
-                      <Badge
-                        className="picker-source-tag"
-                        color={sourceStyle(s.source ?? "").color}
-                      >
-                        {sourceStyle(s.source ?? "").label}
-                      </Badge>
-                    )}
-                    <Badge>{`${s.messageCount} msgs`}</Badge>
-                  </span>
-                </button>
+                    <span className="picker-meta" style={{ color: theme.textMuted }}>
+                      {isForeignSession(s) && (
+                        <Badge
+                          className="picker-source-tag"
+                          color={sourceStyle(s.source ?? "").color}
+                        >
+                          {sourceStyle(s.source ?? "").label}
+                        </Badge>
+                      )}
+                      {s.model && <Badge className="picker-model-tag">{s.model}</Badge>}
+                      <Badge>{`${s.messageCount} msgs`}</Badge>
+                    </span>
+                    {s.lastReply && <span className="picker-snippet">{s.lastReply}</span>}
+                  </button>
+                  {failedRowShown && s.id === failedRowId && resumeErrorBlock}
+                </Fragment>
               ))}
             </div>
           )}

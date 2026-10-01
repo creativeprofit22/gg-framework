@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
-  getSettings,
   listSessions,
+  readSettings,
   selectWorkspace,
   waitForReady,
   type RecentSession,
@@ -13,8 +13,8 @@ import { ChatPicker } from "./ChatPicker";
 vi.mock("./agent", () => ({
   arrangeAllWindows: vi.fn(),
   focusWindowByOffset: vi.fn(),
-  getSettings: vi.fn(),
   listSessions: vi.fn(),
+  readSettings: vi.fn(),
   selectWorkspace: vi.fn(),
   waitForReady: vi.fn(),
 }));
@@ -24,7 +24,7 @@ vi.mock("./WindowLayoutButton", () => ({
   WindowLayoutButton: () => <button>Windows</button>,
 }));
 
-const getSettingsMock = vi.mocked(getSettings);
+const readSettingsMock = vi.mocked(readSettings);
 const listSessionsMock = vi.mocked(listSessions);
 const selectWorkspaceMock = vi.mocked(selectWorkspace);
 const waitForReadyMock = vi.mocked(waitForReady);
@@ -45,7 +45,7 @@ afterEach(() => {
 
 describe("ChatPicker", () => {
   it("keeps decorated new-chat buttons native with pane window controls hidden", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([]);
     const bindChat = vi.fn(() => new Promise<void>(() => {}));
@@ -67,7 +67,7 @@ describe("ChatPicker", () => {
     expect(bindChat).toHaveBeenCalledOnce();
   });
   it("loads sessions from projectsRoot and resumes them in chat mode", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([session]);
     selectWorkspaceMock.mockResolvedValue();
@@ -92,7 +92,7 @@ describe("ChatPicker", () => {
   });
 
   it("starts a new chat without a resume path", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([]);
     selectWorkspaceMock.mockResolvedValue();
@@ -107,7 +107,7 @@ describe("ChatPicker", () => {
   });
 
   it("starts a new chat with the initially active agent", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([]);
     selectWorkspaceMock.mockResolvedValue();
@@ -129,7 +129,7 @@ describe("ChatPicker", () => {
   });
 
   it("shows selection failures without hiding chats and allows retrying", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([session]);
     const bindChat = vi
@@ -144,7 +144,7 @@ describe("ChatPicker", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.firstElementChild?.textContent).toBe(
-      "Couldn\u2019t open this session: Startup failed. Use AI Providers to sign in first.",
+      "Couldn\u2019t open \u201cPlan my week\u201d: Startup failed. Use AI Providers to sign in first.",
     );
     expect(alert.querySelector("details")).toBeNull();
     expect(screen.getByText("Plan my week")).toBeDefined();
@@ -157,7 +157,7 @@ describe("ChatPicker", () => {
   });
 
   it("explains an internal startup failure and retries the same session", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([session]);
     let finishRetry: () => void = () => {};
@@ -176,7 +176,13 @@ describe("ChatPicker", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Plan my week/ }));
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("Couldn\u2019t open this session. Please try again.")).toBeDefined();
+    expect(
+      within(alert).getByText("Couldn\u2019t open \u201cPlan my week\u201d. Please try again."),
+    ).toBeDefined();
+    // The error sits directly under the row that failed, and the row points at it.
+    const row = screen.getByRole("button", { name: /Plan my week/ });
+    expect(row.nextElementSibling).toBe(alert);
+    expect(row.getAttribute("aria-describedby")).toBe(alert.id);
     const details = alert.querySelector("details.picker-error-detail");
     expect(details?.querySelector("code")?.textContent).toBe(
       "pane 'primary' generation 3 was superseded",
@@ -185,7 +191,12 @@ describe("ChatPicker", () => {
 
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
     expect(bindChat).toHaveBeenCalledTimes(2);
-    expect(bindChat).toHaveBeenNthCalledWith(2, "/workspaces", "/sessions/chat-1.jsonl", "therapist");
+    expect(bindChat).toHaveBeenNthCalledWith(
+      2,
+      "/workspaces",
+      "/sessions/chat-1.jsonl",
+      "therapist",
+    );
     expect(screen.queryByRole("alert")).toBeNull();
 
     finishRetry();
@@ -194,7 +205,7 @@ describe("ChatPicker", () => {
   });
 
   it("opens Motion in its own folder and lists only Motion sessions", async () => {
-    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces/", configured: true });
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces/", configured: true });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([]);
     selectWorkspaceMock.mockResolvedValue();
@@ -217,7 +228,7 @@ describe("ChatPicker", () => {
   });
 
   it("shows a clear prerequisite error when projectsRoot is unavailable", async () => {
-    getSettingsMock.mockResolvedValue(null);
+    readSettingsMock.mockResolvedValue({ projectsRoot: "  ", configured: false });
 
     render(<ChatPicker onChosen={vi.fn()} />);
 
@@ -226,5 +237,90 @@ describe("ChatPicker", () => {
     ).toBeDefined();
     expect(waitForReadyMock).not.toHaveBeenCalled();
     expect(selectWorkspaceMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the drag region on the header wrappers and off every control", async () => {
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([session]);
+    render(<ChatPicker onChosen={vi.fn()} />);
+    await screen.findByText("Plan my week");
+
+    const head = document.querySelector(".picker-head") as HTMLElement;
+    for (const selector of [".picker-head-main", ".picker-head-window", ".picker-head-actions"]) {
+      expect(head.querySelector(selector)?.hasAttribute("data-tauri-drag-region")).toBe(true);
+    }
+    const controls = head.querySelectorAll("button, input, select");
+    expect(controls.length).toBeGreaterThan(0);
+    for (const control of controls) {
+      expect(control.hasAttribute("data-tauri-drag-region")).toBe(false);
+    }
+  });
+
+  it("shows the model and the last reply on a session row, and nothing when absent", async () => {
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([
+      { ...session, lastReply: "Here is your week, blocked by focus time.", model: "Claude Opus" },
+      { ...session, id: "plain", path: "/plain.jsonl", preview: "Plain row" },
+    ]);
+    render(<ChatPicker onChosen={vi.fn()} />);
+
+    const row = (await screen.findByText("Plan my week")).closest("button") as HTMLElement;
+    expect(row.querySelector(".picker-model-tag")?.textContent).toBe("Claude Opus");
+    expect(row.querySelector(".picker-snippet")?.textContent).toBe(
+      "Here is your week, blocked by focus time.",
+    );
+    const plain = screen.getByText("Plain row").closest("button") as HTMLElement;
+    expect(plain.querySelector(".picker-model-tag")).toBeNull();
+    expect(plain.querySelector(".picker-snippet")).toBeNull();
+  });
+
+  it("explains a load failure plainly and retries the load", async () => {
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock
+      .mockRejectedValueOnce(new Error("sidecar unavailable"))
+      .mockResolvedValueOnce([session]);
+
+    render(<ChatPicker onChosen={vi.fn()} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.firstElementChild?.textContent).toBe(
+      "Couldn\u2019t load chats. Please try again.",
+    );
+    expect(alert.querySelector("details code")?.textContent).toBe("sidecar unavailable");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Plan my week")).toBeDefined();
+    expect(listSessionsMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reports a failed settings read as a load failure, not a missing folder, and retries it", async () => {
+    readSettingsMock
+      .mockRejectedValueOnce(new Error("settings unreadable"))
+      .mockResolvedValueOnce({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([session]);
+
+    render(<ChatPicker onChosen={vi.fn()} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.firstElementChild?.textContent).toBe(
+      "Couldn\u2019t load chats. Please try again.",
+    );
+    expect(alert.querySelector("details code")?.textContent).toBe("settings unreadable");
+    expect(
+      screen.queryByText("Choose a projects folder in Settings before starting a chat."),
+    ).toBeNull();
+    expect(waitForReadyMock).not.toHaveBeenCalled();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Plan my week")).toBeDefined();
+    expect(readSettingsMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

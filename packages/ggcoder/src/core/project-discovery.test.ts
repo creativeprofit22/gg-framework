@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { getModel } from "@kenkaiiii/gg-core/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ConfigModule from "../config.js";
@@ -11,6 +13,7 @@ import {
   discoverProjectsRootFolders,
   discoveryPathKey,
   isAbsoluteCwd,
+  listForeignSessions,
   listRecentSessions,
   mergeDiscoveredProjects,
   type DiscoveredProject,
@@ -347,6 +350,25 @@ describe("discoverProjects (ggcoder store)", () => {
     expect(projects.some((p) => p.path.endsWith("arbitrary-store-name"))).toBe(false);
   });
 
+  it("treats a missing session root as empty but rejects an unreadable one", async () => {
+    const projectPath = path.join(tmp, "projects", "locked");
+    await fs.mkdir(projectPath, { recursive: true });
+    expect(await listRecentSessions(projectPath)).toEqual([]);
+
+    const lockedRoot = path.join(state.sessionsDir, encodeCwd(projectPath));
+    const realReaddir = fs.readdir;
+    const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    const spy = vi.spyOn(fs, "readdir").mockImplementation(((dir: unknown, ...rest: unknown[]) =>
+      dir === lockedRoot
+        ? Promise.reject(denied)
+        : (realReaddir as (...args: unknown[]) => Promise<unknown>)(dir, ...rest)) as typeof fs.readdir);
+    try {
+      await expect(listRecentSessions(projectPath)).rejects.toThrow("EACCES");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("lists recent sessions only from an explicit agent session root", async () => {
     const projectPath = path.join(tmp, "projects", "shared-root");
     const chatSessionsDir = path.join(tmp, ".gg", "chat-sessions", "general");
@@ -394,6 +416,179 @@ describe("discoverProjects (ggcoder store)", () => {
     const sessions = await listRecentSessions(requestedProject);
 
     expect(sessions.map((session) => session.id)).toEqual(["requested-project-session"]);
+  });
+
+  it("reports the last assistant reply and the header model", async () => {
+    const projectPath = path.join(tmp, "projects", "reply-snippet");
+    const timestamp = new Date().toISOString();
+    await writeSessionRecords(projectPath, "reply.jsonl", {
+      id: "reply-session",
+      timestamp,
+      records: [
+        { type: "message", timestamp, message: { role: "user", content: "Fix it" } },
+        {
+          type: "message",
+          timestamp,
+          message: { role: "assistant", content: [{ type: "text", text: "First\n\n  answer" }] },
+        },
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: `Done.   ${"x".repeat(200)}` }],
+          },
+        },
+        // A tool-only reply has no text and must not erase the previous snippet.
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            content: [{ type: "tool_call", id: "t1", name: "read", args: {} }],
+          },
+        },
+      ],
+    });
+
+    const [session] = await listRecentSessions(projectPath);
+
+    expect(session?.lastReply?.startsWith("Done. xxx")).toBe(true);
+    expect(session?.lastReply).toHaveLength(100);
+    expect(session?.lastReply?.endsWith("\u2026")).toBe(true);
+    // Unknown to the registry, so the raw id is shown rather than nothing.
+    expect(session?.model).toBe("claude-sonnet-5");
+  });
+
+  it("keeps hidden thinking out of the native reply snippet", async () => {
+    const projectPath = path.join(tmp, "projects", "thinking-snippet");
+    const timestamp = new Date().toISOString();
+    await writeSessionRecords(projectPath, "thinking.jsonl", {
+      id: "thinking-session",
+      timestamp,
+      records: [
+        { type: "message", timestamp, message: { role: "user", content: "Why?" } },
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", text: "secret" },
+              { type: "text", text: "Answer" },
+            ],
+          },
+        },
+        // A later thinking-only reply has no visible text and must keep the snippet.
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", text: "Let me think about whether" }],
+          },
+        },
+      ],
+    });
+
+    const [session] = await listRecentSessions(projectPath);
+
+    expect(session?.lastReply).toBe("Answer");
+  });
+
+  it("lets a later model_change override the header model, by display name", async () => {
+    const projectPath = path.join(tmp, "projects", "model-change");
+    const timestamp = new Date().toISOString();
+    await writeSessionRecords(projectPath, "model.jsonl", {
+      id: "model-session",
+      timestamp,
+      records: [
+        { type: "message", timestamp, message: { role: "user", content: "Hi" } },
+        { type: "model_change", timestamp, provider: "anthropic", model: "claude-opus-5-5" },
+      ],
+    });
+
+    const [session] = await listRecentSessions(projectPath);
+
+    expect(session?.model).toBe(getModel("claude-opus-5-5")?.name);
+    expect(session?.model).not.toBe("claude-opus-5-5");
+    expect(session?.lastReply).toBeUndefined();
+  });
+
+  it("reads the last assistant reply from a foreign transcript, without a model", async () => {
+    const projectPath = path.join(tmp, "projects", "widgets");
+    await fs.mkdir(projectPath, { recursive: true });
+    const fixture = await fs.readFile(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "__fixtures__",
+        "claude-transcript.jsonl",
+      ),
+      "utf-8",
+    );
+    const claudeDir = path.join(tmp, ".claude", "projects", "widgets");
+    await fs.mkdir(claudeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(claudeDir, "s1.jsonl"),
+      fixture.replaceAll('"/Users/dev/widgets"', JSON.stringify(projectPath)),
+      "utf-8",
+    );
+
+    const [session] = await listForeignSessions(projectPath, 5, tmp);
+
+    expect(session?.source).toBe("claude-code");
+    expect(session?.lastReply).toBe("Added three retries with backoff.");
+    expect(session?.model).toBeUndefined();
+  });
+
+  it("skips a trailing thinking-only Codex reply when choosing the foreign snippet", async () => {
+    const projectPath = path.join(tmp, "projects", "codex-thinking");
+    await fs.mkdir(projectPath, { recursive: true });
+    const timestamp = new Date().toISOString();
+    const records = [
+      { timestamp, type: "session_meta", payload: { id: "codex-1", cwd: projectPath } },
+      {
+        timestamp,
+        type: "response_item",
+        payload: { type: "message", role: "user", content: "Add retries" },
+      },
+      {
+        timestamp,
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: "Retries added." },
+      },
+      {
+        timestamp,
+        type: "response_item",
+        payload: { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+      },
+      {
+        timestamp,
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "c1", output: "ok" },
+      },
+      // Flushed after the tool result, so this becomes a thinking-only message.
+      {
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Let me think about whether" }],
+        },
+      },
+    ];
+    const codexDir = path.join(tmp, ".codex", "sessions", "2026", "09", "29");
+    await fs.mkdir(codexDir, { recursive: true });
+    await fs.writeFile(
+      path.join(codexDir, "rollout-thinking.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf-8",
+    );
+
+    const [session] = await listForeignSessions(projectPath, 5, tmp);
+
+    expect(session?.source).toBe("codex");
+    expect(session?.lastReply).toBe("Retries added.");
   });
 
   it("skips compaction summaries and autopilot injections when choosing a preview", async () => {

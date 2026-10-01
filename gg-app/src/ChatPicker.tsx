@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
 import { theme } from "./theme";
 import {
   arrangeAllWindows,
   focusWindowByOffset,
-  getSettings,
   listSessions,
+  readSettings as readAppSettings,
   selectWorkspace,
   waitForReady,
+  type AppSettings,
   type ChatAgentId,
   type RecentSession,
 } from "./agent";
@@ -18,7 +19,8 @@ import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { MetalButton } from "./MetalButton";
 import { useWindowFocused } from "./useWindowFocused";
-import { describeOpenFailure } from "./open-failure";
+import { describeActionFailure, describeOpenFailure, type FailureCopy } from "./open-failure";
+import { PickerError } from "./PickerError";
 
 interface Props {
   onChosen: (cwd: string) => void;
@@ -27,6 +29,8 @@ interface Props {
   /** Which non-coding workspace this picker opens. Defaults to chat. */
   mode?: "chat" | "motion";
   waitForCatalogReady?: () => Promise<unknown>;
+  /** Reads app settings; must throw on failure so it isn't mistaken for "no folder chosen". */
+  readSettings?: () => Promise<AppSettings>;
   discoverSessions?: (
     cwd: string,
     chatAgent?: ChatAgentId | "all" | "motion",
@@ -45,14 +49,14 @@ const COPY = {
     newLabel: "+ New chat",
     empty: "No previous chats yet.",
     noRoot: "Choose a projects folder in Settings before starting a chat.",
-    loadError: "Chats could not be loaded.",
+    loadAction: "load chats",
   },
   motion: {
     title: "Motion",
     newLabel: "+ New video",
     empty: "No motion sessions yet.",
     noRoot: "Choose a projects folder in Settings before starting a video.",
-    loadError: "Motion sessions could not be loaded.",
+    loadAction: "load motion sessions",
   },
 } as const;
 
@@ -63,6 +67,7 @@ export function ChatPicker({
   initialAgent = "general",
   mode = "chat",
   waitForCatalogReady = waitForReady,
+  readSettings = readAppSettings,
   discoverSessions = listSessions,
   bindChat = (cwd, sessionPath, chatAgent) => selectWorkspace(mode, cwd, sessionPath, chatAgent),
   showWindowControls = true,
@@ -73,13 +78,14 @@ export function ChatPicker({
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FailureCopy | null>(null);
   // `retry` is data, not a closure, so Retry runs this render's `busy` guard.
-  const [selectionError, setSelectionError] = useState<{
-    summary: string;
-    detail: string | null;
-    retry: RecentSession | null;
-  } | null>(null);
+  const [selectionError, setSelectionError] = useState<
+    (FailureCopy & { retry: RecentSession | null }) | null
+  >(null);
+  const selectionErrorId = useId();
+  // Only the latest load may write state; an older one finishing late is dropped.
+  const loadSeq = useRef(0);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -97,34 +103,40 @@ export function ChatPicker({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
+  /** Load (or reload after a failure) the session list under the projects root. */
+  const load = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeq.current;
+    const current = (): boolean => seq === loadSeq.current;
     setLoading(true);
     setError(null);
-    void getSettings()
-      .then(async (settings) => {
-        const projects = settings?.projectsRoot.trim() ?? "";
-        if (!projects) throw new Error(copy.noRoot);
-        const root = mode === "motion" ? motionWorkspacePath(projects) : projects;
-        if (!cancelled) setProjectsRoot(root);
-        await waitForCatalogReady();
-        return discoverSessions(root, mode === "motion" ? "motion" : "all");
-      })
-      .then((recent) => {
-        if (!cancelled) setSessions(recent);
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : copy.loadError);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    try {
+      // A failed read throws into the catch below; only a real empty root is "not configured".
+      const settings = await readSettings();
+      const projects = settings.projectsRoot.trim();
+      if (!projects) {
+        // Actionable as written: say what to do rather than "try again".
+        if (current()) setError({ summary: copy.noRoot, detail: null });
+        return;
+      }
+      const root = mode === "motion" ? motionWorkspacePath(projects) : projects;
+      if (current()) setProjectsRoot(root);
+      await waitForCatalogReady();
+      const recent = await discoverSessions(root, mode === "motion" ? "motion" : "all");
+      if (current()) setSessions(recent);
+    } catch (reason: unknown) {
+      if (current()) setError(describeActionFailure(copy.loadAction, reason));
+    } finally {
+      if (current()) setLoading(false);
+    }
+  }, [copy, mode, readSettings, discoverSessions, waitForCatalogReady]);
+
+  useEffect(() => {
+    void load();
     return () => {
-      cancelled = true;
+      // Invalidate the in-flight load on unmount or dependency change.
+      loadSeq.current += 1;
     };
-  }, [copy, mode, discoverSessions, waitForCatalogReady]);
+  }, [load]);
 
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
@@ -134,60 +146,65 @@ export function ChatPicker({
       .then(() => onChosen(projectsRoot))
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? reason.message : String(reason);
-        setSelectionError({ ...describeOpenFailure(message), retry: session ?? null });
+        setSelectionError({
+          ...describeOpenFailure(message, session?.preview),
+          retry: session ?? null,
+        });
         setBusy(false);
       });
   }
 
+  // A failed resume sits directly under its row; a failed new chat (no row) sits on top.
+  const failedRowId = selectionError?.retry?.id;
+  const failedRowShown =
+    !loading && !error && failedRowId !== undefined && sessions.some((s) => s.id === failedRowId);
+  const selectionErrorBlock = selectionError && (
+    <PickerError
+      id={selectionErrorId}
+      summary={selectionError.summary}
+      detail={selectionError.detail}
+      retryDisabled={busy}
+      onRetry={() => choose(selectionError.retry ?? undefined)}
+    />
+  );
+
   return (
     <div className="picker chat-picker">
       <div className="picker-head" data-tauri-drag-region>
-        {onClose ? <BackButton label="Back" onClick={onClose} /> : null}
-        <span className="picker-title">{copy.title}</span>
-        {!loading && !error && <Badge>{sessions.length}</Badge>}
-        <span className="picker-head-actions">
-          <MetalButton
-            windowFocused={windowFocused}
-            className="btn btn-primary btn-sm"
-            disabled={busy || loading || !projectsRoot}
-            onClick={() => choose()}
-          >
-            {copy.newLabel}
-          </MetalButton>
-          {showWindowControls && (
-            <>
-              <RadioButton />
-              <WindowLayoutButton />
-            </>
-          )}
-        </span>
+        {/* The page's own controls share the list's column; window controls stay at the edge. */}
+        <div className="picker-head-main" data-tauri-drag-region>
+          {onClose ? <BackButton label="Back" onClick={onClose} /> : null}
+          <span className="picker-title">{copy.title}</span>
+          {!loading && !error && <Badge>{sessions.length}</Badge>}
+          <span className="picker-head-actions" data-tauri-drag-region>
+            <MetalButton
+              windowFocused={windowFocused}
+              className="btn btn-primary btn-sm"
+              disabled={busy || loading || !projectsRoot}
+              onClick={() => choose()}
+            >
+              {copy.newLabel}
+            </MetalButton>
+          </span>
+        </div>
+        {showWindowControls && (
+          <span className="picker-head-window" data-tauri-drag-region>
+            <RadioButton />
+            <WindowLayoutButton />
+          </span>
+        )}
       </div>
 
       <div className="picker-list">
-        {selectionError && (
-          <div className="picker-error" role="alert">
-            <div>{selectionError.summary}</div>
-            {selectionError.detail && (
-              <details className="picker-error-detail">
-                <summary>Details</summary>
-                <code>{selectionError.detail}</code>
-              </details>
-            )}
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm picker-error-retry"
-              disabled={busy}
-              onClick={() => choose(selectionError.retry ?? undefined)}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+        {selectionError && !failedRowShown && selectionErrorBlock}
         {loading && <ListSkeleton rows={5} />}
         {!loading && error && (
-          <div className="picker-empty" style={{ color: theme.textMuted }}>
-            {error}
-          </div>
+          <PickerError
+            summary={error.summary}
+            detail={error.detail}
+            retryDisabled={busy}
+            onRetry={() => void load()}
+          />
         )}
         {!loading && !error && sessions.length === 0 && (
           <div className="picker-empty">
@@ -205,22 +222,29 @@ export function ChatPicker({
         {!loading && !error && sessions.length > 0 && (
           <div className="picker-reveal">
             {sessions.map((session) => (
-              <button
-                key={session.id}
-                className="picker-item"
-                disabled={busy}
-                onClick={() => choose(session)}
-              >
-                <span className="picker-row">
-                  <span className="picker-name picker-preview" style={{ color: theme.text }}>
-                    {session.preview || "(no preview)"}
+              <Fragment key={session.id}>
+                <button
+                  className="picker-item"
+                  disabled={busy}
+                  aria-describedby={
+                    failedRowShown && session.id === failedRowId ? selectionErrorId : undefined
+                  }
+                  onClick={() => choose(session)}
+                >
+                  <span className="picker-row">
+                    <span className="picker-name picker-preview" style={{ color: theme.text }}>
+                      {session.preview || "(no preview)"}
+                    </span>
+                    <Badge>{session.lastActiveDisplay}</Badge>
                   </span>
-                  <Badge>{session.lastActiveDisplay}</Badge>
-                </span>
-                <span className="picker-meta" style={{ color: theme.textMuted }}>
-                  {`${session.messageCount} msgs`}
-                </span>
-              </button>
+                  <span className="picker-meta" style={{ color: theme.textMuted }}>
+                    {session.model && <Badge className="picker-model-tag">{session.model}</Badge>}
+                    {`${session.messageCount} msgs`}
+                  </span>
+                  {session.lastReply && <span className="picker-snippet">{session.lastReply}</span>}
+                </button>
+                {failedRowShown && session.id === failedRowId && selectionErrorBlock}
+              </Fragment>
             ))}
           </div>
         )}

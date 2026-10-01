@@ -701,6 +701,10 @@ export interface RecentSession {
    * `path` is that tool's own transcript, imported before it opens.
    */
   source?: SessionSource;
+  /** Start of the last assistant reply (≤100 chars); absent on older daemons. */
+  lastReply?: string;
+  /** Display name of the model last in use; absent for foreign sessions. */
+  model?: string;
 }
 
 export interface SwitchModelResult extends ThinkingState {
@@ -2119,6 +2123,14 @@ export async function getSettings(): Promise<AppSettings | null> {
     await logError(`app_settings_get failed: ${String(e)}`);
     return null;
   }
+}
+
+/**
+ * Read gg-app settings like {@link getSettings}, but let a failed read throw so
+ * callers can tell "couldn't read settings" apart from "no folder chosen yet".
+ */
+export async function readSettings(): Promise<AppSettings> {
+  return await invoke<AppSettings>("app_settings_get");
 }
 
 /**

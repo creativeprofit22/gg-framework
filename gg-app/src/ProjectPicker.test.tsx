@@ -404,7 +404,9 @@ describe("ProjectPicker session list", () => {
     fireEvent.click(screen.getByText(NATIVE_SESSION.preview));
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("Couldn’t open this session. Please try again.")).toBeDefined();
+    expect(
+      within(alert).getByText("Couldn’t open “Native GG Coder session”. Please try again."),
+    ).toBeDefined();
     // The internal cause is kept for bug reports, but only under Details.
     const detail = within(alert).getByText("pane 'primary' generation 3 was superseded");
     expect(detail.closest("details")).not.toBeNull();
@@ -413,6 +415,108 @@ describe("ProjectPicker session list", () => {
 
     await waitFor(() => expect(bindProjectMock).toHaveBeenCalledTimes(2));
     expect(bindProjectMock).toHaveBeenLastCalledWith(PROJECT.path, NATIVE_SESSION.path);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("renders an open failure directly under the row that failed", async () => {
+    const second: RecentSession = { ...NATIVE_SESSION, id: "gg-2", path: "/s/2", preview: "Two" };
+    bindProjectMock.mockRejectedValueOnce(new Error("pane 'primary' generation 3 was superseded"));
+    await renderSessionList([NATIVE_SESSION, second]);
+
+    const row = screen.getByText(NATIVE_SESSION.preview).closest("button");
+    fireEvent.click(row as HTMLButtonElement);
+
+    const alert = await screen.findByRole("alert");
+    expect(row?.nextElementSibling).toBe(alert);
+    expect(row?.getAttribute("aria-describedby")).toBe(alert.id);
+    const otherRow = screen.getByText("Two").closest("button");
+    expect(otherRow?.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("keeps a new-session failure above the list", async () => {
+    bindProjectMock.mockRejectedValueOnce(new Error("pane 'primary' generation 3 was superseded"));
+    await renderSessionList([NATIVE_SESSION]);
+
+    fireEvent.click(screen.getByRole("button", { name: "+ New session" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.parentElement?.classList.contains("picker-list")).toBe(true);
+    expect(alert.textContent).toContain("Couldn’t open this session");
+  });
+});
+
+describe("ProjectPicker header", () => {
+  it("keeps the drag region on the wrappers and off every control", async () => {
+    await renderProjectList([PROJECT]);
+    const head = document.querySelector(".picker-head") as HTMLElement;
+    for (const selector of [".picker-head-main", ".picker-head-window", ".picker-head-actions"]) {
+      expect(head.querySelector(selector)?.hasAttribute("data-tauri-drag-region")).toBe(true);
+    }
+    expect(head.hasAttribute("data-tauri-drag-region")).toBe(true);
+    const controls = head.querySelectorAll("button, input, select, [role='menuitem']");
+    expect(controls.length).toBeGreaterThan(0);
+    for (const control of controls) {
+      expect(control.hasAttribute("data-tauri-drag-region")).toBe(false);
+    }
+    // Window controls sit outside the page column.
+    const windowControls = head.querySelector(".picker-head-window");
+    expect(windowControls?.parentElement).toBe(head);
+    expect(
+      within(windowControls as HTMLElement).getByRole("button", { name: "Radio" }),
+    ).toBeTruthy();
+  });
+});
+
+describe("ProjectPicker More menu", () => {
+  it("opens, runs an item, and returns focus to the trigger on Escape", async () => {
+    openFolderDialogMock.mockResolvedValue(null);
+    await renderProjectList([PROJECT]);
+
+    const trigger = screen.getByRole("button", { name: "More actions" });
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu", { name: "More actions" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Add projects folder", "Open project directly"]);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open project directly" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(openFolderDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Open project directly" }),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+});
+
+describe("ProjectPicker folder errors", () => {
+  it("explains a failed folder save plainly, with Details and Retry", async () => {
+    openFolderDialogMock.mockResolvedValue("/Users/workspace");
+    saveSettingsMock.mockRejectedValueOnce(new Error("EACCES: settings.json"));
+    await renderProjectList([PROJECT]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add projects folder" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.firstElementChild?.textContent).toBe(
+      "Couldn’t add that projects folder. Please try again.",
+    );
+    expect(alert.querySelector("details code")?.textContent).toBe("EACCES: settings.json");
+
+    saveSettingsMock.mockResolvedValueOnce();
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(openFolderDialogMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 });

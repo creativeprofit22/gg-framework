@@ -222,6 +222,7 @@ import {
   type ProgrammaticExecutionOutcome,
 } from "./core/programmatic/execution.js";
 import { appSidecarCodeCommandsResponse, DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "./app-sidecar-command-listing.js";
+import { listingRouteResponse } from "./app-sidecar-listing-route.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
@@ -5180,21 +5181,18 @@ async function createSession(
     if (method === "GET" && url === "/projects") {
       // Session stores plus configured/inferred filesystem roots, with hidden
       // projects filtered by the canonical discovery implementation.
-      void loadAppSettings()
-        .then(({ projectsRoot, projectRoots, hiddenProjects }) =>
-          discoverProjects({
+      void listingRouteResponse(
+        "projects",
+        async () => {
+          const { projectsRoot, projectRoots, hiddenProjects } = await loadAppSettings();
+          return discoverProjects({
             projectsRoot,
             extraRoots: projectRoots,
             hiddenPaths: hiddenProjects,
-          }),
-        )
-        .then((projects) => json(res, 200, { projects }))
-        .catch((err) => {
-          log("ERROR", "app-sidecar", "discoverProjects failed", {
-            message: err instanceof Error ? err.message : String(err),
           });
-          json(res, 200, { projects: [] });
-        });
+        },
+        (message) => log("ERROR", "app-sidecar", "discoverProjects failed", { message }),
+      ).then(({ status, body }) => json(res, status, body));
       return;
     }
 
@@ -5208,9 +5206,11 @@ async function createSession(
       // An omitted chatAgent means coding history; chat callers identify one
       // agent or request the combined, recency-sorted "all" listing; the
       // reserved value "motion" lists Motion sessions.
-      void listSidecarSessions(target, requestedAgent, paths.sessionsDir)
-        .then((sessions) => json(res, 200, { sessions }))
-        .catch(() => json(res, 200, { sessions: [] }));
+      void listingRouteResponse(
+        "sessions",
+        () => listSidecarSessions(target, requestedAgent, paths.sessionsDir),
+        (message) => log("ERROR", "app-sidecar", "listSidecarSessions failed", { message }),
+      ).then(({ status, body }) => json(res, status, body));
       return;
     }
 

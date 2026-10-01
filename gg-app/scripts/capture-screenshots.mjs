@@ -359,6 +359,19 @@ export const responses = {
       preview,
       lastActiveDisplay: ["12m ago", "2h ago", "yesterday"][i],
       messageCount: [24, 61, 8][i],
+      // Synthetic demo text only; the last row omits both to show an older session.
+      ...[
+        {
+          lastReply:
+            "Retries now reuse the same idempotency key, so a double submit can't charge twice.",
+          model: "Claude Sonnet 4.6",
+        },
+        {
+          lastReply: "The resizer runs on sharp now; thumbnails build about four times faster.",
+          model: "GPT-5.5",
+        },
+        {},
+      ][i],
     })),
   },
 };

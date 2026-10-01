@@ -55,7 +55,7 @@ interface Props {
 /**
  * App entry screen: the shimmering Supah Coder banner over the primary actions.
  * Code, Chat and Motion require a configured workspace folder and connected AI provider;
- * everything else lives in full-screen Settings (the bottom-right gear).
+ * everything else lives in full-screen Settings (the top-right gear).
  */
 export function HomeScreen({
   onProjects,

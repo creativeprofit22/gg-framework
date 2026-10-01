@@ -993,6 +993,15 @@ select {
   text-align: center;
   overflow-x: hidden;
   overflow-y: auto;
+  /* Dark backing for small text and the Settings gear: the text-shadow halo
+     alone lost to bright stretches of the dot field (about 2.5:1 behind the
+     version, byline and captions). */
+  --home-ink-backing: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .home {
+    --home-ink-backing: var(--bg);
+  }
 }
 /* The dithered-waves backdrop (HomeDither.tsx): fills the whole home screen,
    edge to edge, under all content. It never takes pointer events itself (the
@@ -1068,18 +1077,21 @@ select {
 }
 /* Edges: Settings top-right, your links bottom-centre, the version (or the
    update button) bottom-left. */
-/* Spans the width and centres its content, rather than translate(-50%):
-   the entry animation (reveal-up) owns transform. Only the links themselves
+/* Centred with auto margins between gutters that clear the version corner,
+   rather than translate(-50%): the entry animation (reveal-up) owns
+   transform. Shrinks to its text so the backing hugs it, and wraps instead of
+   running under the version in very narrow panes. Only the links themselves
    take clicks, so the strip around them stays a window drag area. */
 .home > .home-links {
   position: absolute;
   z-index: 1;
-  left: 0;
-  right: 0;
+  left: 76px;
+  right: 76px;
   bottom: 18px;
-  margin: 0;
+  width: fit-content;
+  margin: 0 auto;
   justify-content: center;
-  white-space: nowrap;
+  text-wrap: balance;
   pointer-events: none;
 }
 .home > .home-links > * {
@@ -1343,18 +1355,16 @@ select {
      the text-shadow halo alone lost to dense stretches of dots. */
   padding: 3px 10px;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-}
-@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .home-tagline {
-    background: var(--bg);
-  }
+  background: var(--home-ink-backing);
 }
 .home-byline {
   margin-top: -18px;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--home-ink-backing);
   font-size: 12px;
   color: var(--text);
 }
@@ -1377,7 +1387,7 @@ select {
 }
 /* ── Home actions ──
    The three ways in (Code, Chat, Motion) as big pills under the banner, and Settings as
-   a gear pinned to the bottom-right corner. */
+   a gear pinned to the top-right corner. */
 .home-actions {
   display: flex;
   /* Narrow windows: wrap onto a second centred row instead of clipping the
@@ -1404,12 +1414,15 @@ select {
 .home-action-note {
   position: absolute;
   top: 100%;
-  left: 0;
-  right: 0;
-  margin-top: 8px;
-  /* Flex centring keeps an over-long caption centred instead of spilling right. */
-  display: flex;
-  justify-content: center;
+  /* Centred on the pill with `translate` (not transform, which the entry
+     animation owns), so an over-long caption stays centred instead of spilling
+     right, and the backing hugs the text. */
+  left: 50%;
+  translate: -50% 0;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--home-ink-backing);
   white-space: nowrap;
   font-size: 12px;
   line-height: 1.3;
@@ -1422,8 +1435,20 @@ select {
   top: 16px;
   right: 20px;
   z-index: 1;
+}
+/* The gear's clear glass let bright dots through; seat it on the shared dark
+   backing and lay the glass tint over it. The child selector outranks the
+   shared .icon-circle size and glass fills (later in App.css and glass.css),
+   so it also carries the gear's full 44px touch target. */
+.home > .home-settings {
   width: 44px;
   height: 44px;
+  background: var(--home-ink-backing);
+}
+.home > .home-settings:hover:not(:disabled) {
+  background:
+    linear-gradient(var(--glass-clear-hover, transparent), var(--glass-clear-hover, transparent)),
+    var(--home-ink-backing);
 }
 
 /* ── Settings screen ──
@@ -1651,11 +1676,6 @@ select {
   border-radius: 50%;
   background: var(--steroids);
   box-shadow: 0 0 6px var(--steroids-glow);
-}
-.home-settings {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
 }
 /* Dimmed (prerequisites unmet): muted but still clickable so it can toast.
    Hold brightness flat on hover so it reads as inactive, not interactive. */
@@ -7850,6 +7870,12 @@ select {
   gap: 10px;
 }
 .home-version {
+  /* Backing over the dot field; negative margins grow it outward so the text
+     (and the update button that replaces it) keep their position. */
+  margin: -3px -8px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--home-ink-backing);
   font-family: var(--sans);
   font-size: 12px;
   font-weight: 500;
@@ -7863,10 +7889,11 @@ select {
   align-items: center;
   gap: 5px;
   min-height: 24px;
-  background: transparent;
+  /* Same backing as the tagline: the halo alone lost to bright dots. */
+  background: var(--home-ink-backing);
   border: none;
-  border-radius: 4px;
-  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  padding: 0 8px;
   font-family: var(--sans);
   font-size: 12px;
   font-weight: 600;

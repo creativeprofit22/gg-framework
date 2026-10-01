@@ -5,8 +5,14 @@ import {
   isSlashCommandsResponse,
   isValidProgrammaticFocus,
   normalizeSlashCommandArgumentHint,
+  normalizeSlashCommandCollection,
+  normalizeSlashCommandEffect,
+  normalizeSlashCommandGroup,
   PROGRAMMATIC_FOCUS_MAX_LENGTH,
   SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH,
+  SLASH_COMMAND_COLLECTION_MAX_LENGTH,
+  SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH,
+  SLASH_COMMAND_PROBLEMS_MAX,
   type SlashCommandsResponse,
 } from "./slash-command-contract.js";
 
@@ -59,6 +65,13 @@ describe("slash-command discovery contract", () => {
       { source: "custom", origin: "project-custom", invocationKind: "prompt" },
       { source: "custom", origin: "global-custom" },
       { source: "custom", argumentHint: "[path or recent — optional]" },
+      { source: "custom", group: "everyday" },
+      { source: "custom", group: "specialist", effect: "plans" },
+      { source: "custom", group: "setup", effect: "edits" },
+      { source: "custom", effect: "reads" },
+      { source: "custom", collection: "demo" },
+      { source: "custom", collection: "demo-kit", group: "everyday", effect: "reads" },
+      { source: "custom", collection: "x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH) },
     ])
       expect(
         isSlashCommandsResponse({ commands: [{ ...response.commands[0], ...metadata }] }),
@@ -79,6 +92,21 @@ describe("slash-command discovery contract", () => {
       { usage: "x".repeat(4_001) },
       { argumentHint: "x".repeat(SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH + 1) },
       { argumentHint: 42 },
+      { source: "built-in", group: "everyday" },
+      { source: "built-in", effect: "reads" },
+      { source: "custom", group: "Everyday" },
+      { source: "custom", group: "other" },
+      { source: "custom", group: "" },
+      { source: "custom", group: 7 },
+      { source: "custom", effect: "Edits" },
+      { source: "custom", effect: "deletes" },
+      { source: "custom", effect: "" },
+      { source: "built-in", collection: "demo" },
+      { source: "custom", collection: "Demo" },
+      { source: "custom", collection: "-demo" },
+      { source: "custom", collection: "" },
+      { source: "custom", collection: 7 },
+      { source: "custom", collection: "x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH + 1) },
       { origin: null },
       { invocationKind: null },
     ])
@@ -94,6 +122,70 @@ describe("slash-command discovery contract", () => {
     const long = normalizeSlashCommandArgumentHint("x".repeat(500));
     expect(long?.length).toBe(SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH);
     expect(long?.endsWith("…")).toBe(true);
+  });
+
+  it("normalizes group and effect to their fixed vocabularies or omits them", () => {
+    expect(normalizeSlashCommandGroup("everyday")).toBe("everyday");
+    expect(normalizeSlashCommandGroup("  Specialist ")).toBe("specialist");
+    expect(normalizeSlashCommandGroup("SETUP")).toBe("setup");
+    expect(normalizeSlashCommandGroup("   ")).toBeUndefined();
+    expect(normalizeSlashCommandGroup(undefined)).toBeUndefined();
+    expect(normalizeSlashCommandGroup(42)).toBeUndefined();
+    expect(normalizeSlashCommandGroup("every\u0007day")).toBeUndefined();
+    expect(normalizeSlashCommandGroup("other")).toBeUndefined();
+    expect(normalizeSlashCommandGroup("every day")).toBeUndefined();
+    expect(normalizeSlashCommandEffect("reads")).toBe("reads");
+    expect(normalizeSlashCommandEffect(" Plans")).toBe("plans");
+    expect(normalizeSlashCommandEffect("EDITS")).toBe("edits");
+    expect(normalizeSlashCommandEffect("deletes")).toBeUndefined();
+    expect(normalizeSlashCommandEffect("")).toBeUndefined();
+    expect(normalizeSlashCommandEffect(null)).toBeUndefined();
+  });
+
+  it("normalizes collections to a bounded lowercase slug or omits them", () => {
+    expect(normalizeSlashCommandCollection("demo")).toBe("demo");
+    expect(normalizeSlashCommandCollection("  Demo-Kit2 ")).toBe("demo-kit2");
+    expect(normalizeSlashCommandCollection("9lives")).toBe("9lives");
+    expect(normalizeSlashCommandCollection("   ")).toBeUndefined();
+    expect(normalizeSlashCommandCollection(undefined)).toBeUndefined();
+    expect(normalizeSlashCommandCollection(42)).toBeUndefined();
+    expect(normalizeSlashCommandCollection("de\u0007mo")).toBeUndefined();
+    expect(normalizeSlashCommandCollection("my demo")).toBeUndefined();
+    expect(normalizeSlashCommandCollection("demo_kit")).toBeUndefined();
+    expect(normalizeSlashCommandCollection("-demo")).toBeUndefined();
+    expect(
+      normalizeSlashCommandCollection("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH)),
+    ).toBe("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH));
+    expect(
+      normalizeSlashCommandCollection("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH + 1)),
+    ).toBeUndefined();
+  });
+
+  it("accepts bounded file-name problems and rejects paths, bad reasons and oversize lists", () => {
+    const ok = { file: "broken.md", scope: "project", reason: "unreadable" };
+    for (const problems of [
+      [],
+      [ok],
+      [{ ...ok, scope: "global", reason: "malformed-frontmatter" }],
+      [{ ...ok, reason: "invalid-name" }],
+      [{ ...ok, file: "x".repeat(SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH) }],
+      Array(SLASH_COMMAND_PROBLEMS_MAX).fill(ok),
+    ])
+      expect(isSlashCommandsResponse({ ...response, problems }), JSON.stringify(problems).slice(0, 80)).toBe(true);
+    for (const problems of [
+      null,
+      ok,
+      [{ ...ok, file: "" }],
+      [{ ...ok, file: "dir/broken.md" }],
+      [{ ...ok, file: "C:\\dir\\broken.md" }],
+      [{ ...ok, file: "bro\u0007ken.md" }],
+      [{ ...ok, file: "x".repeat(SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH + 1) }],
+      [{ ...ok, scope: "built-in" }],
+      [{ ...ok, reason: "exploded" }],
+      [{ ...ok, file: 7 }],
+      Array(SLASH_COMMAND_PROBLEMS_MAX + 1).fill(ok),
+    ])
+      expect(isSlashCommandsResponse({ ...response, problems }), JSON.stringify(problems)?.slice(0, 80)).toBe(false);
   });
 
   it("requires explicit text, reference, and attachment policies", () => {

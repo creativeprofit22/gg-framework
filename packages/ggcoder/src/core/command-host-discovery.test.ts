@@ -3,10 +3,18 @@ import { discoverCommands } from "./command-discovery.js";
 import { AGENT_HOME_COMMANDS } from "../modes/agent-home-mode.js";
 import { SERVE_COMMANDS } from "../modes/serve-mode.js";
 import { UI_SLASH_COMMANDS } from "../ui/submit-slash-commands.js";
+import type * as CustomCommands from "./custom-commands.js";
 
-vi.mock("./custom-commands.js", () => ({ loadCustomCommands: async () => [
-  "model", "m", "Help", "new", "n", "link", "start", "rewind", "ideal-on", "ordinary",
-].map((name) => ({ name, description: "Custom", scope: "project", filePath: `/fixture/${name}.md`, prompt: "BODY" })) }));
+vi.mock("./custom-commands.js", async (importOriginal) => {
+  const fixtures = () => [
+    "model", "m", "Help", "new", "n", "link", "start", "rewind", "ideal-on", "ordinary",
+  ].map((name) => ({ name, description: "Custom", scope: "project", filePath: `/fixture/${name}.md`, prompt: "BODY" }));
+  return {
+    ...(await importOriginal<typeof CustomCommands>()),
+    loadCustomCommands: async () => fixtures(),
+    loadCustomCommandCatalog: async () => ({ commands: fixtures(), problems: [] }),
+  };
+});
 
 describe("host-owned discovery contracts", () => {
   it.each([

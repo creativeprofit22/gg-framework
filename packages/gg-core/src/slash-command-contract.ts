@@ -28,6 +28,71 @@ export function normalizeSlashCommandArgumentHint(value: unknown): string | unde
     : collapsed;
 }
 
+/**
+ * Optional `collection` frontmatter: marks a custom command as part of a
+ * command collection. Only marked commands appear in the desktop palette.
+ */
+export const SLASH_COMMAND_COLLECTION_MAX_LENGTH = 40;
+const SLASH_COMMAND_COLLECTION_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+function isSlashCommandCollection(value: string): boolean {
+  return (
+    value.length <= SLASH_COMMAND_COLLECTION_MAX_LENGTH &&
+    SLASH_COMMAND_COLLECTION_PATTERN.test(value)
+  );
+}
+
+/** Trim and lowercase; values outside `[a-z0-9][a-z0-9-]{0,39}` → undefined. */
+export function normalizeSlashCommandCollection(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return isSlashCommandCollection(normalized) ? normalized : undefined;
+}
+
+/** Optional `group` frontmatter: where a custom command sits in the desktop palette. */
+export const SLASH_COMMAND_GROUPS = ["everyday", "specialist", "setup"] as const;
+export type SlashCommandGroup = (typeof SLASH_COMMAND_GROUPS)[number];
+
+/** Optional `effect` frontmatter: what running a custom command does to the project. */
+export const SLASH_COMMAND_EFFECTS = ["reads", "plans", "edits"] as const;
+export type SlashCommandEffect = (typeof SLASH_COMMAND_EFFECTS)[number];
+
+function normalizeEnum<T extends string>(values: readonly T[], value: unknown): T | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return values.find((candidate) => candidate === normalized);
+}
+
+/** Trim and lowercase; anything outside {@link SLASH_COMMAND_GROUPS} → undefined. */
+export function normalizeSlashCommandGroup(value: unknown): SlashCommandGroup | undefined {
+  return normalizeEnum(SLASH_COMMAND_GROUPS, value);
+}
+
+/** Trim and lowercase; anything outside {@link SLASH_COMMAND_EFFECTS} → undefined. */
+export function normalizeSlashCommandEffect(value: unknown): SlashCommandEffect | undefined {
+  return normalizeEnum(SLASH_COMMAND_EFFECTS, value);
+}
+
+/**
+ * Custom command files that exist but could not become commands (or lost their
+ * header), reported so the desktop can show them instead of silently hiding them.
+ */
+export const SLASH_COMMAND_PROBLEM_REASONS = [
+  "unreadable",
+  "malformed-frontmatter",
+  "invalid-name",
+] as const;
+export type SlashCommandProblemReason = (typeof SLASH_COMMAND_PROBLEM_REASONS)[number];
+export const SLASH_COMMAND_PROBLEMS_MAX = 100;
+export const SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH = 255;
+
+export interface SlashCommandProblem {
+  /** File name only, never a full path. */
+  file: string;
+  scope: "project" | "global";
+  reason: SlashCommandProblemReason;
+}
+
 /** Programmatic focus uses UTF-16 code units, not Unicode code points. */
 export const PROGRAMMATIC_FOCUS_MAX_LENGTH = 4_000;
 export const PROGRAMMATIC_FOCUS_GUIDANCE =
@@ -77,12 +142,35 @@ export interface SlashCommandListing {
   usage?: string;
   /** Placeholder describing accepted arguments, e.g. `[path or recent — optional]`. */
   argumentHint?: string;
+  /** Normalized collection marker; only custom commands may declare one. */
+  collection?: string;
+  /** Palette group from frontmatter; only custom commands may declare one. */
+  group?: SlashCommandGroup;
+  /** What the command does to the project; only custom commands may declare one. */
+  effect?: SlashCommandEffect;
   origin?: "built-in" | "project-custom" | "global-custom";
   invocationKind?: "prompt" | "workspace-action";
 }
 
 export interface SlashCommandsResponse {
   commands: SlashCommandListing[];
+  /** Absent from older daemons; treat absence as "none reported". */
+  problems?: SlashCommandProblem[];
+}
+
+function isSlashCommandProblem(value: unknown): value is SlashCommandProblem {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.file === "string" &&
+    item.file.length > 0 &&
+    item.file.length <= SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH &&
+    !/[\\/]/.test(item.file) &&
+    // eslint-disable-next-line no-control-regex
+    !/[\u0000-\u001f\u007f-\u009f]/.test(item.file) &&
+    (item.scope === "project" || item.scope === "global") &&
+    SLASH_COMMAND_PROBLEM_REASONS.includes(item.reason as SlashCommandProblemReason)
+  );
 }
 
 export function isSlashCommandInputPolicy(value: unknown): value is SlashCommandInputPolicy {
@@ -99,6 +187,16 @@ export function isSlashCommandsResponse(value: unknown): value is SlashCommandsR
   if (!value || typeof value !== "object") return false;
   const commands = (value as { commands?: unknown }).commands;
   if (!Array.isArray(commands)) return false;
+  const problems = (value as { problems?: unknown }).problems;
+  if (
+    problems !== undefined &&
+    !(
+      Array.isArray(problems) &&
+      problems.length <= SLASH_COMMAND_PROBLEMS_MAX &&
+      problems.every(isSlashCommandProblem)
+    )
+  )
+    return false;
 
   return commands.every((command) => {
     if (!command || typeof command !== "object") return false;
@@ -121,6 +219,16 @@ export function isSlashCommandsResponse(value: unknown): value is SlashCommandsR
       (item.argumentHint === undefined ||
         (typeof item.argumentHint === "string" &&
           item.argumentHint.length <= SLASH_COMMAND_ARGUMENT_HINT_MAX_LENGTH)) &&
+      (item.collection === undefined ||
+        (item.source === "custom" &&
+          typeof item.collection === "string" &&
+          isSlashCommandCollection(item.collection))) &&
+      (item.group === undefined ||
+        (item.source === "custom" &&
+          SLASH_COMMAND_GROUPS.includes(item.group as SlashCommandGroup))) &&
+      (item.effect === undefined ||
+        (item.source === "custom" &&
+          SLASH_COMMAND_EFFECTS.includes(item.effect as SlashCommandEffect))) &&
       (item.origin === undefined ||
         (item.source === "built-in" && item.origin === "built-in") ||
         (item.source === "custom" &&

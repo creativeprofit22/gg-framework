@@ -3,8 +3,14 @@ import {
   SLASH_COMMAND_NAME_MAX_LENGTH,
   SLASH_COMMAND_DESCRIPTION_MAX_LENGTH,
   type SlashCommandListing,
+  type SlashCommandProblem,
 } from "@kenkaiiii/gg-core";
-import { loadCustomCommands, type CustomCommand } from "./custom-commands.js";
+import {
+  boundCommandProblems,
+  commandProblem,
+  loadCustomCommandCatalog,
+  type CustomCommand,
+} from "./custom-commands.js";
 import { log } from "./logger.js";
 import { PROMPT_COMMANDS, type PromptCommand } from "./prompt-commands.js";
 import { programmaticCommandReferenceV1Schema } from "./programmatic/contracts.js";
@@ -71,6 +77,8 @@ export interface DiscoveredCommand {
 export interface CommandDiscovery {
   entries: DiscoveredCommand[];
   resolve(name: string): DiscoveredCommand | undefined;
+  /** Custom command files that could not be listed, or lost their header. */
+  problems?: SlashCommandProblem[];
 }
 
 /** Derived per request from the existing Markdown loader; no second parser or catalog store. */
@@ -113,12 +121,16 @@ export async function discoverCommands(
   }
   // The selection/approval helper is reserved even in hosts that do not advertise it.
   claimed.add("programmatic-run");
-  for (const custom of await loadCustomCommands(cwd)) {
+  const catalog = await loadCustomCommandCatalog(cwd);
+  const problems: SlashCommandProblem[] = [...catalog.problems];
+  for (const custom of catalog.commands) {
     if (!custom.name.length || custom.name.length > SLASH_COMMAND_NAME_MAX_LENGTH) {
       log("WARN", "command-discovery", "Skipping custom command with an unrepresentable identity", {
         scope: custom.scope,
         nameLength: String(custom.name.length),
       });
+      const problem = commandProblem(custom.filePath, custom.scope, "invalid-name");
+      if (problem) problems.push(problem);
       continue;
     }
     add({ custom, listing: {
@@ -126,6 +138,9 @@ export async function discoverCommands(
       description: (custom.description.startsWith("Custom command from ")
         ? "Custom command" : custom.description).slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
       ...(custom.argumentHint ? { argumentHint: custom.argumentHint } : {}),
+      ...(custom.collection ? { collection: custom.collection } : {}),
+      ...(custom.group ? { group: custom.group } : {}),
+      ...(custom.effect ? { effect: custom.effect } : {}),
       input: { ...SLASH_COMMAND_INPUT_ALL }, source: "custom",
       origin: custom.scope === "project" ? "project-custom" : "global-custom",
       invocationKind: "prompt",
@@ -138,7 +153,11 @@ export async function discoverCommands(
       if (aliases.length) add(action({ ...item, name: aliases[0]!, aliases: aliases.slice(1) }));
     } else add(action(item));
   }
-  return { entries, resolve: (name) => resolved.get(name) };
+  return {
+    entries,
+    resolve: (name) => resolved.get(name),
+    problems: boundCommandProblems(problems),
+  };
 }
 
 export interface AdvisoryCommandPage {

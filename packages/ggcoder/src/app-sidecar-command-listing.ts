@@ -32,5 +32,9 @@ export const DESKTOP_COMMAND_DISCOVERY_OPTIONS = {
 
 export async function appSidecarCodeCommandsResponse(cwd: string): Promise<SlashCommandsResponse> {
   const discovery = await discoverCommands(cwd, DESKTOP_COMMAND_DISCOVERY_OPTIONS);
-  return { commands: discovery.entries.map((entry) => entry.listing) };
+  const problems = discovery.problems ?? [];
+  return {
+    commands: discovery.entries.map((entry) => entry.listing),
+    ...(problems.length ? { problems } : {}),
+  };
 }

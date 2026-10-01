@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { SLASH_COMMAND_INPUT_ALL, type SlashCommandListing } from "@kenkaiiii/gg-core";
 import { discoverCommands, projectAdvisoryCommands, type CommandDiscovery } from "./command-discovery.js";
+import type * as CustomCommands from "./custom-commands.js";
 
-vi.mock("./custom-commands.js", () => ({ loadCustomCommands: async () => [
-  { name: "fixture", scope: "project", description: "Custom command from /private/owner", prompt: "PRIVATE BODY", filePath: "/private/owner/fixture.md" },
-] }));
+vi.mock("./custom-commands.js", async (importOriginal) => {
+  const fixtures = () => [
+    { name: "fixture", scope: "project", description: "Custom command from /private/owner", prompt: "PRIVATE BODY", filePath: "/private/owner/fixture.md" },
+  ];
+  return {
+    ...(await importOriginal<typeof CustomCommands>()),
+    loadCustomCommands: async () => fixtures(),
+    loadCustomCommandCatalog: async () => ({ commands: fixtures(), problems: [] }),
+  };
+});
 const action: SlashCommandListing = {
   name: "fixture", aliases: ["fixture-alias"], description: "Action", input: { ...SLASH_COMMAND_INPUT_ALL }, source: "built-in",
 };

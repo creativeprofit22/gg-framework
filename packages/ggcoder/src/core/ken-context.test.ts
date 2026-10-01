@@ -100,7 +100,13 @@ describe("buildKenDigest", () => {
       messages,
       verificationEvidence: {
         currentEvidence: [
-          { command: "pnpm test", status: "passed", reason: "Host exit code 0", cwd: base.cwd, executionId: "bg-exit" },
+          {
+            command: "pnpm test",
+            status: "passed",
+            reason: "Host exit code 0",
+            cwd: base.cwd,
+            executionId: "bg-exit",
+          },
         ],
         staleEvidence: [],
       },
@@ -521,6 +527,168 @@ describe("buildKenDigest", () => {
     expect(partial.match(/^- HISTORICAL PASSED:/gm)).toHaveLength(11);
   });
 
+  it("frames autopilot digests as a machine review, never as a user's question", () => {
+    const messages: Message[] = [{ role: "user", content: "add a login form" }];
+    const input = { cwd: base.cwd, gitBranch: base.gitBranch, platform: base.platform, messages };
+    for (const digest of [
+      buildKenAutopilotContext(input),
+      buildKenAutopilotPlanContext({ ...input, planContent: "# Plan" }),
+    ]) {
+      expect(digest).toContain("No user is in this conversation");
+      expect(digest).toContain("## Your task");
+      expect(digest).not.toContain("mentoring the user");
+      expect(digest).not.toContain("They just asked you");
+    }
+    // Chat Ken keeps his user-facing framing.
+    const chat = buildKenDigest({ ...base, messages });
+    expect(chat).toContain("mentoring the user");
+    expect(chat).toContain("## They just asked you");
+  });
+
+  describe("autopilot changed-files section", () => {
+    const edit = (id: string, filePath: string): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_call", id, name: "edit", args: { file_path: filePath } }],
+    });
+    const result = (id: string, isError = false): Message => ({
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: id, content: "ok", isError }],
+    });
+    const section = (digest: string): string =>
+      digest.split("## Files changed by the work under review")[1]?.split("\n\n## ")[0] ?? "";
+
+    it("lists successful edit/write paths from this turn only, sorted", () => {
+      const messages: Message[] = [
+        { role: "user", content: "older ask" },
+        edit("old", "src/old.ts"),
+        result("old"),
+        { role: "user", content: "add a login form" },
+        edit("z", "src/z.ts"),
+        result("z"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "w", name: "write", args: { file_path: "src/a.ts" } }],
+        },
+        result("w"),
+        edit("bad", "src/failed.ts"),
+        result("bad", true),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "r", name: "read", args: { file_path: "src/r.ts" } }],
+        },
+        result("r"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("since the original request");
+      expect(listed.indexOf("- src/a.ts")).toBeLessThan(listed.indexOf("- src/z.ts"));
+      expect(listed).not.toContain("src/old.ts");
+      expect(listed).not.toContain("src/failed.ts");
+      expect(listed).not.toContain("src/r.ts");
+    });
+
+    it("does not restart the turn at Ken's injected prompt that quotes the request", () => {
+      const messages: Message[] = [
+        { role: "user", content: "add a login form" },
+        edit("first", "src/form.ts"),
+        result("first"),
+        { role: "user", content: frameAutopilotInjection("Finish: add a login form. Add a test.") },
+        edit("second", "src/form.test.ts"),
+        result("second"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("- src/form.ts");
+      expect(listed).toContain("- src/form.test.ts");
+    });
+
+    it("keeps files whose edits scrolled out of the recent-activity window", () => {
+      const messages: Message[] = [{ role: "user", content: "refactor auth" }];
+      for (let i = 0; i < KEN_RECENT_MESSAGE_LIMIT; i++) {
+        messages.push(edit(`e${i}`, `src/file-${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages,
+        originalRequest: "refactor auth",
+      });
+      expect(digest.split("## Recent activity")[1]).not.toContain("refactor auth");
+      expect(section(digest)).toContain("- src/file-00.ts");
+    });
+
+    it("says when the original request message is gone instead of guessing a boundary", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [edit("e", "src/plan-step.ts"), result("e")],
+        originalRequest: "implement the approved plan",
+      });
+      expect(section(digest)).toContain("original request message was compacted or reset away");
+      expect(section(digest)).toContain("- src/plan-step.ts");
+    });
+
+    it("caps a huge file list and reports the overflow", () => {
+      const messages: Message[] = [{ role: "user", content: "rename everywhere" }];
+      for (let i = 0; i < 45; i++) {
+        messages.push(edit(`e${i}`, `src/f${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "rename everywhere",
+        }),
+      );
+      expect(listed).toContain("- src/f39.ts");
+      expect(listed).not.toContain("- src/f40.ts");
+      expect(listed).toContain("[…5 more files]");
+    });
+
+    it("is omitted when no edit/write calls succeeded, so shell-only work never reads as 'no changes'", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [
+          { role: "user", content: "regenerate the client" },
+          edit("bad", "src/failed.ts"),
+          result("bad", true),
+        ],
+        originalRequest: "regenerate the client",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+      expect(digest).not.toContain("(none)");
+    });
+
+    it("is absent from chat digests", () => {
+      const digest = buildKenDigest({
+        ...base,
+        messages: [{ role: "user", content: "hi" }, edit("e", "src/x.ts"), result("e")],
+        originalRequest: "hi",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+    });
+  });
+
   it("labels legacy unclassified command outcomes without calling them test failures", () => {
     const messages: Message[] = [
       {
@@ -555,7 +723,7 @@ describe("buildKenDigest", () => {
     ];
 
     const digest = buildKenAutopilotContext({ ...base, messages });
-    const evidence = digest.split("## Command observations")[1].split("## They just asked you")[0];
+    const evidence = digest.split("## Command observations")[1].split("## Your task")[0];
     expect(evidence).toContain("PASSED: `tsc --noEmit`");
     expect(evidence).toContain("UNCLASSIFIED: `vitest --watch`");
     expect(evidence).not.toContain("git status");
@@ -598,9 +766,7 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("Wire callback route");
     // … before the trailing question, which is the PLAN instruction (not the
     // work-review one).
-    expect(digest.indexOf("## Plan under review")).toBeLessThan(
-      digest.indexOf("## They just asked you"),
-    );
+    expect(digest.indexOf("## Plan under review")).toBeLessThan(digest.indexOf("## Your task"));
     expect(digest).toContain(AUTOPILOT_PLAN_REVIEW_INSTRUCTION);
     expect(digest).not.toContain(AUTOPILOT_REVIEW_INSTRUCTION);
   });

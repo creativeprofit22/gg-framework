@@ -117,8 +117,12 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(chat).not.toContain("ALL_CLEAR");
   });
 
-  it("limits structured approval warnings to corpus availability, not failed verification", () => {
-    expect(prompt).toContain('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}');
+  it("limits the approval warning to corpus availability, not failed verification", () => {
+    // The flag rides on the verdict line, so the first-line rule has no exception.
+    expect(prompt).toContain("ALL_CLEAR CORPUS_UNVERIFIED");
+    expect(prompt).toContain("Put the flag on the verdict line itself");
+    expect(prompt).not.toContain('{"verdict"');
+    expect(prompt).not.toContain("except the structured corpus limitation");
     expect(prompt).toContain("Never append prose to ALL_CLEAR");
     expect(prompt).toContain("For otherwise approved work ONLY, if a relevant corpus comparison was attempted but unavailable or declined");
     expect(prompt).toContain("Report known failures and unavailable checks honestly");

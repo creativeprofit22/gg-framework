@@ -39,6 +39,16 @@ const pixelsSchema = z.object({
   ok: z.literal(true),
   videoSha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
+const flashChannelSchema = z.object({
+  maxFlashesPerSecond: z.number(),
+  failures: z.array(z.object({ start: z.number(), end: z.number() })),
+});
+const flashSchema = z.object({
+  ok: z.boolean(),
+  videoSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  general: flashChannelSchema,
+  red: flashChannelSchema,
+});
 
 type CommandOutput = { stdout: string; stderr: string };
 /** A busy 15 s WebGL composition sampled at every transition measured ~130 s on an M4 Pro. */
@@ -47,6 +57,7 @@ const STEP_MS = 120_000;
 /** A full 30 s check measured ~0.2 s per layout sample on an M4 Pro: 240 stay under a minute. */
 const SPOT_MAX_FRAMES = 240;
 const SOURCE_CHECK = "Runtime/layout/contrast (includes lint)";
+const FLASH_CHECK = "No harmful flashing (WCAG 2.3.1)";
 /** Errors beyond this many keep their where/when line but drop the repeated message and fix. */
 const DETAILED_ERRORS = 15;
 /** Keeps the error list inside the 12,000-character details cap, with room for notes. */
@@ -98,6 +109,42 @@ export function spotSampleTimes(
     }
   }
   return [...frames].sort((a, b) => a - b).map((frame) => Math.round((frame / fps) * 1000) / 1000);
+}
+
+/** What the agent acts on: whether it flashes, when, how fast, and the levers that fix it. */
+function summarizeFlashes(output: CommandOutput): string {
+  let json: unknown;
+  try {
+    json = JSON.parse(output.stdout);
+  } catch {
+    return `${output.stdout}\n${output.stderr}`;
+  }
+  const parsed = flashSchema.safeParse(json);
+  if (!parsed.success) return `${output.stdout}\n${output.stderr}`;
+  const { general, red } = parsed.data;
+  if (parsed.data.ok) {
+    const peak = Math.max(general.maxFlashesPerSecond, red.maxFlashesPerSecond);
+    return (
+      `Passed: at most ${peak} flashes in any one second (the limit is 3), measured on the ` +
+      "rendered pixels. A screening, not a formal photosensitivity certification."
+    );
+  }
+  const spans = (failures: { start: number; end: number }[]): string =>
+    failures.map(({ start, end }) => `${start}–${end} s`).join(", ");
+  const found = [
+    general.failures.length
+      ? `brightness flashes at ${spans(general.failures)} (up to ${general.maxFlashesPerSecond} per second)`
+      : "",
+    red.failures.length
+      ? `saturated red flashes at ${spans(red.failures)} (up to ${red.maxFlashesPerSecond} per second)`
+      : "",
+  ].filter(Boolean);
+  return (
+    `Fails: ${found.join("; ")}. More than three flashes in one second can trigger seizures ` +
+    "in people with photosensitive epilepsy. Fix it by keeping light/dark or red swaps to at " +
+    "most three in any second, shrinking the flashing area below about 3% of the frame, or " +
+    "reducing the brightness difference between the alternating states."
+  );
 }
 
 /** Source fingerprint for reusing a passing audit; a project it cannot fingerprint is re-audited. */
@@ -380,6 +427,17 @@ export function createMotionCheckTool(
         ]);
         const pixelReport = pixels ? pixelsSchema.safeParse(JSON.parse(pixels.stdout)) : null;
         validate("Structured pixel report", pixelReport?.success === true);
+        // Always the whole export, spot or not: about 2 s for 30 s of 1080p60 on an M4 Pro.
+        const flashes = await run(
+          FLASH_CHECK,
+          process.execPath,
+          [path.join(bundle.root, "bin", "flash-check.mjs"), output],
+          { describe: summarizeFlashes },
+        );
+        const flashReport = flashes ? flashSchema.safeParse(JSON.parse(flashes.stdout)) : null;
+        // A failing check already reports its findings; only a passing exit needs its report proven.
+        if (flashes)
+          validate("Structured flash report", flashReport?.success === true && flashReport.data.ok);
         const audio = await run("Audio metadata", ffprobe, [
           "-v",
           "error",
@@ -418,12 +476,22 @@ export function createMotionCheckTool(
             const measured = levelsSchema.parse(JSON.parse(levels.stderr.slice(start, end + 2)));
             const loudness = Number(measured.input_i);
             const peak = Number(measured.input_tp);
+            const finite = Number.isFinite(loudness) && Number.isFinite(peak);
             // Measure, don't impose a new mix. Clipping is a failure; distribution-specific
-            // loudness targets remain the user's contract.
-            validate(
-              "Audio is finite and not clipping",
-              Number.isFinite(loudness) && Number.isFinite(peak) && peak <= 0,
-            );
+            // loudness targets remain the user's contract, so the numbers are reported as is.
+            checks.push({
+              name: "Audio is finite and not clipping",
+              ok: finite && peak <= 0,
+              details:
+                `Integrated loudness ${measured.input_i} LUFS, true peak ${measured.input_tp} dBTP. ` +
+                (!finite
+                  ? "Not measurable: the audio may be silent or unreadable."
+                  : peak > 0
+                    ? "Clipping: the true peak is above 0 dBTP."
+                    : peak > -1
+                      ? "No clipping, but peaks above -1 dBTP can distort once a platform re-encodes the audio."
+                      : "No clipping."),
+            });
           }
         }
         const id = randomUUID();
@@ -451,7 +519,10 @@ export function createMotionCheckTool(
         validate(
           "Pixel report matches rendered frames",
           pixelReport?.success === true &&
-            pixelReport.data.videoSha256 === evidence.manifest.video.sha256,
+            pixelReport.data.videoSha256 === evidence.manifest.video.sha256 &&
+            (flashReport === null ||
+              (flashReport.success &&
+                flashReport.data.videoSha256 === evidence.manifest.video.sha256)),
         );
         if (spotFrames !== undefined) {
           // Honest scope: frames outside the windows, and the instants between frames that

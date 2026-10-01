@@ -19,9 +19,10 @@ Do not overwrite a reusable kit while editing a video.
 3. Record the selected kit and bindings in the video's `frame.md`.
 
 The kit's colours, fonts and motion personality feed the plan: they replace
-the motion-language defaults. Required identity outranks taste; if it conflicts
-with a requested treatment, resolve that actual choice with the user instead of
-silently changing the font, logo or colours.
+the motion-language defaults and set its palette, type and register. Required
+identity outranks taste; if it conflicts with a requested treatment, resolve
+that actual choice with the user instead of silently changing the font, logo or
+colours.
 
 If the source was already captured and the kit approved, reuse it. Do not
 repeat a brand interview, capture, audit or approval for a new headline.

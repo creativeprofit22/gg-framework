@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { GearSixIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { killTask, type BackgroundTask } from "./agent";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
@@ -70,7 +71,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
         title="Background tasks"
         onClick={() => setOpen((o) => !o)}
       >
-        {"\u2699 "}
+        <GearSixIcon className="bgtasks-icon" size={13} weight="bold" aria-hidden="true" />
         {runningCount} background task{runningCount === 1 ? "" : "s"}
       </button>
       {open &&

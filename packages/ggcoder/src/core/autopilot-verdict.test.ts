@@ -6,7 +6,39 @@ describe("parseAutopilotVerdict", () => {
     expect(parseAutopilotVerdict("ALL_CLEAR")).toEqual({ kind: "all_clear" });
   });
 
-  it("preserves a structured corpus limitation separately from the verdict", () => {
+  it.each([
+    "ALL_CLEAR CORPUS_UNVERIFIED",
+    "all clear: corpus_unverified",
+    "ALL_CLEAR_CORPUS_UNVERIFIED",
+    "\n\nALL_CLEAR CORPUS_UNVERIFIED\n",
+  ])("keeps the corpus warning carried on the verdict line: %j", (reply) => {
+    expect(parseAutopilotVerdict(reply)).toEqual({
+      kind: "all_clear",
+      evidenceLimitation: "corpus_unverified",
+    });
+  });
+
+  it("keeps the corpus warning when Ken drifts it below a bare ALL_CLEAR", () => {
+    // The benchmarked failure: keyword line, then the old JSON form. The
+    // approval used to win and the warning was silently dropped.
+    expect(
+      parseAutopilotVerdict(
+        'ALL_CLEAR\n{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}',
+      ),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it("recovers a flagged approval buried after prose", () => {
+    expect(
+      parseAutopilotVerdict("Checked the diff, corpus was down.\nALL_CLEAR CORPUS_UNVERIFIED"),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it("does not invent a warning for a plain approval", () => {
+    expect(parseAutopilotVerdict("ALL_CLEAR\nlooks good")).toEqual({ kind: "all_clear" });
+  });
+
+  it("still parses the legacy JSON corpus limitation", () => {
     expect(
       parseAutopilotVerdict('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}'),
     ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });

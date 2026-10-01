@@ -67,3 +67,9 @@ What the runtime actually requires:
 Everything else in the skeleton is ordinary HTML and CSS: the `#root` box, `.clip` positioning, and fonts are yours to choose.
 
 This pattern is **standalone** (top-level `index.html`) — no `<template>` wrapper around the root. For sub-compositions (files loaded by `data-composition-src`), see `sub-compositions.md`.
+
+## Vertical (9:16)
+
+For phone-first video, set the viewport meta to `width=1080, height=1920`, give the root `data-width="1080"` and `data-height="1920"`, and render with the matching size (`--resolution portrait`). Everything else stays the same.
+
+Size type against the frame's width, not its height: a 96 px headline that suits a 1920 px-wide frame takes over half the width of a 1080 px one, so check that the longest word fits. When the video will play in a feed (Reels, TikTok, Shorts), keep text, logos and key subjects out of the areas the app covers. Meta asks for the top 14%, the bottom 35% and 6% on each side to stay clear (about 270 px, 670 px and 65 px at 1080×1920); TikTok covers a similar band at the bottom and a column of buttons on the right.

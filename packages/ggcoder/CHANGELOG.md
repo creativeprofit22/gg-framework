@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.67.0
+
+### Minor Changes
+
+- GG Motion now screens every render for harmful flashing (WCAG 2.3.1, more than three flashes a second), reports audio loudness and true peak instead of a bare pass/fail, and asks a few plain-language questions before starting a new video from an open prompt.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.67.0
+- @kenkaiiii/gg-agent@5.67.0
+- @kenkaiiii/gg-core@5.67.0
+
 ## 5.66.4
 
 ### Patch Changes

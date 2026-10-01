@@ -108,6 +108,7 @@ import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEven
 import { useSmoothText } from "./useSmoothText";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
+import { CritterFloor, type CritterGroup } from "./CritterFloor";
 import { CompactionNotice } from "./CompactionNotice";
 import { ModelSelect } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
@@ -3267,6 +3268,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     () => withoutSupersedingMessage(queuedMessages, supersedingText),
     [queuedMessages, supersedingText],
   );
+  // Sub-agent groups for the critter floor. Recomputed with `items`, but the
+  // floor compares group identities and ignores token-only re-renders.
+  const critterGroups = useMemo(
+    () =>
+      items.filter(
+        (item): item is Extract<Item, { kind: "subagent_group" }> & CritterGroup =>
+          item.kind === "subagent_group",
+      ),
+    [items],
+  );
 
   const pendingAskAnswers = useRef(new Set<number>());
   const handleAskAnswer = useCallback(
@@ -5064,6 +5075,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       </div>
 
+      {/* Sub-agents walk on top of the pinned region as critters; the lane
+          opens (pushing the chat up) only while one is out. */}
+      <CritterFloor groups={critterGroups} />
       <div className="liveregion">
         {/* Motion's starting points sit just above the activity bar and go away
             once the conversation has its first message. */}

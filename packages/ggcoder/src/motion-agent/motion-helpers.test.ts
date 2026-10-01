@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { findMotionBundle } from "../core/skills.js";
 
 const run = promisify(execFile);
@@ -298,6 +299,82 @@ describe("motion-check rendered-pixel gate", () => {
     const obsolete = await runHelper("motion-check.mjs", ["check.json", "index.motion.json"]);
     expect(obsolete.code).toBe(1);
     expect(obsolete.stderr).toContain("usage: motion-check.mjs");
+  });
+});
+
+// Real FFmpeg encodes and decodes; the Windows runner has stretched these well past 5 s.
+describe("flash-check (WCAG 2.3.1)", { timeout: 60_000 }, () => {
+  const flashReport = z.object({
+    ok: z.boolean(),
+    general: z.object({ maxFlashesPerSecond: z.number() }),
+    red: z.object({ maxFlashesPerSecond: z.number() }),
+  });
+  // Black/white levels in limited-range video, as rendered exports encode them.
+  const swap = (hz: number, area = "1") =>
+    `color=c=black:s=320x180:r=30:d=3,geq=lum='if(lt(mod(T*${hz},1),0.5)*${area},235,16)':cb=128:cr=128`;
+  it.each([
+    { name: "one full-frame flash a second", source: swap(1), ok: true, general: 1 },
+    { name: "three full-frame flashes a second", source: swap(3), ok: true, general: 3 },
+    { name: "four full-frame flashes a second", source: swap(4), ok: false, general: 4 },
+    {
+      name: "a flash filling one corner of the frame",
+      source: swap(5, "between(X,0,110)*between(Y,0,62)"),
+      ok: false,
+      general: 5,
+    },
+    {
+      name: "a small flashing patch (about 2% of the frame)",
+      source: swap(5, "between(X,140,180)*between(Y,75,105)"),
+      ok: true,
+      general: 0,
+    },
+    {
+      name: "a light pulse that never gets dark",
+      source:
+        "color=c=black:s=320x180:r=30:d=3,geq=lum='if(lt(mod(T*5,1),0.5),235,222)':cb=128:cr=128",
+      ok: true,
+      general: 0,
+    },
+    {
+      name: "fast camera-style motion",
+      source: "testsrc2=s=320x180:r=60:d=3,scroll=h=0.02",
+      ok: true,
+    },
+    {
+      name: "saturated red flashing",
+      source:
+        "color=c=black:s=320x180:r=30:d=3,geq=r='if(lt(mod(T*5,1),0.5),255,0)':g=0:b=0,format=yuv420p",
+      ok: false,
+      red: 5,
+    },
+  ])("$name", async ({ source, ok, general, red }) => {
+    const video = path.join(tmp, "video.mp4");
+    await run("ffmpeg", [
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      source,
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      video,
+    ]);
+    const result = await runHelper("flash-check.mjs", [video]);
+    const report = flashReport.parse(JSON.parse(result.stdout));
+    expect(report.ok).toBe(ok);
+    expect(result.code).toBe(ok ? 0 : 1);
+    if (general !== undefined) expect(report.general.maxFlashesPerSecond).toBe(general);
+    if (red !== undefined) expect(report.red.maxFlashesPerSecond).toBe(red);
+  });
+  it("rejects a missing file instead of reporting it safe", async () => {
+    const result = await runHelper("flash-check.mjs", [path.join(tmp, "missing.mp4")]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Flash verification failed");
   });
 });
 

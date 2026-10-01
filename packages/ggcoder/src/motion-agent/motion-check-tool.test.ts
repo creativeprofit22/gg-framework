@@ -13,6 +13,7 @@ const exec = promisify(execFile);
 // Each test spawns real FFmpeg, ffprobe and Node processes. On the Windows CI runner a
 // cold start has stretched a ~4 s test past 20 s, so give real headroom.
 const MEDIA_TEST_MS = 60_000;
+const FLASH_CHECK = "No harmful flashing (WCAG 2.3.1)";
 const runtimeReport = {
   ok: true,
   lint: { filesScanned: 1, errorCount: 0 },
@@ -80,7 +81,17 @@ function details(result: string | StructuredToolResult, name: string): string {
   if (!found) throw new Error(`Missing check ${name}`);
   return found.details;
 }
-async function render(audio?: "quiet" | "clipped", still = false): Promise<void> {
+const PICTURES = {
+  pattern: "testsrc2=size=320x180:rate=24:duration=2",
+  still: "color=c=red:size=320x180:rate=24:duration=2",
+  // Black and white swapping every three frames at 24 fps: four flashes a second.
+  flashing:
+    "color=c=black:size=320x180:rate=24:duration=2,geq=lum='if(lt(mod(N,6),3),235,16)':cb=128:cr=128",
+};
+async function render(
+  audio?: "quiet" | "clipped",
+  picture: keyof typeof PICTURES = "pattern",
+): Promise<void> {
   await exec("ffmpeg", [
     "-y",
     "-v",
@@ -88,9 +99,7 @@ async function render(audio?: "quiet" | "clipped", still = false): Promise<void>
     "-f",
     "lavfi",
     "-i",
-    still
-      ? "color=c=red:size=320x180:rate=24:duration=2"
-      : "testsrc2=size=320x180:rate=24:duration=2",
+    PICTURES[picture],
     ...(audio
       ? [
           "-f",
@@ -191,17 +200,37 @@ describe("Motion single-pass output check", { timeout: MEDIA_TEST_MS }, () => {
     ]);
     expect(await fs.readFile(path.join(root, "renders", "video.mp4"))).toEqual(before);
     expect(summary(result).checks.some((item) => item.name === "Audio levels")).toBe(false);
+    expect(summary(result).checks).toContainEqual({ name: FLASH_CHECK, ok: true });
+    expect(details(result, FLASH_CHECK)).toContain("Passed: at most");
+  });
+  it("fails a render that flashes more than three times a second and says when", async () => {
+    await render(undefined, "flashing");
+    const result = await check();
+    expect(summary(result).technical).toBe(false);
+    expect(summary(result).checks).toContainEqual({ name: FLASH_CHECK, ok: false });
+    expect(details(result, FLASH_CHECK)).toContain("brightness flashes at 0–2 s");
+    expect(details(result, FLASH_CHECK)).toContain("up to 4 per second");
+    // The finding names the levers, so the fix is a retime, not a guess.
+    expect(details(result, FLASH_CHECK)).toContain("at most three in any second");
   });
   it.each(["quiet", "clipped"] as const)(
     "measures %s audio without imposing a generic mix target",
     async (audio) => {
       await render(audio);
-      const result = summary(await check());
+      const output = await check();
+      const result = summary(output);
       expect(result.checks).toContainEqual({
         name: "Audio is finite and not clipping",
         ok: audio === "quiet",
       });
       expect(result.technical).toBe(audio === "quiet");
+      // The measured levels are reported, so a delivery target can be judged without re-measuring.
+      expect(details(output, "Audio is finite and not clipping")).toMatch(
+        /^Integrated loudness -?\d+(\.\d+)? LUFS, true peak -?\d+(\.\d+)? dBTP\. /,
+      );
+      expect(details(output, "Audio is finite and not clipping")).toContain(
+        audio === "quiet" ? "No clipping" : "Clipping: the true peak is above 0 dBTP",
+      );
     },
   );
   it("honors configured FFmpeg and sibling ffprobe without PATH", async () => {
@@ -394,7 +423,7 @@ describe("Motion single-pass output check", { timeout: MEDIA_TEST_MS }, () => {
   it.each([false, true])(
     "does not excuse frozen output without explicit slideshow intent (%s)",
     async (slideshowRequested) => {
-      await render(undefined, true);
+      await render(undefined, "still");
       expect(summary(await check({ slideshowRequested })).technical).toBe(slideshowRequested);
     },
   );

@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentSessionOptions } from "../core/agent-session.js";
 import { buildSubAgentSystemPrompt, SUBAGENT_RETURN_CONTRACT } from "../system-prompt.js";
+import { createAskUserTool } from "../tools/ask-user.js";
 import { createSkillTool } from "../tools/skill.js";
 import { CONTEXT_LIMITS, resolveContextLimits } from "../core/context-limits.js";
 import {
@@ -83,10 +84,12 @@ describe("Motion agent", () => {
     }
   });
 
-  it("designs every video itself instead of selecting templates or stopping to ask", async () => {
+  it("designs every video itself instead of selecting templates, with no stops after the upfront questions", async () => {
     const prompt = buildMotionAgentPrompt(await motionBundle());
     expect(prompt).toContain("Plan → build/edit → preview/check → deliver");
-    expect(prompt).toContain("then design the video yourself without stopping to ask");
+    // One upfront question card for open prompts, then no further stops.
+    expect(prompt).toContain("first ask the few things only the user knows");
+    expect(prompt).toContain("then design the video yourself without further stops");
     expect(prompt).toContain("Never invent an unavailable skill");
     expect(prompt).toContain(
       "Use the user's brand kit, references and required assets over any default",
@@ -101,6 +104,95 @@ describe("Motion agent", () => {
     const prompt = buildMotionAgentPrompt(await motionBundle());
     expect(prompt).toContain("Make every video a showcase piece");
     expect(prompt).toContain("plan before building");
+  });
+
+  it("asks non-designers about their world in plain words and reports results the same way", async () => {
+    const bundle = await motionBundle();
+    const prompt = buildMotionAgentPrompt(bundle);
+    expect(prompt).toContain("Users are not motion designers");
+    expect(prompt).toContain('not "9:16 or 16:9?"');
+    expect(prompt).toContain("Keep craft terms (register, easing, LUFS, safe zone, fps) out");
+    // The written delivery is the final message. Live runs that also offered a card at delivery
+    // always called it first and never wrote the summary, so delivery has no card.
+    expect(prompt).toContain("Deliver with your final message, in plain words");
+    expect(prompt).toContain("one line on anything you assumed");
+    expect(prompt).toContain("then what the checks mean for viewers and any limits");
+    expect(prompt).toContain(
+      "Close with one sentence naming the changes they're most likely to want",
+    );
+    expect(prompt).toContain("The delivery message ends the turn: no ask_user card at delivery");
+    const skills = await loadMotionSkills(bundle);
+    const motion = skills.find((skill) => skill.name === "motion")?.content ?? "";
+    // When to ask: once, before planning, and never for what is already answered.
+    expect(motion).toContain("For a new video from an open prompt, ask once, before planning");
+    expect(motion).toContain("A detailed brief, a shot list or an edit gets no\n  questions.");
+    expect(motion).toContain("at most three questions, each with a recommended");
+    expect(motion).toContain("it is not an approval step");
+    expect(motion).toContain('1. "Where will people mostly watch this?"');
+    // The music answer can't promise a library that only fits upbeat subjects.
+    expect(motion).toContain("GG's built-in tracks are all upbeat and cheerful.");
+    expect(motion).not.toContain("I'll pick a fitting track from GG's built-in music");
+    expect(motion).toContain("Viewer: <where it's watched, sound, purpose; mark what you assumed>");
+    const qa = skills.find((skill) => skill.name === "video-qa")?.content ?? "";
+    // Checks are reported in viewer terms, in a final message that no card can hide.
+    expect(qa).toContain("It's safe for people sensitive to flashing lights");
+    expect(qa).toContain("never the standard or tool names");
+    expect(qa).toContain("2. Write the delivery message as your final message");
+    expect(qa).toContain("no `ask_user` card at delivery");
+    expect(qa).not.toMatch(/call `ask_user` in the same reply/);
+    // No check measures safe areas, so they are reported as a design choice, not a check result.
+    expect(qa).toContain("as your choice");
+    expect(qa).not.toContain('Other plain wording for checks: "Nothing important sits under');
+  });
+
+  it("gives every starting answer an outcome label the question card accepts", async () => {
+    const skills = await loadMotionSkills(await motionBundle());
+    const motion = skills.find((skill) => skill.name === "motion")?.content ?? "";
+    const bank = motion.slice(
+      motion.indexOf("**Starting wording.**"),
+      motion.indexOf("## Choose support only when needed"),
+    );
+    const multi = bank.match(/\(pick any\): ([^\n]+)\n {3}([^\n]+)/);
+    const labels = [
+      ...[...bank.matchAll(/^ {3}- ([^:\n]+):/gm)].map((match) => match[1] ?? ""),
+      // The pick-any answers are one "·"-separated list wrapped across two lines.
+      ...(multi ? `${multi[1] ?? ""} ${multi[2] ?? ""}`.split("·") : []),
+    ]
+      .map((label) => label.trim())
+      .filter(Boolean);
+    expect(labels).toHaveLength(25);
+    expect(labels).toEqual(
+      expect.arrayContaining(["My logo or colours", "My photos or videos", "Nothing, start fresh"]),
+    );
+    const shown: string[] = [];
+    const ask = createAskUserTool(async (request) => {
+      shown.push(...request.questions.flatMap((q) => q.options?.map((o) => o.label) ?? []));
+      return { action: "cancel" };
+    });
+    // Short enough to render as a chip, and never rejected as deferring the choice back.
+    for (const label of labels) expect(label.length).toBeLessThanOrEqual(24);
+    for (let start = 0; start < labels.length; start += 5) {
+      const options = [...labels.slice(start, start + 5), "Keep it as it is"].map((label) => ({
+        label,
+      }));
+      const result = await ask.execute(
+        {
+          questions: [
+            {
+              id: "bank",
+              question: "Which fits?",
+              // The Local Fork requires context on every question card.
+              detail: "Pick what you already have so the video can use it.",
+              kind: "multi",
+              options,
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: `bank-${start}` },
+      );
+      expect(String(result)).not.toMatch(/^Error/);
+    }
+    expect(shown).toEqual(expect.arrayContaining(labels));
   });
 
   it("gives every video a shipped motion language of principles, not a fixed house look", async () => {
@@ -126,6 +218,20 @@ describe("Motion agent", () => {
     expect(language).toContain("never\ncopy an earlier video's");
     // Agnostic by design: palette roles and ranges, never fixed colour values.
     expect(language).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    // No single look baked in: size, pace and frame rate follow the register and context.
+    expect(language).not.toMatch(
+      /250–360 px|0\.5 s at 120 BPM|particle burst|clearcoat|iridescent/,
+    );
+    expect(language).toContain("Smooth by default, bounce by choice");
+    expect(language).toContain("one second per 15 characters");
+    expect(language).toContain("**No harmful flashing.**");
+    const easing = await fs.readFile(
+      path.join(bundle.root, "references", "runtime", "gsap-easing-and-stagger.md"),
+      "utf8",
+    );
+    expect(easing).toContain("Smooth by default, bounce by choice");
+    // Pointers to removed rules and files.
+    expect(easing).not.toMatch(/spring-pop-entrance|storyboard|t ≤ 0\.5s|the workflows'/);
     await expect(
       fs.access(path.join(bundle.root, "references", "README.md")),
     ).resolves.toBeUndefined();

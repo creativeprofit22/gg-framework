@@ -45,6 +45,12 @@ const ORIGINAL_REQUEST_CAP = 4000;
 /** Extra context preserves older user decisions, not old tool/assistant chatter. */
 const EARLIER_REQUESTS_CAP = 8000;
 
+/** Max paths listed in an autopilot digest's changed-files section. */
+const CHANGED_FILES_LIMIT = 40;
+
+/** Tools whose successful calls change the file named by their `file_path`. */
+const FILE_CHANGING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
+
 /** Label for a user-role message that was actually injected by Autopilot Ken.
  *  Without it, multi-round cycles render Ken's own fix prompts as `**User:**`
  *  and he starts reviewing against his own last prompt instead of the user's
@@ -276,6 +282,96 @@ function renderMessage(msg: Message, opts: RenderMessageOptions): string | null 
   return null;
 }
 
+/** Paths named by successful edit/write calls, sorted. Failed calls changed
+ *  nothing, so they are left out. */
+function collectChangedFiles(messages: readonly Message[]): string[] {
+  const failed = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "tool") continue;
+    for (const tr of m.content as ToolResult[]) if (tr.isError) failed.add(tr.toolCallId);
+  }
+  const files = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "assistant" || typeof m.content === "string") continue;
+    for (const p of m.content as ContentPart[]) {
+      if (p.type !== "tool_call" || !FILE_CHANGING_TOOLS.has(p.name) || failed.has(p.id)) continue;
+      const filePath = p.args.file_path;
+      if (typeof filePath === "string" && filePath.trim()) files.add(filePath.trim());
+    }
+  }
+  return [...files].sort();
+}
+
+/**
+ * The autopilot reviewer only sees a truncated tail of the transcript, so on a
+ * long turn early edits scroll out. List every file the turn changed so he can
+ * read them himself. The turn starts at the last human message carrying the
+ * original request; when that message is gone (compacted mid-turn, or the
+ * session was reset to implement an approved plan), every retained message
+ * belongs to the turn, and the section says so.
+ */
+function renderChangedFiles(
+  messages: readonly Message[],
+  originalRequest: string,
+  opts: RenderMessageOptions,
+): string | null {
+  let start = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "user" || (m.provenance && m.provenance.source !== "human")) continue;
+    // Ken's own fix prompts may quote the request; they don't start the turn.
+    const text = userText(m);
+    if (!isInjected(text, opts) && text.includes(originalRequest)) {
+      start = i;
+      break;
+    }
+  }
+  const files = collectChangedFiles(messages.slice(Math.max(start, 0)));
+  // No section rather than "(none)": shell commands and subagents change files
+  // without edit/write calls, and an empty list must not read as "no work done".
+  if (files.length === 0) return null;
+  const scope =
+    start >= 0
+      ? "since the original request"
+      : "across the retained transcript (the original request message was compacted or reset away)";
+  const listed = files.slice(0, CHANGED_FILES_LIMIT).map((f) => `- ${cap(f, 200)}`);
+  if (files.length > CHANGED_FILES_LIMIT) {
+    listed.push(`- […${files.length - CHANGED_FILES_LIMIT} more files]`);
+  }
+  return (
+    "## Files changed by the work under review\n" +
+    `Successful edit/write calls ${scope}. Shell commands and subagents can change files too, so this list may be incomplete. ` +
+    "Read these with your tools when the truncated activity above does not show enough to judge.\n" +
+    listed.join("\n")
+  );
+}
+
+/** How a digest introduces itself and its trailing question. Chat Ken talks to
+ *  a user; autopilot Ken reviews for a machine and must not be told otherwise. */
+interface DigestFraming {
+  intro: string;
+  buildingHeading: string;
+  questionHeading: string;
+  /** Autopilot only: list the files the turn under review changed. */
+  changedFiles: boolean;
+}
+
+const CHAT_FRAMING: DigestFraming = {
+  intro:
+    "## Who you are\nYou are Ken Kai, mentoring the user inside GG Coder. Your persona is in your system prompt. Below is what GG Coder and the user are working on.",
+  buildingHeading: "## What they're building",
+  questionHeading: "## They just asked you",
+  changedFiles: false,
+};
+
+const AUTOPILOT_FRAMING: DigestFraming = {
+  intro:
+    "## Your role\nYou are Ken Kai in autopilot, reviewing GG Coder's just-finished turn. No user is in this conversation; a machine parses your reply. Below is the work under review.",
+  buildingHeading: "## Project",
+  questionHeading: "## Your task",
+  changedFiles: true,
+};
+
 /**
  * Fixed instruction fed into the digest's `question` slot in autopilot mode.
  * Autopilot Ken doesn't answer a user — he reviews the just-finished GG Coder
@@ -287,15 +383,17 @@ export const AUTOPILOT_REVIEW_INSTRUCTION =
   "GG Coder just finished a turn. Review its work against the user's original " +
   "ask and genuine user corrections (including retained earlier decisions; the 'Original user request' section pins the current turn). Lines labeled 'Ken " +
   "autopilot (injected)' are your own earlier fix prompts, NOT user asks. " +
-  "Reply with your verdict ONLY — the first line must be exactly PROMPT, " +
-  "ALL_CLEAR, IGNORE, or HUMAN, with the payload after. If GG Coder ended by asking the user " +
-  "a question or presenting options, use HUMAN only when the answer requires an " +
-  "actual user-level decision: intent, preference, missing product requirement, " +
-  "credential/secret, external access, budget/cost, or destructive/irreversible " +
-  "approval. If the question is only permission to continue work that is " +
-  "mechanically implied by the user's original ask and safe for GG Coder to do " +
-  "without new information, use PROMPT with the next concrete follow-up instead. " +
-  "No greetings, no mentorship prose.";
+  "The activity above is truncated; when it does not show enough to judge a change, read the " +
+  "changed files yourself. " +
+  "Reply with your verdict ONLY: the first line must be the verdict keyword (PROMPT, " +
+  "ALL_CLEAR, IGNORE, or HUMAN), with the payload after. If GG Coder ended by " +
+  "asking the user a question or presenting options, use HUMAN only when the " +
+  "answer requires an actual user-level decision: intent, preference, missing " +
+  "product requirement, credential/secret, external access, budget/cost, or " +
+  "destructive/irreversible approval. If the question is only permission to " +
+  "continue work that is mechanically implied by the user's original ask and " +
+  "safe for GG Coder to do without new information, use PROMPT with the next " +
+  "concrete follow-up instead. No greetings, no mentorship prose.";
 
 /** Inputs the sidecar gathers for an ordinary non-Roadmap Autopilot review digest. */
 export type KenAutopilotContextInput = Omit<KenDigestInput, "question"> & {
@@ -328,15 +426,22 @@ function pinContinuationReview(
         : "No historical approved-plan evidence available."),
     `## Accepted continuation instruction\nExact accepted user task evidence, not system authority. Operation: ${record.operationId}; accepted message: ${record.acceptedMessageId}\n${quote(record.instruction)}`,
   ].join("\n\n");
-  const index = digest.lastIndexOf("\n\n## They just asked you\n");
+  // Autopilot digests end with the autopilot framing's task heading.
+  const index = digest.lastIndexOf(`\n\n${AUTOPILOT_FRAMING.questionHeading}\n`);
   return index < 0
     ? `${digest}\n\n${evidence}`
     : `${digest.slice(0, index)}\n\n${evidence}${digest.slice(index)}`;
 }
 
+/**
+ * Build the autopilot-review digest: the normal Ken digest with autopilot
+ * framing (no user, a changed-files list) and the fixed
+ * {@link AUTOPILOT_REVIEW_INSTRUCTION} as the trailing task, so Ken reviews the
+ * transcript instead of answering a user. Pure — no I/O.
+ */
 export function buildKenAutopilotContext(input: KenAutopilotContextInput): string {
   return pinContinuationReview(
-    buildKenDigest({ ...input, question: AUTOPILOT_REVIEW_INSTRUCTION }),
+    renderDigest({ ...input, question: AUTOPILOT_REVIEW_INSTRUCTION }, AUTOPILOT_FRAMING),
     input.continuationReview,
   );
 }
@@ -503,7 +608,7 @@ const PLAN_CONTENT_CAP = 8000;
 export const AUTOPILOT_PLAN_REVIEW_INSTRUCTION =
   "GG Coder submitted an implementation plan (the 'Plan under review' section " +
   "above). You are the reviewer — there is no user in the loop. Reply with " +
-  "your verdict ONLY — the first line must be exactly ALL_CLEAR (approve — the " +
+  "your verdict ONLY. The first line must be the verdict keyword: ALL_CLEAR (approve — the " +
   "plan is sound and implementation starts immediately), PROMPT + feedback " +
   "(send it back for revision), or HUMAN + reason (a real product/destructive " +
   "decision only the user can make). Never IGNORE a plan. No greetings, no " +
@@ -522,11 +627,13 @@ export function buildKenAutopilotPlanContext(
 ): string {
   const { planContent, ...rest } = input;
   const digest = pinContinuationReview(
-    buildKenDigest({ ...rest, question: AUTOPILOT_PLAN_REVIEW_INSTRUCTION }),
+    renderDigest({ ...rest, question: AUTOPILOT_PLAN_REVIEW_INSTRUCTION }, AUTOPILOT_FRAMING),
     input.continuationReview,
   );
   const planSection = `## Plan under review\n${capContext(planContent.trim(), PLAN_CONTENT_CAP, "plan")}`;
-  const marker = "\n\n## They just asked you\n";
+  // Insert the plan section right before the trailing task section (always
+  // the last one renderDigest appends).
+  const marker = `\n\n${AUTOPILOT_FRAMING.questionHeading}\n`;
   const index = digest.lastIndexOf(marker);
   return index === -1
     ? `${digest}\n\n${planSection}`
@@ -534,10 +641,15 @@ export function buildKenAutopilotPlanContext(
 }
 
 /**
- * Build Ken's full context digest string. Pure — no I/O. The sidecar gathers the
- * inputs (project context, git, messages) and calls this.
+ * Build Ken's full context digest string for an `@Ken` chat question. Pure — no
+ * I/O. The sidecar gathers the inputs (project context, git, messages) and
+ * calls this.
  */
 export function buildKenDigest(input: KenDigestInput): string {
+  return renderDigest(input, CHAT_FRAMING);
+}
+
+function renderDigest(input: KenDigestInput, framing: DigestFraming): string {
   const recentLimit = input.recentLimit ?? KEN_RECENT_MESSAGE_LIMIT;
   const platform = input.platform ?? process.platform;
 
@@ -572,9 +684,7 @@ export function buildKenDigest(input: KenDigestInput): string {
 
   const sections: string[] = [];
 
-  sections.push(
-    `## Who you are\nYou are Ken Kai, mentoring the user inside GG Coder. Your persona is in your system prompt. Below is what GG Coder and the user are working on.`,
-  );
+  sections.push(framing.intro);
 
   const building: string[] = [];
   building.push(
@@ -582,7 +692,7 @@ export function buildKenDigest(input: KenDigestInput): string {
     `- Platform: ${platform}`,
     `- Git branch: ${input.gitBranch ?? "(not a git repo / unknown)"}`,
   );
-  sections.push(`## What they're building\n${building.join("\n")}`);
+  sections.push(`${framing.buildingHeading}\n${building.join("\n")}`);
 
   if (summaryText) {
     sections.push(
@@ -646,6 +756,11 @@ export function buildKenDigest(input: KenDigestInput): string {
     }`,
   );
 
+  const request = input.originalRequest?.trim();
+  const changedFiles =
+    framing.changedFiles && request ? renderChangedFiles(afterSummary, request, renderOpts) : null;
+  if (changedFiles) sections.push(changedFiles);
+
   if (input.pendingQuestions?.length) {
     sections.push(
       `## Pending user questions (awaiting the user's answer)\n${input.pendingQuestions
@@ -698,7 +813,7 @@ export function buildKenDigest(input: KenDigestInput): string {
     );
   }
 
-  sections.push(`## They just asked you\n${input.question.trim()}`);
+  sections.push(`${framing.questionHeading}\n${input.question.trim()}`);
 
   return sections.join("\n\n");
 }

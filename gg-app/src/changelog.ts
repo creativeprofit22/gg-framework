@@ -22,6 +22,16 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.74.0",
+    date: "2026-10-01",
+    items: [
+      "Your helper agents now come to life as little pixel `critters`. Watch them beam in above the chat, wander around, hop with every new task and tell you what they're up to, then wave goodbye when the job is done. Give one a click and see how it reacts.",
+      "`GG Motion` now gets to know your video before it starts. It asks up to `3` plain questions, like where people will mostly watch it, then builds the whole thing without bugging you again. Every render is also screened for harmful flashing, so your videos stay safe for people with photosensitive epilepsy.",
+      "Your project list is clean again. I stopped it from filling up with hidden tool folders and projects you opened once but never actually worked in, so only your real work shows up.",
+      "On `Windows` and `Linux`, the window layout menu no longer hides behind your chat. Every option is right there and ready to click.",
+    ],
+  },
+  {
     version: "0.73.3",
     date: "2026-09-30",
     items: [

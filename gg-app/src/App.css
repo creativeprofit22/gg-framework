@@ -654,7 +654,7 @@
   }
 }
 .zoom-overlay-pct {
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: 26px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -5877,9 +5877,59 @@ select {
   margin-top: 3px;
 }
 
-/* ── Sub-agent in-chat feed (parallel delegations + live tool activity) ── */
+/* ── Sub-agent in-chat line: the agents themselves walk on the critter floor,
+   so the transcript keeps one short summary row. ── */
 .subagents {
   margin: 6px 0 10px;
+}
+.subagents-compact {
+  display: flex;
+  /* Same gutter + gap as `.assistant-msg`, so the critter sits in the assistant
+     dot's column and the text starts where message text starts. */
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  font-family: var(--sans);
+}
+.subagents-critter {
+  flex: 0 0 auto;
+  width: 16px;
+  display: inline-flex;
+  align-items: center;
+}
+/* One sprite cell per CSS px (14×14), kept crisp. */
+.subagents-critter-img {
+  width: 14px;
+  height: 14px;
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+  transform-origin: 50% 100%;
+}
+.subagents-critter-working {
+  animation: subagents-critter-hop 0.9s var(--ease-in-out) infinite;
+}
+/* Failed / called back: tipped over and drained, like on the floor. */
+.subagents-critter-failed {
+  transform-origin: 50% 50%;
+  transform: rotate(-90deg);
+  filter: saturate(0.35) brightness(0.85);
+}
+@keyframes subagents-critter-hop {
+  0%,
+  60%,
+  100% {
+    transform: none;
+  }
+  30% {
+    transform: translateY(-3px) scale(0.94, 1.06);
+  }
+}
+.subagents-compact-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .subagents-head {
   display: flex;
@@ -5974,7 +6024,8 @@ select {
 }
 @media (prefers-reduced-motion: reduce) {
   .blink,
-  .queued-dot {
+  .queued-dot,
+  .subagents-critter-working {
     animation: none;
   }
   .queued-dot {
@@ -5985,6 +6036,281 @@ select {
 /* ── Pinned live region (tool panel + activity bar) ── */
 .liveregion {
   flex: 0 0 auto;
+}
+
+/* ── Critter floor: sub-agents walk on top of the pinned live region ──
+   The lane's bottom edge is the tool panel's (or activity bar's) top border,
+   so that border is the floor. 0px tall while nobody is out; eases open when
+   the first critter is summoned, which steals height from the flexible
+   transcript so the chat slides up instead of being covered (the transcript's
+   resize observer keeps the newest message pinned through the transition).
+   Open height = sprite (14 cells × --critter-px) + room for a hovering bee and
+   the bubble/badge above it, so nothing a critter shows overlaps the chat. */
+.critter-lane {
+  --critter-px: 2px;
+  --critter-size: calc(var(--critter-px) * 14);
+  flex: 0 0 auto;
+  position: relative;
+  /* Above the transcript so summon beams and bubbles may glow over it. */
+  z-index: 2;
+  height: 0;
+  transition: height 340ms var(--ease-out);
+}
+.critter-lane.open {
+  height: calc(var(--critter-size) + 48px);
+}
+.critter-floor {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.critter {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: var(--critter-size);
+  height: var(--critter-size);
+  pointer-events: auto;
+  cursor: pointer;
+  will-change: transform;
+}
+.critter.summoning,
+.critter.leaving {
+  pointer-events: none;
+}
+.critter-body,
+.critter-flip {
+  position: absolute;
+  inset: 0;
+}
+.critter-body {
+  transform-origin: 50% 100%;
+}
+.critter-flip img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+}
+.critter-f1,
+.critter.frame1 .critter-f0 {
+  visibility: hidden;
+}
+.critter.frame1 .critter-f1 {
+  visibility: visible;
+}
+.critter.left .critter-flip {
+  transform: scaleX(-1);
+}
+/* White silhouette over the sprite: lit during summon/teleport, else hidden. */
+.critter-flip .critter-sil {
+  opacity: 0;
+  filter: drop-shadow(0 0 3px var(--critter-color)) drop-shadow(0 0 6px var(--critter-color));
+}
+.critter-shadow {
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  bottom: -2px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  filter: blur(1px);
+}
+.critter.fallen .critter-body {
+  transform: rotate(-90deg) translateX(30%);
+  transition: transform 260ms cubic-bezier(0.5, 1.6, 0.6, 1);
+  filter: saturate(0.4) brightness(0.8);
+}
+.critter.fading {
+  opacity: 0;
+  transition: opacity 600ms var(--ease-in);
+}
+
+/* Summon / teleport light. */
+.critter-beam,
+.critter-beam-core {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  height: 120px;
+  pointer-events: none;
+}
+.critter-beam {
+  width: calc(var(--critter-px) * 10);
+  margin-left: calc(var(--critter-px) * -5);
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--critter-color) 85%, white) 0%,
+    color-mix(in srgb, var(--critter-color) 45%, transparent) 45%,
+    transparent 100%
+  );
+  border-radius: 50% 50% 2px 2px / 12% 12% 2px 2px;
+  filter: blur(1.5px);
+  mix-blend-mode: screen;
+}
+.critter-beam-core {
+  width: 2px;
+  margin-left: -1px;
+  background: linear-gradient(to top, white, transparent);
+}
+.critter-ring {
+  position: absolute;
+  bottom: -3px;
+  left: 50%;
+  width: var(--critter-size);
+  height: 7px;
+  margin-left: calc(var(--critter-size) / -2);
+  border: 2px solid var(--critter-color);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--critter-color);
+  pointer-events: none;
+}
+.critter-spark {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--critter-px) * 5);
+  width: var(--critter-px);
+  height: var(--critter-px);
+  background: var(--critter-spark, white);
+  box-shadow: 0 0 4px var(--critter-spark, white);
+  pointer-events: none;
+}
+.critter-sweat {
+  position: absolute;
+  top: 2px;
+  width: 3px;
+  height: 4px;
+  border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%;
+  background: #7fd8ff;
+  pointer-events: none;
+}
+
+/* Speech bubble (latest tool) and status badges (✓, ✗, !). */
+.critter-bubble,
+.critter-badge {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: critter-pop 180ms cubic-bezier(0.3, 1.6, 0.6, 1) both;
+}
+/* White speech bubble with dark ink, in the app font. Clipping lives on the
+   inner text so the tail (::after) can sit outside the box. */
+.critter-bubble {
+  bottom: calc(100% + 8px);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0a0a0c;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+.critter-bubble-text {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.critter-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -4px;
+  border: 4px solid transparent;
+  border-top-color: #ffffff;
+}
+.critter-badge {
+  bottom: calc(100% + 2px);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+.critter-badge-ok {
+  color: var(--success);
+}
+.critter-badge-err {
+  color: var(--error);
+}
+.critter-badge-yikes {
+  color: var(--warning);
+  font-size: 13px;
+}
+@keyframes critter-pop {
+  from {
+    transform: translateX(-50%) scale(0.4);
+    opacity: 0;
+  }
+}
+
+/* Hover card with the stats the old in-chat feed showed. */
+.critter-tooltip {
+  position: absolute;
+  left: 0;
+  /* Just above the critters' heads (hovering bee included). */
+  bottom: calc(var(--critter-size) + 14px);
+  z-index: 3;
+  min-width: 190px;
+  max-width: 320px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.critter-tooltip[hidden] {
+  display: none;
+}
+.critter-tooltip-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text);
+}
+.critter-tooltip-swatch {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.critter-tooltip-dim {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.critter-tooltip-activity {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .critter-lane {
+    transition: none;
+  }
+  .critter-bubble,
+  .critter-badge {
+    animation: none;
+  }
+  .critter.fallen .critter-body {
+    transform: none;
+    transition: none;
+  }
 }
 
 .livetoolpanel {
@@ -7855,11 +8181,15 @@ select {
   margin-left: 10px;
 }
 .bgtasks-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: transparent;
   border: 1px solid;
   border-radius: var(--radius-pill);
   font-family: var(--sans);
-  font-size: 12px;
+  /* Same size as the rest of the footer's text. */
+  font-size: 13px;
   padding: 0 8px;
   cursor: pointer;
   line-height: 1.5;
@@ -7870,6 +8200,9 @@ select {
 }
 .bgtasks-button:hover {
   background: var(--surface-1);
+}
+.bgtasks-icon {
+  flex: 0 0 auto;
 }
 .bgtasks-menu {
   /* Fixed (not absolute) so the footer's `overflow: hidden` doesn't clip the
@@ -7901,7 +8234,7 @@ select {
 }
 .bgtasks-cmd {
   flex: 1 1 auto;
-  font-family: var(--mono);
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8904,7 +9237,7 @@ select {
   border-radius: var(--radius-button);
   background: transparent;
   color: var(--text-muted);
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   /* The 14px track sets the row height; 1.25 only gives labels descender room. */
@@ -9214,7 +9547,7 @@ select {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 6px;
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: 13px;
   padding: 0 2px;
 }

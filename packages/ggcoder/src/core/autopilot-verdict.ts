@@ -6,10 +6,15 @@
  * first non-empty line carries the keyword; anything after is the payload.
  *
  *   PROMPT
- *   <runnable GG Coder prompt body, 1-3 lines>
+ *   <runnable GG Coder prompt body: a few lines, or a short bullet list>
  *
  *   ALL_CLEAR
  *   ACCEPT_VERIFICATION_EXCEPTION {"id":"<current exception ID>"}  // optional
+ *
+ *   ALL_CLEAR CORPUS_UNVERIFIED
+ *   (approval whose real-world cross-check was impossible; the flag rides on
+ *   the verdict line so it can't be lost the way a separate JSON reply was)
+ *
  *   IGNORE
  *
  *   HUMAN
@@ -35,7 +40,11 @@
 
 export type AutopilotVerdict =
   | { kind: "prompt"; body: string }
-  | { kind: "all_clear"; acceptedVerificationExceptionId?: string; evidenceLimitation?: "corpus_unverified" }
+  | {
+      kind: "all_clear";
+      acceptedVerificationExceptionId?: string;
+      evidenceLimitation?: "corpus_unverified";
+    }
   | { kind: "ignore" }
   | { kind: "human"; reason: string };
 
@@ -107,11 +116,23 @@ function parseVerificationExceptionAcceptance(payload: string): string | undefin
   }
 }
 
+/** The flagged approval, e.g. `ALL_CLEAR CORPUS_UNVERIFIED` or
+ *  `all clear: corpus_unverified`, after {@link normalizeKeywordLine}. */
+const FLAGGED_ALL_CLEAR_RE = /^ALL_CLEAR[_:,-]*CORPUS_UNVERIFIED$/;
+
+/** The flag anywhere in an approval reply: on the verdict line, or drifted
+ *  below it (the benchmarked failure). Keeping a warning is always safe. */
+const CORPUS_FLAG_RE = /corpus_unverified/i;
+
 /**
  * Fallback for when Ken ignores the "keyword-first, nothing before it"
  * instruction and buries a bare ALL_CLEAR/IGNORE/SKIP line after a recap or
- * explanation. Returns the LAST such line so ALL_CLEAR's optional acceptance
- * payload can be re-parsed from the exact verdict boundary.
+ * explanation (a real drift pattern models fall into despite the system
+ * prompt). Only matches a line that is EXACTLY one of these bare keywords (or
+ * the flagged approval). PROMPT/HUMAN carry payloads and get their own
+ * dedicated recovery passes in parseAutopilotVerdict. Returns the LAST such
+ * line so ALL_CLEAR's optional acceptance payload and corpus flag can be
+ * re-parsed from the exact verdict boundary, or null if none is present.
  */
 function findTrailingBareVerdict(
   lines: string[],
@@ -119,8 +140,9 @@ function findTrailingBareVerdict(
   let found: { kind: "all_clear" | "ignore"; index: number } | null = null;
   for (let index = 0; index < lines.length; index += 1) {
     const normalized = normalizeKeywordLine(lines[index]!);
-    if (normalized === "ALL_CLEAR") found = { kind: "all_clear", index };
-    else if (normalized === "IGNORE" || normalized === "SKIP") {
+    if (normalized === "ALL_CLEAR" || FLAGGED_ALL_CLEAR_RE.test(normalized)) {
+      found = { kind: "all_clear", index };
+    } else if (normalized === "IGNORE" || normalized === "SKIP") {
       found = { kind: "ignore", index };
     }
   }
@@ -183,9 +205,17 @@ export function parseAutopilotVerdict(reply: string): AutopilotVerdict {
 
   if (collapsed === "ALL_CLEAR" || collapsed.startsWith("ALL_CLEAR")) {
     const acceptedVerificationExceptionId = parseVerificationExceptionAcceptance(rest);
-    return acceptedVerificationExceptionId
-      ? { kind: "all_clear", acceptedVerificationExceptionId }
-      : { kind: "all_clear" };
+    // The flag rides on the verdict line; a drifted flag below a bare approval
+    // is kept too (keeping a warning is always safe). A valid acceptance payload
+    // is the only permitted body, so its JSON is never scanned for the flag.
+    const corpusUnverified =
+      CORPUS_FLAG_RE.test(keywordLine) ||
+      (acceptedVerificationExceptionId === undefined && CORPUS_FLAG_RE.test(rest));
+    return {
+      kind: "all_clear",
+      ...(acceptedVerificationExceptionId ? { acceptedVerificationExceptionId } : {}),
+      ...(corpusUnverified ? { evidenceLimitation: "corpus_unverified" as const } : {}),
+    };
   }
 
   // IGNORE / SKIP: the turn wasn't real work — nothing to say, nothing to show.

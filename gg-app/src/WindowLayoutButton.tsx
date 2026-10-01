@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { AppWindowIcon } from "@phosphor-icons/react";
+import { SquaresFourIcon } from "@phosphor-icons/react";
 import { setupWindows, arrangeAllWindows } from "./agent";
 import { supportsNativeSelectPopup } from "./platform";
 import { playSound } from "./sounds";
@@ -85,7 +85,7 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
     return (
       <span className="winlayout">
         <span className="winlayout-icon-btn btn btn-ghost btn-sm btn-nav-icon" aria-hidden="true">
-          <AppWindowIcon size={16} />
+          <SquaresFourIcon size={16} />
         </span>
         <select
           className="winlayout-select"
@@ -122,7 +122,7 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
         aria-controls={open ? menuId : undefined}
         onClick={() => setOpen((current) => !current)}
       >
-        <AppWindowIcon size={16} />
+        <SquaresFourIcon size={16} />
       </button>
       {open && (
         <>

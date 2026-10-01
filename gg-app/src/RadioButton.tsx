@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { PauseIcon, PlayIcon, RadioIcon, SpeakerHighIcon } from "@phosphor-icons/react";
+import { PauseIcon, PlayIcon, HeadphonesIcon, SpeakerHighIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { getRadioState, setRadio, setRadioVolume, type RadioStation } from "./agent";
 import { Modal } from "./Modal";
@@ -137,7 +137,7 @@ export function RadioButton(): React.ReactElement {
         style={playing ? { color: theme.accent } : undefined}
         onClick={() => setOpen(true)}
       >
-        <RadioIcon size={16} aria-hidden="true" />
+        <HeadphonesIcon size={16} aria-hidden="true" />
       </button>
       {open && (
         <Modal title="Internet Radio" onClose={() => setOpen(false)} className="radio-modal">

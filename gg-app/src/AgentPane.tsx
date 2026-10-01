@@ -28,8 +28,9 @@ import { MetalButton } from "./MetalButton";
 import {
   isValidProgrammaticFocus,
   PROGRAMMATIC_FOCUS_GUIDANCE,
-  CLIENT_OWNED_SLASH_COMMANDS,
 } from "@kenkaiiii/gg-core/slash-command-contract";
+import { menuCommands, paletteCommands } from "./menu-commands";
+import { CommandPalette } from "./CommandPalette";
 import { autosizeComposer } from "./composer-autosize";
 import {
   COMPACT_IDLE_PLACEHOLDER,
@@ -80,6 +81,7 @@ import {
   type ChatAgentId,
   type ModelOption,
   type PendingPlanReview,
+  type CommandProblem,
   type SlashCommand,
   type BackgroundTask,
   type ProjectTask,
@@ -508,17 +510,6 @@ function FooterSep(): React.ReactElement {
 // BLACK_CIRCLE — ⏺ on mac (matches the TUI figure).
 const DOT = "\u23FA";
 
-// `/schedule` lives in the webview, not the sidecar's command registry: it
-// registers a recurring timer instead of prompting the agent. Declared here so
-// the palette can still discover it alongside the real slash commands.
-const SCHEDULE_COMMAND: SlashCommand = {
-  name: CLIENT_OWNED_SLASH_COMMANDS.schedule.name,
-  aliases: [...CLIENT_OWNED_SLASH_COMMANDS.schedule.aliases],
-  description: "Run a prompt on a repeating schedule — <prompt> | 15m | [times]",
-  input: { text: "optional", references: "optional", attachments: "optional" },
-  source: "built-in",
-};
-
 function slashCommandForInput(
   input: string,
   commands: SlashCommand[],
@@ -759,6 +750,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const target = props.target ?? props.initialTarget ?? null;
   useEffect(() => {
     const epoch = ++lifecycleEpochRef.current;
+    // Problems describe the previous target's command files; never carry them over.
+    setPaletteProblems([]);
     if (!target) return;
     setWorkspaceMode(target.mode ?? "code");
     let ownedGeneration: number | null = null;
@@ -939,6 +932,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [modelCatalogRefreshNonce, setModelCatalogRefreshNonce] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  // Command files that could not be listed, shown by the Ctrl/Cmd+K palette.
+  // Always written together with `commands` from one guarded catalog response.
+  const [paletteProblems, setPaletteProblems] = useState<CommandProblem[]>([]);
   const commandRequestRef = useRef(0);
   const commandClientRef = useRef(client);
   commandClientRef.current = client;
@@ -948,19 +944,26 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const mode = commandModeRef.current;
     const generation = generationRef.current;
     const lifecycle = lifecycleEpochRef.current;
+    const current = (): boolean =>
+      client === commandClientRef.current &&
+      mountedRef.current &&
+      request === commandRequestRef.current &&
+      mode === commandModeRef.current &&
+      generation === generationRef.current &&
+      lifecycle === lifecycleEpochRef.current;
     try {
-      const next = await listCommands();
-      if (
-        next !== null &&
-        client === commandClientRef.current &&
-        mountedRef.current &&
-        request === commandRequestRef.current &&
-        mode === commandModeRef.current &&
-        generation === generationRef.current &&
-        lifecycle === lifecycleEpochRef.current
-      ) {
-        setCommands(next);
+      // One request feeds both the command list and the palette's problems so
+      // they can never describe different targets, modes or generations.
+      if (client.listCommandCatalog) {
+        const catalog = await client.listCommandCatalog();
+        if (catalog !== null && current()) {
+          setCommands(catalog.commands);
+          setPaletteProblems(catalog.problems);
+        }
+        return;
       }
+      const next = await listCommands();
+      if (next !== null && current()) setCommands(next);
     } catch {
       // A failed refresh must not replace a successful catalog.
     }
@@ -1726,6 +1729,35 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [ownsWindowGlobals]);
+
+  // Cmd/Ctrl+K → palette of the commands whose files declare a `collection`
+  // marker, grouped by `group` frontmatter (missing → Other), plus any command
+  // files that could not be listed. Ordinary commands stay in the slash menu.
+  // An unreadable file cannot reveal its collection, so any known problem also
+  // opens the palette (otherwise a fully broken collection would look like
+  // nothing); with no collection commands and no problems the shortcut stays
+  // silent. Every pane registers this; only the focused pane in the focused
+  // window acts.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const collectionCommands = useMemo(() => paletteCommands(commands), [commands]);
+  const hasCollectionCommands = collectionCommands.length > 0;
+  const paletteAvailable = hasCollectionCommands || paletteProblems.length > 0;
+  const paneKeyFocus = windowFocused && props.windowFocused !== false && props.focused !== false;
+  useEffect(() => {
+    if (!paneKeyFocus || !paletteAvailable) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "k" || e.defaultPrevented) return;
+      // Needs a chat box to fill, and never stacks over another dialog.
+      if (!inputRef.current) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      e.preventDefault();
+      setPaletteOpen(true);
+      void refreshCommands();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paneKeyFocus, paletteAvailable, refreshCommands]);
 
   // Position in the multi-window reading order (e.g. window 2 of 4), plus
   // whether this window is the focused one. Driven by the Rust `window-order`
@@ -2812,17 +2844,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const scheduleParse = scheduleDraft ? parseScheduleCommand(input) : null;
   // Drives the composer's invalid affordance; submit() enforces the block.
   const scheduleInvalid = scheduleParse !== null && !scheduleParse.ok;
-  // Commit lives in the top-right button, not the slash menu.
-  const COMMIT_NAMES = ["commit", "setup-commit"];
-  // `/schedule` is handled entirely in the webview (it registers a timer rather
-  // than prompting the agent), so the sidecar's registry never lists it. Inject
-  // it here or it would be undiscoverable — typing `/sch` would show nothing.
-  const menuCommands = [SCHEDULE_COMMAND, ...commands].filter(
-    (c) => !COMMIT_NAMES.includes(c.name),
-  );
   const slashMatches =
     slashQuery !== null
-      ? menuCommands.filter(
+      ? menuCommands(commands).filter(
           (c) =>
             c.name.toLowerCase().startsWith(slashQuery) ||
             c.aliases.some((a) => a.toLowerCase().startsWith(slashQuery)),
@@ -5054,6 +5078,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               onHover={setSlashIndex}
             />
           )
+        )}
+        {paletteOpen && (
+          <CommandPalette
+            commands={collectionCommands}
+            problems={paletteProblems}
+            onClose={() => setPaletteOpen(false)}
+            onInsert={(cmd) => {
+              setPaletteOpen(false);
+              pickSlashCommand(cmd);
+            }}
+            onSend={(cmd) => {
+              setPaletteOpen(false);
+              submitText(`/${cmd.name}`);
+            }}
+          />
         )}
         {mentionOpen && !noReferenceSlashCommand && (
           <FileMentionMenu

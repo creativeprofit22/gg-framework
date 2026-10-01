@@ -44,6 +44,7 @@ import type {
   PlanRevisionResult,
   ProjectTask as SharedProjectTask,
   SlashCommandListing,
+  SlashCommandProblem,
   SlashCommandsResponse,
 } from "@kenkaiiii/gg-core";
 export type {
@@ -678,6 +679,11 @@ export interface ModelOption {
 }
 
 export type SlashCommand = SlashCommandListing;
+export type CommandProblem = SlashCommandProblem;
+export interface CommandCatalog {
+  commands: SlashCommand[];
+  problems: CommandProblem[];
+}
 
 export interface DiscoveredProject {
   name: string;
@@ -3106,6 +3112,8 @@ export interface PaneAgentClient extends NotesClient {
   killTask(id: string): Promise<string | null>;
   cycleThinking(): Promise<ThinkingState | null>;
   listCommands(): Promise<SlashCommand[] | null>;
+  /** Commands plus files that could not be listed; optional so older clients keep working. */
+  listCommandCatalog?(): Promise<CommandCatalog | null>;
   listModels(): Promise<ModelOption[]>;
   switchModel(model: string): Promise<SwitchModelResult | { error: string }>;
   setOpenAICodexContextProfile(
@@ -3618,6 +3626,16 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       try {
         const response = await call<SlashCommandsResponse>("agent_commands");
         return isSlashCommandsResponse(response) ? [...response.commands] : null;
+      } catch {
+        return null;
+      }
+    },
+    async listCommandCatalog() {
+      try {
+        const response = await call<SlashCommandsResponse>("agent_commands");
+        return isSlashCommandsResponse(response)
+          ? { commands: [...response.commands], problems: [...(response.problems ?? [])] }
+          : null;
       } catch {
         return null;
       }

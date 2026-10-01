@@ -3681,6 +3681,35 @@ describe("AgentPane lifecycle", () => {
     },
   );
 
+  it("reports a busy-session mutation conflict as not sent rather than uncertain", async () => {
+    const pane = client("pane-mutation-conflict", 8);
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), running: true });
+    const submission = deferred<AgentModule.PromptSubmissionResult>();
+    vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
+    const view = render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: "Second quick message" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    const message =
+      "Another change to this session was still finishing, so this message wasn't sent. Send it again.";
+    await act(async () =>
+      submission.reject(
+        new PromptSubmissionError({
+          category: "rejected",
+          code: "session_mutation_in_progress",
+          message,
+        }),
+      ),
+    );
+    expect(await screen.findByText("Prompt wasn’t sent")).toBeTruthy();
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.queryByText("Prompt status is uncertain")).toBeNull();
+    expect(view.container.querySelector(".user-msg")).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe("Second quick message");
+  });
+
   it.each([false, true])(
     "retains rejected composer submissions while running=%s",
     async (running) => {
@@ -7064,5 +7093,311 @@ describe("AgentPane lifecycle", () => {
     fireEvent.change(input, { target: { value: "Review @src/brand" } });
     await waitFor(() => expect(pane.searchFiles).toHaveBeenCalled());
     expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe("command palette (Ctrl/Cmd+K)", () => {
+  const tagged: AgentModule.SlashCommand[] = [
+    {
+      name: "demo",
+      aliases: [],
+      description: "Demo grouped command",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "custom",
+      origin: "project-custom",
+      collection: "demo",
+      group: "everyday",
+      effect: "reads",
+    },
+    {
+      name: "ungrouped",
+      aliases: [],
+      description: "In the collection but no group",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "custom",
+      origin: "project-custom",
+      collection: "demo",
+    },
+    {
+      name: "ordinary",
+      aliases: [],
+      description: "Not in any collection",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "custom",
+      origin: "project-custom",
+    },
+  ];
+
+  async function renderPane(
+    commands: AgentModule.SlashCommand[],
+    props: { focused?: boolean } = {},
+    setup?: (pane: ReturnType<typeof client>) => void,
+  ) {
+    const pane = client(`pane-palette-${randomUUID()}`, 7);
+    vi.mocked(pane.listCommands).mockResolvedValue(commands);
+    setup?.(pane);
+    const view = render(
+      <AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle {...props} />,
+    );
+    // A client with a catalog lists commands and problems in one request.
+    await waitFor(() => expect(pane.listCommandCatalog ?? pane.listCommands).toHaveBeenCalled());
+    const input = (await screen.findByRole("textbox")) as HTMLTextAreaElement;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => {});
+    return { pane, input, view };
+  }
+
+  const otherTarget: PaneSessionTarget = {
+    ...chatTarget,
+    cwd: "/other",
+    sessionPath: "/other-session",
+  };
+  const brokenCatalog = {
+    commands: tagged.slice(2),
+    problems: [{ file: "broken.md", scope: "project" as const, reason: "unreadable" as const }],
+  };
+
+  it("does not carry a previous target's problems into the next target", async () => {
+    const nextCatalog = deferred<AgentModule.CommandCatalog | null>();
+    let onNextTarget = false;
+    const { pane, view } = await renderPane(tagged.slice(2), {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => (onNextTarget ? nextCatalog.promise : brokenCatalog));
+    });
+    pressCtrlK();
+    await screen.findByRole("region", { name: "1 command file has a problem" });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search commands" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    onNextTarget = true;
+    view.rerender(
+      <AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />,
+    );
+    await act(async () => {});
+    // The new target's catalog has not arrived: the old broken file is gone.
+    pressCtrlK();
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    await act(async () => {
+      nextCatalog.resolve({ commands: tagged, problems: [] });
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    pressCtrlK();
+    await screen.findByRole("dialog", { name: "Commands" });
+    expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: /command file/ })).toBeNull();
+  });
+
+  it("drops a previous target's late catalog response", async () => {
+    const late = deferred<AgentModule.CommandCatalog | null>();
+    let onNextTarget = false;
+    const { pane, view } = await renderPane(tagged.slice(2), {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () =>
+        onNextTarget ? { commands: tagged.slice(2), problems: [] } : late.promise,
+      );
+    });
+    onNextTarget = true;
+    view.rerender(
+      <AgentPane client={pane} target={otherTarget} workspaceOwnsSessionLifecycle />,
+    );
+    await act(async () => {});
+    await act(async () => {
+      late.resolve(brokenCatalog);
+    });
+    await act(async () => {});
+    pressCtrlK();
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the last commands and problems when a catalog refresh fails", async () => {
+    let fail = false;
+    const { pane } = await renderPane(tagged, {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => {
+        if (fail) throw new Error("daemon unavailable");
+        return { commands: tagged, problems: brokenCatalog.problems };
+      });
+    });
+    const catalog = vi.mocked(pane.listCommandCatalog);
+    await act(async () => {});
+    fail = true;
+    const before = catalog?.mock.calls.length ?? 0;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => {});
+    expect(catalog?.mock.calls.length).toBeGreaterThan(before);
+    pressCtrlK();
+    const panel = await screen.findByRole("region", { name: "1 command file has a problem" });
+    expect(within(panel).getByText("broken.md")).toBeTruthy();
+    expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
+  });
+
+  it("lists commands without problems when the client has no catalog", async () => {
+    const { pane } = await renderPane(tagged);
+    expect(pane.listCommandCatalog).toBeUndefined();
+    const before = vi.mocked(pane.listCommands).mock.calls.length;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => {});
+    expect(vi.mocked(pane.listCommands).mock.calls.length).toBe(before + 1);
+    pressCtrlK();
+    await screen.findByRole("dialog", { name: "Commands" });
+    expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: /command file/ })).toBeNull();
+  });
+
+  it("lists commands and problems with one request per refresh", async () => {
+    const { pane } = await renderPane(tagged.slice(2), {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => ({ commands: tagged.slice(2), problems: [] }));
+    });
+    const catalog = vi.mocked(pane.listCommandCatalog);
+    await act(async () => {});
+    const before = catalog?.mock.calls.length ?? 0;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => {});
+    expect(catalog?.mock.calls.length).toBe(before + 1);
+    expect(pane.listCommands).not.toHaveBeenCalled();
+  });
+
+  function pressCtrlK(): void {
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+  }
+
+  it("opens only collection commands, grouped, and fills the chat box on Enter", async () => {
+    const { pane, input } = await renderPane(tagged);
+    const before = vi.mocked(pane.listCommands).mock.calls.length;
+    pressCtrlK();
+    const search = await screen.findByRole("combobox", { name: "Search commands" });
+    expect(screen.getByRole("dialog", { name: "Commands" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
+    // A collection command without a group sits under Other, never hidden.
+    expect(
+      within(screen.getByRole("group", { name: "Other" })).getByRole("option", { name: /\/ungrouped/ }),
+    ).toBeTruthy();
+    // Ordinary commands stay in the slash menu, not the palette.
+    expect(screen.queryByRole("option", { name: /\/ordinary/ })).toBeNull();
+    expect(screen.queryByRole("option", { name: /\/schedule/ })).toBeNull();
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(
+      within(screen.getByRole("group", { name: "Everyday" })).getByRole("option", { name: /\/demo.*reads.*project/ }),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(vi.mocked(pane.listCommands).mock.calls.length).toBeGreaterThan(before),
+    );
+
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Commands" })).toBeNull());
+    expect(input.value).toBe("/demo ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("sends through the prompt path on Shift+Enter", async () => {
+    const { pane } = await renderPane(tagged);
+    pressCtrlK();
+    const search = await screen.findByRole("combobox", { name: "Search commands" });
+    fireEvent.keyDown(search, { key: "Enter", shiftKey: true });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/demo"));
+    expect(screen.queryByRole("dialog", { name: "Commands" })).toBeNull();
+  });
+
+  it("queues Shift+Enter through the existing queue while the agent is busy, without interrupting", async () => {
+    const { pane, input } = await renderPane(tagged, {}, (p) => {
+      vi.mocked(p.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running: true,
+        runState: "running",
+      });
+      vi.mocked(p.sendPrompt).mockResolvedValue({ queued: true, count: 1, queueId: "q-palette" });
+    });
+    // Wait until the pane knows the agent is running (Stop replaces Send).
+    await screen.findByRole("button", { name: "Stop response" });
+    fireEvent.change(input, { target: { value: "draft in progress" } });
+    pressCtrlK();
+    const search = await screen.findByRole("combobox", { name: "Search commands" });
+    fireEvent.keyDown(search, { key: "Enter", shiftKey: true });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/demo"));
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(pane.cancel).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Commands" })).toBeNull();
+    // Still running: the stop control stays, so the current run was not interrupted.
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeTruthy();
+  });
+
+  it("stays silent when no command declares a collection", async () => {
+    await renderPane(tagged.slice(2));
+    pressCtrlK();
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("shows command files that could not be read as an error state", async () => {
+    const { pane } = await renderPane(tagged, {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => ({
+        commands: tagged,
+        problems: [{ file: "broken.md", scope: "project" as const, reason: "unreadable" as const }],
+      }));
+    });
+    pressCtrlK();
+    const panel = await screen.findByRole("region", { name: "1 command file has a problem" });
+    expect(within(panel).getByText("broken.md")).toBeTruthy();
+    expect(pane.listCommandCatalog).toHaveBeenCalled();
+    expect(screen.getByRole("option", { name: /\/demo/ })).toBeTruthy();
+  });
+
+  it("stays silent with no collection commands when the catalog reports no problems", async () => {
+    const { pane } = await renderPane(tagged.slice(2), {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => ({ commands: tagged.slice(2), problems: [] }));
+    });
+    await waitFor(() => expect(pane.listCommandCatalog).toHaveBeenCalled());
+    pressCtrlK();
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens with the problem panel when broken files leave no collection commands", async () => {
+    const { pane } = await renderPane(tagged.slice(2), {}, (p) => {
+      p.listCommandCatalog = vi.fn(async () => ({
+        commands: tagged.slice(2),
+        problems: [{ file: "broken.md", scope: "global" as const, reason: "unreadable" as const }],
+      }));
+    });
+    // Learned in the background, before the shortcut is pressed.
+    await waitFor(() => expect(pane.listCommandCatalog).toHaveBeenCalled());
+    await act(async () => {});
+    pressCtrlK();
+    const panel = await screen.findByRole("region", { name: "1 command file has a problem" });
+    expect(within(panel).getByText("broken.md")).toBeTruthy();
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.getByText("No collection commands could be loaded.")).toBeTruthy();
+  });
+
+  it("ignores Ctrl+K in an unfocused pane", async () => {
+    await renderPane(tagged, { focused: false });
+    pressCtrlK();
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("does not open over another dialog", async () => {
+    await renderPane(tagged);
+    const other = document.createElement("div");
+    other.setAttribute("role", "dialog");
+    other.setAttribute("aria-modal", "true");
+    document.body.appendChild(other);
+    try {
+      pressCtrlK();
+      await act(async () => {});
+      expect(screen.queryByRole("combobox", { name: "Search commands" })).toBeNull();
+    } finally {
+      other.remove();
+    }
   });
 });

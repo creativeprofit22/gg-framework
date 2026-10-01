@@ -6837,6 +6837,151 @@ select {
   }
 }
 
+/* ── Ctrl/Cmd+K collection palette (Modal + .slash-item rows) ──
+   Anchored near the top so the search box stays put while results shrink. */
+.modal-backdrop:has(> .command-palette) {
+  align-items: flex-start;
+  padding-top: min(14vh, 120px);
+}
+.modal.command-palette {
+  width: min(600px, 92vw);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - min(14vh, 120px) - 24px);
+}
+.command-palette .modal-head {
+  margin-bottom: 12px;
+}
+.command-palette-list {
+  margin-top: 8px;
+  min-height: 0;
+  max-height: min(56vh, 440px);
+  overflow-y: auto;
+  container: command-palette / inline-size;
+}
+.command-palette-heading {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 10px 4px;
+}
+.command-palette-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+  padding: 7px 10px;
+}
+.command-palette-option .slash-name {
+  grid-area: 1 / 1;
+}
+.command-palette-option .command-palette-desc {
+  grid-area: 1 / 2;
+  min-width: 0;
+}
+.command-palette-option .command-palette-tags {
+  grid-area: 1 / 3;
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
+}
+.command-palette-option .slash-hint {
+  grid-area: 2 / 1 / 3 / -1;
+  max-width: 100%;
+}
+.command-palette-scope {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+/* Narrow windows: the description gets its own wrapping line instead of
+   collapsing to a stub between the name and the scope label. */
+@container command-palette (max-width: 440px) {
+  .command-palette-option .command-palette-desc {
+    grid-area: 2 / 1 / 3 / -1;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  .command-palette-option .slash-hint {
+    grid-area: 3 / 1 / 4 / -1;
+  }
+}
+/* Effect badge: the word carries the meaning; the edge tint only reinforces it. */
+.command-palette-effect {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  color: var(--text);
+}
+.command-palette-effect-plans {
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+}
+.command-palette-effect-edits {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
+}
+.command-palette-problems {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--error) 55%, var(--border));
+  border-radius: var(--radius-button);
+  background: color-mix(in srgb, var(--error) 9%, var(--surface-1));
+  font-size: 12.5px;
+  max-height: 120px;
+  overflow-y: auto;
+  /* The dialog is a flex column: let the command list shrink, not this box,
+     so every listed problem stays visible up to the cap. */
+  flex-shrink: 0;
+}
+.command-palette-problems-title {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--error);
+}
+.command-palette-problems ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.command-palette-problems li {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+.command-palette-problem-file {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+}
+.command-palette-empty {
+  font-size: 13px;
+  padding: 14px 10px;
+}
+.command-palette-keys {
+  margin: 10px 2px 0;
+  font-size: 11.5px;
+}
+@media (forced-colors: active) {
+  .command-palette-option.active {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  .command-palette-problems,
+  .command-palette-effect,
+  .command-palette-scope {
+    border-color: CanvasText;
+  }
+}
+
 /* ── @-mention file picker (reuses .slash-menu chrome) ── */
 .mention-item {
   align-items: center;

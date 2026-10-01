@@ -36,4 +36,3 @@ overrides:
 
 patchedDependencies:
   metal-fx@2.0.10: patches/metal-fx@2.0.10.patch
-  border-beam@1.3.0: patches/border-beam@1.3.0.patch

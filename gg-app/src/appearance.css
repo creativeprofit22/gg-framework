@@ -74,6 +74,30 @@
 :root[data-appearance-theme="light"] .login-logo.is-monochrome {
   filter: invert(0.88);
 }
+/* Home ink sits over the Light dot field: a light halo instead of Dark's black one. */
+:root[data-appearance-theme="light"]
+  :is(.home-version-row, .home-tagline, .home-action-note, .home-links, .home-version-corner) {
+  text-shadow:
+    0 1px 2px rgb(255 255 255 / 0.9),
+    0 0 12px rgb(255 255 255 / 0.8);
+}
+/* The Home banner is painted white for Dark; Light gets the same shimmer in
+   dark ink (its band runs lighter instead of brighter). The glitch tear
+   copies match the base ink so a tear still shows as shape, not colour. */
+:root[data-appearance-theme="light"] .ascii-logo-glitch {
+  background-image: linear-gradient(
+    100deg,
+    #20202a 0%,
+    #2b2b37 25%,
+    #474756 50%,
+    #2b2b37 75%,
+    #20202a 100%
+  );
+}
+:root[data-appearance-theme="light"] .ascii-logo-glitch::before,
+:root[data-appearance-theme="light"] .ascii-logo-glitch::after {
+  color: #2b2b37;
+}
 :root[data-appearance-theme="light"] .azure-remove-btn:hover:not(:disabled) {
   color: var(--error);
 }

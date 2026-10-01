@@ -1,4 +1,4 @@
-import { forwardRef, useRef, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { EffectComposer, wrapEffect } from "@react-three/postprocessing";
 import { Effect } from "postprocessing";
@@ -239,7 +239,7 @@ function DitheredWaves({
   mouseRadius,
 }: DitheredWavesProps): React.ReactElement {
   const mouse = useRef(new THREE.Vector2());
-  const { viewport, size, gl } = useThree();
+  const { viewport, size, gl, invalidate } = useThree();
 
   // Built once and handed to the material. three.js reads uniforms from the
   // material every frame, so they are updated in place through it (see
@@ -285,6 +285,14 @@ function DitheredWaves({
     uniforms.mouseRadius.value = mouseRadius;
     if (enableMouseInteraction) uniforms.mousePos.value.copy(mouse.current);
   });
+
+  // New colours (a theme switch) only reach the uniforms in a frame, and an
+  // on-demand canvas (reduced motion, unfocused window) draws none by itself.
+  const [waveR, waveG, waveB] = waveColor;
+  const [backR, backG, backB] = backgroundColor;
+  useEffect(() => {
+    invalidate();
+  }, [invalidate, waveR, waveG, waveB, backR, backG, backB]);
 
   const handlePointerMove = (e: ThreeEvent<PointerEvent>): void => {
     if (!enableMouseInteraction) return;

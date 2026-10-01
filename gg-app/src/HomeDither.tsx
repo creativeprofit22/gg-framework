@@ -1,4 +1,7 @@
-import { Component, lazy, Suspense, useState } from "react";
+import { Component, lazy, Suspense, useState, useSyncExternalStore } from "react";
+import { appearance, type Appearance } from "./appearance";
+// Type-only: erased at build, so three.js stays in the lazily loaded chunk.
+import type { Rgb } from "./Dither";
 import { useWindowFocused } from "./useWindowFocused";
 
 // three.js + postprocessing are large, so they load in their own chunk, only
@@ -6,12 +9,24 @@ import { useWindowFocused } from "./useWindowFocused";
 const Dither = lazy(() => import("./Dither").then((module) => ({ default: module.Dither })));
 
 /**
- * React Bits' suggested grey waves on black. The dither quantises each colour
- * channel to `colorNum` levels, so a tinted wave comes out as saturated
- * primary dots; neutral grey stays calm behind the text.
+ * Dark: React Bits' suggested grey waves on black. Light: grey dots on the
+ * Light theme's near-white background (#fcfbfd), so Home ink drawn for Light
+ * reads against it. The dither quantises each colour channel to `colorNum`
+ * levels, so a tinted wave comes out as saturated primary dots; neutral grey
+ * stays calm behind the text.
  */
-const WAVE_COLOR = [0.34509803921568627, 0.34509803921568627, 0.34509803921568627] as const;
-const BACKGROUND_COLOR = [0, 0, 0] as const;
+const PALETTES = {
+  dark: {
+    wave: [0.34509803921568627, 0.34509803921568627, 0.34509803921568627] as const,
+    background: [0, 0, 0] as const,
+  },
+  light: {
+    wave: [0.6, 0.6, 0.6] as const,
+    background: [0.988, 0.984, 0.992] as const,
+  },
+} satisfies Record<Appearance["theme"], { wave: Rgb; background: Rgb }>;
+
+const getTheme = (): Appearance["theme"] => appearance.getSnapshot().preferences.theme;
 
 function webglAvailable(): boolean {
   try {
@@ -58,6 +73,7 @@ class BackdropBoundary extends Component<{ children: React.ReactNode }, { failed
  */
 export function HomeDither(): React.ReactElement | null {
   const focused = useWindowFocused();
+  const palette = PALETTES[useSyncExternalStore(appearance.subscribe, getTheme)];
   const [reduced] = useState(prefersReducedMotion);
   const [supported] = useState(webglAvailable);
   // The home screen element: pointer events are read from it, since the
@@ -76,8 +92,8 @@ export function HomeDither(): React.ReactElement | null {
         <BackdropBoundary>
           <Suspense fallback={null}>
             <Dither
-              waveColor={WAVE_COLOR}
-              backgroundColor={BACKGROUND_COLOR}
+              waveColor={palette.wave}
+              backgroundColor={palette.background}
               colorNum={4}
               pixelSize={2}
               waveAmplitude={0.3}

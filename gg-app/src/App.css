@@ -6500,40 +6500,105 @@ select {
 .inputwrap:focus-within {
   border-color: var(--border-strong);
 }
-/* Sibling overlays avoid nesting Beam's generated descendant selectors. They
-   cannot intercept clicks, clip menus, or change the composer's layout. */
-.working-beam[data-beam] {
+/* Working beam: sibling overlays that cannot intercept clicks, clip menus, or
+   change the composer's layout. Only `transform` and `opacity` animate, so the
+   compositor runs the sweep; the edge masks and gradient are painted once. */
+.working-beam {
+  --beam-radius: var(--radius-input);
   position: absolute;
   inset: 0;
-  pointer-events: none;
   z-index: 2;
+  pointer-events: none;
+  border-radius: var(--beam-radius);
+  overflow: hidden;
+  contain: strict;
+  /* Lets the sweep size itself to the overlay's diagonal (cqw/cqh). */
+  container-type: size;
+  opacity: 0;
+  animation: working-beam-in 0.6s ease forwards;
+}
+.working-beam-sm {
+  --beam-radius: var(--radius-pill);
 }
 .inputwrap > .working-beam {
   inset: -1px;
 }
-.working-beam-surface {
-  width: 100%;
-  height: 100%;
-  border-radius: var(--radius-input);
+.working-beam-ring,
+.working-beam-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
 }
-.working-beam-sm .working-beam-surface {
-  border-radius: var(--radius-pill);
+/* 1px stroke: the padding box minus the content box. */
+.working-beam-ring {
+  padding: 1px;
+  opacity: 0.35;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
 }
-.app:not(.window-focused) .working-beam,
-.app:not(.window-focused) .working-beam::before,
-.app:not(.window-focused) .working-beam::after,
-.app:not(.window-focused) .working-beam [data-beam-bloom] {
-  animation-play-state: paused !important;
+.working-beam-sm .working-beam-ring {
+  opacity: 0.45;
+}
+/* Soft inner glow fading inward from every edge. */
+.working-beam-glow {
+  opacity: 0.3;
+  -webkit-mask:
+    linear-gradient(to right, #000, transparent 14px, transparent calc(100% - 14px), #000),
+    linear-gradient(to bottom, #000, transparent 10px, transparent calc(100% - 10px), #000);
+  -webkit-mask-composite: source-over;
+  mask:
+    linear-gradient(to right, #000, transparent 14px, transparent calc(100% - 14px), #000),
+    linear-gradient(to bottom, #000, transparent 10px, transparent calc(100% - 10px), #000);
+  mask-composite: add;
+}
+.working-beam-sweep {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  /* A square spanning the overlay's diagonal, so its corners never show. */
+  width: calc(100% + 160px);
+  width: hypot(100cqw, 100cqh);
+  aspect-ratio: 1;
+  background: conic-gradient(
+    transparent 0turn 0.3turn,
+    rgb(255 50 100 / 0.4) 0.38turn,
+    rgb(255 120 40) 0.47turn,
+    rgb(240 50 180) 0.56turn,
+    rgb(100 70 255) 0.66turn,
+    rgb(40 140 255) 0.76turn,
+    rgb(30 185 170 / 0.5) 0.86turn,
+    transparent 0.95turn
+  );
+  transform: translate(-50%, -50%) rotate(0turn);
+  animation: working-beam-spin 1.96s linear infinite;
+  will-change: transform;
+}
+@keyframes working-beam-spin {
+  to {
+    transform: translate(-50%, -50%) rotate(1turn);
+  }
+}
+@keyframes working-beam-in {
+  to {
+    opacity: 1;
+  }
+}
+/* Only the pane you are looking at keeps sweeping; others hold a still arc. */
+.app:not(.window-focused) .working-beam-sweep,
+.agent-pane:not(.pane-focused) .working-beam-sweep {
+  animation-play-state: paused;
 }
 @media (prefers-reduced-motion: reduce), (forced-colors: active) {
-  /* These decorative beams are optional; retain the existing status text and
-     focus borders without motion. Rotate presets lack this package fallback. */
-  .working-beam[data-beam],
-  .working-beam[data-beam]::before,
-  .working-beam[data-beam]::after,
-  .working-beam[data-beam] [data-beam-bloom] {
+  /* Decorative only: the status text and focus borders still show work. */
+  .working-beam {
     display: none;
-    animation: none !important;
   }
 }
 .inputwrap.dragover {

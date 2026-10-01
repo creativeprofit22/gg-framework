@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import html from "../index.html?raw";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WorkingBeam } from "./WorkingBeam";
 
@@ -28,11 +28,12 @@ it("keeps the nonce source in the actual desktop entry HTML", () => {
   expect(html).toMatch(/<style id="app-style-nonce">/);
 });
 
-it("authorizes the real lazy beam styles using the current window nonce", async () => {
+it("keeps the working beam on static CSS, with no runtime stylesheet to authorize", () => {
+  const before = document.querySelectorAll("style").length;
   const { container, rerender } = render(<WorkingBeam active />);
-  await waitFor(() => expect(container.querySelector("style")?.nonce).toBe(nonceStyle.nonce));
   rerender(<WorkingBeam active size="sm" />);
-  expect(container.querySelector("style")?.nonce).toBe(nonceStyle.nonce);
+  expect(container.querySelector(".working-beam")).not.toBeNull();
+  expect(document.querySelectorAll("style")).toHaveLength(before);
 });
 
 it("authorizes metal's import-time stylesheet before it enters the document", async () => {

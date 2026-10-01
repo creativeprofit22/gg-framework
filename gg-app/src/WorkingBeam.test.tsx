@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkingBeam } from "./WorkingBeam";
 
@@ -18,24 +18,26 @@ afterEach(() => {
 });
 
 describe("WorkingBeam", () => {
-  it("mounts the real package only while active, at the requested strength", async () => {
+  it("mounts a decorative overlay only while active, without runtime stylesheets", () => {
     const { container, rerender } = render(<WorkingBeam active={false} />);
-    expect(container.querySelector("[data-beam]")).toBeNull();
+    expect(container.querySelector(".working-beam")).toBeNull();
 
     rerender(<WorkingBeam active />);
-    await waitFor(() => expect(container.querySelector("[data-beam]")).not.toBeNull());
-    const beam = container.querySelector<HTMLElement>("[data-beam]");
-    expect(beam?.hasAttribute("data-active")).toBe(true);
+    const beam = container.querySelector<HTMLElement>(".working-beam");
+    expect(beam).not.toBeNull();
     expect(beam?.getAttribute("aria-hidden")).toBe("true");
-    expect(beam?.style.getPropertyValue("--beam-strength")).toBe("0.7");
     expect(beam?.classList.contains("working-beam-md")).toBe(true);
+    // Both the stroke and the inner glow carry a rotating sweep.
+    expect(beam?.querySelectorAll(".working-beam-ring > .working-beam-sweep")).toHaveLength(1);
+    expect(beam?.querySelectorAll(".working-beam-glow > .working-beam-sweep")).toHaveLength(1);
+    // Static CSS only: nothing for the window's style nonce to authorize.
+    expect(container.querySelector("style")).toBeNull();
 
     rerender(<WorkingBeam active={false} />);
-    expect(container.querySelector("[data-beam]")).toBeNull();
-    expect(container.querySelector("style")).toBeNull();
+    expect(container.querySelector(".working-beam")).toBeNull();
   });
 
-  it("keeps the draft, focus, and stop control intact across work transitions", async () => {
+  it("keeps the draft, focus, and stop control intact across work transitions", () => {
     const onStop = vi.fn();
     const composer = (active: boolean) => (
       <div className="inputwrap">
@@ -51,18 +53,16 @@ describe("WorkingBeam", () => {
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
     input.focus();
     rerender(composer(true));
-    await waitFor(() =>
-      expect(container.querySelector(".working-beam-sm[data-active]")).not.toBeNull(),
-    );
+    expect(container.querySelector(".working-beam-sm")).not.toBeNull();
     expect(screen.getByRole("textbox")).toBe(input);
     expect(document.activeElement).toBe(input);
     expect(input.value).toBe("Keep my draft");
-    expect(container.querySelector(".working-beam-sm[data-active]")).not.toBeNull();
-    expect(container.querySelector("[data-beam] [data-beam]")).toBeNull();
+    expect(container.querySelectorAll(".working-beam")).toHaveLength(2);
+    expect(container.querySelector(".working-beam .working-beam")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(onStop).toHaveBeenCalledOnce();
     rerender(composer(false));
     expect(screen.getByRole("textbox")).toBe(input);
-    expect(container.querySelector("[data-beam]")).toBeNull();
+    expect(container.querySelector(".working-beam")).toBeNull();
   });
 });

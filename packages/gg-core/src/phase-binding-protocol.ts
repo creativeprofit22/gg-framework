@@ -99,9 +99,7 @@ export interface PhaseLeaseRequestV2 {
 }
 
 export type PhaseBindingProtocolRequest =
-  | PhaseBindingRequest
-  | PhaseLeaseRequestV2
-  | PhaseExecutionReconciliationRequestV3;
+  PhaseBindingRequest | PhaseLeaseRequestV2 | PhaseExecutionReconciliationRequestV3;
 
 export type PhaseLeaseOutcome =
   | ProjectNotesUnsupportedFormat

@@ -196,9 +196,7 @@ describe("Qwen Cloud Token Plan registry and policy", () => {
     expectTypeOf<QwenCloudConnectionStatus["verification"]>().toEqualTypeOf<
       "not-tested" | "succeeded"
     >();
-    expectTypeOf<
-      Extract<QwenCloudConnectionResult, { ok: false }>["code"]
-    >().toEqualTypeOf<
+    expectTypeOf<Extract<QwenCloudConnectionResult, { ok: false }>["code"]>().toEqualTypeOf<
       | "invalid-key-format"
       | "native-unavailable"
       | "vault-unavailable"

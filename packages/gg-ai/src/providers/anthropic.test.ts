@@ -79,24 +79,45 @@ describe("Anthropic serialized HTTP tool schemas", () => {
     const mock = MockAnthropic as unknown as {
       httpCreate: ((params: unknown, options: unknown) => unknown) | null;
     };
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(
-      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
-      { headers: { "content-type": "text/event-stream" } },
-    ));
-    const client = new RealAnthropic({ apiKey: "test-not-a-credential", maxRetries: 0, fetch: fetchMock });
-    mock.httpCreate = (params, options) => client.messages.create(
-      params as Parameters<typeof client.messages.create>[0],
-      options as Parameters<typeof client.messages.create>[1],
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const client = new RealAnthropic({
+      apiKey: "test-not-a-credential",
+      maxRetries: 0,
+      fetch: fetchMock,
+    });
+    mock.httpCreate = (params, options) =>
+      client.messages.create(
+        params as Parameters<typeof client.messages.create>[0],
+        options as Parameters<typeof client.messages.create>[1],
+      );
     const keys = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__", "prototype"];
-    const rawInputSchema = JSON.parse(JSON.stringify({
-      oneOf: ["a", "b"].map((value, index) => ({
-        type: "object",
-        properties: Object.fromEntries(keys.map((key) => [key, { type: "string", const: value }])),
-        required: index === 0 ? keys : keys.slice(0, -1),
-      })),
-    }));
-    const actions = ["inspect", "bind-current", "rebind-current", "acquire", "renew", "release", "takeover"];
+    const rawInputSchema = JSON.parse(
+      JSON.stringify({
+        oneOf: ["a", "b"].map((value, index) => ({
+          type: "object",
+          properties: Object.fromEntries(
+            keys.map((key) => [key, { type: "string", const: value }]),
+          ),
+          required: index === 0 ? keys : keys.slice(0, -1),
+        })),
+      }),
+    );
+    const actions = [
+      "inspect",
+      "bind-current",
+      "rebind-current",
+      "acquire",
+      "renew",
+      "release",
+      "takeover",
+    ];
     const parameters = z.record(z.string(), z.unknown());
     const roadmapParameters = z.discriminatedUnion("action", [
       z.object({ action: z.literal("inspect") }).strict(),
@@ -255,7 +276,11 @@ describe("Anthropic serialized HTTP tool schemas", () => {
           required: ["workspace"],
           [keyword]: [
             {
-              properties: { action: { const: "read" }, limit: { maximum: 10 }, path: { type: "string" } },
+              properties: {
+                action: { const: "read" },
+                limit: { maximum: 10 },
+                path: { type: "string" },
+              },
               required: ["action", "path"],
             },
             { properties: { action: { const: "list" } }, required: ["action"] },
@@ -367,120 +392,129 @@ describe("Anthropic serialized HTTP tool schemas", () => {
   );
 });
 
-describe.each(["none", "short", "long"] as const)("prewarm tools prefix (%s cache)", (cacheRetention) => {
-  it.each(["server-only", "empty-custom", "custom-only", "both", "neither"] as const)(
-    "matches normal streaming for %s tools",
-    async (scenario) => {
-      const { default: RealAnthropic } =
-        await vi.importActual<typeof AnthropicSDK>("@anthropic-ai/sdk");
-      const { default: MockAnthropic } = await import("@anthropic-ai/sdk");
-      const mock = MockAnthropic as unknown as {
-        httpCreate: ((params: unknown, options: unknown) => unknown) | null;
-      };
-      const bodies: Record<string, unknown>[] = [];
-      const client = new RealAnthropic({
-        apiKey: "test-key",
-        maxRetries: 0,
-        fetch: async (_url, init) => {
-          const body = JSON.parse(String(init?.body));
-          bodies.push(body);
-          if (body.stream) {
-            const events = [
-              {
-                type: "message_delta",
-                delta: { stop_reason: "end_turn" },
-                usage: { output_tokens: 1 },
-              },
-              { type: "message_stop" },
-            ];
-            return new Response(
-              events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
-              { headers: { "content-type": "text/event-stream" } },
-            );
-          }
-          return Response.json({
-            id: "msg_test",
-            type: "message",
-            role: "assistant",
-            content: [],
-            stop_reason: "end_turn",
-            usage: { input_tokens: 1, output_tokens: 1 },
-          });
-        },
-      });
-      const customTools = [
-        {
-          name: "lookup",
-          description: "Look up a value",
-          parameters: z.object({ query: z.string() }),
-        },
-      ];
-      const serverTools = [
-        { type: "web_search_20250305", name: "web_search", max_uses: 2 },
-        { type: "web_fetch_20250910", name: "web_fetch", allowed_domains: ["example.com"] },
-      ];
-      const hasCustom = scenario === "custom-only" || scenario === "both";
-      const hasServer =
-        scenario === "server-only" || scenario === "empty-custom" || scenario === "both";
-      const options = {
-        apiKey: "test-key",
-        model: "claude-test",
-        cacheRetention,
-        ...(hasCustom ? { tools: customTools } : scenario === "empty-custom" ? { tools: [] } : {}),
-        ...(hasServer ? { serverTools } : {}),
-      };
-      const before = structuredClone(serverTools);
-      const previousHttpCreate = mock.httpCreate;
-      mock.httpCreate = (params, requestOptions) =>
-        client.messages.create(
-          params as Parameters<typeof client.messages.create>[0],
-          requestOptions as Parameters<typeof client.messages.create>[1],
-        );
-      try {
-        await prewarmAnthropicCache({ ...options, system: "test" });
-        await streamAnthropic({
-          ...options,
-          provider: "anthropic",
-          messages: [
-            { role: "system", content: "test" },
-            { role: "user", content: "." },
-          ],
-        }).response;
-        expect(bodies).toHaveLength(2);
-        expect(bodies[0]!.tools).toEqual(bodies[1]!.tools);
-        const tools = bodies[0]!.tools as Record<string, unknown>[] | undefined;
-        if (scenario === "neither") {
-          expect(bodies[0]).not.toHaveProperty("tools");
-          expect(bodies[1]).not.toHaveProperty("tools");
-        } else {
-          expect(tools).toHaveLength((hasCustom ? 1 : 0) + (hasServer ? 2 : 0));
-          if (hasServer) expect(tools!.slice(hasCustom ? 1 : 0)).toEqual(serverTools);
-          if (hasCustom) {
-            expect(tools![0]).toMatchObject({
-              name: "lookup",
-              input_schema: {
-                type: "object",
-                properties: { query: { type: "string" } },
-                required: ["query"],
-              },
+describe.each(["none", "short", "long"] as const)(
+  "prewarm tools prefix (%s cache)",
+  (cacheRetention) => {
+    it.each(["server-only", "empty-custom", "custom-only", "both", "neither"] as const)(
+      "matches normal streaming for %s tools",
+      async (scenario) => {
+        const { default: RealAnthropic } =
+          await vi.importActual<typeof AnthropicSDK>("@anthropic-ai/sdk");
+        const { default: MockAnthropic } = await import("@anthropic-ai/sdk");
+        const mock = MockAnthropic as unknown as {
+          httpCreate: ((params: unknown, options: unknown) => unknown) | null;
+        };
+        const bodies: Record<string, unknown>[] = [];
+        const client = new RealAnthropic({
+          apiKey: "test-key",
+          maxRetries: 0,
+          fetch: async (_url, init) => {
+            const body = JSON.parse(String(init?.body));
+            bodies.push(body);
+            if (body.stream) {
+              const events = [
+                {
+                  type: "message_delta",
+                  delta: { stop_reason: "end_turn" },
+                  usage: { output_tokens: 1 },
+                },
+                { type: "message_stop" },
+              ];
+              return new Response(
+                events
+                  .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+                  .join(""),
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            }
+            return Response.json({
+              id: "msg_test",
+              type: "message",
+              role: "assistant",
+              content: [],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
             });
-            expect(tools![0]!.cache_control).toEqual(
-              cacheRetention === "none"
-                ? undefined
-                : { type: "ephemeral", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) },
-            );
-            expect(tools![0]!.eager_input_streaming).toBe(
-              fineGrainedToolStreamingEnabled() ? true : undefined,
-            );
+          },
+        });
+        const customTools = [
+          {
+            name: "lookup",
+            description: "Look up a value",
+            parameters: z.object({ query: z.string() }),
+          },
+        ];
+        const serverTools = [
+          { type: "web_search_20250305", name: "web_search", max_uses: 2 },
+          { type: "web_fetch_20250910", name: "web_fetch", allowed_domains: ["example.com"] },
+        ];
+        const hasCustom = scenario === "custom-only" || scenario === "both";
+        const hasServer =
+          scenario === "server-only" || scenario === "empty-custom" || scenario === "both";
+        const options = {
+          apiKey: "test-key",
+          model: "claude-test",
+          cacheRetention,
+          ...(hasCustom
+            ? { tools: customTools }
+            : scenario === "empty-custom"
+              ? { tools: [] }
+              : {}),
+          ...(hasServer ? { serverTools } : {}),
+        };
+        const before = structuredClone(serverTools);
+        const previousHttpCreate = mock.httpCreate;
+        mock.httpCreate = (params, requestOptions) =>
+          client.messages.create(
+            params as Parameters<typeof client.messages.create>[0],
+            requestOptions as Parameters<typeof client.messages.create>[1],
+          );
+        try {
+          await prewarmAnthropicCache({ ...options, system: "test" });
+          await streamAnthropic({
+            ...options,
+            provider: "anthropic",
+            messages: [
+              { role: "system", content: "test" },
+              { role: "user", content: "." },
+            ],
+          }).response;
+          expect(bodies).toHaveLength(2);
+          expect(bodies[0]!.tools).toEqual(bodies[1]!.tools);
+          const tools = bodies[0]!.tools as Record<string, unknown>[] | undefined;
+          if (scenario === "neither") {
+            expect(bodies[0]).not.toHaveProperty("tools");
+            expect(bodies[1]).not.toHaveProperty("tools");
+          } else {
+            expect(tools).toHaveLength((hasCustom ? 1 : 0) + (hasServer ? 2 : 0));
+            if (hasServer) expect(tools!.slice(hasCustom ? 1 : 0)).toEqual(serverTools);
+            if (hasCustom) {
+              expect(tools![0]).toMatchObject({
+                name: "lookup",
+                input_schema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                  required: ["query"],
+                },
+              });
+              expect(tools![0]!.cache_control).toEqual(
+                cacheRetention === "none"
+                  ? undefined
+                  : { type: "ephemeral", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) },
+              );
+              expect(tools![0]!.eager_input_streaming).toBe(
+                fineGrainedToolStreamingEnabled() ? true : undefined,
+              );
+            }
           }
+          expect(serverTools).toEqual(before);
+        } finally {
+          mock.httpCreate = previousHttpCreate;
         }
-        expect(serverTools).toEqual(before);
-      } finally {
-        mock.httpCreate = previousHttpCreate;
-      }
-    },
-  );
-});
+      },
+    );
+  },
+);
 
 describe("streamAnthropic request shaping", () => {
   it("sends thinking, cache, image, and tool transform params", async () => {

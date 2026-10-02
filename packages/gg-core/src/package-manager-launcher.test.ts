@@ -18,8 +18,11 @@ describe("package manager launch resolution", () => {
   ] as const)("runs %s's %s through Node without argument splitting", (manager, relative) => {
     const script = `${dir}\\${relative}`;
     const files = new Set([`${dir}\\${manager}.cmd`, script]);
-    expect(resolvePackageManagerLaunch(manager, args, { Path: `"${dir}"` }, "win32", (p) => files.has(p)))
-      .toEqual({ command: process.execPath, args: [script, ...args] });
+    expect(
+      resolvePackageManagerLaunch(manager, args, { Path: `"${dir}"` }, "win32", (p) =>
+        files.has(p),
+      ),
+    ).toEqual({ command: process.execPath, args: [script, ...args] });
   });
 
   it.runIf(process.platform === "win32").each([
@@ -45,22 +48,33 @@ describe("package manager launch resolution", () => {
 
   it("supports a standalone pnpm executable", () => {
     const exe = `${dir}\\pnpm.exe`;
-    expect(resolvePackageManagerLaunch("pnpm", args, { PATH: dir }, "win32", (p) => p === exe))
-      .toEqual({ command: exe, args });
+    expect(
+      resolvePackageManagerLaunch("pnpm", args, { PATH: dir }, "win32", (p) => p === exe),
+    ).toEqual({ command: exe, args });
   });
 
   it("fails closed on an unknown shim rather than using a shell or later installation", () => {
-    expect(() => resolvePackageManagerLaunch("npm", args, { PATH: `${dir};C:\\Other` }, "win32",
-      (p) => p === `${dir}\\npm.cmd` || p.startsWith("C:\\Other\\"))).toThrow("Unsupported npm launcher");
+    expect(() =>
+      resolvePackageManagerLaunch(
+        "npm",
+        args,
+        { PATH: `${dir};C:\\Other` },
+        "win32",
+        (p) => p === `${dir}\\npm.cmd` || p.startsWith("C:\\Other\\"),
+      ),
+    ).toThrow("Unsupported npm launcher");
   });
 
   it("ignores cwd and relative PATH entries", () => {
-    expect(() => resolvePackageManagerLaunch("npm", args, { PATH: ";.;tools" }, "win32", () => true))
-      .toThrow("npm launcher not found");
+    expect(() =>
+      resolvePackageManagerLaunch("npm", args, { PATH: ";.;tools" }, "win32", () => true),
+    ).toThrow("npm launcher not found");
   });
 
   it("preserves Unix execution and argv", () => {
-    expect(resolvePackageManagerLaunch("npm", args, {}, "linux", () => false))
-      .toEqual({ command: "npm", args });
+    expect(resolvePackageManagerLaunch("npm", args, {}, "linux", () => false)).toEqual({
+      command: "npm",
+      args,
+    });
   });
 });

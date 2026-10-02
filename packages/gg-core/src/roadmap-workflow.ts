@@ -36,8 +36,7 @@ export interface RoadmapWorkflowValidationError {
 }
 
 export type RoadmapWorkflowValidationResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: RoadmapWorkflowValidationError };
+  { ok: true; value: T } | { ok: false; error: RoadmapWorkflowValidationError };
 
 export interface RoadmapInspectionVerificationSummary {
   status: NotesVerificationStatus;

@@ -208,7 +208,10 @@ export function isSlashCommandsResponse(value: unknown): value is SlashCommandsR
       Array.isArray(item.aliases) &&
       item.aliases.length <= 50 &&
       item.aliases.every(
-        (alias) => typeof alias === "string" && alias.length > 0 && alias.length <= SLASH_COMMAND_NAME_MAX_LENGTH,
+        (alias) =>
+          typeof alias === "string" &&
+          alias.length > 0 &&
+          alias.length <= SLASH_COMMAND_NAME_MAX_LENGTH,
       ) &&
       typeof item.description === "string" &&
       item.description.length <= SLASH_COMMAND_DESCRIPTION_MAX_LENGTH &&

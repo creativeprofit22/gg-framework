@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { detectGlobalUpdateManager } from "./auto-update-install.js";
 import path from "node:path";
-import { resolvePackageManagerLaunch, type UpdatePackageManager } from "./package-manager-launcher.js";
+import {
+  resolvePackageManagerLaunch,
+  type UpdatePackageManager,
+} from "./package-manager-launcher.js";
 
 /**
  * Provider-agnostic background self-updater. Each app composes its own instance
@@ -68,7 +71,8 @@ function performUpdateInBackground(
   onComplete: (success: boolean) => void,
 ): boolean {
   try {
-    const args = manager === "yarn" ? ["global", "add"] : [manager === "npm" ? "install" : "add", "-g"];
+    const args =
+      manager === "yarn" ? ["global", "add"] : [manager === "npm" ? "install" : "add", "-g"];
     args.push(`${packageName}@latest`);
     const launch = resolvePackageManagerLaunch(manager, args);
     const child = spawn(launch.command, launch.args, {

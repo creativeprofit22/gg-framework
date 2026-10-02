@@ -13,7 +13,11 @@ const pkg = "@kenkaiiii/ggcoder";
 
 beforeEach(() => {
   vi.spyOn(fs, "realpathSync").mockImplementation((file) => String(file));
-  vi.mocked(execFileSync).mockReset().mockImplementation(() => { throw new Error("not installed"); });
+  vi.mocked(execFileSync)
+    .mockReset()
+    .mockImplementation(() => {
+      throw new Error("not installed");
+    });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -45,9 +49,11 @@ describe("positive global installation ownership", () => {
     entry(paths.join(modules, pkg, "dist/cli.js"), platform);
     globalRoot(manager, root);
     expect(detectGlobalUpdateManager(pkg)).toBe(manager);
-    expect(execFileSync).toHaveBeenCalledWith(manager,
+    expect(execFileSync).toHaveBeenCalledWith(
+      manager,
       manager === "yarn" ? ["global", "dir"] : ["root", "-g"],
-      expect.objectContaining({ shell: false, timeout: 3000 }));
+      expect.objectContaining({ shell: false, timeout: 3000 }),
+    );
   });
 
   it.each([
@@ -75,11 +81,14 @@ describe("positive global installation ownership", () => {
     expect(detectGlobalUpdateManager(pkg)).toBeNull();
   });
 
-  it.each(["relative/node_modules", "/root/node_modules\nwarning", ""])("rejects ambiguous root %s", (root) => {
-    entry("/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js");
-    globalRoot("npm", root);
-    expect(detectGlobalUpdateManager(pkg)).toBeNull();
-  });
+  it.each(["relative/node_modules", "/root/node_modules\nwarning", ""])(
+    "rejects ambiguous root %s",
+    (root) => {
+      entry("/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js");
+      globalRoot("npm", root);
+      expect(detectGlobalUpdateManager(pkg)).toBeNull();
+    },
+  );
 
   it("fails closed when global discovery fails", () => {
     entry("/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js");
@@ -91,7 +100,9 @@ describe("positive global installation ownership", () => {
     const stored = `${root}/.pnpm/@kenkaiiii+ggcoder@1.0.0/node_modules/${pkg}`;
     entry(`${stored}/dist/cli.js`);
     globalRoot("pnpm", root);
-    vi.mocked(fs.realpathSync).mockImplementation((file) => String(file) === `${root}/${pkg}` ? stored : String(file));
+    vi.mocked(fs.realpathSync).mockImplementation((file) =>
+      String(file) === `${root}/${pkg}` ? stored : String(file),
+    );
     expect(detectGlobalUpdateManager(pkg)).toBe("pnpm");
   });
 
@@ -100,7 +111,8 @@ describe("positive global installation ownership", () => {
     entry(`${checkout}/cli.js`);
     globalRoot("npm", "/usr/lib/node_modules");
     vi.mocked(fs.realpathSync).mockImplementation((file) =>
-      String(file) === `/usr/lib/node_modules/${pkg}` ? checkout : String(file));
+      String(file) === `/usr/lib/node_modules/${pkg}` ? checkout : String(file),
+    );
     expect(detectGlobalUpdateManager(pkg)).toBeNull();
   });
 

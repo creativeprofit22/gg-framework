@@ -64,8 +64,7 @@ export function isProgressSnapshot(value: unknown): value is ProgressSnapshot {
   if (!record(value)) return false;
   return (
     level(value.level) &&
-    (value.maxLevel === undefined ||
-      (level(value.maxLevel) && value.maxLevel >= value.level)) &&
+    (value.maxLevel === undefined || (level(value.maxLevel) && value.maxLevel >= value.level)) &&
     count(value.tier) &&
     Number.isInteger(value.tier) &&
     ["rankName", "tierName", "tierGlyph", "effectId", "memberSince"].every(

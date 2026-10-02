@@ -46,10 +46,7 @@ describe("parseRequiredClaudeCodeVersion", () => {
 
 describe("noteRequiredClaudeCodeVersion", () => {
   it("raises the cached version past a stale cache and reports a retry", async () => {
-    await fs.writeFile(
-      cacheFile(),
-      JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }),
-    );
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(JSON.stringify({ version: "2.1.280" }), { status: 200 })),
@@ -65,10 +62,7 @@ describe("noteRequiredClaudeCodeVersion", () => {
   });
 
   it("falls back to the demanded version when npm is unreachable", async () => {
-    await fs.writeFile(
-      cacheFile(),
-      JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }),
-    );
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -77,26 +71,21 @@ describe("noteRequiredClaudeCodeVersion", () => {
     );
 
     const { noteRequiredClaudeCodeVersion, getClaudeCodeVersion } = await load();
-    expect(
-      await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required."),
-    ).toBe(true);
+    expect(await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required.")).toBe(true);
     expect(await getClaudeCodeVersion()).toBe("2.1.280");
   });
 
   it("does not retry when the cached version already satisfies the requirement", async () => {
-    await fs.writeFile(
-      cacheFile(),
-      JSON.stringify({ version: "2.1.281", fetchedAt: Date.now() }),
-    );
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.281", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(JSON.stringify({ version: "2.1.281" }), { status: 200 })),
     );
 
     const { noteRequiredClaudeCodeVersion } = await load();
-    expect(
-      await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required."),
-    ).toBe(false);
+    expect(await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required.")).toBe(
+      false,
+    );
   });
 
   it("ignores errors that carry no version requirement", async () => {

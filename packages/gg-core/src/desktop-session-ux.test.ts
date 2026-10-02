@@ -10,7 +10,9 @@ describe("isPromptSubmissionRejection", () => {
     "session_mutation_in_progress",
     "workflow_busy",
   ])("accepts the definite pre-execution code %s", (code) => {
-    expect(isPromptSubmissionRejection({ category: "rejected", code, message: "Not sent." })).toBe(true);
+    expect(isPromptSubmissionRejection({ category: "rejected", code, message: "Not sent." })).toBe(
+      true,
+    );
   });
 
   it.each([
@@ -18,7 +20,10 @@ describe("isPromptSubmissionRejection", () => {
     ["unknown category", { category: "unknown", code: "workflow_busy", message: "Busy." }],
     ["empty message", { category: "rejected", code: "session_mutation_in_progress", message: " " }],
     ["control characters", { category: "rejected", code: "workflow_busy", message: "a\nb" }],
-    ["oversized message", { category: "rejected", code: "workflow_busy", message: "x".repeat(257) }],
+    [
+      "oversized message",
+      { category: "rejected", code: "workflow_busy", message: "x".repeat(257) },
+    ],
     ["string failure", "session_mutation_in_progress"],
   ])("rejects %s", (_label, value) => {
     expect(isPromptSubmissionRejection(value)).toBe(false);

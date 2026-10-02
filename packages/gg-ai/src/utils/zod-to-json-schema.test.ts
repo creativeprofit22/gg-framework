@@ -10,13 +10,15 @@ describe("Anthropic object compositions", () => {
       for (const keyword of ["oneOf", "anyOf"]) {
         for (const requiredInBoth of [true, false]) {
           // Parse as MCP JSON so __proto__ is an own field, not object-literal syntax.
-          const schema = JSON.parse(JSON.stringify({
-            [keyword]: ["a", "b"].map((value, index) => ({
-              type: "object",
-              properties: { [key]: { type: "string", const: value } },
-              required: requiredInBoth || index === 0 ? [key] : [],
-            })),
-          }));
+          const schema = JSON.parse(
+            JSON.stringify({
+              [keyword]: ["a", "b"].map((value, index) => ({
+                type: "object",
+                properties: { [key]: { type: "string", const: value } },
+                required: requiredInBoth || index === 0 ? [key] : [],
+              })),
+            }),
+          );
           const before = structuredClone(schema);
           const result = normalizeRootForAnthropic(schema);
           const properties = result.properties as Record<string, unknown>;
@@ -47,7 +49,10 @@ describe("Anthropic object compositions", () => {
     expect(result.required ?? []).toEqual([]);
   });
   it.each([
-    [{ type: "string", const: "auto" }, { type: "integer", minimum: 1 }],
+    [
+      { type: "string", const: "auto" },
+      { type: "integer", minimum: 1 },
+    ],
     [{ type: "string" }, { type: "number" }],
     [{ type: "string", const: "auto" }, { type: "string" }],
     [{ const: "read" }, { enum: ["list", "write"], type: "string" }],
@@ -73,13 +78,15 @@ describe("Anthropic object compositions", () => {
   });
 
   it("compacts pure mixed-type literals without keeping one alternative's type", () => {
-    expect(normalizeRootForAnthropic({
-      oneOf: [
-        { properties: { kind: { type: "string", const: "auto" } } },
-        { properties: { kind: { type: "integer", const: 1 } } },
-        { properties: { kind: { type: "boolean", const: false } } },
-      ],
-    }).properties).toEqual({ kind: { enum: ["auto", 1, false] } });
+    expect(
+      normalizeRootForAnthropic({
+        oneOf: [
+          { properties: { kind: { type: "string", const: "auto" } } },
+          { properties: { kind: { type: "integer", const: 1 } } },
+          { properties: { kind: { type: "boolean", const: false } } },
+        ],
+      }).properties,
+    ).toEqual({ kind: { enum: ["auto", 1, false] } });
   });
   it.each([
     { oneOf: [{ $ref: "https://example.invalid/schema" }] },
@@ -156,10 +163,17 @@ describe("Anthropic object compositions", () => {
       required: ["workspace"],
       [keyword]: [
         {
-          properties: { action: { const: "read" }, limit: { maximum: 10 }, path: { type: "string" } },
+          properties: {
+            action: { const: "read" },
+            limit: { maximum: 10 },
+            path: { type: "string" },
+          },
           required: ["action", "path"],
         },
-        { properties: { action: { const: "list" }, limit: { maximum: 100 } }, required: ["action"] },
+        {
+          properties: { action: { const: "list" }, limit: { maximum: 100 } },
+          required: ["action"],
+        },
       ],
     };
     const before = structuredClone(schema);

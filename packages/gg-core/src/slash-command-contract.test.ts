@@ -51,7 +51,9 @@ describe("programmatic focus contract", () => {
   it("rejects every C0/DEL/C1 control except CR, LF and tab", () => {
     for (let code = 0; code <= 159; code++) {
       const allowed = (code >= 32 && code < 127) || [9, 10, 13].includes(code);
-      expect(isValidProgrammaticFocus(`a${String.fromCharCode(code)}b`), String(code)).toBe(allowed);
+      expect(isValidProgrammaticFocus(`a${String.fromCharCode(code)}b`), String(code)).toBe(
+        allowed,
+      );
     }
   });
 });
@@ -153,9 +155,9 @@ describe("slash-command discovery contract", () => {
     expect(normalizeSlashCommandCollection("my demo")).toBeUndefined();
     expect(normalizeSlashCommandCollection("demo_kit")).toBeUndefined();
     expect(normalizeSlashCommandCollection("-demo")).toBeUndefined();
-    expect(
-      normalizeSlashCommandCollection("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH)),
-    ).toBe("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH));
+    expect(normalizeSlashCommandCollection("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH))).toBe(
+      "x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH),
+    );
     expect(
       normalizeSlashCommandCollection("x".repeat(SLASH_COMMAND_COLLECTION_MAX_LENGTH + 1)),
     ).toBeUndefined();
@@ -171,7 +173,10 @@ describe("slash-command discovery contract", () => {
       [{ ...ok, file: "x".repeat(SLASH_COMMAND_PROBLEM_FILE_MAX_LENGTH) }],
       Array(SLASH_COMMAND_PROBLEMS_MAX).fill(ok),
     ])
-      expect(isSlashCommandsResponse({ ...response, problems }), JSON.stringify(problems).slice(0, 80)).toBe(true);
+      expect(
+        isSlashCommandsResponse({ ...response, problems }),
+        JSON.stringify(problems).slice(0, 80),
+      ).toBe(true);
     for (const problems of [
       null,
       ok,
@@ -185,7 +190,10 @@ describe("slash-command discovery contract", () => {
       [{ ...ok, file: 7 }],
       Array(SLASH_COMMAND_PROBLEMS_MAX + 1).fill(ok),
     ])
-      expect(isSlashCommandsResponse({ ...response, problems }), JSON.stringify(problems)?.slice(0, 80)).toBe(false);
+      expect(
+        isSlashCommandsResponse({ ...response, problems }),
+        JSON.stringify(problems)?.slice(0, 80),
+      ).toBe(false);
   });
 
   it("requires explicit text, reference, and attachment policies", () => {

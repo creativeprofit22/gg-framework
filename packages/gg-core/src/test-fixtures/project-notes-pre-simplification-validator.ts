@@ -151,11 +151,7 @@ export interface NotesPendingCompletionV1 {
 }
 
 export type NotesPhaseExecutionState =
-  | "needs-plan"
-  | "implementing"
-  | "needs-reconciliation"
-  | "completion-pending"
-  | "completed";
+  "needs-plan" | "implementing" | "needs-reconciliation" | "completion-pending" | "completed";
 
 export interface NotesPhaseExecutionV1 {
   version: 1;
@@ -457,8 +453,7 @@ export interface NotesRoadmapDirectPhaseAdvancementCheckpoint {
 }
 
 export type NotesRoadmapPhaseAdvancementCheckpoint =
-  | NotesRoadmapLegacyPhaseAdvancementCheckpoint
-  | NotesRoadmapDirectPhaseAdvancementCheckpoint;
+  NotesRoadmapLegacyPhaseAdvancementCheckpoint | NotesRoadmapDirectPhaseAdvancementCheckpoint;
 
 export interface NotesRoadmapPhaseAdvancementConfirmation {
   type: "phase-advancement-confirmation";
@@ -617,8 +612,7 @@ export interface NotesValidationError {
 }
 
 export type NotesValidationResult =
-  | { ok: true; document: NotesDocumentV3 }
-  | { ok: false; error: NotesValidationError };
+  { ok: true; document: NotesDocumentV3 } | { ok: false; error: NotesValidationError };
 
 export interface ProjectNotesSnapshot {
   projectKey: string;
@@ -626,9 +620,7 @@ export interface ProjectNotesSnapshot {
   document: NotesDocumentV3;
 }
 export type ProjectNotesCorruptReason =
-  | "malformed-json"
-  | "invalid-envelope"
-  | "project-key-mismatch";
+  "malformed-json" | "invalid-envelope" | "project-key-mismatch";
 
 export interface ProjectNotesCorruption {
   primary: ProjectNotesCorruptReason | null;

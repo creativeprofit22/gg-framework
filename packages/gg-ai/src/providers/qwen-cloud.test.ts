@@ -149,7 +149,10 @@ describe.each([true, false])("Qwen Token Plan real SDK boundary (streaming=%s)",
     [{ topP: 0.8 }, { top_p: 0.8 }],
     [{ topP: 1 }, { top_p: 1 }],
     [{ stop: ["END", "\nUser:"] }, { stop: ["END", "\nUser:"] }],
-    [{ temperature: 0, stop: ["END"] }, { temperature: 0, stop: ["END"] }],
+    [
+      { temperature: 0, stop: ["END"] },
+      { temperature: 0, stop: ["END"] },
+    ],
     [{}, {}],
   ])("forwards supplied sampling/stopping options only: %j", async (supplied, expected) => {
     const fetch = mock();
@@ -167,7 +170,12 @@ describe.each([true, false])("Qwen Token Plan real SDK boundary (streaming=%s)",
 
   it("leaves nullish sampling/stopping options omitted", async () => {
     const fetch = mock();
-    await stream({ ...options, temperature: null, topP: null, stop: null } as unknown as StreamOptions);
+    await stream({
+      ...options,
+      temperature: null,
+      topP: null,
+      stop: null,
+    } as unknown as StreamOptions);
     const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(init.body as string);
     for (const field of ["temperature", "top_p", "stop"]) expect(body).not.toHaveProperty(field);
@@ -273,7 +281,12 @@ describe.each([true, false])("Qwen Token Plan real SDK boundary (streaming=%s)",
           model.thinking.kind === "binary" ? undefined : normalized,
         );
         for (const field of [
-          "thinking_budget", "preserve_thinking", "clear_thinking", "temperature", "top_p", "stop",
+          "thinking_budget",
+          "preserve_thinking",
+          "clear_thinking",
+          "temperature",
+          "top_p",
+          "stop",
         ])
           expect(body).not.toHaveProperty(field);
       }
@@ -424,9 +437,14 @@ describe.each([true, false])("Qwen Token Plan real SDK boundary (streaming=%s)",
     }
   it("preserves explicit structured overflow classification without retaining upstream details", async () => {
     const echo = "isolatedSecretToken";
-    const fetch = mock(() => Response.json({
-      error: { code: "context_length_exceeded", message: echo },
-    }, { status: 400, headers: { "x-request-id": echo } }));
+    const fetch = mock(() =>
+      Response.json(
+        {
+          error: { code: "context_length_exceeded", message: echo },
+        },
+        { status: 400, headers: { "x-request-id": echo } },
+      ),
+    );
     const error = await Promise.resolve(stream(options)).catch((e) => e);
     expect(error.message).toBe("Qwen Cloud Token Plan prompt is too long.");
     expect(String(error)).not.toContain(echo);
@@ -447,16 +465,27 @@ describe.each([true, false])("Qwen Token Plan real SDK boundary (streaming=%s)",
     [429, "context_length_exceeded", "usage limit reached"],
     [500, "context_length_exceeded", "request failed"],
     [503, "context_length_exceeded", "request failed"],
-  ])("does not infer overflow from status %s or untrusted wording/code %s", async (status, code, expected) => {
-    const fetch = mock(() => Response.json({
-      error: { code, message: "context_length_exceeded: prompt is too long isolatedSecretToken" },
-    }, { status: status as number }));
-    const error = await Promise.resolve(stream(options)).catch((e) => e);
-    expect(error.message).toBe(`Qwen Cloud Token Plan ${expected}.`);
-    expect(error.cause).toBeUndefined();
-    expect(JSON.stringify(error)).not.toContain("isolatedSecretToken");
-    expect(fetch).toHaveBeenCalledTimes(1);
-  });
+  ])(
+    "does not infer overflow from status %s or untrusted wording/code %s",
+    async (status, code, expected) => {
+      const fetch = mock(() =>
+        Response.json(
+          {
+            error: {
+              code,
+              message: "context_length_exceeded: prompt is too long isolatedSecretToken",
+            },
+          },
+          { status: status as number },
+        ),
+      );
+      const error = await Promise.resolve(stream(options)).catch((e) => e);
+      expect(error.message).toBe(`Qwen Cloud Token Plan ${expected}.`);
+      expect(error.cause).toBeUndefined();
+      expect(JSON.stringify(error)).not.toContain("isolatedSecretToken");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
   it("sanitizes in-stream and transport errors", async () => {
     mock(() => sse([{ error: { message: "isolatedSecretToken" } }]));
     await expect(stream({ ...options, streaming: true })).rejects.toThrow(

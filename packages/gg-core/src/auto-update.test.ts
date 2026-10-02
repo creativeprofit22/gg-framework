@@ -20,15 +20,22 @@ beforeEach(() => {
   statePath = path.join(root, "update-state.json");
   fs.writeFileSync(statePath, JSON.stringify(pending()));
   child = Object.assign(new EventEmitter(), { unref: vi.fn() });
-  vi.mocked(spawn).mockReset().mockReturnValue(child as unknown as ChildProcess);
+  vi.mocked(spawn)
+    .mockReset()
+    .mockReturnValue(child as unknown as ChildProcess);
   vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-  vi.spyOn(process, "argv", "get").mockReturnValue(["node", "/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js"]);
+  vi.spyOn(process, "argv", "get").mockReturnValue([
+    "node",
+    "/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js",
+  ]);
   vi.spyOn(fs, "realpathSync").mockImplementation((file) => String(file));
-  vi.mocked(execFileSync).mockReset().mockImplementation((command) => {
-    if (command === "pnpm") return "/home/user/.local/share/pnpm/global/5/node_modules";
-    if (command === "yarn") return "/home/user/.config/yarn/global";
-    return "/usr/lib/node_modules";
-  });
+  vi.mocked(execFileSync)
+    .mockReset()
+    .mockImplementation((command) => {
+      if (command === "pnpm") return "/home/user/.local/share/pnpm/global/5/node_modules";
+      if (command === "yarn") return "/home/user/.config/yarn/global";
+      return "/usr/lib/node_modules";
+    });
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
   updater = createAutoUpdater({ packageName: "@kenkaiiii/ggcoder", stateFilePath: statePath });
 });
@@ -55,7 +62,10 @@ describe("background updater lifecycle", () => {
     expect(readState().lastUpdateAttempt).toBeUndefined();
   });
   it("does not promise automatic updates from periodic checkout checks", async () => {
-    vi.spyOn(process, "argv", "get").mockReturnValue(["node", String.raw`E:\Projects\gg-framework-fork\packages\ggcoder\dist\cli.js`]);
+    vi.spyOn(process, "argv", "get").mockReturnValue([
+      "node",
+      String.raw`E:\Projects\gg-framework-fork\packages\ggcoder\dist\cli.js`,
+    ]);
     vi.mocked(fetch).mockResolvedValue({ json: async () => ({ version: "2.0.0" }) } as Response);
     const notify = vi.fn();
     vi.useFakeTimers();
@@ -95,7 +105,9 @@ describe("background updater lifecycle", () => {
   });
 
   it("handles synchronous spawn failure without claiming an attempt", () => {
-    vi.mocked(spawn).mockImplementation(() => { throw new Error("EINVAL"); });
+    vi.mocked(spawn).mockImplementation(() => {
+      throw new Error("EINVAL");
+    });
     expect(updater.checkAndAutoUpdate("1.0.0")).toBeNull();
     expect(readState().updatePending).toBe(true);
     expect(readState().lastUpdateAttempt).toBeUndefined();
@@ -118,15 +130,31 @@ describe("background updater lifecycle", () => {
 
   it.each([
     ["/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js", "npm", ["install", "-g"]],
-    ["/home/user/.local/share/pnpm/global/5/node_modules/@kenkaiiii/ggcoder/cli.js", "pnpm", ["add", "-g"]],
-    ["/home/user/.config/yarn/global/node_modules/@kenkaiiii/ggcoder/cli.js", "yarn", ["global", "add"]],
+    [
+      "/home/user/.local/share/pnpm/global/5/node_modules/@kenkaiiii/ggcoder/cli.js",
+      "pnpm",
+      ["add", "-g"],
+    ],
+    [
+      "/home/user/.config/yarn/global/node_modules/@kenkaiiii/ggcoder/cli.js",
+      "yarn",
+      ["global", "add"],
+    ],
   ] as const)("passes separate arguments for %s", (script, manager, prefix) => {
     vi.spyOn(process, "argv", "get").mockReturnValue(["node", script]);
     vi.stubEnv("QWEN_CLOUD_TOKEN_PLAN_KEY", "fixture-not-a-secret");
     try {
       updater.checkAndAutoUpdate("1.0.0");
-      expect(spawn).toHaveBeenCalledWith(manager, [...prefix, "@kenkaiiii/ggcoder@latest"],
-        expect.objectContaining({ shell: false, detached: true, stdio: "ignore", windowsHide: true }));
+      expect(spawn).toHaveBeenCalledWith(
+        manager,
+        [...prefix, "@kenkaiiii/ggcoder@latest"],
+        expect.objectContaining({
+          shell: false,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        }),
+      );
       const options = vi.mocked(spawn).mock.calls[0]![2]!;
       expect(options.env).not.toHaveProperty("QWEN_CLOUD_TOKEN_PLAN_KEY");
     } finally {
@@ -136,16 +164,18 @@ describe("background updater lifecycle", () => {
 
   it("absorbs asynchronous ENOENT and leaves the update retryable", async () => {
     updater.checkAndAutoUpdate("1.0.0");
-    await expect(new Promise<void>((resolve, reject) => {
-      setImmediate(() => {
-        try {
-          child.emit("error", Object.assign(new Error("spawn npm ENOENT"), { code: "ENOENT" }));
-          resolve();
-        } catch (error) {
-          reject(error);
-        }
-      });
-    })).resolves.toBeUndefined();
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        setImmediate(() => {
+          try {
+            child.emit("error", Object.assign(new Error("spawn npm ENOENT"), { code: "ENOENT" }));
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }),
+    ).resolves.toBeUndefined();
     expect(readState().updatePending).toBe(true);
     expect(readState().lastUpdateAttempt).toBeUndefined();
   });

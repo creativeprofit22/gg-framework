@@ -8,7 +8,10 @@ export interface AssistantTextDeltaPayload {
 /** Preserve saved-image warnings verbatim in both live and restored transcripts. */
 export function extractImageWarnings(text: string): string {
   if (/^Partial completion: saved \d+ of \d+ requested images\./.test(text)) return text;
-  return text.split("\n").filter((line) => line.startsWith("WARNING: Image saved,")).join("\n");
+  return text
+    .split("\n")
+    .filter((line) => line.startsWith("WARNING: Image saved,"))
+    .join("\n");
 }
 
 /** Codes the sidecar returns only before a prompt is queued or run. Keep in lockstep with lib.rs. */
@@ -31,11 +34,17 @@ export interface PromptSubmissionRejection {
 export function isPromptSubmissionRejection(value: unknown): value is PromptSubmissionRejection {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const failure = value as Record<string, unknown>;
-  return failure.category === "rejected" && typeof failure.code === "string" &&
+  return (
+    failure.category === "rejected" &&
+    typeof failure.code === "string" &&
     (PROMPT_SUBMISSION_REJECTION_CODES as readonly string[]).includes(failure.code) &&
-    typeof failure.message === "string" && failure.message.trim().length > 0 &&
+    typeof failure.message === "string" &&
+    failure.message.trim().length > 0 &&
     failure.message.length <= 256 &&
-    Array.from(failure.message).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
+    Array.from(failure.message).every(
+      (character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127,
+    )
+  );
 }
 
 /** Enhancement input ceiling in UTF-16 code units (JavaScript string.length), not code points. */
@@ -43,8 +52,7 @@ export const ENHANCE_PROMPT_MAX_CHARS = 12_000;
 
 /** Display-only prompt hints. Never put these fields in model messages. */
 export type PromptSegment =
-  | { kind: "text"; text: string }
-  | { kind: "term"; text: string; original: string; note?: string };
+  { kind: "text"; text: string } | { kind: "term"; text: string; original: string; note?: string };
 
 export interface PromptMeta {
   kenSent?: boolean;
@@ -62,10 +70,17 @@ export function normalizePromptMeta(value: unknown): PromptMeta | undefined {
     for (const value of input.enhancements) {
       if (!value || typeof value !== "object" || typeof value.text !== "string") break;
       if (value.kind === "text") segments.push({ kind: "text", text: value.text });
-      else if (value.kind === "term" && typeof value.original === "string" &&
-        (value.note === undefined || typeof value.note === "string")) {
-        segments.push({ kind: "term", text: value.text, original: value.original,
-          ...(value.note !== undefined ? { note: value.note } : {}) });
+      else if (
+        value.kind === "term" &&
+        typeof value.original === "string" &&
+        (value.note === undefined || typeof value.note === "string")
+      ) {
+        segments.push({
+          kind: "term",
+          text: value.text,
+          original: value.original,
+          ...(value.note !== undefined ? { note: value.note } : {}),
+        });
       } else break;
     }
     if (segments.length === input.enhancements.length) meta.enhancements = segments;
@@ -106,7 +121,11 @@ export function resolveRunEndOutcome(data: Record<string, unknown>): RunEndOutco
     case "unverified":
       return data.outcome;
     case undefined:
-      return data.cancelled === true ? "cancelled" : data.unverified === true ? "unverified" : "completed";
+      return data.cancelled === true
+        ? "cancelled"
+        : data.unverified === true
+          ? "unverified"
+          : "completed";
     default:
       return "failed";
   }
@@ -128,8 +147,12 @@ export interface AskQuestion {
   options?: AskOption[];
   allowOther?: boolean;
 }
-export interface AskUserRequest { questions: AskQuestion[] }
-export interface AskUserPrompt extends AskUserRequest { id: string }
+export interface AskUserRequest {
+  questions: AskQuestion[];
+}
+export interface AskUserPrompt extends AskUserRequest {
+  id: string;
+}
 
 // Bound admission, not a truncated projection: every live question must fit in ready.
 // The string ceiling includes the command creator's complete 64K preview.
@@ -141,33 +164,65 @@ const askRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
 export function isAskUserPrompt(value: unknown): value is AskUserPrompt {
-  if (!askRecord(value) || !askText(value.id, 1) || value.id.length > 256 ||
-    !Array.isArray(value.questions) || value.questions.length < 1 || value.questions.length > 5) return false;
+  if (
+    !askRecord(value) ||
+    !askText(value.id, 1) ||
+    value.id.length > 256 ||
+    !Array.isArray(value.questions) ||
+    value.questions.length < 1 ||
+    value.questions.length > 5
+  )
+    return false;
   const ids = new Set<string>();
   for (const q of value.questions) {
-    if (!askRecord(q) || !askText(q.id, 1) || ids.has(q.id) || !askText(q.question, 1) ||
-      typeof q.kind !== "string" || !["confirm", "choice", "multi", "text"].includes(q.kind) ||
+    if (
+      !askRecord(q) ||
+      !askText(q.id, 1) ||
+      ids.has(q.id) ||
+      !askText(q.question, 1) ||
+      typeof q.kind !== "string" ||
+      !["confirm", "choice", "multi", "text"].includes(q.kind) ||
       (q.detail !== undefined && !askText(q.detail)) ||
-      (q.allowOther !== undefined && typeof q.allowOther !== "boolean")) return false;
+      (q.allowOther !== undefined && typeof q.allowOther !== "boolean")
+    )
+      return false;
     ids.add(q.id);
     if (q.options !== undefined) {
-      if (!Array.isArray(q.options) || q.options.length > 6 || !q.options.every((o: unknown) =>
-        askRecord(o) && askText(o.label, 1) &&
-        (o.value === undefined || askText(o.value)) &&
-        (o.hint === undefined || askText(o.hint)) &&
-        (o.recommended === undefined || typeof o.recommended === "boolean"))) return false;
+      if (
+        !Array.isArray(q.options) ||
+        q.options.length > 6 ||
+        !q.options.every(
+          (o: unknown) =>
+            askRecord(o) &&
+            askText(o.label, 1) &&
+            (o.value === undefined || askText(o.value)) &&
+            (o.hint === undefined || askText(o.hint)) &&
+            (o.recommended === undefined || typeof o.recommended === "boolean"),
+        )
+      )
+        return false;
     }
-    if ((q.kind === "choice" || q.kind === "multi") &&
-      (!Array.isArray(q.options) || q.options.length === 0)) return false;
+    if (
+      (q.kind === "choice" || q.kind === "multi") &&
+      (!Array.isArray(q.options) || q.options.length === 0)
+    )
+      return false;
   }
-  try { return JSON.stringify(value).length <= ASK_USER_MAX_PROMPT_CHARS; }
-  catch { return false; }
+  try {
+    return JSON.stringify(value).length <= ASK_USER_MAX_PROMPT_CHARS;
+  } catch {
+    return false;
+  }
 }
 
 /** Reject malformed/partial snapshots as a whole; [] alone means no live questions. */
 export function isPendingAskSnapshot(value: unknown): value is AskUserPrompt[] {
-  return Array.isArray(value) && value.length <= ASK_USER_MAX_PENDING &&
-    value.every(isAskUserPrompt) && new Set(value.map((prompt) => prompt.id)).size === value.length;
+  return (
+    Array.isArray(value) &&
+    value.length <= ASK_USER_MAX_PENDING &&
+    value.every(isAskUserPrompt) &&
+    new Set(value.map((prompt) => prompt.id)).size === value.length
+  );
 }
 
 /** Host settlement of one question, independent of parent run boundaries. */
@@ -179,8 +234,11 @@ export interface AskUserSettledEvent {
 export function isAskUserSettledEvent(value: unknown): value is AskUserSettledEvent {
   if (!value || typeof value !== "object") return false;
   const event = value as Record<string, unknown>;
-  return typeof event.id === "string" && event.id.length > 0 &&
-    (event.action === "answer" || event.action === "cancel");
+  return (
+    typeof event.id === "string" &&
+    event.id.length > 0 &&
+    (event.action === "answer" || event.action === "cancel")
+  );
 }
 
 /** Successful /ask acknowledgement; absence of this is never authorization. */
@@ -189,7 +247,13 @@ export interface AskUserAcknowledgement {
 }
 
 export function requireAskUserAcknowledgement(value: unknown): AskUserAcknowledgement {
-  if (value && typeof value === "object" && "ok" in value && value.ok === true && !("error" in value)) {
+  if (
+    value &&
+    typeof value === "object" &&
+    "ok" in value &&
+    value.ok === true &&
+    !("error" in value)
+  ) {
     return { ok: true };
   }
   throw new Error("The question answer was not acknowledged.");
@@ -213,8 +277,7 @@ export interface KenEventMetadata {
 
 /** Authoritative permission to change context mode before a conversation starts. */
 export type OpenAICodexContextProfileEligibility =
-  | { canChange: true }
-  | { canChange: false; reason: string };
+  { canChange: true } | { canChange: false; reason: string };
 
 /** Session UX authority carried by initial state and context extras. */
 export interface DesktopSessionUXState {
@@ -291,13 +354,34 @@ interface ContinuationCommitResponseBase {
   message?: string;
 }
 
-export type ContinuationCommitResponse = ContinuationCommitResponseBase & (
-  | { outcome: "accepted"; accepted: true; resetAttempted: true;
-      destination: ContinuationDestination; acceptedMessageId: string }
-  | { outcome: "rejected"; accepted: false; resetAttempted: false;
-      destination?: never; acceptedMessageId?: never }
-  | { outcome: "partial"; accepted: false | null; resetAttempted: true;
-      destination?: ContinuationDestination; acceptedMessageId?: never }
-  | { outcome: "outcome-unknown"; accepted: null; resetAttempted: boolean;
-      destination?: ContinuationDestination; acceptedMessageId?: never }
-);
+export type ContinuationCommitResponse = ContinuationCommitResponseBase &
+  (
+    | {
+        outcome: "accepted";
+        accepted: true;
+        resetAttempted: true;
+        destination: ContinuationDestination;
+        acceptedMessageId: string;
+      }
+    | {
+        outcome: "rejected";
+        accepted: false;
+        resetAttempted: false;
+        destination?: never;
+        acceptedMessageId?: never;
+      }
+    | {
+        outcome: "partial";
+        accepted: false | null;
+        resetAttempted: true;
+        destination?: ContinuationDestination;
+        acceptedMessageId?: never;
+      }
+    | {
+        outcome: "outcome-unknown";
+        accepted: null;
+        resetAttempted: boolean;
+        destination?: ContinuationDestination;
+        acceptedMessageId?: never;
+      }
+  );

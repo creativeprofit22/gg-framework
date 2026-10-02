@@ -73,21 +73,48 @@ describe("provider wire boundary", () => {
     let captured: StreamOptions | undefined;
     const sentinel = new Error("captured");
     providerRegistry.register("wire-capture", {
-      stream: (options) => { captured = options; throw sentinel; },
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
     });
     const message: ToolResultMessage = {
       role: "tool",
-      content: [{ type: "tool_result", toolCallId: "images", content: [
-        { type: "text", text: "Generated two images" },
-        { type: "image", mediaType: "image/png", data: "AA==" },
-      ], imageResult: { version: 1, images: [
-        { type: "image", mediaType: "image/png", data: "AQ==", path: "/original one.png" },
-        { type: "image", mediaType: "image/png", data: "Ag==", path: "/original, two.png" },
-      ] } }],
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "images",
+          content: [
+            { type: "text", text: "Generated two images" },
+            { type: "image", mediaType: "image/png", data: "AA==" },
+          ],
+          imageResult: {
+            version: 1,
+            images: [
+              { type: "image", mediaType: "image/png", data: "AQ==", path: "/original one.png" },
+              { type: "image", mediaType: "image/png", data: "Ag==", path: "/original, two.png" },
+            ],
+          },
+        },
+      ],
     };
     try {
-      expect(() => stream({ provider: "wire-capture" as StreamOptions["provider"], model: "test", supportsImages: true, messages: [message] })).toThrow(sentinel);
-      expect(captured?.messages).toEqual([{ role: "tool", content: [{ type: "tool_result", toolCallId: "images", content: message.content[0]!.content }] }]);
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          supportsImages: true,
+          messages: [message],
+        }),
+      ).toThrow(sentinel);
+      expect(captured?.messages).toEqual([
+        {
+          role: "tool",
+          content: [
+            { type: "tool_result", toolCallId: "images", content: message.content[0]!.content },
+          ],
+        },
+      ]);
       expect(message.content[0]!.imageResult?.images).toHaveLength(2);
     } finally {
       providerRegistry.unregister("wire-capture");

@@ -39,11 +39,7 @@ export interface PhaseStartSession {
 }
 
 export type PhaseStartReconciliationOutcome =
-  | "ready"
-  | "needs-plan"
-  | "needs-reconciliation"
-  | "completion-pending"
-  | "completed";
+  "ready" | "needs-plan" | "needs-reconciliation" | "completion-pending" | "completed";
 
 export type PhaseStartResult =
   | {

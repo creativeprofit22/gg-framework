@@ -1,4 +1,8 @@
-import { isNotesPhasePresent, validateNotesPhaseDeletion, type NotesPhaseDeletion } from "./roadmap-phase-deletion.js";
+import {
+  isNotesPhasePresent,
+  validateNotesPhaseDeletion,
+  type NotesPhaseDeletion,
+} from "./roadmap-phase-deletion.js";
 export * from "./roadmap-phase-deletion.js";
 
 export type NotesTaskStatus = "todo" | "done";
@@ -154,11 +158,7 @@ export interface NotesPendingCompletionV1 {
 }
 
 export type NotesPhaseExecutionState =
-  | "needs-plan"
-  | "implementing"
-  | "needs-reconciliation"
-  | "completion-pending"
-  | "completed";
+  "needs-plan" | "implementing" | "needs-reconciliation" | "completion-pending" | "completed";
 
 export interface NotesPhaseExecutionV1 {
   version: 1;
@@ -460,8 +460,7 @@ export interface NotesRoadmapDirectPhaseAdvancementCheckpoint {
 }
 
 export type NotesRoadmapPhaseAdvancementCheckpoint =
-  | NotesRoadmapLegacyPhaseAdvancementCheckpoint
-  | NotesRoadmapDirectPhaseAdvancementCheckpoint;
+  NotesRoadmapLegacyPhaseAdvancementCheckpoint | NotesRoadmapDirectPhaseAdvancementCheckpoint;
 
 export interface NotesRoadmapPhaseAdvancementConfirmation {
   type: "phase-advancement-confirmation";
@@ -550,8 +549,12 @@ export function isNotesPhaseAdvancementSourceCurrent(
 ): boolean {
   return (
     isNotesPhasePresent(phase) &&
-    !phase.deletion?.events.some(event => event.action === "delete" &&
-      phase.roadmapEvents.findIndex(candidate => candidate.id === checkpoint.id) < event.retired.roadmapEventCount) &&
+    !phase.deletion?.events.some(
+      (event) =>
+        event.action === "delete" &&
+        phase.roadmapEvents.findIndex((candidate) => candidate.id === checkpoint.id) <
+          event.retired.roadmapEventCount,
+    ) &&
     phase.id === checkpoint.completedPhaseId &&
     phase.status === "done" &&
     phase.archivedAt === null &&
@@ -641,8 +644,7 @@ export interface NotesValidationError {
 }
 
 export type NotesValidationResult =
-  | { ok: true; document: NotesDocumentV3 }
-  | { ok: false; error: NotesValidationError };
+  { ok: true; document: NotesDocumentV3 } | { ok: false; error: NotesValidationError };
 
 export interface ProjectNotesSnapshot {
   projectKey: string;
@@ -650,9 +652,7 @@ export interface ProjectNotesSnapshot {
   document: NotesDocumentV3;
 }
 export type ProjectNotesCorruptReason =
-  | "malformed-json"
-  | "invalid-envelope"
-  | "project-key-mismatch";
+  "malformed-json" | "invalid-envelope" | "project-key-mismatch";
 
 export interface ProjectNotesCorruption {
   primary: ProjectNotesCorruptReason | null;
@@ -665,11 +665,17 @@ export interface ProjectNotesUnsupportedFormat {
   message: string;
 }
 
-export function isProjectNotesUnsupportedFormat(value: unknown): value is ProjectNotesUnsupportedFormat {
-  return isRecordWithKeys(value, ["status", "source", "message"]) &&
+export function isProjectNotesUnsupportedFormat(
+  value: unknown,
+): value is ProjectNotesUnsupportedFormat {
+  return (
+    isRecordWithKeys(value, ["status", "source", "message"]) &&
     value.status === "unsupported" &&
     (value.source === "primary" || value.source === "backup") &&
-    typeof value.message === "string" && value.message.length > 0 && value.message.length <= 1024;
+    typeof value.message === "string" &&
+    value.message.length > 0 &&
+    value.message.length <= 1024
+  );
 }
 
 export type ProjectNotesLoadOutcome =
@@ -2085,10 +2091,16 @@ function validatePhase(
   knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
-  if (!isRecordWithKeys(value, PHASE_KEYS) && !isRecordWithKeys(value, LEGACY_PHASE_KEYS) &&
-      !isRecordWithKeys(value, [...PHASE_KEYS, "deletion"]) &&
-      !isRecordWithKeys(value, [...LEGACY_PHASE_KEYS, "deletion"])) {
-    return validationError(pathPrefix, "expected legacy fields with optional execution and deletion");
+  if (
+    !isRecordWithKeys(value, PHASE_KEYS) &&
+    !isRecordWithKeys(value, LEGACY_PHASE_KEYS) &&
+    !isRecordWithKeys(value, [...PHASE_KEYS, "deletion"]) &&
+    !isRecordWithKeys(value, [...LEGACY_PHASE_KEYS, "deletion"])
+  ) {
+    return validationError(
+      pathPrefix,
+      "expected legacy fields with optional execution and deletion",
+    );
   }
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "expected a stable ID");
@@ -2151,30 +2163,49 @@ function validatePhase(
   if (pendingTransitionError) return pendingTransitionError;
   if ("deletion" in value) {
     const deletionError = validateNotesPhaseDeletion(
-      value.deletion, value.id, Array.isArray(value.roadmapEvents) ? value.roadmapEvents.length : 0,
+      value.deletion,
+      value.id,
+      Array.isArray(value.roadmapEvents) ? value.roadmapEvents.length : 0,
       (retired, retiredPath) => {
         const errors = [
           validateNotesSessionLink(retired.session, `${retiredPath}.session`),
-          retired.execution === null ? null : validateNotesPhaseExecution(retired.execution, `${retiredPath}.execution`),
+          retired.execution === null
+            ? null
+            : validateNotesPhaseExecution(retired.execution, `${retiredPath}.execution`),
           validateReminder(retired.reminder, `${retiredPath}.reminder`),
           validateOverrides(retired.overrides, `${retiredPath}.overrides`, knownReferenceIds),
-          validatePendingAutomaticLifecycleTransition(retired.pendingAutomaticLifecycleTransition,
-            `${retiredPath}.pendingAutomaticLifecycleTransition`, retired.overrides),
+          validatePendingAutomaticLifecycleTransition(
+            retired.pendingAutomaticLifecycleTransition,
+            `${retiredPath}.pendingAutomaticLifecycleTransition`,
+            retired.overrides,
+          ),
         ];
-        const nestedError = errors.find(error => error !== null);
+        const nestedError = errors.find((error) => error !== null);
         if (nestedError) return nestedError;
-        return isNotesPhaseStatus(retired.status) && isNullableTimestamp(retired.completedAt) &&
-          isNullableTimestamp(retired.archivedAt) && isNullableNonEmptyString(retired.attentionReason)
-          ? null : validationError(retiredPath, "invalid retired runtime fields");
-      }, `${pathPrefix}.deletion`,
+        return isNotesPhaseStatus(retired.status) &&
+          isNullableTimestamp(retired.completedAt) &&
+          isNullableTimestamp(retired.archivedAt) &&
+          isNullableNonEmptyString(retired.attentionReason)
+          ? null
+          : validationError(retiredPath, "invalid retired runtime fields");
+      },
+      `${pathPrefix}.deletion`,
     );
     if (deletionError) return deletionError;
     const deletion = value.deletion as NotesPhaseDeletion;
-    if (deletion.currentDeletionId !== null && (value.session !== null || "execution" in value ||
-        value.reminder !== null || value.pendingAutomaticLifecycleTransition !== null ||
+    if (
+      deletion.currentDeletionId !== null &&
+      (value.session !== null ||
+        "execution" in value ||
+        value.reminder !== null ||
+        value.pendingAutomaticLifecycleTransition !== null ||
         (value.overrides as NotesPhaseOverrides).status !== null ||
-        (value.overrides as NotesPhaseOverrides).referenceIds !== null)) {
-      return validationError(`${pathPrefix}.deletion`, "deleted phase cannot retain live runtime authority");
+        (value.overrides as NotesPhaseOverrides).referenceIds !== null)
+    ) {
+      return validationError(
+        `${pathPrefix}.deletion`,
+        "deleted phase cannot retain live runtime authority",
+      );
     }
   }
   const lifecycleError = validateLifecycleEvents(
@@ -2487,10 +2518,11 @@ function validateRoadmapEvents(
   for (let index = 0; index < value.length; index += 1) {
     // Retired sessions validate only the exact history prefix that preceded deletion.
     // This is persisted-record validation, never permission to resume that session.
-    const retiredEvent = deletion?.events.find(event =>
-      event.action === "delete" && index < event.retired.roadmapEventCount);
-    const phaseSession = retiredEvent?.action === "delete"
-      ? retiredEvent.retired.session : currentPhaseSession;
+    const retiredEvent = deletion?.events.find(
+      (event) => event.action === "delete" && index < event.retired.roadmapEventCount,
+    );
+    const phaseSession =
+      retiredEvent?.action === "delete" ? retiredEvent.retired.session : currentPhaseSession;
     const event = value[index];
     const eventPath = `${pathPrefix}[${index}]`;
     if (typeof event !== "object" || event === null || Array.isArray(event)) {

@@ -14,7 +14,8 @@ describe("shared file-reference wire format", () => {
     const plain = "Discuss\n\nReferenced files:\nnot a chip";
     expect(parseReferencedFiles(plain)).toEqual({ text: plain, files: [] });
     const text = "Earlier\n\nReferenced files:\n- first.ts";
-    expect(parseReferencedFiles(`${text}\n\nReferenced files:\n- last.ts\nnot a chip\n- ignored.ts`))
-      .toEqual({ text, files: ["last.ts"] });
+    expect(
+      parseReferencedFiles(`${text}\n\nReferenced files:\n- last.ts\nnot a chip\n- ignored.ts`),
+    ).toEqual({ text, files: ["last.ts"] });
   });
 });

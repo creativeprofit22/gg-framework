@@ -272,12 +272,15 @@ function stripMessageProvenance(messages: Message[]): Message[] {
   let stripped: Message[] | undefined;
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index]!;
-    const hasImageResult = message.role === "tool" && message.content.some((result) => result.imageResult !== undefined);
+    const hasImageResult =
+      message.role === "tool" && message.content.some((result) => result.imageResult !== undefined);
     if (!message.provenance && !hasImageResult) continue;
     stripped ??= messages.slice();
     const { provenance: _provenance, ...wireMessage } = message;
     if (wireMessage.role === "tool" && hasImageResult) {
-      wireMessage.content = wireMessage.content.map(({ imageResult: _imageResult, ...result }) => result);
+      wireMessage.content = wireMessage.content.map(
+        ({ imageResult: _imageResult, ...result }) => result,
+      );
     }
     stripped[index] = wireMessage as Message;
   }

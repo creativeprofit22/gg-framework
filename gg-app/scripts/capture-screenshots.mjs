@@ -335,10 +335,27 @@ export const responses = {
   // authStatus() also reads this native result; null makes it discard the whole provider list.
   qwen_cloud_connection_status: { ok: true, status: { provider: "qwen-cloud", credential: "absent", verification: "not-tested", allowance: "unavailable-with-inference-key" } },
   app_settings_get: { projectsRoot: "/Users/demo/projects", configured: true },
+  // Settings shows a load-failure alert when this reply is missing.
+  azure_connection_status: {
+    configured: false,
+    source: "none",
+    endpoint: null,
+    deployment: null,
+    endpointSummary: null,
+    deploymentSummary: null,
+    hasStoredKey: false,
+  },
   agent_serve_status: { running: false, configured: false },
   agent_models: { models },
   agent_commands: { commands },
   agent_tasks: { tasks: [] },
+  // Opening a session: select_project answers with the pane's new generation,
+  // then hydration reads history and any pending Roadmap draft. Shapes match
+  // chat-design-preview/fixtures.mjs; a null reply fails the strict parsers.
+  select_project: 1,
+  agent_history: { history: [] },
+  agent_roadmap_phase_draft_get: { status: "ok", draft: null },
+  agent_prompt: { queued: false, count: 0 },
   agent_memories: { memories: [] },
   agent_jiwa: { jiwa: [] },
   agent_local: localModels,

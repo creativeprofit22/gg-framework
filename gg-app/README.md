@@ -55,6 +55,23 @@ New IPC means a Rust `#[tauri::command]` proxying the sidecar, registered in
   agent-coupled stays in its package and the app just consumes it.
 - One component per file, matching the terminal UI's look.
 
+## Checking screens in the dev app
+
+`scripts/dev-nav.mjs` opens named screens in the running dev app with the same fake
+demo data and saves screenshots under `.gg/screenshots/dev-nav/` (ignored by git).
+
+```bash
+pnpm --filter gg-app dev --host 127.0.0.1    # terminal 1
+pnpm --filter gg-app nav settings chat         # or: all; --viewports 1600x900,390x844
+```
+
+Screens: `home`, `projects`, `sessions`, `workspace`, `chat`, `notes`, `tasks`, `settings`,
+`settings-dialog`. It exits with an error when a step fails, the page throws, the console logs
+an error, an error banner is visible, or the page scrolls sideways, so a broken screen never
+passes as a fresh screenshot. Use `--out <dir>` to save elsewhere and `--url` (or
+`GG_SHOT_URL`) to point at another port; only loopback addresses are accepted. It uses Playwright's browser, falling back to installed Chrome or Edge. This
+checks browser rendering only, not the native desktop app.
+
 ## README screenshots
 
 `scripts/capture-screenshots.mjs` regenerates `docs/screenshots/*.png` for the root README.

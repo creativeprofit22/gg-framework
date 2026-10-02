@@ -1087,6 +1087,8 @@ select {
   --home-terrain-px: 2px;
   --home-critter-floor: calc(var(--home-terrain-px) * 8);
   --home-above-critters: calc(var(--home-critter-floor) + 28px + 48px + 6px);
+  /* The byline's side gutters, which keep the version corner clear of it. */
+  --home-corner-gutter: 76px;
 }
 .home > .home-critters {
   position: absolute;
@@ -1115,8 +1117,8 @@ select {
 .home > .home-links {
   position: absolute;
   z-index: 1;
-  left: 76px;
-  right: 76px;
+  left: var(--home-corner-gutter);
+  right: var(--home-corner-gutter);
   bottom: var(--home-above-critters);
   width: fit-content;
   margin: 0 auto;
@@ -1134,6 +1136,19 @@ select {
   bottom: var(--home-above-critters);
   display: flex;
   align-items: center;
+  /* Long update statuses wrap instead of running off the right edge. */
+  max-width: calc(100% - 40px);
+}
+/* The update button and its statuses outgrow the gutter, so while it shows
+   the byline steps up a row instead of sharing the corner's. */
+.home:has(> .home-version-corner .home-update) > .home-links {
+  bottom: calc(var(--home-above-critters) + 36px);
+}
+/* Narrow panes wrap the longest status onto a second line; clear that too. */
+@container conversation-pane (max-width: 480px) {
+  .home:has(> .home-version-corner .home-update) > .home-links {
+    bottom: calc(var(--home-above-critters) + 54px);
+  }
 }
 
 .ascii-logo {
@@ -9083,6 +9098,28 @@ select {
 }
 .home-update-hidden {
   visibility: hidden;
+}
+/* Local-update status text is unbounded (raw git/build lines, error text), so
+   clamp it to the rows the byline lift above clears: one line in wide panes
+   (+36px), two in narrow ones (+54px). The button's title has the full text. */
+.home-update-status {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.home-update-retry {
+  flex: none;
+  white-space: nowrap;
+}
+@container conversation-pane (max-width: 480px) {
+  .home-update-status {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
 }
 .home-update-pct {
   display: inline-block;

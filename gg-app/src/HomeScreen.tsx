@@ -291,7 +291,11 @@ export function HomeScreen({
           <button
             className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
             disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
-            title={appUpdate.installTitle}
+            title={
+              localUpdateStatus
+                ? (appUpdate.statusMessage ?? appUpdate.installTitle)
+                : appUpdate.installTitle
+            }
             onClick={() => {
               if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
                 setSummarizeDecisions(false);
@@ -306,10 +310,18 @@ export function HomeScreen({
             )}
             <DownloadSimpleIcon size={14} weight="bold" aria-hidden="true" />
             {localUpdateStatus ? (
-              <span>
-                {appUpdate.statusMessage ?? appUpdate.installLabel}
-                {appUpdate.phase === "error" && " — Retry"}
-              </span>
+              <>
+                <span className="home-update-status">
+                  {appUpdate.statusMessage ?? appUpdate.installLabel}
+                </span>
+                {/* Outside the clamped text so a long error never hides it. */}
+                {appUpdate.phase === "error" && (
+                  <>
+                    {" "}
+                    <span className="home-update-retry">{"— Retry"}</span>
+                  </>
+                )}
+              </>
             ) : (
               /* Both labels occupy the same grid cell; the inactive one is
                 visibility:hidden, so the pill is ALWAYS sized to the wider of

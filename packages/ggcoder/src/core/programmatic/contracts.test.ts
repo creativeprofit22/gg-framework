@@ -1603,13 +1603,11 @@ describe("needs-first V2 advisory contracts", () => {
       expect(
         programmaticRecommendationV2Schema.safeParse({ ...recommendation(), alternatives }).success,
       ).toBe(false);
-    const alternatives = choices
-      .slice(0, 3)
-      .map(({ kind }) => ({
-        kind,
-        reasonNotSelected: "Does not meet this one-off need",
-        ...(kind === "missing-capability" ? {} : { availability }),
-      }));
+    const alternatives = choices.slice(0, 3).map(({ kind }) => ({
+      kind,
+      reasonNotSelected: "Does not meet this one-off need",
+      ...(kind === "missing-capability" ? {} : { availability }),
+    }));
     alternatives.push({
       kind: "needs-more-evidence",
       reasonNotSelected: "Enough evidence for manual review",

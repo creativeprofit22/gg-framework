@@ -308,12 +308,10 @@ for (const scenario of cases) {
             );
             await page.emulateMedia({ reducedMotion: "no-preference" });
           }
-          const painted = await dialog
-            .locator(".scorecard-rank")
-            .evaluate((el) => ({
-              color: getComputedStyle(el).color,
-              background: getComputedStyle(el).backgroundImage,
-            }));
+          const painted = await dialog.locator(".scorecard-rank").evaluate((el) => ({
+            color: getComputedStyle(el).color,
+            background: getComputedStyle(el).backgroundImage,
+          }));
           const paintedColors =
             painted.background === "none"
               ? [painted.color]

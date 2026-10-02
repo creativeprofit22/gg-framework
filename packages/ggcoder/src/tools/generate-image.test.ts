@@ -700,16 +700,14 @@ describe("generate_image — error handling", () => {
   });
 
   it("returns a user-facing message on API error (non-200)", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            detail: "content moderation blocked; sk-image-fixture-secret-1234567890",
-          }),
-          { status: 400 },
-        ),
-      ) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "content moderation blocked; sk-image-fixture-secret-1234567890",
+        }),
+        { status: 400 },
+      ),
+    ) as unknown as typeof globalThis.fetch;
 
     const { createGenerateImageTool } = await import("./generate-image.js");
     const tool = createGenerateImageTool(tmpDir, fakeAuth());

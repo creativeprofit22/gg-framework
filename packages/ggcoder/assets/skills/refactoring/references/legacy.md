@@ -6,7 +6,7 @@ For codebases or areas where the baseline gate cannot be met: no tests, an unrun
 
 **1. Make the system runnable and observable.** Get it to start locally with realistic data. If you cannot execute it, say so and stop — static-only refactoring of critical legacy paths is a coin flip.
 
-**2. Build characterization tests (golden master).** Tests that assert what the code *actually does*, not what it should do:
+**2. Build characterization tests (golden master).** Tests that assert what the code _actually does_, not what it should do:
 
 - Call the boundary (public API, CLI, event handler, exported function) with real inputs.
 - Capture the full observable output — return values, written files, emitted events, HTTP responses, log lines.
@@ -28,9 +28,11 @@ Gate: the characterization suite is **green against the unmodified system** befo
 ## Incremental migration strategies
 
 ### Branch by Abstraction
+
 For replacing an internal implementation that many callers use. Create an abstraction over the old implementation → migrate callers to it one by one (each a working commit) → implement the new behind the abstraction → flip the default → delete the old. Hybrid states are acceptable and working at every commit.
 
 ### Parallel Change (expand–migrate–contract)
+
 For changing a live contract (API, storage schema, queue message) where old and new consumers coexist:
 
 1. **Expand** — support both old and new forms side by side; write the new form.
@@ -40,6 +42,7 @@ For changing a live contract (API, storage schema, queue message) where old and 
 Never skip the migration phase because tests pass — external consumers may exist that tests don't model.
 
 ### Strangler Fig
+
 For replacing a subsystem wholesale. Put a facade in front of the legacy system → route traffic through the facade → intercept one route/slice at a time, implementing it fresh behind the facade (guarded by a feature flag when the slice is risky) → when all slices are intercepted, the legacy core is unused; delete it. Each interception must keep the characterization suite green.
 
 ## Per-phase discipline (all strategies)

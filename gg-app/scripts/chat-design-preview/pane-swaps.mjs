@@ -159,13 +159,11 @@ export async function exerciseSwaps(page) {
   assert.equal(await button("primary").count(), 0);
   const animated = await page.evaluate(() =>
     [...document.querySelectorAll(".workspace-pane-slot")].flatMap((el) =>
-      el
-        .getAnimations()
-        .map((a) => ({
-          id: el.dataset.paneId,
-          duration: a.effect.getTiming().duration,
-          frames: a.effect.getKeyframes(),
-        })),
+      el.getAnimations().map((a) => ({
+        id: el.dataset.paneId,
+        duration: a.effect.getTiming().duration,
+        frames: a.effect.getKeyframes(),
+      })),
     ),
   );
   // An explicit paused midpoint is a visual inspection aid, not timing evidence.

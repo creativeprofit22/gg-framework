@@ -9,3 +9,49 @@ pnpm-lock.yaml
 # the seeded agent files. Formatting them would change the hash and break that
 # test — the fixture's whole job is to preserve the shipped bytes verbatim.
 packages/ggcoder/src/__fixtures__/
+
+# Bundled motion assets: third-party licensed templates, skills and helpers
+# (see THIRD-PARTY.md) shipped to the motion agent as-is. Keeping upstream bytes
+# keeps them diffable against their source.
+packages/ggcoder/assets/motion/
+
+# Prompt-bench experiments: comparison-bench records a SHA-256 of these sources
+# with every result. Reformatting would change the hashes and detach recorded
+# runs from the code that produced them.
+experiments/prompt-bench/
+
+# Source-text audits: the bloat guards and sidecar wiring tests read these files
+# verbatim and assert exact substrings, single-line call shapes and character
+# budgets. Prettier's line wrapping breaks those assertions with no behaviour
+# change.
+packages/ggcoder/src/app-sidecar.ts
+packages/ggcoder/src/app-sidecar-programmatic-chat.ts
+packages/ggcoder/src/app-sidecar-programmatic-execution.ts
+packages/ggcoder/src/app-sidecar-programmatic-projection.ts
+packages/ggcoder/src/core/custom-commands.ts
+packages/ggcoder/src/core/programmatic/advisory-tools.ts
+packages/ggcoder/src/core/programmatic/assessment-history.ts
+packages/ggcoder/src/core/programmatic/assessment.ts
+packages/ggcoder/src/core/programmatic/command-verification.ts
+packages/ggcoder/src/core/programmatic/discovery-projection.ts
+packages/ggcoder/src/core/programmatic/discovery-review.ts
+packages/ggcoder/src/core/programmatic/execution.ts
+packages/ggcoder/src/core/programmatic/inventory.ts
+packages/ggcoder/src/core/programmatic/lifecycle.ts
+packages/ggcoder/src/core/programmatic/profile.ts
+packages/ggcoder/src/core/programmatic/recommendation-contracts.ts
+packages/ggcoder/src/core/programmatic/recommendation-history.ts
+packages/ggcoder/src/core/programmatic/recommendations.ts
+packages/ggcoder/src/core/programmatic/storage.ts
+packages/ggcoder/src/tools/programmatic-profile.ts
+packages/ggcoder/src/ui/hooks/useAgentLoop.ts
+
+# CI-guarded config and smoke scripts: verify-release-ci.test.mjs and the smoke
+# check tests match exact lines in these files (env blocks, gate steps, cleanup
+# code) to prove the release gates are wired. Reformatting breaks the match.
+.github/workflows/ci.yml
+gg-app/scripts/appearance-dev-smoke.mjs
+gg-app/scripts/cross-pane-project-isolation-dev-smoke.mjs
+gg-app/scripts/pane-swaps-dev-smoke.mjs
+gg-app/scripts/programmatic-execution-dev-smoke.mjs
+gg-app/scripts/programmatic-smoke-lifecycle.mjs

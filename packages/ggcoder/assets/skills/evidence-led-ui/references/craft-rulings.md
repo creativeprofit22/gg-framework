@@ -106,25 +106,25 @@ Prefer native `:focus-visible` and existing accessible primitives. Add or change
 
 For changes to focus, control edges, or dropdown anatomy, run applicable rows in a real browser. Add regressions to existing browser tests where available; otherwise record manual steps and results. Do not invent a new test suite just for this check.
 
-| Sequence or state | Required result |
-|---|---|
+| Sequence or state                                                                                        | Required result                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Pointer open → choose option or dismiss → Space/Enter or an unrelated shortcut → Tab → click blank space | No custom stale ring is resurrected merely by a keydown; native activation still works; Tab immediately reveals the correct focus target; pointer cleanup preserves genuine states. Test selection and dismissal separately. |
-| Tab/Shift+Tab → activate → Escape/close → resume navigation | Visible focus throughout keyboard use, correct return target, no trap; supported arrow-key navigation also works. |
-| Pointer into text input → type; keyboard into input → type | Caret, editing, and appropriate visible focus remain intact. |
-| Selected/expanded/error control inside a glass wrapper, with and without keyboard focus | Each state remains correct; no duplicate local/shared ring or unintended container-wide edge. Inspect computed styles and rendered output. |
-| Every affected shared-control variant, long value, narrow width, 200% text zoom, RTL | One chevron; measured inset and reserved text area do not collide; arrow hit area works. |
-| Supported browser/webview, themes, forced colors, and touch where applicable | Focus and chevron remain visible and operable; record unavailable combinations as unverified. Native popup behavior needs native interaction, not just a programmatic value change. |
+| Tab/Shift+Tab → activate → Escape/close → resume navigation                                              | Visible focus throughout keyboard use, correct return target, no trap; supported arrow-key navigation also works.                                                                                                            |
+| Pointer into text input → type; keyboard into input → type                                               | Caret, editing, and appropriate visible focus remain intact.                                                                                                                                                                 |
+| Selected/expanded/error control inside a glass wrapper, with and without keyboard focus                  | Each state remains correct; no duplicate local/shared ring or unintended container-wide edge. Inspect computed styles and rendered output.                                                                                   |
+| Every affected shared-control variant, long value, narrow width, 200% text zoom, RTL                     | One chevron; measured inset and reserved text area do not collide; arrow hit area works.                                                                                                                                     |
+| Supported browser/webview, themes, forced colors, and touch where applicable                             | Focus and chevron remain visible and operable; record unavailable combinations as unverified. Native popup behavior needs native interaction, not just a programmatic value change.                                          |
 
 Report the reproduced cause, shared owner changed, tested sequences and browser/platform, and any remaining uncertainty. An initial-state screenshot, class-name assertion, or source review alone does not establish that interaction regressions passed.
 
 Reuse existing motion tokens first. If none exist, begin with these restrained bands, then tune by component size and distance:
 
-| Role | Typical duration | Use |
-|---|---:|---|
-| Immediate micro-feedback | 70 to 110 ms | button, toggle, icon fill, press |
-| Standard state change | 140 to 200 ms | color, border, background, small disclosure |
-| Entrance or panel continuity | 180 to 240 ms | menu, popover, drawer, inserted feedback |
-| Exit | 120 to 180 ms | dismissal and removal |
+| Role                         | Typical duration | Use                                         |
+| ---------------------------- | ---------------: | ------------------------------------------- |
+| Immediate micro-feedback     |     70 to 110 ms | button, toggle, icon fill, press            |
+| Standard state change        |    140 to 200 ms | color, border, background, small disclosure |
+| Entrance or panel continuity |    180 to 240 ms | menu, popover, drawer, inserted feedback    |
+| Exit                         |    120 to 180 ms | dismissal and removal                       |
 
 For a neutral productive curve, Carbon documents `cubic-bezier(0.2, 0, 0.38, 0.9)` for standard productive motion, with separate entrance and exit curves. Use local easing when available.
 
@@ -142,16 +142,16 @@ Do not choose Arial, Helvetica, or a bare `system-ui` stack as the visible desig
 
 The following families were present in Google Fonts metadata fetched 14 July 2026. Popularity positions in that metadata included DM Sans 23, Manrope 37, Lora 43, Bricolage Grotesque 45, Plus Jakarta Sans 51, Space Grotesk 79, Instrument Serif 92, Geist 125, IBM Plex Mono 129, Source Serif 4 133, Instrument Sans 140, Newsreader 148, Geist Mono 149, and DM Mono 168. Popularity is discovery evidence, not a command to use the highest-ranked family.
 
-| Pairing | Best fit | Role split |
-|---|---|---|
-| Instrument Sans + Instrument Serif | editorial brands, culture, thoughtful commerce | sans for UI/body, serif for display or pull quotes |
-| Manrope + IBM Plex Mono | precise product UI, operations, technical SaaS | sans for interface, mono for data and technical labels |
-| Plus Jakarta Sans + Source Serif 4 | trustworthy services, education, research | sans for navigation/UI, serif for long reading |
-| DM Sans + DM Mono | clean application UI, data products | sans for hierarchy, mono for identifiers and code |
-| Space Grotesk + Newsreader | modern editorial/product hybrids | grotesk for display/UI, serif for narrative |
-| Bricolage Grotesque + Lora | playful or crafted consumer products | expressive sans for display, serif for supporting warmth |
-| Geist + Geist Mono | restrained developer tools | sans for UI, mono for code/data |
-| Noto Sans + Noto Serif | multilingual products | broad-script sans/serif system |
+| Pairing                            | Best fit                                       | Role split                                               |
+| ---------------------------------- | ---------------------------------------------- | -------------------------------------------------------- |
+| Instrument Sans + Instrument Serif | editorial brands, culture, thoughtful commerce | sans for UI/body, serif for display or pull quotes       |
+| Manrope + IBM Plex Mono            | precise product UI, operations, technical SaaS | sans for interface, mono for data and technical labels   |
+| Plus Jakarta Sans + Source Serif 4 | trustworthy services, education, research      | sans for navigation/UI, serif for long reading           |
+| DM Sans + DM Mono                  | clean application UI, data products            | sans for hierarchy, mono for identifiers and code        |
+| Space Grotesk + Newsreader         | modern editorial/product hybrids               | grotesk for display/UI, serif for narrative              |
+| Bricolage Grotesque + Lora         | playful or crafted consumer products           | expressive sans for display, serif for supporting warmth |
+| Geist + Geist Mono                 | restrained developer tools                     | sans for UI, mono for code/data                          |
+| Noto Sans + Noto Serif             | multilingual products                          | broad-script sans/serif system                           |
 
 Use one family when role, weight, width, size, and tracking provide enough hierarchy. Add a second family only for a clear role contrast. Two families are usually sufficient; a third requires a specific content role.
 

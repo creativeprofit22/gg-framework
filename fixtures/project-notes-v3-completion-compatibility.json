@@ -42,10 +42,7 @@
       "order": 0,
       "status": "needs-attention",
       "sourcePrompt": "Add an authoritative Notes v3 schema fixture shared across boundaries.",
-      "referenceIds": [
-        "ref-schema-issue",
-        "ref-schema-pr"
-      ],
+      "referenceIds": ["ref-schema-issue", "ref-schema-pr"],
       "session": {
         "sessionId": "session-phase-16-contract",
         "sessionPath": "/sessions/phase-16-contract.jsonl"
@@ -75,10 +72,7 @@
           "updatedAt": "2026-07-25T12:32:00.000Z"
         },
         "referenceIds": {
-          "value": [
-            "ref-schema-issue",
-            "ref-schema-pr"
-          ],
+          "value": ["ref-schema-issue", "ref-schema-pr"],
           "source": "user",
           "updatedAt": "2026-07-25T12:33:00.000Z"
         }
@@ -132,9 +126,7 @@
           "progress": "Verified the shared Notes v3 contract",
           "blocker": null,
           "requiredExternalAction": null,
-          "evidence": [
-            "Backend and app validators accepted the canonical fixture"
-          ],
+          "evidence": ["Backend and app validators accepted the canonical fixture"],
           "verification": "passed",
           "verificationReason": null,
           "verificationSession": {
@@ -153,11 +145,7 @@
             "sessionPath": "/sessions/phase-16-contract.jsonl"
           },
           "planStepTotal": 3,
-          "completedPlanSteps": [
-            1,
-            2,
-            3
-          ],
+          "completedPlanSteps": [1, 2, 3],
           "runOutcome": "succeeded",
           "timestamp": "2026-07-25T12:34:56.000Z"
         },
@@ -166,9 +154,7 @@
           "id": "review-schema-contract",
           "reviewer": "ken-autopilot",
           "decision": "accepted",
-          "evidence": [
-            "Canonical contract checks are complete"
-          ],
+          "evidence": ["Canonical contract checks are complete"],
           "reason": null,
           "implementationCheckpointId": "checkpoint-schema-contract",
           "verificationStatusUpdateId": "roadmap-schema-verification",
@@ -302,15 +288,11 @@
       "id": "phase-migration-proof",
       "title": "Preserve migration evidence",
       "goal": "Retain complete legacy fields while extending the document",
-      "doneWhen": [
-        "Migration and restart tests remain green"
-      ],
+      "doneWhen": ["Migration and restart tests remain green"],
       "order": 1,
       "status": "done",
       "sourcePrompt": "Keep focused v2 migration fixtures.",
-      "referenceIds": [
-        "ref-schema-pr"
-      ],
+      "referenceIds": ["ref-schema-pr"],
       "session": null,
       "reminder": null,
       "attentionReason": null,

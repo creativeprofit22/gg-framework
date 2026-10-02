@@ -162,14 +162,12 @@ await capturePreview({
   state: "activity",
   verify: async (page) => {
     await page.locator(".livetoolpanel .tool-line").waitFor();
-    const samples = await page
-      .locator(".livetoolpanel .tool-line > span")
-      .evaluateAll((elements) =>
-        elements.map((el) => ({
-          color: getComputedStyle(el).color,
-          bg: getComputedStyle(el.closest(".livetoolpanel")).backgroundColor,
-        })),
-      );
+    const samples = await page.locator(".livetoolpanel .tool-line > span").evaluateAll((elements) =>
+      elements.map((el) => ({
+        color: getComputedStyle(el).color,
+        bg: getComputedStyle(el.closest(".livetoolpanel")).backgroundColor,
+      })),
+    );
     for (const sample of samples)
       assert(contrast(sample.color, sample.bg) >= 4.5, "Live tool text contrast");
     for (const isError of [false, true]) {

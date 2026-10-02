@@ -1,48 +1,53 @@
 # Smells, Metrics, Prioritization
 
-Detection and targeting material for the refactoring skill. Thresholds are heuristics for *where to look*, never rules that a file crossing one must be refactored.
+Detection and targeting material for the refactoring skill. Thresholds are heuristics for _where to look_, never rules that a file crossing one must be refactored.
 
 ## Metrics quick reference
 
 Estimate without tooling: cyclomatic complexity ≈ count of decision points (`if`, `while`, `for`, `&&`, `||`, `case`, `catch`, ternary) + 1. Cognitive complexity adds weighting for nesting.
 
-| Metric | Comfortable | Refactor signal |
-|---|---|---|
-| Cyclomatic complexity (function) | < 10 | 16+ |
-| Cognitive complexity (function) | < 10 | 15+ |
-| Function length | < 30 lines | 50+ (or one screen) |
-| Class/module length | < 300 lines | 500+ |
-| Parameters | ≤ 3 | 6+ (or booleans that change behavior) |
-| Duplication | — | Same logic 3+ places (Rule of Three) |
+| Metric                           | Comfortable | Refactor signal                       |
+| -------------------------------- | ----------- | ------------------------------------- |
+| Cyclomatic complexity (function) | < 10        | 16+                                   |
+| Cognitive complexity (function)  | < 10        | 15+                                   |
+| Function length                  | < 30 lines  | 50+ (or one screen)                   |
+| Class/module length              | < 300 lines | 500+                                  |
+| Parameters                       | ≤ 3         | 6+ (or booleans that change behavior) |
+| Duplication                      | —           | Same logic 3+ places (Rule of Three)  |
 
 ## Smell catalog
 
 Work top of list first within a risk band. Each entry: signal → usual transformation.
 
 ### Bloaters
+
 - **Long method / function** — exceeds a screen, needs comments to explain sections → Extract Method; conditional blocks each become guard clauses or extracted methods.
 - **God class / module** — knows everything, changes for every reason → Extract Class by responsibility; move features to the module that owns the data (Feature Envy fix).
 - **Long parameter list** — callers pass the same cluster → Introduce Parameter Object; or pass the object the params came from.
 - **Primitive obsession** — coordinates, money, IDs as bare strings/numbers everywhere → Introduce Value Object with validation at creation.
 
 ### Change preventers
+
 - **Divergent change** — one module changed for many unrelated reasons → split by reason (Extract Class).
 - **Shotgun surgery** — one change scattered across many files → Move Function/Field until one module owns the concept.
 - **Parallel inheritance hierarchies** — two hierarchies that must move together → reference one from the other, or unify with a strategy.
 
 ### Dispensables
+
 - **Duplicate code** — same logic 3+ places (Rule of Three: tolerate twice, extract on the third) → Extract Function, share it. Two occurrences with divergence is a bug factory.
 - **Dead code** — unreached branches, unused exports, commented-out blocks → delete. Git history has it.
 - **Speculative generality** — abstraction with one caller, flags always passed the same value, "we might need it" → inline and delete. Treat as aggressively as bloat; agents generate this smell by default.
 - **Magic numbers** — unexplained literals → named constant placed where its meaning lives.
 
 ### Couplers
+
 - **Feature envy** — method mostly reads another module's data → Move Function to the data.
 - **Inappropriate intimacy** — modules poking each other's privates → Move Method/Field, or extract the shared concept.
 - **Message chains** — `a.b().c().d()` → hide the chain behind a method on the object you know.
 - **Middle man** — class that only forwards → remove it, let callers talk directly.
 
 ### Conditionals
+
 - **Deep nesting** — 3+ levels → guard clauses, then Extract Method per branch; Replace Nested Conditional with Guard Clauses.
 - **Complex switch repeated** — same switch on type in multiple places → Replace Conditional with Polymorphism (or a lookup table for the simple data case — do not build a class hierarchy to avoid an object literal).
 - **Boolean-flag parameters** — `doThing(x, true)` → split into two named functions.
@@ -56,7 +61,7 @@ Each must be mechanically checkable — "does everything still compile/tests gre
 - **Move Function**: move, fix references, adjust visibility. Best when the function's data lives in the destination (Feature Envy).
 - **Introduce Parameter Object**: group params into a record, migrate callers mechanically.
 - **Replace Conditional with Polymorphism**: only after the switch is duplicated in 2+ places; introduce subtype per branch, migrate case by case, delete the switch last.
-- **Replace Magic Number / Introduce Named Constant**: constant named by *meaning*, not value (`MAX_RETRIES`, not `THREE`).
+- **Replace Magic Number / Introduce Named Constant**: constant named by _meaning_, not value (`MAX_RETRIES`, not `THREE`).
 
 ## Prioritization
 

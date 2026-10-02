@@ -14,12 +14,18 @@ import {
 import { log } from "./logger.js";
 import { PROMPT_COMMANDS, type PromptCommand } from "./prompt-commands.js";
 import { programmaticCommandReferenceV1Schema } from "./programmatic/contracts.js";
-import { assessProgrammaticSetup, loadApprovedProgrammaticProfile, type ProgrammaticSetupAssessment } from "./programmatic/profile.js";
+import {
+  assessProgrammaticSetup,
+  loadApprovedProgrammaticProfile,
+  type ProgrammaticSetupAssessment,
+} from "./programmatic/profile.js";
 
 export type ProgrammaticReadiness = ProgrammaticSetupAssessment["status"];
 
 /** Share only concurrent work. Every later request checks the live approved baseline again. */
-export function createProgrammaticReadinessReader(cwd: string): () => Promise<ProgrammaticReadiness> {
+export function createProgrammaticReadinessReader(
+  cwd: string,
+): () => Promise<ProgrammaticReadiness> {
   let pending: Promise<ProgrammaticReadiness> | undefined;
   return () => {
     pending ??= (async (): Promise<ProgrammaticReadiness> => {
@@ -33,25 +39,36 @@ export function createProgrammaticReadinessReader(cwd: string): () => Promise<Pr
       } catch {
         return "unreadable";
       }
-    })().finally(() => { pending = undefined; });
+    })().finally(() => {
+      pending = undefined;
+    });
     return pending;
   };
 }
 
 export function programmaticReadinessGuidance(status: ProgrammaticReadiness): string | null {
   switch (status) {
-    case "current": return null;
-    case "missing": return "Run /setup-programmatic, review the proposal and separately approve saving setup before /programmatic.";
-    case "refresh-required": return "Run /setup-programmatic to review and separately approve a setup refresh or legacy upgrade before /programmatic. Saved reports remain inspectable.";
-    case "unreadable": return "Stored setup or configuration is unreadable or unsafe. Run /setup-programmatic to inspect repair guidance; preserve existing files and saved reports. Nothing was rewritten.";
+    case "current":
+      return null;
+    case "missing":
+      return "Run /setup-programmatic, review the proposal and separately approve saving setup before /programmatic.";
+    case "refresh-required":
+      return "Run /setup-programmatic to review and separately approve a setup refresh or legacy upgrade before /programmatic. Saved reports remain inspectable.";
+    case "unreadable":
+      return "Stored setup or configuration is unreadable or unsafe. Run /setup-programmatic to inspect repair guidance; preserve existing files and saved reports. Nothing was rewritten.";
   }
 }
 
-export function registryCommandListings(commands: readonly { name: string; aliases: string[]; description: string; usage?: string }[]): SlashCommandListing[] {
+export function registryCommandListings(
+  commands: readonly { name: string; aliases: string[]; description: string; usage?: string }[],
+): SlashCommandListing[] {
   return commands.map((command) => ({
-    name: command.name, aliases: command.aliases, description: command.description,
+    name: command.name,
+    aliases: command.aliases,
+    description: command.description,
     ...(command.usage ? { usage: command.usage } : {}),
-    input: { text: "optional", references: "none", attachments: "none" }, source: "built-in",
+    input: { text: "optional", references: "none", attachments: "none" },
+    source: "built-in",
   }));
 }
 
@@ -113,11 +130,18 @@ export async function discoverCommands(
       for (const name of [item.name, ...item.aliases]) workspaceClaims.add(name.toLowerCase());
   }
   for (const prompt of PROMPT_COMMANDS) {
-    add({ prompt, listing: {
-      name: prompt.name, aliases: [...prompt.aliases], description: prompt.description,
-      input: { ...(prompt.input ?? SLASH_COMMAND_INPUT_ALL) }, source: "built-in",
-      origin: "built-in", invocationKind: "prompt",
-    } });
+    add({
+      prompt,
+      listing: {
+        name: prompt.name,
+        aliases: [...prompt.aliases],
+        description: prompt.description,
+        input: { ...(prompt.input ?? SLASH_COMMAND_INPUT_ALL) },
+        source: "built-in",
+        origin: "built-in",
+        invocationKind: "prompt",
+      },
+    });
   }
   // The selection/approval helper is reserved even in hosts that do not advertise it.
   claimed.add("programmatic-run");
@@ -133,18 +157,25 @@ export async function discoverCommands(
       if (problem) problems.push(problem);
       continue;
     }
-    add({ custom, listing: {
-      name: custom.name, aliases: [],
-      description: (custom.description.startsWith("Custom command from ")
-        ? "Custom command" : custom.description).slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
-      ...(custom.argumentHint ? { argumentHint: custom.argumentHint } : {}),
-      ...(custom.collection ? { collection: custom.collection } : {}),
-      ...(custom.group ? { group: custom.group } : {}),
-      ...(custom.effect ? { effect: custom.effect } : {}),
-      input: { ...SLASH_COMMAND_INPUT_ALL }, source: "custom",
-      origin: custom.scope === "project" ? "project-custom" : "global-custom",
-      invocationKind: "prompt",
-    } });
+    add({
+      custom,
+      listing: {
+        name: custom.name,
+        aliases: [],
+        description: (custom.description.startsWith("Custom command from ")
+          ? "Custom command"
+          : custom.description
+        ).slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
+        ...(custom.argumentHint ? { argumentHint: custom.argumentHint } : {}),
+        ...(custom.collection ? { collection: custom.collection } : {}),
+        ...(custom.group ? { group: custom.group } : {}),
+        ...(custom.effect ? { effect: custom.effect } : {}),
+        input: { ...SLASH_COMMAND_INPUT_ALL },
+        source: "custom",
+        origin: custom.scope === "project" ? "project-custom" : "global-custom",
+        invocationKind: "prompt",
+      },
+    });
   }
   for (const item of options.getRegistryActions?.() ?? options.registryActions ?? []) {
     if (isClaimed(item.name)) {
@@ -169,31 +200,60 @@ export interface AdvisoryCommandPage {
 }
 
 /** Bounds include JSON escaping and the page envelope, measured in UTF-16 units. */
-export function projectAdvisoryCommands(discovery: CommandDiscovery, offset = 0): AdvisoryCommandPage {
+export function projectAdvisoryCommands(
+  discovery: CommandDiscovery,
+  offset = 0,
+): AdvisoryCommandPage {
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > discovery.entries.length)
     throw new Error("Invalid command page offset; list from offset 0 after command changes.");
   const page: AdvisoryCommandPage = {
-    entries: [], offset, nextOffset: null, total: discovery.entries.length, limitedCoverage: offset > 0,
+    entries: [],
+    offset,
+    nextOffset: null,
+    total: discovery.entries.length,
+    limitedCoverage: offset > 0,
   };
   for (let index = offset; index < discovery.entries.length; index++) {
     const listing = discovery.entries[index]!.listing;
     const supported = programmaticCommandReferenceV1Schema.safeParse({
-      version: 1, name: listing.name, source: listing.origin, invocationKind: listing.invocationKind,
+      version: 1,
+      name: listing.name,
+      source: listing.origin,
+      invocationKind: listing.invocationKind,
     }).success;
     let row: AdvisoryCommandPage["entries"][number] = {
-      name: listing.name, aliases: listing.aliases, description: listing.description.slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
-      input: listing.input, source: listing.source, origin: listing.origin, invocationKind: listing.invocationKind,
+      name: listing.name,
+      aliases: listing.aliases,
+      description: listing.description.slice(0, SLASH_COMMAND_DESCRIPTION_MAX_LENGTH),
+      input: listing.input,
+      source: listing.source,
+      origin: listing.origin,
+      invocationKind: listing.invocationKind,
       ...(listing.usage ? { usage: listing.usage } : {}),
       ...(listing.argumentHint ? { argumentHint: listing.argumentHint } : {}),
-      ...(!supported ? { bodyUnavailableReason: "Identity is unsupported for advisory body lookup." } : {}),
+      ...(!supported
+        ? { bodyUnavailableReason: "Identity is unsupported for advisory body lookup." }
+        : {}),
     };
     // A single legal UI row can exceed a whole advisory page after JSON escaping.
     // Keep the executable identity intact, disclose omitted metadata, and always advance.
     if (JSON.stringify({ ...page, entries: [row] }).length > 31_900) {
-      row = { ...row, aliases: [], description: "Metadata omitted to fit the advisory page limit.", usage: undefined, argumentHint: undefined, metadataLimited: true };
+      row = {
+        ...row,
+        aliases: [],
+        description: "Metadata omitted to fit the advisory page limit.",
+        usage: undefined,
+        argumentHint: undefined,
+        metadataLimited: true,
+      };
       page.limitedCoverage = true;
     }
-    const candidate = { ...page, entries: [...page.entries, row], nextOffset: index + 1, limitedCoverage: true };
+    const candidate = {
+      ...page,
+      entries: [...page.entries, row],
+      nextOffset: index + 1,
+      limitedCoverage: true,
+    };
     if (page.entries.length >= 100 || JSON.stringify(candidate).length > 32_000) {
       page.nextOffset = index;
       page.limitedCoverage = true;

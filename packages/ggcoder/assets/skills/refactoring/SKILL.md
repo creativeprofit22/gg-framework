@@ -16,7 +16,7 @@ Change the structure of code without changing what it does. Every observable beh
 2. **The baseline is a gate, not advice.** Before the first edit: the test suite runs green on unmodified code, or you build a safety net first (see mode 3). Record what you ran and its result. A suite that was already red tells you nothing — fix or quarantine the noise before counting on it.
 3. **One named transformation per step.** Each step applies exactly one refactoring (Extract Method, Move Function, Introduce Parameter…) and has a name you can state. If you cannot name it, it is not a refactoring — it is a rewrite wearing a costume.
 4. **Red means revert, not debug.** After each step, run the smallest relevant suite. Green ⇒ commit (when per-step commits were agreed — see the loop's checkpoint), message names the transformation. Red ⇒ revert the step immediately (`git restore`/`git checkout` the touched files). A red intermediate means the step was too big or wrong; debugging a broken step costs more than re-slicing it.
-5. **Never touch tests to get green.** In a pure refactor, modifying, loosening, or deleting an assertion is the cardinal sin — it destroys the only proof you have. If a test blocks legitimate structural change (asserts private internals), convert it to assert observable behavior *before* the transformation, as its own commit. Any unexplained test change in a refactor diff is a red flag.
+5. **Never touch tests to get green.** In a pure refactor, modifying, loosening, or deleting an assertion is the cardinal sin — it destroys the only proof you have. If a test blocks legitimate structural change (asserts private internals), convert it to assert observable behavior _before_ the transformation, as its own commit. Any unexplained test change in a refactor diff is a red flag.
 6. **Smallest suite per step, full suite per finish.** Iterate fast on the touched area, but before declaring done: full test suite + typecheck + lint, on the same commands CI runs.
 7. **Prove it, don't vibe it.** The closing question is not "is this good code" but "can I prove nothing observable changed?" Answer with evidence: suites run, before/after outputs, mutation spot-checks when the boundary is critical. Say plainly what you could not verify.
 8. **Make the change easy, then make the easy change** (Beck). Preparatory refactoring — small structural setup that makes the coming feature trivial — is the highest-ROI kind. Do it, then stop.
@@ -29,11 +29,11 @@ Change the structure of code without changing what it does. Every observable beh
 
 **2. Plan-first** — the user asks for a refactor plan, the change is architectural, or multiple approaches compete. Interview the problem, explore the repo to verify claims, fix scope as in/out lists, check test coverage (thin coverage is a question to the user, not an assumption), then break the work into a plan of tiny commits — each commit leaves the codebase working. File it where the user wants (issue, doc, or just the reply). Do NOT embed file paths or code snippets in the plan — they go stale before the work starts.
 
-**3. Legacy / untested** — no tests, unrunnable suite, or a migration too large for one session. Do not proceed with the normal loop. Go to `references/legacy.md`: characterization tests capturing *actual* current behavior (bugs included — log them, don't silently fix them), seams, branch-by-abstraction, parallel change (expand–migrate–contract), strangler fig.
+**3. Legacy / untested** — no tests, unrunnable suite, or a migration too large for one session. Do not proceed with the normal loop. Go to `references/legacy.md`: characterization tests capturing _actual_ current behavior (bugs included — log them, don't silently fix them), seams, branch-by-abstraction, parallel change (expand–migrate–contract), strangler fig.
 
 ## Execute loop
 
-1. **Baseline.** Run the suite on unmodified code; record green. If red or absent → mode 3. If the project has no VCS, say so and stop for direction. If the working tree is dirty with unrelated changes, see *Dirty tree* below — a dirty baseline destroys the revert safety.
+1. **Baseline.** Run the suite on unmodified code; record green. If red or absent → mode 3. If the project has no VCS, say so and stop for direction. If the working tree is dirty with unrelated changes, see _Dirty tree_ below — a dirty baseline destroys the revert safety.
 2. **Commit checkpoint.** Refactoring is safest with per-step commits on a dedicated branch — ask the user once, up front: "I'll commit each verified step on a branch — good?" If they decline, keep steps small and separable and report the step list for review at the end. Never commit without authorization.
 3. **Pick one target.** If you were started from a `Fix /sweep:` task, that task's finding and named transformation are the target — still re-read the cited lines, since code may have moved since the sweep. Otherwise, ranked by risk-adjusted value, not by how interesting it is: security → correctness → structure → duplication → naming. Hotspots first — files where churn (recent edit frequency) meets complexity. Smell catalog and metrics thresholds: `references/smells.md`.
 4. **Apply one named transformation.** Full mechanics per transformation live in `references/smells.md`. Prefer language-aware tooling (IDE rename, AST codemods) over regex edits; at scale (>~10 files or >~500 lines), a codemod is the safe path and regex is the wrong one.
@@ -46,11 +46,11 @@ Unrelated uncommitted changes make "revert the step" unsafe. Ask once, with `ask
 
 ## Risk levels set the safety net
 
-| Risk | Touching | Minimum net before editing |
-|---|---|---|
-| Low | Pure internals, no I/O | Unit tests + types |
-| Medium | Module boundary, parsing, state | + contract tests at the seam |
-| High | Money, auth, concurrency, migrations, data | + integration tests, a rollback plan, and small phases |
+| Risk   | Touching                                   | Minimum net before editing                             |
+| ------ | ------------------------------------------ | ------------------------------------------------------ |
+| Low    | Pure internals, no I/O                     | Unit tests + types                                     |
+| Medium | Module boundary, parsing, state            | + contract tests at the seam                           |
+| High   | Money, auth, concurrency, migrations, data | + integration tests, a rollback plan, and small phases |
 
 When unsure whether behavior could change: **do not apply — ask.**
 

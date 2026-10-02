@@ -199,33 +199,36 @@ describe("AppSidecarRoadmapToolHost", () => {
     ["phase-archived", "phase-archived"],
     ["corrupt", "notes-corrupt"],
     ["phase-lease-lost", "phase-lease-lost"],
-  ] as const)("preserves %s fencing failures through the public status tool", async (status, result) => {
-    const recordRoadmapStatusUpdate = vi.fn();
-    const broadcastNotesSnapshot = vi.fn();
-    const reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
-    const mutateStatusWithLeaseFence = vi.fn(async () => ({ status }));
-    const host = new AppSidecarRoadmapToolHost({
-      cwd: "/project",
-      repository: { recordRoadmapStatusUpdate },
-      reconciliations,
-      projectAutopilot: { isEnabled: () => false },
-      broadcastNotesSnapshot,
-      mutateStatusWithLeaseFence,
-    });
-    const output = await host
-      .createSessionTools("coding", owningSession)[0]!
-      .execute(doneInput(), {} as never);
-    expect(JSON.parse(String(output))).toEqual({
-      result,
-      phaseId: "phase-1",
-      revision: 4,
-      ...(status === "phase-lease-lost"
-        ? { message: "Roadmap status was not saved because this session lost its phase lease." }
-        : {}),
-    });
-    expect(mutateStatusWithLeaseFence).toHaveBeenCalledWith("phase-1", expect.any(Function));
-    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
-    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
-    expect(reconciliations.owner("/project")).toBeUndefined();
-  });
+  ] as const)(
+    "preserves %s fencing failures through the public status tool",
+    async (status, result) => {
+      const recordRoadmapStatusUpdate = vi.fn();
+      const broadcastNotesSnapshot = vi.fn();
+      const reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+      const mutateStatusWithLeaseFence = vi.fn(async () => ({ status }));
+      const host = new AppSidecarRoadmapToolHost({
+        cwd: "/project",
+        repository: { recordRoadmapStatusUpdate },
+        reconciliations,
+        projectAutopilot: { isEnabled: () => false },
+        broadcastNotesSnapshot,
+        mutateStatusWithLeaseFence,
+      });
+      const output = await host
+        .createSessionTools("coding", owningSession)[0]!
+        .execute(doneInput(), {} as never);
+      expect(JSON.parse(String(output))).toEqual({
+        result,
+        phaseId: "phase-1",
+        revision: 4,
+        ...(status === "phase-lease-lost"
+          ? { message: "Roadmap status was not saved because this session lost its phase lease." }
+          : {}),
+      });
+      expect(mutateStatusWithLeaseFence).toHaveBeenCalledWith("phase-1", expect.any(Function));
+      expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+      expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+      expect(reconciliations.owner("/project")).toBeUndefined();
+    },
+  );
 });

@@ -479,8 +479,9 @@ describe("AgentSession MCP identity boundary", () => {
           expect(internals.liveMcpTools.has(identity.providerName)).toBe(false);
           const search = internals.registeredTools.get("tool_search");
           if (search) {
-            expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT)))
-              .not.toContain(identity.providerName);
+            expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT))).not.toContain(
+              identity.providerName,
+            );
           }
           for (const wait of waits) expect(wait).not.toHaveBeenCalled();
         };
@@ -496,8 +497,9 @@ describe("AgentSession MCP identity boundary", () => {
         expect(connectTransport).toHaveBeenCalledOnce();
         expect(acquire).toHaveBeenCalledTimes(serverName === "kencode-search" ? 1 : 0);
         const search = internals.registeredTools.get("tool_search")!;
-        expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT)))
-          .toContain(identity.providerName);
+        expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT))).toContain(
+          identity.providerName,
+        );
         const promoted = internals.registeredTools.get(identity.providerName)!;
         await expect(promoted.execute({}, TOOL_CONTEXT)).resolves.toBe("needle");
 

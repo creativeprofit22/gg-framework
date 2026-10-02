@@ -28,7 +28,8 @@ const HF = join(BIN, "hyperframes.mjs");
 
 const args = process.argv.slice(2);
 const onlyIndex = args.indexOf("--only");
-const only = onlyIndex >= 0 ? new Set((args[onlyIndex + 1] ?? "").split(",").filter(Boolean)) : null;
+const only =
+  onlyIndex >= 0 ? new Set((args[onlyIndex + 1] ?? "").split(",").filter(Boolean)) : null;
 const render = !args.includes("--no-render");
 const noIndex = args.includes("--no-index");
 if (noIndex && !only) {
@@ -60,7 +61,10 @@ async function readMeta(dir, id, type) {
   if (type === "piece" && meta.license === "MIT") {
     const notice = await readFile(join(dir, "LICENSE"), "utf8").catch(() => "");
     if (!/MIT License/i.test(notice) || !/Copyright/i.test(notice)) {
-      problem(id, "MIT piece needs the upstream LICENSE (with its copyright line) beside piece.html");
+      problem(
+        id,
+        "MIT piece needs the upstream LICENSE (with its copyright line) beside piece.html",
+      );
     }
   }
   return meta;
@@ -112,10 +116,13 @@ async function preview(project, at, out, id) {
   const frames = (await readdir(join(project, "snapshots"))).filter((f) => f.endsWith(".png"));
   const frame = frames.sort()[0];
   if (!frame) return problem(id, "snapshot produced no frame");
-  const sharp = createRequire(join(MOTION, "..", "..", "node_modules", "hyperframes", "package.json"))(
-    "sharp",
-  );
-  await sharp(join(project, "snapshots", frame)).resize(640, 360).jpeg({ quality: 80 }).toFile(out);
+  const sharp = createRequire(
+    join(MOTION, "..", "..", "node_modules", "hyperframes", "package.json"),
+  )("sharp");
+  await sharp(join(project, "snapshots", frame))
+    .resize(640, 360)
+    .jpeg({ quality: 80 })
+    .toFile(out);
 }
 
 const THREE_IMPORTMAP =
@@ -184,11 +191,16 @@ for (const id of pieceIds) {
   const source = await tryRead(id, () => readFile(join(dir, "piece.html"), "utf8"));
   if (!meta || source === undefined) continue;
   for (const issue of auditSource(source)) problem(id, issue);
-  if (!source.includes(`data-composition-id="${id}"`)) problem(id, "root must use data-composition-id");
-  if (!source.includes(`window.__timelines["${id}"]`)) problem(id, "timeline must register as its id");
+  if (!source.includes(`data-composition-id="${id}"`))
+    problem(id, "root must use data-composition-id");
+  if (!source.includes(`window.__timelines["${id}"]`))
+    problem(id, "timeline must register as its id");
   // HyperFrames drops the root element's id when it inlines a sub-composition.
   if (source.includes(`"${id}-root"`) && /getElementById\(\s*["'][^"']*-root["']/.test(source)) {
-    problem(id, `do not look up "#${id}-root" (its id is dropped when mounted); use [data-composition-id="${id}"]`);
+    problem(
+      id,
+      `do not look up "#${id}-root" (its id is dropped when mounted); use [data-composition-id="${id}"]`,
+    );
   }
   pieces.push(meta);
 }
@@ -217,7 +229,10 @@ for (const id of lookIds) {
   // (WCAG AA 4.5:1; saturated duotone fields rarely reach AAA 7:1), --muted
   // carries small labels (4.5:1 too).
   const field = tokenColor(tokens, "--field");
-  for (const [token, min] of [["--ink", 4.5], ["--muted", 4.5]]) {
+  for (const [token, min] of [
+    ["--ink", 4.5],
+    ["--muted", 4.5],
+  ]) {
     const fg = tokenColor(tokens, token);
     if (field && fg) {
       const ratio = contrast(over(fg, field), field);

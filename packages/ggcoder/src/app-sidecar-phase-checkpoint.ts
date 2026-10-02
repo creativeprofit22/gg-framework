@@ -40,8 +40,7 @@ export class PhaseCheckpointError extends Error {
 }
 
 export type ActivePhaseStageResult =
-  | { status: "no-active-phase" }
-  | { status: "updated"; context: ActivePhaseContextV1 };
+  { status: "no-active-phase" } | { status: "updated"; context: ActivePhaseContextV1 };
 
 export type ActivePhaseLinkSyncResult =
   | { status: "no-active-phase" }

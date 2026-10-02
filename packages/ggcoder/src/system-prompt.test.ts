@@ -250,7 +250,9 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Offering optional follow-up work counts as a question.");
     expect(prompt).toContain("No question? Just end; never invent one.");
     // A card never stands in for an answer, and never arrives without context.
-    expect(prompt).toContain("A card never replaces an answer: when the user asks something, answer it");
+    expect(prompt).toContain(
+      "A card never replaces an answer: when the user asks something, answer it",
+    );
     expect(prompt).toContain("first write what you found and why you need their call");
     expect(prompt).not.toContain("the ask is the last line");
     expect(prompt).not.toContain("Blockquote nothing else");
@@ -271,7 +273,9 @@ describe("buildSystemPrompt", () => {
     // instead of publishing a second, drifting list of reasons to stop.
     expect(talk).toContain("When something in How to Work genuinely stops you");
     expect(prompt).toContain("Stop for user decisions, secrets/access, cost");
-    expect(prompt).toContain("Audits, planning and honest partial progress may stop without completing a task or phase");
+    expect(prompt).toContain(
+      "Audits, planning and honest partial progress may stop without completing a task or phase",
+    );
     expect(prompt).toContain("Report remaining gaps; never fabricate Done");
 
     // The blockquote is the ask and only the ask, so exactly one blockquote

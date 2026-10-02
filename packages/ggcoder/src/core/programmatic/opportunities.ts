@@ -73,11 +73,10 @@ function detectCanonicalTauri(paths: ReadonlySet<string>): OpportunityDraft[] {
           "The app has the three configuration files needed to check its Tauri desktop packaging setup.",
         inputPaths,
         currentProcess: "Tauri packaging support must otherwise be maintained manually.",
-        expectedOutput: "Set up repeatable desktop app packaging for this computer's operating system.",
+        expectedOutput:
+          "Set up repeatable desktop app packaging for this computer's operating system.",
         verification: "Check that the generated packaging files match this desktop app.",
-        risks: [
-          "New packaging files could conflict with packaging files you already maintain.",
-        ],
+        risks: ["New packaging files could conflict with packaging files you already maintain."],
         confidence: "medium",
         mutationPaths,
         evidence: {

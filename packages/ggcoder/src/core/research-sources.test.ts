@@ -101,7 +101,10 @@ describe("checkPlanCitations", () => {
   it.each([
     ["a bare none declaration", "## Sources\nSources: none"],
     ["a none declaration with only punctuation", "## Sources\nSources: none."],
-    ["a none declaration whose reason is on the next line", "Sources: none\nthe corpus results were unrelated."],
+    [
+      "a none declaration whose reason is on the next line",
+      "Sources: none\nthe corpus results were unrelated.",
+    ],
   ])("rejects %s", (_label, content) => {
     expect(checkPlanCitations(content, ledgerWithSearch()).ok).toBe(false);
   });
@@ -142,7 +145,13 @@ describe("checkDraftCitations", () => {
     ],
     [
       "a repo URL with different label and URL casing",
-      [{ owner: "Vercel", repo: "Turborepo", canonicalUrl: "https://github.com/VERCEL/turborepo.git" }],
+      [
+        {
+          owner: "Vercel",
+          repo: "Turborepo",
+          canonicalUrl: "https://github.com/VERCEL/turborepo.git",
+        },
+      ],
       undefined,
     ],
     ["an explicit reason", [], "Corpus results only confirmed the existing local design."],
@@ -157,11 +166,19 @@ describe("checkDraftCitations", () => {
     ],
     [
       "matching labels but a URL to an unrelated repo",
-      { owner: "vercel", repo: "turborepo", canonicalUrl: "https://github.com/evil/repo/blob/c42dc53/a.ts" },
+      {
+        owner: "vercel",
+        repo: "turborepo",
+        canonicalUrl: "https://github.com/evil/repo/blob/c42dc53/a.ts",
+      },
     ],
     [
       "a retrieved-repo URL behind a non-GitHub host",
-      { owner: "vercel", repo: "turborepo", canonicalUrl: "https://evil.test/github.com/vercel/turborepo" },
+      {
+        owner: "vercel",
+        repo: "turborepo",
+        canonicalUrl: "https://evil.test/github.com/vercel/turborepo",
+      },
     ],
     [
       "a retrieved-repo URL with misleading labels",

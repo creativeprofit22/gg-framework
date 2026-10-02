@@ -63,7 +63,9 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("Historical reports were not rerun");
     expect(prompt).toContain("unclassified or unavailable results are not failed tests");
     expect(prompt).toContain("Choose relevant checks, not one per criterion");
-    expect(prompt).toContain("Audits, approved planning and honest partial progress may stop without completing a phase");
+    expect(prompt).toContain(
+      "Audits, approved planning and honest partial progress may stop without completing a phase",
+    );
     expect(prompt).not.toContain("trust only PASSED rows");
   });
 
@@ -124,10 +126,14 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).not.toContain('{"verdict"');
     expect(prompt).not.toContain("except the structured corpus limitation");
     expect(prompt).toContain("Never append prose to ALL_CLEAR");
-    expect(prompt).toContain("For otherwise approved work ONLY, if a relevant corpus comparison was attempted but unavailable or declined");
+    expect(prompt).toContain(
+      "For otherwise approved work ONLY, if a relevant corpus comparison was attempted but unavailable or declined",
+    );
     expect(prompt).toContain("Report known failures and unavailable checks honestly");
     expect(prompt).toContain("missing transcript evidence alone is not a failure");
-    expect(prompt).toContain("PROMPT only when something real is wrong or unfinished: a failing/absent test, a broken build");
+    expect(prompt).toContain(
+      "PROMPT only when something real is wrong or unfinished: a failing/absent test, a broken build",
+    );
   });
 
   it("tells Ken injected transcript lines are his own, not user asks", () => {

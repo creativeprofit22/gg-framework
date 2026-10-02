@@ -213,7 +213,8 @@ export function projectRoadmapInspection(
   const inspection: RoadmapInspection = {
     projectKey: loaded.snapshot.projectKey,
     revision: loaded.snapshot.revision,
-    phases: loaded.snapshot.document.phases.filter(isNotesPhasePresent)
+    phases: loaded.snapshot.document.phases
+      .filter(isNotesPhasePresent)
       .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
       .map(projectPhaseInspection),
   };
@@ -222,8 +223,11 @@ export function projectRoadmapInspection(
 
 function projectPhaseInspection(phase: NotesPhase): RoadmapInspection["phases"][number] {
   // Retired evidence stays in Notes history, not a new run's current verification.
-  const boundary = phase.deletion?.events.reduce((count, event) =>
-    event.action === "delete" ? event.retired.roadmapEventCount : count, 0) ?? 0;
+  const boundary =
+    phase.deletion?.events.reduce(
+      (count, event) => (event.action === "delete" ? event.retired.roadmapEventCount : count),
+      0,
+    ) ?? 0;
   phase = { ...phase, roadmapEvents: phase.roadmapEvents.slice(boundary) };
   const statusUpdates = phase.roadmapEvents.filter((event) => event.type === "status-update");
   const progress = statusUpdates.at(-1) ?? null;

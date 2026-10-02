@@ -39,7 +39,10 @@ export type PooledClient =
  * is absent; the proxy then exits with "Unknown binary". Returns the evidence
  * line, or null when the failure looks like a genuine server crash.
  */
-export function missingBinaryEvidence(spawnErrorCode: string | undefined, stderr: string): string | null {
+export function missingBinaryEvidence(
+  spawnErrorCode: string | undefined,
+  stderr: string,
+): string | null {
   if (spawnErrorCode === "ENOENT") return "executable not found (ENOENT)";
   const rustup = /Unknown binary '[^']+' in (?:official )?toolchain '[^']+'/.exec(stderr);
   if (rustup) return rustup[0];
@@ -133,7 +136,9 @@ export class LspClientPool {
   async retain(spec: LspServerSpec, root: string, holder: object): Promise<PooledClient> {
     if (this.releasedHolders.has(holder)) return { status: "unavailable" };
     const key = this.keyFor(spec, root);
-    const retirements = [...this.retiring].filter(([entry]) => entry.key === key).map(([, cleanup]) => cleanup);
+    const retirements = [...this.retiring]
+      .filter(([entry]) => entry.key === key)
+      .map(([, cleanup]) => cleanup);
     if (retirements.length) await Promise.all(retirements);
     if (this.releasedHolders.has(holder)) return { status: "unavailable" };
     const missingHint = this.missing.get(key);
@@ -237,23 +242,30 @@ export class LspClientPool {
   /** Release shared references, but retain exclusive ownership until native close. */
   async releaseAndWait(holder: object): Promise<void> {
     this.releasedHolders.add(holder);
-    const owned = [...new Set([
-      ...(this.heldEntries.get(holder) ?? []),
-      ...[...this.entries.values()].filter((entry) => entry.holders.has(holder)),
-    ])];
-    await Promise.all(owned.map((entry) => {
-      if (entry.holders.size > 1) { entry.holders.delete(holder); return; }
-      const existing = this.retiring.get(entry);
-      if (existing) return existing;
-      const cleanup = (async () => {
-        await Promise.all([entry.pending, entry.native.client?.shutdownAndWait()]);
-        entry.holders.delete(holder);
-        if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
-        this.retiring.delete(entry);
-      })();
-      this.retiring.set(entry, cleanup);
-      return cleanup;
-    }));
+    const owned = [
+      ...new Set([
+        ...(this.heldEntries.get(holder) ?? []),
+        ...[...this.entries.values()].filter((entry) => entry.holders.has(holder)),
+      ]),
+    ];
+    await Promise.all(
+      owned.map((entry) => {
+        if (entry.holders.size > 1) {
+          entry.holders.delete(holder);
+          return;
+        }
+        const existing = this.retiring.get(entry);
+        if (existing) return existing;
+        const cleanup = (async () => {
+          await Promise.all([entry.pending, entry.native.client?.shutdownAndWait()]);
+          entry.holders.delete(holder);
+          if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+          this.retiring.delete(entry);
+        })();
+        this.retiring.set(entry, cleanup);
+        return cleanup;
+      }),
+    );
     this.heldEntries.delete(holder);
     if (this.entries.size === 0) this.stopSweep();
   }
@@ -344,7 +356,12 @@ export class LspClientPool {
     this.sweepTimer = undefined;
   }
 
-  private rememberMissing(key: string, spec: LspServerSpec, root: string, evidence: string): PooledClient {
+  private rememberMissing(
+    key: string,
+    spec: LspServerSpec,
+    root: string,
+    evidence: string,
+  ): PooledClient {
     const hint = installHintFor(spec);
     this.missing.set(key, hint);
     log("WARN", "lsp", `${spec.id} language server binary missing`, { root, evidence, hint });
@@ -385,7 +402,9 @@ export class LspClientPool {
       await client.initialize(INIT_TIMEOUT_MS);
       if (!client.isAlive) {
         const evidence = await this.missingAfterExit(client);
-        return evidence ? this.rememberMissing(key, spec, root, evidence) : { status: "server_failed" };
+        return evidence
+          ? this.rememberMissing(key, spec, root, evidence)
+          : { status: "server_failed" };
       }
       log("INFO", "lsp", `${spec.id} server initialized`, {
         root,

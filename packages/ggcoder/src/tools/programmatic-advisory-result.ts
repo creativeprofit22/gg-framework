@@ -20,11 +20,16 @@ export function createProgrammaticAdvisoryResultTool(
       const turn = getTurn();
       if (!turn) throw new Error("No active host advisory turn.");
       return turn.submit(input, {
-        snapshot: (snapshot) => commandInformation
-          ? checkAdvisoryCommandSnapshot(commandInformation, snapshot, context) : Promise.resolve(false),
+        snapshot: (snapshot) =>
+          commandInformation
+            ? checkAdvisoryCommandSnapshot(commandInformation, snapshot, context)
+            : Promise.resolve(false),
         page: async (offset) => {
-          if (!commandInformation) throw new Error("Command catalog unavailable under host policy.");
-          return JSON.parse(String(await commandInformation.execute({ action: "list", offset }, context))) as unknown;
+          if (!commandInformation)
+            throw new Error("Command catalog unavailable under host policy.");
+          return JSON.parse(
+            String(await commandInformation.execute({ action: "list", offset }, context)),
+          ) as unknown;
         },
         signal: context.signal,
       });

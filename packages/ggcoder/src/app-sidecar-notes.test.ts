@@ -160,21 +160,30 @@ beforeEach(async () => {
     ["alias", fakeSession("c:/work/./project")],
     ["other", fakeSession("C:\\Work\\Other")],
   ]);
-  const deletionSessions = [...sessions.values()].map(context => ({
-    context, mutations: new AppSidecarSessionMutationCoordinator(),
+  const deletionSessions = [...sessions.values()].map((context) => ({
+    context,
+    mutations: new AppSidecarSessionMutationCoordinator(),
     getState: () => ({ cwd: context.cwd, ...context.currentSession }),
     getBusyState: () => ({ running: false, autopilotActive: false, runLifecycleRunning: false }),
-    getActivePhaseContext: () => undefined, setActivePhaseContext: async () => {},
+    getActivePhaseContext: () => undefined,
+    setActivePhaseContext: async () => {},
   }));
-  const deletion = createAppSidecarPhaseDeletionCoordinator({ repository,
+  const deletion = createAppSidecarPhaseDeletionCoordinator({
+    repository,
     leases: new RoadmapPhaseLeaseRepository(path.join(root, ".gg")),
     reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
-    listSessions: () => deletionSessions, onCommittedSnapshot,
+    listSessions: () => deletionSessions,
+    onCommittedSnapshot,
   });
   const handler = createAppSidecarNotesHandler({
     repository,
-    phaseDeletion: { execute: (input, context) => deletion.execute(input,
-      deletionSessions.find(session => session.context === context)!) },
+    phaseDeletion: {
+      execute: (input, context) =>
+        deletion.execute(
+          input,
+          deletionSessions.find((session) => session.context === context)!,
+        ),
+    },
     diagnostics: createAppSidecarStorageDiagnostics({
       applicationIdentity: "com.ggcoder.local-fork",
       agentDataRoot: path.join(root, ".gg"),
@@ -183,8 +192,13 @@ beforeEach(async () => {
     onCommittedSnapshot,
   });
   server = http.createServer((req, res) => {
-    if (req.url === "/notes/phase-deletion" && req.headers["x-gg-token"] !== "synthetic-native-token") {
-      res.writeHead(401); res.end(JSON.stringify({ error: "unauthorized" })); return;
+    if (
+      req.url === "/notes/phase-deletion" &&
+      req.headers["x-gg-token"] !== "synthetic-native-token"
+    ) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
     }
     const header = req.headers["x-gg-session"];
     const id = typeof header === "string" ? header : header?.[0];
@@ -227,25 +241,62 @@ async function request(
 
 it("runs authenticated deletion/recovery through HTTP, real coordination and durable storage", async () => {
   const context = sessions.get("a")!;
-  const document = notes("Unrelated content stays"); document.phases[0]!.session = null;
+  const document = notes("Unrelated content stays");
+  document.phases[0]!.session = null;
   await repository.migrate(context.cwd, document);
-  const input = { version: 1, action: "delete", operationId: "http-delete", phaseId: "phase-1",
-    expectedProjectKey: canonicalProjectKey(context.cwd), expectedRevision: 1, expectedGeneration: 0 };
-  const post = (body: unknown, id = "a", headers?: Record<string, string>) => request(id, "/notes/phase-deletion",
-    { method: "POST", body: JSON.stringify(body), headers });
+  const input = {
+    version: 1,
+    action: "delete",
+    operationId: "http-delete",
+    phaseId: "phase-1",
+    expectedProjectKey: canonicalProjectKey(context.cwd),
+    expectedRevision: 1,
+    expectedGeneration: 0,
+  };
+  const post = (body: unknown, id = "a", headers?: Record<string, string>) =>
+    request(id, "/notes/phase-deletion", { method: "POST", body: JSON.stringify(body), headers });
   expect((await post(input, "a", { "x-gg-token": "wrong" })).response.status).toBe(401);
   expect((await post(input, "unknown")).response.status).toBe(404);
   expect((await post(input, "other")).body).toMatchObject({ status: "unavailable" });
   expect((await post({ ...input, actor: "admin" })).response.status).toBe(400);
   expect((await post({ ...input, operationId: "x".repeat(20000) })).response.status).toBe(413);
-  expect((await post(input)).body).toMatchObject({ status: "committed", replayed: false, snapshot: { revision: 2 } });
-  expect((await post(input)).body).toMatchObject({ status: "committed", replayed: true, snapshot: { revision: 2 } });
-  expect((await post({ ...input, action: "recover", operationId: "http-recover", expectedRevision: 2, expectedGeneration: 1 })).body)
-    .toMatchObject({ status: "committed", snapshot: { revision: 3, document: { reference: document.reference,
-      phases: [{ deletion: { currentDeletionId: null }, session: null, reminder: null }] } } });
-  expect(sessions.get("alias")!.events.length).toBe(3); expect(sessions.get("other")!.events).toEqual([]);
+  expect((await post(input)).body).toMatchObject({
+    status: "committed",
+    replayed: false,
+    snapshot: { revision: 2 },
+  });
+  expect((await post(input)).body).toMatchObject({
+    status: "committed",
+    replayed: true,
+    snapshot: { revision: 2 },
+  });
+  expect(
+    (
+      await post({
+        ...input,
+        action: "recover",
+        operationId: "http-recover",
+        expectedRevision: 2,
+        expectedGeneration: 1,
+      })
+    ).body,
+  ).toMatchObject({
+    status: "committed",
+    snapshot: {
+      revision: 3,
+      document: {
+        reference: document.reference,
+        phases: [{ deletion: { currentDeletionId: null }, session: null, reminder: null }],
+      },
+    },
+  });
+  expect(sessions.get("alias")!.events.length).toBe(3);
+  expect(sessions.get("other")!.events).toEqual([]);
   const restarted = new ProjectNotesRepository(path.join(root, ".gg"));
-  expect(await restarted.load(context.cwd)).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
+  expect(await restarted.load(context.cwd)).toMatchObject({
+    status: "ok",
+    snapshot: { revision: 3 },
+  });
 });
 
 async function chunkedRequest(
@@ -400,9 +451,13 @@ describe("app sidecar Notes routes", () => {
       const result = await request("a", route, init);
       expect(result.response.status).toBe(409);
       expect(result.body).toMatchObject({
-        status: "unsupported", source: "primary", message: expect.stringContaining("supports these Notes"),
+        status: "unsupported",
+        source: "primary",
+        message: expect.stringContaining("supports these Notes"),
       });
-      expect(await Promise.all([fs.readFile(paths.primary), fs.readFile(paths.backup)])).toEqual(before);
+      expect(await Promise.all([fs.readFile(paths.primary), fs.readFile(paths.backup)])).toEqual(
+        before,
+      );
     }
     expect(committedSnapshots).toEqual([]);
     expect(sessions.get("a")!.events).toEqual([]);

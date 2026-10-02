@@ -18,14 +18,17 @@ describe("app sidecar prompt enhancement validation", () => {
     expect(enhance).not.toHaveBeenCalled();
   });
 
-  it.each(["x".repeat(12_000), "😀".repeat(6_000)])("accepts a non-empty prompt at the UTF-16 limit: %#", async (text) => {
-    expect(text.length).toBe(ENHANCE_PROMPT_MAX_CHARS);
-    const result = { enhanced: "done", segments: [] };
-    const enhance = vi.fn(async () => result);
-    await expect(runEnhancePromptRequest({ text }, enhance)).resolves.toEqual({
-      status: 200,
-      body: result,
-    });
-    expect(enhance).toHaveBeenCalledWith(text);
-  });
+  it.each(["x".repeat(12_000), "😀".repeat(6_000)])(
+    "accepts a non-empty prompt at the UTF-16 limit: %#",
+    async (text) => {
+      expect(text.length).toBe(ENHANCE_PROMPT_MAX_CHARS);
+      const result = { enhanced: "done", segments: [] };
+      const enhance = vi.fn(async () => result);
+      await expect(runEnhancePromptRequest({ text }, enhance)).resolves.toEqual({
+        status: 200,
+        body: result,
+      });
+      expect(enhance).toHaveBeenCalledWith(text);
+    },
+  );
 });

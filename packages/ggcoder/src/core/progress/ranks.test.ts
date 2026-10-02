@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LEVEL, buildSnapshot, levelForXp, rankForLevel, rankLadder, xpForLevel } from "./ranks.js";
+import {
+  MAX_LEVEL,
+  buildSnapshot,
+  levelForXp,
+  rankForLevel,
+  rankLadder,
+  xpForLevel,
+} from "./ranks.js";
 import { createEmptyProgress } from "./store.js";
 
 describe("buildSnapshot cap metadata", () => {

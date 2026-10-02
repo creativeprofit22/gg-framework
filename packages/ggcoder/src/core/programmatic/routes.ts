@@ -1,8 +1,19 @@
 import path from "node:path";
-import { sha256 as hash, canonicalRepositoryRoot, containedPath, stableJson } from "../tauri-package/paths.js";
+import {
+  sha256 as hash,
+  canonicalRepositoryRoot,
+  containedPath,
+  stableJson,
+} from "../tauri-package/paths.js";
 import { discoverCommands, type CommandDiscoveryOptions } from "../command-discovery.js";
 import { commandLocalStat, observeCommandSources, readCommandText } from "./command-creation.js";
-import { directCommandSelectionV1Schema, directExecutionSnapshotV1Schema, type DirectCommandSelection, type DirectExecutionPolicy, type DirectExecutionSnapshot } from "./contracts.js";
+import {
+  directCommandSelectionV1Schema,
+  directExecutionSnapshotV1Schema,
+  type DirectCommandSelection,
+  type DirectExecutionPolicy,
+  type DirectExecutionSnapshot,
+} from "./contracts.js";
 import { loadCustomCommands, type CustomCommand } from "../custom-commands.js";
 import { getPromptCommand, type PromptCommand } from "../prompt-commands.js";
 import type {
@@ -41,7 +52,9 @@ function scopedArguments(opportunity: DiscoveredOpportunityV1): RouteArgumentV1[
 function tauriArguments(opportunity: DiscoveredOpportunityV1): RouteArgumentV1[] {
   const packageManifest = opportunity.identity.path ?? opportunity.representativeCase;
   const separator = packageManifest.lastIndexOf("/");
-  return [{ name: "app-root", value: separator === -1 ? "." : packageManifest.slice(0, separator) }];
+  return [
+    { name: "app-root", value: separator === -1 ? "." : packageManifest.slice(0, separator) },
+  ];
 }
 
 export const SPECIALIST_ROUTES = Object.freeze([
@@ -92,10 +105,7 @@ function registryEntry(command: string): SpecialistDefinition | UnavailableComma
   const entries = SPECIALIST_ROUTES.filter((entry) => entry.command === command);
   if (entries.length === 0) return unavailable("unsupported");
   const entry = entries[0]!;
-  if (
-    entries.length !== 1 ||
-    (entry.owner === "built-in") !== (entry.portability === "bundled")
-  ) {
+  if (entries.length !== 1 || (entry.owner === "built-in") !== (entry.portability === "bundled")) {
     return unavailable("ambiguous", entry);
   }
   return entry;
@@ -161,7 +171,8 @@ export function resolveOpportunityRoute(
       status: "unroutable",
       opportunityId: opportunity.identity.id,
       availability: unavailable("unsupported"),
-      reason: "GG has no supported task tool for this opportunity. It can be reviewed but not started here.",
+      reason:
+        "GG has no supported task tool for this opportunity. It can be reviewed but not started here.",
     });
   }
 
@@ -176,11 +187,7 @@ export function resolveOpportunityRoute(
     });
   }
   const definition = registryEntry(command.data);
-  const availability = resolveSpecialistAvailability(
-    command.data,
-    customCommands,
-    builtInCommand,
-  );
+  const availability = resolveSpecialistAvailability(command.data, customCommands, builtInCommand);
   if ("status" in definition) {
     return routeResolutionV1Schema.parse({
       version: PROGRAMMATIC_CONTRACT_VERSION,
@@ -208,11 +215,13 @@ export function resolveOpportunityRoute(
     opportunityId: opportunity.identity.id,
     configurationFingerprint,
     specialistCommand: command.data,
-    arguments: definition.arguments(opportunity).sort((left, right) =>
-      compareText(left.name, right.name),
-    ),
+    arguments: definition
+      .arguments(opportunity)
+      .sort((left, right) => compareText(left.name, right.name)),
     evidencePaths: observedEvidencePaths(opportunity),
-    scopePaths: [...new Set([...opportunity.inputPaths, ...opportunity.mutationPaths])].sort(compareText),
+    scopePaths: [...new Set([...opportunity.inputPaths, ...opportunity.mutationPaths])].sort(
+      compareText,
+    ),
     successCondition: opportunity.verification,
     mutates: definition.mutates,
     reason: opportunity.expectedOutput,
@@ -241,7 +250,9 @@ export type ResolvedSpecialist = Readonly<{
 async function loadSpecialistInputs(cwd: string) {
   return {
     customs: await loadCustomCommands(cwd),
-    builtIns: new Map(SPECIALIST_ROUTES.map(({ command }) => [command, getPromptCommand(command)] as const)),
+    builtIns: new Map(
+      SPECIALIST_ROUTES.map(({ command }) => [command, getPromptCommand(command)] as const),
+    ),
   };
 }
 
@@ -251,9 +262,10 @@ export async function resolveProgrammaticSpecialist(
   fingerprint: ConfigurationFingerprintV1,
 ): Promise<ResolvedSpecialist | RouteResolutionV1> {
   const { customs, builtIns } = await loadSpecialistInputs(cwd);
-  const builtin = opportunity.route.status === "routable"
-    ? builtIns.get(opportunity.route.specialistCommand)
-    : undefined;
+  const builtin =
+    opportunity.route.status === "routable"
+      ? builtIns.get(opportunity.route.specialistCommand)
+      : undefined;
   const route = resolveOpportunityRoute(opportunity, fingerprint, customs, builtin);
   if (route.status !== "routable") return route;
   const custom = customs.find(({ name }) => name === route.specialistCommand);
@@ -282,53 +294,106 @@ async function executionFileIdentity(absolute: string) {
     ancestors.push({ path: parent, dev: owner.dev, ino: owner.ino, birthtime: owner.birthtimeMs });
     if (parent === path.dirname(parent)) break;
   }
-  return hash(stableJson({ path: absolute, dev: stat.dev, ino: stat.ino, size: stat.size,
-    mtime: stat.mtimeMs, ctime: stat.ctimeMs, birthtime: stat.birthtimeMs, ancestors }));
+  return hash(
+    stableJson({
+      path: absolute,
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtime: stat.mtimeMs,
+      ctime: stat.ctimeMs,
+      birthtime: stat.birthtimeMs,
+      ancestors,
+    }),
+  );
 }
 
 /** Exact-content direct selection; discovery decides ownership, never a supplied path. */
 export async function resolveDirectCommand(
-  cwd: string, input: DirectCommandSelection, policy: DirectExecutionPolicy,
-  signal: AbortSignal, options: CommandDiscoveryOptions = {},
+  cwd: string,
+  input: DirectCommandSelection,
+  policy: DirectExecutionPolicy,
+  signal: AbortSignal,
+  options: CommandDiscoveryOptions = {},
 ): Promise<ResolvedDirectCommand> {
   const selection = directCommandSelectionV1Schema.parse(input);
   signal.throwIfAborted();
-  if (selection.containment !== "agent-session") throw new Error("OS confinement is unsupported. Use a separately approved confined workflow.");
-  if (selection.command.invocationKind !== "prompt") throw new Error("Workspace actions cannot run here. Use their ordinary approved workflow.");
-  if (!(await commandLocalStat(cwd))?.isDirectory()) throw new Error("Project owner is unavailable or linked.");
+  if (selection.containment !== "agent-session")
+    throw new Error("OS confinement is unsupported. Use a separately approved confined workflow.");
+  if (selection.command.invocationKind !== "prompt")
+    throw new Error("Workspace actions cannot run here. Use their ordinary approved workflow.");
+  if (!(await commandLocalStat(cwd))?.isDirectory())
+    throw new Error("Project owner is unavailable or linked.");
   const root = await canonicalRepositoryRoot(cwd);
-  const repositorySha256 = hash(stableJson({ root, dev: (await commandLocalStat(root))!.dev, ino: (await commandLocalStat(root))!.ino }));
+  const repositorySha256 = hash(
+    stableJson({
+      root,
+      dev: (await commandLocalStat(root))!.dev,
+      ino: (await commandLocalStat(root))!.ino,
+    }),
+  );
   const sources = await observeCommandSources(root, signal);
   const discovery = await discoverCommands(root, options);
   signal.throwIfAborted();
   const entry = discovery.resolve(selection.command.name);
-  if (!entry || !discovery.entries.includes(entry) || entry.listing.name !== selection.command.name ||
-    entry.listing.origin !== selection.command.source || entry.listing.invocationKind !== "prompt")
-    throw new Error("The canonical command or selected owner is unavailable. Refresh discovery and review the current command.");
+  if (
+    !entry ||
+    !discovery.entries.includes(entry) ||
+    entry.listing.name !== selection.command.name ||
+    entry.listing.origin !== selection.command.source ||
+    entry.listing.invocationKind !== "prompt"
+  )
+    throw new Error(
+      "The canonical command or selected owner is unavailable. Refresh discovery and review the current command.",
+    );
   const name = entry.listing.name.toLowerCase();
   const aliases = new Set([name, ...entry.listing.aliases.map((alias) => alias.toLowerCase())]);
-  const competing = discovery.entries.filter((candidate) => candidate !== entry &&
-    [candidate.listing.name, ...candidate.listing.aliases].some((identity) => aliases.has(identity.toLowerCase())));
-  if (competing.length) throw new Error("Ambiguous command name or alias. Resolve collisions before execution.");
+  const competing = discovery.entries.filter(
+    (candidate) =>
+      candidate !== entry &&
+      [candidate.listing.name, ...candidate.listing.aliases].some((identity) =>
+        aliases.has(identity.toLowerCase()),
+      ),
+  );
+  if (competing.length)
+    throw new Error("Ambiguous command name or alias. Resolve collisions before execution.");
   let raw: string;
   let prompt: string;
   let ownerSha256: string;
   let sourceIdentitySha256: string;
   if (entry.custom) {
-    const chosen = sources.sources.find((source) => path.resolve(source.filePath) === path.resolve(entry.custom!.filePath));
-    if (!chosen || chosen.name !== entry.listing.name || chosen.prompt !== entry.custom.prompt || !chosen.filename.endsWith(".md"))
+    const chosen = sources.sources.find(
+      (source) => path.resolve(source.filePath) === path.resolve(entry.custom!.filePath),
+    );
+    if (
+      !chosen ||
+      chosen.name !== entry.listing.name ||
+      chosen.prompt !== entry.custom.prompt ||
+      !chosen.filename.endsWith(".md")
+    )
       throw new Error("Command source changed or is unsupported. Refresh and review again.");
-    const collisions = sources.sources.filter((source) => source.scope === chosen.scope &&
-      [source.name, source.filename.replace(/\.md$/i, "")].some((identity) => aliases.has(identity.toLowerCase())));
+    const collisions = sources.sources.filter(
+      (source) =>
+        source.scope === chosen.scope &&
+        [source.name, source.filename.replace(/\.md$/i, "")].some((identity) =>
+          aliases.has(identity.toLowerCase()),
+        ),
+    );
     if (collisions.length !== 1 || collisions[0] !== chosen)
-      throw new Error("Ambiguous same-owner name, filename or case collision. Rename conflicting commands first.");
+      throw new Error(
+        "Ambiguous same-owner name, filename or case collision. Rename conflicting commands first.",
+      );
     const identity = await executionFileIdentity(chosen.filePath);
     raw = await readCommandText(chosen.filePath, signal);
-    if (raw !== chosen.raw || identity !== await executionFileIdentity(chosen.filePath))
+    if (raw !== chosen.raw || identity !== (await executionFileIdentity(chosen.filePath)))
       throw new Error("Command changed while being reviewed.");
     prompt = chosen.prompt;
-    ownerSha256 = hash(stableJson({ root, source: selection.command.source, path: path.resolve(chosen.filePath) }));
-    sourceIdentitySha256 = hash(stableJson({ identity, directory: await executionFileIdentity(chosen.directory) }));
+    ownerSha256 = hash(
+      stableJson({ root, source: selection.command.source, path: path.resolve(chosen.filePath) }),
+    );
+    sourceIdentitySha256 = hash(
+      stableJson({ identity, directory: await executionFileIdentity(chosen.directory) }),
+    );
   } else if (entry.prompt) {
     // Built-ins are host prompt objects, not local Markdown files.
     raw = stableJson(entry.prompt);
@@ -347,11 +412,17 @@ export async function resolveDirectCommand(
       const absolute = containedPath(root, relative);
       const identitySha256 = await executionFileIdentity(absolute);
       const content = await readCommandText(absolute, signal);
-      if (identitySha256 !== await executionFileIdentity(absolute)) throw new Error("Declared file changed during review.");
+      if (identitySha256 !== (await executionFileIdentity(absolute)))
+        throw new Error("Declared file changed during review.");
       bytes += Buffer.byteLength(content);
       if (bytes > 512_000) throw new Error("Declared files exceed the aggregate review limit.");
       previews.push({ path: relative, content });
-      files.push({ path: relative, sha256: hash(content), identitySha256, bytes: Buffer.byteLength(content) });
+      files.push({
+        path: relative,
+        sha256: hash(content),
+        identitySha256,
+        bytes: Buffer.byteLength(content),
+      });
     }
     return files;
   };
@@ -362,17 +433,39 @@ export async function resolveDirectCommand(
     const stat = await commandLocalStat(directory);
     catalogOwners.push([directory, stat ? await executionFileIdentity(directory) : null]);
   }
-  sourceIdentitySha256 = hash(stableJson({ sourceIdentitySha256, catalogOwners, catalog: sources.fingerprint }));
+  sourceIdentitySha256 = hash(
+    stableJson({ sourceIdentitySha256, catalogOwners, catalog: sources.fingerprint }),
+  );
   const snapshot = directExecutionSnapshotV1Schema.parse({
-    version: 1, selection, policy, repositorySha256, rawMarkdownSha256: hash(raw), sourceIdentitySha256,
-    command: { version: 1, command: selection.command, capabilityKind: helpers.length ? "script-backed" : "prompt-only",
-      ownerSha256, bodySha256: hash(prompt), helpers: helpers.map(({ path, sha256 }) => ({ path, sha256 })) },
-    helpers, prerequisites,
+    version: 1,
+    selection,
+    policy,
+    repositorySha256,
+    rawMarkdownSha256: hash(raw),
+    sourceIdentitySha256,
+    command: {
+      version: 1,
+      command: selection.command,
+      capabilityKind: helpers.length ? "script-backed" : "prompt-only",
+      ownerSha256,
+      bodySha256: hash(prompt),
+      helpers: helpers.map(({ path, sha256 }) => ({ path, sha256 })),
+    },
+    helpers,
+    prerequisites,
   });
   const preview = JSON.stringify({ selection, policy, command: raw, files: previews });
-  if (Buffer.byteLength(preview) > 64_000) throw new Error("Full review exceeds 64 KB. Reduce declared content; execution content is never truncated.");
+  if (Buffer.byteLength(preview) > 64_000)
+    throw new Error(
+      "Full review exceeds 64 KB. Reduce declared content; execution content is never truncated.",
+    );
   signal.throwIfAborted();
-  return { command: Object.freeze({ name: selection.command.name, prompt }), snapshot, sha256: hash(stableJson(snapshot)), preview };
+  return {
+    command: Object.freeze({ name: selection.command.name, prompt }),
+    snapshot,
+    sha256: hash(stableJson(snapshot)),
+    preview,
+  };
 }
 
 export async function resolveProgrammaticRoutes(

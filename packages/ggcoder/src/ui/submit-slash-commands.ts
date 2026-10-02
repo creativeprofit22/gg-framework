@@ -12,7 +12,10 @@ export const UI_SLASH_COMMANDS = registryCommandListings([
   { name: "rewind", aliases: [], description: "Restore a checkpoint" },
   { name: "ideal-on", aliases: [], description: "Enable pre-final review" },
   { name: "ideal-off", aliases: [], description: "Disable pre-final review" },
-]).map((command) => ({ ...command, input: { text: "none", references: "none", attachments: "none" } as const }));
+]).map((command) => ({
+  ...command,
+  input: { text: "none", references: "none", attachments: "none" } as const,
+}));
 
 interface UiSlashCommandActions {
   openModelSelector: () => void;

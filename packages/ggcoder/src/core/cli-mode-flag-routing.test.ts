@@ -44,9 +44,9 @@ describe("CLI mode flag routing", () => {
     ["interactive", {}],
     ["RPC", { rpc: true }],
   ] as const)("rejects JSON-only agent flags in %s mode", (_label, modeFlags) => {
-    expect(() =>
-      routeCliModeFlags({ ...modeFlags, "agent-prompt": "Review the change" }),
-    ).toThrow("--agent-prompt is only supported with --json");
+    expect(() => routeCliModeFlags({ ...modeFlags, "agent-prompt": "Review the change" })).toThrow(
+      "--agent-prompt is only supported with --json",
+    );
     expect(() => routeCliModeFlags({ ...modeFlags, "agent-context": "none" })).toThrow(
       "--agent-context is only supported with --json",
     );
@@ -70,9 +70,7 @@ describe("CLI mode flag routing", () => {
     expect(() => routeCliModeFlags({ json: true, rpc: true })).toThrow(
       "--json and --rpc cannot be used together",
     );
-    expect(() => routeCliModeFlags({ "max-turns": "3x" })).toThrow(
-      "Expected a positive integer",
-    );
+    expect(() => routeCliModeFlags({ "max-turns": "3x" })).toThrow("Expected a positive integer");
     expect(() => routeCliModeFlags({ json: true, "agent-context": "all" })).toThrow(
       "Expected project or none",
     );
@@ -80,7 +78,9 @@ describe("CLI mode flag routing", () => {
 
   it("documents every mode-restricted advertised flag", () => {
     const cliSource = fs.readFileSync(new URL("../cli.ts", import.meta.url), "utf8");
-    expect(cliSource).toContain("Sub-agent body composed with tools/context/environment (JSON only)");
+    expect(cliSource).toContain(
+      "Sub-agent body composed with tools/context/environment (JSON only)",
+    );
     expect(cliSource).toContain("Project files in composed prompt: project|none (JSON only)");
     expect(cliSource).toContain("Resume a session by id (interactive only)");
   });

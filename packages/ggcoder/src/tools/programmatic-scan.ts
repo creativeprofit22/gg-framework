@@ -66,7 +66,9 @@ export function createProgrammaticScanTool(
         state_path: result.path,
         configuration_fingerprint: result.configurationFingerprint,
         summary: result.summary,
-        ...(result.ok ? { scan_counts: result.scanCounts } : { error: { code: result.error, detail: result.detail } }),
+        ...(result.ok
+          ? { scan_counts: result.scanCounts }
+          : { error: { code: result.error, detail: result.detail } }),
       });
     },
   };

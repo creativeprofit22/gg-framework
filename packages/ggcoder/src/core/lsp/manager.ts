@@ -443,7 +443,15 @@ export class LspManager {
       const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
       const key = `${spec.id}\u0000${root}`;
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
-      const work = this.collect(key, spec, root, normalizedFilePath, content, budgetMs, lateGraceMs);
+      const work = this.collect(
+        key,
+        spec,
+        root,
+        normalizedFilePath,
+        content,
+        budgetMs,
+        lateGraceMs,
+      );
 
       // Leave slow initialization/indexing alive to warm the next edit. Record
       // its eventual evidence too, but report this call honestly as timed out.
@@ -502,7 +510,7 @@ export class LspManager {
   shutdownAllAndWait(): Promise<void> {
     this.shutDown = true;
     this.warmKeys.clear();
-    return this.cleanup ??= this.pool.releaseAndWait(this);
+    return (this.cleanup ??= this.pool.releaseAndWait(this));
   }
 
   shutdownAll(): void {

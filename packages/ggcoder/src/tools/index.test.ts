@@ -49,7 +49,10 @@ describe("createTools research citation gate (terminal TUI wiring)", () => {
       source.indexOf("// ── Sessions"),
     );
     expect(tui).toContain("const researchSources = new ResearchSourceLedger();");
-    const createCall = tui.slice(tui.indexOf("await createTools("), tui.indexOf("const mcpManager"));
+    const createCall = tui.slice(
+      tui.indexOf("await createTools("),
+      tui.indexOf("const mcpManager"),
+    );
     expect(createCall).toMatch(/^\s+researchSources,$/m);
     const renderCall = tui.slice(tui.indexOf("await renderApp("));
     expect(renderCall).toMatch(/^\s+researchSources,$/m);

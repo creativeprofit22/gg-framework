@@ -9,24 +9,42 @@ import { runUserTurn, type UserTurnDeps } from "./app-sidecar-user-turn.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
 
 // Execute production session wiring and routes, without booting providers or native services.
-async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode = "code",
-  load = async () => false) {
+async function pane(
+  shared: AppSidecarProjectAutopilotState,
+  cwd: string,
+  mode = "code",
+  load = async () => false,
+) {
   const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
   const file = ts.createSourceFile("sidecar.ts", source, ts.ScriptTarget.Latest, true);
   const declarations = new Map<string, string>();
   let route = "";
   let queuedEnabled = "";
   function visit(node: ts.Node) {
-    if (ts.isFunctionDeclaration(node) && node.name) declarations.set(node.name.text, node.getText(file));
-    if (ts.isVariableStatement(node) && node.declarationList.declarations.some((d) => d.name.getText(file) === "userTurnDeps")) {
+    if (ts.isFunctionDeclaration(node) && node.name)
+      declarations.set(node.name.text, node.getText(file));
+    if (
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some((d) => d.name.getText(file) === "userTurnDeps")
+    ) {
       declarations.set("userTurnDeps", node.getText(file));
     }
-    if (ts.isIfStatement(node) && node.expression.getText(file) === 'method === "POST" && url === "/autopilot"') route = node.getText(file);
-    if (ts.isCallExpression(node) && node.expression.getText(file) === "shouldStartAutopilotCycle") {
+    if (
+      ts.isIfStatement(node) &&
+      node.expression.getText(file) === 'method === "POST" && url === "/autopilot"'
+    )
+      route = node.getText(file);
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(file) === "shouldStartAutopilotCycle"
+    ) {
       const argument = node.arguments[0];
       if (argument && ts.isObjectLiteralExpression(argument)) {
-        const enabled = argument.properties.find((p) => ts.isPropertyAssignment(p) && p.name.getText(file) === "enabled");
-        if (enabled && ts.isPropertyAssignment(enabled)) queuedEnabled = enabled.initializer.getText(file);
+        const enabled = argument.properties.find(
+          (p) => ts.isPropertyAssignment(p) && p.name.getText(file) === "enabled",
+        );
+        if (enabled && ts.isPropertyAssignment(enabled))
+          queuedEnabled = enabled.initializer.getText(file);
       }
     }
     ts.forEachChild(node, visit);
@@ -39,40 +57,92 @@ async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode =
   expect(start).toBeGreaterThan(0);
   const messages: Message[] = [];
   const prompt = async () => {
-    messages.push({ role: "assistant", content: [{ type: "tool_call", id: String(messages.length), name: "edit", args: {} }] });
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_call", id: String(messages.length), name: "edit", args: {} }],
+    });
   };
   const session = {
-    newSession: async () => { messages.length = 0; }, getQueuedCount: () => 0,
-    getAppMarkers: () => [], persistAppMarker: async () => {},
-    setIdealReviewSuppressed: vi.fn(), getState: () => ({ provider: "test", model: "test" }),
-    getThinkingLevel: () => null, getMessages: () => messages, getPlanMode: () => false,
-    getRoadmapPhaseLeaseMarker: () => null, dispose: async () => {},
+    newSession: async () => {
+      messages.length = 0;
+    },
+    getQueuedCount: () => 0,
+    getAppMarkers: () => [],
+    persistAppMarker: async () => {},
+    setIdealReviewSuppressed: vi.fn(),
+    getState: () => ({ provider: "test", model: "test" }),
+    getThinkingLevel: () => null,
+    getMessages: () => messages,
+    getPlanMode: () => false,
+    getRoadmapPhaseLeaseMarker: () => null,
+    dispose: async () => {},
   };
   const events = vi.fn();
   const review = vi.fn(async () => "all-clear" as const);
   const programmaticChat = { dispose: vi.fn((): void => {}) };
   const context = vm.createContext({
-    mode, cwd, projectAutopilot: shared, loadAutopilot: load, session, broadcast: events,
-    autopilotCancelled: false, runAgent: async (_text: string, run: () => Promise<void>) => run(),
-    runAutopilotCycle: review, runStrandedQueue: async () => {}, planGate: { pending: () => null },
-    log: () => {}, readBody: async (req: { body: string }) => req.body,
-    json: (res: { resolve: (body: unknown) => void }, _status: number, body: unknown) => res.resolve(body),
-    saveAutopilot: async () => {}, lastNewSessionReset: null, chatAgent: null, running: false,
-    runLifecycle: { state: "idle" }, getSupportedThinkingLevels: () => [], getModel: () => null,
-    kenStatePayload: () => ({}), footerExtras: () => ({}),
-    reminderCoordinator: { unwatchSession: () => {} }, opts: { id: cwd },
-    phaseCandidates: { dispose: async () => {} }, elicitations: { cancelAll: () => {} }, asks: { cancelAll: () => {} },
-    tasksPollStopped: false, tasksPoll: null, gitPollStopped: false, gitPoll: null,
-    gitHubPollStopped: false, gitHubPoll: null, phaseLeaseHeartbeat: null, ciPoll: { stop: () => {} },
-    serveController: null, clients: [], kenLifecycle: { abort: () => {} }, kenAutoAbort: { abort: () => {} },
-    kenSession: null, kenAutoSession: null, programmaticChat,
-    taskTurnActive: false, runUserTurn, promptActiveSession: prompt, AUTOMATION_PROVENANCE: {},
-    loadTasksSync: () => [{ id: "task", title: "Implement change", prompt: "Implement change", status: "pending" }],
+    mode,
+    cwd,
+    projectAutopilot: shared,
+    loadAutopilot: load,
+    session,
+    broadcast: events,
+    autopilotCancelled: false,
+    runAgent: async (_text: string, run: () => Promise<void>) => run(),
+    runAutopilotCycle: review,
+    runStrandedQueue: async () => {},
+    planGate: { pending: () => null },
+    log: () => {},
+    readBody: async (req: { body: string }) => req.body,
+    json: (res: { resolve: (body: unknown) => void }, _status: number, body: unknown) =>
+      res.resolve(body),
+    saveAutopilot: async () => {},
+    lastNewSessionReset: null,
+    chatAgent: null,
+    running: false,
+    runLifecycle: { state: "idle" },
+    getSupportedThinkingLevels: () => [],
+    getModel: () => null,
+    kenStatePayload: () => ({}),
+    footerExtras: () => ({}),
+    reminderCoordinator: { unwatchSession: () => {} },
+    opts: { id: cwd },
+    phaseCandidates: { dispose: async () => {} },
+    elicitations: { cancelAll: () => {} },
+    asks: { cancelAll: () => {} },
+    tasksPollStopped: false,
+    tasksPoll: null,
+    gitPollStopped: false,
+    gitPoll: null,
+    gitHubPollStopped: false,
+    gitHubPoll: null,
+    phaseLeaseHeartbeat: null,
+    ciPoll: { stop: () => {} },
+    serveController: null,
+    clients: [],
+    kenLifecycle: { abort: () => {} },
+    kenAutoAbort: { abort: () => {} },
+    kenSession: null,
+    kenAutoSession: null,
+    programmaticChat,
+    taskTurnActive: false,
+    runUserTurn,
+    promptActiveSession: prompt,
+    AUTOMATION_PROVENANCE: {},
+    loadTasksSync: () => [
+      { id: "task", title: "Implement change", prompt: "Implement change", status: "pending" },
+    ],
     isManuallyRunnableTaskStatus: (status: string) => status === "pending",
-    planGateConflict: () => null, deactivateApprovedPlan: () => {}, injectedAutopilotPrompts: [],
-    AppSidecarPlanGate, persistPlanGateMarker: async () => {}, markTaskInProgress: () => {},
-    finalizeTaskRun: () => {}, pruneDoneTasksSync: () => [],
-    isWorkflowCommandText: () => false, loadWorkflowCommandSpecs: async () => [],
+    planGateConflict: () => null,
+    deactivateApprovedPlan: () => {},
+    injectedAutopilotPrompts: [],
+    AppSidecarPlanGate,
+    persistPlanGateMarker: async () => {},
+    markTaskInProgress: () => {},
+    finalizeTaskRun: () => {},
+    pruneDoneTasksSync: () => [],
+    isWorkflowCommandText: () => false,
+    loadWorkflowCommandSpecs: async () => [],
   });
   const code = `async function initialize() {
     ${source.slice(start, end)}
@@ -85,14 +155,27 @@ async function pane(shared: AppSidecarProjectAutopilotState, cwd: string, mode =
       queuedEnabled: () => ${queuedEnabled}, setActive: (active) => { autopilotActive = active; },
       replace: (replacement) => { session = replacement; } };
   } initialize();`;
-  const api = await vm.runInContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context) as {
-    userTurnDeps: UserTurnDeps; stateSnapshot: () => { autopilot: boolean }; dispose: () => Promise<void>;
+  const api = (await vm.runInContext(
+    ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText,
+    context,
+  )) as {
+    userTurnDeps: UserTurnDeps;
+    stateSnapshot: () => { autopilot: boolean };
+    dispose: () => Promise<void>;
     runTaskById: (id: string) => Promise<boolean>;
     request: (req: { body: string }, res: { resolve: (body: unknown) => void }) => void;
-    queuedEnabled: () => boolean; setActive: (active: boolean) => void; replace: (replacement: typeof session) => void;
+    queuedEnabled: () => boolean;
+    setActive: (active: boolean) => void;
+    replace: (replacement: typeof session) => void;
   };
-  return { ...api, events, session, review, programmaticChat,
-    toggle: (enabled: boolean) => new Promise((resolve) => api.request({ body: JSON.stringify({ enabled }) }, { resolve })),
+  return {
+    ...api,
+    events,
+    session,
+    review,
+    programmaticChat,
+    toggle: (enabled: boolean) =>
+      new Promise((resolve) => api.request({ body: JSON.stringify({ enabled }) }, { resolve })),
     turn: () => runUserTurn(api.userTurnDeps, "Implement change", prompt, false),
   };
 }
@@ -101,7 +184,10 @@ describe("live project Autopilot session composition", () => {
   it("fans out on/off to snapshots, ordinary/task gates, queued gates and Ideal suppression", async () => {
     const shared = new AppSidecarProjectAutopilotState();
     const cwd = path.resolve("work", "project");
-    const equivalent = process.platform === "win32" ? cwd.toUpperCase().replaceAll("\\", "/") : path.join(cwd, "..", "project");
+    const equivalent =
+      process.platform === "win32"
+        ? cwd.toUpperCase().replaceAll("\\", "/")
+        : path.join(cwd, "..", "project");
     const a = await pane(shared, cwd);
     const b = await pane(shared, equivalent);
     const other = await pane(shared, path.resolve("work", "other"));
@@ -121,9 +207,11 @@ describe("live project Autopilot session composition", () => {
       expect(other.stateSnapshot().autopilot).toBe(false);
       expect(chat.stateSnapshot().autopilot).toBe(false);
     }
-    for (const current of [a, b]) expect(current.events.mock.calls.filter(([type]) => type === "autopilot")).toEqual([
-      ["autopilot", { autopilot: true }], ["autopilot", { autopilot: false }],
-    ]);
+    for (const current of [a, b])
+      expect(current.events.mock.calls.filter(([type]) => type === "autopilot")).toEqual([
+        ["autopilot", { autopilot: true }],
+        ["autopilot", { autopilot: false }],
+      ]);
     expect(other.events).not.toHaveBeenCalled();
     expect(chat.events).not.toHaveBeenCalled();
     b.setActive(true);

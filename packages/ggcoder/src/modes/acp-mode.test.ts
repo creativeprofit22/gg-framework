@@ -129,31 +129,39 @@ class AcpClient {
 
   constructor(mode?: "update-failure") {
     const sourceDir = path.dirname(fileURLToPath(import.meta.url));
-    const args = mode === "update-failure"
-      ? ["--import", "tsx", "--import", pathToFileURL(path.join(sourceDir, "__fixtures__", "acp-update-failure-preload.mjs")).href,
-        path.join(tmpHome, "global", "node_modules", "@kenkaiiii", "ggcoder", "cli.ts"), "acp", "--cwd", tmpProject]
-      : [agentBundle, tmpProject, tmpOtherProject];
-    this.child = spawn(
-      process.execPath,
-      args,
-      {
-        // Run from the package root so `tsx` resolves for the real-CLI case; the
-        // project directory is passed explicitly rather than inherited from the
-        // test runner. The default fixture runs from the prebuilt bundle.
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HOME: tmpHome,
-          USERPROFILE: tmpHome,
-          GG_DISABLE_TELEMETRY: "1",
-          ...(mode === "update-failure" ? {
-            GG_AGENT_DIR: path.join(tmpHome, ".gg"),
-            PATH: `${path.join(tmpHome, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
-          } : {}),
-        },
-        stdio: ["pipe", "pipe", "pipe"],
+    const args =
+      mode === "update-failure"
+        ? [
+            "--import",
+            "tsx",
+            "--import",
+            pathToFileURL(path.join(sourceDir, "__fixtures__", "acp-update-failure-preload.mjs"))
+              .href,
+            path.join(tmpHome, "global", "node_modules", "@kenkaiiii", "ggcoder", "cli.ts"),
+            "acp",
+            "--cwd",
+            tmpProject,
+          ]
+        : [agentBundle, tmpProject, tmpOtherProject];
+    this.child = spawn(process.execPath, args, {
+      // Run from the package root so `tsx` resolves for the real-CLI case; the
+      // project directory is passed explicitly rather than inherited from the
+      // test runner. The default fixture runs from the prebuilt bundle.
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpHome,
+        USERPROFILE: tmpHome,
+        GG_DISABLE_TELEMETRY: "1",
+        ...(mode === "update-failure"
+          ? {
+              GG_AGENT_DIR: path.join(tmpHome, ".gg"),
+              PATH: `${path.join(tmpHome, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
+            }
+          : {}),
       },
-    ) as ChildProcessWithoutNullStreams;
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams;
 
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {
@@ -245,7 +253,9 @@ class AcpClient {
   ): Promise<Record<string, unknown>> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const found = updates(this.frames).filter((update) => update.sessionUpdate === kind)[occurrence - 1];
+      const found = updates(this.frames).filter((update) => update.sessionUpdate === kind)[
+        occurrence - 1
+      ];
       if (found) return found;
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for ${kind}; stderr=${this.stderr}`);
@@ -288,51 +298,90 @@ afterEach(async () => {
   await fs.rm(tmpOtherProject, { recursive: true, force: true });
 });
 
-it("keeps the real CLI's ACP responsive after an asynchronous pending-update spawn error", async () => {
-  const statePath = path.join(tmpHome, ".gg", "update-state.json");
-  await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify({
-    lastCheckedAt: Date.now(), latestVersion: "99999.0.0", updatePending: true,
-  }));
-  await fs.writeFile(path.join(tmpHome, ".gg", "auth.json"), JSON.stringify({
-    anthropic: { accessToken: "fixture-not-a-real-key", refreshToken: "", expiresAt: Date.now() + 86_400_000 },
-  }));
-  // Give the Windows resolver a known shim layout, but NEVER execute it. The
-  // preload intercepts the detached spawn and emits the observed error instead.
-  const bin = path.join(tmpHome, "bin");
-  await fs.mkdir(path.join(bin, "node_modules", "npm", "bin"), { recursive: true });
-  await fs.writeFile(path.join(bin, "npm.cmd"), "@exit /b 1\r\n");
-  await fs.writeFile(path.join(bin, "node_modules", "npm", "bin", "npm-cli.js"),
-    'throw new Error("test must never execute an install");\n');
+it(
+  "keeps the real CLI's ACP responsive after an asynchronous pending-update spawn error",
+  async () => {
+    const statePath = path.join(tmpHome, ".gg", "update-state.json");
+    await fs.mkdir(path.dirname(statePath), { recursive: true });
+    await fs.writeFile(
+      statePath,
+      JSON.stringify({
+        lastCheckedAt: Date.now(),
+        latestVersion: "99999.0.0",
+        updatePending: true,
+      }),
+    );
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        anthropic: {
+          accessToken: "fixture-not-a-real-key",
+          refreshToken: "",
+          expiresAt: Date.now() + 86_400_000,
+        },
+      }),
+    );
+    // Give the Windows resolver a known shim layout, but NEVER execute it. The
+    // preload intercepts the detached spawn and emits the observed error instead.
+    const bin = path.join(tmpHome, "bin");
+    await fs.mkdir(path.join(bin, "node_modules", "npm", "bin"), { recursive: true });
+    await fs.writeFile(path.join(bin, "npm.cmd"), "@exit /b 1\r\n");
+    await fs.writeFile(
+      path.join(bin, "node_modules", "npm", "bin", "npm-cli.js"),
+      'throw new Error("test must never execute an install");\n',
+    );
 
-  // An owned global entrypoint is required now; checkout launches never install.
-  const globalEntry = path.join(tmpHome, "global", "node_modules", "@kenkaiiii", "ggcoder", "cli.ts");
-  const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const packageRoot = path.dirname(globalEntry);
-  await fs.mkdir(packageRoot, { recursive: true });
-  // Copy the real entrypoint so its direct-execution guard still runs; share its
-  // dependencies without installing anything or redirecting the entrypoint.
-  for (const entry of await fs.readdir(sourceRoot, { withFileTypes: true })) {
-    const source = path.join(sourceRoot, entry.name);
-    const target = path.join(packageRoot, entry.name);
-    if (entry.isDirectory()) await fs.symlink(source, target, "junction");
-    else await fs.copyFile(source, target);
-  }
-  await fs.symlink(path.join(sourceRoot, "..", "node_modules"), path.join(packageRoot, "node_modules"), "junction");
-  await fs.copyFile(path.join(sourceRoot, "..", "package.json"), path.join(packageRoot, "package.json"));
+    // An owned global entrypoint is required now; checkout launches never install.
+    const globalEntry = path.join(
+      tmpHome,
+      "global",
+      "node_modules",
+      "@kenkaiiii",
+      "ggcoder",
+      "cli.ts",
+    );
+    const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const packageRoot = path.dirname(globalEntry);
+    await fs.mkdir(packageRoot, { recursive: true });
+    // Copy the real entrypoint so its direct-execution guard still runs; share its
+    // dependencies without installing anything or redirecting the entrypoint.
+    for (const entry of await fs.readdir(sourceRoot, { withFileTypes: true })) {
+      const source = path.join(sourceRoot, entry.name);
+      const target = path.join(packageRoot, entry.name);
+      if (entry.isDirectory()) await fs.symlink(source, target, "junction");
+      else await fs.copyFile(source, target);
+    }
+    await fs.symlink(
+      path.join(sourceRoot, "..", "node_modules"),
+      path.join(packageRoot, "node_modules"),
+      "junction",
+    );
+    await fs.copyFile(
+      path.join(sourceRoot, "..", "package.json"),
+      path.join(packageRoot, "package.json"),
+    );
 
-  client = new AcpClient("update-failure");
-  client.send({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: 1 } });
-  const frames = await client.until("init", REAL_CLI_BOOT_TIMEOUT_MS);
-  expect(frames.at(-1)?.error).toBeUndefined();
-  expect(frames.at(-1)?.result?.protocolVersion).toBe(ACP_PROTOCOL_VERSION);
-  await vi.waitFor(() => expect(client!.stderr).toContain("fixture: asynchronous updater ENOENT"));
-  expect(await client.list("after-update-error")).toEqual([]);
-  const state = JSON.parse(await fs.readFile(statePath, "utf8"));
-  expect(state.updatePending).toBe(true);
-  expect(state.lastUpdateAttempt).toBeUndefined();
-  expect(client.stderr).not.toContain("Unhandled 'error' event");
-}, REAL_CLI_BOOT_TIMEOUT_MS + ACP_TEST_TIMEOUT_MS);
+    client = new AcpClient("update-failure");
+    client.send({
+      jsonrpc: "2.0",
+      id: "init",
+      method: "initialize",
+      params: { protocolVersion: 1 },
+    });
+    const frames = await client.until("init", REAL_CLI_BOOT_TIMEOUT_MS);
+    expect(frames.at(-1)?.error).toBeUndefined();
+    expect(frames.at(-1)?.result?.protocolVersion).toBe(ACP_PROTOCOL_VERSION);
+    await vi.waitFor(() =>
+      expect(client!.stderr).toContain("fixture: asynchronous updater ENOENT"),
+    );
+    expect(await client.list("after-update-error")).toEqual([]);
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+    expect(state.updatePending).toBe(true);
+    expect(state.lastUpdateAttempt).toBeUndefined();
+    expect(client.stderr).not.toContain("Unhandled 'error' event");
+  },
+  REAL_CLI_BOOT_TIMEOUT_MS + ACP_TEST_TIMEOUT_MS,
+);
 
 /** Session updates only, unwrapped to the `update` payload. */
 function updates(frames: Frame[]): Record<string, unknown>[] {
@@ -822,12 +871,22 @@ describe("ACP mode over stdio", () => {
     expect(byName.has("programmatic")).toBe(false);
     expect(byName.has("programmatic-run")).toBe(false);
     await fs.unlink(path.join(commandsDir, "commit.md"));
-    client.send({ jsonrpc: "2.0", id: 90, method: "session/prompt", params: {
-      sessionId: "acp-fixture-session", prompt: [{ type: "text", text: "refresh commands" }],
-    } });
+    client.send({
+      jsonrpc: "2.0",
+      id: 90,
+      method: "session/prompt",
+      params: {
+        sessionId: "acp-fixture-session",
+        prompt: [{ type: "text", text: "refresh commands" }],
+      },
+    });
     await client.until(90);
     const refreshed = await client.untilUpdate("available_commands_update", undefined, 2);
-    expect((refreshed.availableCommands as { name: string }[]).some((command) => command.name === "commit")).toBe(false);
+    expect(
+      (refreshed.availableCommands as { name: string }[]).some(
+        (command) => command.name === "commit",
+      ),
+    ).toBe(false);
   });
 
   it("switches mode via session/set_mode and tells the client with current_mode_update", async () => {

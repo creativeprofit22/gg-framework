@@ -137,7 +137,9 @@ export interface AutopilotCycleDeps {
  *  - HUMAN                     → autopilot_human
  *  - rounds exhausted          → autopilot_capped
  */
-export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<AutopilotCycleOutcome> {
+export async function driveAutopilotCycle(
+  deps: AutopilotCycleDeps,
+): Promise<AutopilotCycleOutcome> {
   if (deps.isCancelled()) return "cancelled";
   await deps.resetReviewer();
   let remediationRounds = 0;

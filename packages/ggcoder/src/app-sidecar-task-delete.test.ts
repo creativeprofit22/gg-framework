@@ -31,7 +31,13 @@ let tasksFile = "";
 const staged = new Map<string, string>();
 
 function task(id: string): TaskRecord {
-  return { id, title: `Task ${id}`, prompt: `Run ${id}`, status: "pending", createdAt: "2026-09-04T00:00:00.000Z" };
+  return {
+    id,
+    title: `Task ${id}`,
+    prompt: `Run ${id}`,
+    status: "pending",
+    createdAt: "2026-09-04T00:00:00.000Z",
+  };
 }
 
 beforeEach(() => {
@@ -49,7 +55,12 @@ beforeEach(() => {
   }) as typeof renameSync);
 });
 
-interface Res { headersSent: boolean; status?: number; body?: Record<string, unknown>; done: () => void }
+interface Res {
+  headersSent: boolean;
+  status?: number;
+  body?: Record<string, unknown>;
+  done: () => void;
+}
 
 async function harness() {
   const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
@@ -57,8 +68,16 @@ async function harness() {
   let route = "";
   let message = "";
   function visit(node: ts.Node) {
-    if (ts.isIfStatement(node) && node.expression.getText(file) === 'method === "POST" && url === "/tasks/delete"') route = node.getText(file);
-    if (ts.isVariableStatement(node) && node.declarationList.declarations[0]?.name.getText(file) === "TASK_DELETE_FAILED_MESSAGE") message = node.getText(file);
+    if (
+      ts.isIfStatement(node) &&
+      node.expression.getText(file) === 'method === "POST" && url === "/tasks/delete"'
+    )
+      route = node.getText(file);
+    if (
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations[0]?.name.getText(file) === "TASK_DELETE_FAILED_MESSAGE"
+    )
+      message = node.getText(file);
     ts.forEachChild(node, visit);
   }
   visit(file);
@@ -81,9 +100,12 @@ async function harness() {
     },
   });
   vm.runInContext(
-    ts.transpileModule(`${message}\nfunction request(req, res) { const method = "POST", url = "/tasks/delete"; ${route} }`, {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText,
+    ts.transpileModule(
+      `${message}\nfunction request(req, res) { const method = "POST", url = "/tasks/delete"; ${route} }`,
+      {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      },
+    ).outputText,
     context,
   );
   const request = (body: string | Error) =>
@@ -103,25 +125,31 @@ describe("POST /tasks/delete", () => {
     expect(loadTasksSync(CWD).map((t) => t.id)).toEqual(["bbb"]);
   });
 
-  it.each(["EPERM", "EBUSY"])("answers a failed save (%s) with a 500 and keeps the task", async (code) => {
-    const h = await harness();
-    vi.mocked(renameSync).mockImplementationOnce(() => {
-      throw Object.assign(new Error(`${code}: operation not permitted, rename C:\\private\\tasks.json`), { code });
-    });
-    const res = await h.request(JSON.stringify({ id: "aaa" }));
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({
-      error: "task_delete_failed",
-      message: "The task could not be deleted. It is still in the list. Try again.",
-    });
-    expect(JSON.stringify(res.body)).not.toContain("private");
-    expect(loadTasksSync(CWD).map((t) => t.id)).toEqual(["aaa", "bbb"]);
-    expect(h.captureSidecarError).toHaveBeenCalledTimes(1);
-    // The retry succeeds once the file is writable again.
-    const retry = await h.request(JSON.stringify({ id: "aaa" }));
-    expect(retry.status).toBe(200);
-    expect(loadTasksSync(CWD).map((t) => t.id)).toEqual(["bbb"]);
-  });
+  it.each(["EPERM", "EBUSY"])(
+    "answers a failed save (%s) with a 500 and keeps the task",
+    async (code) => {
+      const h = await harness();
+      vi.mocked(renameSync).mockImplementationOnce(() => {
+        throw Object.assign(
+          new Error(`${code}: operation not permitted, rename C:\\private\\tasks.json`),
+          { code },
+        );
+      });
+      const res = await h.request(JSON.stringify({ id: "aaa" }));
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({
+        error: "task_delete_failed",
+        message: "The task could not be deleted. It is still in the list. Try again.",
+      });
+      expect(JSON.stringify(res.body)).not.toContain("private");
+      expect(loadTasksSync(CWD).map((t) => t.id)).toEqual(["aaa", "bbb"]);
+      expect(h.captureSidecarError).toHaveBeenCalledTimes(1);
+      // The retry succeeds once the file is writable again.
+      const retry = await h.request(JSON.stringify({ id: "aaa" }));
+      expect(retry.status).toBe(200);
+      expect(loadTasksSync(CWD).map((t) => t.id)).toEqual(["bbb"]);
+    },
+  );
 
   it("answers when the body read itself rejects", async () => {
     const h = await harness();
@@ -134,6 +162,8 @@ describe("POST /tasks/delete", () => {
   it("keeps the 400 paths", async () => {
     const h = await harness();
     expect((await h.request("{not json")).status).toBe(400);
-    expect((await h.request(JSON.stringify({ id: "  " }))).body).toEqual({ error: "missing task id" });
+    expect((await h.request(JSON.stringify({ id: "  " }))).body).toEqual({
+      error: "missing task id",
+    });
   });
 });

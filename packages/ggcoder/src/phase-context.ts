@@ -44,10 +44,7 @@ export interface ActivePhaseContextV1 {
 }
 
 export type ActivePhaseContextClearReason =
-  | "cleared"
-  | "binding-compensation"
-  | "binding-reconciliation"
-  | "phase-rebound";
+  "cleared" | "binding-compensation" | "binding-reconciliation" | "phase-rebound";
 
 export interface ActivePhaseContextClearV1 {
   version: 1;
@@ -274,7 +271,8 @@ export function createActivePhaseContext(input: {
   executionStage?: ActivePhaseExecutionStage;
   approvedPlanPath?: string;
 }): ActivePhaseContextV1 {
-  if (isNotesPhaseDeleted(input.phase)) throw new Error("Deleted phases cannot become active context");
+  if (isNotesPhaseDeleted(input.phase))
+    throw new Error("Deleted phases cannot become active context");
   if (input.phase.archivedAt !== null) {
     throw new ActivePhaseContextError("Archived phases cannot become active session context.");
   }

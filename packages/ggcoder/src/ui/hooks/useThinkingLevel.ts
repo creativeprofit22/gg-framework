@@ -3,7 +3,11 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { clampThinkingLevel, resolveInitialThinkingLevel } from "../../core/thinking-level.js";
 
 /** Keep runtime, status badges and remount snapshots on the same legal level. */
-export function useThinkingLevel(provider: Provider, model: string, initial: ThinkingLevel | undefined) {
+export function useThinkingLevel(
+  provider: Provider,
+  model: string,
+  initial: ThinkingLevel | undefined,
+) {
   const [savedLevel, setThinkingLevel] = useState(() =>
     resolveInitialThinkingLevel(provider, model, !!initial, initial),
   );

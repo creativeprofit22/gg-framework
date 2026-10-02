@@ -2,7 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildProgrammaticInventory, normalizeInventoryPath, validateProgrammaticFile, walkProgrammaticPaths } from "./inventory.js";
+import {
+  buildProgrammaticInventory,
+  normalizeInventoryPath,
+  validateProgrammaticFile,
+  walkProgrammaticPaths,
+} from "./inventory.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -147,7 +152,10 @@ describe("buildProgrammaticInventory", () => {
       },
     };
 
-    const result = await buildProgrammaticInventory(root, { limits: { maxFileBytes: 3 }, operations });
+    const result = await buildProgrammaticInventory(root, {
+      limits: { maxFileBytes: 3 },
+      operations,
+    });
     const unlimited = await buildProgrammaticInventory(root);
 
     expect(result.inventory.entries).toEqual([
@@ -156,7 +164,11 @@ describe("buildProgrammaticInventory", () => {
       { path: "small.txt", bytes: 2 },
     ]);
     expect(read).toEqual(["package.json"]);
-    expect(result.summary).toMatchObject({ fileCount: 3, totalBytes: 10, configurationFileCount: 1 });
+    expect(result.summary).toMatchObject({
+      fileCount: 3,
+      totalBytes: 10,
+      configurationFileCount: 1,
+    });
     expect(result.configurationSnapshot).toEqual(unlimited.configurationSnapshot);
     await writeFixture(root, { "package.json": '{"private":true}' });
     await expect(buildProgrammaticInventory(root, { limits: { maxFileBytes: 3 } })).rejects.toThrow(
@@ -167,8 +179,12 @@ describe("buildProgrammaticInventory", () => {
   it("shares safe-file validation without relaxing containment or strict fingerprints", async () => {
     const root = await temporaryDirectory();
     await writeFixture(root, { WORKFLOW: "first", "unknown.source-type": "text" });
-    await expect(validateProgrammaticFile(root, "../outside")).rejects.toThrow("unreadable or unsafe");
-    await expect(validateProgrammaticFile(root, "WORKFLOW", undefined, 1)).rejects.toThrow("Inventory file size limit exceeded (1)");
+    await expect(validateProgrammaticFile(root, "../outside")).rejects.toThrow(
+      "unreadable or unsafe",
+    );
+    await expect(validateProgrammaticFile(root, "WORKFLOW", undefined, 1)).rejects.toThrow(
+      "Inventory file size limit exceeded (1)",
+    );
     const before = await buildProgrammaticInventory(root);
     await writeFixture(root, { WORKFLOW: "second" });
     const after = await buildProgrammaticInventory(root);

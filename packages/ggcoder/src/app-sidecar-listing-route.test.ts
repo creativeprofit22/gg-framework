@@ -31,7 +31,11 @@ describe("listingRouteResponse", () => {
   });
 
   it("does not report an empty project list when discovery rejects", async () => {
-    const result = await listingRouteResponse("projects", () => Promise.reject("bad settings"), () => {});
+    const result = await listingRouteResponse(
+      "projects",
+      () => Promise.reject("bad settings"),
+      () => {},
+    );
 
     expect(result).toEqual({ status: 500, body: { error: "bad settings" } });
   });

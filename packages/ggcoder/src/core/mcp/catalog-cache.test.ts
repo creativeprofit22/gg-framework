@@ -98,8 +98,9 @@ describe("McpCatalogCache", () => {
 
     expect((await cache.entriesFor([{ ...server, enabled: false }])).size).toBe(0);
     expect(await fs.readFile(file, "utf-8")).toBe(saved);
-    expect((await cache.entriesFor([{ ...server, enabled: true }])).get(server.name)?.tools)
-      .toEqual([{ toolName: "search", description: "cached search" }]);
+    expect(
+      (await cache.entriesFor([{ ...server, enabled: true }])).get(server.name)?.tools,
+    ).toEqual([{ toolName: "search", description: "cached search" }]);
     expect(await cache.protocolEraFor(server)).toBe("legacy");
   });
 

@@ -1,4 +1,8 @@
-import { CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES, type SlashCommandListing, type SlashCommandsResponse } from "@kenkaiiii/gg-core";
+import {
+  CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES,
+  type SlashCommandListing,
+  type SlashCommandsResponse,
+} from "@kenkaiiii/gg-core";
 import { discoverCommands, type CommandDiscoveryOptions } from "./core/command-discovery.js";
 
 export const WORKSPACE_ACTIONS: SlashCommandListing[] = [

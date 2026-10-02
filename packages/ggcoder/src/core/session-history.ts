@@ -456,8 +456,10 @@ export function detectPromptCommand(
   candidates: ReadonlyArray<{ name: string; prompt: string }>,
 ): string | null {
   for (const command of candidates) {
-    const body = command.name === "programmatic" && text.startsWith(command.prompt)
-      ? stripProgrammaticAdvisoryContext(text) : text;
+    const body =
+      command.name === "programmatic" && text.startsWith(command.prompt)
+        ? stripProgrammaticAdvisoryContext(text)
+        : text;
     const match = matchPromptCommand(body, [command]);
     if (match) return `/${match.command.name}${match.args ? ` ${match.args}` : ""}`;
   }

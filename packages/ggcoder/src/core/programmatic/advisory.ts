@@ -2,7 +2,11 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { z } from "zod";
 import type { ToolResult } from "@kenkaiiii/gg-ai";
-import { safeRetrievalUrl, type InspectedLocalLocation, type RetrievalResource } from "../../tools/retrieval-metadata.js";
+import {
+  safeRetrievalUrl,
+  type InspectedLocalLocation,
+  type RetrievalResource,
+} from "../../tools/retrieval-metadata.js";
 import type { AdvisoryCommandPage } from "../command-discovery.js";
 import { ProgrammaticSetupInspection, SETUP_ASSESSMENT_TOOLS } from "./setup-inspection.js";
 import {
@@ -60,25 +64,46 @@ export interface AdvisoryReceipt {
 }
 
 /** Exact delivered identity; external receipts currently carry no verified line ranges. */
-export function deliveredExternalReceipt(receipts: AdvisoryReceipt[], citation: {
-  inspectedUrl: string; revision?: string; location?: { path: string; startLine?: number; endLine?: number };
-}): AdvisoryReceipt | undefined {
-  return receipts.find((receipt) => receipt.status === "retrieved" &&
-    receipt.external?.sourceUri === citation.inspectedUrl &&
-    (!citation.revision || receipt.external.revision === citation.revision) &&
-    (!citation.location || (receipt.external.path === citation.location.path &&
-      citation.location.startLine === undefined && citation.location.endLine === undefined)));
+export function deliveredExternalReceipt(
+  receipts: AdvisoryReceipt[],
+  citation: {
+    inspectedUrl: string;
+    revision?: string;
+    location?: { path: string; startLine?: number; endLine?: number };
+  },
+): AdvisoryReceipt | undefined {
+  return receipts.find(
+    (receipt) =>
+      receipt.status === "retrieved" &&
+      receipt.external?.sourceUri === citation.inspectedUrl &&
+      (!citation.revision || receipt.external.revision === citation.revision) &&
+      (!citation.location ||
+        (receipt.external.path === citation.location.path &&
+          citation.location.startLine === undefined &&
+          citation.location.endLine === undefined)),
+  );
 }
 
-export function localLocations(receipt: AdvisoryReceipt | undefined): { path: string; startLine?: number; endLine?: number }[] {
+export function localLocations(
+  receipt: AdvisoryReceipt | undefined,
+): { path: string; startLine?: number; endLine?: number }[] {
   if (receipt?.status !== "retrieved") return [];
-  return receipt.locations ?? (receipt.location ? [{ path: receipt.location, ...receipt.range }] : []);
+  return (
+    receipt.locations ?? (receipt.location ? [{ path: receipt.location, ...receipt.range }] : [])
+  );
 }
 
-function hasLocalInspection(receipt: AdvisoryReceipt | undefined, cited?: { path: string }): boolean {
-  return localLocations(receipt).some((location) =>
-    (!cited || location.path === cited.path) &&
-    receipt?.localSources?.some((source) => source.path === location.path && source.purpose === "independent"));
+function hasLocalInspection(
+  receipt: AdvisoryReceipt | undefined,
+  cited?: { path: string },
+): boolean {
+  return localLocations(receipt).some(
+    (location) =>
+      (!cited || location.path === cited.path) &&
+      receipt?.localSources?.some(
+        (source) => source.path === location.path && source.purpose === "independent",
+      ),
+  );
 }
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -128,13 +153,17 @@ export class AdvisoryEvidence {
       /^(?:Error\b|Failed\b|Unable\b|File not found\b|Permission denied\b|Could not read\b|Binary file\b|No (?:results|matches)|\{"(?:error|status":"unavailable))/i.test(
         output.trim(),
       );
-    const locations = tool === "code_search" && retrieval?.outcome === "retrieved"
-      ? (retrieval.localLocations ?? []).slice(0, 64).filter((location) => repositoryRelativePathSchema.safeParse(location.path).success)
-      : [];
+    const locations =
+      tool === "code_search" && retrieval?.outcome === "retrieved"
+        ? (retrieval.localLocations ?? [])
+            .slice(0, 64)
+            .filter((location) => repositoryRelativePathSchema.safeParse(location.path).success)
+        : [];
     // LSP outlines, references, definitions and hover are navigation leads,
     // not whole inspected source, even when the tool reads files internally.
     const inspected =
-      tool === "read" || locations.length > 0 ||
+      tool === "read" ||
+      locations.length > 0 ||
       tool === "web_fetch" ||
       (tool === "research_corpus" && input.action === "show");
     const receipt: AdvisoryReceipt = {
@@ -249,18 +278,30 @@ export class ProgrammaticAdvisoryTurn {
     this.pendingResults.delete(result.toolCallId);
     const complete = !result.capped && !result.isError;
     if (!complete)
-      this.limitations.add(`Tool call ${result.toolCallId.slice(0, 128)}: source delivery was ${result.capped ? "capped" : "unsuccessful"}; complete inspection is not established.`);
+      this.limitations.add(
+        `Tool call ${result.toolCallId.slice(0, 128)}: source delivery was ${result.capped ? "capped" : "unsuccessful"}; complete inspection is not established.`,
+      );
     accept(complete);
   }
   readonly mode: "setup" | "configured";
   private readonly setup?: ProgrammaticSetupInspection;
   private accepted?: Assessment;
-  get acceptedResult(): Assessment | undefined { return this.accepted && structuredClone(this.accepted); }
-  get deterministicState(): ScanState { return this.scanState; }
-  allows(tool: string): boolean {
-    return this.active && (this.mode === "setup" ? SETUP_ASSESSMENT_TOOLS.has(tool) : ADVISORY_READ_TOOLS.has(tool));
+  get acceptedResult(): Assessment | undefined {
+    return this.accepted && structuredClone(this.accepted);
   }
-  constructor(readonly evidence: AdvisoryEvidence, policy: ProgrammaticAdvisoryPolicy = { mode: "configured" }) {
+  get deterministicState(): ScanState {
+    return this.scanState;
+  }
+  allows(tool: string): boolean {
+    return (
+      this.active &&
+      (this.mode === "setup" ? SETUP_ASSESSMENT_TOOLS.has(tool) : ADVISORY_READ_TOOLS.has(tool))
+    );
+  }
+  constructor(
+    readonly evidence: AdvisoryEvidence,
+    policy: ProgrammaticAdvisoryPolicy = { mode: "configured" },
+  ) {
     this.mode = policy.mode;
     if (this.mode === "setup") this.setup = new ProgrammaticSetupInspection(true);
     else if (policy.scanAvailable === false) this.markScanUnavailable();
@@ -269,7 +310,9 @@ export class ProgrammaticAdvisoryTurn {
   markScanUnavailable(): void {
     if (this.active && this.mode === "configured" && this.scanState === "not-started") {
       this.scanState = "unavailable";
-      this.limitations.add("The deterministic scan tool is unavailable under host policy; no scan was attempted.");
+      this.limitations.add(
+        "The deterministic scan tool is unavailable under host policy; no scan was attempted.",
+      );
     }
   }
   get active(): boolean {
@@ -286,8 +329,7 @@ export class ProgrammaticAdvisoryTurn {
     this.pendingResults.clear();
   }
   claim(tool: string, args: unknown): void {
-    if (!this.allows(tool))
-      throw new Error("Tool unavailable in read-only advisory scope.");
+    if (!this.allows(tool)) throw new Error("Tool unavailable in read-only advisory scope.");
     this.setup?.claimName(tool, args);
     if (tool === "programmatic_scan") {
       if (
@@ -379,7 +421,10 @@ export class ProgrammaticAdvisoryTurn {
     checks.signal.throwIfAborted();
     if (this.submitted || this.submissionPending)
       throw new Error("Only one validated advisory presentation is permitted per turn.");
-    if (this.mode === "configured" && (this.scanState === "not-started" || this.scanState === "in-flight"))
+    if (
+      this.mode === "configured" &&
+      (this.scanState === "not-started" || this.scanState === "in-flight")
+    )
       throw new Error(
         "The required deterministic scan attempt must settle before advisory submission.",
       );
@@ -388,7 +433,9 @@ export class ProgrammaticAdvisoryTurn {
         "The deterministic scan was denied or cancelled; advisory submission is unavailable. Do not retry the scan or repair setup in this turn.",
       );
     if (this.pendingResults.size)
-      throw new Error("Evidence results are awaiting post-cap preparation; submit in a later model turn.");
+      throw new Error(
+        "Evidence results are awaiting post-cap preparation; submit in a later model turn.",
+      );
     this.submissionPending = true;
     try {
       if (JSON.stringify(input).length > ADVISORY_LIMITS.resultChars)
@@ -409,16 +456,12 @@ export class ProgrammaticAdvisoryTurn {
       }
       if (!this.fullCoverage())
         this.limitations.add("Not all current catalog pages were inspected.");
-      if (
-        !this.evidence.list().some((receipt) => hasLocalInspection(receipt))
-      )
+      if (!this.evidence.list().some((receipt) => hasLocalInspection(receipt)))
         this.limitations.add("Bounded local source evidence was not inspected.");
       for (const recommendation of result.recommendations) {
         for (const item of recommendation.evidence.items) {
           if ("kind" in item) {
-            if (
-              !deliveredExternalReceipt(this.evidence.list(), item)
-            )
+            if (!deliveredExternalReceipt(this.evidence.list(), item))
               throw new Error(
                 "External provenance must match an inspected host receipt; search leads and unsupplied revisions are not evidence.",
               );
@@ -433,38 +476,61 @@ export class ProgrammaticAdvisoryTurn {
           if (item.basis === "observed" && receipt.status !== "retrieved")
             throw new Error("Search leads and failed calls cannot substantiate observed evidence.");
           const cited = item.location;
-          if (cited && !localLocations(receipt).some((location) =>
-            cited.path === location.path && (cited.startLine === undefined ||
-              (location.startLine !== undefined && location.endLine !== undefined &&
-                cited.startLine >= location.startLine && (cited.endLine ?? cited.startLine) <= location.endLine))))
+          if (
+            cited &&
+            !localLocations(receipt).some(
+              (location) =>
+                cited.path === location.path &&
+                (cited.startLine === undefined ||
+                  (location.startLine !== undefined &&
+                    location.endLine !== undefined &&
+                    cited.startLine >= location.startLine &&
+                    (cited.endLine ?? cited.startLine) <= location.endLine)),
+            )
+          )
             throw new Error("Evidence location was not inspected by the referenced tool call.");
         }
         const choice = recommendation.choice;
-        const localSupport = recommendation.evidence.items.some((item) =>
-          !("kind" in item) && item.basis !== "assumed" &&
-          hasLocalInspection(this.evidence.get(item.source), item.location));
+        const localSupport = recommendation.evidence.items.some(
+          (item) =>
+            !("kind" in item) &&
+            item.basis !== "assumed" &&
+            hasLocalInspection(this.evidence.get(item.source), item.location),
+        );
         const commands = [
           ...(choice.kind === "reuse-command" || choice.kind === "extend-command" ? [choice] : []),
           ...recommendation.alternatives.filter((option) => option.availability !== undefined),
         ];
         if (commands.some((option) => option.availability?.status === "available") && !localSupport)
-          throw new Error("Command suitability requires inspected local prerequisite evidence, not its prompt body alone.");
-        if (["reuse-command", "extend-command", "missing-capability"].includes(choice.kind) && !localSupport)
-          throw new Error("Positive automation recommendations require inspected local workflow evidence, not assumptions, metadata or external examples alone.");
+          throw new Error(
+            "Command suitability requires inspected local prerequisite evidence, not its prompt body alone.",
+          );
+        if (
+          ["reuse-command", "extend-command", "missing-capability"].includes(choice.kind) &&
+          !localSupport
+        )
+          throw new Error(
+            "Positive automation recommendations require inspected local workflow evidence, not assumptions, metadata or external examples alone.",
+          );
         if (choice.kind === "extend-command" && choice.availability.status !== "available")
-          throw new Error("Extension requires an inspected base; use needs-more-evidence for an unresolved or unreadable command.");
+          throw new Error(
+            "Extension requires an inspected base; use needs-more-evidence for an unresolved or unreadable command.",
+          );
         // One delivery/freshness boundary for selected targets and concrete alternatives.
         // Receipt provenance does not prove the model's explanation of prerequisite relevance.
         for (const option of commands) {
           if (option.availability?.status !== "available") continue;
           const snapshot = option.availability.snapshot;
           if (!this.snapshots.has(fingerprint(snapshot)))
-            throw new Error("Resolve the exact candidate body before asserting availability; host hashes cannot be supplied by the model.");
+            throw new Error(
+              "Resolve the exact candidate body before asserting availability; host hashes cannot be supplied by the model.",
+            );
           const current = await checks.snapshot(snapshot).catch(() => false);
           checks.signal.throwIfAborted();
           if (!current) {
             option.availability = {
-              status: "unavailable", command: snapshot.command,
+              status: "unavailable",
+              command: snapshot.command,
               reason: "Command identity/body changed or cannot be safely resolved at submission.",
             };
             this.limitations.add("A recommended or compared command changed before submission.");
@@ -517,15 +583,18 @@ export function renderAdvisoryResult(result: Assessment): string {
       `Scope: ${workflow.affectedSubproject.scope === "repository-wide" ? "repository-wide" : workflow.affectedSubproject.path}`,
       `Proposed change boundary: ${workflow.mutationBoundary}`,
     );
-    if (choice.kind === "manual") lines.push(`Next: follow these manual steps — ${choice.steps.join("; ")}`);
-    else if (choice.kind === "needs-more-evidence") lines.push(
-      `Missing evidence: ${choice.missingEvidence.join("; ")}`,
-      `Next: inspect without making changes — ${choice.nextInspectionSteps.join("; ")}`,
-    );
+    if (choice.kind === "manual")
+      lines.push(`Next: follow these manual steps — ${choice.steps.join("; ")}`);
+    else if (choice.kind === "needs-more-evidence")
+      lines.push(
+        `Missing evidence: ${choice.missingEvidence.join("; ")}`,
+        `Next: inspect without making changes — ${choice.nextInspectionSteps.join("; ")}`,
+      );
     if (choice.kind === "missing-capability" || choice.kind === "extend-command") {
       const proposal = choice.kind === "missing-capability" ? choice.proposal : choice.requirement;
       lines.push(`Proposal only: ${proposal.desiredOutcome}`);
-      if (choice.kind === "extend-command") lines.push(`Proposed changes: ${choice.proposedChanges.join("; ")}`);
+      if (choice.kind === "extend-command")
+        lines.push(`Proposed changes: ${choice.proposedChanges.join("; ")}`);
       lines.push(
         `Inputs: ${proposal.inputs.join("; ")}`,
         `Outputs: ${proposal.outputs.join("; ")}`,
@@ -541,15 +610,21 @@ export function renderAdvisoryResult(result: Assessment): string {
     }
     if (choice.kind === "reuse-command" || choice.kind === "extend-command") {
       const availability = choice.availability;
-      lines.push(availability.status === "available"
-        ? `/${availability.snapshot.command.name}: ${availability.snapshot.command.invocationKind === "workspace-action" ? "workspace action" : "prompt"} available, not started. This does not guarantee the required tools or behavior.`
-        : `/${availability.command.name} unavailable: ${availability.reason}`);
+      lines.push(
+        availability.status === "available"
+          ? `/${availability.snapshot.command.name}: ${availability.snapshot.command.invocationKind === "workspace-action" ? "workspace action" : "prompt"} available, not started. This does not guarantee the required tools or behavior.`
+          : `/${availability.command.name} unavailable: ${availability.reason}`,
+      );
       if (availability.status === "unavailable")
         lines.push("Next: recheck the command and project prerequisites before proceeding.");
       else if (availability.snapshot.capabilityKind === "app-backed")
-        lines.push("Next: review the required application integration. This proposal cannot run it.");
+        lines.push(
+          "Next: review the required application integration. This proposal cannot run it.",
+        );
       else if (choice.kind === "reuse-command")
-        lines.push("Next: review the current command, prerequisites and scope before approving a run.");
+        lines.push(
+          "Next: review the current command, prerequisites and scope before approving a run.",
+        );
     }
     for (const item of recommendation.evidence.items) {
       if (!("kind" in item) && item.severity !== "info")
@@ -558,7 +633,9 @@ export function renderAdvisoryResult(result: Assessment): string {
     // Keep known restrictions, not a routine report of unselected alternatives.
     for (const alternative of recommendation.alternatives) {
       if (alternative.availability?.status === "unavailable")
-        lines.push(`/${alternative.availability.command.name} unavailable: ${alternative.availability.reason}`);
+        lines.push(
+          `/${alternative.availability.command.name} unavailable: ${alternative.availability.reason}`,
+        );
     }
   }
   return safeText(lines.join("\n"));

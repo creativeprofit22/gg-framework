@@ -44,8 +44,16 @@ describe("custom command palette metadata discovery", () => {
   it("carries normalized project and global group/effect into validated listings", async () => {
     const cwd = await temporaryDir("gg-palette-project-");
     const projectDir = path.join(cwd, ".gg", "commands");
-    await writeCommand(projectDir, "alpha.md", "---\ndescription: Alpha\ncollection: demo\ngroup: everyday\neffect: reads\n---\nBody");
-    await writeCommand(projectDir, "beta.md", "---\ncollection: '  Demo '\ngroup: '  Setup '\neffect: EDITS\n---\nBody");
+    await writeCommand(
+      projectDir,
+      "alpha.md",
+      "---\ndescription: Alpha\ncollection: demo\ngroup: everyday\neffect: reads\n---\nBody",
+    );
+    await writeCommand(
+      projectDir,
+      "beta.md",
+      "---\ncollection: '  Demo '\ngroup: '  Setup '\neffect: EDITS\n---\nBody",
+    );
     await writeCommand(
       path.join(mockedPaths.agentDir, "commands"),
       "gamma.md",
@@ -81,9 +89,21 @@ describe("custom command palette metadata discovery", () => {
     const cwd = await temporaryDir("gg-palette-project-");
     const dir = path.join(cwd, ".gg", "commands");
     await writeCommand(dir, "plain.md", "---\ndescription: Plain\n---\nBody");
-    await writeCommand(dir, "blank.md", '---\ncollection: "  "\ngroup: "  "\neffect: ""\n---\nBody');
-    await writeCommand(dir, "unknown.md", "---\ncollection: my demo\ngroup: other\neffect: deletes\n---\nBody");
-    await writeCommand(dir, "control.md", "---\ncollection: de\u0007mo\ngroup: every\u0007day\n---\nBody");
+    await writeCommand(
+      dir,
+      "blank.md",
+      '---\ncollection: "  "\ngroup: "  "\neffect: ""\n---\nBody',
+    );
+    await writeCommand(
+      dir,
+      "unknown.md",
+      "---\ncollection: my demo\ngroup: other\neffect: deletes\n---\nBody",
+    );
+    await writeCommand(
+      dir,
+      "control.md",
+      "---\ncollection: de\u0007mo\ngroup: every\u0007day\n---\nBody",
+    );
     await writeCommand(dir, "long.md", `---\ncollection: ${"x".repeat(41)}\n---\nBody`);
 
     const discovery = await discoverCommands(cwd, { readReadiness });
@@ -165,7 +185,9 @@ describe("custom command palette metadata discovery", () => {
     const discovery = await discoverCommands(cwd, { readReadiness });
 
     expect(discovery.entries.some((entry) => entry.listing.name.startsWith("xxx"))).toBe(false);
-    expect(discovery.problems).toEqual([{ file: "long.md", scope: "project", reason: "invalid-name" }]);
+    expect(discovery.problems).toEqual([
+      { file: "long.md", scope: "project", reason: "invalid-name" },
+    ]);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -194,7 +216,9 @@ describe("custom command palette metadata discovery", () => {
     expect(commandProblem(`${"x".repeat(256)}.md`, "project", "invalid-name")).toBeNull();
     expect(commandProblem("", "project", "invalid-name")).toBeNull();
     expect(commandProblem(path.join("cmds", "ok.md"), "project", "invalid-name")).toEqual({
-      file: "ok.md", scope: "project", reason: "invalid-name",
+      file: "ok.md",
+      scope: "project",
+      reason: "invalid-name",
     });
     expect(
       boundCommandProblems([
@@ -215,7 +239,9 @@ describe("custom command palette metadata discovery", () => {
     const cwd = await temporaryDir("gg-palette-project-");
     await fs.mkdir(path.join(cwd, ".gg", "commands", "broken.md"), { recursive: true });
     const response = await appSidecarCodeCommandsResponse(cwd);
-    expect(response.problems).toEqual([{ file: "broken.md", scope: "project", reason: "unreadable" }]);
+    expect(response.problems).toEqual([
+      { file: "broken.md", scope: "project", reason: "unreadable" },
+    ]);
     expect(isSlashCommandsResponse(response)).toBe(true);
   });
 });

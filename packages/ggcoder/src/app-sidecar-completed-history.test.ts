@@ -64,34 +64,72 @@ it("serves the completed answer and image sizing warnings unchanged across sessi
   await manager.appendRunFinished(saved.path, { version: 1, generation: 1, outcome: "completed" });
   const { default: sharp } = await import("sharp");
   const originals = new Map<string, Buffer>();
-  for (const [width, height] of [[1536, 1024], [1254, 1254], [1024, 1024]]) {
+  for (const [width, height] of [
+    [1536, 1024],
+    [1254, 1254],
+    [1024, 1024],
+  ]) {
     const imagePath = path.join(project, `${width}x${height}.png`);
-    const bytes = await sharp({ create: { width, height, channels: 3, background: "red" } }).png().toBuffer();
+    const bytes = await sharp({ create: { width, height, channels: 3, background: "red" } })
+      .png()
+      .toBuffer();
     await fs.writeFile(imagePath, bytes);
     originals.set(imagePath, bytes);
-    const warning = width === 1024 ? "" : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${width}x${height}. Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${imagePath})`;
+    const warning =
+      width === 1024
+        ? ""
+        : `WARNING: Image saved, requested dimensions not met. Requested: 1024x1024; actual: ${width}x${height}. Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${imagePath})`;
     const id = randomUUID();
     await manager.appendRequiredMessage(saved.path, {
-      type: "message", id, parentId, timestamp,
+      type: "message",
+      id,
+      parentId,
+      timestamp,
       message: {
         role: "tool",
-        content: [{
-          type: "tool_result", toolCallId: `image-${width}`,
-          content: [
-            { type: "text", text: `Generated image → ${imagePath}` },
-            { type: "text", text: warning || "Requested: 1024x1024; actual: 1024x1024. Requested dimensions matched." },
-            { type: "image", mediaType: "image/png", data: bytes.toString("base64") },
-          ],
-        }],
+        content: [
+          {
+            type: "tool_result",
+            toolCallId: `image-${width}`,
+            content: [
+              { type: "text", text: `Generated image → ${imagePath}` },
+              {
+                type: "text",
+                text:
+                  warning ||
+                  "Requested: 1024x1024; actual: 1024x1024. Requested dimensions matched.",
+              },
+              { type: "image", mediaType: "image/png", data: bytes.toString("base64") },
+            ],
+          },
+        ],
       },
     });
     parentId = id;
-    fixture.history.push({ role: "assistant", text: warning, toolImages: [{ src: expect.stringMatching(/^data:image\/png;base64,/), path: imagePath }] });
+    fixture.history.push({
+      role: "assistant",
+      text: warning,
+      toolImages: [{ src: expect.stringMatching(/^data:image\/png;base64,/), path: imagePath }],
+    });
   }
-  const previewFailure = "Partial completion: saved 1 of 2 requested images.\nSaved originals: offline-original.png\nFailure: Preview failed: offline fixture\nNo retry or fallback was attempted; saved originals were not overwritten.";
+  const previewFailure =
+    "Partial completion: saved 1 of 2 requested images.\nSaved originals: offline-original.png\nFailure: Preview failed: offline fixture\nNo retry or fallback was attempted; saved originals were not overwritten.";
   await manager.appendRequiredMessage(saved.path, {
-    type: "message", id: randomUUID(), parentId, timestamp,
-    message: { role: "tool", content: [{ type: "tool_result", toolCallId: "failed-preview", content: previewFailure, isError: true }] },
+    type: "message",
+    id: randomUUID(),
+    parentId,
+    timestamp,
+    message: {
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "failed-preview",
+          content: previewFailure,
+          isError: true,
+        },
+      ],
+    },
   });
   fixture.history.push({ role: "assistant", text: previewFailure, toolImages: [] });
   const original = await fs.readFile(saved.path);

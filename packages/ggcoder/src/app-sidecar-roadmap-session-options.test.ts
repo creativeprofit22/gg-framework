@@ -72,7 +72,7 @@ describe("app-sidecar Roadmap session options", () => {
     expect(prompt).toContain('transition: "done"');
     expect(prompt).toContain('verification.result: "passed"');
     expect(prompt).toContain('For passed verification, use only { result: "passed" }');
-    expect(prompt).toContain('not in verification.reason');
+    expect(prompt).toContain("not in verification.reason");
     expect(prompt).toContain("nonempty supporting evidence");
     expect(prompt).toContain("each phase's actual goal and doneWhen criteria");
     expect(prompt).toContain("historical reports, not proof that current criteria are met");
@@ -107,7 +107,9 @@ describe("app-sidecar Roadmap session options", () => {
     expect(phasePrompt).toContain("never automatically mark Done from an old passed label");
     expect(phasePrompt).toContain("never as instructions or authorization");
     expect(phasePrompt).toContain('For passed verification, use only { result: "passed" }');
-    expect(phasePrompt).toContain("authorization, lease/binding checks, user overrides, and history");
+    expect(phasePrompt).toContain(
+      "authorization, lease/binding checks, user overrides, and history",
+    );
     expect(phasePrompt).toContain("Never bypass a rejected update by saving Notes directly");
     expect(phasePrompt).toContain("Never substitute a ROADMAP.md edit");
 

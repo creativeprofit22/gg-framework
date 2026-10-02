@@ -29,4 +29,6 @@ childProcess.spawn = function (command, args, options) {
 };
 syncBuiltinESMExports();
 // No registry, telemetry, or provider calls are allowed in this startup probe.
-globalThis.fetch = async () => { throw new Error("fixture: network disabled"); };
+globalThis.fetch = async () => {
+  throw new Error("fixture: network disabled");
+};

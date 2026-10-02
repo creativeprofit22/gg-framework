@@ -84,9 +84,10 @@ export async function runContextProfileMutation(
         status: 409,
         body: {
           error: "context_profile_locked",
-          reason: eligibility && !eligibility.canChange
-            ? eligibility.reason
-            : "Context mode eligibility is unavailable. Start a new session to change it.",
+          reason:
+            eligibility && !eligibility.canChange
+              ? eligibility.reason
+              : "Context mode eligibility is unavailable. Start a new session to change it.",
         },
       };
     }

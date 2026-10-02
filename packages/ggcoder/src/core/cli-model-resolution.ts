@@ -7,9 +7,7 @@ export function resolveRpcModel(provider: Provider, explicitModel: string | unde
 
 export function resolveSavedCliModel(provider: Provider, savedModel: string | undefined): string {
   const registeredModel = savedModel ? getModel(savedModel) : undefined;
-  return registeredModel?.provider === provider
-    ? registeredModel.id
-    : getDefaultModel(provider).id;
+  return registeredModel?.provider === provider ? registeredModel.id : getDefaultModel(provider).id;
 }
 
 export function resolveInteractiveCliModel(

@@ -5,8 +5,7 @@
  * its Retry block; answering 200 with an empty array would read as "no history".
  */
 export type ListingRouteResponse<K extends string, T> =
-  | { status: 200; body: Record<K, T[]> }
-  | { status: 500; body: { error: string } };
+  { status: 200; body: Record<K, T[]> } | { status: 500; body: { error: string } };
 
 export async function listingRouteResponse<K extends string, T>(
   key: K,

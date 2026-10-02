@@ -141,10 +141,12 @@ describe("Ken question context", () => {
     try {
       expect(bridge.pendingRequests).toHaveLength(1);
       expect(bridge.pendingRequests[0].questions[0].options).toEqual(questions[0].options);
-      const transcript: Message[] = [{
-        role: "assistant",
-        content: [{ type: "tool_call", id: "large-valid", name: "ask_user", args: parsed }],
-      }];
+      const transcript: Message[] = [
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "large-valid", name: "ask_user", args: parsed }],
+        },
+      ];
       for (const build of [buildKenDigest, buildKenAutopilotContext]) {
         for (const input of [
           { messages: [], pendingQuestions: bridge.pendingRequests },

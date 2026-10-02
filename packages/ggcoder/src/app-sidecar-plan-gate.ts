@@ -5,10 +5,7 @@ export type { PendingPlanReview } from "@kenkaiiii/gg-core";
 export const MAX_PLAN_GATE_CONTENT_BYTES = 512 * 1024;
 
 export type PlanReviewState =
-  | "pending-review"
-  | "revision-requested"
-  | "human-approved"
-  | "superseded";
+  "pending-review" | "revision-requested" | "human-approved" | "superseded";
 export type PlanReviewActor = "gg-coder" | "ken-autopilot" | "user";
 export type PlanReviewStatus = "unreviewed" | "ready";
 
@@ -263,7 +260,11 @@ export class AppSidecarPlanGate {
     });
   }
 
-  markReady(checkpointId: string, generation: number, reason?: string): Promise<PlanGateTransitionResult> {
+  markReady(
+    checkpointId: string,
+    generation: number,
+    reason?: string,
+  ): Promise<PlanGateTransitionResult> {
     return this.transition(checkpointId, generation, ["pending-review"], (checkpoint) => ({
       ...checkpoint,
       reviewStatus: "ready",

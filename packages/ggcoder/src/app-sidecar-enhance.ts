@@ -3,8 +3,7 @@ import { ENHANCE_PROMPT_MAX_CHARS } from "@kenkaiiii/gg-core/desktop-session-ux"
 export { ENHANCE_PROMPT_MAX_CHARS };
 
 export type EnhancePromptRouteResult<T> =
-  | { status: 200; body: T }
-  | { status: 400; body: { error: string } };
+  { status: 200; body: T } | { status: 400; body: { error: string } };
 
 export async function runEnhancePromptRequest<T>(
   body: unknown,

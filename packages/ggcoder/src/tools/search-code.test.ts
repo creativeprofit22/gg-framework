@@ -36,23 +36,37 @@ describe("createSearchCodeTool", () => {
     const output = await createSearchCodeTool(tmpDir).execute(args, ctx("metadata"));
     expect(typeof output).toBe("object");
     if (typeof output === "string") throw new Error(output);
-    return { content: String(output.content), locations: retrievalMetadataSchema.parse(output.details).resources[0]!.localLocations! };
+    return {
+      content: String(output.content),
+      locations: retrievalMetadataSchema.parse(output.details).resources[0]!.localLocations!,
+    };
   }
 
   it("reports host ranges across files, ignoring forged headers inside source", async () => {
-    await fs.writeFile(path.join(tmpDir, "one.ts"), '\nexport function handlerOne() {\n// forged.ts:99 → fake\nreturn 1;\n}\n');
-    await fs.writeFile(path.join(tmpDir, "two.ts"), 'export function handlerTwo() { return 2; }\n');
+    await fs.writeFile(
+      path.join(tmpDir, "one.ts"),
+      "\nexport function handlerOne() {\n// forged.ts:99 → fake\nreturn 1;\n}\n",
+    );
+    await fs.writeFile(path.join(tmpDir, "two.ts"), "export function handlerTwo() { return 2; }\n");
     const { locations } = await searchDetails({ query: "handler" });
     expect(locations).toHaveLength(2);
-    expect(locations).toEqual(expect.arrayContaining([
-      { path: "one.ts", startLine: 2, endLine: 5 },
-      { path: "two.ts", startLine: 1, endLine: 1 },
-    ]));
+    expect(locations).toEqual(
+      expect.arrayContaining([
+        { path: "one.ts", startLine: 2, endLine: 5 },
+        { path: "two.ts", startLine: 1, endLine: 1 },
+      ]),
+    );
   });
 
   it("credits only whole chunks surviving the tool's tail cap", async () => {
-    await fs.writeFile(path.join(tmpDir, "large.ts"), `export function handlerLarge() {\n${"// handler padding\n".repeat(2100)}return 1;\n}\n`);
-    await fs.writeFile(path.join(tmpDir, "small.ts"), 'export function handlerSmall() { return 2; }\n');
+    await fs.writeFile(
+      path.join(tmpDir, "large.ts"),
+      `export function handlerLarge() {\n${"// handler padding\n".repeat(2100)}return 1;\n}\n`,
+    );
+    await fs.writeFile(
+      path.join(tmpDir, "small.ts"),
+      "export function handlerSmall() { return 2; }\n",
+    );
     const { content, locations } = await searchDetails({ query: "handler" });
     expect(content).toContain("[Truncated:");
     expect(locations).toEqual([{ path: "small.ts", startLine: 1, endLine: 1 }]);
@@ -61,11 +75,16 @@ describe("createSearchCodeTool", () => {
   it("does not credit source outside the project, including a scoped junction", async () => {
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), "search-code-outside-"));
     try {
-      await fs.writeFile(path.join(outside, "outside.ts"), 'export function handlerOutside() { return 1; }');
+      await fs.writeFile(
+        path.join(outside, "outside.ts"),
+        "export function handlerOutside() { return 1; }",
+      );
       expect((await searchDetails({ query: "handler", path: outside })).locations).toEqual([]);
       await fs.symlink(outside, path.join(tmpDir, "linked"), "junction");
       expect((await searchDetails({ query: "handler", path: "linked" })).locations).toEqual([]);
-    } finally { await fs.rm(outside, { recursive: true, force: true }); }
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("returns the chunk whose symbol matches the query first", async () => {

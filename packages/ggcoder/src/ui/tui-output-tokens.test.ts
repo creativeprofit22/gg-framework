@@ -22,9 +22,6 @@ describe("TUI request output-token caps", () => {
   it("keeps Astra's output ceiling independent of the context profile", () => {
     const profiles = ["stable", "experimental"] as const;
 
-    expect(profiles.map(() => resolveModelMaxTokens("gpt-6-astra"))).toEqual([
-      128_000,
-      128_000,
-    ]);
+    expect(profiles.map(() => resolveModelMaxTokens("gpt-6-astra"))).toEqual([128_000, 128_000]);
   });
 });

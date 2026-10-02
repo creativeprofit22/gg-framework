@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useFakeHome } from "./test-support/fake-home.js";
 import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
-import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./core/programmatic/profile.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "./core/programmatic/profile.js";
 
 let root: string;
 let cwd: string;
@@ -22,40 +25,79 @@ afterEach(async () => {
 });
 
 async function command(name: string) {
-  await fs.writeFile(path.join(cwd, ".gg", "commands", `${name}.md`),
-    `---\nname: ${name}\ndescription: Fixture command\n---\nFixture body`);
+  await fs.writeFile(
+    path.join(cwd, ".gg", "commands", `${name}.md`),
+    `---\nname: ${name}\ndescription: Fixture command\n---\nFixture body`,
+  );
 }
 
 describe("setup-first desktop discovery", () => {
   it("withholds legacy setup until separately approved upgrade, preserving saved report bytes", async () => {
     const proposal = await buildProgrammaticProfileProposal(cwd);
-    expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+    expect(
+      (await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile))
+        .ok,
+    ).toBe(true);
     const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
     const saved = JSON.parse(await fs.readFile(profilePath, "utf8"));
-    const legacy = JSON.stringify({ version: 1, profile: saved.profile, configurationFingerprint: saved.configurationFingerprint });
+    const legacy = JSON.stringify({
+      version: 1,
+      profile: saved.profile,
+      configurationFingerprint: saved.configurationFingerprint,
+    });
     await fs.writeFile(profilePath, legacy);
     const statePath = path.join(cwd, ".gg/programmatic/state.json");
     await fs.writeFile(statePath, "independent saved report bytes");
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(false);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(false);
     expect(await fs.readFile(profilePath, "utf8")).toBe(legacy);
     expect(await fs.readFile(statePath, "utf8")).toBe("independent saved report bytes");
     const upgrade = await buildProgrammaticProfileProposal(cwd);
-    expect((await persistProgrammaticProfile(cwd, upgrade.configurationFingerprint, upgrade.profile, { expectedPriorProfileDigest: upgrade.expectedPriorProfileDigest })).ok).toBe(true);
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(true);
+    expect(
+      (
+        await persistProgrammaticProfile(cwd, upgrade.configurationFingerprint, upgrade.profile, {
+          expectedPriorProfileDigest: upgrade.expectedPriorProfileDigest,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(true);
     expect(await fs.readFile(statePath, "utf8")).toBe("independent saved report bytes");
   });
   it("unlocks only after saving approved settings and detects later configuration drift", async () => {
     await fs.writeFile(path.join(cwd, "package.json"), '{"name":"fixture"}');
     const proposal = await buildProgrammaticProfileProposal(cwd);
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(false);
-    const saved = await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(false);
+    const saved = await persistProgrammaticProfile(
+      cwd,
+      proposal.configurationFingerprint,
+      proposal.profile,
+    );
     expect(saved.ok).toBe(true);
     const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
     const bytes = await fs.readFile(profilePath);
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(true);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(true);
     expect(await fs.readFile(profilePath)).toEqual(bytes);
     await fs.writeFile(path.join(cwd, "package.json"), '{"name":"changed"}');
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(false);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(false);
     expect(await fs.readFile(profilePath)).toEqual(bytes);
   });
 
@@ -63,7 +105,11 @@ describe("setup-first desktop discovery", () => {
     await fs.mkdir(path.join(cwd, ".gg/programmatic"));
     const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
     await fs.writeFile(profilePath, "malformed fixture");
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "programmatic")).toBe(false);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some(
+        (item) => item.name === "programmatic",
+      ),
+    ).toBe(false);
     expect(await fs.readFile(profilePath, "utf8")).toBe("malformed fixture");
   });
   it("advertises setup but not assessment or its internal run helper in a fresh project", async () => {
@@ -88,11 +134,16 @@ describe("setup-first desktop discovery", () => {
   });
 
   it("re-reads command creation and removal without restarting discovery", async () => {
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh")).toBe(false);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh"),
+    ).toBe(false);
     await command("fresh");
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.find((item) => item.name === "fresh"))
-      .toMatchObject({ origin: "project-custom", invocationKind: "prompt" });
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.find((item) => item.name === "fresh"),
+    ).toMatchObject({ origin: "project-custom", invocationKind: "prompt" });
     await fs.unlink(path.join(cwd, ".gg", "commands", "fresh.md"));
-    expect((await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh")).toBe(false);
+    expect(
+      (await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh"),
+    ).toBe(false);
   });
 });

@@ -89,9 +89,7 @@ export const RoadmapBindParams = z.discriminatedUnion("action", [
 
 type RoadmapBindInput = z.infer<typeof RoadmapBindParams>;
 export type RoadmapBindToolResult =
-  | ProjectNotesStorageDiagnostics
-  | PhaseBindingOutcome
-  | PhaseLeaseOutcome;
+  ProjectNotesStorageDiagnostics | PhaseBindingOutcome | PhaseLeaseOutcome;
 
 const phaseLeaseProperties = {
   phase_id: { type: "string", maxLength: 256 },

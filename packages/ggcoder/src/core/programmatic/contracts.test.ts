@@ -72,67 +72,149 @@ const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
 describe("independent command verification state", () => {
   it("preserves unknown/false/true loading without granting behavior or execution", () => {
     for (const loads of [undefined, false, true]) {
-      const value = { ...(loads === undefined ? {} : { loads }), reviewedContent: "unavailable", behavior: "unavailable", executionApproved: false };
+      const value = {
+        ...(loads === undefined ? {} : { loads }),
+        reviewedContent: "unavailable",
+        behavior: "unavailable",
+        executionApproved: false,
+      };
       expect(programmaticCommandVerificationStateSchema.parse(value)).toEqual(value);
-      expect(programmaticCommandVerificationStateSchema.safeParse({ ...value, executionApproved: true }).success).toBe(false);
-      expect(programmaticCommandVerificationStateSchema.safeParse({ ...value, behavior: "passed" }).success).toBe(false);
+      expect(
+        programmaticCommandVerificationStateSchema.safeParse({ ...value, executionApproved: true })
+          .success,
+      ).toBe(false);
+      expect(
+        programmaticCommandVerificationStateSchema.safeParse({ ...value, behavior: "passed" })
+          .success,
+      ).toBe(false);
     }
   });
 });
 
 describe("direct reviewed execution contracts", () => {
   const selection = {
-    version: 1, command: { version: 1, name: "custom-check", source: "project-custom", invocationKind: "prompt" },
-    arguments: "input", outcome: "Check input", successCondition: "Input is checked",
-    helpers: ["scripts/check.mjs"], prerequisites: ["package.json"], requiredTools: ["bash"],
-    mode: "general-work", containment: "agent-session",
+    version: 1,
+    command: {
+      version: 1,
+      name: "custom-check",
+      source: "project-custom",
+      invocationKind: "prompt",
+    },
+    arguments: "input",
+    outcome: "Check input",
+    successCondition: "Input is checked",
+    helpers: ["scripts/check.mjs"],
+    prerequisites: ["package.json"],
+    requiredTools: ["bash"],
+    mode: "general-work",
+    containment: "agent-session",
   };
   const policy = {
-    version: 1, revision: 1, mode: "general-work", tools: ["bash", "read"], actionApprovalTools: ["bash"],
-    containment: "agent-session", disclosure: "Not an OS sandbox", maxTurns: 30, deadlineMs: 600_000,
-    provider: "fixture", model: "fixture", runtimeSha256: "a".repeat(64),
+    version: 1,
+    revision: 1,
+    mode: "general-work",
+    tools: ["bash", "read"],
+    actionApprovalTools: ["bash"],
+    containment: "agent-session",
+    disclosure: "Not an OS sandbox",
+    maxTurns: 30,
+    deadlineMs: 600_000,
+    provider: "fixture",
+    model: "fixture",
+    runtimeSha256: "a".repeat(64),
   };
-  const file = { path: "scripts/check.mjs", sha256: "b".repeat(64), identitySha256: "c".repeat(64), bytes: 100 };
+  const file = {
+    path: "scripts/check.mjs",
+    sha256: "b".repeat(64),
+    identitySha256: "c".repeat(64),
+    bytes: 100,
+  };
   const snapshot = {
-    version: 1, selection, policy,
-    command: { version: 1, command: selection.command, capabilityKind: "script-backed", ownerSha256: "d".repeat(64), bodySha256: "e".repeat(64), helpers: [{ path: file.path, sha256: file.sha256 }] },
-    repositorySha256: "f".repeat(64), rawMarkdownSha256: "a".repeat(64), sourceIdentitySha256: "b".repeat(64),
-    helpers: [file], prerequisites: [{ ...file, path: "package.json" }],
+    version: 1,
+    selection,
+    policy,
+    command: {
+      version: 1,
+      command: selection.command,
+      capabilityKind: "script-backed",
+      ownerSha256: "d".repeat(64),
+      bodySha256: "e".repeat(64),
+      helpers: [{ path: file.path, sha256: file.sha256 }],
+    },
+    repositorySha256: "f".repeat(64),
+    rawMarkdownSha256: "a".repeat(64),
+    sourceIdentitySha256: "b".repeat(64),
+    helpers: [file],
+    prerequisites: [{ ...file, path: "package.json" }],
   };
   it("accepts an existing custom command without a creation receipt or Opportunity", () => {
     expect(directCommandSelectionV1Schema.parse(selection)).toEqual(selection);
     expect(directExecutionSnapshotV1Schema.parse(snapshot)).toEqual(snapshot);
-    expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: "custom-check" }).success).toBe(false);
+    expect(
+      scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: "custom-check" })
+        .success,
+    ).toBe(false);
   });
   it.each([
-    { approval: true }, { helpers: ["../escape"] }, { helpers: ["C:/escape"] },
-    { helpers: ["scripts/a", "scripts/A"] }, { prerequisites: selection.helpers },
-    { requiredTools: ["bash", "bash"] }, { mode: "unrestricted" }, { arguments: "x".repeat(4001) },
+    { approval: true },
+    { helpers: ["../escape"] },
+    { helpers: ["C:/escape"] },
+    { helpers: ["scripts/a", "scripts/A"] },
+    { prerequisites: selection.helpers },
+    { requiredTools: ["bash", "bash"] },
+    { mode: "unrestricted" },
+    { arguments: "x".repeat(4001) },
   ])("rejects invalid or caller-authorized selection %j", (change) => {
-    expect(directCommandSelectionV1Schema.safeParse({ ...selection, ...change }).success).toBe(false);
+    expect(directCommandSelectionV1Schema.safeParse({ ...selection, ...change }).success).toBe(
+      false,
+    );
   });
   it("binds every declaration and rejects unsupported or over-budget host envelopes", () => {
     for (const change of [
       { selection: { ...selection, containment: "os-confined" } },
       { selection: { ...selection, requiredTools: ["steroids"] } },
       { helpers: [{ ...file, sha256: "a".repeat(64) }] },
-      { prerequisites: [] }, { helpers: [{ ...file, bytes: 128 * 1024 + 1 }] },
+      { prerequisites: [] },
+      { helpers: [{ ...file, bytes: 128 * 1024 + 1 }] },
       { policy: { ...policy, mode: "read-only" } },
       { command: { ...snapshot.command, command: { ...selection.command, name: "other" } } },
-    ]) expect(directExecutionSnapshotV1Schema.safeParse({ ...snapshot, ...change }).success).toBe(false);
-    expect(directExecutionPolicyV1Schema.safeParse({ ...policy, actionApprovalTools: ["write"] }).success).toBe(false);
-    expect(directExecutionPolicyV1Schema.safeParse({ ...policy, maxTurns: 31 }).success).toBe(false);
+    ])
+      expect(directExecutionSnapshotV1Schema.safeParse({ ...snapshot, ...change }).success).toBe(
+        false,
+      );
+    expect(
+      directExecutionPolicyV1Schema.safeParse({ ...policy, actionApprovalTools: ["write"] })
+        .success,
+    ).toBe(false);
+    expect(directExecutionPolicyV1Schema.safeParse({ ...policy, maxTurns: 31 }).success).toBe(
+      false,
+    );
   });
   it("requires bounded content-specific results without certifying behavior", () => {
     const result = {
-      version: 1, runId: "00000000-0000-4000-8000-000000000000", status: "completed", summary: "Finished",
-      snapshot, executionSha256: "a".repeat(64), evidence: [], behavior: "unverified", limitations: ["Tool completion does not prove correctness."],
+      version: 1,
+      runId: "00000000-0000-4000-8000-000000000000",
+      status: "completed",
+      summary: "Finished",
+      snapshot,
+      executionSha256: "a".repeat(64),
+      evidence: [],
+      behavior: "unverified",
+      limitations: ["Tool completion does not prove correctness."],
     };
     expect(directCommandResultV1Schema.parse(result)).toEqual(result);
-    expect(directCommandResultV1Schema.safeParse({ ...result, behavior: "passed" }).success).toBe(false);
-    expect(directCommandResultV1Schema.safeParse({ ...result, snapshot: undefined }).success).toBe(false);
-    expect(directCommandResultV1Schema.safeParse({ ...result, limitations: [] }).success).toBe(false);
-    expect(directCommandResultV1Schema.safeParse({ ...result, conversation: [] }).success).toBe(false);
+    expect(directCommandResultV1Schema.safeParse({ ...result, behavior: "passed" }).success).toBe(
+      false,
+    );
+    expect(directCommandResultV1Schema.safeParse({ ...result, snapshot: undefined }).success).toBe(
+      false,
+    );
+    expect(directCommandResultV1Schema.safeParse({ ...result, limitations: [] }).success).toBe(
+      false,
+    );
+    expect(directCommandResultV1Schema.safeParse({ ...result, conversation: [] }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -883,12 +965,16 @@ describe("programmatic extension contracts", () => {
       expect(programmaticAssessmentInputV1Schema.parse({ version: 1, focus }).focus).toBe(focus);
     }
     for (const focus of [" " + "x".repeat(4_000), "😀".repeat(2_000) + "x"]) {
-      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(false);
+      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(
+        false,
+      );
     }
     for (let code = 0; code <= 159; code++) {
       const focus = `a${String.fromCharCode(code)}b`;
       const allowed = (code >= 32 && code < 127) || [9, 10, 13].includes(code);
-      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(allowed);
+      expect(programmaticAssessmentInputV1Schema.safeParse({ version: 1, focus }).success).toBe(
+        allowed,
+      );
     }
   });
 
@@ -993,18 +1079,45 @@ describe("programmatic extension contracts", () => {
           expect(programmaticRecommendationV1Schema.parse(reuse)).toEqual(reuse);
         }
       }
-      expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: name }).success)
-        .toBe(false);
+      expect(
+        scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand: name }).success,
+      ).toBe(false);
     },
   );
 
   it("rejects ambiguous identities, helper dependencies, unsafe paths and forged authority", () => {
     for (const name of [
-      "", "/check", "check/part", "check\\part", "check now", " check", "check ",
-      "check\targ", "check\n", "check\r", "check\0", "check\u007f", "check\u0085",
-      "check;run", "check|run", "check&run", "$(check)", "`check`", "check>out",
-      "check<in", "check\"arg", "check'arg", "check:run", "check%PATH%", "check*",
-      "-check", "_check", ".check", "..", "chéck", "x".repeat(101),
+      "",
+      "/check",
+      "check/part",
+      "check\\part",
+      "check now",
+      " check",
+      "check ",
+      "check\targ",
+      "check\n",
+      "check\r",
+      "check\0",
+      "check\u007f",
+      "check\u0085",
+      "check;run",
+      "check|run",
+      "check&run",
+      "$(check)",
+      "`check`",
+      "check>out",
+      "check<in",
+      'check"arg',
+      "check'arg",
+      "check:run",
+      "check%PATH%",
+      "check*",
+      "-check",
+      "_check",
+      ".check",
+      "..",
+      "chéck",
+      "x".repeat(101),
     ]) {
       expect(programmaticCommandReferenceV1Schema.safeParse({ ...command, name }).success).toBe(
         false,
@@ -1115,9 +1228,12 @@ describe("programmatic extension contracts", () => {
       files: [{ ...creation.files[0], proposedSha256: "d".repeat(64) }],
     };
     expect(programmaticCreationProposalV1Schema.safeParse(frontmatterEdit).success).toBe(true);
-    expect(isProgrammaticReviewCurrent(creation, frontmatterEdit, "creation", {
-      ...approval, purpose: "creation",
-    })).toBe(false);
+    expect(
+      isProgrammaticReviewCurrent(creation, frontmatterEdit, "creation", {
+        ...approval,
+        purpose: "creation",
+      }),
+    ).toBe(false);
     for (const value of [
       {
         ...creation,
@@ -1129,7 +1245,10 @@ describe("programmatic extension contracts", () => {
       { ...creation, files: [] },
       { ...creation, files: [...creation.files, ...creation.files] },
       { ...creation, files: [{ ...creation.files[0], path: ".gg/commands/wrong.md" }] },
-      { ...scriptCreation, files: [...creation.files, { ...scriptCreation.files[1], proposedSha256: "d".repeat(64) }] },
+      {
+        ...scriptCreation,
+        files: [...creation.files, { ...scriptCreation.files[1], proposedSha256: "d".repeat(64) }],
+      },
       { ...creation, files: [{ ...creation.files[0], prior: {} }] },
       { ...creation, snapshot: app },
       { ...scriptCreation, files: creation.files },
@@ -1316,31 +1435,69 @@ describe("needs-first V2 advisory contracts", () => {
     status: "available",
     snapshot: {
       version: 1,
-      command: { version: 1, name: "check-callers", source: "project-custom", invocationKind: "prompt" },
-      capabilityKind: "prompt-only", ownerSha256: "a".repeat(64), bodySha256: "b".repeat(64), helpers: [],
+      command: {
+        version: 1,
+        name: "check-callers",
+        source: "project-custom",
+        invocationKind: "prompt",
+      },
+      capabilityKind: "prompt-only",
+      ownerSha256: "a".repeat(64),
+      bodySha256: "b".repeat(64),
+      helpers: [],
     },
   };
   const requirement = {
-    version: 1, desiredOutcome: "Review callers", capabilityKind: "prompt-only",
-    inputs: ["Sources"], outputs: ["Report"], prerequisites: ["Readable callers"],
-    risks: ["Dynamic callers may be missed"], verificationExpectations: ["Compare against known callers"],
+    version: 1,
+    desiredOutcome: "Review callers",
+    capabilityKind: "prompt-only",
+    inputs: ["Sources"],
+    outputs: ["Report"],
+    prerequisites: ["Readable callers"],
+    risks: ["Dynamic callers may be missed"],
+    verificationExpectations: ["Compare against known callers"],
   };
   const choices = [
     { kind: "reuse-command", availability },
-    { kind: "extend-command", availability, proposedChanges: ["Include generated callers"], requirement },
+    {
+      kind: "extend-command",
+      availability,
+      proposedChanges: ["Include generated callers"],
+      requirement,
+    },
     { kind: "missing-capability", proposal: requirement },
     { kind: "manual", steps: ["Review the single caller"] },
-    { kind: "needs-more-evidence", missingEvidence: ["Caller inventory"], nextInspectionSteps: ["Inspect package exports"] },
+    {
+      kind: "needs-more-evidence",
+      missingEvidence: ["Caller inventory"],
+      nextInspectionSteps: ["Inspect package exports"],
+    },
   ];
   const recommendation = (choice = choices[0]!) => ({
-    version: 2, kind: "advisory", outcome: "Review callers", rationale: "Avoid incompatible changes",
-    uncertainty: "Dynamic callers remain uncertain", evidence: { version: 1, items: [evidenceItem] },
-    workflow, alternatives: [{ kind: choice.kind === "manual" ? "needs-more-evidence" : "manual", reasonNotSelected: "Repeated review warrants a reusable check" }],
+    version: 2,
+    kind: "advisory",
+    outcome: "Review callers",
+    rationale: "Avoid incompatible changes",
+    uncertainty: "Dynamic callers remain uncertain",
+    evidence: { version: 1, items: [evidenceItem] },
+    workflow,
+    alternatives: [
+      {
+        kind: choice.kind === "manual" ? "needs-more-evidence" : "manual",
+        reasonNotSelected: "Repeated review warrants a reusable check",
+      },
+    ],
     choice,
   });
   const result = (recommendations: unknown[] = []) => ({
-    version: 2, kind: "advisory", recommendations,
-    coverage: { status: "limited", scope: "Client sources", reason: "Dynamic callers not inspected" },
+    version: 2,
+    kind: "advisory",
+    recommendations,
+    coverage: {
+      status: "limited",
+      scope: "Client sources",
+      reason: "Dynamic callers not inspected",
+    },
   });
 
   it.each(choices)("accepts the $kind choice without changing nested V1 contracts", (choice) => {
@@ -1353,83 +1510,181 @@ describe("needs-first V2 advisory contracts", () => {
   it.each(Object.keys(workflow))("requires workflow field %s", (field) => {
     const incomplete: Record<string, unknown> = { ...workflow };
     delete incomplete[field];
-    expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(), workflow: incomplete }).success).toBe(false);
+    expect(
+      programmaticRecommendationV2Schema.safeParse({ ...recommendation(), workflow: incomplete })
+        .success,
+    ).toBe(false);
   });
 
   it("requires V2 workflow and alternatives rather than silently enriching V1", () => {
-    const { workflow: _workflow, alternatives: _alternatives, ...legacy } = recommendation(choices[3]);
+    const {
+      workflow: _workflow,
+      alternatives: _alternatives,
+      ...legacy
+    } = recommendation(choices[3]);
     expect(programmaticRecommendationV1Schema.parse({ ...legacy, version: 1 }).version).toBe(1);
     expect(programmaticRecommendationV2Schema.safeParse(legacy).success).toBe(false);
-    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), version: 1 }).success).toBe(false);
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse({ ...result(), version: 1 }).success,
+    ).toBe(false);
   });
 
   it("accepts explicit repository-wide scope and rejects unsafe or ambiguous subprojects", () => {
-    expect(programmaticWorkflowV2Schema.parse({ ...workflow, affectedSubproject: { scope: "repository-wide" } }).affectedSubproject).toEqual({ scope: "repository-wide" });
+    expect(
+      programmaticWorkflowV2Schema.parse({
+        ...workflow,
+        affectedSubproject: { scope: "repository-wide" },
+      }).affectedSubproject,
+    ).toEqual({ scope: "repository-wide" });
     for (const affectedSubproject of [
-      { scope: "subproject" }, { scope: "repository-wide", path: "packages/client" },
-      ...[".", "../client", "/client", "C:/client", "packages\\client"].map((path) => ({ scope: "subproject", path })),
-    ]) expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, affectedSubproject }).success).toBe(false);
+      { scope: "subproject" },
+      { scope: "repository-wide", path: "packages/client" },
+      ...[".", "../client", "/client", "C:/client", "packages\\client"].map((path) => ({
+        scope: "subproject",
+        path,
+      })),
+    ])
+      expect(
+        programmaticWorkflowV2Schema.safeParse({ ...workflow, affectedSubproject }).success,
+      ).toBe(false);
   });
 
   it("distinguishes supported repeatability from assumptions for every choice", () => {
-    for (const choice of choices) for (const basis of ["observed", "inferred", "assumed"]) {
-      const value = { ...recommendation(choice), workflow: { ...workflow, repeatability: { ...workflow.repeatability, basis } } };
-      expect(programmaticRecommendationV2Schema.safeParse(value).success).toBe(basis !== "assumed" || ["manual", "needs-more-evidence"].includes(choice.kind));
-    }
-    for (const repeatability of [{ basis: "observed" }, { explanation: "Unknown" }, { basis: "reported", explanation: "Unknown" }, { basis: "assumed", explanation: " " }]) {
-      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, repeatability }).success).toBe(false);
+    for (const choice of choices)
+      for (const basis of ["observed", "inferred", "assumed"]) {
+        const value = {
+          ...recommendation(choice),
+          workflow: { ...workflow, repeatability: { ...workflow.repeatability, basis } },
+        };
+        expect(programmaticRecommendationV2Schema.safeParse(value).success).toBe(
+          basis !== "assumed" || ["manual", "needs-more-evidence"].includes(choice.kind),
+        );
+      }
+    for (const repeatability of [
+      { basis: "observed" },
+      { explanation: "Unknown" },
+      { basis: "reported", explanation: "Unknown" },
+      { basis: "assumed", explanation: " " },
+    ]) {
+      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, repeatability }).success).toBe(
+        false,
+      );
     }
   });
 
   it("requires meaningful distinct alternatives only for positive automation", () => {
     for (const choice of choices) {
-      expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(choice), alternatives: [] }).success).toBe(["manual", "needs-more-evidence"].includes(choice.kind));
+      expect(
+        programmaticRecommendationV2Schema.safeParse({
+          ...recommendation(choice),
+          alternatives: [],
+        }).success,
+      ).toBe(["manual", "needs-more-evidence"].includes(choice.kind));
     }
     for (const alternatives of [
       [{ kind: "reuse-command", reasonNotSelected: "Same option" }],
-      [{ kind: "manual", reasonNotSelected: "First" }, { kind: "manual", reasonNotSelected: "Duplicate" }],
-      [{ kind: "manual", reasonNotSelected: " " }], [{ kind: "manual" }],
+      [
+        { kind: "manual", reasonNotSelected: "First" },
+        { kind: "manual", reasonNotSelected: "Duplicate" },
+      ],
+      [{ kind: "manual", reasonNotSelected: " " }],
+      [{ kind: "manual" }],
       [{ kind: "other", reasonNotSelected: "Unknown option" }],
       [{ kind: "manual", reasonNotSelected: "Not a command", availability }],
-      [{ kind: "extend-command", reasonNotSelected: "Insufficient", availability: { status: "available" } }],
+      [
+        {
+          kind: "extend-command",
+          reasonNotSelected: "Insufficient",
+          availability: { status: "available" },
+        },
+      ],
       Array(5).fill({ kind: "manual", reasonNotSelected: "Too many" }),
-    ]) expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(), alternatives }).success).toBe(false);
-    const alternatives = choices.slice(0, 3).map(({ kind }) => ({ kind, reasonNotSelected: "Does not meet this one-off need", ...(kind === "missing-capability" ? {} : { availability }) }));
-    alternatives.push({ kind: "needs-more-evidence", reasonNotSelected: "Enough evidence for manual review" });
-    expect(programmaticRecommendationV2Schema.safeParse({ ...recommendation(choices[3]), alternatives }).success).toBe(true);
+    ])
+      expect(
+        programmaticRecommendationV2Schema.safeParse({ ...recommendation(), alternatives }).success,
+      ).toBe(false);
+    const alternatives = choices
+      .slice(0, 3)
+      .map(({ kind }) => ({
+        kind,
+        reasonNotSelected: "Does not meet this one-off need",
+        ...(kind === "missing-capability" ? {} : { availability }),
+      }));
+    alternatives.push({
+      kind: "needs-more-evidence",
+      reasonNotSelected: "Enough evidence for manual review",
+    });
+    expect(
+      programmaticRecommendationV2Schema.safeParse({ ...recommendation(choices[3]), alternatives })
+        .success,
+    ).toBe(true);
   });
 
   it("rejects unknown authority fields at every new boundary", () => {
     const value = recommendation();
     for (const change of [
-      { approved: true }, { workflow: { ...workflow, tools: ["bash"] } },
+      { approved: true },
+      { workflow: { ...workflow, tools: ["bash"] } },
       { workflow: { ...workflow, repeatability: { ...workflow.repeatability, count: 100 } } },
       { alternatives: [{ ...value.alternatives[0], approved: true }] },
       ...choices.map((choice) => ({ choice: { ...choice, execute: true } })),
-    ]) expect(programmaticRecommendationV2Schema.safeParse({ ...value, ...change }).success).toBe(false);
-    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), approved: true }).success).toBe(false);
-    expect(programmaticAssessmentResultV2Schema.safeParse({ ...result(), coverage: { ...result().coverage, complete: true } }).success).toBe(false);
+    ])
+      expect(programmaticRecommendationV2Schema.safeParse({ ...value, ...change }).success).toBe(
+        false,
+      );
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse({ ...result(), approved: true }).success,
+    ).toBe(false);
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse({
+        ...result(),
+        coverage: { ...result().coverage, complete: true },
+      }).success,
+    ).toBe(false);
   });
 
   it("bounds workflow text and lists plus extension and inspection lists", () => {
     for (const trigger of ["", " ", "bad\u0000text", "x".repeat(4_001)]) {
       expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, trigger }).success).toBe(false);
     }
-    expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, trigger: "x".repeat(4_000), inputs: Array(50).fill("Input") }).success).toBe(true);
-    for (const field of ["inputs", "currentProcess"]) for (const list of [[], Array(51).fill("Input")]) {
-      expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, [field]: list }).success).toBe(false);
-    }
-    for (const [index, field] of [[1, "proposedChanges"], [4, "missingEvidence"], [4, "nextInspectionSteps"]] as const) {
+    expect(
+      programmaticWorkflowV2Schema.safeParse({
+        ...workflow,
+        trigger: "x".repeat(4_000),
+        inputs: Array(50).fill("Input"),
+      }).success,
+    ).toBe(true);
+    for (const field of ["inputs", "currentProcess"])
+      for (const list of [[], Array(51).fill("Input")]) {
+        expect(programmaticWorkflowV2Schema.safeParse({ ...workflow, [field]: list }).success).toBe(
+          false,
+        );
+      }
+    for (const [index, field] of [
+      [1, "proposedChanges"],
+      [4, "missingEvidence"],
+      [4, "nextInspectionSteps"],
+    ] as const) {
       for (const list of [undefined, [], Array(51).fill("Step")]) {
-        expect(programmaticRecommendationV2Schema.safeParse(recommendation({ ...choices[index]!, [field]: list })).success).toBe(false);
+        expect(
+          programmaticRecommendationV2Schema.safeParse(
+            recommendation({ ...choices[index]!, [field]: list }),
+          ).success,
+        ).toBe(false);
       }
     }
   });
 
   it("permits empty results but enforces ten recommendations and the serialized budget including coverage", () => {
     expect(programmaticAssessmentResultV2Schema.parse(result())).toEqual(result());
-    expect(programmaticAssessmentResultV2Schema.safeParse(result(Array(10).fill(recommendation()))).success).toBe(true);
-    expect(programmaticAssessmentResultV2Schema.safeParse(result(Array(11).fill(recommendation()))).success).toBe(false);
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse(result(Array(10).fill(recommendation())))
+        .success,
+    ).toBe(true);
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse(result(Array(11).fill(recommendation())))
+        .success,
+    ).toBe(false);
     const large = recommendation(choices[3]);
     large.workflow = { ...workflow, inputs: Array(15).fill("x".repeat(4_000)) };
     const bounded = result([large]);
@@ -1505,7 +1760,9 @@ describe("Phase 1 structural bloat audit", () => {
       if (ts.isImportDeclaration(node)) {
         return ts.isStringLiteral(node.moduleSpecifier) &&
           // Focus rules are shared with the browser, not copied into the domain.
-          ["node:path", "zod", "@kenkaiiii/gg-core/slash-command-contract"].includes(node.moduleSpecifier.text)
+          ["node:path", "zod", "@kenkaiiii/gg-core/slash-command-contract"].includes(
+            node.moduleSpecifier.text,
+          )
           ? []
           : ["disallowed import"];
       }

@@ -19,7 +19,10 @@ const EMBEDDED_PERMALINK_PATTERN =
 const GITHUB_REPO_SOURCE = /github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?(?=[/#?)\s\]>"'`]|$)/.source;
 const EMBEDDED_GITHUB_REPO_PATTERN = new RegExp(GITHUB_REPO_SOURCE, "gi");
 // A standalone URL must be on github.com itself, not merely mention it in a path.
-const GITHUB_URL_REPO_PATTERN = new RegExp(/^https?:\/\/(?:www\.)?/.source + GITHUB_REPO_SOURCE, "i");
+const GITHUB_URL_REPO_PATTERN = new RegExp(
+  /^https?:\/\/(?:www\.)?/.source + GITHUB_REPO_SOURCE,
+  "i",
+);
 const MAX_LISTED_REPOS = 8;
 /** Minimum trimmed length (in characters) of a "no sources used" reason, shared by the plan and draft gates. */
 export const MIN_NO_SOURCES_REASON_LENGTH = 10;
@@ -118,8 +121,8 @@ export function checkPlanCitations(content: string, ledger: ResearchSourceLedger
     if (isNoSourcesReason(match[1])) return { ok: true };
   }
   const linked = new Set(
-    [...content.matchAll(EMBEDDED_GITHUB_REPO_PATTERN)].map(
-      (match) => (match[1] ?? "").toLowerCase(),
+    [...content.matchAll(EMBEDDED_GITHUB_REPO_PATTERN)].map((match) =>
+      (match[1] ?? "").toLowerCase(),
     ),
   );
   if (ledger.consultedRepos().some((repo) => linked.has(repo))) return { ok: true };

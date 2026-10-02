@@ -5,8 +5,11 @@ it("projects only live detached requests across answer, timeout and teardown", a
   vi.useFakeTimers();
   const settled = vi.fn();
   const bridge = createParkedRequests<{ detail: { text: string } }, string>({
-    idPrefix: "fixture", broadcast: () => {}, cancelValue: () => "cancel",
-    timeoutMs: 100, onSettled: settled,
+    idPrefix: "fixture",
+    broadcast: () => {},
+    cancelValue: () => "cancel",
+    timeoutMs: 100,
+    onSettled: settled,
   });
   try {
     expect(bridge.pendingRequests).toEqual([]);
@@ -26,5 +29,8 @@ it("projects only live detached requests across answer, timeout and teardown", a
     expect(await third).toBe("cancel");
     expect(bridge.pendingRequests).toEqual([]);
     expect(settled).toHaveBeenCalledTimes(3);
-  } finally { bridge.cancelAll(); vi.useRealTimers(); }
+  } finally {
+    bridge.cancelAll();
+    vi.useRealTimers();
+  }
 });

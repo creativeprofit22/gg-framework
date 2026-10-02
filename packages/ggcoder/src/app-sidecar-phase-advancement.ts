@@ -50,7 +50,8 @@ export interface AppSidecarRoadmapPhaseAdvancementCoordinator {
 }
 
 function orderedRoadmapPhases(snapshot: ProjectNotesSnapshot): NotesPhase[] {
-  return snapshot.document.phases.filter(isNotesPhasePresent)
+  return snapshot.document.phases
+    .filter(isNotesPhasePresent)
     .map((phase, documentIndex) => ({ phase, documentIndex }))
     .sort(
       (left, right) =>

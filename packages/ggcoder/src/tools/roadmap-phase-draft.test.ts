@@ -321,7 +321,10 @@ describe("createRoadmapPhaseDraftTool", () => {
   });
 
   it("exports a bounded transform-free provider schema", () => {
-    const tool = createRoadmapPhaseDraftTool(async () => ({ status: "inspection-required", message: "inspect" }));
+    const tool = createRoadmapPhaseDraftTool(async () => ({
+      status: "inspection-required",
+      message: "inspect",
+    }));
     const exportedSchema = (): Record<string, unknown> =>
       tool.rawInputSchema ?? (z.toJSONSchema(tool.parameters) as Record<string, unknown>);
 

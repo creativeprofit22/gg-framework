@@ -46,7 +46,10 @@ async function repository(): Promise<string> {
 
 async function generateProfile(root: string): Promise<void> {
   const tool = createProgrammaticProfileTool(root, {
-    reviewer: async (request) => ({ action: "answer", answers: { [request.questions[0]!.id]: "save-setup" } }),
+    reviewer: async (request) => ({
+      action: "answer",
+      answers: { [request.questions[0]!.id]: "save-setup" },
+    }),
   });
   const inspected = JSON.parse((await tool.execute({ action: "inspect" }, context)) as string) as {
     configuration_fingerprint: ConfigurationFingerprintV1;
@@ -72,37 +75,58 @@ afterEach(async () => {
 });
 
 describe("scan cancellation", () => {
-  it.each(["before", "paused", "committed"] as const)("honestly reports cancellation %s publication", async (when) => {
-    const root = await repository();
-    await generateProfile(root);
-    const profile = await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH));
-    const controller = new AbortController();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => { entered = resolve; });
-    let notifications = 0;
-    const tool = createProgrammaticScanTool(root, {
-      onPreFileMutation: async () => { if (when === "paused") { entered(); await held; } },
-      onFileMutated: () => { notifications++; if (when === "committed") controller.abort(); },
-    });
-    if (when === "before") controller.abort();
-    const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
-    turn.claim("programmatic_scan", {});
-    const executionContext = { ...context, signal: controller.signal };
-    const running = when === "committed"
-      ? executeAdvisoryTool(turn, root, tool, {}, executionContext)
-      : tool.execute({}, executionContext);
-    if (when === "paused") { await ready; controller.abort(); release(); }
-    const result = JSON.parse(await running as string);
-    expect(result).toMatchObject({ ok: when === "committed", changed: when === "committed" });
-    expect(notifications).toBe(when === "committed" ? 1 : 0);
-    if (when === "committed") expect([...turn.limitations]).not.toContain("programmatic_scan: cancelled.");
-    expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH))).toEqual(profile);
-    expect((await fs.readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(
-      when === "committed" ? ["profile.json", "state.json"] : ["profile.json"],
-    );
-  });
+  it.each(["before", "paused", "committed"] as const)(
+    "honestly reports cancellation %s publication",
+    async (when) => {
+      const root = await repository();
+      await generateProfile(root);
+      const profile = await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH));
+      const controller = new AbortController();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let notifications = 0;
+      const tool = createProgrammaticScanTool(root, {
+        onPreFileMutation: async () => {
+          if (when === "paused") {
+            entered();
+            await held;
+          }
+        },
+        onFileMutated: () => {
+          notifications++;
+          if (when === "committed") controller.abort();
+        },
+      });
+      if (when === "before") controller.abort();
+      const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+      turn.claim("programmatic_scan", {});
+      const executionContext = { ...context, signal: controller.signal };
+      const running =
+        when === "committed"
+          ? executeAdvisoryTool(turn, root, tool, {}, executionContext)
+          : tool.execute({}, executionContext);
+      if (when === "paused") {
+        await ready;
+        controller.abort();
+        release();
+      }
+      const result = JSON.parse((await running) as string);
+      expect(result).toMatchObject({ ok: when === "committed", changed: when === "committed" });
+      expect(notifications).toBe(when === "committed" ? 1 : 0);
+      if (when === "committed")
+        expect([...turn.limitations]).not.toContain("programmatic_scan: cancelled.");
+      expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH))).toEqual(profile);
+      expect((await fs.readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(
+        when === "committed" ? ["profile.json", "state.json"] : ["profile.json"],
+      );
+    },
+  );
 });
 
 describe("`/programmatic` validates the stored profile and configuration fingerprint before running a read-only scan", () => {
@@ -116,8 +140,12 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     expect(command?.prompt).toContain(
       "The host supplies permitted assessment tools for this turn.",
     );
-    expect(command?.prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.");
-    expect(command?.prompt).toContain("Report the supplied bounded result separately as Deterministic scan");
+    expect(command?.prompt).toContain(
+      "The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.",
+    );
+    expect(command?.prompt).toContain(
+      "Report the supplied bounded result separately as Deterministic scan",
+    );
     expect(command?.prompt).toContain(
       "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
     );
@@ -174,11 +202,16 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     );
     expect(state.records).toHaveLength(1);
     expect(JSON.parse(output)).toMatchObject({
-      ok: false, changed: true, recovered: false,
+      ok: false,
+      changed: true,
+      recovered: false,
       state_path: PROGRAMMATIC_STATE_PATH,
       configuration_fingerprint: state.configurationFingerprint,
       summary: { new: 1, active: 1, failed: 1 },
-      error: { code: "post-commit-failed", detail: expect.stringContaining("Read the current report") },
+      error: {
+        code: "post-commit-failed",
+        detail: expect.stringContaining("Read the current report"),
+      },
     });
   });
 
@@ -200,31 +233,43 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
   });
 
-  it.each([2, 3] as const)("keeps an identical V%s approval a byte-preserving no-op in the lifecycle commit window", async (version) => {
-    const root = await repository();
-    await generateProfile(root);
-    const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
-    const current = programmaticProfileEnvelopeV3Schema.parse(JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown);
-    const { historyPolicy: _policy, ...legacy } = current;
-    const stored = version === 3 ? current : programmaticProfileEnvelopeV2Schema.parse({ ...legacy, version: 2 });
-    await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
-    const proposal = await buildProgrammaticProfileProposal(root);
-    let replacementResult: Awaited<ReturnType<typeof persistProgrammaticProfile>> | undefined;
+  it.each([2, 3] as const)(
+    "keeps an identical V%s approval a byte-preserving no-op in the lifecycle commit window",
+    async (version) => {
+      const root = await repository();
+      await generateProfile(root);
+      const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
+      const current = programmaticProfileEnvelopeV3Schema.parse(
+        JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown,
+      );
+      const { historyPolicy: _policy, ...legacy } = current;
+      const stored =
+        version === 3
+          ? current
+          : programmaticProfileEnvelopeV2Schema.parse({ ...legacy, version: 2 });
+      await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
+      const proposal = await buildProgrammaticProfileProposal(root);
+      let replacementResult: Awaited<ReturnType<typeof persistProgrammaticProfile>> | undefined;
 
-    const result = await runProgrammaticScan(root, {
-      onPreFileMutation: async () => {
-        replacementResult = await persistProgrammaticProfile(
-          root,
-          proposal.configurationFingerprint,
-          proposal.profile,
-          { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest },
-        );
-      },
-    });
+      const result = await runProgrammaticScan(root, {
+        onPreFileMutation: async () => {
+          replacementResult = await persistProgrammaticProfile(
+            root,
+            proposal.configurationFingerprint,
+            proposal.profile,
+            { expectedPriorProfileDigest: proposal.expectedPriorProfileDigest },
+          );
+        },
+      });
 
-    expect(replacementResult).toMatchObject({ ok: true, changed: false });
-    expect(result).toMatchObject({ ok: true, changed: true });
-    expect(await fs.readFile(profilePath, "utf8")).toBe(JSON.stringify(stored, null, 2));
-    expect(programmaticLifecycleStateV1Schema.parse(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8"))).records).toHaveLength(1);
-  });
+      expect(replacementResult).toMatchObject({ ok: true, changed: false });
+      expect(result).toMatchObject({ ok: true, changed: true });
+      expect(await fs.readFile(profilePath, "utf8")).toBe(JSON.stringify(stored, null, 2));
+      expect(
+        programmaticLifecycleStateV1Schema.parse(
+          JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_STATE_PATH), "utf8")),
+        ).records,
+      ).toHaveLength(1);
+    },
+  );
 });

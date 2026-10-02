@@ -58,9 +58,17 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
   });
 
   it("does not automatically give persistent child workers command creation", async () => {
-    const result = await createTools(os.tmpdir(), { lspDiagnostics: false, disableSubagents: true });
-    try { expect(result.tools.map((tool) => tool.name)).not.toContain("programmatic_command"); }
-    finally { result.commandCreation?.dispose(); result.processManager.shutdownAll(); result.lspManager?.shutdownAll(); }
+    const result = await createTools(os.tmpdir(), {
+      lspDiagnostics: false,
+      disableSubagents: true,
+    });
+    try {
+      expect(result.tools.map((tool) => tool.name)).not.toContain("programmatic_command");
+    } finally {
+      result.commandCreation?.dispose();
+      result.processManager.shutdownAll();
+      result.lspManager?.shutdownAll();
+    }
   });
 
   it("an agent with no `tools:` frontmatter keeps the full toolset (backward compatible)", async () => {

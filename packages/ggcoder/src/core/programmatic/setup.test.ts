@@ -116,7 +116,10 @@ it("rejects inconsistent snapshot metadata and incomplete inventory without rewr
   await fs.writeFile(path.join(root, "large.dll"), Buffer.alloc(16 * 1024 * 1024 + 1));
   const listed = await assessProgrammaticSetup(root);
   expect(listed.status).toBe("current");
-  expect(listed.inventory?.inventory.entries).toContainEqual({ path: "large.dll", bytes: 16 * 1024 * 1024 + 1 });
+  expect(listed.inventory?.inventory.entries).toContainEqual({
+    path: "large.dll",
+    bytes: 16 * 1024 * 1024 + 1,
+  });
   await fs.writeFile(path.join(root, "tsconfig.json"), Buffer.alloc(16 * 1024 * 1024 + 1));
   const assessment = await assessProgrammaticSetup(root);
   expect(assessment.status).toBe("unreadable");
@@ -132,7 +135,9 @@ it("explains project-size failures instead of blaming saved setup", async () => 
   for (let i = 0; i < 10_001; i += 1) await fs.writeFile(path.join(root, `f${i}`), "");
   const assessment = await assessProgrammaticSetup(root);
   expect(assessment.status).toBe("unreadable");
-  expect(assessment.diagnostic).toMatch(/^This project is too large to check: it has more than 10,000 files\./);
+  expect(assessment.diagnostic).toMatch(
+    /^This project is too large to check: it has more than 10,000 files\./,
+  );
   expect(assessment.diagnostic).not.toContain(root);
   expect(assessment.diagnostic).not.toContain("Stored setup");
   expect(assessment.failure).toBe("inventory");
@@ -154,7 +159,9 @@ it("keeps the repair message for unreadable saved setup", async () => {
   expect(assessment.failure).toBe("stored");
   const report = await readProgrammaticChatReport(root);
   expect(report.configuration?.failure).toBe("stored");
-  expect(report.reason).toBe("Saved settings cannot be read. Any results shown are from an earlier check.");
+  expect(report.reason).toBe(
+    "Saved settings cannot be read. Any results shown are from an earlier check.",
+  );
 });
 
 it.each(["writeFile", "rename"] as const)(
@@ -179,59 +186,83 @@ it.each(["writeFile", "rename"] as const)(
   },
 );
 
-it.each(["writeFile", "rename"] as const)("preserves the original %s error when cleanup also fails", async (operation) => {
-  const root = await fixture();
-  await approve(root);
-  const previous = await bytes(root);
-  await fs.writeFile(path.join(root, "package.json"), "\n{}\n");
-  const original = new Error("original pre-commit failure");
-  await expect(approve(root, { operations: {
-    [operation]: async () => { throw original; },
-    rm: async (file, options) => {
-      await fs.rm(file, options);
-      throw new Error("cleanup failure");
-    },
-  } })).rejects.toBe(original);
-  expect(await bytes(root)).toBe(previous);
-  expect((await buildProgrammaticProfileProposal(root)).operation).toBe("refresh");
-});
+it.each(["writeFile", "rename"] as const)(
+  "preserves the original %s error when cleanup also fails",
+  async (operation) => {
+    const root = await fixture();
+    await approve(root);
+    const previous = await bytes(root);
+    await fs.writeFile(path.join(root, "package.json"), "\n{}\n");
+    const original = new Error("original pre-commit failure");
+    await expect(
+      approve(root, {
+        operations: {
+          [operation]: async () => {
+            throw original;
+          },
+          rm: async (file, options) => {
+            await fs.rm(file, options);
+            throw new Error("cleanup failure");
+          },
+        },
+      }),
+    ).rejects.toBe(original);
+    expect(await bytes(root)).toBe(previous);
+    expect((await buildProgrammaticProfileProposal(root)).operation).toBe("refresh");
+  },
+);
 
 it.each([
-  ["initial", false], ["initial", true], ["refresh", false], ["refresh", true],
-] as const)("reports committed %s cleanup failure (notification failure: %s)", async (operation, notificationFails) => {
-  const root = await fixture();
-  if (operation === "refresh") await approve(root);
-  const previous = operation === "refresh" ? await bytes(root) : null;
-  await fs.mkdir(path.join(root, ".gg/programmatic"), { recursive: true });
-  const statePath = path.join(root, ".gg/programmatic/state.json");
-  await fs.writeFile(statePath, "independent lifecycle bytes");
-  await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
-  const proposal = await buildProgrammaticProfileProposal(root);
-  expect(proposal.operation).toBe(operation);
-  let cleanups = 0;
-  let notifications = 0;
-  const result = await approve(root, {
-    operations: { rm: async () => {
-      cleanups++;
-      throw new Error("cleanup failure");
-    } },
-    onCommitted: () => {
-      notifications++;
-      if (notificationFails) throw new Error("notification failure");
-    },
-  });
-  expect(result).toMatchObject({ ok: false, changed: true, error: "post-commit-failed",
-    detail: expect.stringMatching(/Read back setup before retrying/) });
-  expect(cleanups).toBe(1);
-  expect(notifications).toBe(1);
-  const saved = await bytes(root);
-  expect(saved).not.toBe(previous);
-  expect(JSON.parse(saved)).toEqual({ version: 2, profile: proposal.profile,
-    configurationFingerprint: proposal.configurationFingerprint,
-    configurationSnapshot: proposal.configurationSnapshot });
-  expect(await fs.readFile(statePath, "utf8")).toBe("independent lifecycle bytes");
-  expect((await buildProgrammaticProfileProposal(root)).operation).toBe("current");
-});
+  ["initial", false],
+  ["initial", true],
+  ["refresh", false],
+  ["refresh", true],
+] as const)(
+  "reports committed %s cleanup failure (notification failure: %s)",
+  async (operation, notificationFails) => {
+    const root = await fixture();
+    if (operation === "refresh") await approve(root);
+    const previous = operation === "refresh" ? await bytes(root) : null;
+    await fs.mkdir(path.join(root, ".gg/programmatic"), { recursive: true });
+    const statePath = path.join(root, ".gg/programmatic/state.json");
+    await fs.writeFile(statePath, "independent lifecycle bytes");
+    await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+    const proposal = await buildProgrammaticProfileProposal(root);
+    expect(proposal.operation).toBe(operation);
+    let cleanups = 0;
+    let notifications = 0;
+    const result = await approve(root, {
+      operations: {
+        rm: async () => {
+          cleanups++;
+          throw new Error("cleanup failure");
+        },
+      },
+      onCommitted: () => {
+        notifications++;
+        if (notificationFails) throw new Error("notification failure");
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      changed: true,
+      error: "post-commit-failed",
+      detail: expect.stringMatching(/Read back setup before retrying/),
+    });
+    expect(cleanups).toBe(1);
+    expect(notifications).toBe(1);
+    const saved = await bytes(root);
+    expect(saved).not.toBe(previous);
+    expect(JSON.parse(saved)).toEqual({
+      version: 2,
+      profile: proposal.profile,
+      configurationFingerprint: proposal.configurationFingerprint,
+      configurationSnapshot: proposal.configurationSnapshot,
+    });
+    expect(await fs.readFile(statePath, "utf8")).toBe("independent lifecycle bytes");
+    expect((await buildProgrammaticProfileProposal(root)).operation).toBe("current");
+  },
+);
 
 it("revalidates configuration after the pre-mutation callback", async () => {
   const root = await fixture();
@@ -296,14 +327,16 @@ it("rejects a linked profile parent introduced during a read", async () => {
   await approve(root);
   const saved = await bytes(root);
   await fs.writeFile(path.join(outside, "profile.json"), saved);
-  const assessment = await assessProgrammaticSetup(root, { operations: {
-    readFile: async (file) => {
-      const contents = await fs.readFile(file);
-      await fs.rename(path.join(root, ".gg/programmatic"), path.join(root, ".gg/retained"));
-      await fs.symlink(outside, path.join(root, ".gg/programmatic"), "junction");
-      return contents;
+  const assessment = await assessProgrammaticSetup(root, {
+    operations: {
+      readFile: async (file) => {
+        const contents = await fs.readFile(file);
+        await fs.rename(path.join(root, ".gg/programmatic"), path.join(root, ".gg/retained"));
+        await fs.symlink(outside, path.join(root, ".gg/programmatic"), "junction");
+        return contents;
+      },
     },
-  } });
+  });
   expect(assessment.status).toBe("unreadable");
   expect(assessment.stored).toBeNull();
   expect(await fs.readFile(path.join(outside, "profile.json"), "utf8")).toBe(saved);
@@ -314,7 +347,7 @@ it("rethrows cancellation instead of reporting the project as unreadable", async
   const controller = new AbortController();
   controller.abort();
   await expect(assessProgrammaticSetup(root, { signal: controller.signal })).rejects.toThrow();
-  await expect(
-    assessProgrammaticSetup(root, { signal: controller.signal }),
-  ).rejects.toMatchObject({ name: "AbortError" });
+  await expect(assessProgrammaticSetup(root, { signal: controller.signal })).rejects.toMatchObject({
+    name: "AbortError",
+  });
 });

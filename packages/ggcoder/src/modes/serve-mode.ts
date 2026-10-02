@@ -354,14 +354,21 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
     text += `/help — this message\n`;
 
     // Prompt-template commands
-    const discovered = (await discoverCommands(projectPath, {
-      workspaceActions: SERVE_COMMANDS, workspaceCaseInsensitive: true,
-      registryActions: registryCommandListings(state?.session.slashCommands.getAll() ?? []),
-    })).entries;
-    const sessionCommands = discovered.filter((entry) => entry.listing.invocationKind === "workspace-action" &&
-      !SERVE_COMMANDS.some((command) => command.name === entry.listing.name));
+    const discovered = (
+      await discoverCommands(projectPath, {
+        workspaceActions: SERVE_COMMANDS,
+        workspaceCaseInsensitive: true,
+        registryActions: registryCommandListings(state?.session.slashCommands.getAll() ?? []),
+      })
+    ).entries;
+    const sessionCommands = discovered.filter(
+      (entry) =>
+        entry.listing.invocationKind === "workspace-action" &&
+        !SERVE_COMMANDS.some((command) => command.name === entry.listing.name),
+    );
     if (sessionCommands.length) text += `\n*Session Commands*\n`;
-    for (const { listing } of sessionCommands) text += `/${listing.name} — ${listing.description}\n`;
+    for (const { listing } of sessionCommands)
+      text += `/${listing.name} — ${listing.description}\n`;
     const prompts = discovered.filter((entry) => entry.prompt).map((entry) => entry.listing);
     if (prompts.length > 0) {
       text += `\n*Agent Commands*\n`;

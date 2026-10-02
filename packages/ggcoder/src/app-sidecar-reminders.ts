@@ -60,8 +60,7 @@ export type ReminderClaimOutcome =
   | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
 
 export type ReminderReleaseOutcome =
-  | { status: "released" }
-  | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
+  { status: "released" } | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
 
 export interface ReminderClock {
   now(): number;
@@ -141,7 +140,12 @@ function hasDeliveredDueReminder(document: NotesDocumentV3, nowMs: number): bool
 }
 
 function isEligiblePhase(phase: NotesPhase): boolean {
-  return !isNotesPhaseDeleted(phase) && phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled";
+  return (
+    !isNotesPhaseDeleted(phase) &&
+    phase.archivedAt === null &&
+    phase.status !== "done" &&
+    phase.status !== "cancelled"
+  );
 }
 
 function compareOccurrences(left: DueReminderOccurrence, right: DueReminderOccurrence): number {

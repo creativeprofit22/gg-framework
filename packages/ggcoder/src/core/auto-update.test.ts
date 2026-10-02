@@ -55,9 +55,14 @@ beforeEach(() => {
   }
   vi.restoreAllMocks();
   child = Object.assign(new EventEmitter(), { unref: vi.fn() });
-  vi.mocked(spawn).mockReset().mockReturnValue(child as unknown as ChildProcess);
+  vi.mocked(spawn)
+    .mockReset()
+    .mockReturnValue(child as unknown as ChildProcess);
   vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-  vi.spyOn(process, "argv", "get").mockReturnValue(["node", "/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js"]);
+  vi.spyOn(process, "argv", "get").mockReturnValue([
+    "node",
+    "/usr/lib/node_modules/@kenkaiiii/ggcoder/cli.js",
+  ]);
   vi.spyOn(fs, "realpathSync").mockImplementation((file) => String(file));
 });
 

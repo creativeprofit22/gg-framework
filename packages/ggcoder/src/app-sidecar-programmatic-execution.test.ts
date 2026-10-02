@@ -18,28 +18,59 @@ const text = `/programmatic-run ${"a".repeat(64)} ${"b".repeat(64)}`;
 function outcome(status: ProgrammaticExecutionOutcome["status"]): ProgrammaticExecutionOutcome {
   if (status === "rejected") return { version: 1, status, reason: "approval-rejected" };
   return executionResultV1Schema.parse({
-    version: 1, status, summary: "Bounded specialist summary.",
+    version: 1,
+    status,
+    summary: "Bounded specialist summary.",
     route: {
-      version: 1, status: "routable", opportunityId: "a".repeat(64),
+      version: 1,
+      status: "routable",
+      opportunityId: "a".repeat(64),
       configurationFingerprint: { version: 1, sha256: "b".repeat(64) },
-      specialistCommand: "setup-sweep", arguments: [], evidencePaths: ["package.json"], scopePaths: ["package.json"],
-      successCondition: "Inspect the manifest.", mutates: true, reason: "Fixture route.",
+      specialistCommand: "setup-sweep",
+      arguments: [],
+      evidencePaths: ["package.json"],
+      scopePaths: ["package.json"],
+      successCondition: "Inspect the manifest.",
+      mutates: true,
+      reason: "Fixture route.",
       availability: { status: "available", source: "built-in", portability: "bundled" },
     },
-    evidence: { version: 1, items: [{ basis: "observed", source: "programmatic-execution", code: "tool-completed", severity: "info", message: "Tool read completed (manifest)." }] },
+    evidence: {
+      version: 1,
+      items: [
+        {
+          basis: "observed",
+          source: "programmatic-execution",
+          code: "tool-completed",
+          severity: "info",
+          message: "Tool read completed (manifest).",
+        },
+      ],
+    },
   });
 }
 function host() {
   return {
-    text, attachmentCount: 0, busy: false, automated: false, codeMode: true, planMode: false,
-    claimStart: vi.fn(() => true), respond: vi.fn(),
-    runAgent: vi.fn(async (_label: string, run: () => Promise<ProgrammaticExecutionOutcome>) => { await run(); }),
+    text,
+    attachmentCount: 0,
+    busy: false,
+    automated: false,
+    codeMode: true,
+    planMode: false,
+    claimStart: vi.fn(() => true),
+    respond: vi.fn(),
+    runAgent: vi.fn(async (_label: string, run: () => Promise<ProgrammaticExecutionOutcome>) => {
+      await run();
+    }),
     execute: vi.fn(async () => outcome("succeeded")),
   };
 }
 describe("explicit single-opportunity app command", () => {
   it("keeps the app adapter out of lifecycle storage", async () => {
-    const adapter = await readFile(new URL("./app-sidecar-programmatic-execution.ts", import.meta.url), "utf8");
+    const adapter = await readFile(
+      new URL("./app-sidecar-programmatic-execution.ts", import.meta.url),
+      "utf8",
+    );
     expect(adapter).toContain("options.claimStart()");
     expect(adapter).toContain("options.runAgent(");
     expect(adapter).not.toMatch(/new AgentSession|writeFile|rename|setTimeout|agentLoop|spawn\(/);
@@ -50,12 +81,20 @@ describe("explicit single-opportunity app command", () => {
     expect(sidecar).toContain("runSucceeded = programmaticSettlement?.succeeded ?? true");
     expect(sidecar).toContain("programmaticSettlement?.journalOutcome ??");
     expect(sidecar).toContain("...programmaticSettlement?.event,");
-    expect(sidecar).toContain('programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed")');
+    expect(sidecar).toContain(
+      'programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed")',
+    );
     expect(sidecar).toContain('if (cancelled) outcome = "aborted"');
     expect(sidecar).toContain("runLifecycle.recordOutcome(generation, outcome)");
     expect(sidecar).toContain("...createRunEndPayload(outcome, runLifecycle.state)");
-    const execute = sidecar.slice(sidecar.indexOf("execute: async (selection)"), sidecar.indexOf("if (handledProgrammatic) return"));
-    const entry = sidecar.slice(sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"), sidecar.indexOf("if (handledProgrammatic) return"));
+    const execute = sidecar.slice(
+      sidecar.indexOf("execute: async (selection)"),
+      sidecar.indexOf("if (handledProgrammatic) return"),
+    );
+    const entry = sidecar.slice(
+      sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"),
+      sidecar.indexOf("if (handledProgrammatic) return"),
+    );
     expect(entry).toContain("planMode: session.getPlanMode(),");
     expect(execute).toContain("return result;");
     expect(execute).toContain("cancelQuestions: () => asks.cancelAll()");
@@ -66,50 +105,85 @@ describe("explicit single-opportunity app command", () => {
     ["blocked", "unverified", { unverified: true }],
     ["cancelled", "aborted", { cancelled: true }],
     ["rejected", "aborted", { cancelled: true }],
-  ] as const)("settles structured %s in the parent journal and run_end", async (status, journalOutcome, flags) => {
-    const options = host();
-    const result = outcome(status);
-    options.execute.mockResolvedValue(result);
-    const journal = { started: vi.fn(), finished: vi.fn() };
-    const lifecycle = new RunLifecycle(undefined, journal);
-    const broadcast = vi.fn();
-    options.runAgent.mockImplementation(async (_label, run) => {
+  ] as const)(
+    "settles structured %s in the parent journal and run_end",
+    async (status, journalOutcome, flags) => {
+      const options = host();
+      const result = outcome(status);
+      options.execute.mockResolvedValue(result);
+      const journal = { started: vi.fn(), finished: vi.fn() };
+      const lifecycle = new RunLifecycle(undefined, journal);
+      const broadcast = vi.fn();
+      options.runAgent.mockImplementation(async (_label, run) => {
+        const { generation } = lifecycle.begin(() => {});
+        const settlement = settleProgrammaticRun(await run())!;
+        expect(settlement.succeeded).toBe(status === "succeeded");
+        expect(isProgrammaticExecutionResult(settlement.event.programmaticResult)).toBe(true);
+        lifecycle.settle(generation, settlement.journalOutcome);
+        broadcast("run_end", {
+          ...settlement.event,
+          ...createRunEndPayload(settlement.journalOutcome, lifecycle.state),
+        });
+      });
+      await handleAppSidecarProgrammaticExecution(options);
+      expect(journal.finished).toHaveBeenCalledExactlyOnceWith(1, journalOutcome);
+      const { route: _route, ...bounded } =
+        "route" in result ? result : { ...result, route: undefined };
+      expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", {
+        ...flags,
+        outcome: journalOutcome === "aborted" ? "cancelled" : journalOutcome,
+        programmaticResult: bounded,
+        runState: "idle",
+      });
+    },
+  );
+  it.each(["succeeded", "failed", "blocked"] as const)(
+    "cancellation after a %s result still journals aborted",
+    async (status) => {
+      const journal = { started: vi.fn(), finished: vi.fn() };
+      const lifecycle = new RunLifecycle(undefined, journal);
       const { generation } = lifecycle.begin(() => {});
-      const settlement = settleProgrammaticRun(await run())!;
-      expect(settlement.succeeded).toBe(status === "succeeded");
-      expect(isProgrammaticExecutionResult(settlement.event.programmaticResult)).toBe(true);
-      lifecycle.settle(generation, settlement.journalOutcome);
-      broadcast("run_end", { ...settlement.event, ...createRunEndPayload(settlement.journalOutcome, lifecycle.state) });
-    });
-    await handleAppSidecarProgrammaticExecution(options);
-    expect(journal.finished).toHaveBeenCalledExactlyOnceWith(1, journalOutcome);
-    const { route: _route, ...bounded } = "route" in result ? result : { ...result, route: undefined };
-    expect(broadcast).toHaveBeenCalledExactlyOnceWith("run_end", { ...flags, outcome: journalOutcome === "aborted" ? "cancelled" : journalOutcome, programmaticResult: bounded, runState: "idle" });
-  });
-  it.each(["succeeded", "failed", "blocked"] as const)("cancellation after a %s result still journals aborted", async (status) => {
-    const journal = { started: vi.fn(), finished: vi.fn() };
-    const lifecycle = new RunLifecycle(undefined, journal);
-    const { generation } = lifecycle.begin(() => {});
-    const settlement = settleProgrammaticRun(outcome(status))!;
-    const cancellation = lifecycle.cancel(1000);
-    expect(lifecycle.settle(generation, settlement.journalOutcome)).toEqual({ settled: true, cancelled: true });
-    await cancellation;
-    expect(journal.finished).toHaveBeenCalledExactlyOnceWith(generation, "aborted");
-    expect(lifecycle.state).toBe("idle");
-  });
+      const settlement = settleProgrammaticRun(outcome(status))!;
+      const cancellation = lifecycle.cancel(1000);
+      expect(lifecycle.settle(generation, settlement.journalOutcome)).toEqual({
+        settled: true,
+        cancelled: true,
+      });
+      await cancellation;
+      expect(journal.finished).toHaveBeenCalledExactlyOnceWith(generation, "aborted");
+      expect(lifecycle.state).toBe("idle");
+    },
+  );
   it("leaves ordinary void callbacks on the existing parent path", () => {
     expect(settleProgrammaticRun(undefined)).toBeUndefined();
   });
   it("dispatches exactly one selection after a synchronous run claim", async () => {
     const options = host();
     expect(await handleAppSidecarProgrammaticExecution(options)).toBe(true);
-    expect(options.execute).toHaveBeenCalledExactlyOnceWith({ opportunityId: "a".repeat(64), configurationSha256: "b".repeat(64) });
-    expect(options.claimStart.mock.invocationCallOrder[0]).toBeLessThan(options.execute.mock.invocationCallOrder[0]!);
+    expect(options.execute).toHaveBeenCalledExactlyOnceWith({
+      opportunityId: "a".repeat(64),
+      configurationSha256: "b".repeat(64),
+    });
+    expect(options.claimStart.mock.invocationCallOrder[0]).toBeLessThan(
+      options.execute.mock.invocationCallOrder[0]!,
+    );
   });
-  it.each([`${text} extra`, `${text}\n${text}`, "/PROGRAMMATIC-RUN a b", "/programmatic-run research", "/programmatic-run"]) ("rejects invalid selection %s", (value) => {
+  it.each([
+    `${text} extra`,
+    `${text}\n${text}`,
+    "/PROGRAMMATIC-RUN a b",
+    "/programmatic-run research",
+    "/programmatic-run",
+  ])("rejects invalid selection %s", (value) => {
     expect(parseProgrammaticRunSelection(value)).toBe("invalid");
   });
-  it.each([{ busy: true }, { attachmentCount: 1 }, { automated: true }, { codeMode: false }, { planMode: true }])("rejects without dispatch: %o", async (override) => {
+  it.each([
+    { busy: true },
+    { attachmentCount: 1 },
+    { automated: true },
+    { codeMode: false },
+    { planMode: true },
+  ])("rejects without dispatch: %o", async (override) => {
     const options = { ...host(), ...override };
     await handleAppSidecarProgrammaticExecution(options);
     expect(options.execute).not.toHaveBeenCalled();
@@ -118,24 +192,34 @@ describe("explicit single-opportunity app command", () => {
   it.each([
     { invalid: true, status: 400, code: "invalid_programmatic_selection" },
     { invalid: false, status: 409, code: "programmatic_execution_busy" },
-  ])("returns a definite $code before acceptance or execution", async ({ invalid, status, code }) => {
-    const options = host();
-    if (invalid) options.text = "/programmatic-run invalid";
-    else options.claimStart.mockReturnValue(false); // another pane won the claim
-    await handleAppSidecarProgrammaticExecution(options);
-    expect(options.respond).toHaveBeenCalledExactlyOnceWith(status, {
-      error: code, message: expect.any(String),
-    });
-    expect(options.runAgent).not.toHaveBeenCalled();
-    expect(options.execute).not.toHaveBeenCalled();
-  });
-  it.each(["chat", "motion", "unknown"])("returns 400 invalid_programmatic_selection for a %s-mode session", async (mode) => {
-    const options = { ...host(), codeMode: isProgrammaticCodeMode(mode) };
-    expect(await handleAppSidecarProgrammaticExecution(options)).toBe(true);
-    expect(options.respond).toHaveBeenCalledExactlyOnceWith(400, { error: "invalid_programmatic_selection", message: expect.stringContaining("In Code mode") });
-    expect(options.claimStart).not.toHaveBeenCalled();
-    expect(options.execute).not.toHaveBeenCalled();
-  });
+  ])(
+    "returns a definite $code before acceptance or execution",
+    async ({ invalid, status, code }) => {
+      const options = host();
+      if (invalid) options.text = "/programmatic-run invalid";
+      else options.claimStart.mockReturnValue(false); // another pane won the claim
+      await handleAppSidecarProgrammaticExecution(options);
+      expect(options.respond).toHaveBeenCalledExactlyOnceWith(status, {
+        error: code,
+        message: expect.any(String),
+      });
+      expect(options.runAgent).not.toHaveBeenCalled();
+      expect(options.execute).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["chat", "motion", "unknown"])(
+    "returns 400 invalid_programmatic_selection for a %s-mode session",
+    async (mode) => {
+      const options = { ...host(), codeMode: isProgrammaticCodeMode(mode) };
+      expect(await handleAppSidecarProgrammaticExecution(options)).toBe(true);
+      expect(options.respond).toHaveBeenCalledExactlyOnceWith(400, {
+        error: "invalid_programmatic_selection",
+        message: expect.stringContaining("In Code mode"),
+      });
+      expect(options.claimStart).not.toHaveBeenCalled();
+      expect(options.execute).not.toHaveBeenCalled();
+    },
+  );
   it("accepts a code-mode session selection", async () => {
     const options = { ...host(), codeMode: isProgrammaticCodeMode("code") };
     await handleAppSidecarProgrammaticExecution(options);
@@ -152,11 +236,19 @@ describe("explicit single-opportunity app command", () => {
   });
   it("wires both sidecar gates through the Code-only helpers", async () => {
     const sidecar = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
-    const executor = sidecar.slice(sidecar.indexOf("executeReviewedCommand: (async (request)"), sidecar.indexOf("programmaticExecutionActive = true;"));
-    expect(executor).toContain("reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive })");
+    const executor = sidecar.slice(
+      sidecar.indexOf("executeReviewedCommand: (async (request)"),
+      sidecar.indexOf("programmaticExecutionActive = true;"),
+    );
+    expect(executor).toContain(
+      "reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive })",
+    );
     expect(executor).toContain("throw new Error(REVIEWED_EXECUTION_UNAVAILABLE)");
     expect(REVIEWED_EXECUTION_UNAVAILABLE).toContain("outside Code mode");
-    const entry = sidecar.slice(sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"), sidecar.indexOf("if (handledProgrammatic) return"));
+    const entry = sidecar.slice(
+      sidecar.indexOf("const handledProgrammatic = await handleAppSidecarProgrammaticExecution({"),
+      sidecar.indexOf("if (handledProgrammatic) return"),
+    );
     expect(entry).toContain("codeMode: isProgrammaticCodeMode(mode),");
     expect(sidecar).not.toMatch(/codeMode: mode !== "chat"/);
   });

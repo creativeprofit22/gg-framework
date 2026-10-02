@@ -7,7 +7,10 @@ import type { NotesDocumentV3 } from "@kenkaiiii/gg-core/project-notes";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
-import { AppSidecarPlanHandoff, type ApprovedPlanConsumptionIdentity } from "./app-sidecar-plan-handoff.js";
+import {
+  AppSidecarPlanHandoff,
+  type ApprovedPlanConsumptionIdentity,
+} from "./app-sidecar-plan-handoff.js";
 import { persistApprovedPlanSnapshot } from "./app-sidecar-approved-plan.js";
 import {
   AppSidecarPlanGate,
@@ -52,9 +55,13 @@ async function sidecarImplementationLaunch(bindings: Record<string, unknown>) {
   const declarations: string[] = [];
   let launch: string | undefined;
   function visit(node: ts.Node): void {
-    if (ts.isVariableStatement(node) && node.declarationList.declarations.some(
-      (declaration) => declaration.name.getText(file) === "IMPLEMENT_PLAN_PROMPT",
-    )) declarations.push(node.getText(file));
+    if (
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (declaration) => declaration.name.getText(file) === "IMPLEMENT_PLAN_PROMPT",
+      )
+    )
+      declarations.push(node.getText(file));
     if (ts.isFunctionDeclaration(node) && node.name?.text === "currentImplementationPlanPrompt") {
       declarations.push(node.getText(file));
     }
@@ -71,91 +78,124 @@ async function sidecarImplementationLaunch(bindings: Record<string, unknown>) {
     `(() => { ${declarations.join("\n")} return (${launch}); })()`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
   );
-  return vm.runInNewContext(compiled.outputText, bindings) as
-    (consumption: ApprovedPlanConsumptionIdentity) => Promise<void>;
+  return vm.runInNewContext(compiled.outputText, bindings) as (
+    consumption: ApprovedPlanConsumptionIdentity,
+  ) => Promise<void>;
 }
 
 describe("approved phase implementation message", () => {
-  it.each([false, true])("requires user approval and avoids checkpoint ceremony (autopilot ready: %s)", async (autopilotReady) => {
-    const cwd = await temporaryRoot();
-    const repository = new ProjectNotesRepository(await temporaryRoot());
-    const document = JSON.parse(await fs.readFile(
-      new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8",
-    )) as NotesDocumentV3;
-    const phase = document.phases[0]!;
-    await repository.migrate(cwd, document);
-    const gate = new AppSidecarPlanGate([], async () => {});
-    const checkpoint = await gate.submit("/plan.md", "# Plan\n\n## Steps\n\n1. Preserve requirement text\n2. Verify truthfully\n");
-    if (autopilotReady) await gate.markReady(checkpoint.checkpointId, checkpoint.generation, "Ready for user review");
-    let consumption: ApprovedPlanConsumptionIdentity | null = null;
-    const runApprovedPlanImplementation = vi.fn(async (_prompt: string, _generation: number) => {});
-    const launchImplementation = await sidecarImplementationLaunch({
-      cwd,
-      durableRoadmapExecution: true,
-      notesRepository: repository,
-      session: {
-        getActivePhaseContext: () => ({ phase }),
-        getApprovedPlanConsumption: () => consumption,
-        runApprovedPlanImplementation,
-      },
-      planGate: gate,
-      runClaim: { claim: () => true, release: () => {} },
-      runLifecycle: { generation: 7 },
-      commitActivePhaseImplementationStart: async () => {},
-      runAgent: async (_prompt: string, run: () => Promise<void>) => run(),
-    });
-    const scheduled: Array<() => void> = [];
-    const onLaunchFailure = vi.fn();
-    const handoff = new AppSidecarPlanHandoff({
-      approve: (id, generation) => gate.approve(id, generation),
-      currentConsumption: () => consumption,
-      commitApproval: async (approved) => {
-        expect(approved).toMatchObject({ state: "human-approved", actor: "user", content: checkpoint.content });
-        const approvedPath = await persistApprovedPlanSnapshot(cwd, approved);
-        const plan = createApprovedPlan({
-          planId: approved.checkpointId,
-          content: await fs.readFile(approvedPath, "utf8"),
-          snapshotPath: path.relative(cwd, approvedPath).split(path.sep).join("/"),
-          approvedAt: approved.timestamp,
-          approvedRevision: 2,
-          baseCommit: "2".repeat(40),
-        });
-        await repository.approvePhaseExecutionPlan(cwd, {
-          operationId: approved.checkpointId,
-          phaseId: phase.id,
-          expectedRevision: 1,
-          repository: { projectKey: "project-key", identityHash: "1".repeat(64), rootCommit: "2".repeat(40) },
-          plan,
-          lastSession: phase.session,
-        });
-        const stored = await repository.load(cwd);
-        expect(stored.status).toBe("ok");
-        if (stored.status !== "ok") throw new Error("Stored phase plan unavailable");
-        expect(stored.snapshot.document.phases[0]?.execution?.plan).toEqual(plan);
-        consumption = { checkpointId: approved.checkpointId, generation: approved.generation, state: "approval-committed" };
-        return consumption;
-      },
-      launchImplementation,
-      schedule: (callback) => scheduled.push(callback),
-      onLaunchFailure,
-    });
-    expect(gate.current()?.state).toBe("pending-review");
-    expect(handoff.resumePending()).toBe(false);
-    expect(await handoff.recoverApproved(gate.current())).toBe(false);
-    expect(scheduled).toHaveLength(0);
-    expect(runApprovedPlanImplementation).not.toHaveBeenCalled();
+  it.each([false, true])(
+    "requires user approval and avoids checkpoint ceremony (autopilot ready: %s)",
+    async (autopilotReady) => {
+      const cwd = await temporaryRoot();
+      const repository = new ProjectNotesRepository(await temporaryRoot());
+      const document = JSON.parse(
+        await fs.readFile(
+          new URL("../../../fixtures/project-notes-v3.json", import.meta.url),
+          "utf8",
+        ),
+      ) as NotesDocumentV3;
+      const phase = document.phases[0]!;
+      await repository.migrate(cwd, document);
+      const gate = new AppSidecarPlanGate([], async () => {});
+      const checkpoint = await gate.submit(
+        "/plan.md",
+        "# Plan\n\n## Steps\n\n1. Preserve requirement text\n2. Verify truthfully\n",
+      );
+      if (autopilotReady)
+        await gate.markReady(
+          checkpoint.checkpointId,
+          checkpoint.generation,
+          "Ready for user review",
+        );
+      let consumption: ApprovedPlanConsumptionIdentity | null = null;
+      const runApprovedPlanImplementation = vi.fn(
+        async (_prompt: string, _generation: number) => {},
+      );
+      const launchImplementation = await sidecarImplementationLaunch({
+        cwd,
+        durableRoadmapExecution: true,
+        notesRepository: repository,
+        session: {
+          getActivePhaseContext: () => ({ phase }),
+          getApprovedPlanConsumption: () => consumption,
+          runApprovedPlanImplementation,
+        },
+        planGate: gate,
+        runClaim: { claim: () => true, release: () => {} },
+        runLifecycle: { generation: 7 },
+        commitActivePhaseImplementationStart: async () => {},
+        runAgent: async (_prompt: string, run: () => Promise<void>) => run(),
+      });
+      const scheduled: Array<() => void> = [];
+      const onLaunchFailure = vi.fn();
+      const handoff = new AppSidecarPlanHandoff({
+        approve: (id, generation) => gate.approve(id, generation),
+        currentConsumption: () => consumption,
+        commitApproval: async (approved) => {
+          expect(approved).toMatchObject({
+            state: "human-approved",
+            actor: "user",
+            content: checkpoint.content,
+          });
+          const approvedPath = await persistApprovedPlanSnapshot(cwd, approved);
+          const plan = createApprovedPlan({
+            planId: approved.checkpointId,
+            content: await fs.readFile(approvedPath, "utf8"),
+            snapshotPath: path.relative(cwd, approvedPath).split(path.sep).join("/"),
+            approvedAt: approved.timestamp,
+            approvedRevision: 2,
+            baseCommit: "2".repeat(40),
+          });
+          await repository.approvePhaseExecutionPlan(cwd, {
+            operationId: approved.checkpointId,
+            phaseId: phase.id,
+            expectedRevision: 1,
+            repository: {
+              projectKey: "project-key",
+              identityHash: "1".repeat(64),
+              rootCommit: "2".repeat(40),
+            },
+            plan,
+            lastSession: phase.session,
+          });
+          const stored = await repository.load(cwd);
+          expect(stored.status).toBe("ok");
+          if (stored.status !== "ok") throw new Error("Stored phase plan unavailable");
+          expect(stored.snapshot.document.phases[0]?.execution?.plan).toEqual(plan);
+          consumption = {
+            checkpointId: approved.checkpointId,
+            generation: approved.generation,
+            state: "approval-committed",
+          };
+          return consumption;
+        },
+        launchImplementation,
+        schedule: (callback) => scheduled.push(callback),
+        onLaunchFailure,
+      });
+      expect(gate.current()?.state).toBe("pending-review");
+      expect(handoff.resumePending()).toBe(false);
+      expect(await handoff.recoverApproved(gate.current())).toBe(false);
+      expect(scheduled).toHaveLength(0);
+      expect(runApprovedPlanImplementation).not.toHaveBeenCalled();
 
-    // Both manual review and autopilot-ready review still require this user action.
-    expect(await handoff.accept(checkpoint.checkpointId, checkpoint.generation)).toMatchObject({ status: "committed" });
-    expect(scheduled).toHaveLength(1);
-    scheduled[0]!();
-    await vi.waitFor(() => expect(runApprovedPlanImplementation).toHaveBeenCalledOnce());
-    expect(onLaunchFailure).not.toHaveBeenCalled();
-    const [message, generation] = runApprovedPlanImplementation.mock.calls[0]!;
-    expect(generation).toBe(7);
-    expect(message).toContain("The plan has been approved. Implement it now");
-    expect(message).not.toMatch(/before continuing|roadmap_checkpoint|expected_revision|stale-revision|retry|step_id=|plan_hash=/i);
-  });
+      // Both manual review and autopilot-ready review still require this user action.
+      expect(await handoff.accept(checkpoint.checkpointId, checkpoint.generation)).toMatchObject({
+        status: "committed",
+      });
+      expect(scheduled).toHaveLength(1);
+      scheduled[0]!();
+      await vi.waitFor(() => expect(runApprovedPlanImplementation).toHaveBeenCalledOnce());
+      expect(onLaunchFailure).not.toHaveBeenCalled();
+      const [message, generation] = runApprovedPlanImplementation.mock.calls[0]!;
+      expect(generation).toBe(7);
+      expect(message).toContain("The plan has been approved. Implement it now");
+      expect(message).not.toMatch(
+        /before continuing|roadmap_checkpoint|expected_revision|stale-revision|retry|step_id=|plan_hash=/i,
+      );
+    },
+  );
 });
 
 describe("persistApprovedPlanSnapshot", () => {

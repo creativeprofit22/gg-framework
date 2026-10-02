@@ -123,11 +123,9 @@ export function createGenerateImageTool(
       "Requested dimensions are forwarded to the image service, but actual dimensions and shape may differ. " +
       "Originals are never silently resized; mismatches are warned.",
     parameters: GenerateImageParams,
-    async execute(
-      args: GenerateImageArgs,
-      context: ToolContext,
-    ): Promise<StructuredToolResult> {
-      if (context.signal.aborted) return { content: "Image generation aborted before start.", isError: true };
+    async execute(args: GenerateImageArgs, context: ToolContext): Promise<StructuredToolResult> {
+      if (context.signal.aborted)
+        return { content: "Image generation aborted before start.", isError: true };
       // Stale callers can bypass the public schema; reject before credential refresh or provider usage.
       const background: unknown = args.background;
       if (background === "transparent") {
@@ -151,7 +149,8 @@ export function createGenerateImageTool(
         accountId = creds.accountId;
       } catch {
         return {
-          content: "OpenAI is not connected. The user needs to connect their OpenAI account " +
+          content:
+            "OpenAI is not connected. The user needs to connect their OpenAI account " +
             "to use image generation.",
           isError: true,
         };
@@ -177,12 +176,17 @@ export function createGenerateImageTool(
         `Saved originals: ${savedPaths.join(", ")}\nFailure: ${failure}\n` +
         "No retry or fallback was attempted; saved originals were not overwritten. " +
         "Resolve the reported error before requesting only the missing images with a new output path.";
-      const sizeReport = () => sizing.map((item) => {
-        const dimensions = `Requested: ${item.requested}; actual: ${item.actual ?? "unknown"}.`;
-        if (item.status === "mismatched") return `WARNING: Image saved, requested dimensions not met. ${dimensions} Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${item.path})`;
-        if (item.status === "unverified") return `WARNING: Image saved, dimensions could not be verified. ${dimensions} (${item.path})`;
-        return `${dimensions} ${item.status === "matched" ? "Requested dimensions matched." : "No exact dimensions requested."} (${item.path})`;
-      }).join("\n");
+      const sizeReport = () =>
+        sizing
+          .map((item) => {
+            const dimensions = `Requested: ${item.requested}; actual: ${item.actual ?? "unknown"}.`;
+            if (item.status === "mismatched")
+              return `WARNING: Image saved, requested dimensions not met. ${dimensions} Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${item.path})`;
+            if (item.status === "unverified")
+              return `WARNING: Image saved, dimensions could not be verified. ${dimensions} (${item.path})`;
+            return `${dimensions} ${item.status === "matched" ? "Requested dimensions matched." : "No exact dimensions requested."} (${item.path})`;
+          })
+          .join("\n");
 
       try {
         // Build the image_generation tool definition with the requested params.
@@ -207,7 +211,10 @@ export function createGenerateImageTool(
           try {
             fileBuffer = await readFile(imagePath);
           } catch {
-            return { content: `Could not read the image at ${args.image}. Check the path is correct.`, isError: true };
+            return {
+              content: `Could not read the image at ${args.image}. Check the path is correct.`,
+              isError: true,
+            };
           }
           // The Responses API accepts images as data URLs.
           const refMediaType =
@@ -236,16 +243,25 @@ export function createGenerateImageTool(
         try {
           while (savedPaths.length < requestedCount) {
             const generated = await callImageGeneration(
-              inputContent, imageTool, token, accountId, context.signal,
+              inputContent,
+              imageTool,
+              token,
+              accountId,
+              context.signal,
             );
             if (generated.length === 0) {
               if (savedPaths.length === 0) {
-                return { content: "Image generation returned no image results from GPT-6 Astra. No fallback model was used.", isError: true };
+                return {
+                  content:
+                    "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
+                  isError: true,
+                };
               }
               throw new Error("Image generation returned no image results from GPT-6 Astra.");
             }
             for (const buf of generated.slice(0, requestedCount - savedPaths.length)) {
-              const savePath = requestedCount === 1 ? outPath : insertIndex(outPath, savedPaths.length);
+              const savePath =
+                requestedCount === 1 ? outPath : insertIndex(outPath, savedPaths.length);
               await mkdir(path.dirname(savePath), { recursive: true });
               context.signal.throwIfAborted();
               await writeFile(savePath, buf, { flag: "wx" });
@@ -260,10 +276,13 @@ export function createGenerateImageTool(
                 if (meta.width && meta.height) {
                   actual = `${meta.width}x${meta.height}`;
                   status = requestedPixels
-                    ? meta.width === Number(requestedPixels[1]) && meta.height === Number(requestedPixels[2])
+                    ? meta.width === Number(requestedPixels[1]) &&
+                      meta.height === Number(requestedPixels[2])
                       ? "matched"
                       : "mismatched"
-                    : !args.size || args.size === "auto" ? "not-requested" : "unverified";
+                    : !args.size || args.size === "auto"
+                      ? "not-requested"
+                      : "unverified";
                 }
               } catch {
                 // Preserve valid returned bytes even when dimension inspection is unavailable.
@@ -273,7 +292,11 @@ export function createGenerateImageTool(
           }
         } catch (err) {
           if (savedPaths.length === 0) throw err;
-          failure = context.signal.aborted ? "Image generation aborted." : err instanceof Error ? err.message : String(err);
+          failure = context.signal.aborted
+            ? "Image generation aborted."
+            : err instanceof Error
+              ? err.message
+              : String(err);
         }
 
         // The primary image (first) gets the full treatment: model-visible
@@ -326,10 +349,20 @@ export function createGenerateImageTool(
           imageResult: {
             version: 1,
             images: imagePreviews.map(({ base64, mediaType, path }) => ({
-              type: "image", data: base64, mediaType, path,
+              type: "image",
+              data: base64,
+              mediaType,
+              path,
             })),
           },
-          details: { imagePreviews, sizing, requestedCount, savedCount: savedPaths.length, savedPaths, failure },
+          details: {
+            imagePreviews,
+            sizing,
+            requestedCount,
+            savedCount: savedPaths.length,
+            savedPaths,
+            failure,
+          },
           ...(failure ? { isError: true } : {}),
         };
       } catch (err) {

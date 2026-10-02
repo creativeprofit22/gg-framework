@@ -1,11 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import { ASK_USER_MAX_PENDING, ASK_USER_MAX_PROMPT_CHARS, isPendingAskSnapshot } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  ASK_USER_MAX_PENDING,
+  ASK_USER_MAX_PROMPT_CHARS,
+  isPendingAskSnapshot,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import { createAskUserBridge, type AskUserRequest } from "./ask-user.js";
 
-const request: AskUserRequest = { questions: [{ id: "review", kind: "choice", question: "Create reviewed files?",
-  detail: "Exact preview\n" + "+ file contents\n".repeat(4_000), allowOther: false,
-  options: [{ label: "Create reviewed files", value: "host-content-hash-and-nonce", hint: "Does not run files" },
-    { label: "Do not create files", value: "reject", recommended: true }] }] };
+const request: AskUserRequest = {
+  questions: [
+    {
+      id: "review",
+      kind: "choice",
+      question: "Create reviewed files?",
+      detail: "Exact preview\n" + "+ file contents\n".repeat(4_000),
+      allowOther: false,
+      options: [
+        {
+          label: "Create reviewed files",
+          value: "host-content-hash-and-nonce",
+          hint: "Does not run files",
+        },
+        { label: "Do not create files", value: "reject", recommended: true },
+      ],
+    },
+  ],
+};
 
 describe("live question snapshots", () => {
   it("recovers the exact missed event without settling or extending the question", async () => {
@@ -26,7 +45,10 @@ describe("live question snapshots", () => {
       expect(await result).toEqual({ action: "cancel" });
       expect(bridge.pendingRequests).toEqual([]);
       expect(onSettled).toHaveBeenCalledExactlyOnceWith({ id: snapshot[0]!.id, action: "cancel" });
-    } finally { bridge.cancelAll(); vi.useRealTimers(); }
+    } finally {
+      bridge.cancelAll();
+      vi.useRealTimers();
+    }
   });
 
   it("detaches snapshots and admitted inputs, and removes answered questions", async () => {
@@ -38,8 +60,13 @@ describe("live question snapshots", () => {
     snapshot[0]!.questions[0]!.options![0]!.value = "mutated snapshot";
     expect(bridge.pendingRequests[0]!.questions).toEqual(request.questions);
     const id = snapshot[0]!.id;
-    expect(bridge.settle(id, { action: "answer", answers: { review: "host-content-hash-and-nonce" } })).toBe(true);
-    expect(await result).toEqual({ action: "answer", answers: { review: "host-content-hash-and-nonce" } });
+    expect(
+      bridge.settle(id, { action: "answer", answers: { review: "host-content-hash-and-nonce" } }),
+    ).toBe(true);
+    expect(await result).toEqual({
+      action: "answer",
+      answers: { review: "host-content-hash-and-nonce" },
+    });
     expect(bridge.pendingRequests).toEqual([]);
     expect(bridge.settle(id, { action: "cancel" })).toBe(false);
   });
@@ -52,10 +79,14 @@ describe("live question snapshots", () => {
     expect(await previous).toEqual({ action: "cancel" });
     const fresh = createAskUserBridge({ broadcast: () => {} });
     expect(fresh.pendingRequests).toEqual([]);
-    expect(fresh.settle(oldId, { action: "answer", answers: { review: "host-content-hash-and-nonce" } })).toBe(false);
+    expect(
+      fresh.settle(oldId, { action: "answer", answers: { review: "host-content-hash-and-nonce" } }),
+    ).toBe(false);
     const current = fresh.park(request);
     expect(fresh.pendingRequests[0]!.id).not.toBe(oldId);
-    expect(fresh.settle(oldId, { action: "answer", answers: { review: "host-content-hash-and-nonce" } })).toBe(false);
+    expect(
+      fresh.settle(oldId, { action: "answer", answers: { review: "host-content-hash-and-nonce" } }),
+    ).toBe(false);
     expect(fresh.pendingCount).toBe(1);
     fresh.cancelAll();
     expect(await current).toEqual({ action: "cancel" });
@@ -68,8 +99,17 @@ describe("live question snapshots", () => {
       await expect(bridge.park(request)).rejects.toThrow("live-question limit");
       expect(bridge.pendingRequests).toHaveLength(ASK_USER_MAX_PENDING);
       expect(isPendingAskSnapshot(bridge.pendingRequests)).toBe(true);
-    } finally { bridge.cancelAll(); await Promise.all(pending); }
-    await expect(bridge.park({ questions: [{ ...request.questions[0]!, detail: "x".repeat(ASK_USER_MAX_PROMPT_CHARS + 1) }] })).rejects.toThrow("invalid content");
+    } finally {
+      bridge.cancelAll();
+      await Promise.all(pending);
+    }
+    await expect(
+      bridge.park({
+        questions: [
+          { ...request.questions[0]!, detail: "x".repeat(ASK_USER_MAX_PROMPT_CHARS + 1) },
+        ],
+      }),
+    ).rejects.toThrow("invalid content");
     expect(bridge.pendingRequests).toEqual([]);
   });
 
@@ -79,10 +119,21 @@ describe("live question snapshots", () => {
     expect(isPendingAskSnapshot(null)).toBe(false);
     const prompt = { ...request, id: "ask-live" };
     expect(isPendingAskSnapshot([prompt, prompt])).toBe(false);
-    for (const changes of [{ kind: "unknown" }, { options: [] }, { allowOther: "yes" },
-      { options: [{ label: "Create", value: 1 }] }, { detail: "x".repeat(128_001) }]) {
-      expect(isPendingAskSnapshot([{ ...prompt, questions: [{ ...request.questions[0], ...changes }] }])).toBe(false);
+    for (const changes of [
+      { kind: "unknown" },
+      { options: [] },
+      { allowOther: "yes" },
+      { options: [{ label: "Create", value: 1 }] },
+      { detail: "x".repeat(128_001) },
+    ]) {
+      expect(
+        isPendingAskSnapshot([{ ...prompt, questions: [{ ...request.questions[0], ...changes }] }]),
+      ).toBe(false);
     }
-    expect(isPendingAskSnapshot(Array.from({ length: ASK_USER_MAX_PENDING + 1 }, (_, i) => ({ ...prompt, id: `ask-${i}` })))).toBe(false);
+    expect(
+      isPendingAskSnapshot(
+        Array.from({ length: ASK_USER_MAX_PENDING + 1 }, (_, i) => ({ ...prompt, id: `ask-${i}` })),
+      ),
+    ).toBe(false);
   });
 });

@@ -952,8 +952,7 @@ export class SessionVerificationEvidenceLedger {
 
   /** Upgrade a handed-off check once task_output reports its terminal state. */
   private recordBackgroundCompletion(details: unknown): void {
-    const task = (details as { taskOutput?: BackgroundTaskOutputDetails } | undefined)
-      ?.taskOutput;
+    const task = (details as { taskOutput?: BackgroundTaskOutputDetails } | undefined)?.taskOutput;
     if (!task || typeof task.id !== "string" || task.isRunning !== false) return;
     const executionId = this.pendingBackground.get(task.id);
     if (executionId === undefined) return;
@@ -990,10 +989,7 @@ export class SessionVerificationEvidenceLedger {
       evidence.elapsedMs = task.completedAt - startedAt;
     }
     entry.evidence = evidence;
-    if (
-      entry.run === this.run &&
-      classifyVerificationCommand(entry.evidence.command).candidate
-    ) {
+    if (entry.run === this.run && classifyVerificationCommand(entry.evidence.command).candidate) {
       this.runChecked = true;
     }
   }

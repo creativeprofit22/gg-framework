@@ -108,7 +108,9 @@ describe("SharedMcpClientPool", () => {
           connected.push(target!.timeout);
           return [];
         },
-        dispose: async () => { disposed.push(id); },
+        dispose: async () => {
+          disposed.push(id);
+        },
       } as unknown as MCPClientManager;
     });
     pools.push(pool);
@@ -302,10 +304,15 @@ describe("SharedMcpClientPool", () => {
         const toolSearch = internals.tools.find((tool) => tool.name === "tool_search");
         expect(toolSearch).toBeDefined();
         activations.push(
-          Promise.resolve(toolSearch!.execute({ query: "echo routing marker" }, {
-            signal: new AbortController().signal,
-            toolCallId: `activation-${activations.length}`,
-          })),
+          Promise.resolve(
+            toolSearch!.execute(
+              { query: "echo routing marker" },
+              {
+                signal: new AbortController().signal,
+                toolCallId: `activation-${activations.length}`,
+              },
+            ),
+          ),
         );
       };
       return session;

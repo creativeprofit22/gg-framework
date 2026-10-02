@@ -133,16 +133,23 @@ export class RoadmapPhaseLeaseRepository {
     cwd: string,
     phaseId: string,
     operation: () => Promise<T>,
-  ): Promise<{ status: "executed"; value: T } | { status: "conflicting-lease" | "ambiguous-lease" }> {
+  ): Promise<
+    { status: "executed"; value: T } | { status: "conflicting-lease" | "ambiguous-lease" }
+  > {
     const paths = this.paths(cwd);
     await ensureDirectory(paths.directory);
     return this.lock(paths.primary, async () => {
       const projectKey = canonicalProjectKey(cwd);
       const [primary, backup] = await Promise.all([
-        readCandidate(paths.primary, projectKey), readCandidate(paths.backup, projectKey),
+        readCandidate(paths.primary, projectKey),
+        readCandidate(paths.backup, projectKey),
       ]);
-      if (primary.status === "invalid" || backup.status === "invalid" ||
-          (primary.status === "missing" && backup.status !== "missing")) return { status: "ambiguous-lease" };
+      if (
+        primary.status === "invalid" ||
+        backup.status === "invalid" ||
+        (primary.status === "missing" && backup.status !== "missing")
+      )
+        return { status: "ambiguous-lease" };
       const lease = primary.status === "valid" ? primary.state.leases[phaseId] : undefined;
       if (lease) {
         const liveness = await this.processLiveness(lease.holder).catch(() => "unknown" as const);
@@ -226,11 +233,19 @@ export class RoadmapPhaseLeaseRepository {
       if (input.loadCurrentContext && request.action !== "release") {
         const fresh = await input.loadCurrentContext();
         if (!fresh || fresh.phaseId !== request.phaseId) return { status: "phase-not-found" };
-        if (canonicalProjectKey(fresh.projectKey) !== projectKey) return {
-          status: "project-mismatch", roadmapRevision: fresh.roadmapRevision, currentProjectKey: fresh.projectKey };
+        if (canonicalProjectKey(fresh.projectKey) !== projectKey)
+          return {
+            status: "project-mismatch",
+            roadmapRevision: fresh.roadmapRevision,
+            currentProjectKey: fresh.projectKey,
+          };
         if (fresh.planId !== request.planId) return { status: "plan-mismatch" };
-        if (request.expectedRevision < (fresh.lastDeletionRevision ?? 0)) return {
-          status: "stale-revision", roadmapRevision: fresh.roadmapRevision, leaseRevision: state.leaseRevision };
+        if (request.expectedRevision < (fresh.lastDeletionRevision ?? 0))
+          return {
+            status: "stale-revision",
+            roadmapRevision: fresh.roadmapRevision,
+            leaseRevision: state.leaseRevision,
+          };
         context = fresh;
       }
       if (request.action === "inspect") {

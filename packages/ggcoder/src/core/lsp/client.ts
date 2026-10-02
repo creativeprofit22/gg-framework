@@ -680,10 +680,13 @@ export class LspClient {
     this.markDead();
     this.cleanup = (async () => {
       if (this.proc.pid !== undefined) {
-        await killProcessTreeAsync({
-          pid: this.proc.pid,
-          isExited: () => this.proc.exitCode !== null || this.proc.signalCode !== null,
-        }, { requireSettlement: true });
+        await killProcessTreeAsync(
+          {
+            pid: this.proc.pid,
+            isExited: () => this.proc.exitCode !== null || this.proc.signalCode !== null,
+          },
+          { requireSettlement: true },
+        );
       }
       await this.nativeClose;
     })();

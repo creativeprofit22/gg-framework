@@ -17,23 +17,67 @@ it("preserves V2 validation hints through the existing Responses strict-mode fal
   expect(tools).toHaveLength(1);
   // Nested choices use the provider's existing fallback; host Zod validation remains strict.
   expect(tools[0]).toMatchObject({
-    type: "function", name: "programmatic_advisory_result", strict: null,
+    type: "function",
+    name: "programmatic_advisory_result",
+    strict: null,
     parameters: {
-      type: "object", additionalProperties: false,
+      type: "object",
+      additionalProperties: false,
       required: ["version", "kind", "recommendations", "coverage"],
       properties: {
         version: { const: 2 },
-        recommendations: { type: "array", maxItems: 10, items: {
-          type: "object",
-          required: ["version", "kind", "outcome", "rationale", "uncertainty", "evidence", "workflow", "alternatives", "choice"],
-          properties: {
-            workflow: { type: "object", required: ["trigger", "representativeCase", "inputs", "currentProcess", "output", "successCheck", "affectedSubproject", "mutationBoundary", "repeatability"] },
-            alternatives: { type: "array", maxItems: 4 },
-            choice: { oneOf: expect.arrayContaining([
-              ...["reuse-command", "extend-command", "missing-capability", "manual", "needs-more-evidence"].map((kind) => expect.objectContaining({ properties: expect.objectContaining({ kind: expect.objectContaining({ const: kind }) }) })),
-            ]) },
+        recommendations: {
+          type: "array",
+          maxItems: 10,
+          items: {
+            type: "object",
+            required: [
+              "version",
+              "kind",
+              "outcome",
+              "rationale",
+              "uncertainty",
+              "evidence",
+              "workflow",
+              "alternatives",
+              "choice",
+            ],
+            properties: {
+              workflow: {
+                type: "object",
+                required: [
+                  "trigger",
+                  "representativeCase",
+                  "inputs",
+                  "currentProcess",
+                  "output",
+                  "successCheck",
+                  "affectedSubproject",
+                  "mutationBoundary",
+                  "repeatability",
+                ],
+              },
+              alternatives: { type: "array", maxItems: 4 },
+              choice: {
+                oneOf: expect.arrayContaining([
+                  ...[
+                    "reuse-command",
+                    "extend-command",
+                    "missing-capability",
+                    "manual",
+                    "needs-more-evidence",
+                  ].map((kind) =>
+                    expect.objectContaining({
+                      properties: expect.objectContaining({
+                        kind: expect.objectContaining({ const: kind }),
+                      }),
+                    }),
+                  ),
+                ]),
+              },
+            },
           },
-        } },
+        },
       },
     },
   });

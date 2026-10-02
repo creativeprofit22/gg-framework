@@ -1,11 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { SLASH_COMMAND_INPUT_ALL, type SlashCommandListing } from "@kenkaiiii/gg-core";
-import { discoverCommands, projectAdvisoryCommands, type CommandDiscovery } from "./command-discovery.js";
+import {
+  discoverCommands,
+  projectAdvisoryCommands,
+  type CommandDiscovery,
+} from "./command-discovery.js";
 import type * as CustomCommands from "./custom-commands.js";
 
 vi.mock("./custom-commands.js", async (importOriginal) => {
   const fixtures = () => [
-    { name: "fixture", scope: "project", description: "Custom command from /private/owner", prompt: "PRIVATE BODY", filePath: "/private/owner/fixture.md" },
+    {
+      name: "fixture",
+      scope: "project",
+      description: "Custom command from /private/owner",
+      prompt: "PRIVATE BODY",
+      filePath: "/private/owner/fixture.md",
+    },
   ];
   return {
     ...(await importOriginal<typeof CustomCommands>()),
@@ -14,7 +24,11 @@ vi.mock("./custom-commands.js", async (importOriginal) => {
   };
 });
 const action: SlashCommandListing = {
-  name: "fixture", aliases: ["fixture-alias"], description: "Action", input: { ...SLASH_COMMAND_INPUT_ALL }, source: "built-in",
+  name: "fixture",
+  aliases: ["fixture-alias"],
+  description: "Action",
+  input: { ...SLASH_COMMAND_INPUT_ALL },
+  source: "built-in",
 };
 
 describe("derived command discovery", () => {
@@ -23,18 +37,35 @@ describe("derived command discovery", () => {
     const options = { getRegistryActions: () => actions };
     expect((await discoverCommands("unused", options)).resolve("later")).toBeUndefined();
     actions = [{ ...action, name: "later" }];
-    expect((await discoverCommands("unused", options)).resolve("later")?.listing.invocationKind).toBe("workspace-action");
-    const host = await discoverCommands("unused", { workspaceActions: [{ ...action, name: "FIXTURE" }], workspaceCaseInsensitive: true });
+    expect(
+      (await discoverCommands("unused", options)).resolve("later")?.listing.invocationKind,
+    ).toBe("workspace-action");
+    const host = await discoverCommands("unused", {
+      workspaceActions: [{ ...action, name: "FIXTURE" }],
+      workspaceCaseInsensitive: true,
+    });
     expect(host.entries.some((entry) => entry.custom?.name === "fixture")).toBe(false);
   });
 
   it("advances past a single oversized escaped metadata row without losing its identity", () => {
-    const discovery: CommandDiscovery = { entries: [{ listing: {
-      ...action, description: "\u0001".repeat(4000), usage: "\u0001".repeat(4000),
-      origin: "built-in", invocationKind: "workspace-action",
-    } }], resolve: () => undefined };
+    const discovery: CommandDiscovery = {
+      entries: [
+        {
+          listing: {
+            ...action,
+            description: "\u0001".repeat(4000),
+            usage: "\u0001".repeat(4000),
+            origin: "built-in",
+            invocationKind: "workspace-action",
+          },
+        },
+      ],
+      resolve: () => undefined,
+    };
     const page = projectAdvisoryCommands(discovery);
-    expect(page.entries).toEqual([expect.objectContaining({ name: "fixture", metadataLimited: true })]);
+    expect(page.entries).toEqual([
+      expect.objectContaining({ name: "fixture", metadataLimited: true }),
+    ]);
     expect(page.nextOffset).toBeNull();
     expect(page.limitedCoverage).toBe(true);
     expect(JSON.stringify(page).length).toBeLessThanOrEqual(32_000);
@@ -52,10 +83,15 @@ describe("derived command discovery", () => {
   });
 
   it("bounds pages including serialized text and reports continuation", () => {
-    const entries = Array.from({ length: 201 }, (_, index) => ({ listing: {
-      ...action, name: `command-${index}`, description: "\"".repeat(4_000), origin: "built-in" as const,
-      invocationKind: "workspace-action" as const,
-    } }));
+    const entries = Array.from({ length: 201 }, (_, index) => ({
+      listing: {
+        ...action,
+        name: `command-${index}`,
+        description: '"'.repeat(4_000),
+        origin: "built-in" as const,
+        invocationKind: "workspace-action" as const,
+      },
+    }));
     const discovery: CommandDiscovery = { entries, resolve: () => undefined };
     let offset = 0;
     const names: string[] = [];

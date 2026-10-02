@@ -8,8 +8,7 @@ export interface PhaseImplementationPlanProgress {
 
 export class AppSidecarPhaseImplementationPlanTracker {
   private retained:
-    | (PhaseImplementationPlanProgress & { phaseId: string; planHash: string | null })
-    | null = null;
+    (PhaseImplementationPlanProgress & { phaseId: string; planHash: string | null }) | null = null;
 
   clear(): void {
     this.retained = null;

@@ -426,10 +426,15 @@ describe("discoverProjects (ggcoder store)", () => {
     const lockedRoot = path.join(state.sessionsDir, encodeCwd(projectPath));
     const realReaddir = fs.readdir;
     const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
-    const spy = vi.spyOn(fs, "readdir").mockImplementation(((dir: unknown, ...rest: unknown[]) =>
-      dir === lockedRoot
-        ? Promise.reject(denied)
-        : (realReaddir as (...args: unknown[]) => Promise<unknown>)(dir, ...rest)) as typeof fs.readdir);
+    const spy = vi
+      .spyOn(fs, "readdir")
+      .mockImplementation(((dir: unknown, ...rest: unknown[]) =>
+        dir === lockedRoot
+          ? Promise.reject(denied)
+          : (realReaddir as (...args: unknown[]) => Promise<unknown>)(
+              dir,
+              ...rest,
+            )) as typeof fs.readdir);
     try {
       await expect(listRecentSessions(projectPath)).rejects.toThrow("EACCES");
     } finally {

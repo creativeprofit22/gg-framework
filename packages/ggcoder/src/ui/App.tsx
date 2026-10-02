@@ -482,7 +482,9 @@ export function App(props: AppProps) {
   const agentRunningRef = useRef(false);
   const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
   const runAllTasksRef = useRef(props.sessionStore?.runAllTasks ?? false);
-  const startTaskRef = useRef<(title: string, prompt: string, taskId: string, unattended: boolean) => void>(() => {});
+  const startTaskRef = useRef<
+    (title: string, prompt: string, taskId: string, unattended: boolean) => void
+  >(() => {});
   const cwdRef = useRef(props.cwd);
   // The project root is fixed for the session's lifetime, so this never changes.
   const displayedCwd = props.cwd;
@@ -515,7 +517,11 @@ export function App(props: AppProps) {
   const currentModelRef = useRef(props.model);
   const [currentTools, setCurrentTools] = useState(props.tools);
   const currentToolsRef = useRef(props.tools);
-  const [thinkingLevel, setThinkingLevel] = useThinkingLevel(currentProvider, currentModel, props.thinking);
+  const [thinkingLevel, setThinkingLevel] = useThinkingLevel(
+    currentProvider,
+    currentModel,
+    props.thinking,
+  );
   const thinkingLevelRef = useRef<ThinkingLevel | undefined>(thinkingLevel);
   currentModelRef.current = currentModel;
   thinkingLevelRef.current = thinkingLevel;
@@ -597,22 +603,26 @@ export function App(props: AppProps) {
 
   const sessionStore = props.sessionStore;
 
-  const { planMode, planModeStateRef, rebuildSystemPrompt, replaceSystemPrompt, setPlanModeAndPrompt } = useModeState(
-    {
-      initialPlanMode: props.sessionStore?.planMode ?? props.planModeRef?.current ?? false,
-      skills: props.skills,
-      planModeRef: props.planModeRef,
-      sessionStore: props.sessionStore,
-      cwdRef,
-      currentToolsRef,
-      providerRef: currentProviderRef,
-      modelRef: currentModelRef,
-      thinkingLevelRef,
-      approvedPlanPathRef,
-      injectedLanguagesRef,
-      messagesRef,
-    },
-  );
+  const {
+    planMode,
+    planModeStateRef,
+    rebuildSystemPrompt,
+    replaceSystemPrompt,
+    setPlanModeAndPrompt,
+  } = useModeState({
+    initialPlanMode: props.sessionStore?.planMode ?? props.planModeRef?.current ?? false,
+    skills: props.skills,
+    planModeRef: props.planModeRef,
+    sessionStore: props.sessionStore,
+    cwdRef,
+    currentToolsRef,
+    providerRef: currentProviderRef,
+    modelRef: currentModelRef,
+    thinkingLevelRef,
+    approvedPlanPathRef,
+    injectedLanguagesRef,
+    messagesRef,
+  });
 
   const {
     pendingHistoryFlushRef,
@@ -739,19 +749,27 @@ export function App(props: AppProps) {
   const discoveryRequest = useRef(0);
   const reloadCustomCommands = useCallback(() => {
     const request = ++discoveryRequest.current;
-    void discoverCommands(props.cwd, { workspaceActions: UI_SLASH_COMMANDS }).then((discovery) => {
-      if (request !== discoveryRequest.current) return;
-      setCustomCommands(discovery.entries.flatMap((entry) => entry.custom ? [entry.custom] : []));
-      setReadyPromptCommands(discovery.entries.filter((entry) => entry.prompt).map((entry) => entry.listing));
-    }).catch(() => {
-      if (request !== discoveryRequest.current) return;
-      setCustomCommands([]);
-      setReadyPromptCommands([]);
-    });
+    void discoverCommands(props.cwd, { workspaceActions: UI_SLASH_COMMANDS })
+      .then((discovery) => {
+        if (request !== discoveryRequest.current) return;
+        setCustomCommands(
+          discovery.entries.flatMap((entry) => (entry.custom ? [entry.custom] : [])),
+        );
+        setReadyPromptCommands(
+          discovery.entries.filter((entry) => entry.prompt).map((entry) => entry.listing),
+        );
+      })
+      .catch(() => {
+        if (request !== discoveryRequest.current) return;
+        setCustomCommands([]);
+        setReadyPromptCommands([]);
+      });
   }, [props.cwd]);
   useEffect(() => {
     reloadCustomCommands();
-    return () => { discoveryRequest.current++; };
+    return () => {
+      discoveryRequest.current++;
+    };
   }, [reloadCustomCommands]);
 
   useEffect(() => {
@@ -2270,9 +2288,15 @@ export function App(props: AppProps) {
   const handleToggleThinking = useCallback(() => {
     setThinkingLevel((prev) => {
       const next = getNextThinkingLevel(currentProvider, currentModel, prev);
-      log("INFO", "thinking", currentProvider === "qwen-cloud"
-        ? getThinkingFooterLabel(next, currentModel)
-        : next ? `Thinking ${next}` : "Thinking disabled");
+      log(
+        "INFO",
+        "thinking",
+        currentProvider === "qwen-cloud"
+          ? getThinkingFooterLabel(next, currentModel)
+          : next
+            ? `Thinking ${next}`
+            : "Thinking disabled",
+      );
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
         void sm.load().then(async () => {
@@ -2482,14 +2506,14 @@ export function App(props: AppProps) {
       .map(fromPrompt)
       .filter((c): c is SlashCommandInfo => c !== null);
     const knownPromptNames = new Set(promptOrder);
-    const remainingPromptCommands = readyPromptCommands.filter(
-      (c) => !knownPromptNames.has(c.name),
-    ).map((c) => ({
-      name: c.name,
-      aliases: c.aliases,
-      description: c.description,
-      sectionTitle: "workflows",
-    }));
+    const remainingPromptCommands = readyPromptCommands
+      .filter((c) => !knownPromptNames.has(c.name))
+      .map((c) => ({
+        name: c.name,
+        aliases: c.aliases,
+        description: c.description,
+        sectionTitle: "workflows",
+      }));
 
     return [
       // Session actions (most frequent)

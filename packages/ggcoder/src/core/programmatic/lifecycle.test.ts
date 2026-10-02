@@ -107,46 +107,74 @@ async function persistedState(root: string): Promise<ProgrammaticLifecycleStateV
 }
 
 describe("lifecycle cancellation", () => {
-  it.each(["inventory", "precommit", "revalidation", "backup-committed"] as const)("preserves history and reports publication honestly at %s", async (when) => {
-    const root = await createRepository();
-    expect(await runProgrammaticScan(root)).toMatchObject({ ok: true });
-    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
-    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
-    const primary = await readFile(primaryPath);
-    const historical = await persistedState(root);
-    historical.records = [];
-    const previous = Buffer.from(JSON.stringify(historical));
-    await writeFile(previousPath, previous);
-    await writeFile(path.join(root, "package.json"), '{"name":"updated"}\n');
-    await approveProfile(root);
-    const controller = new AbortController();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => { entered = resolve; });
-    let paused = false;
-    let precommit = false;
-    const pause = async () => { if (!paused) { paused = true; entered(); await held; } };
-    const running = runProgrammaticScan(root, {
-      signal: controller.signal,
-      inventoryOperations: { readFile: async (file) => {
-        if (when === "inventory" || (when === "revalidation" && precommit)) await pause();
-        return readFile(file);
-      } },
-      onPreFileMutation: async () => { precommit = true; if (when === "precommit") await pause(); },
-      onFileMutated: async (file) => {
-        if (when === "backup-committed" && file === PROGRAMMATIC_PREVIOUS_STATE_PATH) await pause();
-      },
-    });
-    await ready;
-    controller.abort();
-    release();
-    expect(await running).toMatchObject({ ok: false, changed: when === "backup-committed",
-      error: when === "backup-committed" ? "post-commit-failed" : "cancelled" });
-    expect(await readFile(primaryPath)).toEqual(primary);
-    expect(await readFile(previousPath)).toEqual(when === "backup-committed" ? primary : previous);
-    expect((await readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(["profile.json", "state.json", "state.previous.json"]);
-  });
+  it.each(["inventory", "precommit", "revalidation", "backup-committed"] as const)(
+    "preserves history and reports publication honestly at %s",
+    async (when) => {
+      const root = await createRepository();
+      expect(await runProgrammaticScan(root)).toMatchObject({ ok: true });
+      const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+      const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+      const primary = await readFile(primaryPath);
+      const historical = await persistedState(root);
+      historical.records = [];
+      const previous = Buffer.from(JSON.stringify(historical));
+      await writeFile(previousPath, previous);
+      await writeFile(path.join(root, "package.json"), '{"name":"updated"}\n');
+      await approveProfile(root);
+      const controller = new AbortController();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let paused = false;
+      let precommit = false;
+      const pause = async () => {
+        if (!paused) {
+          paused = true;
+          entered();
+          await held;
+        }
+      };
+      const running = runProgrammaticScan(root, {
+        signal: controller.signal,
+        inventoryOperations: {
+          readFile: async (file) => {
+            if (when === "inventory" || (when === "revalidation" && precommit)) await pause();
+            return readFile(file);
+          },
+        },
+        onPreFileMutation: async () => {
+          precommit = true;
+          if (when === "precommit") await pause();
+        },
+        onFileMutated: async (file) => {
+          if (when === "backup-committed" && file === PROGRAMMATIC_PREVIOUS_STATE_PATH)
+            await pause();
+        },
+      });
+      await ready;
+      controller.abort();
+      release();
+      expect(await running).toMatchObject({
+        ok: false,
+        changed: when === "backup-committed",
+        error: when === "backup-committed" ? "post-commit-failed" : "cancelled",
+      });
+      expect(await readFile(primaryPath)).toEqual(primary);
+      expect(await readFile(previousPath)).toEqual(
+        when === "backup-committed" ? primary : previous,
+      );
+      expect((await readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual([
+        "profile.json",
+        "state.json",
+        "state.previous.json",
+      ]);
+    },
+  );
 });
 
 describe("lifecycle byte limits", () => {
@@ -168,21 +196,32 @@ describe("lifecycle byte limits", () => {
       await writeFile(primaryPath, bytes);
       await writeFile(previousPath, bytes);
       const read = vi.fn((filePath: string) => readFile(filePath));
-      const options = { operations: {
-        lstat: async (filePath: string) => {
-          const stat = await lstat(filePath);
-          if (path.basename(filePath) === "state.json") stat.size = size;
-          return stat;
+      const options = {
+        operations: {
+          lstat: async (filePath: string) => {
+            const stat = await lstat(filePath);
+            if (path.basename(filePath) === "state.json") stat.size = size;
+            return stat;
+          },
+          readFile: read,
         },
-        readFile: read,
-      } };
+      };
       expect(await readProgrammaticChatReport(root, 0, options)).toMatchObject({
-        status: "recovered", scan: { available: false },
+        status: "recovered",
+        scan: { available: false },
       });
-      const detail = await readProgrammaticChatDetail(root, record.opportunity.identity.id, options);
+      const detail = await readProgrammaticChatDetail(
+        root,
+        record.opportunity.identity.id,
+        options,
+      );
       expect(detail.detail?.summary.state).toBe("running");
-      expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.json")).toBe(false);
-      expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json")).toBe(true);
+      expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.json")).toBe(
+        false,
+      );
+      expect(
+        read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json"),
+      ).toBe(true);
       expect(await readFile(primaryPath)).toEqual(bytes);
       expect(await readFile(previousPath)).toEqual(bytes);
       expect((await persistedState(root)).records[0]!.lifecycle).toEqual(record.lifecycle);
@@ -198,15 +237,21 @@ describe("lifecycle byte limits", () => {
     await writeFile(primaryPath, "invalid primary");
     await writeFile(previousPath, previous);
     const read = vi.fn((filePath: string) => readFile(filePath));
-    await expect(readProgrammaticChatReport(root, 0, { operations: {
-      lstat: async (filePath) => {
-        const stat = await lstat(filePath);
-        if (path.basename(filePath) === "state.previous.json") stat.size = byteLimit + 1;
-        return stat;
-      },
-      readFile: read,
-    } })).rejects.toThrow(/recovery is required/);
-    expect(read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json")).toBe(false);
+    await expect(
+      readProgrammaticChatReport(root, 0, {
+        operations: {
+          lstat: async (filePath) => {
+            const stat = await lstat(filePath);
+            if (path.basename(filePath) === "state.previous.json") stat.size = byteLimit + 1;
+            return stat;
+          },
+          readFile: read,
+        },
+      }),
+    ).rejects.toThrow(/recovery is required/);
+    expect(
+      read.mock.calls.some(([filePath]) => path.basename(filePath) === "state.previous.json"),
+    ).toBe(false);
     expect(await readFile(primaryPath, "utf8")).toBe("invalid primary");
     expect(await readFile(previousPath)).toEqual(previous);
   });
@@ -214,13 +259,17 @@ describe("lifecycle byte limits", () => {
   it("accepts metadata exactly at the byte ceiling", async () => {
     const root = await createRepository();
     await runProgrammaticScan(root);
-    expect(await readProgrammaticChatReport(root, 0, { operations: {
-      lstat: async (filePath) => {
-        const stat = await lstat(filePath);
-        if (path.basename(filePath) === "state.json") stat.size = byteLimit;
-        return stat;
-      },
-    } })).toMatchObject({ status: "current" });
+    expect(
+      await readProgrammaticChatReport(root, 0, {
+        operations: {
+          lstat: async (filePath) => {
+            const stat = await lstat(filePath);
+            if (path.basename(filePath) === "state.json") stat.size = byteLimit;
+            return stat;
+          },
+        },
+      }),
+    ).toMatchObject({ status: "current" });
   });
 
   it("refuses oversized serialized output before any state-file mutation", async () => {
@@ -233,21 +282,33 @@ describe("lifecycle byte limits", () => {
     await writeFile(path.join(root, "src-tauri/tauri.conf.json"), '{"productName":"Changed"}');
     await approveProfile(root);
     const measure = Buffer.byteLength;
-    const size = vi.spyOn(Buffer, "byteLength").mockImplementation((value, encoding) =>
-      typeof value === "string" && value.includes('"records":')
-        ? byteLimit + 1 : measure(value, encoding));
-    const write = vi.fn(async () => { throw new Error("Unexpected write"); });
+    const size = vi
+      .spyOn(Buffer, "byteLength")
+      .mockImplementation((value, encoding) =>
+        typeof value === "string" && value.includes('"records":')
+          ? byteLimit + 1
+          : measure(value, encoding),
+      );
+    const write = vi.fn(async () => {
+      throw new Error("Unexpected write");
+    });
     const remove = vi.fn((filePath: string, options: { force: true }) => rm(filePath, options));
     try {
-      expect(await runProgrammaticScan(root, { operations: { writeFile: write, rm: remove } }))
-        .toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+      expect(
+        await runProgrammaticScan(root, { operations: { writeFile: write, rm: remove } }),
+      ).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
       expect(write).not.toHaveBeenCalled();
       // The scan cleans stale managed siblings before reading; replacement must
       // reject overflow before performing any additional temporary mutation.
-      expect(remove.mock.calls.map(([filePath]) => path.basename(filePath)))
-        .toEqual([".state.tmp", ".state.previous.tmp"]);
-      expect(size.mock.calls.some(([value]) =>
-        typeof value === "string" && value.includes('"records":'))).toBe(true);
+      expect(remove.mock.calls.map(([filePath]) => path.basename(filePath))).toEqual([
+        ".state.tmp",
+        ".state.previous.tmp",
+      ]);
+      expect(
+        size.mock.calls.some(
+          ([value]) => typeof value === "string" && value.includes('"records":'),
+        ),
+      ).toBe(true);
     } finally {
       size.mockRestore();
     }
@@ -255,35 +316,43 @@ describe("lifecycle byte limits", () => {
     expect(await readFile(previousPath)).toEqual(bytes);
   });
 
-  it.each(["metadata", "buffer"] as const)("rejects oversized temporary %s before commit", async (source) => {
-    const root = await createRepository();
-    await runProgrammaticScan(root);
-    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
-    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
-    const bytes = await readFile(primaryPath);
-    await writeFile(previousPath, bytes);
-    await writeFile(path.join(root, "src-tauri/tauri.conf.json"), '{"productName":"Changed"}');
-    await approveProfile(root);
-    const raw = Buffer.from(bytes);
-    Object.defineProperty(raw, "length", { value: byteLimit + 1 });
-    const decode = vi.spyOn(raw, "toString");
-    const read = vi.fn(async (filePath: string) =>
-      filePath.endsWith(".tmp") ? raw : readFile(filePath));
-    expect(await runProgrammaticScan(root, { operations: {
-      lstat: async (filePath) => {
-        const stat = await lstat(filePath);
-        if (source === "metadata" && filePath.endsWith(".tmp")) stat.size = byteLimit + 1;
-        return stat;
-      },
-      readFile: read,
-    } })).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
-    if (source === "metadata") {
-      expect(read.mock.calls.some(([filePath]) => filePath.endsWith(".tmp"))).toBe(false);
-    }
-    expect(decode).not.toHaveBeenCalled();
-    expect(await readFile(primaryPath)).toEqual(bytes);
-    expect(await readFile(previousPath)).toEqual(bytes);
-  });
+  it.each(["metadata", "buffer"] as const)(
+    "rejects oversized temporary %s before commit",
+    async (source) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+      const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+      const bytes = await readFile(primaryPath);
+      await writeFile(previousPath, bytes);
+      await writeFile(path.join(root, "src-tauri/tauri.conf.json"), '{"productName":"Changed"}');
+      await approveProfile(root);
+      const raw = Buffer.from(bytes);
+      Object.defineProperty(raw, "length", { value: byteLimit + 1 });
+      const decode = vi.spyOn(raw, "toString");
+      const read = vi.fn(async (filePath: string) =>
+        filePath.endsWith(".tmp") ? raw : readFile(filePath),
+      );
+      expect(
+        await runProgrammaticScan(root, {
+          operations: {
+            lstat: async (filePath) => {
+              const stat = await lstat(filePath);
+              if (source === "metadata" && filePath.endsWith(".tmp")) stat.size = byteLimit + 1;
+              return stat;
+            },
+            readFile: read,
+          },
+        }),
+      ).toMatchObject({ ok: false, changed: false, error: "persistence-failed" });
+      if (source === "metadata") {
+        expect(read.mock.calls.some(([filePath]) => filePath.endsWith(".tmp"))).toBe(false);
+      }
+      expect(decode).not.toHaveBeenCalled();
+      expect(await readFile(primaryPath)).toEqual(bytes);
+      expect(await readFile(previousPath)).toEqual(bytes);
+    },
+  );
 
   it("rejects an oversized returned buffer before decoding despite understated metadata", async () => {
     const root = await createRepository();
@@ -295,9 +364,14 @@ describe("lifecycle byte limits", () => {
     const raw = Buffer.from(bytes);
     Object.defineProperty(raw, "length", { value: byteLimit + 1 });
     const decode = vi.spyOn(raw, "toString");
-    expect(await readProgrammaticChatReport(root, 0, { operations: {
-      readFile: async (filePath) => path.basename(filePath) === "state.json" ? raw : readFile(filePath),
-    } })).toMatchObject({ status: "recovered" });
+    expect(
+      await readProgrammaticChatReport(root, 0, {
+        operations: {
+          readFile: async (filePath) =>
+            path.basename(filePath) === "state.json" ? raw : readFile(filePath),
+        },
+      }),
+    ).toMatchObject({ status: "recovered" });
     expect(decode).not.toHaveBeenCalled();
     expect(await readFile(primaryPath)).toEqual(bytes);
     expect(await readFile(previousPath)).toEqual(bytes);
@@ -305,56 +379,98 @@ describe("lifecycle byte limits", () => {
 });
 
 describe("configuration drift reconciliation", () => {
-  it.each(["completed", "dismissed"] as const)("preserves %s identity/history through refresh and failed scan retry", async (terminal) => {
-    const root = await createRepository();
-    await runProgrammaticScan(root);
-    const state = await persistedState(root);
-    const first = state.records[0]!;
-    first.lifecycle.state = terminal;
-    const disappeared = structuredClone(first);
-    disappeared.opportunity.identity.id = "f".repeat(64);
-    disappeared.lifecycle.opportunity.id = disappeared.opportunity.identity.id;
-    state.records.push(disappeared);
-    state.records.sort((a, b) => a.opportunity.identity.id.localeCompare(b.opportunity.identity.id));
-    await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(state));
-    const before = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
-    await writeFile(path.join(root, "package.json"), '{"name":"drift"}\n');
-    const stale = await readProgrammaticChatReport(root);
-    expect(stale.scan.available).toBe(false);
-    expect(stale.reason).toBe("Project settings changed. Choose Review setup before checking for opportunities or starting a task.");
-    expect((await readProgrammaticChatDetail(root, first.opportunity.identity.id)).detail?.summary.state).toBe(terminal);
-    await approveProfile(root);
-    expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
-    expect(await runProgrammaticScan(root, { operations: { rename: async () => { throw new Error("injected failure"); } } }))
-      .toMatchObject({ ok: false });
-    expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
-    expect(await readProgrammaticChatReport(root)).toMatchObject({ status: "stale", scan: { available: true } });
-    expect((await runProgrammaticScan(root)).ok).toBe(true);
-    const after = await persistedState(root);
-    expect(after.records.find((record) => record.opportunity.identity.id === first.opportunity.identity.id)?.lifecycle).toEqual(first.lifecycle);
-    expect(after.records.find((record) => record.opportunity.identity.id === disappeared.opportunity.identity.id)?.lifecycle).toEqual(disappeared.lifecycle);
-    const profileBytes = await readFile(path.join(root, ".gg/programmatic/profile.json"));
-    for (let i = 0; i < 3; i++) {
-      await writeFile(path.join(root, "source.ts"), `export const value = ${i};`);
+  it.each(["completed", "dismissed"] as const)(
+    "preserves %s identity/history through refresh and failed scan retry",
+    async (terminal) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const state = await persistedState(root);
+      const first = state.records[0]!;
+      first.lifecycle.state = terminal;
+      const disappeared = structuredClone(first);
+      disappeared.opportunity.identity.id = "f".repeat(64);
+      disappeared.lifecycle.opportunity.id = disappeared.opportunity.identity.id;
+      state.records.push(disappeared);
+      state.records.sort((a, b) =>
+        a.opportunity.identity.id.localeCompare(b.opportunity.identity.id),
+      );
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(state));
+      const before = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
+      await writeFile(path.join(root, "package.json"), '{"name":"drift"}\n');
+      const stale = await readProgrammaticChatReport(root);
+      expect(stale.scan.available).toBe(false);
+      expect(stale.reason).toBe(
+        "Project settings changed. Choose Review setup before checking for opportunities or starting a task.",
+      );
+      expect(
+        (await readProgrammaticChatDetail(root, first.opportunity.identity.id)).detail?.summary
+          .state,
+      ).toBe(terminal);
+      await approveProfile(root);
+      expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
+      expect(
+        await runProgrammaticScan(root, {
+          operations: {
+            rename: async () => {
+              throw new Error("injected failure");
+            },
+          },
+        }),
+      ).toMatchObject({ ok: false });
+      expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
+      expect(await readProgrammaticChatReport(root)).toMatchObject({
+        status: "stale",
+        scan: { available: true },
+      });
       expect((await runProgrammaticScan(root)).ok).toBe(true);
-      expect(await readFile(path.join(root, ".gg/programmatic/profile.json"))).toEqual(profileBytes);
-    }
-  });
+      const after = await persistedState(root);
+      expect(
+        after.records.find(
+          (record) => record.opportunity.identity.id === first.opportunity.identity.id,
+        )?.lifecycle,
+      ).toEqual(first.lifecycle);
+      expect(
+        after.records.find(
+          (record) => record.opportunity.identity.id === disappeared.opportunity.identity.id,
+        )?.lifecycle,
+      ).toEqual(disappeared.lifecycle);
+      const profileBytes = await readFile(path.join(root, ".gg/programmatic/profile.json"));
+      for (let i = 0; i < 3; i++) {
+        await writeFile(path.join(root, "source.ts"), `export const value = ${i};`);
+        expect((await runProgrammaticScan(root)).ok).toBe(true);
+        expect(await readFile(path.join(root, ".gg/programmatic/profile.json"))).toEqual(
+          profileBytes,
+        );
+      }
+    },
+  );
 
   it("keeps legacy reports inspectable but denies scan/execution until explicit upgrade", async () => {
     const root = await createRepository();
     await runProgrammaticScan(root);
     const state = await persistedState(root);
     const profilePath = path.join(root, ".gg/programmatic/profile.json");
-    const { configurationSnapshot: _snapshot, ...profile } = JSON.parse(await readFile(profilePath, "utf8"));
+    const { configurationSnapshot: _snapshot, ...profile } = JSON.parse(
+      await readFile(profilePath, "utf8"),
+    );
     await writeFile(profilePath, JSON.stringify({ ...profile, version: 1 }));
     const report = await readProgrammaticChatReport(root);
     expect(report).toMatchObject({ status: "stale", scan: { available: false } });
-    expect(report.reason).toBe("Saved setup uses an older format, so earlier file settings cannot be compared. Choose Review setup.");
+    expect(report.reason).toBe(
+      "Saved setup uses an older format, so earlier file settings cannot be compared. Choose Review setup.",
+    );
     expect(report.rows).toHaveLength(1);
-    expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
-    await expect(accessProgrammaticExecutionRecord(root, state.records[0]!.opportunity.identity.id, state.configurationFingerprint))
-      .rejects.toThrow(/configuration/);
+    expect(await runProgrammaticScan(root)).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+    });
+    await expect(
+      accessProgrammaticExecutionRecord(
+        root,
+        state.records[0]!.opportunity.identity.id,
+        state.configurationFingerprint,
+      ),
+    ).rejects.toThrow(/configuration/);
     await approveProfile(root);
     expect((await runProgrammaticScan(root)).ok).toBe(true);
     expect((await persistedState(root)).records).toEqual(state.records);
@@ -365,16 +481,18 @@ describe("configuration drift reconciliation", () => {
     await runProgrammaticScan(root);
     const before = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
     let changed = false;
-    const result = await runProgrammaticScan(root, { operations: {
-      readFile: async (filePath) => {
-        const value = await readFile(filePath);
-        if (!changed && path.basename(filePath) === "state.json") {
-          changed = true;
-          await writeFile(path.join(root, "package.json"), '{"name":"raced"}\n');
-        }
-        return value;
+    const result = await runProgrammaticScan(root, {
+      operations: {
+        readFile: async (filePath) => {
+          const value = await readFile(filePath);
+          if (!changed && path.basename(filePath) === "state.json") {
+            changed = true;
+            await writeFile(path.join(root, "package.json"), '{"name":"raced"}\n');
+          }
+          return value;
+        },
       },
-    } });
+    });
     expect(changed).toBe(true);
     expect(result).toMatchObject({ ok: false, error: "stale-configuration" });
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
@@ -387,58 +505,101 @@ describe("chat report and dismissal", () => {
     await runProgrammaticScan(root);
     const state = await persistedState(root);
     const id = state.records[0]!.opportunity.identity.id;
-    await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, { from: "discovered", to: "queued" });
-    await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, { from: "queued", to: "running", runId: randomUUID() });
+    await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, {
+      from: "discovered",
+      to: "queued",
+    });
+    await accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint, {
+      from: "queued",
+      to: "running",
+      runId: randomUUID(),
+    });
     const bytes = await readFile(path.join(root, PROGRAMMATIC_STATE_PATH));
     vi.resetModules();
     const fresh = await import("./lifecycle.js");
     expect(fresh.readProgrammaticChatReport).not.toBe(readProgrammaticChatReport);
     expect((await fresh.readProgrammaticChatReport(root)).scan.available).toBe(false);
-    expect((await fresh.readProgrammaticChatDetail(root, id)).detail?.summary.state).toBe("running");
+    expect((await fresh.readProgrammaticChatDetail(root, id)).detail?.summary.state).toBe(
+      "running",
+    );
     expect(await fresh.runProgrammaticScan(root)).toMatchObject({ ok: false, changed: false });
-    await expect(fresh.accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint)).rejects.toThrow("running");
+    await expect(
+      fresh.accessProgrammaticExecutionRecord(root, id, state.configurationFingerprint),
+    ).rejects.toThrow("running");
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(bytes);
   });
-  it.each([1, 50])("blocks conflicting actions with an owner at index %i and restores them after settlement", async (ownerIndex) => {
-    const root = await createRepository();
-    await runProgrammaticScan(root);
-    const initial = await persistedState(root);
-    const first = initial.records[0]!;
-    initial.records = Array.from({ length: 51 }, (_, index) => {
-      const identity = { ...first.opportunity.identity, id: index.toString(16).padStart(64, "0") };
-      return { ...first, opportunity: { ...first.opportunity, identity },
-        lifecycle: { ...first.lifecycle, opportunity: identity } };
-    });
-    await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(initial));
-    const id = initial.records[0]!.opportunity.identity.id;
-    const owner = initial.records[ownerIndex]!.opportunity.identity.id;
-    const fp = initial.configurationFingerprint;
-    const runId = randomUUID();
-    await accessProgrammaticExecutionRecord(root, owner, fp, { from: "discovered", to: "queued" });
-    await accessProgrammaticExecutionRecord(root, owner, fp, { from: "queued", to: "running", runId });
-    const report = await readProgrammaticChatReport(root);
-    const detail = await readProgrammaticChatDetail(root, id);
-    expect(report.rows).toHaveLength(50);
-    expect(report.rows.some((row) => row.state === "running")).toBe(ownerIndex < 50);
-    expect(report.scan).toMatchObject({ available: false, reason: expect.stringContaining("running") });
-    expect(detail.detail?.summary).toEqual(report.rows[0]);
-    expect(detail.detail?.summary).toMatchObject({
-      state: "discovered", route: { available: true },
-      actions: { run: { available: false, reason: expect.stringContaining("running") },
-        dismiss: { available: false, reason: expect.stringContaining("running") } },
-    });
-    expect(detail.detail?.evidence.length).toBeGreaterThan(0);
-    expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(true);
-    expect(isProgrammaticChatResponse({ version: 1, action: "detail", ok: true, ...detail })).toBe(true);
-    await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("running");
-    await expect(dismissProgrammaticOpportunity(root, id, report.snapshot!)).rejects.toThrow("running");
-    await settleProgrammaticExecutionRecord(root, owner, runId, fp, "completed");
-    const refreshed = await readProgrammaticChatReport(root);
-    expect(refreshed.snapshot).not.toBe(report.snapshot);
-    expect(refreshed.scan.available).toBe(true);
-    expect(refreshed.rows[0]).toMatchObject({ actions: { run: { available: true }, dismiss: { available: true } } });
-    expect((await readProgrammaticChatDetail(root, id)).detail?.summary).toEqual(refreshed.rows[0]);
-  });
+  it.each([1, 50])(
+    "blocks conflicting actions with an owner at index %i and restores them after settlement",
+    async (ownerIndex) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const initial = await persistedState(root);
+      const first = initial.records[0]!;
+      initial.records = Array.from({ length: 51 }, (_, index) => {
+        const identity = {
+          ...first.opportunity.identity,
+          id: index.toString(16).padStart(64, "0"),
+        };
+        return {
+          ...first,
+          opportunity: { ...first.opportunity, identity },
+          lifecycle: { ...first.lifecycle, opportunity: identity },
+        };
+      });
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(initial));
+      const id = initial.records[0]!.opportunity.identity.id;
+      const owner = initial.records[ownerIndex]!.opportunity.identity.id;
+      const fp = initial.configurationFingerprint;
+      const runId = randomUUID();
+      await accessProgrammaticExecutionRecord(root, owner, fp, {
+        from: "discovered",
+        to: "queued",
+      });
+      await accessProgrammaticExecutionRecord(root, owner, fp, {
+        from: "queued",
+        to: "running",
+        runId,
+      });
+      const report = await readProgrammaticChatReport(root);
+      const detail = await readProgrammaticChatDetail(root, id);
+      expect(report.rows).toHaveLength(50);
+      expect(report.rows.some((row) => row.state === "running")).toBe(ownerIndex < 50);
+      expect(report.scan).toMatchObject({
+        available: false,
+        reason: expect.stringContaining("running"),
+      });
+      expect(detail.detail?.summary).toEqual(report.rows[0]);
+      expect(detail.detail?.summary).toMatchObject({
+        state: "discovered",
+        route: { available: true },
+        actions: {
+          run: { available: false, reason: expect.stringContaining("running") },
+          dismiss: { available: false, reason: expect.stringContaining("running") },
+        },
+      });
+      expect(detail.detail?.evidence.length).toBeGreaterThan(0);
+      expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(
+        true,
+      );
+      expect(
+        isProgrammaticChatResponse({ version: 1, action: "detail", ok: true, ...detail }),
+      ).toBe(true);
+      await expect(accessProgrammaticExecutionRecord(root, id, fp)).rejects.toThrow("running");
+      await expect(dismissProgrammaticOpportunity(root, id, report.snapshot!)).rejects.toThrow(
+        "running",
+      );
+      await settleProgrammaticExecutionRecord(root, owner, runId, fp, "completed");
+      const refreshed = await readProgrammaticChatReport(root);
+      expect(refreshed.snapshot).not.toBe(report.snapshot);
+      expect(refreshed.scan.available).toBe(true);
+      expect(refreshed.rows[0]).toMatchObject({
+        actions: { run: { available: true }, dismiss: { available: true } },
+      });
+      expect((await readProgrammaticChatDetail(root, id)).detail?.summary).toEqual(
+        refreshed.rows[0],
+      );
+    },
+  );
   it("allows an approved refresh scan without promoting last-known records on reads", async () => {
     const root = await createRepository();
     expect((await runProgrammaticScan(root)).ok).toBe(true);
@@ -447,17 +608,25 @@ describe("chat report and dismissal", () => {
     const id = initial.rows[0]!.id;
     await writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
     expect(await readProgrammaticChatReport(root)).toMatchObject({
-      status: "stale", scan: { available: false },
+      status: "stale",
+      scan: { available: false },
     });
-    expect(await runProgrammaticScan(root)).toMatchObject({ ok: false, error: "stale-configuration" });
+    expect(await runProgrammaticScan(root)).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+    });
     await approveProfile(root);
     const approved = await readProgrammaticChatReport(root);
     expect(approved).toMatchObject({
-      status: "stale", scan: { available: true },
-      snapshot: initial.snapshot, fingerprint: initial.fingerprint,
+      status: "stale",
+      scan: { available: true },
+      snapshot: initial.snapshot,
+      fingerprint: initial.fingerprint,
     });
     expect(approved.rows.every((row) => !row.route.available)).toBe(true);
-    expect((await readProgrammaticChatDetail(root, id)).detail?.summary.route.available).toBe(false);
+    expect((await readProgrammaticChatDetail(root, id)).detail?.summary.route.available).toBe(
+      false,
+    );
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(bytes);
     expect((await runProgrammaticScan(root)).ok).toBe(true);
     const refreshed = await readProgrammaticChatReport(root);
@@ -504,38 +673,54 @@ describe("chat report and dismissal", () => {
     { requested: 50, total: 0, offset: 0, count: 0 },
     { requested: 100, total: 51, offset: 50, count: 1 },
     { requested: 50, total: 50, offset: 0, count: 50 },
-  ])("recovers a smaller previous report at $requested to $offset ($total records) without writes", async ({ requested, total, offset, count }) => {
-    const root = await createRepository();
-    await runProgrammaticScan(root);
-    const initial = await persistedState(root);
-    const first = initial.records[0]!;
-    initial.records = Array.from({ length: 151 }, (_, index) => {
-      const identity = { ...first.opportunity.identity, id: index.toString(16).padStart(64, "0") };
-      return { ...first, opportunity: { ...first.opportunity, identity },
-        lifecycle: { ...first.lifecycle, opportunity: identity } };
-    });
-    const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
-    const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
-    await writeFile(primaryPath, JSON.stringify(initial));
-    const oldPage = await readProgrammaticChatReport(root, requested);
-    expect(oldPage.offset).toBe(requested);
-    expect(oldPage.rows).toHaveLength(50);
-    const selectedId = oldPage.rows[0]!.id;
-    const previousBytes = JSON.stringify({ ...initial, records: initial.records.slice(0, total) });
-    await writeFile(previousPath, previousBytes);
-    await writeFile(primaryPath, "broken");
-    const report = await readProgrammaticChatReport(root, oldPage.offset);
-    expect(report).toMatchObject({ status: "recovered", offset, total });
-    expect(report.rows).toHaveLength(count);
-    expect(report.rows.map((row) => row.id)).toEqual(
-      initial.records.slice(offset, offset + count).map((record) => record.opportunity.identity.id),
-    );
-    expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(true);
-    expect(await readProgrammaticChatReport(root, report.offset)).toEqual(report);
-    expect((await readProgrammaticChatDetail(root, selectedId)).detail).toBeNull();
-    expect(await readFile(primaryPath, "utf8")).toBe("broken");
-    expect(await readFile(previousPath, "utf8")).toBe(previousBytes);
-  });
+  ])(
+    "recovers a smaller previous report at $requested to $offset ($total records) without writes",
+    async ({ requested, total, offset, count }) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const initial = await persistedState(root);
+      const first = initial.records[0]!;
+      initial.records = Array.from({ length: 151 }, (_, index) => {
+        const identity = {
+          ...first.opportunity.identity,
+          id: index.toString(16).padStart(64, "0"),
+        };
+        return {
+          ...first,
+          opportunity: { ...first.opportunity, identity },
+          lifecycle: { ...first.lifecycle, opportunity: identity },
+        };
+      });
+      const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
+      const previousPath = path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH);
+      await writeFile(primaryPath, JSON.stringify(initial));
+      const oldPage = await readProgrammaticChatReport(root, requested);
+      expect(oldPage.offset).toBe(requested);
+      expect(oldPage.rows).toHaveLength(50);
+      const selectedId = oldPage.rows[0]!.id;
+      const previousBytes = JSON.stringify({
+        ...initial,
+        records: initial.records.slice(0, total),
+      });
+      await writeFile(previousPath, previousBytes);
+      await writeFile(primaryPath, "broken");
+      const report = await readProgrammaticChatReport(root, oldPage.offset);
+      expect(report).toMatchObject({ status: "recovered", offset, total });
+      expect(report.rows).toHaveLength(count);
+      expect(report.rows.map((row) => row.id)).toEqual(
+        initial.records
+          .slice(offset, offset + count)
+          .map((record) => record.opportunity.identity.id),
+      );
+      expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(
+        true,
+      );
+      expect(await readProgrammaticChatReport(root, report.offset)).toEqual(report);
+      expect((await readProgrammaticChatDetail(root, selectedId)).detail).toBeNull();
+      expect(await readFile(primaryPath, "utf8")).toBe("broken");
+      expect(await readFile(previousPath, "utf8")).toBe(previousBytes);
+    },
+  );
   it("retains stale and recovered records without repairing storage", async () => {
     const root = await createRepository();
     await runProgrammaticScan(root);
@@ -1083,7 +1268,10 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
     const state = await persistedState(root);
     expect(state.records).toHaveLength(1);
     expect(result).toMatchObject({
-      ok: false, changed: true, recovered: false, error: "post-commit-failed",
+      ok: false,
+      changed: true,
+      recovered: false,
+      error: "post-commit-failed",
       configurationFingerprint: state.configurationFingerprint,
       summary: { new: 1, active: 1, failed: 1 },
       detail: expect.stringContaining("persisted"),
@@ -1096,65 +1284,80 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
     { failure: "both", recovered: false },
     { failure: "notification", recovered: true },
     { failure: "cleanup", recovered: true },
-  ])("retains records and recovery after committed $failure failure (recovered=$recovered)", async ({ failure, recovered }) => {
-    const root = await createRepository();
-    await runProgrammaticScan(root);
-    const before = await persistedState(root);
-    before.records[0]!.lifecycle.state = "dismissed";
-    const historical = opportunity("f".repeat(64));
-    const unaffected: ProgrammaticLifecycleRecordV1 = {
-      version: 1, opportunity: historical,
-      lifecycle: { version: 1, opportunity: historical.identity, state: "completed" },
-      presence: "disappeared",
-    };
-    before.records.push(unaffected);
-    await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(before));
-    if (recovered) {
-      await writeFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), JSON.stringify(before));
-      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "{broken");
-    }
-    await writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
-    await approveProfile(root);
-    let notified = false;
-    let cleanupFailed = false;
-    const result = await runProgrammaticScan(root, {
-      onFileMutated: (file) => {
-        if (file !== PROGRAMMATIC_STATE_PATH) return;
-        notified = true;
-        if (failure !== "cleanup") throw new Error("injected notification failure");
-      },
-      operations: {
-        rm: async (file, options) => {
-          if (notified && file.endsWith(`${path.sep}.state.tmp`) && failure !== "notification") {
-            cleanupFailed = true;
-            throw new Error("injected cleanup failure");
-          }
-          return rm(file, options);
+  ])(
+    "retains records and recovery after committed $failure failure (recovered=$recovered)",
+    async ({ failure, recovered }) => {
+      const root = await createRepository();
+      await runProgrammaticScan(root);
+      const before = await persistedState(root);
+      before.records[0]!.lifecycle.state = "dismissed";
+      const historical = opportunity("f".repeat(64));
+      const unaffected: ProgrammaticLifecycleRecordV1 = {
+        version: 1,
+        opportunity: historical,
+        lifecycle: { version: 1, opportunity: historical.identity, state: "completed" },
+        presence: "disappeared",
+      };
+      before.records.push(unaffected);
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), JSON.stringify(before));
+      if (recovered) {
+        await writeFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), JSON.stringify(before));
+        await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "{broken");
+      }
+      await writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+      await approveProfile(root);
+      let notified = false;
+      let cleanupFailed = false;
+      const result = await runProgrammaticScan(root, {
+        onFileMutated: (file) => {
+          if (file !== PROGRAMMATIC_STATE_PATH) return;
+          notified = true;
+          if (failure !== "cleanup") throw new Error("injected notification failure");
         },
-      },
-    });
-    const committed = await persistedState(root);
-    expect(notified).toBe(true);
-    expect(cleanupFailed).toBe(failure !== "notification");
-    expect(committed.configurationFingerprint).not.toEqual(before.configurationFingerprint);
-    expect(committed.records).toHaveLength(2);
-    expect(committed.records).toContainEqual(unaffected);
-    expect(committed.records.find((record) => record.opportunity.identity.id === before.records[0]!.opportunity.identity.id)?.lifecycle).toEqual(before.records[0]!.lifecycle);
-    expect(result).toMatchObject({
-      ok: false, changed: true, recovered, error: "post-commit-failed",
-      configurationFingerprint: committed.configurationFingerprint,
-      summary: { dismissed: 1, disappeared: 1, failed: 1 },
-    });
-    expect(programmaticLifecycleStateV1Schema.parse(JSON.parse(
-      await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), "utf8"),
-    ))).toEqual(before);
-    await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "{interrupted");
-    expect(await readProgrammaticChatReport(root)).toMatchObject({
-      status: "stale", total: 2, fingerprint: before.configurationFingerprint.sha256,
-    });
-    expect(await runProgrammaticScan(root)).toMatchObject({ ok: true, recovered: true });
-    expect((await persistedState(root)).records).toEqual(committed.records);
-  });
+        operations: {
+          rm: async (file, options) => {
+            if (notified && file.endsWith(`${path.sep}.state.tmp`) && failure !== "notification") {
+              cleanupFailed = true;
+              throw new Error("injected cleanup failure");
+            }
+            return rm(file, options);
+          },
+        },
+      });
+      const committed = await persistedState(root);
+      expect(notified).toBe(true);
+      expect(cleanupFailed).toBe(failure !== "notification");
+      expect(committed.configurationFingerprint).not.toEqual(before.configurationFingerprint);
+      expect(committed.records).toHaveLength(2);
+      expect(committed.records).toContainEqual(unaffected);
+      expect(
+        committed.records.find(
+          (record) => record.opportunity.identity.id === before.records[0]!.opportunity.identity.id,
+        )?.lifecycle,
+      ).toEqual(before.records[0]!.lifecycle);
+      expect(result).toMatchObject({
+        ok: false,
+        changed: true,
+        recovered,
+        error: "post-commit-failed",
+        configurationFingerprint: committed.configurationFingerprint,
+        summary: { dismissed: 1, disappeared: 1, failed: 1 },
+      });
+      expect(
+        programmaticLifecycleStateV1Schema.parse(
+          JSON.parse(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH), "utf8")),
+        ),
+      ).toEqual(before);
+      await writeFile(path.join(root, PROGRAMMATIC_STATE_PATH), "{interrupted");
+      expect(await readProgrammaticChatReport(root)).toMatchObject({
+        status: "stale",
+        total: 2,
+        fingerprint: before.configurationFingerprint.sha256,
+      });
+      expect(await runProgrammaticScan(root)).toMatchObject({ ok: true, recovered: true });
+      expect((await persistedState(root)).records).toEqual(committed.records);
+    },
+  );
 
   it.each([PROGRAMMATIC_STATE_PATH, PROGRAMMATIC_PREVIOUS_STATE_PATH])(
     "does not claim a primary commit when the pre-mutation hook fails for %s",
@@ -1175,9 +1378,18 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
         },
       });
       expect(failed).toBe(true);
-      expect(result).toMatchObject(failurePath === PROGRAMMATIC_STATE_PATH
-        ? { ok: false, changed: true, error: "post-commit-failed", detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") }
-        : { ok: false, changed: false, error: "persistence-failed" });
+      expect(result).toMatchObject(
+        failurePath === PROGRAMMATIC_STATE_PATH
+          ? {
+              ok: false,
+              changed: true,
+              error: "post-commit-failed",
+              detail: expect.stringContaining(
+                "recovery copy was persisted, but primary state was not replaced",
+              ),
+            }
+          : { ok: false, changed: false, error: "persistence-failed" },
+      );
       if (failurePath === PROGRAMMATIC_STATE_PATH)
         expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
       expect(await readFile(primaryPath)).toEqual(before);
@@ -1192,11 +1404,18 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
     await approveProfile(root);
     const result = await runProgrammaticScan(root, {
       onFileMutated: (file) => {
-        if (file === PROGRAMMATIC_PREVIOUS_STATE_PATH) throw new Error("backup notification failed");
+        if (file === PROGRAMMATIC_PREVIOUS_STATE_PATH)
+          throw new Error("backup notification failed");
       },
     });
-    expect(result).toMatchObject({ ok: false, changed: true, error: "post-commit-failed",
-      detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") });
+    expect(result).toMatchObject({
+      ok: false,
+      changed: true,
+      error: "post-commit-failed",
+      detail: expect.stringContaining(
+        "recovery copy was persisted, but primary state was not replaced",
+      ),
+    });
     expect(await readFile(path.join(root, PROGRAMMATIC_STATE_PATH))).toEqual(before);
     expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
   });
@@ -1283,8 +1502,14 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
         },
       });
 
-      expect(result).toMatchObject({ ok: false, error: "post-commit-failed", changed: true,
-        detail: expect.stringContaining("recovery copy was persisted, but primary state was not replaced") });
+      expect(result).toMatchObject({
+        ok: false,
+        error: "post-commit-failed",
+        changed: true,
+        detail: expect.stringContaining(
+          "recovery copy was persisted, but primary state was not replaced",
+        ),
+      });
       expect(await readFile(primaryPath)).toEqual(before);
       expect(await readFile(path.join(root, PROGRAMMATIC_PREVIOUS_STATE_PATH))).toEqual(before);
     },

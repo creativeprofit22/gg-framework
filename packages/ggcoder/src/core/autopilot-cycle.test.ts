@@ -102,21 +102,28 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     { verdict: { kind: "human", reason: "Choose" }, expected: "human" },
     { verdict: { kind: "prompt", body: "Fix" }, expected: "capped" },
     { verdict: null, expected: "review-failed" },
-  ] satisfies Array<{ verdict: AutopilotVerdict | null; expected: string }>) (
-    "returns $expected instead of erasing the verdict", async ({ verdict, expected }) => {
-      await expect(driveAutopilotCycle(makeDeps([verdict], { maxRounds: 0 }))).resolves.toBe(expected);
+  ] satisfies Array<{ verdict: AutopilotVerdict | null; expected: string }>)(
+    "returns $expected instead of erasing the verdict",
+    async ({ verdict, expected }) => {
+      await expect(driveAutopilotCycle(makeDeps([verdict], { maxRounds: 0 }))).resolves.toBe(
+        expected,
+      );
     },
   );
 
   it("returns cancellation without accepting a review", async () => {
-    await expect(driveAutopilotCycle(makeDeps([], { isCancelled: () => true }))).resolves.toBe("cancelled");
+    await expect(driveAutopilotCycle(makeDeps([], { isCancelled: () => true }))).resolves.toBe(
+      "cancelled",
+    );
   });
 
   it("returns a plan hold for readiness and drafting", async () => {
-    await expect(driveAutopilotCycle(makeDeps([], { isPlanMode: () => true }))).resolves.toBe("plan-pending");
-    await expect(driveAutopilotCycle(makeDeps([], { planPending: () => true }, [
-      { kind: "all_clear" },
-    ]))).resolves.toBe("plan-pending");
+    await expect(driveAutopilotCycle(makeDeps([], { isPlanMode: () => true }))).resolves.toBe(
+      "plan-pending",
+    );
+    await expect(
+      driveAutopilotCycle(makeDeps([], { planPending: () => true }, [{ kind: "all_clear" }])),
+    ).resolves.toBe("plan-pending");
   });
 
   it("does not review again after a swallowed injected-run failure", async () => {
@@ -480,7 +487,10 @@ describe("driveAutopilotCycle — durable plan gate", () => {
         maxRounds: 2,
         planPending: pending.get,
         requestPlanRevision,
-        runPrompt: async () => { pending.set(true); return true; },
+        runPrompt: async () => {
+          pending.set(true);
+          return true;
+        },
       },
       [
         { kind: "prompt", body: "reject 1" },

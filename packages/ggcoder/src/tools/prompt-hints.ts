@@ -50,8 +50,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
-  generate_image:
-    "Generate/edit images only on explicit request; `image` edits.",
+  generate_image: "Generate/edit images only on explicit request; `image` edits.",
   research_corpus: "Read-only corpus search/show; no indexing or installs.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",

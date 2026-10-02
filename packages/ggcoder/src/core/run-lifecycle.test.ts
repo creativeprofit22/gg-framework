@@ -42,7 +42,11 @@ describe("RunLifecycle", () => {
     lifecycle.settle(generation);
     await expect(cancelled).resolves.toMatchObject({ status: "cancelled" });
     expect(journal.finished).toHaveBeenCalledWith(generation, "aborted");
-    expect(createRunEndPayload("aborted", lifecycle.state)).toEqual({ outcome: "cancelled", cancelled: true, runState: "idle" });
+    expect(createRunEndPayload("aborted", lifecycle.state)).toEqual({
+      outcome: "cancelled",
+      cancelled: true,
+      runState: "idle",
+    });
   });
   it("waits for provider-backed ownership to settle before acknowledging cancel", async () => {
     const abort = vi.fn();

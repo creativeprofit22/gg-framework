@@ -22,7 +22,10 @@ export interface SpawnProcessOptions {
 export interface ProcessLifecycleAdapter {
   spawn(command: string, args: string[], options: SpawnProcessOptions): ChildProcess;
   /** Graceful tree cleanup, with escalation owned by the target adapter. */
-  cleanupProcessTree(target: ProcessTarget, options?: { requireSettlement: boolean }): Promise<void>;
+  cleanupProcessTree(
+    target: ProcessTarget,
+    options?: { requireSettlement: boolean },
+  ): Promise<void>;
   /** Immediate tree cleanup for synchronous shutdown paths. */
   killProcessTree(target: ProcessTarget): void;
   /** Reap only the exact completed wrapper, never its descendants. */
@@ -155,9 +158,16 @@ const msysProcesses = new Map<number, { child: ChildProcess; psPath: string }>()
 
 function localProcessTarget(target: ProcessTarget): ProcessTarget {
   const owned = msysProcesses.get(target.pid);
-  return owned ? { ...target, msysPsPath: owned.psPath,
-    isExited: () => owned.child.exitCode !== null || owned.child.signalCode !== null || (target.isExited?.() ?? false),
-  } : target;
+  return owned
+    ? {
+        ...target,
+        msysPsPath: owned.psPath,
+        isExited: () =>
+          owned.child.exitCode !== null ||
+          owned.child.signalCode !== null ||
+          (target.isExited?.() ?? false),
+      }
+    : target;
 }
 
 export const localProcessLifecycle: ProcessLifecycleAdapter = {
@@ -168,10 +178,17 @@ export const localProcessLifecycle: ProcessLifecycleAdapter = {
       detached: options.detached,
       stdio: options.stdio as Parameters<typeof spawn>[2] extends { stdio: infer S } ? S : never,
     });
-    if (process.platform === "win32" && child.pid !== undefined &&
-        path.win32.isAbsolute(command) && /^bash\.exe$/i.test(path.win32.basename(command))) {
+    if (
+      process.platform === "win32" &&
+      child.pid !== undefined &&
+      path.win32.isAbsolute(command) &&
+      /^bash\.exe$/i.test(path.win32.basename(command))
+    ) {
       const dir = path.win32.dirname(command);
-      const psPath = [path.win32.join(dir, "ps.exe"), path.win32.join(dir, "..", "usr", "bin", "ps.exe")].find(existsSync);
+      const psPath = [
+        path.win32.join(dir, "ps.exe"),
+        path.win32.join(dir, "..", "usr", "bin", "ps.exe"),
+      ].find(existsSync);
       if (psPath) {
         const pid = child.pid;
         msysProcesses.set(pid, { child, psPath });
@@ -182,7 +199,8 @@ export const localProcessLifecycle: ProcessLifecycleAdapter = {
     }
     return child;
   },
-  cleanupProcessTree: (target, options) => killProcessTreeAsync(localProcessTarget(target), options),
+  cleanupProcessTree: (target, options) =>
+    killProcessTreeAsync(localProcessTarget(target), options),
   killProcessTree: (target) => killProcessTree(localProcessTarget(target)),
   reapProcessWrapper: (target) => reapProcessWrapper(target),
 };

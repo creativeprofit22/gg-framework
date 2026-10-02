@@ -14,14 +14,18 @@ describe("desktop verification settlement", () => {
     expect(settlement).not.toContain("broadcastError(");
     expect(settlement).not.toContain("verificationProblem");
     expect(settlement).not.toContain("getVerificationProblem");
-    expect(settlement).toContain('programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed")');
+    expect(settlement).toContain(
+      'programmaticSettlement?.journalOutcome ?? (!runSucceeded ? "failed" : "completed")',
+    );
     expect(settlement).toContain('if (cancelled) outcome = "aborted"');
     expect(settlement).toContain("...createRunEndPayload(outcome, runLifecycle.state)");
     expect(settlement).toContain("runLifecycle.recordOutcome(generation, outcome)");
     expect(settlement).toContain("finishOwnedGeneration(generation, false, outcome)");
     expect(settlement).toContain("await runJournalPersistence");
     expect(settlement).not.toContain("notesRepository.recordImplementationCheckpoint");
-    expect(source).toContain('broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state))');
+    expect(source).toContain(
+      'broadcast("run_end", createRunEndPayload("aborted", runLifecycle.state))',
+    );
     expect(settlement).toContain("if (!(cancelled && !ownsGeneration))");
     expect(settlement).toContain("session.getRunVerificationActivity()");
     expect(settlement).toContain("session.getVerificationEvidence()");

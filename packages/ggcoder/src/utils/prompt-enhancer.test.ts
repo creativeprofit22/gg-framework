@@ -93,9 +93,7 @@ describe("parseEnhanced clean text", () => {
 describe("enhancer examples", () => {
   // Instruction coverage only; live behavior is measured by the retained comparison.
   it("warns about removed annotation fields and unsupported tradeoff alternatives", () => {
-    expect(ENHANCER_SYSTEM_PROMPT).toContain(
-      "the original-words and note fields are removed",
-    );
+    expect(ENHANCER_SYSTEM_PROMPT).toContain("the original-words and note fields are removed");
     expect(ENHANCER_SYSTEM_PROMPT).toContain(
       "Keep every concrete detail and behavioral condition in the surrounding request",
     );
@@ -114,7 +112,15 @@ describe("enhancer examples", () => {
       "These examples illustrate the method. They are not a list of supported fields or terms",
     );
     // No per-field vocabulary lists outside the examples.
-    for (const term of ["J-cut", "Bevel", "padding", "empty state", "debounce", "ducking", "freeze"]) {
+    for (const term of [
+      "J-cut",
+      "Bevel",
+      "padding",
+      "empty state",
+      "debounce",
+      "ducking",
+      "freeze",
+    ]) {
       expect(instructions.toLowerCase()).not.toContain(term.toLowerCase());
     }
     // Terminology is the main job, not an optional extra.
@@ -126,7 +132,9 @@ describe("enhancer examples", () => {
     const bevel = examples.find(({ input }) => input.includes("edges of the table less sharp"));
     expect(bevel).toBeDefined();
     const result = parseEnhanced(bevel!.output);
-    expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "Bevel" }));
+    expect(result.segments).toContainEqual(
+      expect.objectContaining({ kind: "term", text: "Bevel" }),
+    );
     expect(result.enhanced).toContain("Keep the polygon count low");
   });
 
@@ -139,13 +147,17 @@ describe("enhancer examples", () => {
     ]) {
       expect(examples.some((example) => example.input === input)).toBe(true);
     }
-    expect(examples.some(({ input }) => input.includes("Add CSV export to src/reports.ts"))).toBe(true);
+    expect(examples.some(({ input }) => input.includes("Add CSV export to src/reports.ts"))).toBe(
+      true,
+    );
     const mixed = examples.find(({ input }) => input.includes("settings panel less crowded"));
     expect(mixed).toBeDefined();
     const result = parseEnhanced(mixed!.output);
     expect(result.enhanced).toContain("after closing and reopening the app");
     expect(result.enhanced).toContain("Don't change the colors");
-    expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "Persist" }));
+    expect(result.segments).toContainEqual(
+      expect.objectContaining({ kind: "term", text: "Persist" }),
+    );
     expect(result.enhanced).not.toMatch(/localStorage|database|file/);
     const ambiguous = examples.find(({ input }) => input === "make updates show up right away")!;
     const ambiguousResult = parseEnhanced(ambiguous.output);
@@ -206,7 +218,15 @@ describe("independent reference contracts", () => {
 
   it("covers fields beyond code, UI and video, each translating at least one term", () => {
     const fields = new Set(promptEnhancerFixtures.map(({ field }) => field));
-    for (const field of ["spreadsheet", "audio", "photography", "writing", "marketing", "3d", "ui+audio"]) {
+    for (const field of [
+      "spreadsheet",
+      "audio",
+      "photography",
+      "writing",
+      "marketing",
+      "3d",
+      "ui+audio",
+    ]) {
       expect(fields).toContain(field);
     }
     for (const fixture of promptEnhancerFixtures) {
@@ -263,7 +283,9 @@ describe("enhancePrompt", () => {
     expect(system).toBe(`${ENHANCER_SYSTEM_PROMPT}\n\n${stackHint("React")}`);
     expect(system).toContain("Use this only for parts of the draft about this project's code");
     expect(system).toContain("Ignore it for any other field");
-    expect(result.segments).toContainEqual(expect.objectContaining({ kind: "term", text: "J-cut" }));
+    expect(result.segments).toContainEqual(
+      expect.objectContaining({ kind: "term", text: "J-cut" }),
+    );
     expect(result.enhanced).not.toMatch(/React|component/i);
   });
 

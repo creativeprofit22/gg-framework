@@ -113,18 +113,33 @@ describe("copied Notes completion compatibility (real validators)", () => {
       else primary.futureMetadata = true;
       await fs.writeFile(paths.primary, JSON.stringify(primary));
       const before = await bytes(paths);
-      expect(await repository.load(cwd)).toMatchObject({ status: "unsupported", source: "primary" });
+      expect(await repository.load(cwd)).toMatchObject({
+        status: "unsupported",
+        source: "primary",
+      });
       expect(await repository.save(cwd, 1, document)).toMatchObject({ status: "unsupported" });
       expect(await repository.save(cwd, 9, document)).toMatchObject({ status: "unsupported" });
       expect(await repository.migrate(cwd, document)).toMatchObject({ status: "unsupported" });
-      expect(await repository.recordRoadmapStatusUpdate(cwd, {
-        updateId: "blocked-done", phaseId: document.phases[2]!.id,
-        expectedRevision: 9, actor: "gg-coder", transition: "done",
-        progress: "Verified criteria", blocker: null, requiredExternalAction: null,
-        evidence: ["Criteria verified"], verification: "passed", verificationReason: null,
-        proposedReferences: [], timestamp: "2026-09-07T12:00:00.000Z",
-        expectedSession: null, requireBoundPhase: false, autopilotEnabled: false,
-      })).toMatchObject({ status: "unsupported" });
+      expect(
+        await repository.recordRoadmapStatusUpdate(cwd, {
+          updateId: "blocked-done",
+          phaseId: document.phases[2]!.id,
+          expectedRevision: 9,
+          actor: "gg-coder",
+          transition: "done",
+          progress: "Verified criteria",
+          blocker: null,
+          requiredExternalAction: null,
+          evidence: ["Criteria verified"],
+          verification: "passed",
+          verificationReason: null,
+          proposedReferences: [],
+          timestamp: "2026-09-07T12:00:00.000Z",
+          expectedSession: null,
+          requireBoundPhase: false,
+          autopilotEnabled: false,
+        }),
+      ).toMatchObject({ status: "unsupported" });
       expect(await bytes(paths)).toEqual(before);
     },
   );
@@ -158,7 +173,8 @@ describe("copied Notes completion compatibility (real validators)", () => {
       expect(await repository.load(cwd)).toMatchObject({ status: "unsupported", source: "backup" });
       expect(await repository.save(cwd, 1, document)).toMatchObject({ status: "unsupported" });
       expect(await fs.readFile(paths.backup)).toEqual(beforeBackup);
-      if (primaryState === "missing") await expect(fs.readFile(paths.primary)).rejects.toMatchObject({ code: "ENOENT" });
+      if (primaryState === "missing")
+        await expect(fs.readFile(paths.primary)).rejects.toMatchObject({ code: "ENOENT" });
       else expect(await fs.readFile(paths.primary, "utf8")).toBe("{broken-json");
     },
   );

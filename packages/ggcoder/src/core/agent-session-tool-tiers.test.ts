@@ -9,7 +9,10 @@ import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { DEFERRED_TOOL_NAMES } from "../tools/tool-tiers.js";
 import { AgentSession } from "./agent-session.js";
-import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "./programmatic/profile.js";
 
 vi.mock("@kenkaiiii/gg-agent", async () => {
   const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
@@ -97,20 +100,34 @@ it("blocks a fresh project's direct assessment before entering the model loop", 
 
 it("passes validated focus and bounded metadata to the agent request without writing setup", async () => {
   const proposal = await buildProgrammaticProfileProposal(tempProject);
-  expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+  expect(
+    (
+      await persistProgrammaticProfile(
+        tempProject,
+        proposal.configurationFingerprint,
+        proposal.profile,
+      )
+    ).ok,
+  ).toBe(true);
   const profilePath = path.join(tempProject, ".gg/programmatic/profile.json");
   const before = await fs.readFile(profilePath);
   const session = await createSession();
   try {
     expect(await session.willStartAgentRun(`/programmatic ${"x".repeat(4001)}`)).toBe(false);
     await session.prompt("/programmatic   café\n日本語  ");
-    const prompt = String(session.getMessages().find((message) => message.role === "user")?.content);
+    const prompt = String(
+      session.getMessages().find((message) => message.role === "user")?.content,
+    );
     expect(prompt).toContain("## User Instructions\n\ncafé\n日本語");
     const context = JSON.parse(prompt.slice(prompt.indexOf('{"assessment":')));
     expect(context.assessment).toEqual({ version: 1, focus: "café\n日本語" });
     expect(context.commands.entries.length).toBeGreaterThan(0);
-    expect(context.commands.entries.every((entry: Record<string, unknown>) => !('prompt' in entry))).toBe(true);
-    expect(prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.");
+    expect(
+      context.commands.entries.every((entry: Record<string, unknown>) => !("prompt" in entry)),
+    ).toBe(true);
+    expect(prompt).toContain(
+      "The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again.",
+    );
     expect(await fs.readFile(profilePath)).toEqual(before);
   } finally {
     await session.dispose();
@@ -157,14 +174,20 @@ describe("AgentSession built-in tool tiering", () => {
       }
 
       const proposal = await buildProgrammaticProfileProposal(tempProject);
-      expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+      expect(
+        (
+          await persistProgrammaticProfile(
+            tempProject,
+            proposal.configurationFingerprint,
+            proposal.profile,
+          )
+        ).ok,
+      ).toBe(true);
       await session.prompt("/programmatic");
       const commandPrompt = String(
         session.getMessages().find((message) => message.role === "user")?.content,
       );
-      expect(commandPrompt).toContain(
-        "The host supplies permitted assessment tools",
-      );
+      expect(commandPrompt).toContain("The host supplies permitted assessment tools");
     } finally {
       await session.dispose();
     }
@@ -324,7 +347,15 @@ describe("AgentSession built-in tool tiering", () => {
       expect(String(session.getMessages()[0]?.content ?? "")).not.toContain("Available on demand");
 
       const proposal = await buildProgrammaticProfileProposal(tempProject);
-      expect((await persistProgrammaticProfile(tempProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+      expect(
+        (
+          await persistProgrammaticProfile(
+            tempProject,
+            proposal.configurationFingerprint,
+            proposal.profile,
+          )
+        ).ok,
+      ).toBe(true);
       await session.prompt("/programmatic");
       const commandPrompt = String(
         session.getMessages().find((message) => message.role === "user")?.content,

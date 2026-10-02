@@ -8,7 +8,9 @@ describe("A touched-files-only bloat audit confirms lifecycle rules are centrali
       fs.readFile(new URL("../../tools/programmatic-scan.ts", import.meta.url), "utf8"),
       fs.readFile(new URL("./storage.ts", import.meta.url), "utf8"),
     ]);
-    expect(lifecycle).toContain("export type ProgrammaticLifecycleOperations = ProgrammaticStorageOperations;");
+    expect(lifecycle).toContain(
+      "export type ProgrammaticLifecycleOperations = ProgrammaticStorageOperations;",
+    );
     expect(lifecycle).toContain("readBoundedCandidate(");
     expect(lifecycle).toContain("replaceBoundedFile(");
     const operations = storage.match(

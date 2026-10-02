@@ -112,14 +112,20 @@ describe("mcp store", () => {
   }
 
   for (const scope of ["global", "project"] as const) {
-    it.each(["false", 0, null, {}, []].map((value) => [value]))(`rejects malformed shared=%j in ${scope} scope`, async (shared) => {
-      const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, JSON.stringify({
-        mcpServers: { stateful: { command: "local-fixture", shared } },
-      }));
-      await expect(loadServers(tmpProject)).rejects.toThrow(/MCP config.+is malformed/);
-    });
+    it.each(["false", 0, null, {}, []].map((value) => [value]))(
+      `rejects malformed shared=%j in ${scope} scope`,
+      async (shared) => {
+        const file = scope === "global" ? globalMcpPath() : projectMcpPath(tmpProject);
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(
+          file,
+          JSON.stringify({
+            mcpServers: { stateful: { command: "local-fixture", shared } },
+          }),
+        );
+        await expect(loadServers(tmpProject)).rejects.toThrow(/MCP config.+is malformed/);
+      },
+    );
   }
 
   it("round-trips an http server in global scope", async () => {

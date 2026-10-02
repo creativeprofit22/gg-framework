@@ -8,7 +8,10 @@ import type * as McpModule from "./mcp/index.js";
 import { restoreUserRow, resolveRestoredCommand } from "./session-history.js";
 import { getPromptCommand } from "./prompt-commands.js";
 import { expandPromptCommand } from "./prompt-command-expansion.js";
-import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./programmatic/profile.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "./programmatic/profile.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { STEERING_PREFIX } from "./steering.js";
 import { WORKFLOW_BUSY_MESSAGE } from "./workflow-busy-policy.js";
@@ -74,14 +77,19 @@ describe("slash-command restore", () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("research", "PROJECT SHADOW");
     const session = new AgentSession({
-      provider: "anthropic", model: "claude-test", cwd: tmpProject,
-      systemPrompt: "sys", transient: true,
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+      transient: true,
     });
     try {
       await session.initialize();
       await session.promptResolvedCommand({ prompt: "/literal $ARGUMENTS" }, "selected scope");
       expect(session.getMessages().filter((m) => m.role === "user")).toEqual([
-        expect.objectContaining({ content: "/literal $ARGUMENTS\n\n## User Instructions\n\nselected scope" }),
+        expect.objectContaining({
+          content: "/literal $ARGUMENTS\n\n## User Instructions\n\nselected scope",
+        }),
       ]);
       expect(agentLoopMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -246,7 +254,12 @@ describe("slash-command restore", () => {
 
   it("accepts approved focus while rejecting invalid focus, references and attachments", async () => {
     const { AgentSession } = await import("./agent-session.js");
-    const session = new AgentSession({ provider: "anthropic", model: "claude-test", cwd: tmpProject, systemPrompt: "sys" });
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+    });
     const output: string[] = [];
     session.eventBus.on("text_delta", ({ text }) => output.push(text));
     await session.initialize();
@@ -256,16 +269,31 @@ describe("slash-command restore", () => {
       expect(agentLoopMock).not.toHaveBeenCalled();
       expect(output[0]).toContain("/setup-programmatic");
       const proposal = await buildProgrammaticProfileProposal(tmpProject);
-      expect((await persistProgrammaticProfile(tmpProject, proposal.configurationFingerprint, proposal.profile)).ok).toBe(true);
+      expect(
+        (
+          await persistProgrammaticProfile(
+            tmpProject,
+            proposal.configurationFingerprint,
+            proposal.profile,
+          )
+        ).ok,
+      ).toBe(true);
       const barePrompt = getPromptCommand("programmatic")!.prompt;
       for (const focus of ["", "any text", "caller\ninstructions"]) {
         const input = `/programmatic${focus ? ` ${focus}` : ""}`;
         expect(await session.willExpandPromptTemplate(input)).toBe(true);
         await session.prompt(input);
-        const latest = session.getMessages().filter((message) => message.role === "user").at(-1)!;
+        const latest = session
+          .getMessages()
+          .filter((message) => message.role === "user")
+          .at(-1)!;
         expect(String(latest.content)).toContain(barePrompt);
-        expect(String(latest.content)).toContain(focus ? `## User Instructions\n\n${focus}` : '"intent":"general-assessment"');
-        expect(resolveRestoredCommand(null, String(latest.content), [getPromptCommand("programmatic")!])).toBe(input);
+        expect(String(latest.content)).toContain(
+          focus ? `## User Instructions\n\n${focus}` : '"intent":"general-assessment"',
+        );
+        expect(
+          resolveRestoredCommand(null, String(latest.content), [getPromptCommand("programmatic")!]),
+        ).toBe(input);
       }
       const rejectedInputs = [
         `/programmatic ${"x".repeat(4001)}`,
@@ -280,13 +308,22 @@ describe("slash-command restore", () => {
         await session.prompt(input);
         expect(() => session.queueMessage(input)).toThrow();
       }
-      const attachment = { kind: "image" as const, mediaType: "image/png", data: "iVBORw0KGgo=", name: "screenshot.png" };
+      const attachment = {
+        kind: "image" as const,
+        mediaType: "image/png",
+        data: "iVBORw0KGgo=",
+        name: "screenshot.png",
+      };
       await session.promptWithAttachments("/programmatic", [attachment]);
       expect(() => session.queueMessage("/programmatic", [attachment])).toThrow(
         "/programmatic accepts optional text only, not file references or attachments.",
       );
       expect(session.getQueuedCount()).toBe(0);
-      for (const command of ["/programmatic caller instructions", "/setup-programmatic", "/programmatic-run"]) {
+      for (const command of [
+        "/programmatic caller instructions",
+        "/setup-programmatic",
+        "/programmatic-run",
+      ]) {
         expect(() => session.queueMessage(command)).toThrow(/Wait for the current work to finish/);
         expect(session.getQueuedCount()).toBe(0);
       }
@@ -294,13 +331,17 @@ describe("slash-command restore", () => {
       expect(session.getMessages().filter((message) => message.role === "user")).toHaveLength(3);
       expect(agentLoopMock).toHaveBeenCalledTimes(3);
       expect(output.slice(1)).toEqual([
-        ...Array<string>(3).fill("\n\n## Recommendations — not started\n\nAssessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.\n"),
+        ...Array<string>(3).fill(
+          "\n\n## Recommendations — not started\n\nAssessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.\n",
+        ),
         "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",
         "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",
         "/programmatic accepts optional text only, not file references or attachments.\n",
         "/programmatic accepts optional text only, not file references or attachments.\n",
       ]);
-    } finally { await session.dispose(); }
+    } finally {
+      await session.dispose();
+    }
   }, 20_000);
 
   it("preserves arguments for other built-in prompt commands", async () => {
@@ -316,9 +357,7 @@ describe("slash-command restore", () => {
     await session.prompt("/expand focus area");
 
     const body = session.getMessages().find((message) => message.role === "user")!.content;
-    expect(body).toBe(
-      expandPromptCommand(getPromptCommand("expand")!.prompt, "focus area"),
-    );
+    expect(body).toBe(expandPromptCommand(getPromptCommand("expand")!.prompt, "focus area"));
     expect(agentLoopMock).toHaveBeenCalledTimes(1);
     await session.dispose();
   }, 20_000);
@@ -348,8 +387,11 @@ describe("slash-command restore", () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("shipit", "Ship the release now.");
     const session = new AgentSession({
-      provider: "anthropic", model: "claude-test", cwd: tmpProject,
-      systemPrompt: "sys", transient: true,
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+      transient: true,
     });
     const internals = session as unknown as {
       getHookSteeringMessages(): Message[] | null;
@@ -357,12 +399,17 @@ describe("slash-command restore", () => {
     };
     try {
       await session.initialize();
-      expect(await session.queuePrompt("/shipit patch only", [], { kenSent: true })).toEqual({ count: 1, id: "q1" });
+      expect(await session.queuePrompt("/shipit patch only", [], { kenSent: true })).toEqual({
+        count: 1,
+        id: "q1",
+      });
       expect(await session.queuePrompt("/help")).toEqual({ count: 2, id: "q2" });
       expect(await session.queuePrompt("also check the tests")).toEqual({ count: 3, id: "q3" });
       // The queue shows what was typed, never the template body.
       expect(session.listQueuedMessages().map((m) => m.text)).toEqual([
-        "/shipit patch only", "/help", "also check the tests",
+        "/shipit patch only",
+        "/help",
+        "also check the tests",
       ]);
 
       const steering = internals.getHookSteeringMessages();
@@ -374,7 +421,8 @@ describe("slash-command restore", () => {
       expect(expanded).not.toBe(`${STEERING_PREFIX}/shipit patch only`);
       // The typed invocation travels as the display hint, with existing meta kept.
       expect(internals.promptHints.get(steering![0]!)).toEqual({
-        kenSent: true, command: "/shipit patch only",
+        kenSent: true,
+        command: "/shipit patch only",
       });
       // Action commands and plain text keep the old steering behaviour.
       expect(steering![1]!.content).toBe(`${STEERING_PREFIX}/help`);
@@ -390,8 +438,11 @@ describe("slash-command restore", () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("shipit", "Ship the release now.");
     const session = new AgentSession({
-      provider: "anthropic", model: "claude-test", cwd: tmpProject,
-      systemPrompt: "sys", transient: true,
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+      transient: true,
     });
     try {
       await session.initialize();
@@ -411,8 +462,11 @@ describe("slash-command restore", () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("shipit", "Ship the release now.");
     const session = new AgentSession({
-      provider: "anthropic", model: "claude-test", cwd: tmpProject,
-      systemPrompt: "sys", transient: true,
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+      transient: true,
     });
     const internals = session as unknown as { getHookSteeringMessages(): Message[] | null };
     try {
@@ -423,7 +477,9 @@ describe("slash-command restore", () => {
       const third = session.queuePrompt("/shipit again");
       const results = await Promise.all([first, second, third]);
       expect(results).toEqual([
-        { count: 1, id: "q1" }, { count: 2, id: "q2" }, { count: 3, id: "q3" },
+        { count: 1, id: "q1" },
+        { count: 2, id: "q2" },
+        { count: 3, id: "q3" },
       ]);
       expect(session.listQueuedMessages()).toEqual([
         { id: "q1", text: "/shipit patch only" },
@@ -447,8 +503,11 @@ describe("slash-command restore", () => {
     const { AgentSession } = await import("./agent-session.js");
     await writeCustomCommand("shipit", "Ship the release now.");
     const session = new AgentSession({
-      provider: "anthropic", model: "claude-test", cwd: tmpProject,
-      systemPrompt: "sys", transient: true,
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+      transient: true,
     });
     try {
       await session.initialize();

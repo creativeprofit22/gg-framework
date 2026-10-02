@@ -93,8 +93,7 @@ export function parseRoadmapPhaseDraftRoute(
 }
 
 export type RoadmapPhaseDraftRejectBodyResult =
-  | { status: "ok"; feedback: string | null }
-  | { status: "invalid"; message: string };
+  { status: "ok"; feedback: string | null } | { status: "invalid"; message: string };
 
 export function parseRoadmapPhaseDraftRejectBody(raw: string): RoadmapPhaseDraftRejectBodyResult {
   let value: unknown;

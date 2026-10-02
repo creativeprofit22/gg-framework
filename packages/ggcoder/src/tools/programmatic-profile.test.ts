@@ -5,11 +5,17 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentLoop } from "@kenkaiiii/gg-agent";
 import { stream, StreamResult, type ToolCall } from "@kenkaiiii/gg-ai";
-import { ASK_USER_TIMEOUT_MS, createAskUserBridge, type AskUserPrompt, type AskUserRequest } from "../core/ask-user.js";
+import {
+  ASK_USER_TIMEOUT_MS,
+  createAskUserBridge,
+  type AskUserPrompt,
+  type AskUserRequest,
+} from "../core/ask-user.js";
 import { commandCreationReviewer } from "../core/programmatic/command-creation.js";
 
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()), stream: vi.fn(),
+  ...(await importOriginal<Record<string, unknown>>()),
+  stream: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -24,7 +30,10 @@ import {
   persistProgrammaticProfile,
   type ProgrammaticProfileOperations,
 } from "../core/programmatic/profile.js";
-import { buildProgrammaticInventory, PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
+import {
+  buildProgrammaticInventory,
+  PROGRAMMATIC_PROFILE_PATH,
+} from "../core/programmatic/inventory.js";
 import { getPromptCommand, PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { canonicalJson } from "../core/tauri-package/paths.js";
 import {
@@ -33,10 +42,16 @@ import {
 } from "./programmatic-profile.js";
 
 const roots: string[] = [];
-const approveSetup: NonNullable<Parameters<typeof createProgrammaticProfileTool>[1]>["reviewer"] = async (request) => ({
-  action: "answer", answers: { [request.questions[0]!.id]: "save-setup" },
+const approveSetup: NonNullable<
+  Parameters<typeof createProgrammaticProfileTool>[1]
+>["reviewer"] = async (request) => ({
+  action: "answer",
+  answers: { [request.questions[0]!.id]: "save-setup" },
 });
-async function reviewedTool(root: string, options: Parameters<typeof createProgrammaticProfileTool>[1] = {}) {
+async function reviewedTool(
+  root: string,
+  options: Parameters<typeof createProgrammaticProfileTool>[1] = {},
+) {
   const tool = createProgrammaticProfileTool(root, { reviewer: approveSetup, ...options });
   await execute(tool, { action: "inspect" });
   return tool;
@@ -189,10 +204,14 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
 
     const setup = getPromptCommand("setup-programmatic");
-    expect(setup?.prompt).toContain('The host already collected exact `programmatic_profile` inspection facts.');
+    expect(setup?.prompt).toContain(
+      "The host already collected exact `programmatic_profile` inspection facts.",
+    );
     expect(setup?.prompt).toContain("Do not repeat inspection or discover tools.");
     expect(setup?.prompt).toContain("no scan is required or permitted in setup.");
-    expect(setup?.prompt).toContain("Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review");
+    expect(setup?.prompt).toContain(
+      "Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review",
+    );
     expect(setup?.prompt).toContain("do not recite these raw details in the setup transcript");
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");
@@ -221,7 +240,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
       action: "generate",
       configuration_fingerprint: inspected.configuration_fingerprint,
       profile: inspected.profile,
-    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
+      expected_prior_profile_digest: inspected.expected_prior_profile_digest,
     };
 
     expect(await execute(tool, input)).toMatchObject({
@@ -240,12 +259,21 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
       }),
     );
     expect(await execute(tool, input)).toMatchObject({
-      action: "generate", ok: false, changed: false,
+      action: "generate",
+      ok: false,
+      changed: false,
       error: expect.stringContaining("setup-proposal-unavailable"),
     });
-    expect(await persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
-      expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
-    })).toMatchObject({ ok: true, changed: false });
+    expect(
+      await persistProgrammaticProfile(
+        root,
+        inspected.configuration_fingerprint,
+        inspected.profile,
+        {
+          expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
+        },
+      ),
+    ).toMatchObject({ ok: true, changed: false });
     expect(before).toEqual([path.join(root, PROGRAMMATIC_PROFILE_PATH)]);
     expect(after).toEqual(before);
   });
@@ -261,9 +289,13 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         action: "generate",
         configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
-    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
+        expected_prior_profile_digest: inspected.expected_prior_profile_digest,
       }),
-    ).toMatchObject({ error: "operation-failed", message: expect.stringContaining("changed since inspection"), changed: false });
+    ).toMatchObject({
+      error: "operation-failed",
+      message: expect.stringContaining("changed since inspection"),
+      changed: false,
+    });
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
 
     const current = await inspect(root);
@@ -290,7 +322,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         action: "generate",
         configuration_fingerprint: inspected.configuration_fingerprint,
         profile: inspected.profile,
-    expected_prior_profile_digest: inspected.expected_prior_profile_digest,
+        expected_prior_profile_digest: inspected.expected_prior_profile_digest,
       }),
     ).toContain("programmatic_profile is restricted in plan mode");
   });
@@ -323,166 +355,302 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
 });
 
 describe("profile cancellation", () => {
-  it.each(["before", "paused", "committed"] as const)("threads approved tool cancellation %s publication", async (when) => {
-    const { root, inspected, destination, previousBytes } = await previousValidProfile();
-    const controller = new AbortController();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => { entered = resolve; });
-    const tool = await reviewedTool(root, {
-      onPreFileMutation: async () => { if (when === "paused") { entered(); await held; } },
-      onFileMutated: (file) => { if (when === "committed" && path.basename(file) === "profile.json") controller.abort(); },
-    });
-    if (when === "before") controller.abort();
-    const running = tool.execute({ action: "generate", configuration_fingerprint: inspected.configuration_fingerprint,
-      profile: inspected.profile, expected_prior_profile_digest: inspected.expected_prior_profile_digest,
-    }, { signal: controller.signal, toolCallId: "cancel-approved-profile" });
-    if (when === "paused") { await ready; controller.abort(); release(); }
-    expect(JSON.parse(await running as string)).toMatchObject(when === "committed"
-      ? { ok: true, changed: true }
-      : { changed: false, error: "operation-failed", message: expect.stringMatching(/abort|cancel/i) });
-    if (when === "committed") {
-      expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
-      expect(await fs.readFile(path.join(root, ".gg/programmatic/profile.previous.json"), "utf8")).toBe(previousBytes);
-      expect(await fs.readdir(path.join(root, ".gg/programmatic"))).toEqual(["profile.json", "profile.previous.json"]);
-    } else {
-      expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
-      await expectNoTemporaryFiles(root);
-    }
-  });
+  it.each(["before", "paused", "committed"] as const)(
+    "threads approved tool cancellation %s publication",
+    async (when) => {
+      const { root, inspected, destination, previousBytes } = await previousValidProfile();
+      const controller = new AbortController();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const tool = await reviewedTool(root, {
+        onPreFileMutation: async () => {
+          if (when === "paused") {
+            entered();
+            await held;
+          }
+        },
+        onFileMutated: (file) => {
+          if (when === "committed" && path.basename(file) === "profile.json") controller.abort();
+        },
+      });
+      if (when === "before") controller.abort();
+      const running = tool.execute(
+        {
+          action: "generate",
+          configuration_fingerprint: inspected.configuration_fingerprint,
+          profile: inspected.profile,
+          expected_prior_profile_digest: inspected.expected_prior_profile_digest,
+        },
+        { signal: controller.signal, toolCallId: "cancel-approved-profile" },
+      );
+      if (when === "paused") {
+        await ready;
+        controller.abort();
+        release();
+      }
+      expect(JSON.parse((await running) as string)).toMatchObject(
+        when === "committed"
+          ? { ok: true, changed: true }
+          : {
+              changed: false,
+              error: "operation-failed",
+              message: expect.stringMatching(/abort|cancel/i),
+            },
+      );
+      if (when === "committed") {
+        expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
+        expect(
+          await fs.readFile(path.join(root, ".gg/programmatic/profile.previous.json"), "utf8"),
+        ).toBe(previousBytes);
+        expect(await fs.readdir(path.join(root, ".gg/programmatic"))).toEqual([
+          "profile.json",
+          "profile.previous.json",
+        ]);
+      } else {
+        expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
+        await expectNoTemporaryFiles(root);
+      }
+    },
+  );
 
-  it.each(["before", "paused", "committed"] as const)("preserves the true core persistence outcome when aborted %s commit", async (when) => {
-    const { root, inspected, destination, previousBytes } = await previousValidProfile();
-    const controller = new AbortController();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => { entered = resolve; });
-    if (when === "before") controller.abort();
-    const running = persistProgrammaticProfile(root, inspected.configuration_fingerprint, inspected.profile, {
-      expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
-      signal: controller.signal,
-      validateBeforeCommit: async () => { if (when === "paused") { entered(); await held; } },
-      onCommitted: () => { if (when === "committed") controller.abort(); },
-    }).then((result) => result, (error: unknown) => error);
-    if (when === "paused") { await ready; controller.abort(); release(); }
-    const result = await running;
-    if (when === "committed") {
-      expect(result).toMatchObject({ ok: true, changed: true });
-      expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
-    } else {
-      expect(result).toBe(controller.signal.reason);
-      expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
-    }
-    await expectNoTemporaryFiles(root);
-  });
+  it.each(["before", "paused", "committed"] as const)(
+    "preserves the true core persistence outcome when aborted %s commit",
+    async (when) => {
+      const { root, inspected, destination, previousBytes } = await previousValidProfile();
+      const controller = new AbortController();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      if (when === "before") controller.abort();
+      const running = persistProgrammaticProfile(
+        root,
+        inspected.configuration_fingerprint,
+        inspected.profile,
+        {
+          expectedPriorProfileDigest: inspected.expected_prior_profile_digest,
+          signal: controller.signal,
+          validateBeforeCommit: async () => {
+            if (when === "paused") {
+              entered();
+              await held;
+            }
+          },
+          onCommitted: () => {
+            if (when === "committed") controller.abort();
+          },
+        },
+      ).then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+      if (when === "paused") {
+        await ready;
+        controller.abort();
+        release();
+      }
+      const result = await running;
+      if (when === "committed") {
+        expect(result).toMatchObject({ ok: true, changed: true });
+        expect(await fs.readFile(destination, "utf8")).not.toBe(previousBytes);
+      } else {
+        expect(result).toBe(controller.signal.reason);
+        expect(await fs.readFile(destination, "utf8")).toBe(previousBytes);
+      }
+      await expectNoTemporaryFiles(root);
+    },
+  );
 });
 
 describe("host setup authorization", () => {
-  it.each(["approve", "reject", "timeout", "caller-cancel"] as const)("keeps real agent-loop setup review within the host allowance: %s", async (answer) => {
-    const root = await repository();
-    let ready!: (question: AskUserPrompt) => void;
-    const questionReady = new Promise<AskUserPrompt>((resolve) => { ready = resolve; });
-    const onTimeout = vi.fn();
-    const bridge = createAskUserBridge({ broadcast: ready, onTimeout });
-    const onPreFileMutation = vi.fn();
-    const onFileMutated = vi.fn();
-    const tool = createProgrammaticProfileTool(root, {
-      reviewer: commandCreationReviewer(bridge), onPreFileMutation, onFileMutated,
-    });
-    const proposal = await execute(tool, { action: "inspect" }) as unknown as InspectOutput;
-    const args = { action: "generate" as const, configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest };
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const deadlines: number[] = [];
-    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
-      deadlines.push(ms);
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException("Controlled deadline", "TimeoutError")), ms);
-      return controller.signal;
-    });
-    let requests = 0;
-    vi.mocked(stream).mockImplementation(() => new StreamResult((async function* () {
-      if (++requests === 1) {
-        const call: ToolCall = { type: "tool_call", id: "guarded-setup", name: tool.name, args };
-        yield { type: "toolcall_done", id: call.id, name: call.name, args };
-        return { message: { role: "assistant", content: [call] }, stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } };
-      }
-      return { message: { role: "assistant", content: "Done" }, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
-    })()));
-    // Caller cancellation may close the event stream before tool_call_end is delivered.
-    // Observe and await the real tool too, so no-write assertions run after it finishes.
-    const execution = vi.spyOn(tool, "execute");
-    const caller = new AbortController();
-    let finished = false;
-    let result: unknown;
-    const running = (async () => {
-      for await (const event of agentLoop([{ role: "user", content: "Fixture" }], {
-        provider: "anthropic", model: "fixture", tools: [tool], signal: caller.signal,
-      })) {
-        expect(event.type).not.toBe("error");
-        if (event.type === "tool_call_end") {
-          expect(event.isError).toBe(false);
-          result = JSON.parse(event.result);
+  it.each(["approve", "reject", "timeout", "caller-cancel"] as const)(
+    "keeps real agent-loop setup review within the host allowance: %s",
+    async (answer) => {
+      const root = await repository();
+      let ready!: (question: AskUserPrompt) => void;
+      const questionReady = new Promise<AskUserPrompt>((resolve) => {
+        ready = resolve;
+      });
+      const onTimeout = vi.fn();
+      const bridge = createAskUserBridge({ broadcast: ready, onTimeout });
+      const onPreFileMutation = vi.fn();
+      const onFileMutated = vi.fn();
+      const tool = createProgrammaticProfileTool(root, {
+        reviewer: commandCreationReviewer(bridge),
+        onPreFileMutation,
+        onFileMutated,
+      });
+      const proposal = (await execute(tool, { action: "inspect" })) as unknown as InspectOutput;
+      const args = {
+        action: "generate" as const,
+        configuration_fingerprint: proposal.configuration_fingerprint,
+        profile: proposal.profile,
+        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+      };
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const deadlines: number[] = [];
+      vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+        deadlines.push(ms);
+        const controller = new AbortController();
+        setTimeout(
+          () => controller.abort(new DOMException("Controlled deadline", "TimeoutError")),
+          ms,
+        );
+        return controller.signal;
+      });
+      let requests = 0;
+      vi.mocked(stream).mockImplementation(
+        () =>
+          new StreamResult(
+            (async function* () {
+              if (++requests === 1) {
+                const call: ToolCall = {
+                  type: "tool_call",
+                  id: "guarded-setup",
+                  name: tool.name,
+                  args,
+                };
+                yield { type: "toolcall_done", id: call.id, name: call.name, args };
+                return {
+                  message: { role: "assistant", content: [call] },
+                  stopReason: "tool_use",
+                  usage: { inputTokens: 1, outputTokens: 1 },
+                };
+              }
+              return {
+                message: { role: "assistant", content: "Done" },
+                stopReason: "end_turn",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            })(),
+          ),
+      );
+      // Caller cancellation may close the event stream before tool_call_end is delivered.
+      // Observe and await the real tool too, so no-write assertions run after it finishes.
+      const execution = vi.spyOn(tool, "execute");
+      const caller = new AbortController();
+      let finished = false;
+      let result: unknown;
+      const running = (async () => {
+        for await (const event of agentLoop([{ role: "user", content: "Fixture" }], {
+          provider: "anthropic",
+          model: "fixture",
+          tools: [tool],
+          signal: caller.signal,
+        })) {
+          expect(event.type).not.toBe("error");
+          if (event.type === "tool_call_end") {
+            expect(event.isError).toBe(false);
+            result = JSON.parse(event.result);
+          }
         }
-      }
-      finished = true;
-    })();
-    try {
-      const question = await questionReady;
-      await vi.advanceTimersByTimeAsync(300_001);
-      expect(bridge.pendingCount).toBe(1);
-      expect(finished).toBe(false);
-      expect(deadlines).toEqual([ASK_USER_TIMEOUT_MS + 30_000]);
-      expect(onPreFileMutation).not.toHaveBeenCalled();
-      await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({ code: "ENOENT" });
-      await vi.advanceTimersByTimeAsync(ASK_USER_TIMEOUT_MS - 300_001 - 1);
-      expect(bridge.pendingCount).toBe(1);
-      if (answer === "timeout") await vi.advanceTimersByTimeAsync(1);
-      else if (answer === "caller-cancel") caller.abort();
-      else expect(bridge.settle(question.id, { action: "answer", answers: {
-        [question.questions[0]!.id]: answer === "approve" ? "save-setup" : "deny",
-      } })).toBe(true);
-      await running;
-      expect(execution).toHaveBeenCalledTimes(1);
-      const toolResult = JSON.parse(String(await execution.mock.results[0]!.value));
-      if (answer === "caller-cancel") expect(result).toBeUndefined();
-      else expect(result).toEqual(toolResult);
-      expect(bridge.pendingCount).toBe(0);
-      expect(onTimeout).toHaveBeenCalledTimes(answer === "timeout" ? 1 : 0);
-      if (answer === "approve") {
-        expect(result).toMatchObject({ ok: true, changed: true });
-        expect(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")))
-          .toMatchObject({ configurationFingerprint: proposal.configuration_fingerprint, profile: proposal.profile });
-        expect(onPreFileMutation).toHaveBeenCalledTimes(1);
-        expect(onFileMutated).toHaveBeenCalledTimes(1);
-      } else {
-        expect(toolResult).toMatchObject({ changed: false, error: answer === "caller-cancel" ? "operation-failed" : "setup-approval-denied" });
+        finished = true;
+      })();
+      try {
+        const question = await questionReady;
+        await vi.advanceTimersByTimeAsync(300_001);
+        expect(bridge.pendingCount).toBe(1);
+        expect(finished).toBe(false);
+        expect(deadlines).toEqual([ASK_USER_TIMEOUT_MS + 30_000]);
         expect(onPreFileMutation).not.toHaveBeenCalled();
-        expect(onFileMutated).not.toHaveBeenCalled();
-        await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await vi.advanceTimersByTimeAsync(ASK_USER_TIMEOUT_MS - 300_001 - 1);
+        expect(bridge.pendingCount).toBe(1);
+        if (answer === "timeout") await vi.advanceTimersByTimeAsync(1);
+        else if (answer === "caller-cancel") caller.abort();
+        else
+          expect(
+            bridge.settle(question.id, {
+              action: "answer",
+              answers: {
+                [question.questions[0]!.id]: answer === "approve" ? "save-setup" : "deny",
+              },
+            }),
+          ).toBe(true);
+        await running;
+        expect(execution).toHaveBeenCalledTimes(1);
+        const toolResult = JSON.parse(String(await execution.mock.results[0]!.value));
+        if (answer === "caller-cancel") expect(result).toBeUndefined();
+        else expect(result).toEqual(toolResult);
+        expect(bridge.pendingCount).toBe(0);
+        expect(onTimeout).toHaveBeenCalledTimes(answer === "timeout" ? 1 : 0);
+        if (answer === "approve") {
+          expect(result).toMatchObject({ ok: true, changed: true });
+          expect(
+            JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")),
+          ).toMatchObject({
+            configurationFingerprint: proposal.configuration_fingerprint,
+            profile: proposal.profile,
+          });
+          expect(onPreFileMutation).toHaveBeenCalledTimes(1);
+          expect(onFileMutated).toHaveBeenCalledTimes(1);
+        } else {
+          expect(toolResult).toMatchObject({
+            changed: false,
+            error: answer === "caller-cancel" ? "operation-failed" : "setup-approval-denied",
+          });
+          expect(onPreFileMutation).not.toHaveBeenCalled();
+          expect(onFileMutated).not.toHaveBeenCalled();
+          await expect(fs.access(path.join(root, ".gg/programmatic"))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        }
+        expect(
+          bridge.settle(question.id, {
+            action: "answer",
+            answers: { [question.questions[0]!.id]: "save-setup" },
+          }),
+        ).toBe(false);
+        expect(await execute(tool, args)).toMatchObject({
+          changed: false,
+          error: expect.stringContaining("setup-proposal-unavailable"),
+        });
+      } finally {
+        tool.dispose();
+        bridge.cancelAll();
+        await running.catch(() => {});
       }
-      expect(bridge.settle(question.id, { action: "answer", answers: { [question.questions[0]!.id]: "save-setup" } })).toBe(false);
-      expect(await execute(tool, args)).toMatchObject({ changed: false, error: expect.stringContaining("setup-proposal-unavailable") });
-    } finally {
-      tool.dispose();
-      bridge.cancelAll();
-      await running.catch(() => {});
-    }
-  });
+    },
+  );
 
   it("fails closed without a reviewer even after inspection", async () => {
     const root = await repository();
     const tool = createProgrammaticProfileTool(root);
-    const proposal = await execute(tool, { action: "inspect" }) as unknown as InspectOutput;
-    expect(await execute(tool, { action: "generate", configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest,
-    })).toMatchObject({ error: "unsupported-host", changed: false });
+    const proposal = (await execute(tool, { action: "inspect" })) as unknown as InspectOutput;
+    expect(
+      await execute(tool, {
+        action: "generate",
+        configuration_fingerprint: proposal.configuration_fingerprint,
+        profile: proposal.profile,
+        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+      }),
+    ).toMatchObject({ error: "unsupported-host", changed: false });
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
   });
 
-  it.each(["deny", "cancel", "owner", "configuration", "prior", "reset", "plan", "abort", "precommit"] as const)("consumes and refuses %s approvals without writing", async (outcome) => {
+  it.each([
+    "deny",
+    "cancel",
+    "owner",
+    "configuration",
+    "prior",
+    "reset",
+    "plan",
+    "abort",
+    "precommit",
+  ] as const)("consumes and refuses %s approvals without writing", async (outcome) => {
     const root = await repository();
     const signal = new AbortController();
     let owner = "session-a";
@@ -490,7 +658,8 @@ describe("host setup authorization", () => {
     const reviewer = vi.fn(async (request: AskUserRequest) => {
       expect(request.questions[0]!.detail).toContain("configurationFingerprint");
       if (outcome === "owner") owner = "session-b";
-      if (outcome === "configuration") await fs.writeFile(path.join(root, "package.json"), '{"name":"drift"}');
+      if (outcome === "configuration")
+        await fs.writeFile(path.join(root, "package.json"), '{"name":"drift"}');
       if (outcome === "prior") {
         await fs.mkdir(path.join(root, ".gg/programmatic"), { recursive: true });
         await fs.writeFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "preserve competing bytes");
@@ -498,24 +667,44 @@ describe("host setup authorization", () => {
       if (outcome === "reset") tool.cancel();
       if (outcome === "plan") planModeRef.current = true;
       if (outcome === "abort") signal.abort();
-      return outcome === "cancel" ? { action: "cancel" as const } : {
-        action: "answer" as const, answers: { [request.questions[0]!.id]: outcome === "deny" ? "deny" : "save-setup" },
-      };
+      return outcome === "cancel"
+        ? { action: "cancel" as const }
+        : {
+            action: "answer" as const,
+            answers: { [request.questions[0]!.id]: outcome === "deny" ? "deny" : "save-setup" },
+          };
     });
-    const tool = await reviewedTool(root, { reviewer, owner: () => owner, planModeRef,
-      onPreFileMutation: () => { if (outcome === "precommit") tool.cancel(); },
+    const tool = await reviewedTool(root, {
+      reviewer,
+      owner: () => owner,
+      planModeRef,
+      onPreFileMutation: () => {
+        if (outcome === "precommit") tool.cancel();
+      },
     });
     const proposal = await inspect(root);
-    const input: ToolInput = { action: "generate", configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest };
-    const output = JSON.parse(await tool.execute(input, { signal: signal.signal, toolCallId: "review" }) as string);
+    const input: ToolInput = {
+      action: "generate",
+      configuration_fingerprint: proposal.configuration_fingerprint,
+      profile: proposal.profile,
+      expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+    };
+    const output = JSON.parse(
+      (await tool.execute(input, { signal: signal.signal, toolCallId: "review" })) as string,
+    );
     expect(output).toMatchObject({ changed: false });
     expect(output.ok).not.toBe(true);
     expect(reviewer).toHaveBeenCalledTimes(1);
     planModeRef.current = false;
-    expect(await execute(tool, input)).toMatchObject({ changed: false, error: expect.stringContaining("setup-proposal-unavailable") });
+    expect(await execute(tool, input)).toMatchObject({
+      changed: false,
+      error: expect.stringContaining("setup-proposal-unavailable"),
+    });
     expect(reviewer).toHaveBeenCalledTimes(1);
-    if (outcome === "prior") expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")).toBe("preserve competing bytes");
+    if (outcome === "prior")
+      expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")).toBe(
+        "preserve competing bytes",
+      );
     else await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
   });
 
@@ -524,12 +713,22 @@ describe("host setup authorization", () => {
     const reviewer = vi.fn(approveSetup!);
     const tool = await reviewedTool(root, { reviewer });
     const proposal = await inspect(root);
-    const input: ToolInput = { action: "generate", configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest };
+    const input: ToolInput = {
+      action: "generate",
+      configuration_fingerprint: proposal.configuration_fingerprint,
+      profile: proposal.profile,
+      expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+    };
     const sibling = createProgrammaticProfileTool(root, { reviewer });
-    expect(await execute(sibling, input)).toMatchObject({ changed: false, error: expect.stringContaining("setup-proposal-unavailable") });
+    expect(await execute(sibling, input)).toMatchObject({
+      changed: false,
+      error: expect.stringContaining("setup-proposal-unavailable"),
+    });
     tool.dispose();
-    expect(await execute(tool, input)).toMatchObject({ changed: false, error: expect.stringContaining("setup-proposal-unavailable") });
+    expect(await execute(tool, input)).toMatchObject({
+      changed: false,
+      error: expect.stringContaining("setup-proposal-unavailable"),
+    });
     expect(reviewer).not.toHaveBeenCalled();
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
   });
@@ -538,15 +737,26 @@ describe("host setup authorization", () => {
     const root = await repository();
     const replacement = `${root}-original`;
     roots.push(replacement);
-    const tool = await reviewedTool(root, { reviewer: async (request) => {
-      await fs.rename(root, replacement);
-      await fs.cp(replacement, root, { recursive: true });
-      return { action: "answer", answers: { [request.questions[0]!.id]: "save-setup" } };
-    } });
+    const tool = await reviewedTool(root, {
+      reviewer: async (request) => {
+        await fs.rename(root, replacement);
+        await fs.cp(replacement, root, { recursive: true });
+        return { action: "answer", answers: { [request.questions[0]!.id]: "save-setup" } };
+      },
+    });
     const proposal = await inspect(root);
-    expect(await execute(tool, { action: "generate", configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest,
-    })).toMatchObject({ changed: false, error: "operation-failed", message: expect.stringContaining("project changed") });
+    expect(
+      await execute(tool, {
+        action: "generate",
+        configuration_fingerprint: proposal.configuration_fingerprint,
+        profile: proposal.profile,
+        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+      }),
+    ).toMatchObject({
+      changed: false,
+      error: "operation-failed",
+      message: expect.stringContaining("project changed"),
+    });
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
     await expect(fs.access(path.join(replacement, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
   });
@@ -554,14 +764,20 @@ describe("host setup authorization", () => {
   it("does not accept an answer from a previous review", async () => {
     const root = await repository();
     let previousId = "";
-    const tool = await reviewedTool(root, { reviewer: async (request) => {
-      const id = previousId;
-      previousId = request.questions[0]!.id;
-      return { action: "answer", answers: { [id]: "save-setup" } };
-    } });
+    const tool = await reviewedTool(root, {
+      reviewer: async (request) => {
+        const id = previousId;
+        previousId = request.questions[0]!.id;
+        return { action: "answer", answers: { [id]: "save-setup" } };
+      },
+    });
     const proposal = await inspect(root);
-    const input: ToolInput = { action: "generate", configuration_fingerprint: proposal.configuration_fingerprint,
-      profile: proposal.profile, expected_prior_profile_digest: proposal.expected_prior_profile_digest };
+    const input: ToolInput = {
+      action: "generate",
+      configuration_fingerprint: proposal.configuration_fingerprint,
+      profile: proposal.profile,
+      expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+    };
     expect(await execute(tool, input)).toMatchObject({ error: "setup-approval-denied" });
     await execute(tool, { action: "inspect" });
     expect(await execute(tool, input)).toMatchObject({ error: "setup-approval-denied" });
@@ -584,46 +800,80 @@ describe("Initial setup and explicit regeneration are idempotent and preserve th
       expected_prior_profile_digest: first.expected_prior_profile_digest,
     };
     expect(await execute(tool, input)).toMatchObject({ ok: true, changed: true });
-    expect(await persistProgrammaticProfile(root, first.configuration_fingerprint, first.profile, {
-      expectedPriorProfileDigest: first.expected_prior_profile_digest,
-    })).toMatchObject({ ok: true, changed: false });
-    expect(await execute(tool, input)).toMatchObject({ ok: false, changed: false,
-      error: expect.stringContaining("setup-proposal-unavailable") });
-  });
-  it.each(["initial", "refresh"])("serializes committed %s cleanup failure truthfully", async (operation) => {
-    const root = await repository();
-    const tool = await reviewedTool(root);
-    if (operation === "refresh") {
-      const initial = await inspect(root);
-      expect(await execute(tool, { action: "generate",
-        configuration_fingerprint: initial.configuration_fingerprint, profile: initial.profile,
-        expected_prior_profile_digest: initial.expected_prior_profile_digest,
-      })).toMatchObject({ ok: true, changed: true });
-      await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
-    }
-    const proposal = await inspect(root);
-    await execute(tool, { action: "inspect" });
-    const profileDirectory = path.join(await fs.realpath(root), ".gg/programmatic");
-    let cleanups = 0;
-    await vi.mocked(rm).withImplementation(async (file, options) => {
-      if (typeof file === "string" && path.dirname(file) === profileDirectory &&
-          path.basename(file).startsWith(".profile-")) {
-        cleanups++;
-        throw new Error("injected cleanup failure");
-      }
-      return fs.rm(file, options);
-    }, async () => {
-      expect(await execute(tool, { action: "generate",
-        configuration_fingerprint: proposal.configuration_fingerprint, profile: proposal.profile,
-        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
-      })).toMatchObject({ action: "generate", ok: false, changed: true,
-        error: "post-commit-failed", detail: expect.stringContaining("Read back setup before retrying") });
+    expect(
+      await persistProgrammaticProfile(root, first.configuration_fingerprint, first.profile, {
+        expectedPriorProfileDigest: first.expected_prior_profile_digest,
+      }),
+    ).toMatchObject({ ok: true, changed: false });
+    expect(await execute(tool, input)).toMatchObject({
+      ok: false,
+      changed: false,
+      error: expect.stringContaining("setup-proposal-unavailable"),
     });
-    expect(cleanups).toBe(1);
-    expect(JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")))
-      .toMatchObject({ configurationFingerprint: proposal.configuration_fingerprint, profile: proposal.profile });
-    expect(await inspect(root)).toMatchObject({ operation: "current", approval_available: false });
   });
+  it.each(["initial", "refresh"])(
+    "serializes committed %s cleanup failure truthfully",
+    async (operation) => {
+      const root = await repository();
+      const tool = await reviewedTool(root);
+      if (operation === "refresh") {
+        const initial = await inspect(root);
+        expect(
+          await execute(tool, {
+            action: "generate",
+            configuration_fingerprint: initial.configuration_fingerprint,
+            profile: initial.profile,
+            expected_prior_profile_digest: initial.expected_prior_profile_digest,
+          }),
+        ).toMatchObject({ ok: true, changed: true });
+        await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+      }
+      const proposal = await inspect(root);
+      await execute(tool, { action: "inspect" });
+      const profileDirectory = path.join(await fs.realpath(root), ".gg/programmatic");
+      let cleanups = 0;
+      await vi.mocked(rm).withImplementation(
+        async (file, options) => {
+          if (
+            typeof file === "string" &&
+            path.dirname(file) === profileDirectory &&
+            path.basename(file).startsWith(".profile-")
+          ) {
+            cleanups++;
+            throw new Error("injected cleanup failure");
+          }
+          return fs.rm(file, options);
+        },
+        async () => {
+          expect(
+            await execute(tool, {
+              action: "generate",
+              configuration_fingerprint: proposal.configuration_fingerprint,
+              profile: proposal.profile,
+              expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+            }),
+          ).toMatchObject({
+            action: "generate",
+            ok: false,
+            changed: true,
+            error: "post-commit-failed",
+            detail: expect.stringContaining("Read back setup before retrying"),
+          });
+        },
+      );
+      expect(cleanups).toBe(1);
+      expect(
+        JSON.parse(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")),
+      ).toMatchObject({
+        configurationFingerprint: proposal.configuration_fingerprint,
+        profile: proposal.profile,
+      });
+      expect(await inspect(root)).toMatchObject({
+        operation: "current",
+        approval_available: false,
+      });
+    },
+  );
 
   it("preserves the previous profile when a temporary write fails", async () => {
     const { root, inspected, destination, previousBytes } = await previousValidProfile();

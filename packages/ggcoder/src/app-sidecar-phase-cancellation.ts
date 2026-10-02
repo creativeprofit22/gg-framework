@@ -8,9 +8,7 @@ import type {
 } from "./project-notes-repository.js";
 
 export type ActiveOperationCancellationResult =
-  | { status: "cancelled" }
-  | { status: "idle" }
-  | { status: "failed"; reason: string };
+  { status: "cancelled" } | { status: "idle" } | { status: "failed"; reason: string };
 
 export interface PhaseCancellationSession {
   cwd: string;

@@ -498,9 +498,12 @@ async function availableCommands(session: AcpAgentSession, cwd: string): Promise
   return discovery.entries.map(({ listing: command }) => ({
     name: command.name,
     description: command.description,
-    input: command.invocationKind === "prompt"
-      ? command.input.text === "none" ? undefined : { hint: TEMPLATE_ARG_HINT }
-      : hintFromUsage(command.name, command.usage ?? ""),
+    input:
+      command.invocationKind === "prompt"
+        ? command.input.text === "none"
+          ? undefined
+          : { hint: TEMPLATE_ARG_HINT }
+        : hintFromUsage(command.name, command.usage ?? ""),
   }));
 }
 

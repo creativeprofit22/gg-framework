@@ -248,11 +248,7 @@ export type ProjectNotesPhaseLifecycleOutcome =
     }
   | {
       status:
-        | "same-status"
-        | "phase-not-found"
-        | "phase-archived"
-        | "stale-session"
-        | "done-terminal";
+        "same-status" | "phase-not-found" | "phase-archived" | "stale-session" | "done-terminal";
     }
   | { status: "missing" }
   | ProjectNotesUnsupportedFormat
@@ -1182,9 +1178,11 @@ function isCompletionCheckpointAuthoritative(
 ): boolean {
   // Legacy persisted direct checkpoints must retain their evidence-chain integrity.
   // This does not authorize new Done calls or impose transcript certification on runs.
-  return isNotesPhaseAdvancementSourceCurrent(source, checkpoint) &&
+  return (
+    isNotesPhaseAdvancementSourceCurrent(source, checkpoint) &&
     (!("implementationCheckpointId" in checkpoint) ||
-      isNotesDirectCompletionAuthority(source, checkpoint));
+      isNotesDirectCompletionAuthority(source, checkpoint))
+  );
 }
 
 function selectNextEligibleRoadmapPhaseIndexForCheckpoint(
@@ -1218,17 +1216,23 @@ function validateGenericSaveDeletionAuthority(
   previous: NotesDocumentV3,
   next: NotesDocumentV3,
 ): NotesValidationError | null {
-  const previousById = new Map(previous.phases.map(phase => [phase.id, phase]));
-  const nextById = new Map(next.phases.map(phase => [phase.id, phase]));
+  const previousById = new Map(previous.phases.map((phase) => [phase.id, phase]));
+  const nextById = new Map(next.phases.map((phase) => [phase.id, phase]));
   for (const phase of previous.phases) {
     if (!nextById.has(phase.id)) {
-      return validationError("phases", "Phase removal requires the dedicated recoverable deletion operation");
+      return validationError(
+        "phases",
+        "Phase removal requires the dedicated recoverable deletion operation",
+      );
     }
   }
   for (const phase of next.phases) {
     const old = previousById.get(phase.id);
     if (!isDeepStrictEqual(old?.deletion, phase.deletion)) {
-      return validationError("phases", "Deletion history can only change through the dedicated deletion or recovery operation");
+      return validationError(
+        "phases",
+        "Deletion history can only change through the dedicated deletion or recovery operation",
+      );
     }
     if (old?.deletion?.currentDeletionId != null) {
       // Contiguous-array reindexing is the only generic change to a retained tombstone.
@@ -1238,9 +1242,15 @@ function validateGenericSaveDeletionAuthority(
         return validationError("phases", "Recover a deleted phase before editing it");
       }
     }
-    if (old?.deletion && (!isDeepStrictEqual(old.session, phase.session) ||
-        !isDeepStrictEqual(old.execution, phase.execution))) {
-      return validationError("phases", "Recovered phase runtime authority requires a fresh dedicated binding");
+    if (
+      old?.deletion &&
+      (!isDeepStrictEqual(old.session, phase.session) ||
+        !isDeepStrictEqual(old.execution, phase.execution))
+    ) {
+      return validationError(
+        "phases",
+        "Recovered phase runtime authority requires a fresh dedicated binding",
+      );
     }
   }
   return null;
@@ -1383,8 +1393,11 @@ export class ProjectNotesRepository {
   async migrate(cwd: string, document: unknown): Promise<ProjectNotesMigrationOutcome> {
     const validated = coerceNotesDocumentV3(document);
     if (!validated.ok) return { status: "invalid", error: validated.error };
-    if (validated.document.phases.some(phase => phase.deletion !== undefined)) {
-      return { status: "invalid", error: validationError("phases", "Migration cannot create deletion history") };
+    if (validated.document.phases.some((phase) => phase.deletion !== undefined)) {
+      return {
+        status: "invalid",
+        error: validationError("phases", "Migration cannot create deletion history"),
+      };
     }
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
@@ -1508,63 +1521,119 @@ export class ProjectNotesRepository {
     guard: PhaseDeletionCommitGuard,
     timestamp = new Date().toISOString(),
   ): Promise<PhaseDeletionOutcome> {
-    if (!isPhaseDeletionRequest(request) || typeof guard !== "function" ||
-        request.expectedProjectKey !== canonicalProjectKey(cwd)) {
+    if (
+      !isPhaseDeletionRequest(request) ||
+      typeof guard !== "function" ||
+      request.expectedProjectKey !== canonicalProjectKey(cwd)
+    ) {
       return { status: "unavailable", message: "Invalid deletion request or project scope." };
     }
     try {
-      const outcome = await this.withLockedCurrent<PhaseDeletionOutcome>(cwd, async (paths, current, source) => {
-        if (source !== "primary") return { status: "refused", reason: "recovery-required",
-          message: "Project Notes was recovered from a backup. Resolve storage recovery before deleting or recovering a phase." };
-        const snapshot = toSnapshot(current);
-        // Replay identity is global to this project and survives recovery and later cycles.
-        const prior = current.document.phases.flatMap(phase => phase.deletion?.events ?? [])
-          .find(event => event.request.operationId === request.operationId);
-        if (prior) {
-          if (prior.fingerprint !== phaseDeletionFingerprint(request)) return {
-            status: "refused", reason: "operation-id-reused", message: "This request identity belongs to a different operation." };
-          return { status: "committed", action: prior.action, operationId: request.operationId,
-            replayed: true, snapshot };
-        }
-        if (current.revision !== request.expectedRevision) return { status: "conflict", snapshot };
-        const phaseIndex = current.document.phases.findIndex(phase => phase.id === request.phaseId);
-        const phase = current.document.phases[phaseIndex];
-        if (!phase) return { status: "missing" };
-        if (notesPhaseDeletionGeneration(phase) !== request.expectedGeneration) return {
-          status: "refused", reason: "stale-generation", message: "This phase changed. Refresh and confirm the action again." };
-        if ((request.action === "delete") === isNotesPhaseDeleted(phase)) return {
-          status: "refused", reason: request.action === "delete" ? "already-deleted" : "not-deleted",
-          message: "The phase is no longer in the state you confirmed." };
-        // User-approved replacement for the absent snapshot-based topology guard.
-        if (pendingAdvancementAuthorities(current.document).length > 0) return {
-          status: "refused", reason: "protected-advancement",
-          message: "Resolve the pending next-phase decision before deleting or recovering a phase." };
-        if (phase.execution?.state === "needs-reconciliation" || phase.execution?.pendingCompletion != null ||
-            phase.execution?.state === "completion-pending") return {
-          status: "refused", reason: "recovery-required",
-          message: "Resolve execution recovery or pending completion before deleting this phase." };
-        const refusal = await guard(snapshot, structuredClone(phase));
-        if (refusal) return refusal;
-        const document = structuredClone(current.document);
-        document.phases[phaseIndex] = applyNotesPhaseDeletion(phase, request, timestamp);
-        document.updatedAt = timestamp;
-        // First deletion upgrades BOTH backup and primary. Never downgrade after recovery.
-        // A pre-primary interruption leaves a readable old snapshot, not a completed deletion.
-        const upgraded: StoredProjectNotesV2 = { ...current, storeVersion: 2 };
-        const next = await this.commitDocument(paths, upgraded, document, {
-          validationMode: "validated", context: "Phase deletion or recovery",
-        });
-        return { status: "committed", action: request.action, operationId: request.operationId,
-          replayed: false, snapshot: toSnapshot(next) };
-      });
-      if (outcome.status === "corrupt" || outcome.status === "unsupported") return {
-        status: "unavailable", message: "Project Notes storage needs recovery or a supported app version. No deletion was attempted." };
+      const outcome = await this.withLockedCurrent<PhaseDeletionOutcome>(
+        cwd,
+        async (paths, current, source) => {
+          if (source !== "primary")
+            return {
+              status: "refused",
+              reason: "recovery-required",
+              message:
+                "Project Notes was recovered from a backup. Resolve storage recovery before deleting or recovering a phase.",
+            };
+          const snapshot = toSnapshot(current);
+          // Replay identity is global to this project and survives recovery and later cycles.
+          const prior = current.document.phases
+            .flatMap((phase) => phase.deletion?.events ?? [])
+            .find((event) => event.request.operationId === request.operationId);
+          if (prior) {
+            if (prior.fingerprint !== phaseDeletionFingerprint(request))
+              return {
+                status: "refused",
+                reason: "operation-id-reused",
+                message: "This request identity belongs to a different operation.",
+              };
+            return {
+              status: "committed",
+              action: prior.action,
+              operationId: request.operationId,
+              replayed: true,
+              snapshot,
+            };
+          }
+          if (current.revision !== request.expectedRevision)
+            return { status: "conflict", snapshot };
+          const phaseIndex = current.document.phases.findIndex(
+            (phase) => phase.id === request.phaseId,
+          );
+          const phase = current.document.phases[phaseIndex];
+          if (!phase) return { status: "missing" };
+          if (notesPhaseDeletionGeneration(phase) !== request.expectedGeneration)
+            return {
+              status: "refused",
+              reason: "stale-generation",
+              message: "This phase changed. Refresh and confirm the action again.",
+            };
+          if ((request.action === "delete") === isNotesPhaseDeleted(phase))
+            return {
+              status: "refused",
+              reason: request.action === "delete" ? "already-deleted" : "not-deleted",
+              message: "The phase is no longer in the state you confirmed.",
+            };
+          // User-approved replacement for the absent snapshot-based topology guard.
+          if (pendingAdvancementAuthorities(current.document).length > 0)
+            return {
+              status: "refused",
+              reason: "protected-advancement",
+              message:
+                "Resolve the pending next-phase decision before deleting or recovering a phase.",
+            };
+          if (
+            phase.execution?.state === "needs-reconciliation" ||
+            phase.execution?.pendingCompletion != null ||
+            phase.execution?.state === "completion-pending"
+          )
+            return {
+              status: "refused",
+              reason: "recovery-required",
+              message:
+                "Resolve execution recovery or pending completion before deleting this phase.",
+            };
+          const refusal = await guard(snapshot, structuredClone(phase));
+          if (refusal) return refusal;
+          const document = structuredClone(current.document);
+          document.phases[phaseIndex] = applyNotesPhaseDeletion(phase, request, timestamp);
+          document.updatedAt = timestamp;
+          // First deletion upgrades BOTH backup and primary. Never downgrade after recovery.
+          // A pre-primary interruption leaves a readable old snapshot, not a completed deletion.
+          const upgraded: StoredProjectNotesV2 = { ...current, storeVersion: 2 };
+          const next = await this.commitDocument(paths, upgraded, document, {
+            validationMode: "validated",
+            context: "Phase deletion or recovery",
+          });
+          return {
+            status: "committed",
+            action: request.action,
+            operationId: request.operationId,
+            replayed: false,
+            snapshot: toSnapshot(next),
+          };
+        },
+      );
+      if (outcome.status === "corrupt" || outcome.status === "unsupported")
+        return {
+          status: "unavailable",
+          message:
+            "Project Notes storage needs recovery or a supported app version. No deletion was attempted.",
+        };
       return outcome;
     } catch {
       // A rename may have persisted even if directory synchronization/acknowledgement failed.
       // The caller retains exactly this request identity; replay resolves the outcome.
-      return { status: "uncertain", operationId: request.operationId,
-        message: "The write outcome is uncertain. Reconnect and retry this same request to check what was saved." };
+      return {
+        status: "uncertain",
+        operationId: request.operationId,
+        message:
+          "The write outcome is uncertain. Reconnect and retry this same request to check what was saved.",
+      };
     }
   }
 
@@ -1645,8 +1714,8 @@ export class ProjectNotesRepository {
         order: firstOrder + index,
         status: "not-started",
         sourcePrompt: phase.sourcePrompt,
-        referenceIds: phase.referenceIds.map(
-          (referenceId) => resolvedReferenceIds.get(referenceId)!,
+        referenceIds: phase.referenceIds.map((referenceId) =>
+          resolvedReferenceIds.get(referenceId)!,
         ),
         session: null,
         reminder: null,
@@ -1684,7 +1753,8 @@ export class ProjectNotesRepository {
 
     if (outcome.status === "missing") return { status: "notes-missing" };
     if (outcome.status === "corrupt") return { status: "notes-corrupt" };
-    if (outcome.status === "unsupported") return { status: "storage-failed", message: outcome.message };
+    if (outcome.status === "unsupported")
+      return { status: "storage-failed", message: outcome.message };
     return outcome;
   }
 
@@ -2146,11 +2216,18 @@ export class ProjectNotesRepository {
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
       if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
-      if (currentPhase.deletion && (request.expectedRevision === undefined ||
-          request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision)) {
+      if (
+        currentPhase.deletion &&
+        (request.expectedRevision === undefined ||
+          request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision)
+      ) {
         return { status: "stale-revision", revision };
       }
-      if (currentPhase.deletion && (!currentPhase.session || !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))) {
+      if (
+        currentPhase.deletion &&
+        (!currentPhase.session ||
+          !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))
+      ) {
         return { status: "stale-session" };
       }
       const normalizedReferences = request.proposedReferences.map(
@@ -2326,7 +2403,11 @@ export class ProjectNotesRepository {
       if (executionRequiresReconciliation(currentPhase)) {
         return { status: "operation-conflict", revision };
       }
-      if (currentPhase.deletion && (!currentPhase.session || !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))) {
+      if (
+        currentPhase.deletion &&
+        (!currentPhase.session ||
+          !notesSessionLinksEqual(currentPhase.session, request.expectedSession ?? null))
+      ) {
         return { status: "stale-session" };
       }
       const prior = currentPhase.roadmapEvents.find(
@@ -2334,8 +2415,13 @@ export class ProjectNotesRepository {
           event.type === "implementation-checkpoint" && event.id === request.checkpointId,
       );
       if (prior) {
-        if (currentPhase.deletion?.events.some(event => event.action === "delete" &&
-            currentPhase.roadmapEvents.indexOf(prior) < event.retired.roadmapEventCount)) {
+        if (
+          currentPhase.deletion?.events.some(
+            (event) =>
+              event.action === "delete" &&
+              currentPhase.roadmapEvents.indexOf(prior) < event.retired.roadmapEventCount,
+          )
+        ) {
           return { status: "duplicate-id-conflict", revision };
         }
         return sameImplementationCheckpointPayload(prior, request)
@@ -2635,7 +2721,10 @@ export class ProjectNotesRepository {
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
       if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
-      if (currentPhase.deletion && request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision) {
+      if (
+        currentPhase.deletion &&
+        request.expectedRevision <= currentPhase.deletion.events.at(-1)!.request.expectedRevision
+      ) {
         return { status: "stale-revision", revision };
       }
       const executionSession = currentPhase.execution?.lastSession ?? null;
@@ -2835,8 +2924,12 @@ export class ProjectNotesRepository {
       const currentPhase = current.document.phases[phaseIndex]!;
       if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (currentPhase.deletion && (!currentPhase.session || !transition.expectedSession ||
-          !notesSessionLinksEqual(currentPhase.session, transition.expectedSession))) {
+      if (
+        currentPhase.deletion &&
+        (!currentPhase.session ||
+          !transition.expectedSession ||
+          !notesSessionLinksEqual(currentPhase.session, transition.expectedSession))
+      ) {
         return { status: "stale-session" };
       }
       if (
@@ -3003,7 +3096,8 @@ export class ProjectNotesRepository {
       const eligible = current.document.phases.filter(
         (phase) =>
           phase.id !== sourcePhase.id &&
-          !isNotesPhaseDeleted(phase) && phase.archivedAt === null &&
+          !isNotesPhaseDeleted(phase) &&
+          phase.archivedAt === null &&
           (phase.status === "not-started" || phase.status === "planning") &&
           phase.overrides.status === null &&
           (phase.session === null ||
@@ -3012,7 +3106,10 @@ export class ProjectNotesRepository {
       );
       const activeLinks = sameSessionId.filter(
         (phase) =>
-          !isNotesPhaseDeleted(phase) && phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled",
+          !isNotesPhaseDeleted(phase) &&
+          phase.archivedAt === null &&
+          phase.status !== "done" &&
+          phase.status !== "cancelled",
       );
       if (
         existingConfirmation.actor !== "system" ||
@@ -3052,7 +3149,8 @@ export class ProjectNotesRepository {
       sameSessionId.some(
         (phase) =>
           phase.id !== sourcePhase.id &&
-          !isNotesPhaseDeleted(phase) && phase.archivedAt === null &&
+          !isNotesPhaseDeleted(phase) &&
+          phase.archivedAt === null &&
           phase.status !== "done" &&
           phase.status !== "cancelled",
       )
@@ -3094,7 +3192,11 @@ export class ProjectNotesRepository {
 
   private async withLockedCurrent<T>(
     cwd: string,
-    operation: (paths: ProjectNotesPaths, current: StoredProjectNotes, source: "primary" | "backup") => Promise<T>,
+    operation: (
+      paths: ProjectNotesPaths,
+      current: StoredProjectNotes,
+      source: "primary" | "backup",
+    ) => Promise<T>,
   ): Promise<T | UnavailableCurrentState> {
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
@@ -3190,7 +3292,11 @@ export class ProjectNotesRepository {
       let envelope = primary.envelope;
       const backup = await this.readCandidate(paths.backup, projectKey);
       if (backup.status === "unsupported") return unsupportedFormat("backup");
-      if (envelope.storeVersion === 1 && backup.status === "valid" && backup.envelope.storeVersion === 2) {
+      if (
+        envelope.storeVersion === 1 &&
+        backup.status === "valid" &&
+        backup.envelope.storeVersion === 2
+      ) {
         envelope = { ...envelope, storeVersion: 2 };
       }
       return {
@@ -3254,14 +3360,22 @@ export class ProjectNotesRepository {
       // Schema rejection is not evidence of corruption: never discard it to recover
       // an older backup. Known legacy projections still pass the strict parser above.
       if (
-        typeof value === "object" && value !== null && !Array.isArray(value) &&
-        "storeVersion" in value && (value.storeVersion === 1 || value.storeVersion === 2) &&
-        "projectKey" in value && typeof value.projectKey === "string" &&
-        "revision" in value && Number.isInteger(value.revision) &&
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        "storeVersion" in value &&
+        (value.storeVersion === 1 || value.storeVersion === 2) &&
+        "projectKey" in value &&
+        typeof value.projectKey === "string" &&
+        "revision" in value &&
+        Number.isInteger(value.revision) &&
         (value.revision as number) >= 0 &&
-        "document" in value && typeof value.document === "object" &&
-        value.document !== null && !Array.isArray(value.document) &&
-        "version" in value.document && typeof value.document.version === "number"
+        "document" in value &&
+        typeof value.document === "object" &&
+        value.document !== null &&
+        !Array.isArray(value.document) &&
+        "version" in value.document &&
+        typeof value.document.version === "number"
       ) {
         if (value.projectKey !== projectKey) {
           return { status: "invalid", reason: "project-key-mismatch" };
@@ -3285,7 +3399,8 @@ function unsupportedFormat(source: "primary" | "backup"): ProjectNotesUnsupporte
   return {
     status: "unsupported",
     source,
-    message: "Unsupported Project Notes format. Open this project with a version that supports these Notes. No recovery or write was attempted; both stored files were preserved.",
+    message:
+      "Unsupported Project Notes format. Open this project with a version that supports these Notes. No recovery or write was attempted; both stored files were preserved.",
   };
 }
 
@@ -3302,7 +3417,12 @@ function parseStoredEnvelope(
     return null;
   }
   const document = coerceNotesDocumentV3(value.document);
-  if (!document.ok || (value.storeVersion === 1 && document.document.phases.some(phase => phase.deletion !== undefined))) return null;
+  if (
+    !document.ok ||
+    (value.storeVersion === 1 &&
+      document.document.phases.some((phase) => phase.deletion !== undefined))
+  )
+    return null;
   return {
     envelope: {
       storeVersion: value.storeVersion,

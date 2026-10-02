@@ -7,7 +7,9 @@ import type { EventBus } from "../core/event-bus.js";
 // The parent releases this gate over private fixture IPC, not an application route.
 if (!process.send) throw new Error("Source sidecar fixture requires IPC");
 let release!: () => void;
-const generation = new Promise<void>((resolve) => { release = resolve; });
+const generation = new Promise<void>((resolve) => {
+  release = resolve;
+});
 process.on("message", (message) => {
   if (message === "release-generation") release();
 });
@@ -24,9 +26,23 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
     if (process.env.GG_FIXTURE_PARK_QUESTION === "1") {
       const ask = this.tools.find((tool) => tool.name === "ask_user");
       if (!ask) throw new Error("Fixture ask_user tool missing");
-      await ask.execute({ questions: [{ id: "approval", kind: "choice",
-        question: "Allow this action?", detail: "The fixture needs a decision before it continues.", options: [{ label: "Allow action", value: "allow" }, { label: "Stop action", value: "stop" }] }] },
-        { signal: new AbortController().signal, toolCallId: "fixture-ask" });
+      await ask.execute(
+        {
+          questions: [
+            {
+              id: "approval",
+              kind: "choice",
+              question: "Allow this action?",
+              detail: "The fixture needs a decision before it continues.",
+              options: [
+                { label: "Allow action", value: "allow" },
+                { label: "Stop action", value: "stop" },
+              ],
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "fixture-ask" },
+      );
     }
     await generation;
     const truncated = process.env.GG_FIXTURE_TRUNCATED;
@@ -37,8 +53,11 @@ Object.defineProperty(AgentSession.prototype, "runLoop", {
     if (process.env.GG_FIXTURE_QUEUE_DRAIN) {
       if (process.env.GG_FIXTURE_QUEUE_DRAIN === "steering") {
         // Include a hidden runtime row before consumption; hints must use actual positions.
-        this.messages.push({ role: "user", content: "Fixture runtime notification",
-          provenance: { source: "runtime", kind: "notification", visibility: "hidden" } });
+        this.messages.push({
+          role: "user",
+          content: "Fixture runtime notification",
+          provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+        });
         this.messages.push(...(this.getHookSteeringMessages() ?? []));
       }
       await this.flushPendingMessages();

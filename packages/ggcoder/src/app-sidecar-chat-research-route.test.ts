@@ -16,7 +16,10 @@ import {
   handleAppSidecarChatResearchPrompt,
 } from "./app-sidecar-chat-research-route.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./core/programmatic/profile.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "./core/programmatic/profile.js";
 import { useFakeHome } from "./test-support/fake-home.js";
 
 interface FakeMarker {
@@ -382,9 +385,18 @@ describe("app-sidecar chat Research HTTP routes", () => {
       expect(before.commands.some((command) => command.name === "programmatic")).toBe(false);
       expect(before.commands.some((command) => command.name === "setup-programmatic")).toBe(true);
       const proposal = await buildProgrammaticProfileProposal(cwd);
-      expect((await persistProgrammaticProfile(cwd, proposal.configurationFingerprint, proposal.profile, {
-        expectedPriorProfileDigest: proposal.expectedPriorProfileDigest,
-      })).ok).toBe(true);
+      expect(
+        (
+          await persistProgrammaticProfile(
+            cwd,
+            proposal.configurationFingerprint,
+            proposal.profile,
+            {
+              expectedPriorProfileDigest: proposal.expectedPriorProfileDigest,
+            },
+          )
+        ).ok,
+      ).toBe(true);
       const response = await appSidecarCodeCommandsResponse(cwd);
       expect(response.commands.find((command) => command.name === "programmatic")).toMatchObject({
         input: { text: "optional", references: "none", attachments: "none" },

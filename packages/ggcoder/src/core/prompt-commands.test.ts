@@ -5,7 +5,9 @@ import { getPromptCommand, PROMPT_COMMANDS } from "./prompt-commands.js";
 describe("prompt commands", () => {
   it("accepts optional advisory focus without references or attachments", () => {
     expect(getPromptCommand("programmatic")?.input).toEqual({
-      text: "optional", references: "none", attachments: "none",
+      text: "optional",
+      references: "none",
+      attachments: "none",
     });
   });
   it("no longer defines the /goal command", () => {
@@ -25,7 +27,9 @@ describe("prompt commands", () => {
     expect(setupCommit?.prompt).toContain("findings at least 80");
     expect(setupCommit?.prompt).toContain("one `ask_user` choice");
     // ask_user requires `detail`; a recipe without it is rejected and retried.
-    expect(setupCommit?.prompt).toContain("a `detail` of one plain sentence naming which review findings are blocking");
+    expect(setupCommit?.prompt).toContain(
+      "a `detail` of one plain sentence naming which review findings are blocking",
+    );
     expect(setupCommit?.prompt).toContain("rerun affected checks without another review");
     expect(setupCommit?.prompt).toContain("push exactly once after all commits");
     expect(setupCommit?.prompt).not.toContain("current index tree");
@@ -61,7 +65,9 @@ describe("prompt commands", () => {
     expect(cmd?.prompt).toContain("Profile the project");
     expect(cmd?.prompt).toContain("`discover` queries WITHOUT `add`");
     expect(cmd?.prompt).toContain("`ask_user` tool");
-    expect(cmd?.prompt).toContain("a `detail` of one plain sentence saying roughly what indexing the chosen repos costs");
+    expect(cmd?.prompt).toContain(
+      "a `detail` of one plain sentence saying roughly what indexing the chosen repos costs",
+    );
     expect(cmd?.prompt).toContain("Do not index anything until the user answers");
     expect(cmd?.prompt).toContain("`steroids` `add`");
     expect(cmd?.prompt).toContain(STEROIDS_COLLAPSIBLE_TABLE_MARKER);
@@ -137,7 +143,9 @@ describe("prompt commands", () => {
     // question twice, once clickable and once not. Prose is the fallback for
     // hosts that cannot render the card at all.
     expect(expand?.prompt).toContain("`ask_user` tool");
-    expect(expand?.prompt).toContain("a `detail` of one plain sentence saying the table above lists the validated features");
+    expect(expand?.prompt).toContain(
+      "a `detail` of one plain sentence saying the table above lists the validated features",
+    );
     expect(expand?.prompt).toContain("Build all of these features in plan mode");
     expect(expand?.prompt).toContain("Build only the top priority ones in plan mode");
     expect(expand?.prompt).toContain("The card is the ONLY ask");
@@ -251,25 +259,45 @@ describe("prompt commands", () => {
     expect(setup?.prompt).toContain("Assess project needs and workflows");
     expect(setup?.prompt).toContain("including unfamiliar or manifest-free projects");
     expect(setup?.prompt).toContain("Samples are not complete coverage");
-    expect(setup?.prompt).toContain("The host already collected exact `programmatic_profile` inspection facts");
+    expect(setup?.prompt).toContain(
+      "The host already collected exact `programmatic_profile` inspection facts",
+    );
     expect(setup?.prompt).toContain("Do not repeat inspection or discover tools");
-    expect(setup?.prompt).toContain("Submit bounded needs recommendations through `programmatic_advisory_result`");
+    expect(setup?.prompt).toContain(
+      "Submit bounded needs recommendations through `programmatic_advisory_result`",
+    );
     expect(setup?.prompt).toContain("no scan is required or permitted in setup");
     expect(setup?.prompt).not.toContain("tool_search");
-    expect(setup?.prompt).toContain("Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review");
+    expect(setup?.prompt).toContain(
+      "Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review",
+    );
     expect(setup?.prompt).toContain("do not recite these raw details in the setup transcript");
-    expect(setup?.prompt).toContain("Give a brief user-facing outcome, inspection limits and next permitted action instead");
+    expect(setup?.prompt).toContain(
+      "Give a brief user-facing outcome, inspection limits and next permitted action instead",
+    );
     expect(setup?.prompt).toContain("Do not repeat rendered accepted advice");
     expect(setup?.prompt).not.toContain("Report its inventory, exact configuration fingerprint");
-    expect(setup?.prompt).toContain("retain the exact added, removed and modified configuration inputs and policy, schema or exclusion differences in tool data and approval review");
-    expect(setup?.prompt).toContain("briefly explain their decision-critical effects in the transcript");
-    expect(setup?.prompt).toContain("retain all current inputs in the review, never invent historical changes");
-    expect(setup?.prompt).toContain("Unreadable or unsupported data requires repair, not an overwrite");
+    expect(setup?.prompt).toContain(
+      "retain the exact added, removed and modified configuration inputs and policy, schema or exclusion differences in tool data and approval review",
+    );
+    expect(setup?.prompt).toContain(
+      "briefly explain their decision-critical effects in the transcript",
+    );
+    expect(setup?.prompt).toContain(
+      "retain all current inputs in the review, never invent historical changes",
+    );
+    expect(setup?.prompt).toContain(
+      "Unreadable or unsupported data requires repair, not an overwrite",
+    );
     expect(setup?.prompt).toContain("The digest is a concurrency precondition, not user approval");
-    expect(setup?.prompt).toContain("Keep this exact tool contract in tool data and approval review, not a transcript recital");
+    expect(setup?.prompt).toContain(
+      "Keep this exact tool contract in tool data and approval review, not a transcript recital",
+    );
     expect(setup?.prompt).toContain("setup performed no writes");
     expect(setup?.prompt).toContain("Stop for separate user approval");
-    expect(setup?.prompt).toContain("exact returned fingerprint, profile and `expected_prior_profile_digest`");
+    expect(setup?.prompt).toContain(
+      "exact returned fingerprint, profile and `expected_prior_profile_digest`",
+    );
     expect(setup?.prompt).toContain("without proposing regeneration or approval");
     expect(setup?.prompt).toContain("never invent historical changes");
     expect(setup?.prompt).toContain("Saving refreshed settings never scans");
@@ -285,17 +313,33 @@ describe("prompt commands", () => {
     expect(eager).not.toContain("tool_search");
     for (const prompt of [deferred, eager]) {
       expect(prompt).toContain("Submit programmatic_advisory_result");
-      expect(prompt).toContain("Use its validated presentation as Recommendations — not started, including coverage limitations");
-      expect(prompt).toContain("Do not write a second full report repeating rendered accepted advice");
-      expect(prompt).toContain("Follow with only a brief user-facing outcome, any limits not already visible, and the next permitted action");
+      expect(prompt).toContain(
+        "Use its validated presentation as Recommendations — not started, including coverage limitations",
+      );
+      expect(prompt).toContain(
+        "Do not write a second full report repeating rendered accepted advice",
+      );
+      expect(prompt).toContain(
+        "Follow with only a brief user-facing outcome, any limits not already visible, and the next permitted action",
+      );
       expect(prompt).toContain("not just three executable specialists");
-      expect(prompt).toContain("retain manual work when automation adds unjustified cost or prerequisites");
-      expect(prompt).toContain("Start with project needs and workflow observations, even without manifests or enabled scanners");
+      expect(prompt).toContain(
+        "retain manual work when automation adds unjustified cost or prerequisites",
+      );
+      expect(prompt).toContain(
+        "Start with project needs and workflow observations, even without manifests or enabled scanners",
+      );
       expect(prompt.match(/`programmatic_scan\(\{\}\)`/g)).toHaveLength(1);
-      expect(prompt).toContain("The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again");
+      expect(prompt).toContain(
+        "The host already attempted the permitted `programmatic_scan({})` exactly once; do not call it again",
+      );
       expect(prompt).not.toContain("Call `programmatic_scan`");
-      expect(prompt).toContain("Report the supplied bounded result separately as Deterministic scan");
-      expect(prompt).toContain("A scan error remains an error; never repair setup or replace it with model advice");
+      expect(prompt).toContain(
+        "Report the supplied bounded result separately as Deterministic scan",
+      );
+      expect(prompt).toContain(
+        "A scan error remains an error; never repair setup or replace it with model advice",
+      );
       expect(prompt).toContain(
         "Never mutate files, setup, lifecycle, tasks or approvals; never execute specialists, shell commands, indexing or installations",
       );
@@ -305,20 +349,46 @@ describe("prompt commands", () => {
   it("shares needs-first five-outcome policy across setup and configured assessment", () => {
     for (const name of ["setup-programmatic", "programmatic"]) {
       const prompt = getPromptCommand(name)!.prompt;
-      expect(prompt).toContain("Write for AI builders with some coding familiarity, not professional developers");
+      expect(prompt).toContain(
+        "Write for AI builders with some coding familiarity, not professional developers",
+      );
       expect(prompt).toContain("Use complete, concrete sentences in user-facing explanations");
-      expect(prompt).toContain("Give each recommendation an outcome-focused title and a rationale that explains why it helps this project without repeating the title");
+      expect(prompt).toContain(
+        "Give each recommendation an outcome-focused title and a rationale that explains why it helps this project without repeating the title",
+      );
       expect(prompt).toContain("Explain necessary technical terms in plain language");
-      expect(prompt).toContain("Keep decision-critical risks, costs, external data transfers, installation requirements, affected scope and destructive consequences visible in the advice, along with uncertainty and limits of inspection");
-      expect(prompt).toContain("missing risk evidence never justifies a claim that an option is safe or has no risks");
-      expect(prompt).toContain("Concise wording must not omit these consequences or weaken the required structured evidence, workflow, alternatives, validation or separate approvals");
-      expect(prompt).toContain("required workflow, alternatives, evidence, rationale, uncertainty and coverage");
-      expect(prompt).toContain("Positive automation choices require at least one meaningful alternative");
-      expect(prompt).toContain("Evidence sources are retained host receipt IDs; explicit assumptions use source=assumption");
-      expect(prompt).toContain("Recommendations are not started and never approve downstream actions");
+      expect(prompt).toContain(
+        "Keep decision-critical risks, costs, external data transfers, installation requirements, affected scope and destructive consequences visible in the advice, along with uncertainty and limits of inspection",
+      );
+      expect(prompt).toContain(
+        "missing risk evidence never justifies a claim that an option is safe or has no risks",
+      );
+      expect(prompt).toContain(
+        "Concise wording must not omit these consequences or weaken the required structured evidence, workflow, alternatives, validation or separate approvals",
+      );
+      expect(prompt).toContain(
+        "required workflow, alternatives, evidence, rationale, uncertainty and coverage",
+      );
+      expect(prompt).toContain(
+        "Positive automation choices require at least one meaningful alternative",
+      );
+      expect(prompt).toContain(
+        "Evidence sources are retained host receipt IDs; explicit assumptions use source=assumption",
+      );
+      expect(prompt).toContain(
+        "Recommendations are not started and never approve downstream actions",
+      );
       expect(prompt).toContain("Before comparing capabilities, describe each workflow");
-      expect(prompt.indexOf("Identify repeatable workflows")).toBeLessThan(prompt.indexOf("Compare relevant metadata first"));
-      for (const choice of ["reuse-command", "extend-command", "missing-capability", "manual", "needs-more-evidence"])
+      expect(prompt.indexOf("Identify repeatable workflows")).toBeLessThan(
+        prompt.indexOf("Compare relevant metadata first"),
+      );
+      for (const choice of [
+        "reuse-command",
+        "extend-command",
+        "missing-capability",
+        "manual",
+        "needs-more-evidence",
+      ])
         expect(prompt).toContain(`- ${choice}:`);
       expect(prompt).toContain("Never invent usage counts, frequency or time savings");
       expect(prompt).toContain("Consolidate duplicate proposals");

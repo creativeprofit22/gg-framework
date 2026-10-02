@@ -167,7 +167,11 @@ function ensureProjectSync(cwd: string): void {
   mkdirSync(dir, { recursive: true });
   const meta = join(dir, "meta.json");
   if (!existsSync(meta)) {
-    writeFileSync(meta, JSON.stringify({ path: cwd, name: basename(cwd) }, null, 2) + "\n", "utf-8");
+    writeFileSync(
+      meta,
+      JSON.stringify({ path: cwd, name: basename(cwd) }, null, 2) + "\n",
+      "utf-8",
+    );
   }
 }
 

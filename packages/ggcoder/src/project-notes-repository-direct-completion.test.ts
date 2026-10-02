@@ -136,12 +136,24 @@ describe("ProjectNotesRepository direct completion authority", () => {
     const repository = new ProjectNotesRepository(agentDir);
     const cwd = "/project/current";
     await repository.migrate(cwd, document("current"));
-    const createBinding = vi.fn(async () => ({ sessionId: "next-session", sessionPath: "/sessions/next.jsonl" }));
-    const result = await repository.confirmPhaseAdvancement(cwd, {
-      checkpointId: "advancement-checkpoint", nextPhaseId: "phase-2",
-      action: "start-next-phase", operationId: "advance-current",
-    }, createBinding);
-    expect(result).toMatchObject({ status: "accepted", phase: { id: "phase-2", status: "planning" } });
+    const createBinding = vi.fn(async () => ({
+      sessionId: "next-session",
+      sessionPath: "/sessions/next.jsonl",
+    }));
+    const result = await repository.confirmPhaseAdvancement(
+      cwd,
+      {
+        checkpointId: "advancement-checkpoint",
+        nextPhaseId: "phase-2",
+        action: "start-next-phase",
+        operationId: "advance-current",
+      },
+      createBinding,
+    );
+    expect(result).toMatchObject({
+      status: "accepted",
+      phase: { id: "phase-2", status: "planning" },
+    });
     expect(createBinding).toHaveBeenCalledOnce();
   });
   it.each(["mutated-fixture", "later-untyped-status"] as const)(

@@ -1,10 +1,13 @@
 import { z } from "zod";
 
-export const inspectedLocalLocationSchema = z.object({
-  path: z.string().min(1).max(4096),
-  startLine: z.number().int().positive().safe(),
-  endLine: z.number().int().positive().safe(),
-}).strict().refine((value) => value.endLine >= value.startLine);
+export const inspectedLocalLocationSchema = z
+  .object({
+    path: z.string().min(1).max(4096),
+    startLine: z.number().int().positive().safe(),
+    endLine: z.number().int().positive().safe(),
+  })
+  .strict()
+  .refine((value) => value.endLine >= value.startLine);
 export type InspectedLocalLocation = z.infer<typeof inspectedLocalLocationSchema>;
 
 /** Host tool result details only. Never decode this envelope from source content. */

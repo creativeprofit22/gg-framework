@@ -80,11 +80,19 @@ async function makeSession() {
 
 describe("prompt display metadata validation", () => {
   it("copies supported fields and discards model instructions and malformed segments", () => {
-    expect(normalizePromptMeta({ kenSent: true, instructions: "not display metadata",
-      enhancements: [{ kind: "text", text: "hello", extra: "ignored" }] }))
-      .toEqual({ kenSent: true, enhancements: [{ kind: "text", text: "hello" }] });
-    for (const enhancements of [[null], [{ kind: "term", text: "missing original" }],
-      [{ kind: "term", text: "term", original: "old", note: 42 }], "not segments"]) {
+    expect(
+      normalizePromptMeta({
+        kenSent: true,
+        instructions: "not display metadata",
+        enhancements: [{ kind: "text", text: "hello", extra: "ignored" }],
+      }),
+    ).toEqual({ kenSent: true, enhancements: [{ kind: "text", text: "hello" }] });
+    for (const enhancements of [
+      [null],
+      [{ kind: "term", text: "missing original" }],
+      [{ kind: "term", text: "term", original: "old", note: 42 }],
+      "not segments",
+    ]) {
       expect(normalizePromptMeta({ kenSent: true, enhancements })).toEqual({ kenSent: true });
     }
     expect(normalizePromptMeta({ kenSent: "true" })).toBeUndefined();
@@ -105,8 +113,17 @@ describe("AgentSession queue — takeNextQueuedMessage", () => {
         path: "/x.png",
       };
       expect(session.queueMessage("first")).toBe(1);
-      const meta = { kenSent: true, enhancements: [{ kind: "term" as const,
-        text: "second", original: "original second", note: "Display only" }] };
+      const meta = {
+        kenSent: true,
+        enhancements: [
+          {
+            kind: "term" as const,
+            text: "second",
+            original: "original second",
+            note: "Display only",
+          },
+        ],
+      };
       expect(session.queueMessage("second", [att], meta)).toBe(2);
       meta.enhancements[0].note = "Changed after enqueue";
       expect(session.getQueuedCount()).toBe(2);
@@ -118,8 +135,12 @@ describe("AgentSession queue — takeNextQueuedMessage", () => {
       // Attachments survive the take — drainQueue would have dropped them.
       expect(b?.attachments).toEqual([att]);
       expect(b?.id).toBe("q2");
-      expect(b?.meta).toEqual({ kenSent: true, enhancements: [{ kind: "term",
-        text: "second", original: "original second", note: "Display only" }] });
+      expect(b?.meta).toEqual({
+        kenSent: true,
+        enhancements: [
+          { kind: "term", text: "second", original: "original second", note: "Display only" },
+        ],
+      });
 
       expect(session.getQueuedCount()).toBe(0);
       expect(session.takeNextQueuedMessage()).toBeNull();

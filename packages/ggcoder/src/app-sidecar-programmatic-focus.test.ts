@@ -13,7 +13,8 @@ it("rejects invalid direct programmatic focus before starting the source daemon 
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({
         error: "command_input_not_allowed",
-        message: "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).",
+        message:
+          "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).",
       });
       const state = await (await request("/state", sessionId)).json();
       expect(state.running).toBe(false);

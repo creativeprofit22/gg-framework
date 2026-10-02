@@ -55,7 +55,13 @@ function renderInputArea(onSubmit = vi.fn(), onDiscoverCommands = vi.fn()) {
   const theme = loadTheme("dark");
   const result = render(
     <ThemeContext.Provider value={theme}>
-      <InputArea onSubmit={onSubmit} onAbort={vi.fn()} cwd={process.cwd()} disableMouseTracking onDiscoverCommands={onDiscoverCommands} />
+      <InputArea
+        onSubmit={onSubmit}
+        onAbort={vi.fn()}
+        cwd={process.cwd()}
+        disableMouseTracking
+        onDiscoverCommands={onDiscoverCommands}
+      />
     </ThemeContext.Provider>,
     { stdout, patchConsole: false },
   );
@@ -79,17 +85,29 @@ describe("InputArea pasted slash commands", () => {
     const discover = vi.fn();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let view!: ReturnType<typeof renderInputArea>;
-    await act(async () => { view = renderInputArea(vi.fn(), discover); });
+    await act(async () => {
+      view = renderInputArea(vi.fn(), discover);
+    });
     try {
-      await act(async () => { enterText("/"); });
+      await act(async () => {
+        enterText("/");
+      });
       await vi.waitFor(() => expect(discover).toHaveBeenCalledOnce());
-      await act(async () => { enterText("f"); });
+      await act(async () => {
+        enterText("f");
+      });
       expect(discover).toHaveBeenCalledOnce();
-      await act(async () => { pressEnter(); });
-      await act(async () => { enterText("/"); });
+      await act(async () => {
+        pressEnter();
+      });
+      await act(async () => {
+        enterText("/");
+      });
       await vi.waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     } finally {
-      await act(async () => { view.unmount(); });
+      await act(async () => {
+        view.unmount();
+      });
       vi.unstubAllGlobals();
     }
   });

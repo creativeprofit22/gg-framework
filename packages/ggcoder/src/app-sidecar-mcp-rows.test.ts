@@ -7,11 +7,11 @@ import type * as McpStore from "./core/mcp/store.js";
 import type * as Config from "./config.js";
 
 vi.mock("./core/mcp/store.js", async (importOriginal) => ({
-  ...await importOriginal<typeof McpStore>(),
+  ...(await importOriginal<typeof McpStore>()),
   loadServers: vi.fn(),
 }));
 vi.mock("./config.js", async (importOriginal) => ({
-  ...await importOriginal<typeof Config>(),
+  ...(await importOriginal<typeof Config>()),
   loadSavedSettings: vi.fn(() => ({ trustProjectMcpServers: false, trustedProjects: [] })),
 }));
 
@@ -33,27 +33,85 @@ describe("desktop MCP list row building", () => {
     ]);
     vi.spyOn(MCPClientManager.prototype, "connectAllDetailed").mockResolvedValue([
       { name: "connected", ok: true, toolCount: 2, tools: [] },
-      { name: "auth", ok: false, toolCount: 0, tools: [], requiresAuth: true, error: "Requires login." },
-      { name: "failed", ok: false, toolCount: 0, tools: [], requiresAuth: false, error: "Connection refused" },
+      {
+        name: "auth",
+        ok: false,
+        toolCount: 0,
+        tools: [],
+        requiresAuth: true,
+        error: "Requires login.",
+      },
+      {
+        name: "failed",
+        ok: false,
+        toolCount: 0,
+        tools: [],
+        requiresAuth: false,
+        error: "Connection refused",
+      },
     ]);
     const dispose = vi.spyOn(MCPClientManager.prototype, "dispose");
     // Exercise the same builder used by the HTTP response, including JSON serialization.
-    const rows = JSON.parse(JSON.stringify(await buildMcpRows("fixture-project", "fixture-settings")));
+    const rows = JSON.parse(
+      JSON.stringify(await buildMcpRows("fixture-project", "fixture-settings")),
+    );
     expect(rows).toEqual([
-      { name: "disabled", scope: "global", enabled: false, ok: false, toolCount: 0, kind: "http", summary: disabled.config.url },
-      { name: "connected", scope: "global", enabled: true, ok: true, toolCount: 2, kind: "http", summary: "https://connected.invalid/mcp" },
-      { name: "auth", scope: "global", enabled: true, ok: false, toolCount: 0, kind: "http", summary: "https://auth.invalid/mcp", requiresAuth: true, error: "Requires login." },
-      { name: "failed", scope: "global", enabled: true, ok: false, toolCount: 0, kind: "http", summary: "https://failed.invalid/mcp", requiresAuth: false, error: "Connection refused", failureReason: "connection-failed" },
+      {
+        name: "disabled",
+        scope: "global",
+        enabled: false,
+        ok: false,
+        toolCount: 0,
+        kind: "http",
+        summary: disabled.config.url,
+      },
+      {
+        name: "connected",
+        scope: "global",
+        enabled: true,
+        ok: true,
+        toolCount: 2,
+        kind: "http",
+        summary: "https://connected.invalid/mcp",
+      },
+      {
+        name: "auth",
+        scope: "global",
+        enabled: true,
+        ok: false,
+        toolCount: 0,
+        kind: "http",
+        summary: "https://auth.invalid/mcp",
+        requiresAuth: true,
+        error: "Requires login.",
+      },
+      {
+        name: "failed",
+        scope: "global",
+        enabled: true,
+        ok: false,
+        toolCount: 0,
+        kind: "http",
+        summary: "https://failed.invalid/mcp",
+        requiresAuth: false,
+        error: "Connection refused",
+        failureReason: "connection-failed",
+      },
     ]);
     expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("uses the real disabled execution gate without connecting or probing", async () => {
-    vi.mocked(loadServers).mockResolvedValue([disabled, {
-      scope: "global",
-      config: { name: "disabled-stdio", command: "must-not-spawn", enabled: false },
-    }]);
-    const connect = vi.spyOn(Client.prototype, "connect").mockRejectedValue(new Error("Unexpected connection"));
+    vi.mocked(loadServers).mockResolvedValue([
+      disabled,
+      {
+        scope: "global",
+        config: { name: "disabled-stdio", command: "must-not-spawn", enabled: false },
+      },
+    ]);
+    const connect = vi
+      .spyOn(Client.prototype, "connect")
+      .mockRejectedValue(new Error("Unexpected connection"));
     const probe = vi.spyOn(MCPClientManager.prototype, "probe");
     const rows = await buildMcpRows("fixture-project", "fixture-settings");
     expect(rows).toHaveLength(2);
@@ -68,10 +126,12 @@ describe("desktop MCP list row building", () => {
   });
 
   it("preserves project trust errors independently of enabled state", async () => {
-    vi.mocked(loadServers).mockResolvedValue([true, false].map((enabled) => ({
-      scope: "project" as const,
-      config: { name: `project-${enabled}`, command: "must-not-spawn", enabled },
-    })));
+    vi.mocked(loadServers).mockResolvedValue(
+      [true, false].map((enabled) => ({
+        scope: "project" as const,
+        config: { name: `project-${enabled}`, command: "must-not-spawn", enabled },
+      })),
+    );
     const connect = vi.spyOn(MCPClientManager.prototype, "connectAllDetailed");
     const rows = await buildMcpRows("fixture-project", "fixture-settings");
     expect(rows.map((row) => row.enabled)).toEqual([true, false]);

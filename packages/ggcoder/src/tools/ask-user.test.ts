@@ -80,7 +80,14 @@ describe("ask_user", () => {
   it("blocks until the user answers, then returns the answer to the model", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "flag", question: "Flip the flag for everyone now?", kind: "confirm", detail: CONTEXT }],
+      questions: [
+        {
+          id: "flag",
+          question: "Flip the flag for everyone now?",
+          kind: "confirm",
+          detail: CONTEXT,
+        },
+      ],
     });
     const asked = await prompt();
 
@@ -143,7 +150,9 @@ describe("ask_user", () => {
   it("passes free text straight through", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "name", question: "What should I call the flag?", kind: "text", detail: CONTEXT }],
+      questions: [
+        { id: "name", question: "What should I call the flag?", kind: "text", detail: CONTEXT },
+      ],
     });
     const asked = await prompt();
     bridge.settle(asked.id, { action: "answer", answers: { name: "retry_uploads" } });
@@ -172,7 +181,9 @@ describe("ask_user", () => {
     });
     const asked = await prompt();
     expect(asked.questions).toHaveLength(2);
-    expect(asked.questions.map((q) => q.options?.filter((o) => o.recommended).length)).toEqual([1, 1]);
+    expect(asked.questions.map((q) => q.options?.filter((o) => o.recommended).length)).toEqual([
+      1, 1,
+    ]);
     bridge.settle(asked.id, {
       action: "answer",
       answers: { trial: "14 days", proration: "Prorate" },
@@ -185,7 +196,9 @@ describe("ask_user", () => {
   it("tells the model to stop asking when the user never answers", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT }],
+      questions: [
+        { id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT },
+      ],
     });
     await prompt();
     // What an aborted run / closed window does to a parked question.
@@ -199,7 +212,9 @@ describe("ask_user", () => {
   it("releases the turn when the user replies with their own message", async () => {
     const { bridge, call, prompt } = harness();
     const result = call({
-      questions: [{ id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT }],
+      questions: [
+        { id: "go", question: "Run the migration against prod?", kind: "confirm", detail: CONTEXT },
+      ],
     });
     await prompt();
     bridge.cancelAll({ action: "cancel", superseded: true });
@@ -215,7 +230,9 @@ describe("ask_user", () => {
     const { call, broadcast } = harness();
     await expect(
       call({
-        questions: [{ id: "store", question: "Which store?", kind: "choice", detail: CONTEXT, options: [] }],
+        questions: [
+          { id: "store", question: "Which store?", kind: "choice", detail: CONTEXT, options: [] },
+        ],
       }),
     ).resolves.toEqual({
       content: expect.stringContaining("needs at least 2 options"),

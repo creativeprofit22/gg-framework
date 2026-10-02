@@ -72,57 +72,100 @@ function successfulPsSync(stdout: string): typeof spawnSync {
 }
 
 describe("verified tree cleanup", () => {
-  it.each(["linux", "win32"] as const)("does not certify descendants of an exited %s parent", async (platform) => {
-    const spawnProcess = vi.fn();
-    const kill = aliveKill();
-    await expect(killProcessTreeAsync({ pid: 123, isExited: () => true }, {
-      platform, requireSettlement: true, kill, spawn: spawnProcess,
-    })).rejects.toThrow("not confirmed");
-    expect(spawnProcess).not.toHaveBeenCalled();
-    expect(kill).not.toHaveBeenCalled();
-  });
+  it.each(["linux", "win32"] as const)(
+    "does not certify descendants of an exited %s parent",
+    async (platform) => {
+      const spawnProcess = vi.fn();
+      const kill = aliveKill();
+      await expect(
+        killProcessTreeAsync(
+          { pid: 123, isExited: () => true },
+          {
+            platform,
+            requireSettlement: true,
+            kill,
+            spawn: spawnProcess,
+          },
+        ),
+      ).rejects.toThrow("not confirmed");
+      expect(spawnProcess).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not certify descendants when the Windows parent PID is absent", async () => {
     const spawnProcess = vi.fn();
-    const kill = vi.fn(() => { throw errno("ESRCH"); });
-    await expect(killProcessTreeAsync(123, {
-      platform: "win32", requireSettlement: true, kill, spawn: spawnProcess,
-    })).rejects.toThrow("not confirmed");
+    const kill = vi.fn(() => {
+      throw errno("ESRCH");
+    });
+    await expect(
+      killProcessTreeAsync(123, {
+        platform: "win32",
+        requireSettlement: true,
+        kill,
+        spawn: spawnProcess,
+      }),
+    ).rejects.toThrow("not confirmed");
     expect(spawnProcess).not.toHaveBeenCalled();
     expect(kill).toHaveBeenCalledExactlyOnceWith(123, 0);
   });
 
   it("attempts known-target termination before rejecting a failed POSIX snapshot", async () => {
     const kill = aliveKill();
-    await expect(killProcessTreeAsync({ pid: 123, isExited: () => false }, {
-      platform: "linux", requireSettlement: true, kill,
-      spawn: vi.fn(() => { throw new Error("injected snapshot failure"); }),
-    })).rejects.toThrow("injected snapshot failure");
+    await expect(
+      killProcessTreeAsync(
+        { pid: 123, isExited: () => false },
+        {
+          platform: "linux",
+          requireSettlement: true,
+          kill,
+          spawn: vi.fn(() => {
+            throw new Error("injected snapshot failure");
+          }),
+        },
+      ),
+    ).rejects.toThrow("injected snapshot failure");
     expect(kill).toHaveBeenCalledWith(-123, "SIGKILL");
   });
 
-  it.each(["nonzero", "error", "timeout"])("rejects Windows %s instead of accepting fallback dispatch", async (mode) => {
-    vi.useFakeTimers();
-    vi.spyOn(logger, "log").mockImplementation(() => {});
-    const killer = createKiller();
-    const cleanup = killProcessTreeAsync({ pid: 123, isExited: () => false }, {
-      platform: "win32", requireSettlement: true, taskkillTimeoutMs: 20,
-      kill: aliveKill(), spawn: vi.fn(() => killer.child) as unknown as typeof spawn,
-    });
-    const result = expect(cleanup).rejects.toThrow("not confirmed");
-    if (mode === "nonzero") killer.events.emit("close", 1, null);
-    if (mode === "error") killer.events.emit("error", new Error("injected failure"));
-    await vi.runAllTimersAsync();
-    await result;
-  });
+  it.each(["nonzero", "error", "timeout"])(
+    "rejects Windows %s instead of accepting fallback dispatch",
+    async (mode) => {
+      vi.useFakeTimers();
+      vi.spyOn(logger, "log").mockImplementation(() => {});
+      const killer = createKiller();
+      const cleanup = killProcessTreeAsync(
+        { pid: 123, isExited: () => false },
+        {
+          platform: "win32",
+          requireSettlement: true,
+          taskkillTimeoutMs: 20,
+          kill: aliveKill(),
+          spawn: vi.fn(() => killer.child) as unknown as typeof spawn,
+        },
+      );
+      const result = expect(cleanup).rejects.toThrow("not confirmed");
+      if (mode === "nonzero") killer.events.emit("close", 1, null);
+      if (mode === "error") killer.events.emit("error", new Error("injected failure"));
+      await vi.runAllTimersAsync();
+      await result;
+    },
+  );
 
   it("rejects a POSIX survivor even when signal dispatch succeeds", async () => {
     vi.useFakeTimers();
     const helper = createPsHelper();
-    const cleanup = killProcessTreeAsync({ pid: 123, isExited: () => false }, {
-      platform: "linux", requireSettlement: true, taskkillTimeoutMs: 25, posixGraceMs: 0,
-      kill: aliveKill(), spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
-    });
+    const cleanup = killProcessTreeAsync(
+      { pid: 123, isExited: () => false },
+      {
+        platform: "linux",
+        requireSettlement: true,
+        taskkillTimeoutMs: 25,
+        posixGraceMs: 0,
+        kill: aliveKill(),
+        spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      },
+    );
     const result = expect(cleanup).rejects.toThrow("survivors");
     helper.stdout.write("124 123\n");
     helper.events.emit("close", 0);
@@ -132,10 +175,19 @@ describe("verified tree cleanup", () => {
 
   it("rejects an unverified POSIX snapshot", async () => {
     vi.spyOn(logger, "log").mockImplementation(() => {});
-    await expect(killProcessTreeAsync({ pid: 123, isExited: () => false }, {
-      platform: "linux", requireSettlement: true, kill: aliveKill(),
-      spawn: vi.fn(() => { throw new Error("snapshot unavailable"); }) as unknown as typeof spawn,
-    })).rejects.toThrow("snapshot unavailable");
+    await expect(
+      killProcessTreeAsync(
+        { pid: 123, isExited: () => false },
+        {
+          platform: "linux",
+          requireSettlement: true,
+          kill: aliveKill(),
+          spawn: vi.fn(() => {
+            throw new Error("snapshot unavailable");
+          }) as unknown as typeof spawn,
+        },
+      ),
+    ).rejects.toThrow("snapshot unavailable");
   });
 });
 
@@ -145,42 +197,70 @@ describe("Windows MSYS process-tree cleanup", () => {
     "WIN 0 0 1",
     "12 1 12 124 ? 100 12:00 /usr/bin/bash",
     "13 12 12 125 ? 100 12:00 /usr/bin/sleep",
-    "WIN 123 1 100", "WIN 124 123 101", "WIN 125 999 102", "WIN 126 999 99", "WIN 127 124 98",
+    "WIN 123 1 100",
+    "WIN 124 123 101",
+    "WIN 125 999 102",
+    "WIN 126 999 99",
+    "WIN 127 124 98",
   ].join("\n");
-  const target = { pid: 123, isExited: () => false, msysPsPath: "E:\\Git's tools\\usr\\bin\\ps.exe" };
+  const target = {
+    pid: 123,
+    isExited: () => false,
+    msysPsPath: "E:\\Git's tools\\usr\\bin\\ps.exe",
+  };
 
-  it.each([false, true])("kills logically owned reparented children, not outsiders (sync=%s)", async (sync) => {
-    const alive = new Set([123, 124, 125, 126, 127]);
-    const kill = vi.fn((pid: number, signal?: string | number): true => {
-      if (!alive.has(pid)) throw errno("ESRCH");
-      if (signal === "SIGKILL") alive.delete(pid);
-      return true;
-    });
-    const helper = createPsHelper();
-    const killer = createKiller();
-    const spawnProcess = vi.fn((file: string, args: readonly string[]) => {
-      if (file.endsWith("powershell.exe")) {
-        expect(Buffer.from(args.at(-1)!, "base64").toString("utf16le")).toContain("E:\\Git''s tools\\usr\\bin\\ps.exe");
-        queueMicrotask(() => { helper.stdout.write(table); helper.events.emit("close", 0); });
-        return helper.child;
+  it.each([false, true])(
+    "kills logically owned reparented children, not outsiders (sync=%s)",
+    async (sync) => {
+      const alive = new Set([123, 124, 125, 126, 127]);
+      const kill = vi.fn((pid: number, signal?: string | number): true => {
+        if (!alive.has(pid)) throw errno("ESRCH");
+        if (signal === "SIGKILL") alive.delete(pid);
+        return true;
+      });
+      const helper = createPsHelper();
+      const killer = createKiller();
+      const spawnProcess = vi.fn((file: string, args: readonly string[]) => {
+        if (file.endsWith("powershell.exe")) {
+          expect(Buffer.from(args.at(-1)!, "base64").toString("utf16le")).toContain(
+            "E:\\Git''s tools\\usr\\bin\\ps.exe",
+          );
+          queueMicrotask(() => {
+            helper.stdout.write(table);
+            helper.events.emit("close", 0);
+          });
+          return helper.child;
+        }
+        queueMicrotask(() => {
+          alive.delete(123);
+          alive.delete(124);
+          killer.events.emit("close", 0, null);
+        });
+        return killer.child;
+      }) as unknown as typeof spawn;
+      if (sync) {
+        const spawnProcessSync = vi.fn((file: string) => {
+          if (!file.endsWith("powershell.exe")) {
+            alive.delete(123);
+            alive.delete(124);
+          }
+          return { pid: 1, output: [], status: 0, signal: null, stdout: table, stderr: "" };
+        }) as unknown as typeof spawnSync;
+        killProcessTree(target, { platform: "win32", kill, spawnSync: spawnProcessSync });
+      } else {
+        await killProcessTreeAsync(target, {
+          platform: "win32",
+          requireSettlement: true,
+          kill,
+          spawn: spawnProcess,
+        });
       }
-      queueMicrotask(() => { alive.delete(123); alive.delete(124); killer.events.emit("close", 0, null); });
-      return killer.child;
-    }) as unknown as typeof spawn;
-    if (sync) {
-      const spawnProcessSync = vi.fn((file: string) => {
-        if (!file.endsWith("powershell.exe")) { alive.delete(123); alive.delete(124); }
-        return { pid: 1, output: [], status: 0, signal: null, stdout: table, stderr: "" };
-      }) as unknown as typeof spawnSync;
-      killProcessTree(target, { platform: "win32", kill, spawnSync: spawnProcessSync });
-    } else {
-      await killProcessTreeAsync(target, { platform: "win32", requireSettlement: true, kill, spawn: spawnProcess });
-    }
-    expect(kill).toHaveBeenCalledWith(125, "SIGKILL");
-    expect([...alive]).toEqual([126, 127]);
-    expect(kill).not.toHaveBeenCalledWith(126, "SIGKILL");
-    expect(kill).not.toHaveBeenCalledWith(127, "SIGKILL");
-  });
+      expect(kill).toHaveBeenCalledWith(125, "SIGKILL");
+      expect([...alive]).toEqual([126, 127]);
+      expect(kill).not.toHaveBeenCalledWith(126, "SIGKILL");
+      expect(kill).not.toHaveBeenCalledWith(127, "SIGKILL");
+    },
+  );
 
   it("rejects MSYS survivors even when taskkill reports success", async () => {
     vi.useFakeTimers();
@@ -188,31 +268,54 @@ describe("Windows MSYS process-tree cleanup", () => {
     const killer = createKiller();
     const spawnProcess = vi.fn((file: string) => {
       if (file.endsWith("powershell.exe")) {
-        queueMicrotask(() => { helper.stdout.write(table); helper.events.emit("close", 0); });
+        queueMicrotask(() => {
+          helper.stdout.write(table);
+          helper.events.emit("close", 0);
+        });
         return helper.child;
       }
       queueMicrotask(() => killer.events.emit("close", 0, null));
       return killer.child;
     }) as unknown as typeof spawn;
-    const result = expect(killProcessTreeAsync(target, {
-      platform: "win32", requireSettlement: true, taskkillTimeoutMs: 25, kill: aliveKill(), spawn: spawnProcess,
-    })).rejects.toThrow("MSYS process cleanup has live or unverified survivors");
+    const result = expect(
+      killProcessTreeAsync(target, {
+        platform: "win32",
+        requireSettlement: true,
+        taskkillTimeoutMs: 25,
+        kill: aliveKill(),
+        spawn: spawnProcess,
+      }),
+    ).rejects.toThrow("MSYS process cleanup has live or unverified survivors");
     await vi.runAllTimersAsync();
     await result;
   });
 
-  it.each(["missing header", table.replace("WIN 123 1", "WIN 999 1"), table + "\n13 12 12 127 ? 100 12:00 duplicate"])("rejects incomplete or ambiguous snapshots: %s", async (output) => {
+  it.each([
+    "missing header",
+    table.replace("WIN 123 1", "WIN 999 1"),
+    table + "\n13 12 12 127 ? 100 12:00 duplicate",
+  ])("rejects incomplete or ambiguous snapshots: %s", async (output) => {
     const helper = createPsHelper();
     const killer = createKiller();
     const spawnProcess = vi.fn((file: string) => {
       if (file.endsWith("powershell.exe")) {
-        queueMicrotask(() => { helper.stdout.write(output); helper.events.emit("close", 0); });
+        queueMicrotask(() => {
+          helper.stdout.write(output);
+          helper.events.emit("close", 0);
+        });
         return helper.child;
       }
       queueMicrotask(() => killer.events.emit("close", 0, null));
       return killer.child;
     }) as unknown as typeof spawn;
-    await expect(killProcessTreeAsync(target, { platform: "win32", requireSettlement: true, kill: aliveKill(), spawn: spawnProcess })).rejects.toThrow(/header|absent|identity/);
+    await expect(
+      killProcessTreeAsync(target, {
+        platform: "win32",
+        requireSettlement: true,
+        kill: aliveKill(),
+        spawn: spawnProcess,
+      }),
+    ).rejects.toThrow(/header|absent|identity/);
     expect(spawnProcess).toHaveBeenCalledTimes(2);
   });
 });

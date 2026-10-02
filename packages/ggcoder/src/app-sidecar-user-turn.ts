@@ -2,8 +2,11 @@ import type { Message } from "@kenkaiiii/gg-ai";
 import type { AutopilotCycleOutcome } from "./core/autopilot-cycle.js";
 
 import {
-  countAssistantMessages, extractTurnToolCalls, isMechanicalOnlyTurn,
-  shouldStartAutopilotCycle, type AutopilotGateInput,
+  countAssistantMessages,
+  extractTurnToolCalls,
+  isMechanicalOnlyTurn,
+  shouldStartAutopilotCycle,
+  type AutopilotGateInput,
 } from "./core/autopilot-gate.js";
 
 export type UserTurnOutcome = AutopilotCycleOutcome | "no-review";
@@ -20,8 +23,11 @@ export interface UserTurnDeps {
 
 /** Ordinary user-turn gate. Injected reviewer runs must stay on plain runAgent. */
 export async function runUserTurn(
-  deps: UserTurnDeps, text: string, run: () => Promise<void>,
-  workflowCommand: boolean, onSettled?: () => void,
+  deps: UserTurnDeps,
+  text: string,
+  run: () => Promise<void>,
+  workflowCommand: boolean,
+  onSettled?: () => void,
 ): Promise<UserTurnOutcome> {
   deps.clearCancelled();
   const assistantsBefore = countAssistantMessages(deps.getMessages());
@@ -34,11 +40,16 @@ export async function runUserTurn(
     completed = true;
   });
   onSettled?.();
-  const decision = completed ? shouldStartAutopilotCycle({
-    ...deps.gateState(), workflowCommand,
-    assistantMessagesAdded: countAssistantMessages(deps.getMessages()) - assistantsBefore,
-    mechanicalOnly: isMechanicalOnlyTurn(extractTurnToolCalls(deps.getMessages(), messagesBefore)),
-  }) : { start: false as const, reason: "no-assistant-output" as const };
+  const decision = completed
+    ? shouldStartAutopilotCycle({
+        ...deps.gateState(),
+        workflowCommand,
+        assistantMessagesAdded: countAssistantMessages(deps.getMessages()) - assistantsBefore,
+        mechanicalOnly: isMechanicalOnlyTurn(
+          extractTurnToolCalls(deps.getMessages(), messagesBefore),
+        ),
+      })
+    : { start: false as const, reason: "no-assistant-output" as const };
   deps.decision(decision);
   try {
     const outcome = decision.start ? await deps.review(text) : "no-review";
@@ -59,7 +70,11 @@ export function createStrandedQueueDrain(blocked: () => boolean, drain: () => Pr
     if (activeDrain) return activeDrain;
     if (blocked()) return Promise.resolve();
     // Publish ownership before executing the drain, including synchronous re-entry.
-    activeDrain = Promise.resolve().then(drain).finally(() => { activeDrain = undefined; });
+    activeDrain = Promise.resolve()
+      .then(drain)
+      .finally(() => {
+        activeDrain = undefined;
+      });
     return activeDrain;
   };
 }
@@ -71,7 +86,11 @@ export function createContinuationPromptAdapter(deps: {
   workflowCommand: (text: string) => Promise<boolean>;
 }) {
   return async (text: string, onAccepted: () => Promise<void>): Promise<void> => {
-    await runUserTurn(deps.userTurn, text, () => deps.prompt(text, onAccepted),
-      await deps.workflowCommand(text));
+    await runUserTurn(
+      deps.userTurn,
+      text,
+      () => deps.prompt(text, onAccepted),
+      await deps.workflowCommand(text),
+    );
   };
 }

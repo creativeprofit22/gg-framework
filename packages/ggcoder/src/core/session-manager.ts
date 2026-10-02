@@ -270,9 +270,7 @@ export const RUN_FINISHED_CUSTOM_KIND = "run_finished";
 export const APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND = "approved_plan_consumption";
 
 export type ApprovedPlanConsumptionState =
-  | "approval-committed"
-  | "implementation-prompt-started"
-  | "completed";
+  "approval-committed" | "implementation-prompt-started" | "completed";
 
 /** Server/session-owned snapshot of the exact approved plan consumed by the model. */
 export interface ApprovedPlanConsumptionRecord {

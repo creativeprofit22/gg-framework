@@ -353,7 +353,9 @@ describe("SharedMcpPool refcounting", () => {
           connected.push(target.timeout);
           return { name: target.name, ok: true, toolCount: 0, tools: [] };
         },
-        dispose: async () => { disposed.push(id); },
+        dispose: async () => {
+          disposed.push(id);
+        },
       };
     };
     const leftConfig = { ...config, ...(left === undefined ? {} : { timeout: left }) };

@@ -32,12 +32,18 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
     expect(profile.match(/function assessProgrammaticSetup\(/g)).toHaveLength(1);
     expect(profile.match(/function persistProgrammaticProfile\(/g)).toHaveLength(1);
     expect(profile.match(/operations\.rename\(/g)).toHaveLength(1);
-    expect(profile.match(/replaceBoundedFile\(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH, previousProfileTemporary,/g)).toHaveLength(1);
+    expect(
+      profile.match(
+        /replaceBoundedFile\(root, PROGRAMMATIC_PREVIOUS_PROFILE_PATH, previousProfileTemporary,/g,
+      ),
+    ).toHaveLength(1);
     expect(profile).toContain("compareConfigurationSnapshots(");
     expect(lifecycle).toContain("assessProgrammaticSetup(");
     expect(profile).not.toContain("CONFIG_FILE_NAMES");
     expect(lifecycle).not.toContain("CONFIG_FILE_NAMES");
-    expect(`${inventory}\n${profile}\n${lifecycle}`).not.toMatch(/\b(?:setInterval|setTimeout|watch|watchFile)\s*\(/);
+    expect(`${inventory}\n${profile}\n${lifecycle}`).not.toMatch(
+      /\b(?:setInterval|setTimeout|watch|watchFile)\s*\(/,
+    );
     expect(inventory).toContain("PROGRAMMATIC_CONFIGURATION_INPUT_LIMIT * 2");
     expect(Buffer.byteLength(profile)).toBeLessThan(24_500);
     expect(Buffer.byteLength(inventory)).toBeLessThan(18_000);

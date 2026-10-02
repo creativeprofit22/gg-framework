@@ -221,22 +221,26 @@ afterEach(async () => {
 });
 
 describe("ProjectNotesRepository deletion authority", () => {
-  it.each([false, true])("rejects generic omission even for history-free phases (history=%s)", async history => {
-    const repository = new ProjectNotesRepository(await tempAgentDir());
-    const cwd = "/work/deletion-omission";
-    const document = notes();
-    if (!history) {
-      document.phases[0]!.lifecycleEvents = [];
-      document.phases[0]!.roadmapEvents = [];
-    }
-    expect((await repository.migrate(cwd, document)).status).toBe("ok");
-    const before = await fs.readFile(repository.paths(cwd).primary, "utf8");
-    const omitted = { ...document, phases: [] };
-    expect(await repository.save(cwd, 1, omitted)).toMatchObject({
-      status: "invalid", error: { message: expect.stringContaining("dedicated recoverable deletion") },
-    });
-    expect(await fs.readFile(repository.paths(cwd).primary, "utf8")).toBe(before);
-  });
+  it.each([false, true])(
+    "rejects generic omission even for history-free phases (history=%s)",
+    async (history) => {
+      const repository = new ProjectNotesRepository(await tempAgentDir());
+      const cwd = "/work/deletion-omission";
+      const document = notes();
+      if (!history) {
+        document.phases[0]!.lifecycleEvents = [];
+        document.phases[0]!.roadmapEvents = [];
+      }
+      expect((await repository.migrate(cwd, document)).status).toBe("ok");
+      const before = await fs.readFile(repository.paths(cwd).primary, "utf8");
+      const omitted = { ...document, phases: [] };
+      expect(await repository.save(cwd, 1, omitted)).toMatchObject({
+        status: "invalid",
+        error: { message: expect.stringContaining("dedicated recoverable deletion") },
+      });
+      expect(await fs.readFile(repository.paths(cwd).primary, "utf8")).toBe(before);
+    },
+  );
 
   it("rejects tombstone creation through generic save and migration without writing", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
@@ -244,19 +248,32 @@ describe("ProjectNotesRepository deletion authority", () => {
     const document = notes();
     expect((await repository.migrate(cwd, document)).status).toBe("ok");
     const before = await fs.readFile(repository.paths(cwd).primary, "utf8");
-    document.phases[0] = applyNotesPhaseDeletion(document.phases[0]!, {
-      version: 1, action: "delete", operationId: "delete-1", phaseId: document.phases[0]!.id,
-      expectedProjectKey: canonicalProjectKey(cwd), expectedRevision: 1, expectedGeneration: 0,
-    }, NOW);
+    document.phases[0] = applyNotesPhaseDeletion(
+      document.phases[0]!,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-1",
+        phaseId: document.phases[0]!.id,
+        expectedProjectKey: canonicalProjectKey(cwd),
+        expectedRevision: 1,
+        expectedGeneration: 0,
+      },
+      NOW,
+    );
     expect(validateNotesDocumentV3(document).ok).toBe(true);
     expect(await repository.save(cwd, 1, document)).toMatchObject({
-      status: "invalid", error: { message: expect.stringContaining("Deletion history") },
+      status: "invalid",
+      error: { message: expect.stringContaining("Deletion history") },
     });
     expect(await fs.readFile(repository.paths(cwd).primary, "utf8")).toBe(before);
     expect(await repository.migrate("/work/deletion-fresh", document)).toMatchObject({
-      status: "invalid", error: { message: "Migration cannot create deletion history" },
+      status: "invalid",
+      error: { message: "Migration cannot create deletion history" },
     });
-    await expect(fs.stat(repository.paths("/work/deletion-fresh").primary)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(repository.paths("/work/deletion-fresh").primary)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });
 
@@ -1598,81 +1615,110 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
   it.each([
     ["waiting-for-approval", "approval-opened"],
     ["needs-attention", "attention-question-opened"],
-  ] as const)("preserves unresolved %s across progress until authorized resolution", async (status, kind) => {
-    const repository = new ProjectNotesRepository(await tempAgentDir());
-    const cwd = `/work/roadmap-protected-${status}`;
-    const document = roadmapDocument();
-    const phase = document.phases[0]!;
-    phase.status = status;
-    phase.attentionReason = status === "needs-attention" ? "User decision required" : null;
-    phase.lifecycleEvents = [{
-      id: "unresolved-decision",
-      fromStatus: "planning",
-      toStatus: status,
-      source: "agent",
-      timestamp: NOW,
-      reason: "User decision required",
-      kind,
-    }];
-    await repository.migrate(cwd, document);
-    const request: ProjectNotesRoadmapStatusRequest = {
-      updateId: "progress",
-      phaseId: phase.id,
-      expectedRevision: 1,
-      actor: "gg-coder",
-      transition: "in-progress",
-      progress: "Independent work verified; user decision still pending",
-      blocker: null,
-      requiredExternalAction: null,
-      evidence: ["Independent checks passed"],
-      verification: "passed",
-      verificationReason: null,
-      proposedReferences: [],
-      timestamp: NOW,
-      expectedSession: { sessionId: "fresh-session", sessionPath: "/sessions/fresh.jsonl" },
-      requireBoundPhase: false,
-      autopilotEnabled: false,
-    };
-    let revision = 1;
-    for (const transition of ["in-progress", "pending", "review", "blocked"] as const) {
-      const progress = await repository.recordRoadmapStatusUpdate(cwd, {
-        ...request,
-        updateId: `progress-${transition}`,
-        expectedRevision: revision,
-        transition,
-        blocker: transition === "blocked" ? "Another decision is needed" : null,
-        requiredExternalAction: transition === "blocked" ? "Answer the question" : null,
+  ] as const)(
+    "preserves unresolved %s across progress until authorized resolution",
+    async (status, kind) => {
+      const repository = new ProjectNotesRepository(await tempAgentDir());
+      const cwd = `/work/roadmap-protected-${status}`;
+      const document = roadmapDocument();
+      const phase = document.phases[0]!;
+      phase.status = status;
+      phase.attentionReason = status === "needs-attention" ? "User decision required" : null;
+      phase.lifecycleEvents = [
+        {
+          id: "unresolved-decision",
+          fromStatus: "planning",
+          toStatus: status,
+          source: "agent",
+          timestamp: NOW,
+          reason: "User decision required",
+          kind,
+        },
+      ];
+      await repository.migrate(cwd, document);
+      const request: ProjectNotesRoadmapStatusRequest = {
+        updateId: "progress",
+        phaseId: phase.id,
+        expectedRevision: 1,
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Independent work verified; user decision still pending",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: ["Independent checks passed"],
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: NOW,
+        expectedSession: { sessionId: "fresh-session", sessionPath: "/sessions/fresh.jsonl" },
+        requireBoundPhase: false,
+        autopilotEnabled: false,
+      };
+      let revision = 1;
+      for (const transition of ["in-progress", "pending", "review", "blocked"] as const) {
+        const progress = await repository.recordRoadmapStatusUpdate(cwd, {
+          ...request,
+          updateId: `progress-${transition}`,
+          expectedRevision: revision,
+          transition,
+          blocker: transition === "blocked" ? "Another decision is needed" : null,
+          requiredExternalAction: transition === "blocked" ? "Answer the question" : null,
+        });
+        expect(progress).toMatchObject({ status: "committed", statusOutcome: "evidence-only" });
+        if (progress.status !== "committed") throw new Error("Expected progress to be recorded");
+        revision = progress.snapshot.revision;
+        expect(progress.phase).toMatchObject({
+          status,
+          attentionReason: phase.attentionReason,
+          overrides: { status: null },
+          pendingAutomaticLifecycleTransition: phase.pendingAutomaticLifecycleTransition,
+          lifecycleEvents: phase.lifecycleEvents,
+          roadmapEvents: expect.arrayContaining([
+            expect.objectContaining({
+              id: `progress-${transition}`,
+              transition,
+              progress: request.progress,
+            }),
+          ]),
+        });
+        await expect(
+          repository.recordRoadmapStatusUpdate(cwd, {
+            ...request,
+            updateId: `done-${transition}`,
+            transition: "done",
+            expectedRevision: revision,
+          }),
+        ).resolves.toEqual({ status: "operation-conflict", revision });
+      }
+      const resolved = await repository.recordPhaseLifecycleTransition(cwd, phase.id, {
+        status: "in-progress",
+        source: status === "waiting-for-approval" ? "user" : "session",
+        kind:
+          status === "waiting-for-approval"
+            ? "approval-resolved"
+            : "attention-implementation-resolved",
+        reason:
+          status === "waiting-for-approval"
+            ? "Plan approved by user"
+            : "Implementation session resumed",
+        timestamp: NOW,
+        expectedSession: phase.session,
       });
-      expect(progress).toMatchObject({ status: "committed", statusOutcome: "evidence-only" });
-      if (progress.status !== "committed") throw new Error("Expected progress to be recorded");
-      revision = progress.snapshot.revision;
-      expect(progress.phase).toMatchObject({
-        status,
-        attentionReason: phase.attentionReason,
-        overrides: { status: null },
-        pendingAutomaticLifecycleTransition: phase.pendingAutomaticLifecycleTransition,
-        lifecycleEvents: phase.lifecycleEvents,
-        roadmapEvents: expect.arrayContaining([expect.objectContaining({
-          id: `progress-${transition}`, transition, progress: request.progress,
-        })]),
+      if (resolved.status !== "ok") throw new Error("Expected authorized resolution");
+      await expect(
+        repository.recordRoadmapStatusUpdate(cwd, {
+          ...request,
+          updateId: "done-after-resolution",
+          transition: "done",
+          expectedRevision: resolved.snapshot.revision,
+        }),
+      ).resolves.toMatchObject({
+        status: "committed",
+        statusOutcome: "applied",
+        phase: { status: "done" },
       });
-      await expect(repository.recordRoadmapStatusUpdate(cwd, {
-        ...request, updateId: `done-${transition}`, transition: "done", expectedRevision: revision,
-      })).resolves.toEqual({ status: "operation-conflict", revision });
-    }
-    const resolved = await repository.recordPhaseLifecycleTransition(cwd, phase.id, {
-      status: "in-progress",
-      source: status === "waiting-for-approval" ? "user" : "session",
-      kind: status === "waiting-for-approval" ? "approval-resolved" : "attention-implementation-resolved",
-      reason: status === "waiting-for-approval" ? "Plan approved by user" : "Implementation session resumed",
-      timestamp: NOW,
-      expectedSession: phase.session,
-    });
-    if (resolved.status !== "ok") throw new Error("Expected authorized resolution");
-    await expect(repository.recordRoadmapStatusUpdate(cwd, {
-      ...request, updateId: "done-after-resolution", transition: "done", expectedRevision: resolved.snapshot.revision,
-    })).resolves.toMatchObject({ status: "committed", statusOutcome: "applied", phase: { status: "done" } });
-  });
+    },
+  );
 
   it("rejects passed progress with missing evidence without writing and accepts a corrected retry", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
@@ -2036,7 +2082,8 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
         ]),
       },
     });
-    if (resumed.status !== "committed") throw new Error("Expected progress without blocker resolution");
+    if (resumed.status !== "committed")
+      throw new Error("Expected progress without blocker resolution");
 
     const reblocked = await restartedRepository.recordRoadmapStatusUpdate(cwd, {
       ...blockedRequest,

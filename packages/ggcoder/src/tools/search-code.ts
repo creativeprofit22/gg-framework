@@ -101,8 +101,17 @@ export function createSearchCodeTool(
         if (root && lineOffset >= omittedLines && localLocations.length < 64) {
           const actual = await realpath(path.resolve(cwd, chunk.file)).catch(() => undefined);
           const relative = actual ? path.relative(root, actual) : undefined;
-          if (relative && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)) {
-            localLocations.push({ path: chunk.file, startLine: chunk.startLine, endLine: chunk.startLine + textLines - 1 });
+          if (
+            relative &&
+            !path.isAbsolute(relative) &&
+            relative !== ".." &&
+            !relative.startsWith(`..${path.sep}`)
+          ) {
+            localLocations.push({
+              path: chunk.file,
+              startLine: chunk.startLine,
+              endLine: chunk.startLine + textLines - 1,
+            });
           }
         }
         lineOffset += textLines + 2; // header plus blank separator
@@ -110,7 +119,13 @@ export function createSearchCodeTool(
       const content = result.truncated
         ? `${result.content}\n\n[Truncated: showing ${result.keptLines} of ${result.totalLines} lines. Lower max_results or refine the query for fewer chunks.]`
         : body;
-      return { content, details: { kind: "host-retrieval-v1", resources: [{ outcome: "retrieved", localLocations }] } };
+      return {
+        content,
+        details: {
+          kind: "host-retrieval-v1",
+          resources: [{ outcome: "retrieved", localLocations }],
+        },
+      };
     },
   };
 }

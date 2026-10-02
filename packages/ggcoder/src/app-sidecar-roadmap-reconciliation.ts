@@ -2,11 +2,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 
 export type RoadmapReconciliationKind =
-  | "phase-deletion"
-  | "phase-create"
-  | "phase-start"
-  | "status-update"
-  | "implementation-checkpoint";
+  "phase-deletion" | "phase-create" | "phase-start" | "status-update" | "implementation-checkpoint";
 
 export interface RoadmapReconciliationOwner {
   projectKey: string;

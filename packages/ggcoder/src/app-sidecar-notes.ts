@@ -1,5 +1,8 @@
 import type http from "node:http";
-import { isPhaseDeletionRequest, type PhaseDeletionOutcome } from "@kenkaiiii/gg-core/project-notes";
+import {
+  isPhaseDeletionRequest,
+  type PhaseDeletionOutcome,
+} from "@kenkaiiii/gg-core/project-notes";
 import {
   AppSidecarJsonBodyError,
   isExactRecord,
@@ -24,7 +27,10 @@ export const NOTES_REQUEST_BODY_MAX_BYTES = 4 * 1024 * 1024;
 export interface AppSidecarNotesHandlerOptions {
   repository: Pick<ProjectNotesRepository, "load" | "migrate" | "save" | "resolveRoadmapBlocker">;
   phaseDeletion?: {
-    execute(input: unknown, context: StorageDiagnosticsSessionContext): Promise<PhaseDeletionOutcome>;
+    execute(
+      input: unknown,
+      context: StorageDiagnosticsSessionContext,
+    ): Promise<PhaseDeletionOutcome>;
   };
   diagnostics: {
     inspect(context: StorageDiagnosticsSessionContext): Promise<ProjectNotesStorageDiagnostics>;
@@ -63,13 +69,21 @@ export function createAppSidecarNotesHandler(
       if (!isNotesRoute) return false;
 
       if (method === "POST" && pathname === "/notes/phase-deletion") {
-        void readJsonBody(req, 16 * 1024).then(async body => {
-          if (!isPhaseDeletionRequest(body)) { sendJson(res, 400, invalidBody()); return; }
-          const outcome: PhaseDeletionOutcome = options.phaseDeletion
-            ? await options.phaseDeletion.execute(body, context)
-            : { status: "unavailable", message: "Phase deletion is unavailable in this session." };
-          sendJson(res, 200, outcome);
-        }).catch(error => sendBodyReadError(res, error, onError));
+        void readJsonBody(req, 16 * 1024)
+          .then(async (body) => {
+            if (!isPhaseDeletionRequest(body)) {
+              sendJson(res, 400, invalidBody());
+              return;
+            }
+            const outcome: PhaseDeletionOutcome = options.phaseDeletion
+              ? await options.phaseDeletion.execute(body, context)
+              : {
+                  status: "unavailable",
+                  message: "Phase deletion is unavailable in this session.",
+                };
+            sendJson(res, 200, outcome);
+          })
+          .catch((error) => sendBodyReadError(res, error, onError));
         return true;
       }
 
@@ -149,14 +163,23 @@ export function createAppSidecarNotesHandler(
 }
 
 function sendLoadOutcome(res: http.ServerResponse, outcome: ProjectNotesLoadOutcome): void {
-  sendJson(res, outcome.status === "unsupported" || outcome.status === "corrupt" ? 409 : 200, outcome);
+  sendJson(
+    res,
+    outcome.status === "unsupported" || outcome.status === "corrupt" ? 409 : 200,
+    outcome,
+  );
 }
 
 function sendMigrationOutcome(
   res: http.ServerResponse,
   outcome: ProjectNotesMigrationOutcome,
 ): void {
-  const status = outcome.status === "invalid" ? 400 : outcome.status === "unsupported" || outcome.status === "corrupt" ? 409 : 200;
+  const status =
+    outcome.status === "invalid"
+      ? 400
+      : outcome.status === "unsupported" || outcome.status === "corrupt"
+        ? 409
+        : 200;
   sendJson(res, status, outcome);
 }
 
@@ -183,7 +206,9 @@ function sendSaveOutcome(res: http.ServerResponse, outcome: ProjectNotesSaveOutc
       ? 400
       : outcome.status === "missing"
         ? 404
-        : outcome.status === "conflict" || outcome.status === "unsupported" || outcome.status === "corrupt"
+        : outcome.status === "conflict" ||
+            outcome.status === "unsupported" ||
+            outcome.status === "corrupt"
           ? 409
           : 200;
   sendJson(res, status, outcome);

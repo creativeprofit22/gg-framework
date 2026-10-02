@@ -10,8 +10,12 @@ describe("inventory touched-files bloat audit", () => {
     expect(evidence).toContain('from "./inventory.js"');
     expect(context).toContain('from "./assessment-evidence.js"');
     for (const source of [evidence, context]) {
-      expect(source).not.toMatch(/child_process|\bspawn\b|\bexec(?:File|Sync)?\b|writeFile|appendFile|buildProgrammaticInventory|fingerprintConfigurationSnapshot|reconcileProgrammaticLifecycle|runProgrammaticScan/);
-      expect(source).not.toMatch(/from ["'].*(?:profile|lifecycle|agent-session|provider)[^"']*["']/);
+      expect(source).not.toMatch(
+        /child_process|\bspawn\b|\bexec(?:File|Sync)?\b|writeFile|appendFile|buildProgrammaticInventory|fingerprintConfigurationSnapshot|reconcileProgrammaticLifecycle|runProgrammaticScan/,
+      );
+      expect(source).not.toMatch(
+        /from ["'].*(?:profile|lifecycle|agent-session|provider)[^"']*["']/,
+      );
     }
   });
   it("reuses existing scan helpers without execution or indexing surfaces", async () => {

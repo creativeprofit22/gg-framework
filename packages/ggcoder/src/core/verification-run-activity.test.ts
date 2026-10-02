@@ -1,17 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { SessionVerificationEvidenceLedger } from "./verification-evidence.js";
 
-function record(ledger: SessionVerificationEvidenceLedger, id: string, exitCode = 0, run = ledger.runId) {
+function record(
+  ledger: SessionVerificationEvidenceLedger,
+  id: string,
+  exitCode = 0,
+  run = ledger.runId,
+) {
   ledger.recordToolResult({
     name: "bash",
     args: { command: "pnpm test" },
     evidenceRevision: ledger.revision,
     evidenceRun: run,
     isError: exitCode !== 0,
-    details: { bashDiagnostics: {
-      executionId: id, command: "pnpm test", cwd: process.cwd(), startedAt: Date.now(),
-      reason: exitCode === 0 ? "completed" : "nonZeroExit", exitCode,
-    } },
+    details: {
+      bashDiagnostics: {
+        executionId: id,
+        command: "pnpm test",
+        cwd: process.cwd(),
+        startedAt: Date.now(),
+        reason: exitCode === 0 ? "completed" : "nonZeroExit",
+        exitCode,
+      },
+    },
   });
 }
 
@@ -40,7 +51,11 @@ describe("request-scoped host verification", () => {
     ledger.beginRun();
     record(ledger, "before-edit");
     ledger.recordToolResult({ name: "edit", args: {}, isError: false });
-    expect(ledger.runActivity()).toMatchObject({ changed: true, checked: true, evidence: [{ status: "rejected" }] });
+    expect(ledger.runActivity()).toMatchObject({
+      changed: true,
+      checked: true,
+      evidence: [{ status: "rejected" }],
+    });
     expect(ledger.snapshot().currentEvidence).toEqual([]);
     expect(ledger.snapshot().staleEvidence).toHaveLength(1);
     record(ledger, "after-edit");

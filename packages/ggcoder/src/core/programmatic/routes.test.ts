@@ -107,9 +107,14 @@ it("pins exact bodies and ownership and detects command drift", async () => {
   const second = await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint);
   expect(second).not.toEqual(first);
   await writeCommand(path.join(cwd, ".gg", "commands", "research.md"));
-  expect(await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint))
-    .toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
-  const bundled = await resolveProgrammaticSpecialist(cwd, opportunity("setup-tauri-package"), fingerprint);
+  expect(
+    await resolveProgrammaticSpecialist(cwd, opportunity("research"), fingerprint),
+  ).toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
+  const bundled = await resolveProgrammaticSpecialist(
+    cwd,
+    opportunity("setup-tauri-package"),
+    fingerprint,
+  );
   expect(bundled).toHaveProperty("command.prompt", getPromptCommand("setup-tauri-package")!.prompt);
 });
 
@@ -121,12 +126,12 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
-  await Promise.all(temporaryDirs.splice(0).map((directory) => fs.rm(directory, { recursive: true })));
+  await Promise.all(
+    temporaryDirs.splice(0).map((directory) => fs.rm(directory, { recursive: true })),
+  );
 });
 
-describe(
-  "The route registry permits only code-mode `/research`, `/setup-sweep`, and `/setup-tauri-package`, with explicit ownership rules and no arbitrary slash-command names.",
-  () => {
+describe("The route registry permits only code-mode `/research`, `/setup-sweep`, and `/setup-tauri-package`, with explicit ownership rules and no arbitrary slash-command names.", () => {
   it("accepts exactly the three allowlisted specialists", () => {
     expect(
       resolveSpecialistAvailability(
@@ -136,22 +141,26 @@ describe(
       ),
     ).toEqual({ status: "available", source: "built-in", portability: "bundled" });
     for (const command of ["research", "setup-sweep"] as const) {
-      expect(resolveSpecialistAvailability(command, [customCommand(command, "global")], undefined))
-        .toMatchObject({
-          status: "available",
-          source: "global-custom",
-          portability: "machine-local",
-          portabilityWarning: PROGRAMMATIC_MACHINE_LOCAL_WARNING,
-        });
+      expect(
+        resolveSpecialistAvailability(command, [customCommand(command, "global")], undefined),
+      ).toMatchObject({
+        status: "available",
+        source: "global-custom",
+        portability: "machine-local",
+        portabilityWarning: PROGRAMMATIC_MACHINE_LOCAL_WARNING,
+      });
     }
   });
 
-  it.each(["", "deploy", "Research", "setup-tauri"])("rejects unsupported command %j", (command) => {
-    expect(resolveSpecialistAvailability(command, [], undefined)).toEqual({
-      status: "unavailable",
-      reason: "unsupported",
-    });
-  });
+  it.each(["", "deploy", "Research", "setup-tauri"])(
+    "rejects unsupported command %j",
+    (command) => {
+      expect(resolveSpecialistAvailability(command, [], undefined)).toEqual({
+        status: "unavailable",
+        reason: "unsupported",
+      });
+    },
+  );
 
   it("applies built-in precedence before custom commands", () => {
     expect(
@@ -162,57 +171,44 @@ describe(
       ),
     ).toEqual({ status: "available", source: "built-in", portability: "bundled" });
   });
+});
 
-  },
-);
+describe("Ambiguous, unsupported, conflicting, or missing routes remain `unroutable` and never fall back to generic prompts or tasks.", () => {
+  it("returns only non-executable resolutions", () => {
+    const research = opportunity("research");
+    const unsupported = opportunity("research");
+    unsupported.route = { status: "routable", specialistCommand: "deploy" as SpecialistCommand };
+    const resolutions = [
+      resolveOpportunityRoute(research, fingerprint, [], undefined),
+      resolveOpportunityRoute(
+        research,
+        fingerprint,
+        [customCommand("research", "global"), customCommand("research", "global")],
+        undefined,
+      ),
+      resolveOpportunityRoute(
+        research,
+        fingerprint,
+        [customCommand("research", "project")],
+        undefined,
+      ),
+      resolveOpportunityRoute(research, fingerprint, [], fakeBuiltIn("research")),
+      resolveOpportunityRoute(unsupported, fingerprint, [], undefined),
+    ];
 
-describe(
-  "Ambiguous, unsupported, conflicting, or missing routes remain `unroutable` and never fall back to generic prompts or tasks.",
-  () => {
-    it("returns only non-executable resolutions", () => {
-      const research = opportunity("research");
-      const unsupported = opportunity("research");
-      unsupported.route = { status: "routable", specialistCommand: "deploy" as SpecialistCommand };
-      const resolutions = [
-        resolveOpportunityRoute(research, fingerprint, [], undefined),
-        resolveOpportunityRoute(
-          research,
-          fingerprint,
-          [customCommand("research", "global"), customCommand("research", "global")],
-          undefined,
-        ),
-        resolveOpportunityRoute(
-          research,
-          fingerprint,
-          [customCommand("research", "project")],
-          undefined,
-        ),
-        resolveOpportunityRoute(research, fingerprint, [], fakeBuiltIn("research")),
-        resolveOpportunityRoute(unsupported, fingerprint, [], undefined),
-      ];
+    expect(resolutions.map(({ status }) => status)).toEqual(Array(5).fill("unroutable"));
+    expect(
+      resolutions.map((resolution) =>
+        resolution.availability.status === "unavailable"
+          ? resolution.availability.reason
+          : "available",
+      ),
+    ).toEqual(["missing", "ambiguous", "wrong-owner", "wrong-owner", "unsupported"]);
+    expect(JSON.stringify(resolutions)).not.toMatch(/prompt|task|fallback/iu);
+  });
+});
 
-      expect(resolutions.map(({ status }) => status)).toEqual(Array(5).fill("unroutable"));
-      expect(
-        resolutions.map((resolution) =>
-          resolution.availability.status === "unavailable"
-            ? resolution.availability.reason
-            : "available",
-        ),
-      ).toEqual([
-        "missing",
-        "ambiguous",
-        "wrong-owner",
-        "wrong-owner",
-        "unsupported",
-      ]);
-      expect(JSON.stringify(resolutions)).not.toMatch(/prompt|task|fallback/iu);
-    });
-  },
-);
-
-describe(
-  "Each route contains one opportunity ID, bounded arguments, evidence paths, scope, success condition, mutation flag, reason, and current command availability.",
-  () => {
+describe("Each route contains one opportunity ID, bounded arguments, evidence paths, scope, success condition, mutation flag, reason, and current command availability.", () => {
   it("builds deterministic, bounded routes without prompt bodies or fallback commands", () => {
     const candidate = opportunity("research");
     const commands = [customCommand("research", "global")];
@@ -241,12 +237,7 @@ describe(
   it("derives the mutating Tauri route from the built-in registry", () => {
     const candidate = opportunity("setup-tauri-package");
     expect(
-      resolveOpportunityRoute(
-        candidate,
-        fingerprint,
-        [],
-        getPromptCommand("setup-tauri-package"),
-      ),
+      resolveOpportunityRoute(candidate, fingerprint, [], getPromptCommand("setup-tauri-package")),
     ).toMatchObject({
       status: "routable",
       specialistCommand: "setup-tauri-package",
@@ -301,7 +292,8 @@ describe(
       { ...route, prompt: "Do anything." },
       { ...route, opportunityIds: [route.opportunityId, "c".repeat(64)] },
     ];
-    for (const value of invalid) expect(routeResolutionV1Schema.safeParse(value).success).toBe(false);
+    for (const value of invalid)
+      expect(routeResolutionV1Schema.safeParse(value).success).toBe(false);
   });
 
   it("allows only routable resolutions into execution results", () => {
@@ -317,12 +309,9 @@ describe(
       }).success,
     ).toBe(false);
   });
-  },
-);
+});
 
-describe(
-  "Command resolution reuses built-in/custom discovery and reports that globally installed specialists may be unavailable elsewhere.",
-  () => {
+describe("Command resolution reuses built-in/custom discovery and reports that globally installed specialists may be unavailable elsewhere.", () => {
   it.each(["research", "setup-sweep"] as const)(
     "reports installed and missing global /%s commands",
     async (command) => {
@@ -348,18 +337,20 @@ describe(
   it("rejects project-only and project-shadowed global specialists", async () => {
     const cwd = await temporaryDir("gg-route-project-");
     await writeCommand(path.join(cwd, ".gg", "commands", "research.md"));
-    expect((await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0])
-      .toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
+    expect(
+      (await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0],
+    ).toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
 
     await writeCommand(path.join(mockedPaths.agentDir, "commands", "research.md"));
-    expect((await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0])
-      .toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
+    expect(
+      (await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0],
+    ).toMatchObject({ status: "unroutable", availability: { reason: "wrong-owner" } });
   });
 
   it("does not treat the Desktop Chat research handoff as a code-mode command", async () => {
     const cwd = await temporaryDir("gg-route-project-");
-    expect((await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0])
-      .toMatchObject({ status: "unroutable", availability: { reason: "missing" } });
+    expect(
+      (await resolveProgrammaticRoutes(cwd, [opportunity("research")], fingerprint))[0],
+    ).toMatchObject({ status: "unroutable", availability: { reason: "missing" } });
   });
-  },
-);
+});

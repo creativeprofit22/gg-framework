@@ -24,7 +24,9 @@ import {
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -37,11 +39,19 @@ async function harness(provider = "anthropic") {
   let errorReporter = "";
   let admission = "";
   function visit(node: ts.Node) {
-    if (ts.isIfStatement(node) && node.expression.getText(file) === 'method === "POST" && url === "/tasks/run"') route = node.getText(file);
-    if (ts.isFunctionDeclaration(node) && node.name?.text === "runTasks") runner = node.getText(file);
-    if (ts.isFunctionDeclaration(node) && node.name?.text === "broadcastError") errorReporter = node.getText(file);
-    if (ts.isFunctionDeclaration(node) && node.name?.text === "runTaskById") taskRunner = node.getText(file);
-    if (ts.isFunctionDeclaration(node) && node.name?.text === "taskRunAdmissionConflict") admission = node.getText(file);
+    if (
+      ts.isIfStatement(node) &&
+      node.expression.getText(file) === 'method === "POST" && url === "/tasks/run"'
+    )
+      route = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "runTasks")
+      runner = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "broadcastError")
+      errorReporter = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "runTaskById")
+      taskRunner = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "taskRunAdmissionConflict")
+      admission = node.getText(file);
     ts.forEachChild(node, visit);
   }
   visit(file);
@@ -62,34 +72,72 @@ async function harness(provider = "anthropic") {
     conversation = `conversation-${newSession.mock.calls.length}`;
   });
   const context = vm.createContext({
-    running: false, autopilotActive: false, taskTurnActive: false, taskRunAll: false,
-    queuedCount: 0, planMode: false,
-    autopilotCancelled: false, runLifecycle: { running: false },
-    runClaim: new RunClaim(), taskSweepClaim: new RunClaim(),
+    running: false,
+    autopilotActive: false,
+    taskTurnActive: false,
+    taskRunAll: false,
+    queuedCount: 0,
+    planMode: false,
+    autopilotCancelled: false,
+    runLifecycle: { running: false },
+    runClaim: new RunClaim(),
+    taskSweepClaim: new RunClaim(),
     sessionMutations: new AppSidecarSessionMutationCoordinator(),
     reloadCoordinator: new AppSidecarReloadCoordinator(),
-    isAppSidecarSessionBusy, appSidecarTaskRunBusyConflictBody,
-    TASK_RUN_BUSY_MESSAGE, TASK_RUN_PLAN_HANDOFF_MESSAGE, TASK_RUN_REFRESH_MESSAGE,
-    assertProviderExecutionAllowed, runUnattended,
+    isAppSidecarSessionBusy,
+    appSidecarTaskRunBusyConflictBody,
+    TASK_RUN_BUSY_MESSAGE,
+    TASK_RUN_PLAN_HANDOFF_MESSAGE,
+    TASK_RUN_REFRESH_MESSAGE,
+    assertProviderExecutionAllowed,
+    runUnattended,
     planGateConflict: () => null,
     readBody: async (req: { body: string }) => req.body,
-    json: (res: { resolve: (value: number) => void; body?: unknown }, status: number, body?: unknown) => {
+    json: (
+      res: { resolve: (value: number) => void; body?: unknown },
+      status: number,
+      body?: unknown,
+    ) => {
       res.body = body;
       res.resolve(status);
     },
-    log: vi.fn(), cwd: "project", formatSidecarError,
-    desktopGuidance: (text: string) => text, sidecarErrorSecrets: [], captureSidecarError: vi.fn(),
-    session: { newSession, getState: () => ({ provider }),
-      getQueuedCount: () => context.queuedCount as number, getPlanMode: () => context.planMode as boolean,
-      getAppMarkers: () => [], persistAppMarker: async () => {} },
-    loadTasksSync: () => tasks.map((status, index) => ({ id: String(index), title: String(index), prompt: String(index), status })),
+    log: vi.fn(),
+    cwd: "project",
+    formatSidecarError,
+    desktopGuidance: (text: string) => text,
+    sidecarErrorSecrets: [],
+    captureSidecarError: vi.fn(),
+    session: {
+      newSession,
+      getState: () => ({ provider }),
+      getQueuedCount: () => context.queuedCount as number,
+      getPlanMode: () => context.planMode as boolean,
+      getAppMarkers: () => [],
+      persistAppMarker: async () => {},
+    },
+    loadTasksSync: () =>
+      tasks.map((status, index) => ({
+        id: String(index),
+        title: String(index),
+        prompt: String(index),
+        status,
+      })),
     isManuallyRunnableTaskStatus: (status: string) => status === "pending" || status === "blocked",
-    markTaskInProgress: (_cwd: string, id: string) => { tasks[Number(id)] = "in-progress"; },
-    finalizeTaskRun: (_cwd: string, id: string, success: boolean) => { tasks[Number(id)] = success ? "done" : "blocked"; },
+    markTaskInProgress: (_cwd: string, id: string) => {
+      tasks[Number(id)] = "in-progress";
+    },
+    finalizeTaskRun: (_cwd: string, id: string, success: boolean) => {
+      tasks[Number(id)] = success ? "done" : "blocked";
+    },
     pruneDoneTasksSync: () => tasks,
-    AppSidecarPlanGate, persistPlanGateMarker: async () => {}, deactivateApprovedPlan: () => {},
-    injectedAutopilotPrompts: [], planGate: new AppSidecarPlanGate([], async () => {}),
-    userTurnDeps: {}, isWorkflowCommandText: () => false, loadWorkflowCommandSpecs: async () => [],
+    AppSidecarPlanGate,
+    persistPlanGateMarker: async () => {},
+    deactivateApprovedPlan: () => {},
+    injectedAutopilotPrompts: [],
+    planGate: new AppSidecarPlanGate([], async () => {}),
+    userTurnDeps: {},
+    isWorkflowCommandText: () => false,
+    loadWorkflowCommandSpecs: async () => [],
     runUserTurn: async () => {
       context.autopilotActive = true;
       reviewed.resolve();
@@ -97,14 +145,32 @@ async function harness(provider = "anthropic") {
       context.autopilotActive = false;
       return "all-clear";
     },
-    getNextRunnableTask: () => { const index = tasks.indexOf("pending"); return index < 0 ? null : { id: String(index) }; },
+    getNextRunnableTask: () => {
+      const index = tasks.indexOf("pending");
+      return index < 0 ? null : { id: String(index) };
+    },
     broadcast: vi.fn(),
-    setTimeout: (callback: () => void) => { between.resolve(); void cadence.promise.then(callback); },
-    runStrandedQueue: async () => { draining.resolve(); await queue.promise; },
+    setTimeout: (callback: () => void) => {
+      between.resolve();
+      void cadence.promise.then(callback);
+    },
+    runStrandedQueue: async () => {
+      draining.resolve();
+      await queue.promise;
+    },
   });
   // Extract the authoritative busy projection too, rather than duplicating its contract.
-  const busy = source.slice(source.indexOf("  const sessionBusyState ="), source.indexOf("  // Set by /cancel"));
-  vm.runInContext(ts.transpileModule(`${busy}\n${errorReporter}\n${admission}\n${taskRunner}\n${runner}\nfunction request(req, res) { const method = "POST", url = "/tasks/run"; ${route} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  const busy = source.slice(
+    source.indexOf("  const sessionBusyState ="),
+    source.indexOf("  // Set by /cancel"),
+  );
+  vm.runInContext(
+    ts.transpileModule(
+      `${busy}\n${errorReporter}\n${admission}\n${taskRunner}\n${runner}\nfunction request(req, res) { const method = "POST", url = "/tasks/run"; ${route} }`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText,
+    context,
+  );
   const runTaskById = vi.fn(context.runTaskById);
   context.runTaskById = runTaskById;
   const responses: { body?: unknown }[] = [];
@@ -114,10 +180,31 @@ async function harness(provider = "anthropic") {
       responses.push(res);
       context.request({ body: JSON.stringify({ id, all }), resume() {} }, res);
     });
-  const lastBody = () => responses[responses.length - 1]?.body as Record<string, unknown> | undefined;
-  const settled = async () => { queue.resolve(); await vi.waitFor(() => expect(context.taskSweepClaim.active).toBe(false)); };
-  return { context, request, lastBody, resetTasks: () => { tasks[0] = "pending"; tasks[1] = "pending"; }, reset, review, cadence, reviewed, between, draining, settled, runTaskById, newSession,
-    snapshot: () => ({ conversation, tasks: [...tasks], all: context.taskRunAll }) };
+  const lastBody = () =>
+    responses[responses.length - 1]?.body as Record<string, unknown> | undefined;
+  const settled = async () => {
+    queue.resolve();
+    await vi.waitFor(() => expect(context.taskSweepClaim.active).toBe(false));
+  };
+  return {
+    context,
+    request,
+    lastBody,
+    resetTasks: () => {
+      tasks[0] = "pending";
+      tasks[1] = "pending";
+    },
+    reset,
+    review,
+    cadence,
+    reviewed,
+    between,
+    draining,
+    settled,
+    runTaskById,
+    newSession,
+    snapshot: () => ({ conversation, tasks: [...tasks], all: context.taskRunAll }),
+  };
 }
 
 describe("task route admission", () => {
@@ -171,38 +258,64 @@ describe("task route admission", () => {
     },
   );
   it.each([
-    ["session", false], ["session", true],
-    ["persistence", false], ["persistence", true],
-    ["workflow", false], ["workflow", true],
-  ] as const)("reports accepted %s failure once and permits retry (all=%s)", async (failure, all) => {
-    const h = await harness();
-    const secretError = new Error("Session persistence failed: C:\\private\\sessions token=private-value");
-    if (failure === "session") h.newSession.mockRejectedValueOnce(secretError);
-    if (failure === "persistence") {
-      const original = h.context.markTaskInProgress;
-      h.context.markTaskInProgress = vi.fn().mockImplementationOnce(() => { throw secretError; }).mockImplementation(original);
-    }
-    if (failure === "workflow") h.context.loadWorkflowCommandSpecs = vi.fn().mockRejectedValueOnce(secretError).mockResolvedValue([]);
-    expect(await h.request(all)).toBe(202);
-    h.reset.resolve();
-    await h.draining.promise;
-    await h.settled();
-    const events = h.context.broadcast.mock.calls as [string, Record<string, unknown>][];
-    expect(events.filter(([type]) => type === "error")).toEqual([["error", {
-      headline: all ? "Run All stopped" : "Task run stopped",
-      message: "Task setup or execution could not finish.",
-      guidance: "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
-    }]]);
-    expect(events.filter(([type]) => type === "tasks_run_done")).toHaveLength(1);
-    expect(events.some(([type]) => type === "run_end")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("private");
-    expect(h.snapshot().tasks).toEqual([failure === "workflow" ? "blocked" : "pending", "pending"]);
-    expect(h.snapshot().conversation).toBe(failure === "session" ? "original" : "conversation-1");
-    expect(await h.request()).toBe(202);
-    h.review.resolve();
-    await h.settled();
-    expect(events.filter(([type]) => type === "error")).toHaveLength(1);
-  });
+    ["session", false],
+    ["session", true],
+    ["persistence", false],
+    ["persistence", true],
+    ["workflow", false],
+    ["workflow", true],
+  ] as const)(
+    "reports accepted %s failure once and permits retry (all=%s)",
+    async (failure, all) => {
+      const h = await harness();
+      const secretError = new Error(
+        "Session persistence failed: C:\\private\\sessions token=private-value",
+      );
+      if (failure === "session") h.newSession.mockRejectedValueOnce(secretError);
+      if (failure === "persistence") {
+        const original = h.context.markTaskInProgress;
+        h.context.markTaskInProgress = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            throw secretError;
+          })
+          .mockImplementation(original);
+      }
+      if (failure === "workflow")
+        h.context.loadWorkflowCommandSpecs = vi
+          .fn()
+          .mockRejectedValueOnce(secretError)
+          .mockResolvedValue([]);
+      expect(await h.request(all)).toBe(202);
+      h.reset.resolve();
+      await h.draining.promise;
+      await h.settled();
+      const events = h.context.broadcast.mock.calls as [string, Record<string, unknown>][];
+      expect(events.filter(([type]) => type === "error")).toEqual([
+        [
+          "error",
+          {
+            headline: all ? "Run All stopped" : "Task run stopped",
+            message: "Task setup or execution could not finish.",
+            guidance:
+              "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+          },
+        ],
+      ]);
+      expect(events.filter(([type]) => type === "tasks_run_done")).toHaveLength(1);
+      expect(events.some(([type]) => type === "run_end")).toBe(false);
+      expect(JSON.stringify(events)).not.toContain("private");
+      expect(h.snapshot().tasks).toEqual([
+        failure === "workflow" ? "blocked" : "pending",
+        "pending",
+      ]);
+      expect(h.snapshot().conversation).toBe(failure === "session" ? "original" : "conversation-1");
+      expect(await h.request()).toBe(202);
+      h.review.resolve();
+      await h.settled();
+      expect(events.filter(([type]) => type === "error")).toHaveLength(1);
+    },
+  );
   it("does not duplicate a provider failure already reported by the runner", async () => {
     const h = await harness();
     h.context.runUserTurn = async () => {
@@ -220,18 +333,23 @@ describe("task route admission", () => {
     expect(h.snapshot().tasks).toEqual(["blocked", "pending"]);
   });
 
-  it.each([false, true])("rejects a pending Autopilot review (all=%s) without changing state", async (all) => {
-    const h = await harness();
-    h.context.autopilotActive = true;
-    const before = h.snapshot();
-    expect(await h.request(all)).toBe(409);
-    expect(h.snapshot()).toEqual(before);
-    expect(h.runTaskById).not.toHaveBeenCalled();
-    h.context.autopilotActive = false;
-    expect(await h.request()).toBe(202);
-    h.reset.resolve(); h.review.resolve();
-    await h.draining.promise; await h.settled();
-  });
+  it.each([false, true])(
+    "rejects a pending Autopilot review (all=%s) without changing state",
+    async (all) => {
+      const h = await harness();
+      h.context.autopilotActive = true;
+      const before = h.snapshot();
+      expect(await h.request(all)).toBe(409);
+      expect(h.snapshot()).toEqual(before);
+      expect(h.runTaskById).not.toHaveBeenCalled();
+      h.context.autopilotActive = false;
+      expect(await h.request()).toBe(202);
+      h.reset.resolve();
+      h.review.resolve();
+      await h.draining.promise;
+      await h.settled();
+    },
+  );
 
   it.each([false, true])("owns reset, review, cadence and queue windows (all=%s)", async (all) => {
     const h = await harness();
@@ -240,7 +358,8 @@ describe("task route admission", () => {
     expect(await h.request(!all)).toBe(409);
     expect(h.snapshot()).toEqual(beforeReset);
     expect(h.runTaskById).toHaveBeenCalledTimes(1);
-    h.reset.resolve(); await h.reviewed.promise;
+    h.reset.resolve();
+    await h.reviewed.promise;
     const beforeReview = h.snapshot();
     expect(await h.request(!all)).toBe(409);
     expect(h.snapshot()).toEqual(beforeReview);
@@ -255,8 +374,12 @@ describe("task route admission", () => {
     await h.draining.promise;
     expect(await h.request()).toBe(409);
     await h.settled();
-    expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error")).toHaveLength(0);
-    expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "tasks_run_done")).toHaveLength(1);
+    expect(
+      h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error"),
+    ).toHaveLength(0);
+    expect(
+      h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "tasks_run_done"),
+    ).toHaveLength(1);
     // Ownership released: a still-runnable task is admitted again.
     h.resetTasks();
     expect(await h.request()).toBe(202);
@@ -272,7 +395,8 @@ describe("task route admission", () => {
     expect(h.context.reloadCoordinator.prepare([])).toEqual({ ok: true });
     h.context.reloadCoordinator.cancel();
     expect(await h.request()).toBe(202);
-    h.reset.resolve(); h.review.resolve();
+    h.reset.resolve();
+    h.review.resolve();
     await h.settled();
     expect(h.newSession).toHaveBeenCalledTimes(2);
   });
@@ -305,8 +429,20 @@ describe("task route admission", () => {
   });
 
   it.each([
-    ["queued messages", "queued_messages_pending", (h: Awaited<ReturnType<typeof harness>>) => { h.context.queuedCount = 2; }],
-    ["plan mode", "plan_mode_active", (h: Awaited<ReturnType<typeof harness>>) => { h.context.planMode = true; }],
+    [
+      "queued messages",
+      "queued_messages_pending",
+      (h: Awaited<ReturnType<typeof harness>>) => {
+        h.context.queuedCount = 2;
+      },
+    ],
+    [
+      "plan mode",
+      "plan_mode_active",
+      (h: Awaited<ReturnType<typeof harness>>) => {
+        h.context.planMode = true;
+      },
+    ],
   ] as const)("refuses a run blocked by %s with a descriptive 409", async (_label, code, block) => {
     const h = await harness();
     block(h);
@@ -324,7 +460,8 @@ describe("task route admission", () => {
     h.context.queuedCount = 0;
     h.context.planMode = false;
     expect(await h.request()).toBe(202);
-    h.reset.resolve(); h.review.resolve();
+    h.reset.resolve();
+    h.review.resolve();
     await h.settled();
   });
 
@@ -340,11 +477,14 @@ describe("task route admission", () => {
     const h = await harness();
     expect(await h.request()).toBe(202);
     expect(h.lastBody()).toEqual({ accepted: true });
-    h.reset.resolve(); h.review.resolve();
+    h.reset.resolve();
+    h.review.resolve();
     await h.settled();
     expect(h.runTaskById).toHaveBeenCalledTimes(1);
     expect(h.snapshot().tasks).toEqual(["done", "pending"]);
-    expect(h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error")).toHaveLength(0);
+    expect(
+      h.context.broadcast.mock.calls.filter(([type]: [string]) => type === "error"),
+    ).toHaveLength(0);
   });
 
   it("reports a refusal that only appears after acceptance", async () => {
@@ -355,11 +495,16 @@ describe("task route admission", () => {
     await h.settled();
     await done;
     const events = h.context.broadcast.mock.calls as [string, Record<string, unknown>][];
-    expect(events.filter(([type]) => type === "error")).toEqual([["error", {
-      headline: "Run All did not start",
-      message: "Cannot run tasks while plan mode is active. Leave plan mode first.",
-      guidance: "Clear the blocking state, then open Tasks and run it again.",
-    }]]);
+    expect(events.filter(([type]) => type === "error")).toEqual([
+      [
+        "error",
+        {
+          headline: "Run All did not start",
+          message: "Cannot run tasks while plan mode is active. Leave plan mode first.",
+          guidance: "Clear the blocking state, then open Tasks and run it again.",
+        },
+      ],
+    ]);
     expect(events.filter(([type]) => type === "tasks_run_done")).toHaveLength(1);
     expect(h.runTaskById).not.toHaveBeenCalled();
     expect(h.snapshot().tasks).toEqual(["pending", "pending"]);
@@ -371,7 +516,9 @@ describe("task route admission", () => {
     if (owner === "provider") h.context.runClaim.claim();
     if (owner === "mutation") h.context.sessionMutations.tryAcquire("new-session");
     expect(await h.request()).toBe(409);
-    expect(h.lastBody()?.error).toBe(owner === "mutation" ? "session_mutation_in_progress" : "session_busy");
+    expect(h.lastBody()?.error).toBe(
+      owner === "mutation" ? "session_mutation_in_progress" : "session_busy",
+    );
     expect(h.lastBody()?.message).toBe(TASK_RUN_BUSY_MESSAGE);
     expect(h.runTaskById).not.toHaveBeenCalled();
   });
@@ -382,7 +529,8 @@ describe("task route admission", () => {
     expect(await h.request()).toBe(409);
     expect(h.lastBody()).toMatchObject({
       error: "session_busy",
-      message: "Cannot run tasks while the current session is still working. Try again when it finishes.",
+      message:
+        "Cannot run tasks while the current session is still working. Try again when it finishes.",
     });
     expect(h.lastBody()?.state).toMatchObject({ running: true });
     // The claim-race refusal uses the same task-specific wording.
@@ -391,14 +539,20 @@ describe("task route admission", () => {
     expect(await h.request()).toBe(409);
     expect(h.lastBody()).toMatchObject({ error: "session_busy", message: TASK_RUN_BUSY_MESSAGE });
     // The shared session-reset body keeps its new-session wording for other routes.
-    expect(appSidecarSessionBusyConflictBody({ running: true, autopilotActive: false, runLifecycleRunning: false }).message).toBe(
-      "Cannot start a new session while the current session is active.",
-    );
+    expect(
+      appSidecarSessionBusyConflictBody({
+        running: true,
+        autopilotActive: false,
+        runLifecycleRunning: false,
+      }).message,
+    ).toBe("Cannot start a new session while the current session is active.");
   });
 
   it("answers an admission-time throw with a 500 instead of hanging", async () => {
     const h = await harness();
-    h.context.session.getQueuedCount = () => { throw new Error("store unavailable"); };
+    h.context.session.getQueuedCount = () => {
+      throw new Error("store unavailable");
+    };
     expect(await h.request()).toBe(500);
     expect(h.lastBody()).toEqual({
       error: "task_run_failed",

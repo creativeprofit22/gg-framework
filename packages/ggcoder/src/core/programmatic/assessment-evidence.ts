@@ -4,15 +4,29 @@ import { canonicalRepositoryRoot } from "../tauri-package/paths.js";
 import { validateProgrammaticFile, walkProgrammaticPaths } from "./inventory.js";
 
 export const ASSESSMENT_EVIDENCE_LIMITS = Object.freeze({
-  maxPaths: 200, maxExcerpts: 12, maxExcerptBytes: 16 * 1024, maxDeliveredBytes: 64 * 1024,
+  maxPaths: 200,
+  maxExcerpts: 12,
+  maxExcerptBytes: 16 * 1024,
+  maxDeliveredBytes: 64 * 1024,
 });
 
-type DiagnosticCode = "path-limit" | "excerpt-limit" | "excerpt-truncated" | "delivery-limit" |
-  "unreadable-or-unsafe" | "walk-failed" | "non-text" | "permission-denied";
+type DiagnosticCode =
+  | "path-limit"
+  | "excerpt-limit"
+  | "excerpt-truncated"
+  | "delivery-limit"
+  | "unreadable-or-unsafe"
+  | "walk-failed"
+  | "non-text"
+  | "permission-denied";
 export interface ProgrammaticAssessmentEvidence {
   version: 1;
   /** A sampled overview, never a fingerprint inventory or evidence receipt. */
-  paths: { path: string; coverage: "uninspected" | "inspected" | "budget-limited" | "unreadable-or-unsafe" | "nonmatching" }[];
+  paths: {
+    path: string;
+    coverage:
+      "uninspected" | "inspected" | "budget-limited" | "unreadable-or-unsafe" | "nonmatching";
+  }[];
   excerpts: { path: string; text: string; truncated: boolean }[];
   diagnostics: { code: DiagnosticCode; count: number }[];
   exclusions: "programmatic-inventory-and-root-gitignore";
@@ -31,29 +45,52 @@ export interface AssessmentEvidenceOptions {
   authorization?: AssessmentEvidenceAuthorization;
 }
 const traversal: AssessmentEvidenceRequest = { name: "find", args: { pattern: "**/*" } };
-const readRequest = (file_path: string): AssessmentEvidenceRequest => ({ name: "read", args: { file_path, limit: ASSESSMENT_EVIDENCE_LIMITS.maxExcerptBytes + 1 } });
+const readRequest = (file_path: string): AssessmentEvidenceRequest => ({
+  name: "read",
+  args: { file_path, limit: ASSESSMENT_EVIDENCE_LIMITS.maxExcerptBytes + 1 },
+});
 class EvidenceDenied extends Error {}
-function checkAuthorization(authorization: AssessmentEvidenceAuthorization | undefined, request: AssessmentEvidenceRequest) {
+function checkAuthorization(
+  authorization: AssessmentEvidenceAuthorization | undefined,
+  request: AssessmentEvidenceRequest,
+) {
   if (authorization && !authorization.isAllowed(request)) throw new EvidenceDenied();
 }
 
 /** Recheck immediately before delivery as other host work may have awaited since collection. */
-export function recheckAssessmentEvidence(evidence: ProgrammaticAssessmentEvidence, authorization?: AssessmentEvidenceAuthorization) {
+export function recheckAssessmentEvidence(
+  evidence: ProgrammaticAssessmentEvidence,
+  authorization?: AssessmentEvidenceAuthorization,
+) {
   if (!authorization) return;
   const traversalAllowed = authorization.isAllowed(traversal);
-  const denied = evidence.excerpts.filter((item) => !traversalAllowed || !authorization.isAllowed(readRequest(item.path)));
+  const denied = evidence.excerpts.filter(
+    (item) => !traversalAllowed || !authorization.isAllowed(readRequest(item.path)),
+  );
   evidence.excerpts = evidence.excerpts.filter((item) => !denied.includes(item));
-  for (const item of evidence.paths) if (denied.some((excerpt) => excerpt.path === item.path)) item.coverage = "uninspected";
+  for (const item of evidence.paths)
+    if (denied.some((excerpt) => excerpt.path === item.path)) item.coverage = "uninspected";
   if (!traversalAllowed) evidence.paths = [];
-  if ((!traversalAllowed || denied.length) && !evidence.diagnostics.some((item) => item.code === "permission-denied"))
+  if (
+    (!traversalAllowed || denied.length) &&
+    !evidence.diagnostics.some((item) => item.code === "permission-denied")
+  )
     evidence.diagnostics.push({ code: "permission-denied", count: Math.max(1, denied.length) });
 }
 
 /** Prefix-only read; no project imports, execution, or full-source buffering. */
-async function readPrefix(root: string, repositoryPath: string, signal?: AbortSignal, authorization?: AssessmentEvidenceAuthorization) {
+async function readPrefix(
+  root: string,
+  repositoryPath: string,
+  signal?: AbortSignal,
+  authorization?: AssessmentEvidenceAuthorization,
+) {
   const request = readRequest(repositoryPath);
   if (authorization && !(await authorization.authorize(request))) throw new EvidenceDenied();
-  const check = () => { checkAuthorization(authorization, traversal); checkAuthorization(authorization, request); };
+  const check = () => {
+    checkAuthorization(authorization, traversal);
+    checkAuthorization(authorization, request);
+  };
   check();
   signal?.throwIfAborted();
   const absolutePath = await validateProgrammaticFile(root, repositoryPath);
@@ -63,7 +100,8 @@ async function readPrefix(root: string, repositoryPath: string, signal?: AbortSi
   const handle = await open(absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
-    if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino) throw new Error("File changed");
+    if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino)
+      throw new Error("File changed");
     signal?.throwIfAborted();
     const buffer = Buffer.alloc(ASSESSMENT_EVIDENCE_LIMITS.maxExcerptBytes + 1);
     let length = 0;
@@ -78,8 +116,14 @@ async function readPrefix(root: string, repositoryPath: string, signal?: AbortSi
     await validateProgrammaticFile(root, repositoryPath);
     const after = await lstat(absolutePath);
     const final = await handle.stat();
-    if (after.dev !== opened.dev || after.ino !== opened.ino || final.size !== opened.size ||
-        final.mtimeMs !== opened.mtimeMs || final.ctimeMs !== opened.ctimeMs) throw new Error("File changed");
+    if (
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      final.size !== opened.size ||
+      final.mtimeMs !== opened.mtimeMs ||
+      final.ctimeMs !== opened.ctimeMs
+    )
+      throw new Error("File changed");
     const truncated = length > ASSESSMENT_EVIDENCE_LIMITS.maxExcerptBytes;
     const bytes = buffer.subarray(0, Math.min(length, ASSESSMENT_EVIDENCE_LIMITS.maxExcerptBytes));
     // Fatal UTF-8 decoding rejects unfamiliar binary formats, not unfamiliar names.
@@ -110,7 +154,10 @@ export async function collectProgrammaticAssessmentEvidence(
   const { signal, authorization } = options;
   signal?.throwIfAborted();
   const result: ProgrammaticAssessmentEvidence = {
-    version: 1, paths: [], excerpts: [], diagnostics: [],
+    version: 1,
+    paths: [],
+    excerpts: [],
+    diagnostics: [],
     exclusions: "programmatic-inventory-and-root-gitignore",
   };
   const diagnose = (code: DiagnosticCode, count = 1) => {
@@ -119,7 +166,9 @@ export async function collectProgrammaticAssessmentEvidence(
     else result.diagnostics.push({ code, count });
   };
   // Reserve space for all fixed diagnostic codes and coverage state changes.
-  const fits = () => Buffer.byteLength(JSON.stringify(result)) <= ASSESSMENT_EVIDENCE_LIMITS.maxDeliveredBytes - 1024;
+  const fits = () =>
+    Buffer.byteLength(JSON.stringify(result)) <=
+    ASSESSMENT_EVIDENCE_LIMITS.maxDeliveredBytes - 1024;
   let root: string;
   let gitignoreLines: string[] = [];
   try {
@@ -128,10 +177,13 @@ export async function collectProgrammaticAssessmentEvidence(
     root = await canonicalRepositoryRoot(repositoryRoot);
     signal?.throwIfAborted();
     // A missing file is allowed; every other failure prevents discovery under an unknown policy.
-    const exists = await lstat(`${root}/.gitignore`).then(() => true, (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return false;
-      throw error;
-    });
+    const exists = await lstat(`${root}/.gitignore`).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
     if (exists) {
       const ignore = await readPrefix(root, ".gitignore", signal, authorization);
       if (ignore.nonText || ignore.truncated) throw new Error("Unsafe or oversized ignore policy");
@@ -153,7 +205,8 @@ export async function collectProgrammaticAssessmentEvidence(
         break;
       }
       const item: ProgrammaticAssessmentEvidence["paths"][number] = {
-        path: entry.path, coverage: entry.kind === "unsafe" ? "unreadable-or-unsafe" : "uninspected",
+        path: entry.path,
+        coverage: entry.kind === "unsafe" ? "unreadable-or-unsafe" : "uninspected",
       };
       result.paths.push(item);
       if (!fits()) {
@@ -190,7 +243,8 @@ export async function collectProgrammaticAssessmentEvidence(
       result.excerpts.push(excerpt);
       if (!fits()) {
         // Account for JSON escaping and UTF-8, not just source bytes.
-        let low = 0, high = excerpt.text.length;
+        let low = 0,
+          high = excerpt.text.length;
         const text = excerpt.text;
         excerpt.truncated = true;
         while (low < high) {

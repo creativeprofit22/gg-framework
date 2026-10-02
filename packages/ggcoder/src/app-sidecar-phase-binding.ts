@@ -54,11 +54,7 @@ export interface PhaseBindingSession {
 }
 
 export type PhaseStatusLeaseFailure =
-  | "phase-lease-lost"
-  | "corrupt"
-  | "notes-missing"
-  | "phase-not-found"
-  | "phase-archived";
+  "phase-lease-lost" | "corrupt" | "notes-missing" | "phase-not-found" | "phase-archived";
 
 export interface AppSidecarPhaseBindingService {
   bind(request: PhaseBindingRequest, session: PhaseBindingSession): Promise<PhaseBindingOutcome>;
@@ -178,7 +174,8 @@ export function createAppSidecarPhaseBindingService(
       if (!state.sessionPath) throw new Error("Phase launch requires a persisted session.");
       const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
       if (
-        !phase || isNotesPhaseDeleted(phase) ||
+        !phase ||
+        isNotesPhaseDeleted(phase) ||
         phase.archivedAt !== null ||
         phase.status === "done" ||
         !notesSessionLinksEqual(phase.session, state)
@@ -341,8 +338,14 @@ export function createAppSidecarPhaseBindingService(
         takeoverReason: null,
         predecessorProof: null,
       };
-      const input = { cwd: state.cwd, request, context, holder, runState: "idle" as const,
-        loadCurrentContext: () => loadCurrentLeaseContext(options, state.cwd, phaseId) };
+      const input = {
+        cwd: state.cwd,
+        request,
+        context,
+        holder,
+        runState: "idle" as const,
+        loadCurrentContext: () => loadCurrentLeaseContext(options, state.cwd, phaseId),
+      };
       // Renewal authenticates the full holder and marker under the repository lock.
       // Failed renewal may only fall back to acquisition's absent/dead-owner rules.
       let acquired = await leases.execute(
@@ -400,7 +403,8 @@ export function createAppSidecarPhaseBindingService(
         );
         if (
           context.projectKey !== canonicalProjectKey(state.cwd) ||
-          !phase || isNotesPhaseDeleted(phase) ||
+          !phase ||
+          isNotesPhaseDeleted(phase) ||
           phase.archivedAt !== null ||
           phase.status === "done" ||
           !notesSessionLinksEqual(context.session, currentSession) ||
@@ -434,7 +438,8 @@ export function createAppSidecarPhaseBindingService(
       const linkedPhases = loaded.snapshot.document.phases.filter(
         (candidate) =>
           candidate.session?.sessionPath === state.sessionPath &&
-          !isNotesPhaseDeleted(candidate) && candidate.archivedAt === null &&
+          !isNotesPhaseDeleted(candidate) &&
+          candidate.archivedAt === null &&
           candidate.status !== "done",
       );
       const phase = localPhaseId
@@ -442,7 +447,12 @@ export function createAppSidecarPhaseBindingService(
         : linkedPhases.length === 1
           ? linkedPhases[0]
           : undefined;
-      if (!phase || isNotesPhaseDeleted(phase) || phase.archivedAt !== null || phase.status === "done") {
+      if (
+        !phase ||
+        isNotesPhaseDeleted(phase) ||
+        phase.archivedAt !== null ||
+        phase.status === "done"
+      ) {
         if (context || marker) await clearSessionContext(session, "binding-reconciliation");
         return context || marker ? "cleared" : "none";
       }
@@ -708,7 +718,8 @@ async function persistLeaseContextFromLatestNotes(
   if (latest.status !== "ok") return false;
   const phase = latest.snapshot.document.phases.find((candidate) => candidate.id === lease.phaseId);
   if (
-    !phase || isNotesPhaseDeleted(phase) ||
+    !phase ||
+    isNotesPhaseDeleted(phase) ||
     phase.archivedAt !== null ||
     lease.projectKey !== latest.snapshot.projectKey ||
     !notesSessionLinksEqual(phase.session, state) ||
@@ -753,11 +764,16 @@ async function loadCurrentLeaseContext(
 ): Promise<PhaseLeaseContext | null> {
   const loaded = await options.repository.load(cwd);
   if (loaded.status !== "ok" || loaded.recoveredFromBackup) return null;
-  const phase = loaded.snapshot.document.phases.find(candidate => candidate.id === phaseId);
+  const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === phaseId);
   if (!phase || isNotesPhaseDeleted(phase) || phase.archivedAt !== null) return null;
-  return { projectKey: loaded.snapshot.projectKey, roadmapRevision: loaded.snapshot.revision,
-    phaseId, phaseStatus: phase.status, planId: phase.execution?.plan?.planId ?? null,
-    lastDeletionRevision: (phase.deletion?.events.at(-1)?.request.expectedRevision ?? -1) + 1 };
+  return {
+    projectKey: loaded.snapshot.projectKey,
+    roadmapRevision: loaded.snapshot.revision,
+    phaseId,
+    phaseStatus: phase.status,
+    planId: phase.execution?.plan?.planId ?? null,
+    lastDeletionRevision: (phase.deletion?.events.at(-1)?.request.expectedRevision ?? -1) + 1,
+  };
 }
 
 async function executePhaseLease(

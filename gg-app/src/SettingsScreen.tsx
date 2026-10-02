@@ -121,10 +121,8 @@ export function SettingsScreen({
           <div className={`settings-page ${switched ? "is-switching" : "is-entering"}`}>
             {tab === "general" && (
               <EmbeddedModal>
-                <SettingsModal
-                  onClose={stay}
-                  onSaved={() => toast("Project folder saved.", "success")}
-                />
+                {/* Save folder confirms inline, as it does in the dialog. */}
+                <SettingsModal onClose={stay} />
               </EmbeddedModal>
             )}
             {tab === "providers" && <LoginScreen />}

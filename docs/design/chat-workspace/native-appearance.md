@@ -4,7 +4,7 @@ Status, 2026-09-27 UTC: **integrated app source with scoped Windows developer-na
 
 ## Controls and defaults
 
-Settings → **Appearance and reading** applies changes immediately, independently of the project-folder Save/Cancel action. Cancelling Settings does not undo appearance changes.
+Settings → **Appearance and reading** applies and saves changes immediately. Only the project folder is saved explicitly, with **Save folder** beside its field; see [radio-settings-feedback.md](radio-settings-feedback.md#settings-instant-preferences-versus-the-saved-folder).
 
 | Control | Default | Alternative |
 | --- | --- | --- |

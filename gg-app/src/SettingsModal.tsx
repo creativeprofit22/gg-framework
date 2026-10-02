@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
@@ -18,20 +18,31 @@ import { AzureConnectionSettings } from "./AzureConnectionSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
 import { SettingsSection } from "./settings-section";
-import { SettingsHeaderAction } from "./settings-header";
+
+// One sentence per section, shown as the card description on the Settings page
+// and as the hint under the label in the dialog, so the two cannot drift.
+const EFFECTS_COPY = "Sound and the home screen's moving background. Changes apply right away.";
+const FOLDER_COPY =
+  "New projects are created inside this folder. Choose Save folder to keep a change.";
+
+/** A settings card on the page; the dialog shows the content as is. */
+function Card({
+  embedded,
+  children,
+}: {
+  embedded: boolean;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return embedded ? <div className="settings-card">{children}</div> : <>{children}</>;
+}
 
 interface Props {
   onClose: () => void;
   /** Called with the saved projects root so callers can refresh. */
   onSaved?: (projectsRoot: string) => void;
-  onAzureConnectionChanged?: () => void;
 }
 
-export function SettingsModal({
-  onClose,
-  onSaved,
-  onAzureConnectionChanged,
-}: Props): React.ReactElement {
+export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   const embedded = useModalEmbedState() === "embed";
   // Only the project folder is an explicitly saved field; Effects and
   // Appearance persist themselves the moment they change.
@@ -39,12 +50,15 @@ export function SettingsModal({
   const [savedRoot, setSavedRoot] = useState("");
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState(false);
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
   const buildIdentity = formatBuildIdentity();
   const folderId = useId();
   const folderHintId = useId();
   const folderErrorId = useId();
+  const folderPendingId = useId();
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -83,26 +97,38 @@ export function SettingsModal({
 
   async function browse(): Promise<void> {
     const picked = await open({ directory: true, multiple: false, title: "Projects folder" });
-    if (typeof picked === "string") setProjectsRoot(picked);
+    if (typeof picked === "string") editFolder(picked);
+  }
+
+  function editFolder(value: string): void {
+    setProjectsRoot(value);
+    setSaveError(null);
+    setSavedNotice(false);
   }
 
   const trimmedRoot = projectsRoot.trim();
   const folderChanged = trimmedRoot !== "" && trimmedRoot !== savedRoot;
 
-  async function save(): Promise<void> {
+  async function save(fromRetry = false): Promise<void> {
     if (!folderChanged || busy) return;
     setBusy(true);
-    setSaveError(null);
+    // The error (and its Retry) stays until the outcome is known, so a retry
+    // does not pull the focused button out from under the user.
+    setSavedNotice(false);
     try {
       // Saved natively in Rust (writes ~/.gg/gg-app.json) — no sidecar round-trip,
       // so this works even while the sidecar is still booting or has crashed.
       await saveSettings(trimmedRoot);
-      // The Settings page stays open after saving; re-baseline Save folder.
+      // Page and dialog both stay open after saving: re-baseline Save folder
+      // and confirm inline.
       setSavedRoot(trimmedRoot);
+      setSaveError(null);
+      setSavedNotice(true);
       onSaved?.(trimmedRoot);
-      onClose();
+      // Retry is about to disappear; keep focus in the folder section.
+      if (fromRetry) folderInputRef.current?.focus();
     } catch (e) {
-      // Keep the modal and the typed folder so the user can retry or cancel.
+      // Keep the typed folder so the user can retry or close.
       const reason = e instanceof Error ? e.message : String(e);
       setSaveError(`Couldn't save the project folder: ${reason}`);
       toast(`Couldn't save: ${reason}`, "error");
@@ -111,19 +137,13 @@ export function SettingsModal({
     }
   }
 
+  const pending = folderChanged && !busy && !saveError;
+  const describedBy = [folderHintId, pending && folderPendingId, saveError && folderErrorId]
+    .filter(Boolean)
+    .join(" ");
+
   // On the Settings screen this is the General tab; the screen already says
   // "Settings".
-  const saveButton = (
-    <button
-      // In the Settings header it matches the nav bars' small buttons.
-      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
-      disabled={busy || !folderChanged}
-      onClick={() => void save()}
-    >
-      {busy ? "Saving\u2026" : "Save folder"}
-    </button>
-  );
-
   return (
     <Modal title={embedded ? "General" : "Settings"} onClose={onClose} className="settings-modal">
       {/* Columns only on the Settings screen; in the dialog they are
@@ -148,10 +168,10 @@ export function SettingsModal({
           )}
           <SettingsSection
             title="Effects"
-            description="Sounds, and the home screen's moving background. Applies immediately."
+            description={EFFECTS_COPY}
             dialogHint={
               <div className="modal-hint" style={{ color: theme.textMuted }}>
-                Applies immediately; Cancel does not undo it.
+                {EFFECTS_COPY}
               </div>
             }
           >
@@ -160,19 +180,14 @@ export function SettingsModal({
               <HomeBackgroundButton />
             </div>
           </SettingsSection>
-          {embedded ? (
-            <div className="settings-card">
-              <AppearanceSettings />
-            </div>
-          ) : (
+          <Card embedded={embedded}>
             <AppearanceSettings />
-          )}
+          </Card>
         </div>
         <div className="settings-col">
-          {embedded && <SettingsHeaderAction>{saveButton}</SettingsHeaderAction>}
           <SettingsSection
             title="Project folder"
-            description="Where new projects are created. Save folder applies only to this field."
+            description={<span id={folderHintId}>{FOLDER_COPY}</span>}
             // The dialog keeps a real <label> and hint; on the page the card
             // title is shown and the input is named through aria-label.
             dialogTitle={null}
@@ -186,38 +201,52 @@ export function SettingsModal({
                   Project folder
                 </label>
                 <div id={folderHintId} className="modal-hint" style={{ color: theme.textMuted }}>
-                  New projects are created inside this folder. Save folder and Cancel apply only to
-                  this field.
+                  {FOLDER_COPY}
                 </div>
               </>
             }
           >
             <div className="modal-row">
               <input
+                ref={folderInputRef}
                 id={folderId}
                 className="modal-input"
                 style={{ color: theme.text, background: theme.inputBackground }}
                 value={projectsRoot}
                 placeholder="/Users/you/gg-projects"
                 aria-label={embedded ? "Project folder" : undefined}
-                aria-describedby={
-                  embedded
-                    ? saveError
-                      ? folderErrorId
-                      : undefined
-                    : saveError
-                      ? `${folderHintId} ${folderErrorId}`
-                      : folderHintId
-                }
+                aria-describedby={describedBy}
                 aria-invalid={saveError ? true : undefined}
-                onChange={(e) => {
-                  setProjectsRoot(e.target.value);
-                  setSaveError(null);
-                }}
+                onChange={(e) => editFolder(e.target.value)}
               />
-              <button className="modal-btn" onClick={() => void browse()}>
+              <button type="button" className="modal-btn" onClick={() => void browse()}>
                 {"Browse\u2026"}
               </button>
+              {/* Beside the field it saves, on the page and in the dialog. */}
+              <button
+                type="button"
+                className="modal-btn primary settings-folder-save"
+                disabled={busy || !folderChanged}
+                onClick={() => void save()}
+              >
+                {busy ? "Saving\u2026" : "Save folder"}
+              </button>
+            </div>
+            {pending && (
+              <div id={folderPendingId} className="modal-hint" style={{ color: theme.textMuted }}>
+                Not saved yet.
+              </div>
+            )}
+            {/* Always mounted so the confirmation is announced when it appears. */}
+            <div
+              role="status"
+              aria-live="polite"
+              className={
+                savedNotice ? "settings-folder-status modal-hint" : "settings-folder-status"
+              }
+              style={{ color: theme.textSecondary }}
+            >
+              {savedNotice ? "Folder saved." : ""}
             </div>
             {loadError && (
               <div className="modal-hint" style={{ color: theme.textMuted }}>
@@ -225,33 +254,39 @@ export function SettingsModal({
               </div>
             )}
             {saveError && (
-              <div
-                id={folderErrorId}
-                className="modal-hint"
-                role="alert"
-                style={{ color: theme.error }}
-              >
-                {saveError}
+              <div className="settings-folder-error">
+                <div
+                  id={folderErrorId}
+                  className="modal-hint"
+                  role="alert"
+                  style={{ color: theme.error }}
+                >
+                  {saveError}
+                </div>
+                <button
+                  type="button"
+                  className="modal-btn"
+                  disabled={busy}
+                  onClick={() => void save(true)}
+                >
+                  {busy ? "Retrying\u2026" : "Retry"}
+                </button>
               </div>
             )}
           </SettingsSection>
-          {embedded ? (
-            <div className="settings-card">
-              <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
-            </div>
-          ) : (
-            <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
-          )}
+          <Card embedded={embedded}>
+            <AzureConnectionSettings />
+          </Card>
           {buildIdentity && (
             <div className="modal-build-identity" style={{ color: theme.textDim }}>
               {buildIdentity}
             </div>
           )}
-          {/* On the page, Save sits in the screen's header bar instead. */}
+          {/* The page has Back instead; Close discards an unsaved folder edit,
+              which the "Not saved yet." hint warns about. */}
           {!embedded && (
             <div className="modal-actions">
-              <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
-              {saveButton}
+              <ModalDismissButton onClick={onClose}>Close</ModalDismissButton>
             </div>
           )}
         </div>

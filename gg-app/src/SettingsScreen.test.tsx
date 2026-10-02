@@ -104,6 +104,13 @@ describe("SettingsScreen", () => {
     expect(screen.getByText("telegram setup")).toBeTruthy();
   });
 
+  it("leaves the header's action slot empty on General", async () => {
+    await renderScreen();
+    expect(heading()).toBe("General");
+    // Save folder lives beside its field (see SettingsModal.test.tsx).
+    expect(document.querySelector(".settings-head-actions")?.childElementCount).toBe(0);
+  });
+
   it("clears a page's header buttons when another tab opens", async () => {
     await renderScreen({ initialTab: "remote" });
     expect(screen.queryByRole("button", { name: "Start serving" })).not.toBeNull();

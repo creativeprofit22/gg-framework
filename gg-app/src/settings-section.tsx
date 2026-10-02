@@ -9,8 +9,9 @@ import { useModalEmbedState } from "./modal-embed";
  * - in a dialog (tray, chat view): the dialog's usual small label, with
  *   `dialogHint` (if any) under it, then the fields, so dialogs look as they
  *   always have.
- * A page's buttons (Save, Add, Start serving) live in the screen's header bar,
- * via `SettingsHeaderAction`, not in sections.
+ * Page-wide buttons (Add, Start serving) live in the screen's header bar, via
+ * `SettingsHeaderAction`. A button that saves one field (General's Save
+ * folder) sits beside that field instead, on the page and in the dialog.
  */
 export function SettingsSection({
   title,

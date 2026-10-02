@@ -16,11 +16,7 @@ export function AzureConnectionSettings({ onConnectionChanged }: Props): React.R
     <section className="azure-settings" aria-labelledby="azure-settings-title">
       <div className="azure-settings-heading">
         <div>
-          <h3
-            id="azure-settings-title"
-            className="modal-label azure-settings-title"
-            style={{ color: theme.textMuted }}
-          >
+          <h3 id="azure-settings-title" className="modal-label azure-settings-title">
             Azure OpenAI
           </h3>
           <p className="modal-hint azure-settings-description" style={{ color: theme.textMuted }}>

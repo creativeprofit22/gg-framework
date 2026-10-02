@@ -83,10 +83,7 @@ export function AppearanceSettings(): React.ReactElement {
       <h3 id={`${id}-heading`} className="modal-label">
         Appearance and reading
       </h3>
-      <p className="modal-hint">
-        Changes apply immediately in both themes and save separately from the project folder. Cancel
-        does not undo them.
-      </p>
+      <p className="modal-hint">Changes apply right away in both themes.</p>
       <div className="appearance-controls">
         {controls.map(({ field, label, description, options }) => (
           <div className="appearance-control" key={field}>

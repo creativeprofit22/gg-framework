@@ -641,6 +641,7 @@
   margin-block: 6px;
 }
 .appearance-controls {
+  container: appearance-controls / inline-size;
   display: grid;
   gap: 16px;
   margin-block: 18px;
@@ -681,7 +682,10 @@
   color: var(--warning);
   font-size: 13px;
 }
-@media (max-width: 520px) {
+/* Stack the label and hint above the select whenever the controls are narrow
+   (a phone window or one column of the Settings page), not only on narrow
+   windows; side by side, a short label column wraps its hint word by word. */
+@container appearance-controls (max-width: 420px) {
   .appearance-control {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;

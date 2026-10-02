@@ -5,7 +5,8 @@ import { createPortal } from "react-dom";
  * Two slots in the Settings screen's header bar, filled by the open page:
  * - status, beside the page's name (the providers' "N connected", Remote's
  *   Live/Off);
- * - actions, right-aligned on the same row (Save, Add, Start serving).
+ * - actions, right-aligned on the same row (Add, Start serving). General's
+ *   Save folder is not here: it sits beside the folder field it saves.
  * The screen renders the empty slot elements and shares them here; a page
  * renders `<SettingsHeaderStatus>` / `<SettingsHeaderAction>`, which portal
  * their children in. A portal rather than lifted state: the page keeps owning

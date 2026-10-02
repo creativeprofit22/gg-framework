@@ -188,19 +188,19 @@ describe("Azure OpenAI app boundaries", () => {
     // Use a model the OpenAI catalog still ships so both identities coexist.
     const currentEnvironment = {
       ...completeEnvironment,
-      AZURE_OPENAI_DEPLOYMENT: "gpt-6-sol",
-      AZURE_OPENAI_MODEL_ID: "gpt-6-sol",
+      AZURE_OPENAI_DEPLOYMENT: "gpt-6.1-sol",
+      AZURE_OPENAI_MODEL_ID: "gpt-6.1-sol",
     };
-    addedModelIds.add("azure:gpt-6-sol");
+    addedModelIds.add("azure:gpt-6.1-sol");
     const openAIModel = MODELS.find(
-      (candidate) => candidate.id === "gpt-6-sol" && candidate.provider === "openai",
+      (candidate) => candidate.id === "gpt-6.1-sol" && candidate.provider === "openai",
     );
     const model = registerConfiguredAzureModel(currentEnvironment);
 
     expect(openAIModel).toBeDefined();
     expect(model).toMatchObject({
-      id: "azure:gpt-6-sol",
-      name: "Azure OpenAI (gpt-6-sol)",
+      id: "azure:gpt-6.1-sol",
+      name: "Azure OpenAI (gpt-6.1-sol)",
       provider: "azure",
       contextWindow: 1_050_000,
       maxOutputTokens: 128_000,
@@ -212,10 +212,10 @@ describe("Azure OpenAI app boundaries", () => {
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
     expect(registerConfiguredAzureModel(currentEnvironment)).toBe(model);
-    expect(MODELS.filter((candidate) => candidate.id === "gpt-6-sol")).toEqual([openAIModel]);
-    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-6-sol")).toEqual([model]);
+    expect(MODELS.filter((candidate) => candidate.id === "gpt-6.1-sol")).toEqual([openAIModel]);
+    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-6.1-sol")).toEqual([model]);
     expect(getDefaultModel("azure")).toBe(model);
-    expect(getModelDisplayId(model!.id)).toBe("gpt-6-sol");
+    expect(getModelDisplayId(model!.id)).toBe("gpt-6.1-sol");
     expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([
       "low",
       "medium",
@@ -224,7 +224,7 @@ describe("Azure OpenAI app boundaries", () => {
       "max",
       "ultra",
     ]);
-    expect(resolveTransportModel("azure", model!.id, currentEnvironment)).toBe("gpt-6-sol");
+    expect(resolveTransportModel("azure", model!.id, currentEnvironment)).toBe("gpt-6.1-sol");
 
     const selected = await resolveStartOrFallback(
       { hasProviderAuth: async (provider) => provider === "azure" },
@@ -234,7 +234,7 @@ describe("Azure OpenAI app boundaries", () => {
     );
     expect(selected).toEqual({
       provider: "azure",
-      model: "azure:gpt-6-sol",
+      model: "azure:gpt-6.1-sol",
       loggedIn: true,
     });
   });
@@ -254,6 +254,32 @@ describe("Azure OpenAI app boundaries", () => {
       costTier: "high",
       maxThinkingLevel: "ultra",
     });
+  });
+
+  it("keeps full capabilities for a GPT-6 Sol deployment after its OpenAI retirement", () => {
+    const environment = {
+      ...completeEnvironment,
+      AZURE_OPENAI_DEPLOYMENT: "gpt-6-sol",
+      AZURE_OPENAI_MODEL_ID: undefined,
+    };
+    addedModelIds.add("azure:gpt-6-sol");
+
+    expect(MODELS.some((candidate) => candidate.id === "gpt-6-sol")).toBe(false);
+    const model = registerConfiguredAzureModel(environment);
+    expect(model).toMatchObject({
+      id: "azure:gpt-6-sol",
+      modelIdentity: "gpt-6-sol",
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      supportsThinking: true,
+      defaultThinkingLevel: "medium",
+      supportsImages: true,
+      supportsVideo: false,
+      costTier: "medium",
+      maxThinkingLevel: "ultra",
+    });
+    // The retired identity only shapes the Azure entry; OpenAI still does not list it.
+    expect(MODELS.filter((candidate) => candidate.id === "gpt-6-sol")).toEqual([]);
   });
 
   it("maps a customer deployment name to explicit GPT-5.6 Sol capabilities", () => {

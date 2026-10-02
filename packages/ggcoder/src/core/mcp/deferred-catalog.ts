@@ -1,20 +1,37 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { clampToBytes, CONTEXT_LIMITS, type ContextLimits } from "../context-limits.js";
+
+/** Clamp a tool's description to the MCP description budget (eager or deferred). */
+export function clampMcpToolDescription(
+  tool: AgentTool,
+  limits: ContextLimits = CONTEXT_LIMITS,
+): AgentTool {
+  const clamped = clampToBytes(tool.description, limits.mcpToolDescriptionBytes);
+  return clamped.truncated ? { ...tool, description: clamped.text } : tool;
+}
 
 /**
  * Holds MCP tools OUT of the per-turn request payload until the model asks
  * for them via `tool_search`.
  *
- * Benchmarked (bench/RESULTS.md, bench A): injecting every MCP tool schema
+ * Measured: injecting every MCP tool schema
  * eagerly cost ~33KB (~8.3k tokens) per cache-miss turn with just two MCP
  * servers connected — 56% of all billed input tokens in a 6-turn session.
  * Deferring keeps the tool prefix small and byte-stable; promotion is a
  * one-time cache break paid only when a capability is actually needed.
+ *
+ * Descriptions are clamped at `add` time (server-controlled content): a
+ * hostile or bloated MCP server must not be able to inflate every
+ * tool_search result — and, once promoted, every request's tool schema.
  */
 export class DeferredToolCatalog {
   private byName = new Map<string, AgentTool>();
 
+  constructor(private readonly limits: ContextLimits = CONTEXT_LIMITS) {}
+
   add(tools: AgentTool[]): void {
-    for (const tool of tools) this.byName.set(tool.name, tool);
+    for (const tool of tools)
+      this.byName.set(tool.name, clampMcpToolDescription(tool, this.limits));
   }
 
   /** Remove tools (e.g. when their MCP server is reloaded/removed). */

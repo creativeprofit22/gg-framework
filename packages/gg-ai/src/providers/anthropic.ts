@@ -13,7 +13,9 @@ import {
   readHeader,
   isHardBillingMessage,
   isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
   emptyProviderErrorMessage,
+  providerHtmlErrorMessage,
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
@@ -26,6 +28,8 @@ import {
   toAnthropicToolChoice,
   toAnthropicTools,
   isAdaptiveThinkingModel,
+  isForcedToolChoice,
+  rejectsForcedToolChoice,
 } from "./transform.js";
 import { isJsonObject } from "../utils/json.js";
 
@@ -164,28 +168,22 @@ export async function prewarmAnthropicCache(options: {
           ...(system ?? []),
         ]
       : system;
-    const tools = options.tools?.length
-      ? toAnthropicTools(options.tools, {
-          cacheControl,
-          // Keep the serialized tool bytes identical to runStream so the
-          // prewarmed prompt cache actually hits — both are gated by the flag.
-          enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
-        })
-      : undefined;
+    const tools = [
+      ...toAnthropicTools(options.tools ?? [], {
+        cacheControl,
+        // Keep the serialized tool bytes identical to runStream so the
+        // prewarmed prompt cache actually hits — both are gated by the flag.
+        enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
+      }),
+      ...(options.serverTools ?? []),
+    ];
     await client.messages.create(
       {
         model: options.model,
         max_tokens: 1,
         messages,
         ...(fullSystem ? { system: fullSystem as Anthropic.MessageCreateParams["system"] } : {}),
-        ...(tools
-          ? {
-              tools: [
-                ...tools,
-                ...(options.serverTools ?? []),
-              ] as Anthropic.MessageCreateParams["tools"],
-            }
-          : {}),
+        ...(tools.length ? { tools: tools as Anthropic.MessageCreateParams["tools"] } : {}),
       } as Anthropic.MessageCreateParamsNonStreaming,
       {
         signal: options.signal ?? undefined,
@@ -212,6 +210,21 @@ export function streamAnthropic(options: StreamOptions): StreamResult {
 }
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
+  // Fail fast instead of letting the API return an opaque 400: some models
+  // (Sonnet 5.5) reject forced tool use outright.
+  if (
+    options.toolChoice &&
+    options.tools?.length &&
+    isForcedToolChoice(options.toolChoice) &&
+    rejectsForcedToolChoice(options.model)
+  ) {
+    throw new ProviderError(
+      "anthropic",
+      `${options.model} does not support forced tool use; use toolChoice 'auto' and ask for the tool in the prompt.`,
+      { statusCode: 400 },
+    );
+  }
+
   const client = createClient(options);
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
   const useStreaming = options.streaming !== false;
@@ -305,8 +318,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
 
-  // Adaptive thinking models (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5) don't need the
-  // interleaved-thinking beta — they have it built in.
+  // Adaptive thinking models (Fable 5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5)
+  // don't need the interleaved-thinking beta — they have it built in.
   const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 
   const betaHeaders = [
@@ -615,8 +628,15 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           break;
         }
 
-        // message_stop — loop exits naturally
-
+        // message_stop — loop exits naturally.
+        //
+        // Deliberately NOT breaking early here. Breaking makes the SDK iterator
+        // run `if (!done) controller.abort()` in its `finally`
+        // (core/streaming.js:97), which tears the connection down instead of
+        // returning it to the keep-alive pool — every turn would then pay a
+        // fresh TLS handshake. Draining to the end is what every other Anthropic
+        // client does, and the stall it guards against is handled by the agent
+        // loop's idle timeout.
         default:
           // Unhandled event types (e.g. "ping" heartbeats) — yield keepalive
           // so the idle timer in the agent loop resets on any API activity.
@@ -635,6 +655,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (!receivedAnyEvent) {
     throw new ProviderError("anthropic", "Stream ended without producing any events.", {
       statusCode: 504,
+    });
+  }
+
+  // Silent-partial guard: a complete Anthropic stream always emits `message_delta`
+  // (carrying stop_reason) *before* `message_stop`. So consuming events but never
+  // seeing a stop_reason means the stream was truncated mid-flight — a clean TCP
+  // close with no terminal events. Without this guard, normalizeAnthropicStopReason
+  // maps the null stop into "end_turn", making a truncated turn indistinguishable
+  // from a finished one. Throw a 504 so the agent loop treats it as a retryable
+  // transport failure (same bucket as a mid-stream socket destroy). The partial
+  // body is surfaced on `cause` for debugging, never silently returned.
+  if (stopReason === null) {
+    throw new ProviderError("anthropic", "Stream ended before completion (no stop_reason).", {
+      statusCode: 504,
+      cause: { partialContent: contentParts, outputTokens },
     });
   }
 
@@ -826,15 +861,18 @@ function toError(err: unknown): ProviderError {
           : typeof (err as unknown as { type?: unknown }).type === "string"
             ? ((err as unknown as { type: string }).type as string)
             : undefined;
-    // When neither the nested nor top-level body carries a usable message, the
-    // SDK's err.message is a raw JSON echo of the (often near-empty) error body
-    // — swap in a clean fallback rather than showing that to the user (see
-    // isRawJsonErrorEcho).
+    // The SDK may expose raw JSON or a whole HTML edge/proxy page through either
+    // the parsed body or err.message. Preserve the original on `cause`, but never
+    // send transport markup to the user.
     const fallbackMessage = isRawJsonErrorEcho(err.message)
       ? emptyProviderErrorMessage(err.status)
       : err.message;
-    const message =
-      bodyType && bodyMessage ? `${bodyType}: ${bodyMessage}` : (bodyMessage ?? fallbackMessage);
+    const messageCandidate = bodyMessage ?? err.message;
+    const message = isRawHtmlErrorEcho(messageCandidate)
+      ? providerHtmlErrorMessage(err.status)
+      : bodyType && bodyMessage
+        ? `${bodyType}: ${bodyMessage}`
+        : (bodyMessage ?? fallbackMessage);
 
     // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
     // the unified rate-limit headers; a "rejected" status — or a reset stamp

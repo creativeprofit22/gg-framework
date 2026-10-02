@@ -5,8 +5,15 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { truncateHead } from "./truncate.js";
 import { writeOverflow } from "./overflow.js";
-import { localOperations, type ToolOperations } from "./operations.js";
-import { recordRead, type ReadTracker } from "./read-tracker.js";
+import {
+  FileTooLargeError,
+  NotRegularFileError,
+  SymlinkRefusedError,
+  localOperations,
+  readFileBounded,
+  type ToolOperations,
+} from "./operations.js";
+import { countLines, recordRead, type ReadTracker } from "./read-tracker.js";
 import { lineHash } from "../core/hashline.js";
 import {
   IMAGE_EXTENSIONS,
@@ -67,15 +74,29 @@ export const BINARY_EXTENSIONS = new Set([
   ".idx",
 ]);
 
+// Models sometimes pass a line range such as "[98, 242]" as `offset`. Zod's
+// default "expected number, received string" did not teach Haiku the right
+// shape: it repeated the range until three identical invalid calls stopped the
+// whole run. Name the fix. A schema-level `error` also covers `.int()`/`.min()`,
+// so each message must hold for every way the field can be wrong.
 const ReadParams = z.object({
   file_path: z.string().describe("The file path to read"),
   offset: z
-    .number()
+    .number({
+      error:
+        "offset must be ONE line number (an integer >= 1), not a range or string. " +
+        "To read lines 98-242, pass offset: 98 and limit: 145.",
+    })
     .int()
     .min(1)
     .optional()
     .describe("Line number to start reading from (1-based)"),
-  limit: z.number().int().min(1).optional().describe("Maximum number of lines to read"),
+  limit: z
+    .number({ error: "limit must be ONE line count (an integer >= 1), not a range or string." })
+    .int()
+    .min(1)
+    .optional()
+    .describe("Maximum number of lines to read"),
   anchors: z
     .boolean()
     .optional()
@@ -84,6 +105,29 @@ const ReadParams = z.object({
         "by anchor and reject stale edits. Default false.",
     ),
 });
+
+/**
+ * Turn a refused bounded read into a message the model can act on.
+ *
+ * Both cases are dead ends for `read`, so the text names the tool that still
+ * works — otherwise the agent retries `read` with an offset and burns turns on
+ * a file it can never load.
+ */
+function describeBoundedReadError(err: unknown): string | null {
+  if (err instanceof FileTooLargeError) {
+    return (
+      `${err.message}. Use \`grep\` to search it, or \`bash\` with ` +
+      `\`sed -n '1,200p'\` / \`tail\` to view part of it.`
+    );
+  }
+  if (err instanceof NotRegularFileError) {
+    return `${err.message}. Reading it could block forever; use \`bash\` if you really need its stream.`;
+  }
+  if (err instanceof SymlinkRefusedError) {
+    return `${err.message}. Read the file it points at directly, if that path is one you should be reading.`;
+  }
+  return null;
+}
 
 export function createReadTool(
   cwd: string,
@@ -121,7 +165,10 @@ export function createReadTool(
       // structured content so the model can actually see the pixels.
       if (IMAGE_EXTENSIONS.has(ext)) {
         try {
-          const rawBuffer = await fs.readFile(resolved);
+          // Bounded + opened once: an unbounded read here OOM-kills the shared
+          // daemon (every window's session with it) on a huge or non-regular
+          // file wearing an image extension.
+          const rawBuffer = await readFileBounded(resolved);
           const mediaType = IMAGE_MEDIA_TYPES[ext] ?? "image/png";
           const { buffer, mediaType: finalMediaType } = await shrinkToFit(rawBuffer, mediaType);
           const resizedNote =
@@ -151,6 +198,8 @@ export function createReadTool(
             },
           };
         } catch (err: unknown) {
+          const bounded = describeBoundedReadError(err);
+          if (bounded) return bounded;
           const code = (err as NodeJS.ErrnoException).code;
           if (code === "ENOENT") return `File not found: ${resolved}`;
           if (code === "EACCES") return `Permission denied: ${resolved}`;
@@ -190,7 +239,7 @@ export function createReadTool(
               ` (auto-compressed from ${(result.originalBytes / (1024 * 1024)).toFixed(0)} MB to ` +
               `${(result.compressedBytes / (1024 * 1024)).toFixed(0)} MB for analysis)`;
           }
-          const rawBuffer = await fs.readFile(videoPath);
+          const rawBuffer = await readFileBounded(videoPath, videoByteLimit);
           const mediaType = VIDEO_MEDIA_TYPES[ext] ?? "video/mp4";
           return {
             content: [
@@ -199,6 +248,8 @@ export function createReadTool(
             ],
           };
         } catch (err: unknown) {
+          const bounded = describeBoundedReadError(err);
+          if (bounded) return bounded;
           const code = (err as NodeJS.ErrnoException).code;
           if (code === "ENOENT") return `File not found: ${resolved}`;
           if (code === "EACCES") return `Permission denied: ${resolved}`;
@@ -219,6 +270,8 @@ export function createReadTool(
       try {
         raw = await ops.readFile(resolved);
       } catch (err: unknown) {
+        const bounded = describeBoundedReadError(err);
+        if (bounded) return bounded;
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ENOENT") return `File not found: ${resolved}`;
         if (code === "EACCES") return `Permission denied: ${resolved}`;
@@ -226,8 +279,6 @@ export function createReadTool(
         throw err;
       }
       const stat = await ops.stat(resolved);
-      recordRead(readFiles, resolved, raw, stat.mtimeMs);
-      await onFileRead?.(resolved);
       let lines = raw.split("\n");
 
       // Apply offset/limit
@@ -237,6 +288,27 @@ export function createReadTool(
 
       const content = lines.join("\n");
       const result = truncateHead(content);
+      // A line longer than the byte cap can never be shown, and truncateHead
+      // keeps nothing when it opens the window. Name it and point past it,
+      // counting it as seen: otherwise a full-file write could never proceed.
+      if (result.truncated && result.keptLines === 0) {
+        const lineNo = startLine + 1;
+        const bytes = Buffer.byteLength(lines[0] ?? "", "utf-8");
+        recordRead(readFiles, resolved, raw, stat.mtimeMs, [lineNo, lineNo]);
+        await onFileRead?.(resolved);
+        const next =
+          lineNo < countLines(raw)
+            ? `Use offset=${lineNo + 1} to read the rest, or bash`
+            : "Use bash";
+        return `[Line ${lineNo} is too long to show (${bytes} bytes). ${next} (e.g. cut -c1-2000) to inspect it.]`;
+      }
+      // Record exactly which lines the model is shown: a full-file write is only
+      // allowed once it has seen every line (see assertFullySeen).
+      recordRead(readFiles, resolved, raw, stat.mtimeMs, [
+        startLine + 1,
+        startLine + result.keptLines,
+      ]);
+      await onFileRead?.(resolved);
 
       // Prepend line numbers (cat -n style). With `anchors`, also prefix each
       // line with a `hash│` content anchor. The hash is computed from the REAL

@@ -10,6 +10,9 @@ import {
   INJECTED_PROMPT_LABEL,
 } from "./ken-context.js";
 import { USER_INSTRUCTIONS_HEADER } from "./autopilot-gate.js";
+import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
+import { SessionVerificationEvidenceLedger } from "./verification-evidence.js";
+import { frameAutopilotInjection } from "./autopilot-cycle.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 import { createTools } from "../tools/index.js";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -24,25 +27,20 @@ const KEN_ALLOWED_TOOLS = [
   "web_fetch",
   "web_search",
   "screenshot",
+  "steroids",
 ];
-const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
 
-// Mirror of AgentSession.isToolAllowed (which is private): a tool passes when
-// its name is in the allow-list, OR it's an mcp__<server>__<tool> whose server
-// is whitelisted. Kept in lockstep so this test tracks the real filter.
+// Mirror of AgentSession.isToolAllowed (which is private): Ken whitelists no
+// MCP server, so a tool passes only when its name is in the allow-list.
 function isToolAllowed(name: string): boolean {
-  if (KEN_ALLOWED_TOOLS.includes(name)) return true;
-  if (name.startsWith("mcp__")) {
-    const server = name.slice("mcp__".length).split("__")[0];
-    return KEN_ALLOWED_MCP_SERVERS.includes(server);
-  }
-  return false;
+  return KEN_ALLOWED_TOOLS.includes(name);
 }
 
 describe("Ken allowedTools filter", () => {
   it("excludes every mutating tool from the Ken set", async () => {
     const { tools, processManager, lspManager } = await createTools(os.tmpdir(), {
       lspDiagnostics: false,
+      steroidsBin: "/nonexistent/steroids",
     });
     try {
       const kenTools = tools.filter((t) => isToolAllowed(t.name)).map((t) => t.name);
@@ -52,7 +50,7 @@ describe("Ken allowedTools filter", () => {
         expect(kenTools).not.toContain(banned);
       }
       // The read-only research/vision tools must survive.
-      for (const allowed of ["read", "grep", "find", "ls", "screenshot"]) {
+      for (const allowed of ["read", "grep", "find", "ls", "screenshot", "steroids"]) {
         expect(kenTools).toContain(allowed);
       }
     } finally {
@@ -61,13 +59,11 @@ describe("Ken allowedTools filter", () => {
     }
   });
 
-  it("allows whitelisted kencode-search MCP tools but blocks other MCP tools", () => {
-    // kencode-search is Ken's research server: all its tools pass.
-    expect(isToolAllowed("mcp__kencode-search__searchCode")).toBe(true);
-    expect(isToolAllowed("mcp__kencode-search__referenceSources")).toBe(true);
-    expect(isToolAllowed("mcp__kencode-search__discoverRepos")).toBe(true);
-    // A non-whitelisted MCP server (e.g. a user-configured one) is blocked,
-    // even if it exposes an innocuous-looking name.
+  it("allows the native steroids tool but blocks every MCP tool", () => {
+    // steroids is Ken's research corpus: a native tool, no MCP server needed.
+    expect(isToolAllowed("steroids")).toBe(true);
+    // Any MCP server (e.g. a user-configured one) is blocked, even if it
+    // exposes an innocuous-looking name.
     expect(isToolAllowed("mcp__some-other-server__searchCode")).toBe(false);
     expect(isToolAllowed("mcp__filesystem__write_file")).toBe(false);
   });
@@ -80,6 +76,72 @@ describe("buildKenDigest", () => {
     gitBranch: "main" as string | null,
     platform: "darwin",
   };
+
+  it("uses host results instead of re-rejecting a completed background launch", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "bg",
+            name: "bash",
+            args: { command: "pnpm test", run_in_background: true },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "bg", content: "ID: task-1", isError: false }],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: {
+        currentEvidence: [
+          {
+            command: "pnpm test",
+            status: "passed",
+            reason: "Host exit code 0",
+            cwd: base.cwd,
+            executionId: "bg-exit",
+          },
+        ],
+        staleEvidence: [],
+      },
+    });
+    expect(digest).toContain("PASSED: `pnpm test`");
+    expect(digest).toContain("OBSERVED PASSED: `pnpm test`");
+    expect(digest).toContain("not certification of requirements");
+    expect(digest).not.toContain("Current host gate:");
+    expect(digest).not.toContain("HISTORICAL UNCLASSIFIED: `pnpm test`");
+    expect(digest).not.toContain("background or persistent commands are not bounded evidence");
+  });
+
+  it("labels old transcript failures historical when the current host ledger is empty", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "old", name: "bash", args: { command: "pnpm test" } }],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "old", content: "Exit code: 1", isError: true },
+        ],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: { currentEvidence: [], staleEvidence: [] },
+    });
+    expect(digest).toContain("HISTORICAL FAILED: `pnpm test`");
+    expect(digest).toContain("Historical reports were not rerun");
+    expect(digest).not.toContain("OBSERVED FAILED:");
+    expect(digest).not.toContain("Current host gate:");
+  });
 
   it("includes the env and the question", () => {
     const digest = buildKenDigest({ ...base, messages: [] });
@@ -95,11 +157,164 @@ describe("buildKenDigest", () => {
       messages.push({ role: "user", content: `msg-${i}` });
     }
     const digest = buildKenDigest({ ...base, messages });
-    // The earliest messages fall outside the cap.
-    expect(digest).not.toContain("msg-0");
-    expect(digest).not.toContain("msg-5");
+    // Older user requests survive separately; recent activity stays bounded.
+    const recent = digest.split("## Recent activity (GG Coder and user)")[1];
+    expect(recent).not.toContain("msg-0");
+    expect(recent).not.toContain("msg-5");
+    expect(digest).toContain("**User:** msg-0");
+    expect(digest).toContain("**User:** msg-5");
     // The newest message is kept.
     expect(digest).toContain(`msg-${KEN_RECENT_MESSAGE_LIMIT + 9}`);
+  });
+
+  it("retains early constraints and later corrections for manual and autopilot reviews", () => {
+    const messages: Message[] = [
+      { role: "user", content: "CSV only, no new dependencies." },
+      { role: "assistant", content: "SUGGESTED: rewrite in Excel." },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Correction: preserve the current filters too." }],
+      },
+      ...Array.from({ length: 25 }, (): Message => ({
+        role: "assistant",
+        content: "Still working.",
+      })),
+    ];
+    for (const digest of [
+      buildKenDigest({ ...base, messages }),
+      buildKenAutopilotContext({ ...base, messages }),
+    ]) {
+      expect(digest).toContain("CSV only, no new dependencies.");
+      expect(digest).toContain("Correction: preserve the current filters too.");
+      expect(digest.indexOf("CSV only")).toBeLessThan(digest.indexOf("Correction:"));
+      expect(digest).not.toContain("SUGGESTED:");
+      expect(digest).not.toContain("Context incomplete");
+    }
+  });
+
+  it("does not retain injected prompts as user decisions after restart", () => {
+    const messages: Message[] = [
+      { role: "user", content: frameAutopilotInjection("Add analytics.") },
+      { role: "user", content: "Old unframed injection." },
+      { role: "user", content: "Keep it dependency-free." },
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Working." })),
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      injectedPrompts: ["Old unframed injection."],
+    });
+    expect(digest).toContain("Keep it dependency-free.");
+    expect(digest).not.toContain("Add analytics.");
+    expect(digest).not.toContain("Old unframed injection.");
+    const recent = buildKenDigest({ ...base, messages: [messages[0]] });
+    expect(recent).toContain(INJECTED_PROMPT_LABEL);
+    expect(recent).not.toContain("**User:**");
+  });
+
+  it("bounds retained decisions and explicitly discloses omitted or truncated context", () => {
+    const messages: Message[] = [
+      ...Array.from({ length: 100 }, (_, i): Message => ({
+        role: "user",
+        content: `Decision ${i}: ${"x".repeat(500)}`,
+      })),
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Working." })),
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("Context incomplete: some earlier user messages");
+    expect(digest).toContain("Decision 99:");
+    expect(digest.length).toBeLessThan(11000);
+    expect(buildKenDigest({ ...base, messages: [], originalRequest: "x".repeat(5000) })).toContain(
+      "Context incomplete: original request was truncated",
+    );
+    expect(
+      buildKenDigest({
+        ...base,
+        messages: [{ role: "user", content: "[Previous conversation summary]" + "x".repeat(5000) }],
+      }),
+    ).toContain("Context incomplete: conversation summary was truncated");
+  });
+
+  it("retains only human decisions and labels recent automation in both modes", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: "CSV only.",
+        provenance: { source: "human", kind: "prompt", visibility: "transcript" },
+      },
+      { role: "user", content: "Legacy human constraint: no dependencies." },
+      {
+        role: "user",
+        content: "Old verification reminder.",
+        provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Old agent continuation.",
+        provenance: { source: "agent", kind: "automation", visibility: "hidden" },
+      },
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Progress." })),
+      {
+        role: "user",
+        content: "Latest verification reminder.",
+        provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Latest agent continuation.",
+        provenance: { source: "agent", kind: "automation", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Correction: preserve filters.",
+        provenance: { source: "human", kind: "steering", visibility: "transcript" },
+      },
+    ];
+    for (const digest of [
+      buildKenDigest({ ...base, messages }),
+      buildKenAutopilotContext({ ...base, messages }),
+    ]) {
+      expect(digest).toContain("**User:** CSV only.");
+      expect(digest).toContain("**User:** Legacy human constraint: no dependencies.");
+      expect(digest).toContain("**User:** Correction: preserve filters.");
+      expect(digest).not.toContain("Old verification reminder.");
+      expect(digest).not.toContain("Old agent continuation.");
+      expect(digest).toContain("**Runtime (not a user request):** Latest verification reminder.");
+      expect(digest).toContain(
+        "**Agent automation (not a user request):** Latest agent continuation.",
+      );
+      expect(digest).not.toContain("**User:** Latest");
+    }
+  });
+
+  it("runtime reminders cannot consume the retained user-decision budget", () => {
+    const messages: Message[] = [
+      { role: "user", content: "Keep this genuine requirement." },
+      ...Array.from({ length: 40 }, (): Message => ({
+        role: "user",
+        content: "Internal reminder. ".repeat(300),
+        provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+      })),
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Progress." })),
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("Keep this genuine requirement.");
+    expect(digest).not.toContain("Internal reminder.");
+    expect(digest).not.toContain("Context incomplete");
+  });
+
+  it("preserves provenance-tagged compaction summaries", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: "[Previous conversation summary] User chose CSV and rejected Excel.",
+        provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+      },
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("## Story so far");
+    expect(digest).toContain("User chose CSV and rejected Excel.");
+    expect(digest).not.toContain("**User:**");
   });
 
   it("strips image blocks from user messages", () => {
@@ -139,6 +354,381 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("HUMAN");
   });
 
+  it("preserves successful verification after pruning", () => {
+    const command = "tsc --noEmit";
+    const executionId = "pruning-success";
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: base.cwd,
+          startedAt: 1000,
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+    });
+    const result = {
+      type: "tool_result" as const,
+      toolCallId: executionId,
+      content: `Exit code: 0\n${"check output\n".repeat(30)}`,
+    };
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: executionId, name: "bash", args: { command } }],
+      },
+      { role: "tool", content: [result] },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call", id: "read", name: "read", args: { file_path: "README.md" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "read", content: "recent read" }],
+      },
+    ];
+    const snapshot = ledger.snapshot();
+    const input = { ...base, messages, verificationEvidence: snapshot };
+    const before = buildKenDigest(input);
+    const pruning = pruneStaleToolResults(messages, {
+      protectTokens: 0,
+      minimumTokens: 0,
+      protectToolBatches: 1,
+    });
+    const after = buildKenDigest(input);
+
+    expect(before).toContain("PASSED: `tsc --noEmit`");
+    expect(pruning.prunedResults).toBe(1);
+    expect(result.content).toMatch(/^\[Pruned:/);
+    expect(result.toolCallId).toBe(executionId);
+    expect(ledger.snapshot()).toEqual(snapshot);
+    expect(snapshot.currentEvidence[0]).toMatchObject({
+      executionId,
+      cwd: base.cwd,
+      status: "passed",
+    });
+    expect(after).toContain("PASSED: `tsc --noEmit`");
+    expect(after).not.toContain("FAILED:");
+  });
+
+  it("keeps observed failures and historical outcomes distinct from missing legacy output", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (const [executionId, command, exitCode] of [
+      ["failed", "tsc --noEmit", 1],
+      ["rejected", "vitest --watch", 0],
+    ] as const) {
+      ledger.recordToolResult({
+        name: "bash",
+        args: { command },
+        isError: exitCode !== 0,
+        details: {
+          bashDiagnostics: {
+            executionId,
+            command,
+            exitCode,
+            reason: exitCode ? "nonZeroExit" : "completed",
+            cwd: base.cwd,
+            startedAt: 1000,
+          },
+        },
+      });
+    }
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/index.ts" }, isError: false });
+    const digest = buildKenDigest({
+      ...base,
+      messages: [],
+      verificationEvidence: ledger.snapshot(),
+    });
+    expect(digest).toContain("HISTORICAL FAILED: `tsc --noEmit`");
+    expect(digest).toContain("HISTORICAL PASSED: `vitest --watch`");
+    expect(digest).toContain("execution failed; cwd /tmp/proj");
+    const legacy = buildKenDigest({
+      ...base,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_call", id: "legacy", name: "bash", args: { command: "tsc --noEmit" } },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            { type: "tool_result", toolCallId: "legacy", content: "[Pruned: old tool output]" },
+          ],
+        },
+      ],
+    });
+    expect(legacy).toContain("UNAVAILABLE: `tsc --noEmit`");
+    expect(legacy).not.toContain("FAILED:");
+    expect(legacy).not.toContain("PASSED:");
+  });
+
+  it("fills empty and partial ledgers without letting legacy success outrank host failure", () => {
+    const messages: Message[] = [];
+    for (let index = 0; index < 20; index++) {
+      messages.push(
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_call",
+              id: `legacy-${index}`,
+              name: "bash",
+              args: { command: `tsc --noEmit -p project-${index}` },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool_result",
+              toolCallId: `legacy-${index}`,
+              content: "Exit code: 0\nAll passed!",
+            },
+          ],
+        },
+      );
+    }
+    // Retained calls before a summary are still history, not current approval.
+    messages.push({ role: "user", content: "[Previous conversation summary] All checks passed" });
+    const ledger = new SessionVerificationEvidenceLedger();
+    const empty = buildKenDigest({ ...base, messages, verificationEvidence: ledger.snapshot() });
+    expect(empty.match(/^- HISTORICAL PASSED:/gm)).toHaveLength(12);
+    expect(empty).not.toMatch(/^- OBSERVED PASSED:/m);
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit -p project-19" },
+      isError: true,
+      details: {
+        bashDiagnostics: {
+          executionId: "fresh-failure",
+          command: "tsc --noEmit -p project-19",
+          cwd: base.cwd,
+          startedAt: 1000,
+          reason: "nonZeroExit",
+          exitCode: 1,
+        },
+      },
+    });
+    const partial = buildKenDigest({ ...base, messages, verificationEvidence: ledger.snapshot() });
+    expect(partial).toContain("- OBSERVED FAILED: `tsc --noEmit -p project-19`");
+    expect(partial).toContain("execution fresh-failure");
+    expect(partial).not.toContain("PASSED: `tsc --noEmit -p project-19`");
+    expect(partial.match(/^- HISTORICAL PASSED:/gm)).toHaveLength(11);
+  });
+
+  it("frames autopilot digests as a machine review, never as a user's question", () => {
+    const messages: Message[] = [{ role: "user", content: "add a login form" }];
+    const input = { cwd: base.cwd, gitBranch: base.gitBranch, platform: base.platform, messages };
+    for (const digest of [
+      buildKenAutopilotContext(input),
+      buildKenAutopilotPlanContext({ ...input, planContent: "# Plan" }),
+    ]) {
+      expect(digest).toContain("No user is in this conversation");
+      expect(digest).toContain("## Your task");
+      expect(digest).not.toContain("mentoring the user");
+      expect(digest).not.toContain("They just asked you");
+    }
+    // Chat Ken keeps his user-facing framing.
+    const chat = buildKenDigest({ ...base, messages });
+    expect(chat).toContain("mentoring the user");
+    expect(chat).toContain("## They just asked you");
+  });
+
+  describe("autopilot changed-files section", () => {
+    const edit = (id: string, filePath: string): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_call", id, name: "edit", args: { file_path: filePath } }],
+    });
+    const result = (id: string, isError = false): Message => ({
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: id, content: "ok", isError }],
+    });
+    const section = (digest: string): string =>
+      digest.split("## Files changed by the work under review")[1]?.split("\n\n## ")[0] ?? "";
+
+    it("lists successful edit/write paths from this turn only, sorted", () => {
+      const messages: Message[] = [
+        { role: "user", content: "older ask" },
+        edit("old", "src/old.ts"),
+        result("old"),
+        { role: "user", content: "add a login form" },
+        edit("z", "src/z.ts"),
+        result("z"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "w", name: "write", args: { file_path: "src/a.ts" } }],
+        },
+        result("w"),
+        edit("bad", "src/failed.ts"),
+        result("bad", true),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "r", name: "read", args: { file_path: "src/r.ts" } }],
+        },
+        result("r"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("since the original request");
+      expect(listed.indexOf("- src/a.ts")).toBeLessThan(listed.indexOf("- src/z.ts"));
+      expect(listed).not.toContain("src/old.ts");
+      expect(listed).not.toContain("src/failed.ts");
+      expect(listed).not.toContain("src/r.ts");
+    });
+
+    it("does not restart the turn at Ken's injected prompt that quotes the request", () => {
+      const messages: Message[] = [
+        { role: "user", content: "add a login form" },
+        edit("first", "src/form.ts"),
+        result("first"),
+        { role: "user", content: frameAutopilotInjection("Finish: add a login form. Add a test.") },
+        edit("second", "src/form.test.ts"),
+        result("second"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("- src/form.ts");
+      expect(listed).toContain("- src/form.test.ts");
+    });
+
+    it("keeps files whose edits scrolled out of the recent-activity window", () => {
+      const messages: Message[] = [{ role: "user", content: "refactor auth" }];
+      for (let i = 0; i < KEN_RECENT_MESSAGE_LIMIT; i++) {
+        messages.push(edit(`e${i}`, `src/file-${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages,
+        originalRequest: "refactor auth",
+      });
+      expect(digest.split("## Recent activity")[1]).not.toContain("refactor auth");
+      expect(section(digest)).toContain("- src/file-00.ts");
+    });
+
+    it("says when the original request message is gone instead of guessing a boundary", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [edit("e", "src/plan-step.ts"), result("e")],
+        originalRequest: "implement the approved plan",
+      });
+      expect(section(digest)).toContain("original request message was compacted or reset away");
+      expect(section(digest)).toContain("- src/plan-step.ts");
+    });
+
+    it("caps a huge file list and reports the overflow", () => {
+      const messages: Message[] = [{ role: "user", content: "rename everywhere" }];
+      for (let i = 0; i < 45; i++) {
+        messages.push(edit(`e${i}`, `src/f${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "rename everywhere",
+        }),
+      );
+      expect(listed).toContain("- src/f39.ts");
+      expect(listed).not.toContain("- src/f40.ts");
+      expect(listed).toContain("[…5 more files]");
+    });
+
+    it("is omitted when no edit/write calls succeeded, so shell-only work never reads as 'no changes'", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [
+          { role: "user", content: "regenerate the client" },
+          edit("bad", "src/failed.ts"),
+          result("bad", true),
+        ],
+        originalRequest: "regenerate the client",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+      expect(digest).not.toContain("(none)");
+    });
+
+    it("is absent from chat digests", () => {
+      const digest = buildKenDigest({
+        ...base,
+        messages: [{ role: "user", content: "hi" }, edit("e", "src/x.ts"), result("e")],
+        originalRequest: "hi",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+    });
+  });
+
+  it("labels legacy unclassified command outcomes without calling them test failures", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call", id: "pass", name: "bash", args: { command: "tsc --noEmit" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "pass", content: "Exit code: 0\n" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "watch",
+            name: "bash",
+            args: { command: "vitest --watch" },
+          },
+          { type: "tool_call", id: "status", name: "bash", args: { command: "git status" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "watch", content: "Exit code: 0\n" },
+          { type: "tool_result", toolCallId: "status", content: "Exit code: 0\n" },
+        ],
+      },
+    ];
+
+    const digest = buildKenAutopilotContext({ ...base, messages });
+    const evidence = digest.split("## Command observations")[1].split("## Your task")[0];
+    expect(evidence).toContain("PASSED: `tsc --noEmit`");
+    expect(evidence).toContain("UNCLASSIFIED: `vitest --watch`");
+    expect(evidence).not.toContain("git status");
+  });
+
   it("autopilot review instruction separates true human decisions from safe implied follow-ups", () => {
     // GG Coder ending with a question/options is HUMAN only when it needs a
     // real user-level decision. Permission to continue safe work implied by the
@@ -176,9 +766,7 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("Wire callback route");
     // … before the trailing question, which is the PLAN instruction (not the
     // work-review one).
-    expect(digest.indexOf("## Plan under review")).toBeLessThan(
-      digest.indexOf("## They just asked you"),
-    );
+    expect(digest.indexOf("## Plan under review")).toBeLessThan(digest.indexOf("## Your task"));
     expect(digest).toContain(AUTOPILOT_PLAN_REVIEW_INSTRUCTION);
     expect(digest).not.toContain(AUTOPILOT_REVIEW_INSTRUCTION);
   });
@@ -193,6 +781,7 @@ describe("buildKenDigest", () => {
     });
     const section = digest.slice(digest.indexOf("## Plan under review"));
     expect(section).toContain("more chars]");
+    expect(section).toContain("Context incomplete: plan was truncated");
     expect(section.length).toBeLessThan(9000);
   });
 

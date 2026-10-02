@@ -1,24 +1,42 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, XCircle, Lock } from "lucide-react";
+import {
+  CheckCircleIcon,
+  XCircleIcon,
+  LockIcon,
+  MinusCircleIcon,
+  XIcon,
+} from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { ListSkeleton } from "./Skeleton";
+import { SettingsCard, SettingsSection } from "./settings-section";
+import { SettingsHeaderAction } from "./settings-header";
 import {
-  listMcpServers,
-  addMcpServer,
-  removeMcpServer,
-  loginMcpServer,
   listProjects,
-  subscribe,
+  isMcpAuthDoneEvent,
   type McpServerRow,
   type DiscoveredProject,
+  type PaneAgentClient,
   type SidecarEvent,
 } from "./agent";
 import { toast } from "./toast";
 
+export type McpPaneClient = Pick<
+  PaneAgentClient,
+  "listMcpServers" | "addMcpServer" | "loginMcpServer" | "removeMcpServer" | "subscribe"
+>;
+
 interface Props {
   onClose: () => void;
+  /** Pane-bound client: MCP management targets this pane's daemon session. */
+  client: McpPaneClient;
+}
+
+interface McpManagementError {
+  message: string;
+  retry: () => Promise<void>;
 }
 
 /**
@@ -28,10 +46,11 @@ interface Props {
  *
  * Scope: Global writes to ~/.gg/mcp.json (all sessions). Project writes to a
  * chosen project's `.gg/mcp.json` — a project picker appears when Project is
- * selected, since the modal has no inherent project context. Like the CLI, a
- * newly-added server needs an app restart to load (MCP connects once at startup).
+ * selected, since the modal has no inherent project context. Successful changes
+ * reload the pane-scoped AgentSession before the management action completes.
  */
-export function McpModal({ onClose }: Props): React.ReactElement {
+export function McpModal({ onClose, client }: Props): React.ReactElement {
+  const embedded = useModalEmbedState() === "embed";
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [line, setLine] = useState("");
@@ -44,26 +63,35 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   const [listCwd, setListCwd] = useState<string | undefined>(undefined);
   // Name of the server currently mid-login (disables its button + shows status).
   const [loggingIn, setLoggingIn] = useState<string | null>(null);
+  const [managementError, setManagementError] = useState<McpManagementError | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const loginTargetRef = useRef<{ name: string; scope: "global" | "project" } | null>(null);
 
-  const refresh = useCallback(async (cwd?: string): Promise<void> => {
-    setLoading(true);
-    setListCwd(cwd);
-    try {
-      setServers(await listMcpServers(cwd));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh().catch(() => {});
-  }, [refresh]);
+  const refresh = useCallback(
+    async (cwd?: string): Promise<void> => {
+      setLoading(true);
+      setListCwd(cwd);
+      try {
+        const nextServers = await client.listMcpServers(cwd);
+        setServers(nextServers);
+        setManagementError(null);
+      } catch (error) {
+        setManagementError({
+          message: error instanceof Error ? error.message : "Could not load MCP servers.",
+          retry: () => refresh(cwd),
+        });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client],
+  );
 
   // Stream OAuth login progress for remote MCP servers. `mcp_auth_url` opens the
   // system browser; done/error give the user clear feedback and refresh the list
   // so a freshly-authorized server flips to connected.
   useEffect(() => {
-    const unsub = subscribe((e: SidecarEvent) => {
+    const unsub = client.subscribe((e: SidecarEvent) => {
       const d = e.data as Record<string, unknown>;
       const name = String(d.name ?? "");
       switch (e.type) {
@@ -72,20 +100,27 @@ export function McpModal({ onClose }: Props): React.ReactElement {
           void openUrl(String(d.url ?? ""));
           break;
         case "mcp_auth_done": {
+          if (!isMcpAuthDoneEvent(e)) break;
           setLoggingIn(null);
-          const tools = Number(d.toolCount ?? 0);
-          toast(`Signed in to "${name}" \u2014 ${tools} tools.`, "success");
-          void refresh(listCwd).catch(() => {});
+          toast(`Signed in to "${e.data.name}" \u2014 ${e.data.toolCount} tools.`, "success");
+          void refresh(listCwd);
           break;
         }
         case "mcp_auth_error":
           setLoggingIn(null);
-          toast(`Login failed for "${name}": ${String(d.message ?? "unknown error")}`, "error");
+          setManagementError({
+            message: `Sign-in failed for "${name}". The OAuth flow did not complete. Retry sign-in.`,
+            retry: () =>
+              signIn(
+                name,
+                loginTargetRef.current?.name === name ? loginTargetRef.current.scope : "global",
+              ),
+          });
           break;
       }
     });
     return () => unsub();
-  }, [refresh, listCwd]);
+  }, [client, refresh, listCwd]);
 
   // Load discovered projects (for the Project-scope picker). Done once on mount
   // so switching to Project scope shows the list instantly.
@@ -110,7 +145,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
     }
     setBusy(true);
     try {
-      const result = await addMcpServer(
+      const result = await client.addMcpServer(
         trimmed,
         scope,
         scope === "project" ? projectPath : undefined,
@@ -128,7 +163,10 @@ export function McpModal({ onClose }: Props): React.ReactElement {
       }
       await refresh(scope === "project" ? projectPath : undefined);
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not add the MCP server.",
+        retry: add,
+      });
     } finally {
       setBusy(false);
     }
@@ -137,18 +175,22 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   async function signIn(name: string, rowScope: "global" | "project"): Promise<void> {
     if (loggingIn) return;
     setLoggingIn(name);
+    loginTargetRef.current = { name, scope: rowScope };
     try {
-      await loginMcpServer(name, rowScope, rowScope === "project" ? listCwd : undefined);
+      await client.loginMcpServer(name, rowScope, rowScope === "project" ? listCwd : undefined);
       // Outcome arrives via the mcp_auth_* events above.
     } catch (e) {
       setLoggingIn(null);
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not start MCP sign-in.",
+        retry: () => signIn(name, rowScope),
+      });
     }
   }
 
   async function remove(name: string, rowScope: "global" | "project"): Promise<void> {
     try {
-      const { removed } = await removeMcpServer(
+      const { removed } = await client.removeMcpServer(
         name,
         rowScope,
         rowScope === "project" ? listCwd : undefined,
@@ -158,9 +200,23 @@ export function McpModal({ onClose }: Props): React.ReactElement {
         await refresh(listCwd);
       } else {
         toast(`No "${name}" found.`, "warning");
+        setManagementError(null);
       }
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not remove the MCP server.",
+        retry: () => remove(name, rowScope),
+      });
+    }
+  }
+
+  async function retryManagementAction(): Promise<void> {
+    if (!managementError || retrying) return;
+    setRetrying(true);
+    try {
+      await managementError.retry();
+    } finally {
+      setRetrying(false);
     }
   }
 
@@ -170,38 +226,74 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   // which scope you're managing.
   const visible = servers.filter((s) => s.scope === scope);
 
-  return (
-    <Modal title="MCP servers" onClose={onClose}>
-      {loading ? (
+  const addButton = (
+    <button
+      // In the Settings header it matches the nav bars' small buttons.
+      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
+      disabled={!line.trim() || busy}
+      onClick={() => void add()}
+    >
+      {busy ? "Adding\u2026" : "Add"}
+    </button>
+  );
+
+  const serverList = (
+    <>
+      {loading && servers.length === 0 ? (
         <ListSkeleton rows={3} />
       ) : visible.length === 0 ? (
-        <div className="mcp-empty" style={{ color: theme.textMuted }}>
-          {scope === "global"
-            ? "No global MCP servers configured."
-            : "No project MCP servers configured."}
-        </div>
+        !managementError && (
+          <div className="mcp-empty" style={{ color: theme.textMuted }}>
+            No MCP’s configured.
+          </div>
+        )
       ) : (
-        <div className="mcp-list">
+        <div className="mcp-list" aria-busy={loading}>
           {visible.map((s) => (
             <div className="mcp-item" key={`${s.scope}:${s.name}`}>
               <span
                 className="mcp-dot"
                 style={{
-                  color: s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
+                  color: !s.enabled
+                    ? theme.textMuted
+                    : s.ok
+                      ? theme.success
+                      : s.requiresAuth
+                        ? theme.warning
+                        : theme.error,
                 }}
               >
-                {s.ok ? (
-                  <CheckCircle2 size={15} />
+                {!s.enabled ? (
+                  <MinusCircleIcon size={15} className="mcp-status-disabled" />
+                ) : s.ok ? (
+                  <CheckCircleIcon size={15} className="mcp-status-connected" />
                 ) : s.requiresAuth ? (
-                  <Lock size={14} />
+                  <LockIcon size={14} className="mcp-status-auth" />
                 ) : (
-                  <XCircle size={15} />
+                  <XCircleIcon size={15} className="mcp-status-failed" />
                 )}
               </span>
-              <span className="mcp-name" style={{ color: theme.text }} title={s.summary}>
-                {s.name}
-              </span>
-              {s.ok ? (
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
+                  {s.name}
+                </div>
+                {s.enabled && !s.ok && !s.requiresAuth && (
+                  <div
+                    className="mcp-meta"
+                    style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}
+                  >
+                    {/* Raw s.error is diagnostic-only, even after transport redaction. */}
+                    {s.failureReason === "trust-blocked"
+                      ? "Project server blocked. Add or re-add it in this project to trust it."
+                      : "Could not connect. Check the server settings and availability."}
+                  </div>
+                )}
+              </div>
+              {!s.enabled ? (
+                <span className="mcp-meta" style={{ color: theme.textMuted }}>
+                  Disabled
+                </span>
+              ) : s.ok ? (
                 <span className="mcp-meta" style={{ color: theme.textDim }}>
                   {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
                 </span>
@@ -210,7 +302,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
                   Requires login
                 </span>
               ) : null}
-              {s.requiresAuth && !s.ok && (
+              {s.enabled && s.requiresAuth && !s.ok && (
                 <button
                   className="modal-btn primary"
                   style={{ padding: "2px 12px", fontSize: 12 }}
@@ -227,87 +319,129 @@ export function McpModal({ onClose }: Props): React.ReactElement {
                 title={`Remove "${s.name}"`}
                 onClick={() => void remove(s.name, s.scope)}
               >
-                {"\u00d7"}
+                <XIcon size={12} weight="bold" aria-hidden="true" />
               </button>
             </div>
           ))}
         </div>
       )}
+    </>
+  );
 
-      <div className="modal-label" style={{ color: theme.textMuted, marginTop: 4 }}>
-        Add a server
-      </div>
-      <div className="modal-hint" style={{ color: theme.textDim }}>
-        Paste a <code>claude mcp add …</code> or <code>ggcoder mcp add …</code> line.
-        <br />
-        For local servers started with <code>--port</code> (e.g.&nbsp;Playwright MCP), use{" "}
-        <code>--transport sse</code>.
-      </div>
-      <input
-        className="modal-input"
-        style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
-        value={line}
-        placeholder="claude mcp add --transport http notion https://mcp.notion.com/mcp"
-        autoFocus
-        onChange={(e) => setLine(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void add();
-        }}
-      />
-      <div className="mcp-scope-toggle">
-        <button
-          className={`modal-btn${scope === "global" ? " primary" : ""}`}
-          onClick={() => setScope("global")}
+  return (
+    <Modal title="MCP servers" onClose={onClose}>
+      {managementError && (
+        <div
+          className="login-status"
+          role="alert"
+          aria-live="assertive"
+          style={{
+            color: theme.error,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
         >
-          Global
-        </button>
-        <button
-          className={`modal-btn${scope === "project" ? " primary" : ""}`}
-          onClick={() => setScope("project")}
-        >
-          Project
-        </button>
-      </div>
-      {scope === "project" && (
-        <>
-          <input
-            className="modal-input"
-            style={{
-              color: projectPath ? theme.text : theme.textMuted,
-              background: theme.inputBackground,
-              width: "100%",
-              marginTop: 10,
-            }}
-            value={projectPath}
-            placeholder="Type a project path or pick below…"
-            list="mcp-project-paths"
-            onChange={(e) => setProjectPath(e.target.value)}
-          />
-          <datalist id="mcp-project-paths">
-            {projects.map((p) => (
-              <option key={p.path} value={p.path}>
-                {p.name}
-              </option>
-            ))}
-          </datalist>
-        </>
+          <span>{managementError.message}</span>
+          <button
+            className="modal-btn"
+            style={{ flexShrink: 0, whiteSpace: "nowrap", wordBreak: "normal" }}
+            disabled={retrying}
+            onClick={() => void retryManagementAction()}
+          >
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+        </div>
       )}
 
-      <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
-        New servers load on next app restart.
-      </div>
+      {/* Columns only on the Settings screen: servers beside the add form.
+          In the dialog they are transparent (see .settings-cols in App.css). */}
+      <div className="settings-cols">
+        <div className="settings-col">
+          {embedded ? (
+            <SettingsCard title="Servers" description="Extra tools your agent can use.">
+              {serverList}
+            </SettingsCard>
+          ) : (
+            serverList
+          )}
+        </div>
+        <div className="settings-col">
+          {embedded && <SettingsHeaderAction>{addButton}</SettingsHeaderAction>}
+          <SettingsSection
+            title="Add a server"
+            dialogTitle="Add an MCP"
+            description="Paste a claude mcp add command. New conversations pick it up automatically."
+          >
+            <input
+              className="modal-input"
+              style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
+              value={line}
+              placeholder="claude mcp add --transport http notion https://mcp.notion.com/mcp"
+              // A dialog focuses its first field; a Settings page leaves focus on
+              // the tab bar so the arrow keys keep switching tabs.
+              autoFocus={!embedded}
+              onChange={(e) => setLine(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void add();
+              }}
+            />
+            <div className="mcp-scope-toggle">
+              <button
+                className={`modal-btn${scope === "global" ? " primary" : ""}`}
+                onClick={() => setScope("global")}
+              >
+                Global
+              </button>
+              <button
+                className={`modal-btn${scope === "project" ? " primary" : ""}`}
+                onClick={() => setScope("project")}
+              >
+                Project
+              </button>
+            </div>
+            {scope === "project" && (
+              <>
+                <input
+                  className="modal-input"
+                  style={{
+                    color: projectPath ? theme.text : theme.textMuted,
+                    background: theme.inputBackground,
+                    width: "100%",
+                    marginTop: 10,
+                  }}
+                  value={projectPath}
+                  placeholder="Type a project path or pick below…"
+                  list="mcp-project-paths"
+                  onChange={(e) => setProjectPath(e.target.value)}
+                />
+                <datalist id="mcp-project-paths">
+                  {projects.map((p) => (
+                    <option key={p.path} value={p.path}>
+                      {p.name}
+                    </option>
+                  ))}
+                </datalist>
+              </>
+            )}
+          </SettingsSection>
 
-      <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Close
-        </button>
-        <button
-          className="modal-btn primary"
-          disabled={!line.trim() || busy}
-          onClick={() => void add()}
-        >
-          {busy ? "Adding\u2026" : "Add"}
-        </button>
+          <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
+            Changes are saved right away. New conversations use them automatically; conversations
+            that are already open need to be restarted to pick them up. Tools are available only
+            when the server connects and trust requirements are met.
+          </div>
+
+          {/* On the page, Add sits in the screen's header bar instead. */}
+          {!embedded && (
+            <div className="modal-actions">
+              <ModalDismissButton onClick={onClose}>Close</ModalDismissButton>
+              {addButton}
+            </div>
+          )}
+        </div>
       </div>
     </Modal>
   );

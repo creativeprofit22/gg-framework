@@ -170,8 +170,7 @@ function hasRenderableText(text: string): boolean {
  * stripping markers to invisible whitespace.
  */
 export type DisplaySegment =
-  | { kind: "text"; text: string }
-  | { kind: "done"; stepNum: number; description: string };
+  { kind: "text"; text: string } | { kind: "done"; stepNum: number; description: string };
 
 /**
  * Split text on [DONE:N] markers, returning an array of segments. Empty/

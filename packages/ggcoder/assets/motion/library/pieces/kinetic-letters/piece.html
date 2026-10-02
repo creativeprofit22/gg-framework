@@ -1,0 +1,103 @@
+<!doctype html>
+<!--
+  kinetic-letters: a word whose letters drop in one by one from above with a
+  springy overshoot (back.out) and a slight tilt that settles to zero, then
+  a tiny collective settle. Letters are split by a deterministic splitter;
+  tilts come from a fixed pattern, not randomness. Transparent background.
+  Params: --kl-size (font size), --kl-y (vertical center); START, STAGGER,
+  DROP (seconds per letter), EASE, TILTS (degrees, cycled per letter).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="kinetic-letters-root"
+      data-composition-id="kinetic-letters"
+      data-start="0"
+      data-duration="3"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="kinetic-letters"] {
+          --kl-size: 330px;
+          --kl-y: 540px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="kinetic-letters"] .kl-word {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: var(--kl-y);
+          transform: translateY(-50%);
+          text-align: center;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--kl-size);
+          line-height: 1;
+          text-transform: uppercase;
+          white-space: pre;
+        }
+        [data-composition-id="kinetic-letters"] .kl-l {
+          display: inline-block;
+          transform-origin: 50% 100%;
+        }
+        [data-composition-id="kinetic-letters"] .kl-accent {
+          color: var(--accent, currentColor);
+        }
+      </style>
+      <!-- edit: the word (wrap letters in <span class="kl-accent"> to color them) -->
+      <div class="kl-word" id="kl-word">Bounce</div>
+    </div>
+    <script>
+      (function () {
+        const START = 0.2;
+        const STAGGER = 0.07;
+        const DROP = 0.85;
+        const EASE = "back.out(1.4)";
+        const TILTS = [-9, 7, -5, 10, -7, 6, -10, 8];
+        const word = document.getElementById("kl-word");
+        // Deterministic splitter: every character becomes a span.kl-l.
+        (function split(node) {
+          Array.from(node.childNodes).forEach((child) => {
+            if (child.nodeType === 1) return split(child);
+            if (child.nodeType !== 3) return;
+            const frag = document.createDocumentFragment();
+            Array.from(child.textContent.trim() ? child.textContent : "").forEach((ch) => {
+              const s = document.createElement("span");
+              s.className = "kl-l";
+              s.textContent = ch;
+              frag.appendChild(s);
+            });
+            node.replaceChild(frag, child);
+          });
+        })(word);
+        const letters = Array.from(word.querySelectorAll(".kl-l"));
+        const tl = gsap.timeline({ paused: true });
+        letters.forEach((l, i) => {
+          tl.fromTo(
+            l,
+            { yPercent: -150, rotation: TILTS[i % TILTS.length] * 2.2, opacity: 0 },
+            { yPercent: 0, rotation: 0, duration: DROP, ease: EASE },
+            START + i * STAGGER,
+          );
+          tl.fromTo(l, { opacity: 0 }, { opacity: 1, duration: 0.18, ease: "none" }, START + i * STAGGER);
+        });
+        // Collective settle: a small squash as the last letter lands.
+        const land = START + (letters.length - 1) * STAGGER + DROP * 0.45;
+        tl.to(word, { scaleY: 0.96, scaleX: 1.015, duration: 0.12, ease: "power2.out" }, land);
+        tl.to(word, { scaleY: 1, scaleX: 1, duration: 0.5, ease: "back.out(2)" }, land + 0.12);
+        tl.to({}, { duration: Math.max(0, 3 - tl.duration()) });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["kinetic-letters"] = tl;
+      })();
+    </script>
+  </body>
+</html>

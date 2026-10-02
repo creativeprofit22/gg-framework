@@ -1,0 +1,6 @@
+{
+  "id": "iris-circle", "name": "Iris circle", "kind": "transition",
+  "description": "A circular mask grows to cover a cut, holds, then contracts to reveal the next scene.",
+  "tags": ["iris", "mask", "reveal"], "fonts": [], "duration": 2.4,
+  "previewAt": 0.38, "license": "original", "previewLook": "duotone-broadcast"
+}

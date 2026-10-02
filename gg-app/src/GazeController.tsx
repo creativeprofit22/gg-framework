@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { EyeIcon, EyeSlashIcon } from "@phosphor-icons/react";
 import { gazeFocus, onGazeTarget, windowLabel } from "./agent";
+import type { SafeTauriUnlisten } from "./tauri-listener";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { createDwellTracker, createPointSmoother } from "./gaze/smoothing";
 import { createMouseTracker } from "./gaze/mouse-tracker";
@@ -54,13 +55,20 @@ export function GazeController(): React.ReactElement | null {
   // (focused) window holds the solid ring; the un-committed gaze target shows
   // the soft "dwelling here" highlight.
   useEffect(() => {
-    let un: (() => void) | undefined;
+    let disposed = false;
+    let unlisten: SafeTauriUnlisten | undefined;
     void onGazeTarget((ev) => {
       if (ev.committed === windowLabel) setHighlight("focused");
       else if (ev.target === windowLabel) setHighlight("hover");
       else setHighlight("none");
-    }).then((fn) => (un = fn));
-    return () => un?.();
+    }).then((stop) => {
+      if (disposed) void stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      void unlisten?.();
+    };
   }, []);
 
   // Clear this window's border the instant gaze is turned off. The `enabled`
@@ -139,7 +147,7 @@ export function GazeController(): React.ReactElement | null {
       {highlight !== "none" && <div className={`gaze-frame gaze-frame-${highlight}`} aria-hidden />}
       {isMain && enabled && (
         <div className="gaze-pill" role="status">
-          {error ? <EyeOff size={13} /> : <Eye size={13} />}
+          {error ? <EyeSlashIcon size={13} /> : <EyeIcon size={13} />}
           <span>{error ? `gaze: ${error}` : `gaze: ${status || "off"}`}</span>
         </div>
       )}

@@ -2,20 +2,23 @@
 // BUNDLED daemon, wait for the GG_APP_LISTENING handshake, create a session
 // (POST /session), hit /state for that session, then terminate and assert a
 // clean shutdown. Proves the per-platform runtime + single-file bundle + copied
-// native deps (sharp) actually load on this OS, AND that the shared-daemon
-// session protocol works in the bundle.
+// native deps (sharp) actually load on this OS, bundled default skills are
+// present, AND the shared-daemon session protocol works in the bundle.
 //
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcTauri = join(here, "..", "src-tauri");
 const binDir = join(srcTauri, "binaries");
 const sidecar = join(srcTauri, "sidecar", "app-sidecar.mjs");
+const evidenceSkill = join(srcTauri, "sidecar", "skills", "evidence-led-ui", "SKILL.md");
+const daemonAuthToken = "gg-app-sidecar-smoke-bootstrap-token";
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -39,13 +42,200 @@ function nodeBin() {
   return "";
 }
 
+/**
+ * TS/JS diagnostics resolve these packages by physical path and spawn the
+ * language server with the bundled Node runtime. A bundle-load smoke cannot
+ * detect their absence because neither package is imported by the sidecar.
+ */
+function smokeTypescriptLanguageServer(node) {
+  const languageServer = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "typescript-language-server",
+    "lib",
+    "cli.mjs",
+  );
+  const tsserver = join(srcTauri, "sidecar", "node_modules", "typescript", "lib", "tsserver.js");
+  if (!existsSync(languageServer))
+    fail(`bundled TypeScript language server missing: ${languageServer}`);
+  if (!existsSync(tsserver)) fail(`bundled tsserver missing: ${tsserver}`);
+
+  const version = execFileSync(node, [languageServer, "--version"], { encoding: "utf8" }).trim();
+  if (!/^\d+\.\d+\.\d+/.test(version)) {
+    fail(`bundled TypeScript language server returned invalid version: ${version}`);
+  }
+  console.log(`smoke: bundled TypeScript language server starts cleanly (${version})`);
+}
+
+/** source_path also spawns a copied CLI that esbuild cannot discover. */
+function smokeOpenSrc(node) {
+  const bin = join(srcTauri, "sidecar", "node_modules", "opensrc", "bin", "opensrc.js");
+  if (!existsSync(bin)) fail(`bundled opensrc missing: ${bin}`);
+  const help = execFileSync(node, [bin, "--help"], { encoding: "utf8" });
+  if (!help.includes("Fetch source code for packages")) {
+    fail("bundled opensrc did not return its CLI help");
+  }
+  console.log("smoke: bundled opensrc starts cleanly");
+}
+
+/**
+ * Motion mode runs HyperFrames through its own launcher, which resolves the
+ * copied CLI from the sidecar's node_modules. Neither is imported by the
+ * bundle, so a packaging slip would only surface when a user starts a video.
+ */
+function smokeMotionBundle(node) {
+  const motion = join(srcTauri, "sidecar", "motion");
+  for (const rel of [
+    "plugin.json",
+    join("skills", "motion", "SKILL.md"),
+    join("skills", "brand-kit", "SKILL.md"),
+    join("skills", "source-ingest", "SKILL.md"),
+    join("skills", "video-qa", "SKILL.md"),
+    join("references", "runtime", "minimal-composition.md"),
+    join("references", "motion-language.md"),
+    join("assets", "sfx", "sfx-analysis.md"),
+  ]) {
+    if (!existsSync(join(motion, rel))) fail(`bundled Motion file missing: ${rel}`);
+  }
+  const skillNames = readdirSync(join(motion, "skills")).sort();
+  if (
+    JSON.stringify(skillNames) !==
+    JSON.stringify(["brand-kit", "motion", "source-ingest", "video-qa"])
+  ) {
+    fail(`unexpected Motion skill catalog: ${skillNames.join(", ")}`);
+  }
+  if (existsSync(join(motion, "guidance")) || existsSync(join(motion, "references", "authoring"))) {
+    fail("obsolete guidance or After Effects authoring material leaked into the runtime bundle");
+  }
+  const music = join(motion, "assets", "music");
+  const tracks = readdirSync(music).filter((name) => name.endsWith(".mp3"));
+  if (tracks.length === 0) fail("shared Motion music is missing");
+  for (const track of tracks) {
+    if (!existsSync(join(music, "cues", track.replace(/\.mp3$/, ".music-cues.json"))))
+      fail(`missing music cue map: ${track}`);
+  }
+  const { version } = JSON.parse(readFileSync(join(motion, "plugin.json"), "utf8"));
+  const launcher = join(motion, "bin", "hyperframes.mjs");
+  const reported = execFileSync(node, [launcher, "--version"], { encoding: "utf8" }).trim();
+  if (reported !== version) {
+    fail(`bundled HyperFrames CLI reports ${reported}, Motion skills expect ${version}`);
+  }
+  console.log(`smoke: bundled HyperFrames ${reported} starts through the Motion launcher`);
+
+  const motionGate = spawnSync(node, [join(motion, "bin", "motion-check.mjs")], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (motionGate.status !== 1 || !motionGate.stderr?.includes("usage: motion-check.mjs")) {
+    fail("bundled motion verification gate failed to load or accepted missing evidence");
+  }
+  console.log("smoke: bundled motion verification gate rejects missing evidence");
+
+  // The font library ships as plain files; a packaging filter dropping woff2
+  // would silently fall back to generic fonts in every video.
+  const fonts = JSON.parse(
+    execFileSync(node, [join(motion, "bin", "fonts.mjs"), "list"], { encoding: "utf8" }),
+  );
+  const manifest = JSON.parse(readFileSync(join(motion, "fonts", "fonts.json"), "utf8"));
+  for (const entry of manifest) {
+    for (const file of entry.files) {
+      if (!existsSync(join(motion, "fonts", entry.dir, file.file))) {
+        fail(`bundled Motion font missing: ${entry.dir}/${file.file}`);
+      }
+    }
+  }
+  console.log(`smoke: ${fonts.families.length} bundled Motion font families present`);
+
+  // 3D shots import this vendored Three.js through an importmap; a missing
+  // addon would only surface as a blank canvas mid-render.
+  const three = JSON.parse(readFileSync(join(motion, "vendor", "three", "three.json"), "utf8"));
+  for (const rel of ["build/three.module.min.js", "build/three.core.min.js"]) {
+    if (!existsSync(join(motion, "vendor", "three", rel))) fail(`bundled Three.js missing: ${rel}`);
+  }
+  for (const addon of three.addons) {
+    if (!existsSync(join(motion, "vendor", "three", "addons", addon))) {
+      fail(`bundled Three.js addon missing: ${addon}`);
+    }
+  }
+  console.log(`smoke: bundled Three.js ${three.version} with ${three.addons.length} addon files`);
+
+  // The style library is plain files the agent reads by path; check the
+  // helper lists it and every entry it names actually shipped.
+  const library = JSON.parse(
+    execFileSync(node, [join(motion, "bin", "library.mjs"), "list"], { encoding: "utf8" }),
+  );
+  if (!library.ok) fail(`Motion style library failed to list: ${library.error}`);
+  for (const entry of [...library.looks, ...library.pieces]) {
+    if (!existsSync(entry.preview)) fail(`style library preview missing: ${entry.id}`);
+  }
+  for (const piece of library.pieces) {
+    const source = join(motion, "library", "pieces", piece.id, "piece.html");
+    if (!existsSync(source)) fail(`style library piece missing: ${piece.id}`);
+  }
+  console.log(
+    `smoke: style library with ${library.looks.length} looks and ${library.pieces.length} pieces`,
+  );
+}
+
+/** Bash executes through SRT's copied physical CLI; bundling it is load-bearing. */
+function smokeSandboxRuntime(node) {
+  const bin = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "@anthropic-ai",
+    "sandbox-runtime",
+    "dist",
+    "cli.js",
+  );
+  if (!existsSync(bin)) fail(`bundled sandbox runtime missing: ${bin}`);
+  const help = execFileSync(node, [bin, "--help"], { encoding: "utf8" });
+  if (!help.includes("sandbox")) fail("bundled sandbox runtime did not return its CLI help");
+  console.log("smoke: bundled sandbox runtime starts cleanly");
+}
+
+/**
+ * Payload gate: bundle-sidecar strips dev-only weight after copying the
+ * dependency tree (source maps; onnxruntime-web's browser wasm/webgl/webgpu
+ * payloads, which the Node exports map never resolves). If either returns,
+ * ~120 MB of dead files ships in every desktop build unnoticed.
+ */
+function smokeLeanPayload() {
+  const nodeModules = join(srcTauri, "sidecar", "node_modules");
+  const files = existsSync(nodeModules)
+    ? readdirSync(nodeModules, { recursive: true }).filter((f) => {
+        const base = basename(String(f));
+        return (
+          base.endsWith(".map") || (String(f).includes("onnxruntime-web") && base.endsWith(".wasm"))
+        );
+      })
+    : [];
+  if (files.length > 0) {
+    fail(`bundled payload carries pruned file types (first 3: ${files.slice(0, 3).join(", ")})`);
+  }
+  console.log("smoke: bundled payload is lean (no source maps, no browser onnx wasm)");
+}
+
 async function main() {
   if (!existsSync(sidecar)) fail(`bundled sidecar missing: ${sidecar}`);
+  if (!existsSync(evidenceSkill)) fail(`bundled evidence-led-ui skill missing: ${evidenceSkill}`);
   const node = nodeBin();
   console.log(`smoke: ${node} ${sidecar}`);
 
+  smokeTypescriptLanguageServer(node);
+  smokeOpenSrc(node);
+  smokeSandboxRuntime(node);
+  smokeMotionBundle(node);
+  smokeLeanPayload();
+
   const child = spawn(node, [sidecar], {
-    env: { ...process.env, GG_APP_PORT: "0", GG_APP_CWD: process.cwd() },
+    env: {
+      ...process.env,
+      GG_APP_PORT: "0",
+      GG_APP_CWD: process.cwd(),
+      GG_APP_AUTH_TOKEN: daemonAuthToken,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -56,14 +246,13 @@ async function main() {
   // native deps (sharp) loaded on this OS. (Older bundles fataled with "Not
   // logged in" instead; that's still accepted as a legacy pass.)
   //
-  // Timeout is generous (120s): session.initialize() connects the default
-  // `kencode-search` MCP server via `npx -y …` with a 30s connect timeout, and a
-  // cold npx cache on a fresh CI runner can take the full 30s before MCP fails
-  // gracefully and boot continues to server.listen(). 30s here used to race that
-  // and time out; 120s clears it with margin.
+  // Timeout is generous (120s): session.initialize() may connect user MCP
+  // servers via `npx -y …` with a 30s connect timeout, and a cold npx cache on
+  // a fresh CI runner can take the full 30s before MCP fails gracefully and
+  // boot continues to server.listen(). 120s clears it with margin.
   const LOADED_BUT_UNAUTHED = Symbol("loaded-but-unauthed");
 
-  const port = await new Promise((resolve, reject) => {
+  const handshake = await new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error("timed out waiting for GG_APP_LISTENING")),
       120000,
@@ -72,10 +261,10 @@ async function main() {
     let err = "";
     child.stdout.on("data", (d) => {
       out += d.toString();
-      const m = out.match(/GG_APP_LISTENING (\d+)/);
+      const m = out.match(/GG_APP_LISTENING (\d+) (\S+)/);
       if (m) {
         clearTimeout(timer);
-        resolve(Number(m[1]));
+        resolve({ port: Number(m[1]), token: m[2] });
       }
     });
     child.stderr.on("data", (d) => {
@@ -95,11 +284,12 @@ async function main() {
     fail(err.message);
   });
 
-  if (port === LOADED_BUT_UNAUTHED) {
+  if (handshake === LOADED_BUT_UNAUTHED) {
     console.log("smoke: bundle loaded cleanly (sidecar reached auth check; no credentials on CI)");
     console.log("SMOKE PASS");
     process.exit(0);
   }
+  const { port, token } = handshake;
 
   // The daemon holds sessions as in-process objects keyed by id. Create one
   // (POST /session), then read its /state via the `x-gg-session` header — the
@@ -109,7 +299,11 @@ async function main() {
   try {
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-gg-daemon-token": daemonAuthToken,
+        "x-gg-token": token,
+      },
       body: JSON.stringify({ cwd: process.cwd() }),
     });
     if (mk.status !== 200) {
@@ -130,7 +324,7 @@ async function main() {
   let res;
   try {
     res = await fetch(`http://127.0.0.1:${port}/state`, {
-      headers: { "x-gg-session": sessionId },
+      headers: { "x-gg-session": sessionId, "x-gg-token": token },
     });
   } catch (err) {
     child.kill("SIGKILL");
@@ -146,6 +340,25 @@ async function main() {
     fail(`/state body missing "ready": ${JSON.stringify(body)}`);
   }
   console.log(`smoke: session ${sessionId.slice(0, 8)} /state 200 ready=${body.ready}`);
+
+  // A Motion session must build from the packaged bundle (skills + prompt).
+  const motionCwd = mkdtempSync(join(tmpdir(), "gg-smoke-motion-"));
+  try {
+    const mk = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-gg-token": token },
+      body: JSON.stringify({ mode: "motion", cwd: join(motionCwd, "GG Motion") }),
+    });
+    const created = await mk.json().catch(() => ({}));
+    if (mk.status !== 200 || !created.sessionId) {
+      child.kill("SIGKILL");
+      fail(`POST /session (motion) returned ${mk.status}: ${JSON.stringify(created)}`);
+    }
+    console.log(`smoke: motion session ${created.sessionId.slice(0, 8)} created`);
+  } catch (err) {
+    child.kill("SIGKILL");
+    fail(`POST /session (motion) failed: ${err.message}`);
+  }
 
   // Clean shutdown: SIGTERM (SIGKILL fallback on Windows) and wait for exit.
   const exited = new Promise((resolve) => child.on("exit", resolve));

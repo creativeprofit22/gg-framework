@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-01",
+  "label": "Upstream 0.75.0, with Ken's face and a lively Home",
+  "sections": [
+    {
+      "title": "From upstream 0.75.0",
+      "items": [
+        "Ken has a face. His replies now open with a little animated pixel portrait that blinks and talks while he types. Flip `Autopilot` on and he wakes up with a happy hop beside the big `KEN ON` banner; flip it off and he nods off with a sleepy `z`.",
+        "Your Home screen is alive. The whole critter crew beams in along the bottom on a fresh world each visit, from a sunny meadow to a beach, a desert, snow or deep space. Watch them wander, meet up and play, and click one to make it jump.",
+        "File chips under the message box now slide in when you attach or `@`-mention a file, and fold away smoothly when you remove them or send, instead of popping in and out."
+      ]
+    }
+  ]
+}

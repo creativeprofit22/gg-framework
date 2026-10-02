@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="assets/fonts/fonts.css" />
+    <link rel="stylesheet" href="assets/looks/soft-light-ad.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        background: var(--field);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      class="look-soft-light-ad"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div id="bg" data-composition-id="soft-light-field" data-composition-src="compositions/soft-light-field.html" data-start="0" data-duration="5" data-width="1920" data-height="1080" data-track-index="0"></div>
+      <div id="stack" data-composition-id="ui-stack-3d" data-composition-src="compositions/ui-stack-3d.html" data-start="0" data-duration="5" data-width="1920" data-height="1080" data-track-index="1"></div>
+      <div id="caption" data-composition-id="typewriter-caption" data-composition-src="compositions/typewriter-caption.html" data-start="0" data-duration="4" data-width="1920" data-height="1080" data-track-index="2"></div>
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to({}, { duration: 5 });
+      window.__timelines = { main: tl };
+    </script>
+  </body>
+</html>

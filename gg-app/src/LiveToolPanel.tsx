@@ -10,12 +10,17 @@ export const LIVE_TOOL_PANEL_ROWS = 3;
 /** A single tool action in the pinned feed — mirrors ggcoder's LiveToolEntry. */
 export interface LiveToolEntry {
   toolCallId: string;
+  /** Provider-facing alias used for tone/detail behavior and state keys. */
   name: string;
   args: Record<string, unknown>;
   status: "running" | "done";
   isError?: boolean;
   result?: string;
   details?: unknown;
+  /** Exact source identity shown for identity-bearing MCP tools. */
+  displayName?: string;
+  mcpServerName?: string;
+  mcpToolName?: string;
 }
 
 interface Props {
@@ -42,13 +47,21 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
           isError: entry.isError,
           result: entry.result,
           details: entry.details,
+          displayName: entry.displayName,
         });
         const dotColor = done ? (entry.isError ? theme.error : theme.success) : theme.primary;
+        const statusLabel = done ? (entry.isError ? "Failed" : "Completed") : "Running";
         return (
           <div className="tool-row" key={entry.toolCallId}>
-            <span className={`tool-dot${done ? "" : " blink"}`} style={{ color: dotColor }}>
+            <span
+              className={`tool-dot${done ? "" : " blink"}`}
+              style={{ color: dotColor }}
+              title={statusLabel}
+              aria-hidden="true"
+            >
               {DOT}
             </span>
+            <span className="visually-hidden">{statusLabel}: </span>
             <span className="tool-line">
               {parts.map((p, i) => (
                 <span

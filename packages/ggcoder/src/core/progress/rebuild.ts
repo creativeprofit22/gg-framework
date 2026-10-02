@@ -11,9 +11,24 @@ import { xpForLevel } from "./ranks.js";
 import { createEmptyProgress, dayKey } from "./store.js";
 import type { ProgressFile } from "./types.js";
 
-/** Grandfathered XP is capped at the XP needed to reach level 15. */
-const SEED_LEVEL_CAP = 15;
+// Grandfathered XP spreads across a curve instead of clamping everyone onto one level.
+// Full credit up to the level-15 floor; historical usage beyond that keeps earning at a
+// diminished rate (mirrors the engine's DAILY_OVERCAP_FACTOR) so heavy prior users land
+// anywhere from 15 up to a hard ceiling instead of all piling on exactly level 15.
+const SEED_SOFT_CAP_LEVEL = 15;
+const SEED_HARD_CAP_LEVEL = 25;
+const SEED_OVERCAP_FACTOR = 0.25;
 const XP_PER_HISTORICAL_PROMPT = 10;
+
+/** Seed XP from a historical prompt count: full credit to level 15, 25% beyond, hard-capped at 25. */
+export function seedXpForPrompts(totalPrompts: number): number {
+  const softCap = xpForLevel(SEED_SOFT_CAP_LEVEL);
+  const hardCap = xpForLevel(SEED_HARD_CAP_LEVEL);
+  const raw = totalPrompts * XP_PER_HISTORICAL_PROMPT;
+  const full = Math.min(raw, softCap);
+  const overflow = Math.max(0, raw - softCap);
+  return Math.min(hardCap, Math.round(full + overflow * SEED_OVERCAP_FACTOR));
+}
 
 interface SessionScan {
   userPrompts: number;
@@ -59,41 +74,50 @@ function scanSessionFile(file: string): Promise<SessionScan> {
 }
 
 /**
- * Rebuild a progress file from session history. Returns null when there is no
- * history at all (fresh install → start at Lurker via createEmptyProgress).
+ * Rebuild a progress file from coding and/or chat session roots. Returns null
+ * when there is no history at all (fresh install → start at Lurker).
  */
-export async function rebuildFromSessions(sessionsDir?: string): Promise<ProgressFile | null> {
-  const dir = sessionsDir ?? getAppPaths().sessionsDir;
-  let projectDirs: string[];
-  try {
-    projectDirs = await fs.readdir(dir);
-  } catch {
-    return null;
-  }
+export async function rebuildFromSessions(
+  sessionsDirs?: string | string[],
+): Promise<ProgressFile | null> {
+  const dirs = sessionsDirs
+    ? Array.isArray(sessionsDirs)
+      ? sessionsDirs
+      : [sessionsDirs]
+    : [getAppPaths().sessionsDir];
 
   let totalPrompts = 0;
-  let projectCount = 0;
+  const projects = new Set<string>();
   let oldest: string | null = null;
 
-  for (const entry of projectDirs) {
-    const projectDir = path.join(dir, entry);
-    let files: string[];
+  for (const dir of dirs) {
+    let projectDirs: string[];
     try {
-      files = (await fs.readdir(projectDir)).filter((f) => f.endsWith(".jsonl"));
+      projectDirs = await fs.readdir(dir);
     } catch {
       continue;
     }
-    let projectPrompts = 0;
-    for (const f of files) {
-      const scan = await scanSessionFile(path.join(projectDir, f));
-      projectPrompts += scan.userPrompts;
-      if (scan.oldestTimestamp && (!oldest || scan.oldestTimestamp < oldest)) {
-        oldest = scan.oldestTimestamp;
+
+    for (const entry of projectDirs) {
+      const projectDir = path.join(dir, entry);
+      let files: string[];
+      try {
+        files = (await fs.readdir(projectDir)).filter((f) => f.endsWith(".jsonl"));
+      } catch {
+        continue;
       }
-    }
-    if (projectPrompts > 0) {
-      totalPrompts += projectPrompts;
-      projectCount++;
+      let projectPrompts = 0;
+      for (const file of files) {
+        const scan = await scanSessionFile(path.join(projectDir, file));
+        projectPrompts += scan.userPrompts;
+        if (scan.oldestTimestamp && (!oldest || scan.oldestTimestamp < oldest)) {
+          oldest = scan.oldestTimestamp;
+        }
+      }
+      if (projectPrompts > 0) {
+        totalPrompts += projectPrompts;
+        projects.add(entry);
+      }
     }
   }
 
@@ -101,13 +125,12 @@ export async function rebuildFromSessions(sessionsDir?: string): Promise<Progres
 
   const now = new Date();
   const file = createEmptyProgress(now);
-  const cap = xpForLevel(SEED_LEVEL_CAP);
-  const seeded = Math.min(totalPrompts * XP_PER_HISTORICAL_PROMPT, cap);
+  const seeded = seedXpForPrompts(totalPrompts);
 
   file.xp = seeded;
   file.totals.prompts = totalPrompts;
   // Historical projects are counted but their paths aren't rehashed — use opaque markers.
-  file.totals.projects = Array.from({ length: projectCount }, (_, i) => `seed-${i}`);
+  file.totals.projects = Array.from({ length: projects.size }, (_, i) => `seed-${i}`);
   file.xpBySource.prompts = seeded;
   if (oldest) file.createdAt = oldest;
   // Seeding is not "activity today" — leave streak at zero, but keep dayXp clean.

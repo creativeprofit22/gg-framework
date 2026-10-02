@@ -3,3 +3,36 @@ packages:
   - "Matey"
   - "experiments/*"
   - "gg-app"
+
+# Kept here, not in package.json's "pnpm" field: newer pnpm (used by
+# Dependabot) no longer reads that field, which made its lockfiles drop these
+# overrides and fail our frozen CI installs.
+onlyBuiltDependencies:
+  - "@electron/get"
+  - better-sqlite3
+  - electron
+  - esbuild
+  - onnxruntime-node
+
+# Install scripts we deliberately never run (supply-chain policy). Listing them
+# records the decision and silences pnpm's "Ignored build scripts" notice:
+#   opensrc    - postinstall downloads a native binary from GitHub.
+#   protobufjs - postinstall only prints a version-scheme advisory.
+#   sharp      - ships prebuilt @img/* binaries; no build needed.
+ignoredBuiltDependencies:
+  - opensrc
+  - protobufjs
+  - sharp
+
+overrides:
+  global-agent: ^4.1.3
+  ip-address: ^10.3.1
+  protobufjs: ^7.6.1
+  tar: ^7.5.19
+  ws: ^8.21.0
+  hono: ^4.13.1
+  fast-uri: ^3.1.5
+  picomatch: ^2.3.2
+
+patchedDependencies:
+  metal-fx@2.0.10: patches/metal-fx@2.0.10.patch

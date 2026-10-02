@@ -6,6 +6,66 @@ describe("parseAutopilotVerdict", () => {
     expect(parseAutopilotVerdict("ALL_CLEAR")).toEqual({ kind: "all_clear" });
   });
 
+  it.each([
+    "ALL_CLEAR CORPUS_UNVERIFIED",
+    "all clear: corpus_unverified",
+    "ALL_CLEAR_CORPUS_UNVERIFIED",
+    "\n\nALL_CLEAR CORPUS_UNVERIFIED\n",
+  ])("keeps the corpus warning carried on the verdict line: %j", (reply) => {
+    expect(parseAutopilotVerdict(reply)).toEqual({
+      kind: "all_clear",
+      evidenceLimitation: "corpus_unverified",
+    });
+  });
+
+  it("keeps the corpus warning when Ken drifts it below a bare ALL_CLEAR", () => {
+    // The benchmarked failure: keyword line, then the old JSON form. The
+    // approval used to win and the warning was silently dropped.
+    expect(
+      parseAutopilotVerdict(
+        'ALL_CLEAR\n{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}',
+      ),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it("recovers a flagged approval buried after prose", () => {
+    expect(
+      parseAutopilotVerdict("Checked the diff, corpus was down.\nALL_CLEAR CORPUS_UNVERIFIED"),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it("does not invent a warning for a plain approval", () => {
+    expect(parseAutopilotVerdict("ALL_CLEAR\nlooks good")).toEqual({ kind: "all_clear" });
+  });
+
+  it("still parses the legacy JSON corpus limitation", () => {
+    expect(
+      parseAutopilotVerdict('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}'),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it("accepts a fenced structured limitation", () => {
+    expect(
+      parseAutopilotVerdict(
+        '```json\n{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}\n```',
+      ),
+    ).toEqual({ kind: "all_clear", evidenceLimitation: "corpus_unverified" });
+  });
+
+  it.each([
+    '{"verdict":"ALL_CLEAR","evidenceLimitation":"verification_failed"}',
+    '{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified","checks":"failed"}',
+    '{"verdict":"ALL_CLEAR","warning":"verification remains unproven"}',
+    '{"verdict":"PROMPT","evidenceLimitation":"corpus_unverified"}',
+    '{"verdict":"ALL_CLEAR",\nALL_CLEAR',
+    "[\nALL_CLEAR\n]",
+    '```json\n{"verdict":"ALL_CLEAR","checks":"failed"}\nALL_CLEAR',
+    '[{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}]',
+    JSON.stringify({ verdict: "ALL_CLEAR", evidenceLimitation: "x".repeat(2048) }),
+  ])("fails closed on unsupported structured verdict %s", (reply) => {
+    expect(parseAutopilotVerdict(reply).kind).toBe("human");
+  });
+
   it("parses fuzzy ALL CLEAR (space + lowercase)", () => {
     expect(parseAutopilotVerdict("all clear")).toEqual({ kind: "all_clear" });
     expect(parseAutopilotVerdict("All Clear\nlooks good")).toEqual({ kind: "all_clear" });

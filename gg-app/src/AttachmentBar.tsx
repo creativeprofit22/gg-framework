@@ -1,10 +1,19 @@
-import { FileText, Film, X } from "lucide-react";
+import { useLayoutEffect, useRef } from "react";
+import { FileTextIcon, FilmStripIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { PendingAttachment } from "./attachments";
+import { pinSize, usePresenceList } from "./usePresenceList";
+
+/** Exit-animation duration. Must match `.attach-bar.leaving` / `.attach-chip.leaving` in App.css. */
+const EXIT_MS = 220;
+
+const keyOf = (a: PendingAttachment): string => String(a.id);
 
 /**
  * Staged attachment chips shown above the chat input. Images show a thumbnail;
- * videos/files show an icon + name. Each has a remove button.
+ * videos/files show an icon + name. Each has a remove button. Chips pop in when
+ * added and collapse out when removed (or sent); the bar itself grows open and
+ * folds shut so the composer glides instead of jumping.
  */
 export function AttachmentBar({
   attachments,
@@ -13,16 +22,30 @@ export function AttachmentBar({
   attachments: PendingAttachment[];
   onRemove: (id: number) => void;
 }): React.ReactElement | null {
-  if (attachments.length === 0) return null;
+  const shown = usePresenceList(attachments, keyOf, EXIT_MS);
+  const empty = shown.length === 0;
+  const barLeaving = !empty && shown.every((p) => p.leaving);
+  const barRef = useRef<HTMLDivElement>(null);
+  // Measure on mount (enter grows to this height) and again when the bar starts
+  // leaving (exit folds from it).
+  useLayoutEffect(() => pinSize(barRef.current), [barLeaving, empty]);
+
+  if (empty) return null;
   return (
-    <div className="attach-bar">
-      {attachments.map((a) => (
-        <div key={a.id} className="attach-chip" title={a.name}>
+    <div ref={barRef} className={`attach-bar${barLeaving ? " leaving" : ""}`}>
+      {shown.map(({ item: a, key, leaving }) => (
+        <div
+          key={key}
+          ref={leaving ? pinSize : undefined}
+          className={`attach-chip${leaving ? " leaving" : ""}`}
+          title={a.name}
+          inert={leaving}
+        >
           {a.previewUrl ? (
             <img className="attach-thumb" src={a.previewUrl} alt={a.name} />
           ) : (
             <span className="attach-icon" style={{ color: theme.textMuted }}>
-              {a.kind === "video" ? <Film size={16} /> : <FileText size={16} />}
+              {a.kind === "video" ? <FilmStripIcon size={16} /> : <FileTextIcon size={16} />}
             </span>
           )}
           <span className="attach-name">{a.name}</span>
@@ -31,7 +54,7 @@ export function AttachmentBar({
             aria-label={`Remove ${a.name}`}
             onClick={() => onRemove(a.id)}
           >
-            <X size={13} />
+            <XIcon size={13} />
           </button>
         </div>
       ))}

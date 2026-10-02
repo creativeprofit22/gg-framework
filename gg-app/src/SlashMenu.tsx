@@ -11,8 +11,8 @@ interface Props {
 }
 
 /**
- * Upward command palette anchored to the chat input. Lists workflow slash
- * commands matching the current `/prefix`, with name + description. Keyboard
+ * Upward command palette anchored to the chat input. Lists "plays" — the slash
+ * commands matching the current `/prefix` — with name + description. Keyboard
  * nav (↑/↓/Enter/Esc) lives in the input's onKeyDown; this is presentational.
  */
 export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): React.ReactElement {
@@ -26,7 +26,7 @@ export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): 
   return (
     <div className="slash-menu" style={{ background: theme.surface2, borderColor: theme.border }}>
       <div className="slash-menu-title" style={{ color: theme.textMuted }}>
-        workflows
+        plays
       </div>
       {commands.map((cmd, i) => {
         const active = i === activeIndex;
@@ -35,13 +35,21 @@ export function SlashMenu({ commands, activeIndex, onSelect, onHover }: Props): 
             key={cmd.name}
             data-idx={i}
             className={`slash-item${active ? " active" : ""}`}
-            style={{ background: active ? theme.surface1 : "transparent" }}
             onMouseEnter={() => onHover(i)}
             onClick={() => onSelect(cmd)}
           >
             <span className="slash-name" style={{ color: theme.commandColor }}>
               /{cmd.name}
             </span>
+            {active && cmd.argumentHint && (
+              <span
+                className="slash-hint"
+                style={{ color: theme.textMuted }}
+                title={cmd.argumentHint}
+              >
+                {cmd.argumentHint}
+              </span>
+            )}
             <span className="slash-desc" style={{ color: theme.textMuted }}>
               {cmd.description}
             </span>

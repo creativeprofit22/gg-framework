@@ -2,7 +2,7 @@
  * Autopilot toggle — the Material-style switch (Uiverse by lenin55) that turns
  * auto-review on/off for THIS window's project. Sits left of the "+ New" button
  * in the nav row. State lives on the sidecar (persisted per-cwd in gg-app.json);
- * this is a controlled switch that optimistically flips then fires `setAutopilot`.
+ * this controlled switch reflects confirmed server state while mutations are pending.
  *
  * Markup mirrors the source snippet exactly (label.cl-switch > input + span);
  * the styling lives in `.cl-switch` rules in App.css, re-themed to the app's
@@ -31,6 +31,7 @@ export function AutopilotToggle({ checked, onChange, disabled }: Props): React.R
         <label className="cl-switch">
           <input
             type="checkbox"
+            aria-label="Autopilot"
             checked={checked}
             disabled={disabled}
             onChange={(e) => onChange(e.target.checked)}

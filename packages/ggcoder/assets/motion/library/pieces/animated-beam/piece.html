@@ -1,0 +1,273 @@
+<!doctype html>
+<!--
+  animated-beam: icon nodes on the left feed curved gradient beams into a
+  central hub, which beams out to nodes on the right. Each connection has a
+  faint base path plus a gradient "beam" whose gradient offset is a pure
+  function of timeline time (expo-out sweep, repeating).
+  Converted from Magic UI's Animated Beam (MIT, see LICENSE and meta.json
+  source): same quadratic path (control point = midpoint X, startY -
+  curvature), same 4-stop gradient sweeping x1/x2 across the path (the sweep ease is
+  softened for video, see BEAM_EASE),
+  rebuilt as plain SVG driven by a paused GSAP timeline.
+  Params (top of script):
+    INPUTS / OUTPUTS  [{ label, icon, curvature }] — 1–4 each; icon is one of
+                      doc, chat, db, cloud, app, code, user, bell
+    HUB               { label } — the centre node
+    CYCLE             seconds per beam sweep; BEAM_LEN beam length (px);
+                      BEAM_EASE sweep cubic-bezier
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="animated-beam-root"
+      data-composition-id="animated-beam"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="animated-beam"] {
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="animated-beam"] svg.ab-wires {
+          position: absolute;
+          left: 0;
+          top: 0;
+          overflow: visible;
+        }
+        [data-composition-id="animated-beam"] .ab-base {
+          fill: none;
+          stroke: var(--ink, #111);
+          stroke-opacity: 0.2;
+          stroke-width: 4;
+          stroke-linecap: round;
+        }
+        [data-composition-id="animated-beam"] .ab-beam {
+          fill: none;
+          stroke-width: 7;
+          stroke-linecap: round;
+        }
+        [data-composition-id="animated-beam"] .ab-s0 {
+          stop-color: var(--accent, #111);
+        }
+        [data-composition-id="animated-beam"] .ab-s1 {
+          stop-color: color-mix(in srgb, var(--accent, #111) 45%, var(--ink, #111));
+        }
+        [data-composition-id="animated-beam"] .ab-node {
+          position: absolute;
+          width: 132px;
+          height: 132px;
+          margin: -66px 0 0 -66px;
+          box-sizing: border-box;
+          border-radius: 50%;
+          border: 3px solid var(--ink, #111);
+          background: var(--field, #fff);
+          box-shadow: 0 18px 40px -18px color-mix(in srgb, var(--ink, #111) 45%, transparent);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="animated-beam"] .ab-node svg {
+          width: 60px;
+          height: 60px;
+          fill: none;
+          stroke: currentColor;
+          stroke-width: 3.2;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        [data-composition-id="animated-beam"] .ab-node.is-hub {
+          width: 212px;
+          height: 212px;
+          margin: -106px 0 0 -106px;
+          border: 0;
+          background: var(--accent, #111);
+          color: var(--field, #fff);
+        }
+        [data-composition-id="animated-beam"] .ab-node.is-hub svg {
+          width: 96px;
+          height: 96px;
+          stroke-width: 3.6;
+        }
+        [data-composition-id="animated-beam"] .ab-label {
+          position: absolute;
+          margin-top: 18px;
+          transform: translateX(-50%);
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          white-space: nowrap;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="animated-beam"] .ab-label.is-hub {
+          margin-top: 22px;
+          font-size: 24px;
+        }
+      </style>
+      <svg class="ab-wires" id="ab-wires" width="1920" height="1080" viewBox="0 0 1920 1080">
+        <defs id="ab-defs"></defs>
+      </svg>
+      <div id="ab-nodes"></div>
+    </div>
+    <script>
+      (function () {
+        // edit: nodes (icon: doc, chat, db, cloud, app, code, user, bell)
+        const INPUTS = [
+          { label: "Docs", icon: "doc", curvature: -40 },
+          { label: "Chat", icon: "chat", curvature: 0 },
+          { label: "Database", icon: "db", curvature: 40 },
+        ];
+        const OUTPUTS = [
+          { label: "App", icon: "app", curvature: -40 },
+          { label: "API", icon: "code", curvature: 0 },
+          { label: "Team", icon: "user", curvature: 40 },
+        ];
+        const HUB = { label: "Engine" };
+        const CYCLE = 1.9;
+        const BEAM_LEN = 300;
+        // Sweep curve. Upstream uses [0.16, 1, 0.3, 1] (a flash then a long
+        // idle); this softer in-out keeps beams on screen more of each cycle.
+        const BEAM_EASE = [0.55, 0, 0.35, 1];
+        const DURATION = 6;
+
+        const CX = 960;
+        const CY = 520;
+        const COL = 520; // horizontal distance from hub to the side columns
+        const ROW = 250; // vertical spacing between side nodes
+
+        const ICONS = {
+          doc: '<path d="M16 6h22l12 12v36a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"/><path d="M38 6v12h12M21 32h22M21 42h16"/>',
+          chat: '<path d="M10 14a6 6 0 0 1 6-6h32a6 6 0 0 1 6 6v22a6 6 0 0 1-6 6H28l-12 10v-10h0a6 6 0 0 1-6-6z"/><path d="M22 25h20"/>',
+          db: '<ellipse cx="32" cy="14" rx="20" ry="7"/><path d="M12 14v36c0 3.9 9 7 20 7s20-3.1 20-7V14M12 32c0 3.9 9 7 20 7s20-3.1 20-7"/>',
+          cloud: '<path d="M20 48h26a11 11 0 0 0 1-22 15 15 0 0 0-29-2 12 12 0 0 0 2 24z"/>',
+          app: '<rect x="8" y="12" width="48" height="40" rx="5"/><path d="M8 22h48M15 17h2M21 17h2"/>',
+          code: '<path d="M22 18 8 32l14 14M42 18l14 14-14 14M36 12 28 52"/>',
+          user: '<circle cx="32" cy="22" r="10"/><path d="M12 54c2-10 10-16 20-16s18 6 20 16"/>',
+          bell: '<path d="M18 44V28a14 14 0 0 1 28 0v16l4 4H14zM27 54h10"/>',
+          hub: '<path d="M32 6c2 14 12 24 26 26-14 2-24 12-26 26-2-14-12-24-26-26 14-2 24-12 26-26z"/>',
+        };
+
+        const NS = "http://www.w3.org/2000/svg";
+        const svg = document.getElementById("ab-wires");
+        const defs = document.getElementById("ab-defs");
+        const nodesEl = document.getElementById("ab-nodes");
+
+        function node(x, y, icon, label, hub) {
+          const el = document.createElement("div");
+          el.className = "ab-node" + (hub ? " is-hub" : "");
+          el.style.left = x + "px";
+          el.style.top = y + "px";
+          el.innerHTML = `<svg viewBox="0 0 64 64">${ICONS[icon] || ICONS.doc}</svg>`;
+          const l = document.createElement("div");
+          l.className = "ab-label" + (hub ? " is-hub" : "");
+          l.textContent = label;
+          l.style.left = x + "px";
+          l.style.top = (y + (hub ? 106 : 66)) + "px";
+          nodesEl.append(el, l);
+          return el;
+        }
+        const column = (list, x) =>
+          list.map((d, i) => ({ ...d, x, y: CY + (i - (list.length - 1) / 2) * ROW }));
+        const ins = column(INPUTS, CX - COL);
+        const outs = column(OUTPUTS, CX + COL);
+
+        // Beams: [from, to, curvature, delay]. Inputs first, outputs after.
+        const beams = [];
+        ins.forEach((d, i) => beams.push({ sx: d.x, sy: d.y, ex: CX, ey: CY, c: d.curvature, delay: 0.9 + i * 0.45 }));
+        outs.forEach((d, i) => beams.push({ sx: CX, sy: CY, ex: d.x, ey: d.y, c: d.curvature, delay: 1.9 + i * 0.45 }));
+
+        beams.forEach((b, i) => {
+          // Upstream path: M start Q (midX, startY - curvature) end
+          const d = `M ${b.sx},${b.sy} Q ${(b.sx + b.ex) / 2},${b.sy - b.c} ${b.ex},${b.ey}`;
+          const base = document.createElementNS(NS, "path");
+          base.setAttribute("class", "ab-base");
+          base.setAttribute("d", d);
+          const grad = document.createElementNS(NS, "linearGradient");
+          grad.id = "ab-grad-" + i;
+          grad.setAttribute("gradientUnits", "userSpaceOnUse");
+          grad.setAttribute("y1", 0);
+          grad.setAttribute("y2", 0);
+          grad.innerHTML =
+            '<stop class="ab-s0" offset="0" stop-opacity="0"/>' +
+            '<stop class="ab-s0" offset="0"/>' +
+            '<stop class="ab-s1" offset="0.325"/>' +
+            '<stop class="ab-s1" offset="1" stop-opacity="0"/>';
+          defs.appendChild(grad);
+          const beam = document.createElementNS(NS, "path");
+          beam.setAttribute("class", "ab-beam");
+          beam.setAttribute("d", d);
+          beam.setAttribute("stroke", `url(#${grad.id})`);
+          svg.append(base, beam);
+          const len = base.getTotalLength();
+          base.style.strokeDasharray = `${len} ${len + 10}`;
+          Object.assign(b, { base, beam, grad, len });
+        });
+
+        const nodeEls = [
+          ...ins.map((d) => node(d.x, d.y, d.icon, d.label, false)),
+          ...outs.map((d) => node(d.x, d.y, d.icon, d.label, false)),
+        ];
+        const hubEl = node(CX, CY, "hub", HUB.label, true);
+
+        // cubic-bezier(BEAM_EASE) solved for y at x.
+        function bezier(x) {
+          const [p1x, p1y, p2x, p2y] = BEAM_EASE;
+          const cx = 3 * p1x, bx = 3 * (p2x - p1x) - cx, ax = 1 - cx - bx;
+          const cy = 3 * p1y, by = 3 * (p2y - p1y) - cy, ay = 1 - cy - by;
+          let t = x;
+          for (let k = 0; k < 8; k++) {
+            const fx = ((ax * t + bx) * t + cx) * t - x;
+            const dx = (3 * ax * t + 2 * bx) * t + cx;
+            if (Math.abs(dx) < 1e-6) break;
+            t = Math.min(1, Math.max(0, t - fx / dx));
+          }
+          return ((ay * t + by) * t + cy) * t;
+        }
+
+        const clock = { t: 0 };
+        function render() {
+          for (const b of beams) {
+            const xa = Math.min(b.sx, b.ex);
+            const w = Math.abs(b.ex - b.sx);
+            const local = clock.t - b.delay;
+            // Before its first sweep the gradient sits off the start (invisible).
+            const p = local < 0 ? 0 : bezier((local % CYCLE) / CYCLE);
+            // Upstream sweeps x1 10%→110%, x2 0%→100%: the head leads.
+            const head = xa + p * (w + BEAM_LEN);
+            b.grad.setAttribute("x1", head.toFixed(1));
+            b.grad.setAttribute("x2", (head - BEAM_LEN).toFixed(1));
+          }
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.from(nodesEl.querySelectorAll('.ab-label'), { opacity: 0, duration: 0.5 }, 0.4);
+        tl.fromTo(hubEl, { scale: 0.5, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.7, ease: "back.out(1.6)" }, 0.1);
+        nodeEls.forEach((el, i) => {
+          const at = 0.25 + (i % ins.length) * 0.08 + (i >= ins.length ? 0.12 : 0);
+          tl.fromTo(el, { scale: 0.6, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.55, ease: "back.out(1.7)" }, at);
+        });
+        beams.forEach((b, i) => {
+          tl.fromTo(
+            b.base,
+            { strokeDashoffset: b.len },
+            { strokeDashoffset: 0, duration: 0.6, ease: "power2.inOut" },
+            0.45 + i * 0.05,
+          );
+        });
+        tl.fromTo(clock, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: render }, 0);
+        render();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["animated-beam"] = tl;
+      })();
+    </script>
+  </body>
+</html>

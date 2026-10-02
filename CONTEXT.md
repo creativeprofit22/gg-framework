@@ -1,0 +1,25 @@
+# Shared language
+
+**Motion plan** — The short record of a video's concept, motif, palette roles, type roles and beat, written in the video's project record before building. The rendered frames are checked against it.
+
+**Motion language** — The relationships between rhythm, typography, framing, transformation and continuity that give a video its character. It is independent of subject, palette or a universally mandatory effect. GG Motion's shipped guide describes principles, not a fixed house look.
+
+**Motion study** — A short example demonstrating transferable motion decisions. It informs a plan; it is not choreography to copy.
+
+**Support skill** — Instructions for brand identity, source intake or validation. It supports the video's plan rather than adding another creative style or approval workflow.
+
+**Input binding** — Mapping the user's text, fonts, colours, logos and media into the video's plan. Required identity outranks taste.
+
+**Single-pass output check** — One technical checking path that returns actual rendered images to the working agent for inspection. It is not an independent AI critique, creative approval score or repeated check of an unchanged export.
+
+**Composition-level choreography** — Coordinated changes in attention, hierarchy, spatial relationships and visual state over time. Fixed framing and intentional holds are not universal defects.
+
+**Production depth** — A legacy quick, standard or production preference retained for compatibility. It does not activate an automatic review loop.
+
+**Action plan** — A description of opening state, focal action, resulting state and handoff for a scene.
+
+**Studio preferences** — Optional, validated user preferences and reference choices. They fill unresolved choices without overriding the user's explicit requirements or importing general coding-agent instructions.
+
+**Checked output** — The current export has technical results and rendered samples inspected against its plan and inputs. This is not human approval, full playback, audio listening or a guarantee of quality. Changed output needs new evidence; missing evidence or unresolved failure is draft/unverified.
+
+**Review-ready** — A legacy independent-review status, not a requirement or claim made by the normal Motion workflow.

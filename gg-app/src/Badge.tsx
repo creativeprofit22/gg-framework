@@ -1,5 +1,3 @@
-import { theme } from "./theme";
-
 /**
  * Small pill badge with a consistent shape/size across the app. Defaults to a
  * neutral surface pill (Resend scarcity: color is reserved as a data signal).
@@ -9,32 +7,28 @@ import { theme } from "./theme";
 export function Badge({
   children,
   color,
+  title,
+  className,
 }: {
   children: React.ReactNode;
   color?: string;
+  /** Extra class, for callers that style or find a particular badge. */
+  className?: string;
+  /** Native tooltip, for badges whose colour carries state worth spelling out. */
+  title?: string;
 }): React.ReactElement {
   const style = color
-    ? { color, backgroundColor: `${color}22`, borderColor: `${color}55` }
-    : {
-        color: theme.textSecondary,
-        backgroundColor: theme.surface1,
-        borderColor: theme.border,
-      };
+    ? {
+        color,
+        // color-mix, not appended hex alpha: `color` may be a `var(--x)` token.
+        background: `linear-gradient(180deg, color-mix(in srgb, ${color} 21.9608%, transparent) 0%, color-mix(in srgb, ${color} 9.4118%, transparent) 100%)`,
+        borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
+        boxShadow: "0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2)",
+      }
+    : undefined;
   return (
-    <span className="badge" style={style}>
+    <span className={className ? `badge ${className}` : "badge"} style={style} title={title}>
       {children}
     </span>
   );
-}
-
-/** Project source → display label + accent color. One home so badges stay consistent. */
-const SOURCE_STYLES: Record<string, { label: string; color: string }> = {
-  ggcoder: { label: "gg-coder", color: theme.primary }, // blue
-  "claude-code": { label: "Claude Code", color: "#d97757" }, // Anthropic clay
-  codex: { label: "Codex", color: "#aeb6c2" }, // neutral silver
-  ken: { label: "Ken Kai", color: theme.ken }, // orchid/magenta mentor
-};
-
-export function sourceStyle(source: string): { label: string; color: string } {
-  return SOURCE_STYLES[source] ?? { label: source, color: theme.textMuted };
 }

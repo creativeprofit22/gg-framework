@@ -25,7 +25,7 @@ export function CompactionNotice({ status, originalCount, newCount }: Props): Re
       : "Compacted context";
 
   return (
-    <div className="assistant-msg">
+    <div className="assistant-msg" data-swap-row="">
       <span className={`assistant-dot${running ? " blink" : ""}`} style={{ color }}>
         {DOT}
       </span>

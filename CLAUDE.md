@@ -46,6 +46,15 @@ every CSS turn. Canonical methodology and agent contract live at
 `C:/ggcoder-projects/uimaxxxing/AGENTS.md`. Existing architecture and Local Fork
 invariants remain in force.
 
+The methodology is **not** auto-loaded, and `@path` imports are not expanded.
+Before the first UI, CSS, layout, motion, or visual-review turn of a session, read
+`C:/ggcoder-projects/uimaxxxing/methodology/01-contract.md`, `02-protocol.md`,
+`03-eyes.md`, and `07-voice.md`; they route to on-demand shards, which load only
+when the work touches them. Inspect reference images or UI screenshots through the
+eyes probes (`visual.mjs --reference`, `palette.mjs`, `extract-region.mjs`) with
+`UIMAXXXING_EYES_NO_INSTALL=1` in the same call, not a raw `read`. Use `magick`,
+never bare `convert`; a missing probe or `magick` means **not verified**.
+
 ### Routing and approval
 
 Use the same polish instructions in normal conversation; no slash syntax or

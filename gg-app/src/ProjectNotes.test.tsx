@@ -4754,6 +4754,43 @@ describe("ProjectNotes", () => {
     );
   });
 
+  it("keeps a routine local fallback visible but compact, with details on request", async () => {
+    const cwd = "/work/routine-fallback";
+    const client = new FakeProjectNotesClient(cwd);
+    // Notes for another project make the app fall back to on-device storage.
+    client.getOutcome = {
+      status: "ok",
+      snapshot: {
+        projectKey: canonicalProjectKey("/work/other"),
+        revision: 1,
+        document: notes("x"),
+      },
+      recoveredFromBackup: false,
+    };
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    const storageStatus = await screen.findByLabelText("Notes storage status");
+    await waitFor(() => expect(storageStatus.textContent).toContain("Local fallback"));
+    expect(storageStatus.getAttribute("role")).toBe("status");
+    expect(storageStatus.textContent).toContain("Stored on this device only");
+    const detail = within(storageStatus).getByText(/stored only in this app on this device/u);
+    expect(detail.hidden).toBe(true);
+
+    const toggle = within(storageStatus).getByRole("button", { name: "Show details" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe(detail.id);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toBe("Hide details");
+    expect(detail.hidden).toBe(false);
+
+    expect(screen.getByLabelText("Add a Notes task").getAttribute("placeholder")).toBe(
+      "Describe a task, then press Enter",
+    );
+  });
+
   it("explains migration failure and local fallback without leaking the raw error", async () => {
     const cwd = "/work/migration-failure";
     const client = new FakeProjectNotesClient(cwd);

@@ -1,6 +1,6 @@
 import { canonicalProjectKey, isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
 import type { SlashCommand } from "./agent";
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   DatabaseIcon,
@@ -572,6 +572,40 @@ export function NotesPersistenceStatus({
           ? WarningIcon
           : WarningCircleIcon;
   const urgent = tone === "error";
+  // A working local fallback is routine, so it stays visible as one compact line
+  // with its explanation behind a toggle. Warnings and errors always show in full.
+  const compact = tone === "local";
+  const [expanded, setExpanded] = useState(false);
+  const detailId = useId();
+
+  if (compact) {
+    return (
+      <div
+        className={`notes-persistence notes-persistence-${tone} notes-persistence-compact`}
+        role="status"
+        aria-label="Notes storage status"
+        aria-live="polite"
+      >
+        <Icon className="notes-persistence-icon" size={16} aria-hidden="true" />
+        <div className="notes-persistence-summary">
+          <strong>{title}</strong>
+          <span>Stored on this device only</span>
+        </div>
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost notes-persistence-toggle"
+          aria-expanded={expanded}
+          aria-controls={detailId}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Hide details" : "Show details"}
+        </button>
+        <p id={detailId} className="notes-persistence-detail" hidden={!expanded}>
+          {detail}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div

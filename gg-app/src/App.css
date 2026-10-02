@@ -13062,6 +13062,54 @@ select {
   font-size: 12px;
   line-height: 1.45;
 }
+/* Routine local fallback: one line (title + summary + details toggle); the
+   explanation opens below on request. Warnings/errors keep the full card. */
+.notes-persistence-compact {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  row-gap: 4px;
+  padding: 4px 6px 4px 12px;
+}
+.notes-persistence-compact .notes-persistence-icon {
+  margin-top: 0;
+}
+.notes-persistence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  min-width: 0;
+}
+.notes-persistence-summary strong {
+  display: inline;
+}
+.notes-persistence-summary span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.notes-persistence-toggle {
+  min-height: 32px;
+  white-space: nowrap;
+}
+.notes-persistence-compact .notes-persistence-detail {
+  grid-column: 2 / -1;
+  margin: 0 0 4px;
+}
+.notes-persistence-compact .notes-persistence-detail[hidden] {
+  display: none;
+}
+@media (pointer: coarse) {
+  .notes-persistence-toggle {
+    min-height: 44px;
+  }
+  /* The add-task row is a primary touch target: field and button meet the 44px floor. */
+  .notes-add-controls input,
+  .notes-add-controls button {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+}
 .notes-section {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);

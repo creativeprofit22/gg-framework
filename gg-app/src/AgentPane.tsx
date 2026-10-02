@@ -502,9 +502,10 @@ const nextId = (): number => ++idSeq;
 
 // Vertical divider between footer segments (mirrors the TUI's ` \u2502 ` in
 // border color). Rendered between adjacent groups, never leading/trailing.
+// Pure decoration: hidden from assistive tech so it isn't read as a glyph.
 function FooterSep(): React.ReactElement {
   return (
-    <span className="footer-sep" style={{ color: theme.border }}>
+    <span className="footer-sep" style={{ color: theme.border }} aria-hidden="true">
       {"\u2502"}
     </span>
   );

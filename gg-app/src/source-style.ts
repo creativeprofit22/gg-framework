@@ -4,8 +4,9 @@ import { theme } from "./theme";
 /** Project source → display label + accent color. One home so badges stay consistent. */
 const SOURCE_STYLES: Record<string, { label: string; color: string }> = {
   ggcoder: { label: PRODUCT_DISPLAY_NAME, color: theme.primary }, // blue
-  "claude-code": { label: "Claude Code", color: "#d97757" }, // Anthropic clay
-  codex: { label: "Codex", color: "#aeb6c2" }, // neutral silver
+  // Theme tokens (appearance.css): Dark keeps clay/silver, Light swaps in readable ink.
+  "claude-code": { label: "Claude Code", color: "var(--source-claude-code)" }, // Anthropic clay
+  codex: { label: "Codex", color: "var(--source-codex)" }, // neutral silver
   folder: { label: "Folder", color: theme.textDim }, // on disk, never opened
   ken: { label: MENTOR_DISPLAY_NAME, color: theme.ken }, // orchid/magenta mentor
 };

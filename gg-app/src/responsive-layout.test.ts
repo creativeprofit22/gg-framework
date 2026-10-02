@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
 const glassCss = readFileSync(new URL("./glass.css", import.meta.url), "utf8");
+const appearanceCss = readFileSync(new URL("./appearance.css", import.meta.url), "utf8");
 const asciiLogoSource = readFileSync(new URL("./AsciiLogo.tsx", import.meta.url), "utf8");
 
 describe("narrow-window layout contracts", () => {
@@ -127,5 +128,43 @@ describe("narrow-window layout contracts", () => {
     expect(appCss).toMatch(
       /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-detail-actions \.notes-roadmap-primary\s*\{\s*width:\s*100%;/,
     );
+  });
+});
+
+describe("glass accessibility fallback", () => {
+  const solidFallbackQuery =
+    /@media \(prefers-reduced-transparency: reduce\), \(prefers-contrast: more\)\s*\{\s*/;
+  const glassTokens = (block: string | undefined): Map<string, string> =>
+    new Map(
+      [...(block ?? "").matchAll(/(--glass[\w-]*)\s*:\s*([^;]+);/g)].map(
+        (match) => [match[1] ?? "", (match[2] ?? "").trim()] as const,
+      ),
+    );
+
+  it("turns Light glass solid too, despite Light's higher-specificity tints", () => {
+    // Regression: the Light tints sit on `:root[data-appearance-theme="light"]`
+    // (0,2,0), which beat glass.css's `:root` (0,1,0) fallback, so Light glass
+    // stayed translucent under Reduce transparency / Increase contrast.
+    const darkFallback = glassTokens(
+      glassCss.match(new RegExp(`${solidFallbackQuery.source}:root\\s*\\{([^}]*)\\}`))?.[1],
+    );
+    const lightTints = glassTokens(
+      appearanceCss.match(/^:root\[data-appearance-theme="light"\]\s*\{([^}]*)\}/m)?.[1],
+    );
+    const lightFallback = glassTokens(
+      appearanceCss.match(
+        new RegExp(
+          `${solidFallbackQuery.source}:root\\[data-appearance-theme="light"\\]\\s*\\{([^}]*)\\}`,
+        ),
+      )?.[1],
+    );
+
+    expect(darkFallback.get("--glass")).toBe("var(--surface-1)");
+    expect(lightFallback.get("--glass")).toBe("var(--surface-1)");
+    const overridden = [...lightTints.keys()].filter((token) => darkFallback.has(token));
+    expect(overridden.length).toBeGreaterThan(0);
+    for (const token of overridden) {
+      expect(lightFallback.get(token), token).toBe(darkFallback.get(token));
+    }
   });
 });

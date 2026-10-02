@@ -7,6 +7,9 @@
   --sent-user-bg: #172b46;
   --sent-user-border: #36577d;
   --code-bg: #0b0d11;
+  /* Project source badges (source-style.ts): Anthropic clay, neutral silver. */
+  --source-claude-code: #d97757;
+  --source-codex: #aeb6c2;
 }
 :root[data-appearance-theme="light"] {
   --bg: #fcfbfd;
@@ -51,6 +54,11 @@
   --code-comment: #625e70;
   --code-addition-bg: #dcece1;
   --code-deletion-bg: #f3dfe3;
+  /* Source badges reuse Light ink: the code umber keeps Claude Code warm without
+     reading as a warning (retuning --code-symbol shifts this badge too); Codex
+     keeps its neutral grey read. */
+  --source-claude-code: var(--code-symbol);
+  --source-codex: var(--text-muted);
   --meter-track-bg: var(--surface-3);
   --meter-track-border: var(--border-strong);
   --meter-track-shadow: inset 0 1px 2px rgba(24, 24, 35, 0.12);
@@ -61,6 +69,31 @@
   --meter-thumb-shadow: 0 1px 3px rgba(24, 24, 35, 0.28);
   --meter-thumb-shadow-active:
     0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent), 0 1px 4px rgba(24, 24, 35, 0.32);
+  /* Glass tints (glass.css) are smoked dark for Dark. Light frosts the same
+     surfaces pale, so dark ink keeps its contrast on cards, dialogs, menus,
+     toasts and fields; clear glass becomes a faint ink wash. */
+  --glass: rgb(244 243 247 / 0.78);
+  --glass-hover: rgb(232 231 239 / 0.86);
+  --glass-field: rgb(255 255 255 / 0.82);
+  --glass-float: rgb(250 249 252 / 0.94);
+  --glass-modal: rgb(250 249 252 / 0.92);
+  --glass-clear: rgb(24 24 35 / 0.04);
+  --glass-clear-hover: rgb(24 24 35 / 0.08);
+  --glass-shadow: 0 16px 48px rgb(31 27 45 / 0.18);
+}
+/* Mirrors glass.css's solid accessibility fallback: its `:root` rule loses to
+   the Light tints above on specificity, so Light needs its own copy. Keep the
+   two in step. */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root[data-appearance-theme="light"] {
+    --glass: var(--surface-1);
+    --glass-hover: var(--surface-2);
+    --glass-field: var(--surface-1);
+    --glass-float: var(--surface-2);
+    --glass-modal: var(--surface-2);
+    --glass-clear: var(--surface-2);
+    --glass-clear-hover: var(--surface-3);
+  }
 }
 :root[data-appearance-theme="light"],
 :root[data-appearance-theme="light"] body {
@@ -100,6 +133,10 @@
 }
 :root[data-appearance-theme="light"] .azure-remove-btn:hover:not(:disabled) {
   color: var(--error);
+}
+/* Settings-page links (Remote, Steroids) are white for Dark glass. */
+:root[data-appearance-theme="light"] .home-link {
+  color: var(--primary);
 }
 :root[data-appearance-theme="light"] .enh-diss-lead {
   color: var(--primary);
@@ -244,6 +281,18 @@
 }
 :root[data-appearance-theme="light"] .rank-level {
   color: var(--text-secondary);
+}
+/* Popup checkboxes/radios: glass.css draws the unticked edge in white for
+   Dark; on Light's pale field it needs ink to stay above 3:1. */
+:root[data-appearance-theme="light"]
+  .modal-radio
+  input:is([type="checkbox"], [type="radio"]):not(:checked) {
+  border-color: var(--text-muted);
+}
+:root[data-appearance-theme="light"]
+  .modal-radio
+  input:is([type="checkbox"], [type="radio"]):not(:checked):hover:not(:disabled) {
+  border-color: var(--text-secondary);
 }
 :root[data-appearance-theme="light"] .modal-backdrop {
   background: rgba(31, 27, 45, 0.22);

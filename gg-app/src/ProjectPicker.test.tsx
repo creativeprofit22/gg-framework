@@ -329,6 +329,9 @@ describe("ProjectPicker session list", () => {
     // The foreign row is labelled; the native one carries no source tag.
     const badge = screen.getByText("Claude Code");
     expect(badge.className).toContain("picker-source-tag");
+    // Theme token, not raw hex, so Light can swap in readable ink.
+    expect(badge.style.color).toBe("var(--source-claude-code)");
+    expect(badge.getAttribute("style")).not.toMatch(/#[0-9a-f]{3,8}\b/i);
 
     const foreignRow = screen.getByText(FOREIGN_SESSION.preview).closest("button");
     expect(foreignRow?.textContent).toContain("Claude Code");

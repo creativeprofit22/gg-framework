@@ -626,6 +626,9 @@ export interface AgentPaneProps {
   registerInput?: (paneId: string, actions: PaneInputActions | null) => void;
   registerSwapViewState?: RegisterPaneSwapViewState;
   preserveWorkspaceFocus?: () => boolean;
+  /** Receives the header element that hosts the workspace's pane controls
+   *  (split, swap, close); null while this pane shows no session header. */
+  paneChromeSlotRef?: (el: HTMLElement | null) => void;
   target?: PaneSessionTarget | null;
   generation?: number | null;
   onGenerationChange?: (generation: number) => void;
@@ -4806,6 +4809,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         additionalRoots={state?.additionalRoots}
         navHidden={navHidden}
         onToggleNav={toggleNav}
+        paneChromeSlotRef={props.paneChromeSlotRef}
+        leading={
+          <BackButton
+            label={
+              workspaceMode === "chat"
+                ? "Back to chats"
+                : workspaceMode === "motion"
+                  ? "Back to motion sessions"
+                  : "Back to this project's sessions"
+            }
+            onClick={() => setShowPicker(true)}
+          />
+        }
         stripExtras={
           <>
             <TitleUsageMeter currentProvider={state?.provider ?? ""} />
@@ -4821,16 +4837,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </>
         }
       >
-        <BackButton
-          label={
-            workspaceMode === "chat"
-              ? "Back to chats"
-              : workspaceMode === "motion"
-                ? "Back to motion sessions"
-                : "Back to this project's sessions"
-          }
-          onClick={() => setShowPicker(true)}
-        />
         <div className="rank-badge-wrap">
           <RankBadge
             snapshot={progress}

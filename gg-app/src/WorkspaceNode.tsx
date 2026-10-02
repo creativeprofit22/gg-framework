@@ -1,6 +1,8 @@
 /* eslint-disable react-hooks/refs -- The stable lifecycle dispatcher reads its ref only when a child invokes it outside render. */
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import {
+  ArrowsOutCardinalIcon,
   CopyIcon,
   DotsSixVerticalIcon,
   SquareSplitHorizontalIcon,
@@ -37,7 +39,10 @@ export interface WorkspaceNodeProps {
   panes: Record<string, WorkspacePaneValue>;
   windowFocused: boolean;
   canSplit: boolean;
+  /** More than one pane is open, so panes can be dragged into a new arrangement. */
+  canRearrange: boolean;
   rearrangementEnabled: boolean;
+  onToggleRearrangement: () => void;
   activePaneDragSourceId: WorkspacePaneId | null;
   hoveredPaneDrop: { targetPaneId: WorkspacePaneId; placement: PanePlacement } | null;
   dragInstructionsId: string;
@@ -138,7 +143,9 @@ function WorkspaceAgentLeaf({
   panes,
   windowFocused,
   canSplit,
+  canRearrange,
   rearrangementEnabled,
+  onToggleRearrangement,
   activePaneDragSourceId,
   hoveredPaneDrop,
   dragInstructionsId,
@@ -163,6 +170,9 @@ function WorkspaceAgentLeaf({
   style: CSSProperties;
 }): React.ReactElement {
   const focused = focusedPaneId === paneId;
+  // The pane's session header hosts its controls when it has one; panes showing
+  // Home or a picker keep them floating in the pane's top-right corner.
+  const [chromeSlot, setChromeSlot] = useState<HTMLElement | null>(null);
   const lifecycleErrorContextRef = useRef({ paneId, onLifecycleError });
   useLayoutEffect(() => {
     lifecycleErrorContextRef.current = { paneId, onLifecycleError };
@@ -195,6 +205,7 @@ function WorkspaceAgentLeaf({
     registerInput,
     registerSwapViewState: swaps?.registerViewState,
     preserveWorkspaceFocus: swaps?.preserveFocus,
+    paneChromeSlotRef: setChromeSlot,
   };
 
   const registerHost = swaps?.registerHost;
@@ -216,25 +227,8 @@ function WorkspaceAgentLeaf({
     [paneId, registerButton],
   );
   const swapRow = swaps?.rows.get(paneId);
-  return (
-    <section
-      ref={hostRef}
-      tabIndex={-1}
-      aria-label={`Conversation ${paneId}`}
-      className={`workspace-pane-slot${focused ? " pane-focused" : ""}`}
-      data-pane-id={paneId}
-      id={`workspace-pane-${paneId}`}
-      style={style}
-      onPointerDownCapture={(event) => {
-        if (!isPaneDragHandle(event.target)) onFocusPane(paneId);
-      }}
-      onFocusCapture={(event) => {
-        if (!isPaneDragHandle(event.target)) onFocusPane(paneId);
-      }}
-    >
-      {/* Pane chrome precedes the body in the DOM so keyboard users reach the
-          controls at the top of the pane before its transcript and composer.
-          Every chrome element is absolutely positioned, so order is visual-neutral. */}
+  const chrome = (
+    <>
       {rearrangementEnabled && (
         <button
           type="button"
@@ -255,22 +249,21 @@ function WorkspaceAgentLeaf({
           <DotsSixVerticalIcon size={15} aria-hidden="true" />
         </button>
       )}
-      {activePaneDragSourceId && (
-        <PaneDropOverlay
-          enabled={rearrangementEnabled}
-          sourcePaneId={activePaneDragSourceId}
-          targetPaneId={paneId}
-          hoveredPlacement={
-            hoveredPaneDrop?.targetPaneId === paneId ? hoveredPaneDrop.placement : null
-          }
-          onHover={onPaneDropHover}
-          onDrop={onPaneDrop}
-          onReject={onPaneDropReject}
-        />
-      )}
       <div className="workspace-pane-actions" aria-label="Pane actions">
         {focused && (
           <>
+            {canRearrange && (
+              <button
+                type="button"
+                className="workspace-rearrangement-toggle"
+                aria-pressed={rearrangementEnabled}
+                aria-label="Rearrange panes"
+                title={rearrangementEnabled ? "Hide pane drag handles" : "Rearrange panes"}
+                onClick={onToggleRearrangement}
+              >
+                <ArrowsOutCardinalIcon size={15} aria-hidden="true" />
+              </button>
+            )}
             <button
               type="button"
               aria-label="Copy to New Window"
@@ -362,6 +355,41 @@ function WorkspaceAgentLeaf({
         >
           <span aria-hidden="true">×</span>
         </button>
+      )}
+    </>
+  );
+  return (
+    <section
+      ref={hostRef}
+      tabIndex={-1}
+      aria-label={`Conversation ${paneId}`}
+      className={`workspace-pane-slot${focused ? " pane-focused" : ""}${chromeSlot ? " has-header-chrome" : ""}`}
+      data-pane-id={paneId}
+      id={`workspace-pane-${paneId}`}
+      style={style}
+      onPointerDownCapture={(event) => {
+        if (!isPaneDragHandle(event.target)) onFocusPane(paneId);
+      }}
+      onFocusCapture={(event) => {
+        if (!isPaneDragHandle(event.target)) onFocusPane(paneId);
+      }}
+    >
+      {/* Pane controls come before the transcript and composer in keyboard order:
+          in the session header's title row, or ahead of the body when the pane
+          shows Home or a picker (absolutely positioned, so order is visual-neutral). */}
+      {chromeSlot ? createPortal(chrome, chromeSlot) : chrome}
+      {activePaneDragSourceId && (
+        <PaneDropOverlay
+          enabled={rearrangementEnabled}
+          sourcePaneId={activePaneDragSourceId}
+          targetPaneId={paneId}
+          hoveredPlacement={
+            hoveredPaneDrop?.targetPaneId === paneId ? hoveredPaneDrop.placement : null
+          }
+          onHover={onPaneDropHover}
+          onDrop={onPaneDrop}
+          onReject={onPaneDropReject}
+        />
       )}
       <div className="workspace-pane-body">
         {renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}

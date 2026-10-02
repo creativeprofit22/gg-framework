@@ -9855,6 +9855,13 @@ select {
   color: var(--text-muted);
   user-select: none;
 }
+/* Narrow panes drop the visible word so the controls stay on one row; the
+   switch keeps its "Autopilot" accessible name and tooltip. */
+@container conversation-pane (max-width: 640px) {
+  .chat-head-nav .autopilot-label {
+    display: none;
+  }
+}
 
 .cl-toggle-switch {
   position: relative;
@@ -11224,25 +11231,9 @@ select {
   overflow: hidden;
   background: var(--bg);
 }
-.workspace-toolbar {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  min-height: 30px;
-  padding: 4px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-1);
-  user-select: none;
-}
+/* Lives in the focused pane's controls; .workspace-pane-actions sizes it. */
 .workspace-rearrangement-toggle {
-  padding: 3px 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  color: var(--text-secondary);
-  background: var(--surface-2);
   font: inherit;
-  font-size: 12px;
   cursor: pointer;
 }
 .workspace-rearrangement-toggle:hover:not(:disabled),
@@ -11311,9 +11302,13 @@ select {
   min-width: 0;
   min-height: 0;
 }
-/* Keep pane chrome outside the scrolling body, including on focus/scrollIntoView. */
+/* Keep floating pane controls outside the scrolling body, including on
+   focus/scrollIntoView. A session header hosts them in its title row instead. */
 .workspace-pane-body {
   padding-top: 35px;
+}
+.workspace-pane-slot.has-header-chrome > .workspace-pane-body {
+  padding-top: 0;
 }
 /* At high zoom, scroll the pane rather than hiding its header, transcript or footer. */
 .workspace-pane-body > .agent-pane {
@@ -11597,6 +11592,119 @@ select {
   top: 5px;
   right: 8px;
   font-size: 18px;
+}
+/* macOS draws its window buttons over the top-left corner. */
+.platform-macos .pane-drag-handle-agent {
+  left: 82px;
+}
+/* Session header: the pane's controls sit in flow at the end of the title row,
+   so the conversation starts right under the header instead of below a strip
+   reserved for floating buttons. */
+.chat-head-pane-chrome {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+}
+.chat-head-pane-chrome:empty {
+  display: none;
+}
+.chat-head-pane-chrome .pane-drag-handle-agent,
+.chat-head-pane-chrome .workspace-pane-actions,
+.chat-head-pane-chrome .workspace-pane-close {
+  position: relative;
+  top: auto;
+  right: auto;
+  left: auto;
+}
+.chat-head-pane-chrome .workspace-pane-actions,
+.chat-head-pane-chrome .workspace-pane-actions:has([data-pane-swap-direction]) {
+  align-items: center;
+  flex-wrap: nowrap;
+  max-width: none;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+}
+/* In the row, swap buttons follow the pane's other controls instead of
+   floating. They stay last before Close, so focusing a pane (which adds
+   buttons to their left) still never moves them. */
+.chat-head-pane-chrome .workspace-pane-actions .pane-swap-button,
+.chat-head-pane-chrome .workspace-pane-actions .pane-swap-button[data-pane-swap-direction] {
+  position: relative;
+  top: auto;
+  right: auto;
+  width: 25px;
+  height: 25px;
+}
+/* Narrow panes: keep the project's counts readable beside the pane controls.
+   The usage meter keeps its window label and bar; its tooltip and accessible
+   name still carry the reset time. */
+@container conversation-pane (max-width: 560px) {
+  .chat-head-strip {
+    gap: 8px;
+  }
+  .chat-head-strip .title-usage-reset {
+    display: none;
+  }
+  .chat-head-strip .title-usage-track {
+    width: 40px;
+  }
+}
+/* Very narrow panes cannot fit the pane controls beside the title: give them
+   their own lines under it instead of letting the header clip them past the
+   pane edge. Swap and Close lead the first line at the right; the controls a
+   focused pane adds wrap onto the lines below, so focusing a pane still never
+   moves the swap target. The usage meter is already clipped at this width, so
+   it yields its room; the window's wider panes still show it. */
+@container conversation-pane (max-width: 200px) {
+  .chat-head-strip:has(.chat-head-pane-chrome:not(:empty)) {
+    flex-wrap: wrap;
+    row-gap: 3px;
+    height: auto;
+    min-height: 38px;
+    padding-block: 5px;
+  }
+  .chat-head-strip:has(.chat-head-pane-chrome:not(:empty)) .chat-head-title {
+    flex-basis: 0;
+  }
+  .chat-head-strip:has(.chat-head-pane-chrome:not(:empty)) .title-usage-meter {
+    display: none;
+  }
+  .chat-head-pane-chrome {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .chat-head-pane-chrome .workspace-pane-actions,
+  .chat-head-pane-chrome .workspace-pane-actions:has([data-pane-swap-direction]) {
+    display: contents;
+  }
+  .chat-head-pane-chrome .pane-swap-button,
+  .chat-head-pane-chrome .workspace-pane-close {
+    order: -2;
+  }
+  .chat-head-pane-chrome:has(.pane-swap-button, .workspace-pane-close):has(
+      .pane-drag-handle-agent,
+      .workspace-pane-actions > :not(.pane-swap-button)
+    )::after {
+    content: "";
+    order: -1;
+    flex-basis: 100%;
+    height: 0;
+  }
+}
+/* Coarse pointers keep 44px swap targets, so the row grows to hold them. */
+@media (hover: none), (pointer: coarse) {
+  .chat-head-strip:has(.chat-head-pane-chrome .pane-swap-button) {
+    height: auto;
+    min-height: 38px;
+  }
+  .chat-head-pane-chrome .workspace-pane-actions .pane-swap-button,
+  .chat-head-pane-chrome .workspace-pane-actions .pane-swap-button[data-pane-swap-direction] {
+    width: 44px;
+    height: 44px;
+  }
 }
 .workspace-divider {
   position: absolute;

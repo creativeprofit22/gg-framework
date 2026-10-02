@@ -774,19 +774,6 @@ function ReadyWorkspaceShell({
 
   return (
     <main className={`workspace-shell${activePaneDrag ? " pane-drag-active" : ""}`}>
-      <div className="workspace-toolbar" data-tauri-drag-region>
-        <button
-          type="button"
-          className="workspace-rearrangement-toggle"
-          disabled={!canRearrange}
-          aria-pressed={rearrangementEnabled}
-          aria-label="Rearrange panes"
-          title="Enable pane drag handles"
-          onClick={toggleRearrangement}
-        >
-          Rearrange
-        </button>
-      </div>
       <p id={PANE_DRAG_INSTRUCTIONS_ID} className="visually-hidden">
         Drag this handle onto the left, right, top, or bottom edge of another workspace pane. Press
         Escape to cancel.
@@ -817,7 +804,9 @@ function ReadyWorkspaceShell({
           panes={layout.panes}
           windowFocused={windowFocused}
           canSplit={leafIds.length < MAX_WORKSPACE_PANES}
+          canRearrange={canRearrange}
           rearrangementEnabled={rearrangementEnabled}
+          onToggleRearrangement={toggleRearrangement}
           activePaneDragSourceId={activePaneDrag?.sourcePaneId ?? null}
           hoveredPaneDrop={hoveredPaneDrop}
           dragInstructionsId={PANE_DRAG_INSTRUCTIONS_ID}

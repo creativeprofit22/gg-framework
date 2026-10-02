@@ -939,6 +939,53 @@ describe("WorkspaceShell", () => {
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
   });
 
+  it("hosts pane controls in a pane's session header and floats them again without one", async () => {
+    saveTwoPaneLayout();
+    function HeaderPane({ paneChromeSlotRef, ...props }: AgentPaneProps): React.ReactElement {
+      const [hasHeader, setHasHeader] = useState(true);
+      return (
+        <>
+          {hasHeader && <span data-testid={`header-${props.paneId}`} ref={paneChromeSlotRef} />}
+          <button type="button" onClick={() => setHasHeader(false)}>
+            {`leave ${props.paneId} session`}
+          </button>
+          <FakePane {...props} />
+        </>
+      );
+    }
+    render(<WorkspaceShell renderPane={(props) => <HeaderPane {...props} />} />);
+    await screen.findByTestId("pane-secondary");
+
+    const primaryHeader = screen.getByTestId("header-primary");
+    const secondaryHeader = screen.getByTestId("header-secondary");
+    const close = screen.getByRole("button", { name: "Close secondary pane" });
+    expect(secondaryHeader.contains(close)).toBe(true);
+    fireEvent.click(screen.getByRole("textbox", { name: "primary input" }));
+    expect(primaryHeader.contains(screen.getByRole("button", { name: "Split Right" }))).toBe(true);
+    expect(primaryHeader.contains(screen.getByRole("button", { name: "Rearrange panes" }))).toBe(
+      true,
+    );
+    expect(
+      document.querySelector('[data-pane-id="primary"]')?.classList.contains("has-header-chrome"),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "leave secondary session" }));
+    const floating = screen.getByRole("button", { name: "Close secondary pane" });
+    expect(floating.parentElement?.dataset.paneId).toBe("secondary");
+    expect(
+      document.querySelector('[data-pane-id="secondary"]')?.classList.contains("has-header-chrome"),
+    ).toBe(false);
+  });
+
+  it("offers rearrangement only when more than one pane is open", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-primary");
+    expect(screen.queryByRole("button", { name: "Rearrange panes" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    expect(await screen.findByRole("button", { name: "Rearrange panes" })).toBeTruthy();
+  });
+
   it("keeps split, close, divider, and rearrangement controls discoverable by role and name", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);

@@ -26,7 +26,11 @@ interface WorkspaceHeaderProps {
   additionalRoots?: string[];
   navHidden: boolean;
   onToggleNav: () => void;
+  /** Controls before the title (the back button), kept visible with the nav hidden. */
+  leading?: ReactNode;
   stripExtras?: ReactNode;
+  /** Hosts the workspace's pane controls at the end of the title row. */
+  paneChromeSlotRef?: (el: HTMLElement | null) => void;
   children: ReactNode;
 }
 
@@ -43,7 +47,9 @@ export function WorkspaceHeader({
   additionalRoots = [],
   navHidden,
   onToggleNav,
+  leading,
   stripExtras,
+  paneChromeSlotRef,
   children,
 }: WorkspaceHeaderProps): React.ReactElement {
   const paneId = useContext(PaneIdContext);
@@ -60,6 +66,7 @@ export function WorkspaceHeader({
       style={accent ? ({ "--project-accent": accent } as React.CSSProperties) : undefined}
     >
       <div className="chat-head-strip" data-tauri-drag-region>
+        {leading}
         <span
           className="chat-head-title"
           data-tauri-drag-region
@@ -202,6 +209,7 @@ export function WorkspaceHeader({
             <polyline points={navHidden ? "6 9 12 15 18 9" : "6 15 12 9 18 15"} />
           </svg>
         </button>
+        {paneChromeSlotRef && <span className="chat-head-pane-chrome" ref={paneChromeSlotRef} />}
       </div>
 
       {!navHidden && (

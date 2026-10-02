@@ -22,7 +22,10 @@ import {
 } from "./roadmap-reliability-dev-smoke.mjs";
 
 test("review fixture is long, session-scoped, repeatable, and does not mutate Notes", () => {
-  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "review-project") });
+  const state = createRoadmapReliabilityFixtureState({
+    root: tmpdir(),
+    project: join(tmpdir(), "review-project"),
+  });
   const before = JSON.stringify(state.document);
   const a = fixturePendingReviews(state, "a");
   assert.deepEqual(fixturePendingReviews(state, "a"), a);
@@ -39,18 +42,28 @@ test("review fixture is long, session-scoped, repeatable, and does not mutate No
 });
 
 test("interactive review uses readable isolated sample phases without a plan gate", () => {
-  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "preview-project") });
+  const state = createRoadmapReliabilityFixtureState({
+    root: tmpdir(),
+    project: join(tmpdir(), "preview-project"),
+  });
   const before = JSON.stringify(state.document);
   const preview = fixturePendingReviews(state, "preview-session", true);
   assert.equal(preview.plan, null);
   assert.equal(preview.draft.phases.length, 3);
   assert.match(preview.draft.summary, /isolated developer preview/);
   assert.equal(JSON.stringify(state.document), before);
-  assert.equal(parseRoadmapReliabilitySmokeArguments(["--review", "--identity", "com.ggcoder.local-fork"]).interactive, true);
+  assert.equal(
+    parseRoadmapReliabilitySmokeArguments(["--review", "--identity", "com.ggcoder.local-fork"])
+      .interactive,
+    true,
+  );
 });
 
 test("plan preview retains both reviews and a labelled non-executing sample plan", () => {
-  const state = createRoadmapReliabilityFixtureState({ root: tmpdir(), project: join(tmpdir(), "plan-preview") });
+  const state = createRoadmapReliabilityFixtureState({
+    root: tmpdir(),
+    project: join(tmpdir(), "plan-preview"),
+  });
   const before = JSON.stringify(state.document);
   const preview = fixturePendingReviews(state, "preview-session", "plan");
   assert.equal(preview.plan.state, "pending-review");
@@ -58,16 +71,28 @@ test("plan preview retains both reviews and a labelled non-executing sample plan
   assert.match(preview.plan.content, /not connected to a live model/);
   assert.equal(preview.draft.phases.length, 3);
   assert.equal(JSON.stringify(state.document), before);
-  assert.equal(parseRoadmapReliabilitySmokeArguments(["--identity", "com.ggcoder.local-fork", "--review-plan"]).review, "plan");
+  assert.equal(
+    parseRoadmapReliabilitySmokeArguments(["--identity", "com.ggcoder.local-fork", "--review-plan"])
+      .review,
+    "plan",
+  );
 });
 
-for (const [flag, review] of [["--review", "roadmap"], ["--review-plan", "plan"]]) {
+for (const [flag, review] of [
+  ["--review", "roadmap"],
+  ["--review-plan", "plan"],
+]) {
   for (const cleanupFails of [false, true]) {
     test(`${flag} saves screenshot before close and finalizes ${cleanupFails ? "cleanup failure" : "successful close"}`, async () => {
       const root = mkdtempSync(join(tmpdir(), "gg-review-finalization-"));
       const options = parseRoadmapReliabilitySmokeArguments([
-        flag, "--identity", "com.ggcoder.local-fork",
-        "--screenshot", join(root, "preview.png"), "--outcome", join(root, "outcome.json"),
+        flag,
+        "--identity",
+        "com.ggcoder.local-fork",
+        "--screenshot",
+        join(root, "preview.png"),
+        "--outcome",
+        join(root, "outcome.json"),
       ]);
       const events = [];
       const cleanupError = new Error("injected cleanup failure");
@@ -86,18 +111,19 @@ for (const [flag, review] of [["--review", "roadmap"], ["--review-plan", "plan"]
       };
       try {
         const running = finalizeRoadmapReliabilitySmoke(options, {
-          run: () => finishRoadmapReviewPreview(client, options, async () => {
-            assert.equal(readFileSync(options.screenshot, "utf8"), "preview-image");
-            assert.equal(existsSync(options.outcome), false);
-            events.push("closed");
-          }),
+          run: () =>
+            finishRoadmapReviewPreview(client, options, async () => {
+              assert.equal(readFileSync(options.screenshot, "utf8"), "preview-image");
+              assert.equal(existsSync(options.outcome), false);
+              events.push("closed");
+            }),
           cleanup: async () => {
             events.push("cleanup");
             assert.equal(existsSync(options.outcome), false);
             if (cleanupFails) throw cleanupError;
           },
         });
-        if (cleanupFails) await assert.rejects(running, error => error === cleanupError);
+        if (cleanupFails) await assert.rejects(running, (error) => error === cleanupError);
         else assert.equal((await running).status, "preview-closed");
         const outcome = JSON.parse(readFileSync(options.outcome, "utf8"));
         assert.deepEqual(events, ["visible", "screenshot", "closed", "cleanup"]);
@@ -121,24 +147,45 @@ for (const [flag, review] of [["--review", "roadmap"], ["--review-plan", "plan"]
 test("shared finalization preserves automated evidence and persists failures before rejecting", async () => {
   const root = mkdtempSync(join(tmpdir(), "gg-smoke-finalization-"));
   const options = { identity: "com.ggcoder.local-fork", outcome: join(root, "outcome.json") };
-  const result = { status: "passed", identity: options.identity, statusUpdates: 1, fixtureAudit: [] };
+  const result = {
+    status: "passed",
+    identity: options.identity,
+    statusUpdates: 1,
+    fixtureAudit: [],
+  };
   try {
-    assert.deepEqual(await finalizeRoadmapReliabilitySmoke(options, {
-      run: async () => result, cleanup: async () => {},
-    }), result);
+    assert.deepEqual(
+      await finalizeRoadmapReliabilitySmoke(options, {
+        run: async () => result,
+        cleanup: async () => {},
+      }),
+      result,
+    );
     assert.deepEqual(JSON.parse(readFileSync(options.outcome, "utf8")), result);
     for (const stage of ["run", "cleanup"]) {
       const error = new Error(`${stage} failed`);
       let cleaned = false;
-      await assert.rejects(finalizeRoadmapReliabilitySmoke(options, {
-        run: async () => { if (stage === "run") throw error; return result; },
-        cleanup: async () => { cleaned = true; if (stage === "cleanup") throw error; },
-        failureEvidence: () => ({ fixtureAudit: [], developerLogTail: "diagnostics" }),
-      }), caught => caught === error);
+      await assert.rejects(
+        finalizeRoadmapReliabilitySmoke(options, {
+          run: async () => {
+            if (stage === "run") throw error;
+            return result;
+          },
+          cleanup: async () => {
+            cleaned = true;
+            if (stage === "cleanup") throw error;
+          },
+          failureEvidence: () => ({ fixtureAudit: [], developerLogTail: "diagnostics" }),
+        }),
+        (caught) => caught === error,
+      );
       assert.equal(cleaned, true);
       assert.deepEqual(JSON.parse(readFileSync(options.outcome, "utf8")), {
-        status: "failed", identity: options.identity, error: error.message,
-        fixtureAudit: [], developerLogTail: "diagnostics",
+        status: "failed",
+        identity: options.identity,
+        error: error.message,
+        fixtureAudit: [],
+        developerLogTail: "diagnostics",
       });
     }
   } finally {
@@ -342,8 +389,10 @@ test("transport emits actual notes_change, rejects stale status honestly, and re
 test("context numbers survive state hydration, ready replay, and every review refresh", async () => {
   const { root, state } = await fixture();
   const fixtureServer = createRoadmapReliabilityFixtureServer({
-    state, auditFile: join(root, "audit.jsonl"),
-    fixtureToken: "fixture-token", launchToken: "launch-token",
+    state,
+    auditFile: join(root, "audit.jsonl"),
+    fixtureToken: "fixture-token",
+    launchToken: "launch-token",
   });
   const readers = [];
   const controller = new AbortController();
@@ -357,11 +406,14 @@ test("context numbers survive state hydration, ready replay, and every review re
     assert.equal(snapshot.contextWindow, 200_000);
   };
   try {
-    await new Promise((resolveListen) => fixtureServer.server.listen(0, "127.0.0.1", resolveListen));
+    await new Promise((resolveListen) =>
+      fixtureServer.server.listen(0, "127.0.0.1", resolveListen),
+    );
     const origin = `http://127.0.0.1:${fixtureServer.server.address().port}`;
     const headers = { "x-gg-token": "launch-token", "x-gg-session": "session-a" };
     await fetch(`${origin}/session`, {
-      method: "POST", headers,
+      method: "POST",
+      headers,
       body: JSON.stringify({ sessionPath: join(root, "sessions", "session-a.jsonl") }),
     });
     const hydrate = async () => {
@@ -373,7 +425,8 @@ test("context numbers survive state hydration, ready replay, and every review re
     };
     const connect = async () => {
       const response = await fetch(`${origin}/events`, {
-        headers, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
+        headers,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
       });
       assert.equal(response.status, 200);
       const reader = response.body.getReader();
@@ -401,14 +454,17 @@ test("context numbers survive state hydration, ready replay, and every review re
       const nextReady = await connect();
       assert.deepEqual(await nextReady(), await hydrate());
       const response = await fetch(`${origin}/fixture/reviews`, {
-        method: "POST", headers: { "x-fixture-token": "fixture-token" },
+        method: "POST",
+        headers: { "x-fixture-token": "fixture-token" },
         body: JSON.stringify({ sessionId: "session-a", ...preview }),
       });
       assert.equal(response.status, 200);
       const refreshed = await nextReady();
       assert.deepEqual(refreshed, await hydrate());
-      assert.equal(refreshed.pendingPlanReview?.state ?? null,
-        preview.interactive && !preview.review ? null : "pending-review");
+      assert.equal(
+        refreshed.pendingPlanReview?.state ?? null,
+        preview.interactive && !preview.review ? null : "pending-review",
+      );
       assert.ok(state.sessions.get("session-a").reviews.draft);
       assert.deepEqual(await (await connect())(), refreshed);
     }

@@ -9,13 +9,22 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { createSafeTauriUnlisten } from "../../src/tauri-listener";
 
-const nativeBridge = () => (window as unknown as { __TAURI_INTERNALS__: {
-  transformCallback: (callback: (...args: unknown[]) => void) => number;
-  unregisterCallback: (id: number) => void;
-} }).__TAURI_INTERNALS__;
+const nativeBridge = () =>
+  (
+    window as unknown as {
+      __TAURI_INTERNALS__: {
+        transformCallback: (callback: (...args: unknown[]) => void) => number;
+        unregisterCallback: (id: number) => void;
+      };
+    }
+  ).__TAURI_INTERNALS__;
 
 it("cleans up real SDK window/event listeners through the synthetic bridge", async () => {
-  const payload = { responses: fixtureResponses(), layout: createLayout("one", WORKSPACE_LAYOUT_VERSION), options: { state: "completed" } };
+  const payload = {
+    responses: fixtureResponses(),
+    layout: createLayout("one", WORKSPACE_LAYOUT_VERSION),
+    options: { state: "completed" },
+  };
   initScript(payload);
   bootstrapPreview(payload);
   const bridge = window as unknown as {
@@ -41,7 +50,12 @@ it("cleans up real SDK window/event listeners through the synthetic bridge", asy
   const active = baseline();
   const reportError = vi.fn();
   for (let i = 0; i < 10; i++) {
-    for (const event of ["agent-event", "agent-pane-ready", "agent-pane-error", "agent-pane-exited"]) {
+    for (const event of [
+      "agent-event",
+      "agent-pane-ready",
+      "agent-pane-error",
+      "agent-pane-exited",
+    ]) {
       // Dispose before the SDK registration promise resolves, as on an early unmount.
       const pending = getCurrentWebviewWindow().listen(event, removed);
       const disposed = true;
@@ -64,7 +78,10 @@ it("cleans up real SDK window/event listeners through the synthetic bridge", asy
 
 it("supports shared screenshot cleanup without the preview adapter", async () => {
   initScript({ responses: fixtureResponses() });
-  const bridge = window as unknown as { __ggEmit: (type: string) => number; __ggListenerStats: () => unknown };
+  const bridge = window as unknown as {
+    __ggEmit: (type: string) => number;
+    __ggListenerStats: () => unknown;
+  };
   const start = bridge.__ggListenerStats();
   const listener = vi.fn();
   const transform = vi.spyOn(nativeBridge(), "transformCallback");
@@ -82,27 +99,54 @@ it("supports shared screenshot cleanup without the preview adapter", async () =>
 
 it("surfaces native cleanup error logs in preview diagnostics", async () => {
   initScript({ responses: fixtureResponses() });
-  bootstrapPreview({ responses: fixtureResponses(), layout: createLayout("one", WORKSPACE_LAYOUT_VERSION), options: { state: "completed" } });
-  await createSafeTauriUnlisten(() => { throw new Error("synthetic cleanup failure"); }, "fixture")();
-  expect((window as unknown as { __chatPreview: { errors: string[] } }).__chatPreview.errors)
-    .toEqual(["Tauri listener cleanup failed (fixture): Error: synthetic cleanup failure"]);
+  bootstrapPreview({
+    responses: fixtureResponses(),
+    layout: createLayout("one", WORKSPACE_LAYOUT_VERSION),
+    options: { state: "completed" },
+  });
+  await createSafeTauriUnlisten(() => {
+    throw new Error("synthetic cleanup failure");
+  }, "fixture")();
+  expect(
+    (window as unknown as { __chatPreview: { errors: string[] } }).__chatPreview.errors,
+  ).toEqual(["Tauri listener cleanup failed (fixture): Error: synthetic cleanup failure"]);
 });
 
 it("confirms synthetic Autopilot without falling through to an external boundary", async () => {
-  const fallback = vi.fn(async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => 1);
-  const native = { invoke: fallback, transformCallback: vi.fn((_callback: (event: unknown) => void) => 1), unregisterCallback: vi.fn() };
+  const fallback = vi.fn(
+    async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => 1,
+  );
+  const native = {
+    invoke: fallback,
+    transformCallback: vi.fn((_callback: (event: unknown) => void) => 1),
+    unregisterCallback: vi.fn(),
+  };
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: native, configurable: true });
-  bootstrapPreview({ responses: fixtureResponses(), layout: createLayout("one", WORKSPACE_LAYOUT_VERSION), options: { state: "completed" } });
+  bootstrapPreview({
+    responses: fixtureResponses(),
+    layout: createLayout("one", WORKSPACE_LAYOUT_VERSION),
+    options: { state: "completed" },
+  });
   const listener = vi.fn();
   const id = native.transformCallback(listener);
   await native.invoke("plugin:event|listen", { event: "agent-event", handler: id });
   fallback.mockClear();
-  expect(await native.invoke("agent_autopilot_set", { enabled: true })).toEqual({ autopilot: true });
-  expect(listener).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ type: "autopilot", data: { autopilot: true } }) }));
+  expect(await native.invoke("agent_autopilot_set", { enabled: true })).toEqual({
+    autopilot: true,
+  });
+  expect(listener).toHaveBeenCalledWith(
+    expect.objectContaining({
+      payload: expect.objectContaining({ type: "autopilot", data: { autopilot: true } }),
+    }),
+  );
   expect(await native.invoke("agent_state")).toMatchObject({ autopilot: true });
-  await expect(native.invoke("agent_autopilot_set", { enabled: "true" })).rejects.toThrow("Invalid synthetic Autopilot");
+  await expect(native.invoke("agent_autopilot_set", { enabled: "true" })).rejects.toThrow(
+    "Invalid synthetic Autopilot",
+  );
   expect(await native.invoke("agent_state")).toMatchObject({ autopilot: true });
-  expect(await native.invoke("agent_autopilot_set", { enabled: false })).toEqual({ autopilot: false });
+  expect(await native.invoke("agent_autopilot_set", { enabled: false })).toEqual({
+    autopilot: false,
+  });
   expect(fallback).not.toHaveBeenCalled();
 });
 
@@ -111,7 +155,11 @@ it("masks SharedWorker only in the preview and preserves network restrictions", 
   const worker = vi.fn();
   Object.defineProperty(window, "SharedWorker", { value: worker, configurable: true });
   try {
-    const payload = { responses: fixtureResponses(), layout: createLayout("one", WORKSPACE_LAYOUT_VERSION), options: { state: "completed" } };
+    const payload = {
+      responses: fixtureResponses(),
+      layout: createLayout("one", WORKSPACE_LAYOUT_VERSION),
+      options: { state: "completed" },
+    };
     initScript(payload);
     // The shared screenshot bootstrap must not mask ordinary pages' capability.
     expect(window.SharedWorker).toBe(worker);

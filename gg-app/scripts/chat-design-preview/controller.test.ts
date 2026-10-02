@@ -4,7 +4,12 @@ import { parseSelection, startPreview } from "../../src/dev/chat-design-preview/
 
 describe("transient comparison controls", () => {
   it("allows only independent supported reading choices", () => {
-    expect(parseSelection("?variant=reading&size=16&markers=on&streaming=crisp")).toMatchObject({ variant: "reading", size: "16", markers: "on", streaming: "crisp" });
+    expect(parseSelection("?variant=reading&size=16&markers=on&streaming=crisp")).toMatchObject({
+      variant: "reading",
+      size: "16",
+      markers: "on",
+      streaming: "crisp",
+    });
     expect(() => parseSelection("?size=9")).toThrow();
     expect(() => parseSelection("?tracking=javascript:bad")).toThrow();
     expect(parseSelection("?variant=light&code=charcoal").code).toBe("charcoal");

@@ -104,7 +104,13 @@ function diffReplyText() {
     `-const message = "${"a long removed line that keeps going ".repeat(6)}";`,
     `+const message = "${"a long added line that keeps going ".repeat(6)}";`,
   ].join("\n");
-  const long = ["@@ -1,40 +1,40 @@", ...Array.from({ length: 40 }, (_, i) => `${i % 3 === 0 ? "-" : i % 3 === 1 ? "+" : " "}line ${i}`)].join("\n");
+  const long = [
+    "@@ -1,40 +1,40 @@",
+    ...Array.from(
+      { length: 40 },
+      (_, i) => `${i % 3 === 0 ? "-" : i % 3 === 1 ? "+" : " "}line ${i}`,
+    ),
+  ].join("\n");
   return [
     "I changed the greeting to trim the name first:",
     "```diff\n" + short + "\n```",
@@ -131,11 +137,19 @@ function sessionState(sessionId, session) {
     runState: session.running ? "running" : "idle",
     ready: true,
     planMode: false,
-    pendingPlanReview: process.env.GG_LOCAL_LINK_FIXTURE === "1" ? {
-      checkpointId: "local-link-plan", generation: 1, planPath: "plan.md",
-      content: "[Plan file](same.txt)", contentHash: "fixture",
-      state: "pending-review", reviewStatus: "unreviewed", feedback: null,
-    } : null,
+    pendingPlanReview:
+      process.env.GG_LOCAL_LINK_FIXTURE === "1"
+        ? {
+            checkpointId: "local-link-plan",
+            generation: 1,
+            planPath: "plan.md",
+            content: "[Plan file](same.txt)",
+            contentHash: "fixture",
+            state: "pending-review",
+            reviewStatus: "unreviewed",
+            feedback: null,
+          }
+        : null,
     thinkingLevel: null,
     supportedThinkingLevels: [],
     supportsVideo: false,
@@ -159,75 +173,212 @@ function sessionState(sessionId, session) {
 const sceneDelay = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function stateScene(name) {
-  const chunks = (text, size = 24) => Array.from({ length: Math.ceil(text.length / size) }, (_, i) => ["text_delta", { text: text.slice(i * size, (i + 1) * size) }]);
-  const streamed = "## Streaming check\n\nThis reply is **arriving in pieces** with a list:\n\n- first item\n- second item\n\n```diff\n@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n```\n\nMIDSTREAM-MARKER and the rest keeps coming";
+  const chunks = (text, size = 24) =>
+    Array.from({ length: Math.ceil(text.length / size) }, (_, i) => [
+      "text_delta",
+      { text: text.slice(i * size, (i + 1) * size) },
+    ]);
+  const streamed =
+    "## Streaming check\n\nThis reply is **arriving in pieces** with a list:\n\n- first item\n- second item\n\n```diff\n@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n```\n\nMIDSTREAM-MARKER and the rest keeps coming";
   switch (name) {
-    case "stream": return [
-      ["run_start", {}], ["thinking_delta", { text: "thinking" }], ["hold", 1500],
-      ...chunks(streamed), ["hold", 5000],
-      ["tool_call_start", { toolCallId: "t1", name: "bash", args: { command: "pnpm test" } }], ["hold", 2500],
-      ["tool_call_end", { toolCallId: "t1", name: "bash", isError: false, result: "12 passed" }],
-      ["tool_call_start", { toolCallId: "t2", name: "edit", args: { file_path: "src/missing.ts" } }],
-      ["tool_call_end", { toolCallId: "t2", name: "edit", isError: true, result: "File not found: src/missing.ts" }],
-      ...chunks("\n\nFinished after one failed edit. FINAL-MARKER"),
-      ["turn_end", { usage: { outputTokens: 420 } }], ["agent_done", { totalUsage: { outputTokens: 420 } }],
-      ["run_end", { outcome: "completed" }],
-    ];
-    case "fail": return [
-      ["run_start", {}], ...chunks("Starting work before a provider failure…"), ["hold", 800],
-      ["error", { headline: "The provider rejected the request", message: "429 Too Many Requests: rate limit reached for this model. FAIL-MARKER", guidance: "Wait a minute and try again, or switch models." }],
-      ["run_end", { outcome: "failed" }],
-    ];
-    case "cancel": return [
-      ["run_start", {}], ...chunks("Working on something long that will be stopped…"), ["hold", 1500],
-      ["run_cancelling", {}], ["hold", 3000], ["run_end", { outcome: "cancelled", cancelled: true, runState: "idle" }],
-    ];
-    case "ask": return [
-      ["run_start", {}], ...chunks("I need one decision first."),
-      ["ask_user", { id: "fixture-ask", questions: [{ id: "q1", kind: "choice", question: "Which layout should the report use? ASK-MARKER", detail: "This changes how results are grouped.", options: [{ label: "Group by file", recommended: true, hint: "Easier to scan" }, { label: "Group by severity" }] }] }],
-    ];
-    case "compact": return [
-      ["run_start", {}], ["compaction_start", {}], ["hold", 3000],
-      ["compaction_end", { compacted: true, originalCount: 180, newCount: 24 }],
-      ...chunks("Context was compacted. COMPACT-MARKER"), ["run_end", { outcome: "completed" }],
-    ];
-    case "extras": {
-      const agent = (id, name, state, extra = {}) => ["subagent_state", { agent_id: id, task_name: name, state, started_at: 1, updated_at: 2, elapsed_ms: 4200, turn_count: 2, tool_use_count: 3, token_usage: { input: 1200, output: 300 }, ...extra }];
-      const imageFile = process.env.GG_STATE_SCENE_IMAGE;
-      const png = imageFile ? readFileSync(imageFile, "utf8").trim() : "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    case "stream":
       return [
-        ["run_start", {}], ...chunks("Checking a few integrations."),
-        ["tool_call_start", { toolCallId: "m1", name: "mcp__github__create_issue", args: { title: "Fixture issue" } }], ["hold", 800],
-        ["tool_call_end", { toolCallId: "m1", name: "mcp__github__create_issue", isError: true, result: "MCP server 'github' error: 401 Bad credentials. MCPFAIL-MARKER" }],
+        ["run_start", {}],
+        ["thinking_delta", { text: "thinking" }],
+        ["hold", 1500],
+        ...chunks(streamed),
+        ["hold", 5000],
+        ["tool_call_start", { toolCallId: "t1", name: "bash", args: { command: "pnpm test" } }],
+        ["hold", 2500],
+        ["tool_call_end", { toolCallId: "t1", name: "bash", isError: false, result: "12 passed" }],
+        [
+          "tool_call_start",
+          { toolCallId: "t2", name: "edit", args: { file_path: "src/missing.ts" } },
+        ],
+        [
+          "tool_call_end",
+          {
+            toolCallId: "t2",
+            name: "edit",
+            isError: true,
+            result: "File not found: src/missing.ts",
+          },
+        ],
+        ...chunks("\n\nFinished after one failed edit. FINAL-MARKER"),
+        ["turn_end", { usage: { outputTokens: 420 } }],
+        ["agent_done", { totalUsage: { outputTokens: 420 } }],
+        ["run_end", { outcome: "completed" }],
+      ];
+    case "fail":
+      return [
+        ["run_start", {}],
+        ...chunks("Starting work before a provider failure…"),
+        ["hold", 800],
+        [
+          "error",
+          {
+            headline: "The provider rejected the request",
+            message: "429 Too Many Requests: rate limit reached for this model. FAIL-MARKER",
+            guidance: "Wait a minute and try again, or switch models.",
+          },
+        ],
+        ["run_end", { outcome: "failed" }],
+      ];
+    case "cancel":
+      return [
+        ["run_start", {}],
+        ...chunks("Working on something long that will be stopped…"),
+        ["hold", 1500],
+        ["run_cancelling", {}],
+        ["hold", 3000],
+        ["run_end", { outcome: "cancelled", cancelled: true, runState: "idle" }],
+      ];
+    case "ask":
+      return [
+        ["run_start", {}],
+        ...chunks("I need one decision first."),
+        [
+          "ask_user",
+          {
+            id: "fixture-ask",
+            questions: [
+              {
+                id: "q1",
+                kind: "choice",
+                question: "Which layout should the report use? ASK-MARKER",
+                detail: "This changes how results are grouped.",
+                options: [
+                  { label: "Group by file", recommended: true, hint: "Easier to scan" },
+                  { label: "Group by severity" },
+                ],
+              },
+            ],
+          },
+        ],
+      ];
+    case "compact":
+      return [
+        ["run_start", {}],
+        ["compaction_start", {}],
+        ["hold", 3000],
+        ["compaction_end", { compacted: true, originalCount: 180, newCount: 24 }],
+        ...chunks("Context was compacted. COMPACT-MARKER"),
+        ["run_end", { outcome: "completed" }],
+      ];
+    case "extras": {
+      const agent = (id, name, state, extra = {}) => [
+        "subagent_state",
+        {
+          agent_id: id,
+          task_name: name,
+          state,
+          started_at: 1,
+          updated_at: 2,
+          elapsed_ms: 4200,
+          turn_count: 2,
+          tool_use_count: 3,
+          token_usage: { input: 1200, output: 300 },
+          ...extra,
+        },
+      ];
+      const imageFile = process.env.GG_STATE_SCENE_IMAGE;
+      const png = imageFile
+        ? readFileSync(imageFile, "utf8").trim()
+        : "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+      return [
+        ["run_start", {}],
+        ...chunks("Checking a few integrations."),
+        [
+          "tool_call_start",
+          { toolCallId: "m1", name: "mcp__github__create_issue", args: { title: "Fixture issue" } },
+        ],
+        ["hold", 800],
+        [
+          "tool_call_end",
+          {
+            toolCallId: "m1",
+            name: "mcp__github__create_issue",
+            isError: true,
+            result: "MCP server 'github' error: 401 Bad credentials. MCPFAIL-MARKER",
+          },
+        ],
         agent("a1", "audit-styles", "running", { current_activity: "Reading App.css" }),
-        agent("a2", "audit-tests", "running", { current_activity: "Running vitest" }), ["hold", 2500],
+        agent("a2", "audit-tests", "running", { current_activity: "Running vitest" }),
+        ["hold", 2500],
         agent("a1", "audit-styles", "completed", { output: "No issues" }),
-        agent("a2", "audit-tests", "failed", { error: "Timed out after 60s" }), ["hold", 1200],
-        ["tool_call_start", { toolCallId: "g1", name: "generate_image", args: { prompt: "a pigeon wearing a tiny hat" } }], ["hold", 2500],
-        ["tool_call_end", { toolCallId: "g1", name: "generate_image", isError: false, result: "Generated 1 image", details: { imagePreviews: [{ mediaType: "image/png", base64: png, path: "pigeon.png" }] } }],
+        agent("a2", "audit-tests", "failed", { error: "Timed out after 60s" }),
+        ["hold", 1200],
+        [
+          "tool_call_start",
+          {
+            toolCallId: "g1",
+            name: "generate_image",
+            args: { prompt: "a pigeon wearing a tiny hat" },
+          },
+        ],
+        ["hold", 2500],
+        [
+          "tool_call_end",
+          {
+            toolCallId: "g1",
+            name: "generate_image",
+            isError: false,
+            result: "Generated 1 image",
+            details: {
+              imagePreviews: [{ mediaType: "image/png", base64: png, path: "pigeon.png" }],
+            },
+          },
+        ],
         ...chunks("Integrations checked. EXTRAS-MARKER"),
-        ["plan_exit", { checkpointId: "fixture-plan", generation: 1, planPath: ".gg/plans/fixture.md", contentHash: "fixture", content: "# Fixture plan\n\n1. Tidy the header\n2. Add a test\n\nPLAN-MARKER" }],
+        [
+          "plan_exit",
+          {
+            checkpointId: "fixture-plan",
+            generation: 1,
+            planPath: ".gg/plans/fixture.md",
+            contentHash: "fixture",
+            content: "# Fixture plan\n\n1. Tidy the header\n2. Add a test\n\nPLAN-MARKER",
+          },
+        ],
         ["run_end", { outcome: "completed" }],
       ];
     }
-    case "drop": return [
-      ["run_start", {}], ...chunks("Before the connection drops. "), ["hold", 800],
-      ["drop", null], ["hold", 2500], ["await-stream", null], ["hold", 800],
-      ...chunks("After reconnecting the reply continues. DROP-MARKER"), ["run_end", { outcome: "completed" }],
-    ];
-    case "long": return [
-      ["run_start", {}],
-      ...Array.from({ length: 40 }, (_, i) => chunks(`Paragraph ${i + 1} of a long streaming reply that keeps arriving while panes move around.\n\n`, 40)).flat(),
-      ...chunks("LONG-MARKER"), ["run_end", { outcome: "completed" }],
-    ];
-    default: return [];
+    case "drop":
+      return [
+        ["run_start", {}],
+        ...chunks("Before the connection drops. "),
+        ["hold", 800],
+        ["drop", null],
+        ["hold", 2500],
+        ["await-stream", null],
+        ["hold", 800],
+        ...chunks("After reconnecting the reply continues. DROP-MARKER"),
+        ["run_end", { outcome: "completed" }],
+      ];
+    case "long":
+      return [
+        ["run_start", {}],
+        ...Array.from({ length: 40 }, (_, i) =>
+          chunks(
+            `Paragraph ${i + 1} of a long streaming reply that keeps arriving while panes move around.\n\n`,
+            40,
+          ),
+        ).flat(),
+        ...chunks("LONG-MARKER"),
+        ["run_end", { outcome: "completed" }],
+      ];
+    default:
+      return [];
   }
 }
 
 async function playStateScene(name, sessionId, session, audit) {
   audit({ action: "scene-start", scene: name, sessionId });
   for (const [type, data] of stateScene(name)) {
-    if (type === "hold") { await sceneDelay(data); continue; }
+    if (type === "hold") {
+      await sceneDelay(data);
+      continue;
+    }
     if (type === "drop") {
       for (const stream of session.streams ?? []) stream.end();
       session.streams?.clear();
@@ -310,28 +461,60 @@ function createFixtureServer({ auditFile, launchToken }) {
         session.running = true;
         audit({ action: "prompt-held", sessionId, cwd: session.cwd });
         json(response, 202, { queued: false, count: 0 });
-        const scene = process.env.GG_STATE_SCENE_FIXTURE === "1"
-          ? /scene:([a-z]+)/.exec(String(promptBody.text ?? ""))?.[1]
-          : undefined;
+        const scene =
+          process.env.GG_STATE_SCENE_FIXTURE === "1"
+            ? /scene:([a-z]+)/.exec(String(promptBody.text ?? ""))?.[1]
+            : undefined;
         if (scene) void playStateScene(scene, sessionId, session, audit);
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
-        const readingText = Array.from({ length: 100 }, (_, index) => `Sentence ${index}: the reader keeps this exact place while a long paragraph wraps across unequal pane widths.`).join(" ");
-        const history = process.env.GG_PANE_READING_FIXTURE === "1" ? [
-          { role: "user", text: "Reading-position fixture" },
-          { role: "assistant", text: "", mcpToolFailure: { name: "mcp__fixture__tool", result: "Tool evidence before the mentor paragraph." } },
-          { role: "assistant", text: readingText, ken: true },
-          { role: "assistant", text: "", error: { scope: "error", headline: "Fixture error", message: readingText } },
-          { role: "assistant", text: "", autopilot: { phase: "human", reason: readingText } },
-          { role: "assistant", text: "Later normal assistant message.\n\n" + readingText },
-        ] : process.env.GG_DIFF_REPLY_FIXTURE === "1" ? [
-          { role: "user", text: "Diff-reply fixture" },
-          { role: "assistant", text: diffReplyText() },
-        ] : process.env.GG_LOCAL_LINK_FIXTURE === "1" ? [
-          { role: "assistant", text: "[Pane file](same.txt)" },
-          { role: "assistant", text: "", toolImages: [{ src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", path: "same.txt" }] },
-        ] : [];
+        const readingText = Array.from(
+          { length: 100 },
+          (_, index) =>
+            `Sentence ${index}: the reader keeps this exact place while a long paragraph wraps across unequal pane widths.`,
+        ).join(" ");
+        const history =
+          process.env.GG_PANE_READING_FIXTURE === "1"
+            ? [
+                { role: "user", text: "Reading-position fixture" },
+                {
+                  role: "assistant",
+                  text: "",
+                  mcpToolFailure: {
+                    name: "mcp__fixture__tool",
+                    result: "Tool evidence before the mentor paragraph.",
+                  },
+                },
+                { role: "assistant", text: readingText, ken: true },
+                {
+                  role: "assistant",
+                  text: "",
+                  error: { scope: "error", headline: "Fixture error", message: readingText },
+                },
+                { role: "assistant", text: "", autopilot: { phase: "human", reason: readingText } },
+                { role: "assistant", text: "Later normal assistant message.\n\n" + readingText },
+              ]
+            : process.env.GG_DIFF_REPLY_FIXTURE === "1"
+              ? [
+                  { role: "user", text: "Diff-reply fixture" },
+                  { role: "assistant", text: diffReplyText() },
+                ]
+              : process.env.GG_LOCAL_LINK_FIXTURE === "1"
+                ? [
+                    { role: "assistant", text: "[Pane file](same.txt)" },
+                    {
+                      role: "assistant",
+                      text: "",
+                      toolImages: [
+                        {
+                          src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+                          path: "same.txt",
+                        },
+                      ],
+                    },
+                  ]
+                : [];
         json(response, 200, { history });
         return;
       }
@@ -400,10 +583,25 @@ function parseArguments(args) {
   return { identity: values[1] };
 }
 
-export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks = false, readingAnchors = false, diffReplies = false, stateScenes = false, stateSceneImage, reuseDevServer = false, visual = false, beforeNativeStart, verifyWorkspace, onCleanup, appearanceTheme = process.env.GG_APPEARANCE_SMOKE_THEME }) {
-  if (appearanceTheme !== undefined && appearanceTheme !== "dark" && appearanceTheme !== "light") throw new Error("Appearance smoke theme must be dark or light");
+export async function runCrossPaneProjectIsolationSmoke({
+  identity,
+  localLinks = false,
+  readingAnchors = false,
+  diffReplies = false,
+  stateScenes = false,
+  stateSceneImage,
+  reuseDevServer = false,
+  visual = false,
+  beforeNativeStart,
+  verifyWorkspace,
+  onCleanup,
+  appearanceTheme = process.env.GG_APPEARANCE_SMOKE_THEME,
+}) {
+  if (appearanceTheme !== undefined && appearanceTheme !== "dark" && appearanceTheme !== "light")
+    throw new Error("Appearance smoke theme must be dark or light");
   if (appearanceTheme) {
-    if (!reuseDevServer) throw new Error("Appearance checks require the verified normal-app server");
+    if (!reuseDevServer)
+      throw new Error("Appearance checks require the verified normal-app server");
     await (await import("./appearance-dev.mjs")).verifyNormalServer();
   }
   if (process.platform !== "win32") throw new Error("Cross-pane developer smoke requires Windows");
@@ -432,11 +630,16 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
   if (reuseDevServer) {
     // Reuse only this checkout's current Vite source; never stop someone else's server.
     for (const source of ["AgentPane.tsx", "usePaneSwapViewState.ts", "useWorkspacePaneSwaps.ts"]) {
-      const response = await fetch(`http://localhost:1420/src/${source}`, { signal: AbortSignal.timeout(5000) });
+      const response = await fetch(`http://localhost:1420/src/${source}`, {
+        signal: AbortSignal.timeout(5000),
+      });
       const module = await response.text();
       const match = module.match(/sourceMappingURL=data:application\/json;base64,([^\s]+)/);
       const map = match ? JSON.parse(Buffer.from(match[1], "base64").toString("utf8")) : null;
-      if (!response.ok || !map?.sourcesContent?.includes(readFileSync(join(appDir, "src", source), "utf8"))) {
+      if (
+        !response.ok ||
+        !map?.sourcesContent?.includes(readFileSync(join(appDir, "src", source), "utf8"))
+      ) {
         throw new Error(`Existing dev server does not serve current ${source}`);
       }
     }
@@ -475,7 +678,11 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
   let failure;
   try {
     // A finite prebuild must settle before spawning Tauri or starting readiness clocks.
-    if (beforeNativeStart) await beforeNativeStart(environment, JSON.parse(readFileSync(resolve(appDir, devConfig), "utf8")));
+    if (beforeNativeStart)
+      await beforeNativeStart(
+        environment,
+        JSON.parse(readFileSync(resolve(appDir, devConfig), "utf8")),
+      );
     child = spawn(
       reuseDevServer ? process.execPath : (process.env.ComSpec ?? "cmd.exe"),
       reuseDevServer
@@ -510,7 +717,9 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
       client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`),
     );
     if (appearanceTheme) {
-      await client.evaluate(`localStorage.setItem('gg-app:appearance:v1', JSON.stringify({ theme: ${JSON.stringify(appearanceTheme)} })); true`);
+      await client.evaluate(
+        `localStorage.setItem('gg-app:appearance:v1', JSON.stringify({ theme: ${JSON.stringify(appearanceTheme)} })); true`,
+      );
     }
     await client.evaluate(`(() => {
       localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({
@@ -534,10 +743,12 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
       })()`),
     );
     if (localLinks) {
-      await waitFor("pane-local links and image cards", () => client.evaluate(`
+      await waitFor("pane-local links and image cards", () =>
+        client.evaluate(`
         document.querySelectorAll('.agent-pane a[href="same.txt"]').length === 4 &&
         document.querySelectorAll('.img-card[title="Open same.txt"]').length === 2
-      `));
+      `),
+      );
       // Observe, but do not replace, the real native invocation and its result.
       await client.evaluate(`(() => {
         const original = window.fetch;
@@ -552,9 +763,17 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
         };
       })()`);
       for (const paneId of ["pane-b", "primary"]) {
-        await client.evaluate(`document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} .plan-review-details summary`)}).click()`);
-        for (const selector of ['.assistant-text a[href="same.txt"]', '.plan-review-body a[href="same.txt"]', '.img-card[title="Open same.txt"]']) {
-          await client.evaluate(`document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} ${selector}`)}).click()`);
+        await client.evaluate(
+          `document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} .plan-review-details summary`)}).click()`,
+        );
+        for (const selector of [
+          '.assistant-text a[href="same.txt"]',
+          '.plan-review-body a[href="same.txt"]',
+          '.img-card[title="Open same.txt"]',
+        ]) {
+          await client.evaluate(
+            `document.querySelector(${JSON.stringify(`#workspace-pane-${paneId} ${selector}`)}).click()`,
+          );
         }
       }
       const results = await waitFor("native local file opening", async () => {
@@ -562,11 +781,17 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
         return entries.length === 6 ? entries : null;
       });
       for (const paneId of ["primary", "pane-b"]) {
-        if (results.filter((entry) => entry.paneId === paneId && entry.path === "same.txt" && entry.ok).length !== 3) {
+        if (
+          results.filter(
+            (entry) => entry.paneId === paneId && entry.path === "same.txt" && entry.ok,
+          ).length !== 3
+        ) {
           throw new Error(`Wrong native local-file destination: ${JSON.stringify(results)}`);
         }
       }
-      process.stdout.write("PANE-LOCAL LINKS DEV SMOKE PASS: real native open calls from both pane transcripts, plan links, and image cards; fixture daemon.\n");
+      process.stdout.write(
+        "PANE-LOCAL LINKS DEV SMOKE PASS: real native open calls from both pane transcripts, plan links, and image cards; fixture daemon.\n",
+      );
     }
     const initialSessions = await waitFor("A and B daemon sessions", () => {
       const entries = readAudit(auditFile).filter((entry) => entry.action === "session-created");
@@ -667,7 +892,15 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     ) {
       throw new Error("Pane-targeted event bridges were not established for A and C");
     }
-    await verifyWorkspace?.({ client, cdpPort, paths, projectA, projectB, projectC, readAudit: () => readAudit(auditFile) });
+    await verifyWorkspace?.({
+      client,
+      cdpPort,
+      paths,
+      projectA,
+      projectB,
+      projectC,
+      readAudit: () => readAudit(auditFile),
+    });
     process.stdout.write(
       `CROSS-PANE PROJECT ISOLATION DEV SMOKE PASS: ${JSON.stringify({ primary: initialSessions.a, secondary: sessionC.sessionId })}\n`,
     );

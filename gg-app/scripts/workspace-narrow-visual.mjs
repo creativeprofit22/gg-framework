@@ -161,7 +161,9 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
     } catch (error) {
       failures.push(`${label}: ${error.message}`);
       if (label.startsWith("Continuation cancel")) {
-        const cancel = page.locator(".modal-actions").getByRole("button", { name: "Cancel", exact: true });
+        const cancel = page
+          .locator(".modal-actions")
+          .getByRole("button", { name: "Cancel", exact: true });
         if (await cancel.count()) await cancel.evaluate((element) => element.click());
       }
     }
@@ -230,8 +232,13 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
       await page.keyboard.press("Escape");
       await page.keyboard.press(initial === "stable" ? "ArrowDown" : "ArrowUp");
       await page.keyboard.press("Enter");
-      assert.equal(await destination.inputValue(), initial === "stable" ? "experimental" : "stable");
-      const cancel = page.locator(".modal-actions").getByRole("button", { name: "Cancel", exact: true });
+      assert.equal(
+        await destination.inputValue(),
+        initial === "stable" ? "experimental" : "stable",
+      );
+      const cancel = page
+        .locator(".modal-actions")
+        .getByRole("button", { name: "Cancel", exact: true });
       await assertControlReachable(cancel, `${mode} continuation Cancel`);
       await page.keyboard.press("Enter");
       await preview.waitFor({ state: "detached" });
@@ -495,7 +502,9 @@ export async function runWorkspaceNarrowVisualFixture({
         await focusPage.locator('[data-pane-id="primary"] textarea').waitFor();
         await focusPage.locator('[data-pane-id="secondary"] textarea').waitFor();
         // Establish the interaction precondition explicitly after both panes mount.
-        await focusPage.locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"] textarea`).click();
+        await focusPage
+          .locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"] textarea`)
+          .click();
         await focusPage
           .locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"].pane-focused`)
           .waitFor({ timeout: 5_000 });
@@ -506,7 +515,6 @@ export async function runWorkspaceNarrowVisualFixture({
         await verifyContextSelectorFocus(focusPage, pane);
       } catch (error) {
         focusFailures.push(`${initiallyFocused ? "focused" : "unfocused"} pane: ${error.message}`);
-
       } finally {
         await focusPage.close();
       }

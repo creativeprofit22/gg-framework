@@ -14,8 +14,12 @@ export class DevCdpClient {
     this.pending = new Map();
     socket.addEventListener("message", (event) => {
       let message;
-      try { message = JSON.parse(String(event.data)); }
-      catch { this.fail(new Error("invalid dev fixture debugging response")); return; }
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        this.fail(new Error("invalid dev fixture debugging response"));
+        return;
+      }
       if (message.method === "Inspector.detached" || message.method === "Inspector.targetCrashed") {
         this.fail(new Error("dev fixture debugging target detached"));
         return;
@@ -28,8 +32,12 @@ export class DevCdpClient {
       if (message.error) pending.reject(new Error(message.error.message));
       else pending.resolve(message.result);
     });
-    socket.addEventListener("close", () => this.fail(new Error("dev fixture debugging connection closed")));
-    socket.addEventListener("error", () => this.fail(new Error("dev fixture debugging connection failed")));
+    socket.addEventListener("close", () =>
+      this.fail(new Error("dev fixture debugging connection closed")),
+    );
+    socket.addEventListener("error", () =>
+      this.fail(new Error("dev fixture debugging connection failed")),
+    );
   }
 
   fail(error) {
@@ -50,8 +58,22 @@ export class DevCdpClient {
         socket.close();
         reject(new Error("dev fixture debugging connection timed out"));
       }, 10000);
-      socket.addEventListener("open", () => { clearTimeout(timer); resolveOpen(); }, { once: true });
-      socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("could not connect to the dev fixture")); }, { once: true });
+      socket.addEventListener(
+        "open",
+        () => {
+          clearTimeout(timer);
+          resolveOpen();
+        },
+        { once: true },
+      );
+      socket.addEventListener(
+        "error",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("could not connect to the dev fixture"));
+        },
+        { once: true },
+      );
     });
     return new DevCdpClient(socket);
   }
@@ -64,8 +86,11 @@ export class DevCdpClient {
         this.fail(new Error(`dev fixture debugging request timed out: ${method}`));
       }, this.requestTimeoutMs);
       this.pending.set(id, { resolve: resolveSend, reject, timer });
-      try { this.socket.send(JSON.stringify({ id, method, params })); }
-      catch (error) { this.fail(error); }
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.fail(error);
+      }
     });
   }
 
@@ -92,7 +117,10 @@ export class DevCdpClient {
 // Metrics override is CSS viewport emulation; it does not resize the OS window.
 export async function measureReviewDockIsolation(client, { capture = async () => null } = {}) {
   const evidence = [];
-  const settle = () => client.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  const settle = () =>
+    client.evaluate(
+      "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+    );
   try {
     for (const size of [
       { name: "desktop", width: 1280, height: 900, zoom: 1 },
@@ -101,12 +129,26 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
       { name: "short", width: 1000, height: 480, zoom: 1 },
       { name: "200-percent", width: 1280, height: 900, zoom: 2 },
     ]) {
-      await client.send("Emulation.setDeviceMetricsOverride", { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: false });
-      await client.evaluate(`document.documentElement.style.zoom = ${JSON.stringify(String(size.zoom))}; true`);
+      await client.send("Emulation.setDeviceMetricsOverride", {
+        width: size.width,
+        height: size.height,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await client.evaluate(
+        `document.documentElement.style.zoom = ${JSON.stringify(String(size.zoom))}; true`,
+      );
       await settle();
       if (size.name === "320-pane") {
-        const width = await client.evaluate("document.querySelector('.agent-pane').getBoundingClientRect().width");
-        await client.send("Emulation.setDeviceMetricsOverride", { width: Math.round(size.width + (320 - width) * 2), height: size.height, deviceScaleFactor: 1, mobile: false });
+        const width = await client.evaluate(
+          "document.querySelector('.agent-pane').getBoundingClientRect().width",
+        );
+        await client.send("Emulation.setDeviceMetricsOverride", {
+          width: Math.round(size.width + (320 - width) * 2),
+          height: size.height,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
         await settle();
       }
       // The plan gate disables typing. Exercise retained multiline composer geometry
@@ -167,7 +209,9 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
           }
           return { contextMeter, reviewControls, approvalGated, dock: after, transcript, composer: input, pane: paneRect, chatBefore, chatScrolled, dockScrolled, siblingReviewCount: panes[1]?.querySelectorAll('.review-dock').length };
         })()`);
-        await client.evaluate("document.querySelector('[aria-label=\"Expand review to output area\"]').click(); true");
+        await client.evaluate(
+          "document.querySelector('[aria-label=\"Expand review to output area\"]').click(); true",
+        );
         await settle();
         const maximized = await client.evaluate(`(() => {
           const dock = document.querySelector('.review-dock');
@@ -179,18 +223,31 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
           if (getComputedStyle(document.querySelector('.transcript-frame')).visibility !== 'hidden') throw new Error('Hidden output remains focusable');
           return { height: bounds.height, outputHeight: stack.height };
         })()`);
-        await client.evaluate("document.querySelector('[aria-label=\"Restore review size\"]').click(); true");
+        await client.evaluate(
+          "document.querySelector('[aria-label=\"Restore review size\"]').click(); true",
+        );
         await settle();
-        const restored = await client.evaluate("({ height: document.querySelector('.review-dock').getBoundingClientRect().height, scrollTop: document.querySelector('.transcript').scrollTop })");
-        if (Math.abs(restored.height - measured.dock.height) > 1 || Math.abs(restored.scrollTop - measured.chatScrolled) > 2) throw new Error('Restore lost review size or output reading position');
+        const restored = await client.evaluate(
+          "({ height: document.querySelector('.review-dock').getBoundingClientRect().height, scrollTop: document.querySelector('.transcript').scrollTop })",
+        );
+        if (
+          Math.abs(restored.height - measured.dock.height) > 1 ||
+          Math.abs(restored.scrollTop - measured.chatScrolled) > 2
+        )
+          throw new Error("Restore lost review size or output reading position");
         measured.maximized = maximized;
-        if (size.name === "320-pane" && Math.abs(measured.pane.width - 320) > 1) throw new Error(`Expected actual 320 CSS-pixel pane: ${measured.pane.width}`);
-        await client.evaluate("document.querySelector('.review-dock-panel:not([hidden]) .review-content-scroller').scrollTop = 0; true");
+        if (size.name === "320-pane" && Math.abs(measured.pane.width - 320) > 1)
+          throw new Error(`Expected actual 320 CSS-pixel pane: ${measured.pane.width}`);
+        await client.evaluate(
+          "document.querySelector('.review-dock-panel:not([hidden]) .review-content-scroller').scrollTop = 0; true",
+        );
         await settle();
         const screenshot = await capture(`${size.name}-${review}`);
         let referencesScreenshot = null;
         if (review === "roadmap") {
-          await client.evaluate("(() => { const dock = document.querySelector('.review-dock'); const refs = dock.querySelector('.roadmap-draft-references'); const reader = dock.querySelector('.roadmap-draft-review .review-content-scroller'); reader.scrollTop += refs.getBoundingClientRect().top - reader.getBoundingClientRect().top; return true; })()");
+          await client.evaluate(
+            "(() => { const dock = document.querySelector('.review-dock'); const refs = dock.querySelector('.roadmap-draft-references'); const reader = dock.querySelector('.roadmap-draft-review .review-content-scroller'); reader.scrollTop += refs.getBoundingClientRect().top - reader.getBoundingClientRect().top; return true; })()",
+          );
           await settle();
           referencesScreenshot = await capture(`${size.name}-${review}-references`);
         }
@@ -211,22 +268,49 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
           return { height: bounds.height, scrollTop: dock.scrollTop };
         })()`);
         const collapsedScreenshot = await capture(`${size.name}-${review}-collapsed`);
-        evidence.push({ ...size, review, ...measured, screenshot, referencesScreenshot, collapsed, collapsedScreenshot });
+        evidence.push({
+          ...size,
+          review,
+          ...measured,
+          screenshot,
+          referencesScreenshot,
+          collapsed,
+          collapsedScreenshot,
+        });
       }
     }
     await client.evaluate("document.documentElement.style.zoom = ''; true");
-    await client.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await client.send("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
     await settle();
     const accessibility = { supported: false };
     try {
       const tree = await client.send("Accessibility.getFullAXTree");
       accessibility.supported = true;
-      accessibility.controls = tree.nodes.filter(node => !node.ignored && ['button', 'region', 'textbox'].includes(node.role?.value)).map(node => ({ role: node.role.value, name: node.name?.value ?? '' }));
-      accessibility.namedReviewControls = ['Plan approval required', 'Roadmap draft'].map(name => ({ name, found: accessibility.controls.some(control => control.name.includes(name)) }));
-    } catch (error) { accessibility.unavailable = String(error); }
+      accessibility.controls = tree.nodes
+        .filter(
+          (node) => !node.ignored && ["button", "region", "textbox"].includes(node.role?.value),
+        )
+        .map((node) => ({ role: node.role.value, name: node.name?.value ?? "" }));
+      accessibility.namedReviewControls = ["Plan approval required", "Roadmap draft"].map(
+        (name) => ({
+          name,
+          found: accessibility.controls.some((control) => control.name.includes(name)),
+        }),
+      );
+    } catch (error) {
+      accessibility.unavailable = String(error);
+    }
     const media = [];
-    for (const feature of [ { name: 'forced-colors', value: 'active' }, { name: 'prefers-reduced-motion', value: 'reduce' } ]) {
-      await client.send('Emulation.setEmulatedMedia', { features: [feature] });
+    for (const feature of [
+      { name: "forced-colors", value: "active" },
+      { name: "prefers-reduced-motion", value: "reduce" },
+    ]) {
+      await client.send("Emulation.setEmulatedMedia", { features: [feature] });
       await settle();
       const state = await client.evaluate(`(() => {
         const dock = document.querySelector('.review-dock');
@@ -236,7 +320,7 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
       if (!state.matches) throw new Error(`Media emulation failed: ${feature.name}`);
       media.push({ feature, ...state, screenshot: await capture(feature.name) });
     }
-    await client.send('Emulation.setEmulatedMedia', { features: [] });
+    await client.send("Emulation.setEmulatedMedia", { features: [] });
     await client.evaluate(`(() => {
       const pane = document.querySelector('.agent-pane');
       const chat = pane.querySelector('.transcript');
@@ -247,11 +331,16 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
     await settle();
     const bottomFollow = [];
     for (let i = 0; i < 2; i++) {
-      await client.evaluate("document.querySelector('[data-review-trigger=roadmap]').click(); true");
+      await client.evaluate(
+        "document.querySelector('[data-review-trigger=roadmap]').click(); true",
+      );
       await settle();
-      const distance = await client.evaluate("(() => { const chat = document.querySelector('.transcript'); return chat.scrollHeight - chat.clientHeight - chat.scrollTop; })()");
+      const distance = await client.evaluate(
+        "(() => { const chat = document.querySelector('.transcript'); return chat.scrollHeight - chat.clientHeight - chat.scrollTop; })()",
+      );
       bottomFollow.push(distance);
-      if (Math.abs(distance) > 2) throw new Error(`Bottom following lost on review toggle: ${distance}`);
+      if (Math.abs(distance) > 2)
+        throw new Error(`Bottom following lost on review toggle: ${distance}`);
     }
     // Keyboard Escape from feedback first leaves feedback mode, then collapses the dock.
     await client.evaluate(`(() => {
@@ -262,13 +351,33 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
     })()`);
     await settle();
     await client.send("Input.insertText", { text: "Retain this native feedback" });
-    await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-    await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
     await settle();
     // The textarea has disappeared; focus the body action before Escape collapse.
     await client.evaluate("document.querySelector('.plan-review button').focus(); true");
-    await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-    await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
     await settle();
     const keyboard = await client.evaluate(`(() => {
       const trigger = document.querySelector('[data-review-trigger="plan"]');
@@ -277,13 +386,29 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
       return true;
     })()`);
     await settle();
-    await client.evaluate("[...document.querySelectorAll('.plan-review button')].find(b => b.textContent.trim() === 'Feedback').click(); true");
+    await client.evaluate(
+      "[...document.querySelectorAll('.plan-review button')].find(b => b.textContent.trim() === 'Feedback').click(); true",
+    );
     await settle();
-    const retained = await client.evaluate("document.querySelector('.plan-feedback-input').value === 'Retain this native feedback'");
-    if (!retained) throw new Error('Feedback lost across keyboard collapse');
-    return { measurements: evidence, accessibility, media, bottomFollowDistances: bottomFollow, keyboardFocusRestored: keyboard, feedbackRetained: retained, viewportEmulated: true, zoomMethod: 'CSS zoom (not native browser zoom)', screenReaderVerified: false, performanceBeforeComparisonVerified: false, composerEnlargement: '100px textarea height fixture; approval gate remains disabled' };
+    const retained = await client.evaluate(
+      "document.querySelector('.plan-feedback-input').value === 'Retain this native feedback'",
+    );
+    if (!retained) throw new Error("Feedback lost across keyboard collapse");
+    return {
+      measurements: evidence,
+      accessibility,
+      media,
+      bottomFollowDistances: bottomFollow,
+      keyboardFocusRestored: keyboard,
+      feedbackRetained: retained,
+      viewportEmulated: true,
+      zoomMethod: "CSS zoom (not native browser zoom)",
+      screenReaderVerified: false,
+      performanceBeforeComparisonVerified: false,
+      composerEnlargement: "100px textarea height fixture; approval gate remains disabled",
+    };
   } finally {
-    await client.send('Emulation.setEmulatedMedia', { features: [] });
+    await client.send("Emulation.setEmulatedMedia", { features: [] });
     await client.evaluate("document.documentElement.style.zoom = ''; true");
     await client.send("Emulation.clearDeviceMetricsOverride");
   }
@@ -295,7 +420,9 @@ export async function connectToDevWebview(
   acceptTarget = (candidate) => !String(candidate.url).startsWith("devtools://"),
 ) {
   const target = await waitFor("dev fixture debugging target", async () => {
-    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!response.ok) return null;
     const targets = await response.json();
     return targets.find(

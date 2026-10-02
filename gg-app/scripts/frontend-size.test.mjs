@@ -75,9 +75,10 @@ describe("bundle-size enforcement", () => {
   });
 
   it.each(["dist:ggcoder", "sidecar"])("fails CI on %s growth", (artifact) => {
-    const target = artifact === "dist:ggcoder"
-      ? path.join(root, "packages/ggcoder/dist/index.js")
-      : path.join(root, "gg-app/src-tauri/sidecar/app-sidecar.mjs");
+    const target =
+      artifact === "dist:ggcoder"
+        ? path.join(root, "packages/ggcoder/dist/index.js")
+        : path.join(root, "gg-app/src-tauri/sidecar/app-sidecar.mjs");
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, Buffer.alloc(200_000));
     if (artifact === "sidecar") {

@@ -4,27 +4,47 @@ import { startPreview } from "../../src/dev/chat-design-preview/controller";
 import { requireReady } from "./measurements.mjs";
 
 const ids = ["primary", "preview-2", "preview-3", "preview-4", "preview-5", "preview-6"];
-const content = '<div class="assistant-text"><div class="markdown"><p>One</p><p>Two</p><p>Three</p></div></div>';
+const content =
+  '<div class="assistant-text"><div class="markdown"><p>One</p><p>Two</p><p>Three</p></div></div>';
 let cleanup: (() => void) | undefined;
 function mount(count = 6, state = "completed", missing = false) {
   vi.useFakeTimers();
   history.replaceState(null, "", `/__chat-design-preview?state=${state}`);
-  Object.assign(window, { __chatPreview: { options: { state }, errors: [], paneIds: () => ids.slice(0, count) } });
-  document.body.innerHTML = `<div id="root">${ids.slice(0, count).map((id, i) => `<div class="workspace-pane-slot" data-pane-id="${id}"><textarea></textarea><div class="transcript">${missing && i === count - 1 ? "" : state === "empty" ? '<div class="wake-screen" aria-label="Ready to start"></div>' : content}</div></div>`).join("")}</div>`;
+  Object.assign(window, {
+    __chatPreview: { options: { state }, errors: [], paneIds: () => ids.slice(0, count) },
+  });
+  document.body.innerHTML = `<div id="root">${ids
+    .slice(0, count)
+    .map(
+      (id, i) =>
+        `<div class="workspace-pane-slot" data-pane-id="${id}"><textarea></textarea><div class="transcript">${missing && i === count - 1 ? "" : state === "empty" ? '<div class="wake-screen" aria-label="Ready to start"></div>' : content}</div></div>`,
+    )
+    .join("")}</div>`;
   cleanup = startPreview();
 }
 async function harnessReady(count = 6, state = "completed") {
   let result = false;
-  await requireReady({
-    waitForFunction: async (predicate: (args: unknown) => boolean, args: unknown) => {
-      result = Boolean(predicate(args));
-      throw new Error("predicate sampled");
+  await requireReady(
+    {
+      waitForFunction: async (predicate: (args: unknown) => boolean, args: unknown) => {
+        result = Boolean(predicate(args));
+        throw new Error("predicate sampled");
+      },
     },
-  }, count, state).catch((error: Error) => { if (error.message !== "predicate sampled") throw error; });
+    count,
+    state,
+  ).catch((error: Error) => {
+    if (error.message !== "predicate sampled") throw error;
+  });
   return result;
 }
 const controllerReady = () => document.getElementById("root")?.dataset.eyesReady === "true";
-afterEach(() => { cleanup?.(); vi.useRealTimers(); history.replaceState(null, "", "/"); document.body.innerHTML = ""; });
+afterEach(() => {
+  cleanup?.();
+  vi.useRealTimers();
+  history.replaceState(null, "", "/");
+  document.body.innerHTML = "";
+});
 
 describe("per-pane preview readiness", () => {
   it("does not let many paragraphs in five panes stand in for the sixth history", async () => {
@@ -50,7 +70,8 @@ describe("per-pane preview readiness", () => {
     mount(6, "empty", true);
     expect(controllerReady()).toBe(false);
     expect(await harnessReady(6, "empty")).toBe(false);
-    document.querySelector('[data-pane-id="preview-6"] .transcript')!.innerHTML = '<div class="wake-screen" aria-label="Ready to start"></div>';
+    document.querySelector('[data-pane-id="preview-6"] .transcript')!.innerHTML =
+      '<div class="wake-screen" aria-label="Ready to start"></div>';
     vi.advanceTimersByTime(100);
     expect(controllerReady()).toBe(true);
     expect(await harnessReady(6, "empty")).toBe(true);
@@ -58,7 +79,8 @@ describe("per-pane preview readiness", () => {
   it("waits for lazy Markdown to replace its busy fallback", async () => {
     mount(6, "completed", true);
     const transcript = document.querySelector('[data-pane-id="preview-6"] .transcript')!;
-    transcript.innerHTML = '<div class="assistant-text"><div class="markdown" aria-busy="true">Pending text</div></div>';
+    transcript.innerHTML =
+      '<div class="assistant-text"><div class="markdown" aria-busy="true">Pending text</div></div>';
     vi.advanceTimersByTime(100);
     expect(controllerReady()).toBe(false);
     expect(await harnessReady()).toBe(false);

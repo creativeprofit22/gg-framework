@@ -307,54 +307,135 @@ function readBody(request) {
 }
 
 export function fixturePendingReviews(state, sessionId, interactive = false) {
-  const bounded = (text, length) => text.repeat(Math.ceil(length / text.length)).slice(0, length).trimEnd().padEnd(length, ".");
+  const bounded = (text, length) =>
+    text
+      .repeat(Math.ceil(length / text.length))
+      .slice(0, length)
+      .trimEnd()
+      .padEnd(length, ".");
   const references = Array.from({ length: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS }, (_, i) => ({
-    id: `review-reference-${i}`, provider: "github", tool: null,
+    id: `review-reference-${i}`,
+    provider: "github",
+    tool: null,
     canonicalUrl: `https://github.com/fixture/review/blob/main/reference-${i}.md`,
-    owner: "fixture", repo: "review", revision: "main", path: `reference-${i}.md`,
-    range: null, issue: null, pullRequest: null, query: null, anchor: null,
+    owner: "fixture",
+    repo: "review",
+    revision: "main",
+    path: `reference-${i}.md`,
+    range: null,
+    issue: null,
+    pullRequest: null,
+    query: null,
+    anchor: null,
     relevance: "Reference for independent scrolling and bounded review layout",
   }));
   const reviews = {
     plan: {
-      checkpointId: `review-${sessionId}`, generation: 1, planPath: "/fixture/plan.md",
-      content: Array.from({ length: 80 }, (_, i) => `## Step ${i + 1}\nVerify independent review scrolling and preserve the composer.\n`).join("\n"),
-      contentHash: "fixture", state: "pending-review", reviewStatus: "ready", feedback: null,
+      checkpointId: `review-${sessionId}`,
+      generation: 1,
+      planPath: "/fixture/plan.md",
+      content: Array.from(
+        { length: 80 },
+        (_, i) =>
+          `## Step ${i + 1}\nVerify independent review scrolling and preserve the composer.\n`,
+      ).join("\n"),
+      contentHash: "fixture",
+      state: "pending-review",
+      reviewStatus: "ready",
+      feedback: null,
     },
     draft: {
-      id: `draft-${sessionId}`, projectKey: state.projectKey, basedOnRevision: state.revision,
-      createdAt: "2026-09-10T12:00:00.000Z", createdBySessionId: sessionId,
-      summary: bounded("Recovered without an initial draft notification. ", reviewLimits.ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH), status: "pending", references,
+      id: `draft-${sessionId}`,
+      projectKey: state.projectKey,
+      basedOnRevision: state.revision,
+      createdAt: "2026-09-10T12:00:00.000Z",
+      createdBySessionId: sessionId,
+      summary: bounded(
+        "Recovered without an initial draft notification. ",
+        reviewLimits.ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+      ),
+      status: "pending",
+      references,
       phases: Array.from({ length: reviewLimits.ROADMAP_PROPOSED_PHASES_MAX_ITEMS }, (_, i) => ({
-        phaseId: `review-phase-${i}`, title: bounded(`Proposed phase ${i + 1}. `, reviewLimits.ROADMAP_PHASE_TITLE_MAX_LENGTH),
-        goal: bounded("Verify bounded review content. ", reviewLimits.ROADMAP_PHASE_GOAL_MAX_LENGTH),
-        doneWhen: Array.from({ length: reviewLimits.ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS }, (_, j) => bounded(`Criterion ${j + 1}: chat and review scroll independently. `, reviewLimits.ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH)),
-        sourcePrompt: bounded("Synthetic review fixture only. ", reviewLimits.ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH), referenceIds: references.slice(0, reviewLimits.ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS).map(reference => reference.id),
+        phaseId: `review-phase-${i}`,
+        title: bounded(`Proposed phase ${i + 1}. `, reviewLimits.ROADMAP_PHASE_TITLE_MAX_LENGTH),
+        goal: bounded(
+          "Verify bounded review content. ",
+          reviewLimits.ROADMAP_PHASE_GOAL_MAX_LENGTH,
+        ),
+        doneWhen: Array.from({ length: reviewLimits.ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS }, (_, j) =>
+          bounded(
+            `Criterion ${j + 1}: chat and review scroll independently. `,
+            reviewLimits.ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
+          ),
+        ),
+        sourcePrompt: bounded(
+          "Synthetic review fixture only. ",
+          reviewLimits.ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
+        ),
+        referenceIds: references
+          .slice(0, reviewLimits.ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS)
+          .map((reference) => reference.id),
       })),
     },
   };
   if (interactive) {
-    reviews.plan = interactive === "plan" ? {
-      ...reviews.plan,
-      content: [
-        "# Improve the review experience\n\nThis is a sample implementation plan for inspecting the developer UI. It does not execute work in your real project.",
-        "## 1. Keep the conversation in view\n\nPlace the review beneath the output, outside the transcript scroller. Keep the composer visible and retain the reader’s position when the review changes size.\n\n- Collapse to a complete, labelled row.\n- Expand only into the output area.\n- Restore the previous reading position.",
-        "## 2. Make decisions clear\n\nKeep **Approve** and **Feedback** outside the plan’s reading scroller. A collapsed review must never release the approval gate.\n\nFeedback should stay available when switching between Plan approval and Roadmap draft.",
-        "## 3. Handle revisions safely\n\nTie every decision to the saved plan snapshot. Ignore delayed responses for older snapshots. Preserve mentor readiness, revision-pending status, and retry restrictions.\n\n```ts\nif (response.snapshotId !== current.snapshotId) return;\n```",
-        "## 4. Check constrained layouts\n\nVerify a normal desktop window, a narrow pane, short windows, and 200% zoom. Use native bounds measurements to catch clipped controls and overlapping content.",
-        "## Verification\n\n- Keyboard users can reach the reading area and decision buttons.\n- Expand and Restore keep other panes unchanged.\n- Typed feedback survives collapsing and reopening.\n- Approval remains an explicit decision.\n\n**Preview limit:** approval execution and revision generation are not connected to a live model in this isolated fixture.",
-      ].join("\n\n"),
-    } : null;
-    reviews.draft.summary = "Sample Roadmap review: inspect the proposed work, scroll through details, and collapse or reopen this section. This isolated developer preview does not change your real project.";
+    reviews.plan =
+      interactive === "plan"
+        ? {
+            ...reviews.plan,
+            content: [
+              "# Improve the review experience\n\nThis is a sample implementation plan for inspecting the developer UI. It does not execute work in your real project.",
+              "## 1. Keep the conversation in view\n\nPlace the review beneath the output, outside the transcript scroller. Keep the composer visible and retain the reader’s position when the review changes size.\n\n- Collapse to a complete, labelled row.\n- Expand only into the output area.\n- Restore the previous reading position.",
+              "## 2. Make decisions clear\n\nKeep **Approve** and **Feedback** outside the plan’s reading scroller. A collapsed review must never release the approval gate.\n\nFeedback should stay available when switching between Plan approval and Roadmap draft.",
+              "## 3. Handle revisions safely\n\nTie every decision to the saved plan snapshot. Ignore delayed responses for older snapshots. Preserve mentor readiness, revision-pending status, and retry restrictions.\n\n```ts\nif (response.snapshotId !== current.snapshotId) return;\n```",
+              "## 4. Check constrained layouts\n\nVerify a normal desktop window, a narrow pane, short windows, and 200% zoom. Use native bounds measurements to catch clipped controls and overlapping content.",
+              "## Verification\n\n- Keyboard users can reach the reading area and decision buttons.\n- Expand and Restore keep other panes unchanged.\n- Typed feedback survives collapsing and reopening.\n- Approval remains an explicit decision.\n\n**Preview limit:** approval execution and revision generation are not connected to a live model in this isolated fixture.",
+            ].join("\n\n"),
+          }
+        : null;
+    reviews.draft.summary =
+      "Sample Roadmap review: inspect the proposed work, scroll through details, and collapse or reopen this section. This isolated developer preview does not change your real project.";
     reviews.draft.references = [];
     reviews.draft.phases = [
-      { title: "Recover missed Roadmap drafts", goal: "Keep pending proposals discoverable after a reconnect or tool retry.", doneWhen: ["Reconnect restores the same pending draft.", "Repeated delivery does not reopen collapsed details.", "A draft creates no project phases before approval."], sourcePrompt: "Recover pending drafts through the existing native connection. Preserve project isolation, draft identity, errors, and explicit approval." },
-      { title: "Review proposals beside the conversation", goal: "Read the Roadmap without a centered overlay or losing the message input.", doneWhen: ["Review and Collapse work without changing the proposal.", "Chat and review content scroll independently.", "The composer remains visible at narrow and short window sizes."], sourcePrompt: "Embed Roadmap approval in the stationary review section below the transcript. Keep headings, goals, completion criteria, source prompts, and approval actions accessible." },
-      { title: "Preserve plan approval and feedback", goal: "Keep implementation-plan review separate from the transcript while retaining its approval gate.", doneWhen: ["Switching reviews preserves feedback.", "Only one review body is expanded at a time.", "Collapsing details never approves execution."], sourcePrompt: "Move implementation-plan approval into the shared review section. Preserve feedback, revision retry, mentor readiness, and busy restrictions." },
+      {
+        title: "Recover missed Roadmap drafts",
+        goal: "Keep pending proposals discoverable after a reconnect or tool retry.",
+        doneWhen: [
+          "Reconnect restores the same pending draft.",
+          "Repeated delivery does not reopen collapsed details.",
+          "A draft creates no project phases before approval.",
+        ],
+        sourcePrompt:
+          "Recover pending drafts through the existing native connection. Preserve project isolation, draft identity, errors, and explicit approval.",
+      },
+      {
+        title: "Review proposals beside the conversation",
+        goal: "Read the Roadmap without a centered overlay or losing the message input.",
+        doneWhen: [
+          "Review and Collapse work without changing the proposal.",
+          "Chat and review content scroll independently.",
+          "The composer remains visible at narrow and short window sizes.",
+        ],
+        sourcePrompt:
+          "Embed Roadmap approval in the stationary review section below the transcript. Keep headings, goals, completion criteria, source prompts, and approval actions accessible.",
+      },
+      {
+        title: "Preserve plan approval and feedback",
+        goal: "Keep implementation-plan review separate from the transcript while retaining its approval gate.",
+        doneWhen: [
+          "Switching reviews preserves feedback.",
+          "Only one review body is expanded at a time.",
+          "Collapsing details never approves execution.",
+        ],
+        sourcePrompt:
+          "Move implementation-plan approval into the shared review section. Preserve feedback, revision retry, mentor readiness, and busy restrictions.",
+      },
     ].map((phase, i) => ({ ...phase, phaseId: `preview-phase-${i}`, referenceIds: [] }));
   }
   const validated = reviewLimits.validateRoadmapPhaseDraft(reviews.draft);
-  if (!validated.ok) throw new Error(`Invalid bounded review fixture: ${JSON.stringify(validated)}`);
+  if (!validated.ok)
+    throw new Error(`Invalid bounded review fixture: ${JSON.stringify(validated)}`);
   return reviews;
 }
 
@@ -452,15 +533,38 @@ export function createRoadmapReliabilityFixtureServer({
         }
         if (request.method === "POST" && url.pathname === "/fixture/reviews") {
           const session = state.sessions.get(body.sessionId);
-          if (!session) { json(response, 401, { status: "unknown-session" }); return; }
-          session.reviews = fixturePendingReviews(state, body.sessionId, body.interactive === true ? (body.review === "plan" ? "plan" : true) : false);
+          if (!session) {
+            json(response, 401, { status: "unknown-session" });
+            return;
+          }
+          session.reviews = fixturePendingReviews(
+            state,
+            body.sessionId,
+            body.interactive === true ? (body.review === "plan" ? "plan" : true) : false,
+          );
           // Intentionally omit roadmap_phase_draft_change: ready must recover via native IPC.
           for (const stream of clients.get(body.sessionId) ?? []) {
             for (const event of [
               { type: "ready", data: fixtureSessionState(state, body.sessionId) },
-              { type: "text_delta", data: { text: Array.from({ length: 100 }, (_, i) => `Transcript paragraph ${i + 1}: independent scrolling evidence.\n\n`).join("") } },
-              { type: "tool_call_start", data: { toolCallId: "review-tool", name: "read", args: { file_path: "fixture.txt" } } },
-            ]) stream.write(`data: ${JSON.stringify({ sessionId: body.sessionId, ...event })}\n\n`);
+              {
+                type: "text_delta",
+                data: {
+                  text: Array.from(
+                    { length: 100 },
+                    (_, i) => `Transcript paragraph ${i + 1}: independent scrolling evidence.\n\n`,
+                  ).join(""),
+                },
+              },
+              {
+                type: "tool_call_start",
+                data: {
+                  toolCallId: "review-tool",
+                  name: "read",
+                  args: { file_path: "fixture.txt" },
+                },
+              },
+            ])
+              stream.write(`data: ${JSON.stringify({ sessionId: body.sessionId, ...event })}\n\n`);
           }
           audit({ action: "reviews-withheld-notification", sessionId: body.sessionId });
           json(response, 200, { status: "ready", draftId: session.reviews.draft.id });
@@ -632,7 +736,10 @@ export function createRoadmapReliabilityFixtureServer({
       }
       if (request.method === "GET" && url.pathname === "/roadmap/phase-drafts/pending") {
         audit({ action: "pending-draft-read", sessionId });
-        json(response, 200, { status: "ok", draft: state.sessions.get(sessionId)?.reviews?.draft ?? null });
+        json(response, 200, {
+          status: "ok",
+          draft: state.sessions.get(sessionId)?.reviews?.draft ?? null,
+        });
         return;
       }
       if (request.method === "GET" && url.pathname === "/history") {
@@ -858,7 +965,10 @@ export function validateRoadmapReliabilityAudit(entries) {
 }
 
 // Both modes must finish cleanup before publishing an outcome or reporting success.
-export async function finalizeRoadmapReliabilitySmoke(options, { run, cleanup, failureEvidence = () => ({}) }) {
+export async function finalizeRoadmapReliabilitySmoke(
+  options,
+  { run, cleanup, failureEvidence = () => ({}) },
+) {
   let result;
   let failure;
   try {
@@ -876,7 +986,14 @@ export async function finalizeRoadmapReliabilitySmoke(options, { run, cleanup, f
     ? {
         status: "failed",
         identity: options.identity,
-        ...(options.interactive ? { mode: "preview", review: options.review === "plan" ? "plan" : "roadmap", automatedVerification: "not-run", screenshot: options.screenshot } : {}),
+        ...(options.interactive
+          ? {
+              mode: "preview",
+              review: options.review === "plan" ? "plan" : "roadmap",
+              automatedVerification: "not-run",
+              screenshot: options.screenshot,
+            }
+          : {}),
         error: failure instanceof Error ? failure.message : String(failure),
         ...failureEvidence(),
       }
@@ -884,19 +1001,25 @@ export async function finalizeRoadmapReliabilitySmoke(options, { run, cleanup, f
   mkdirSync(dirname(options.outcome), { recursive: true });
   writeFileSync(options.outcome, `${JSON.stringify(outcome, null, 2)}\n`);
   if (failure) throw failure;
-  process.stdout.write(`${options.interactive ? "REVIEW PREVIEW CLOSED (automated verification not run)" : "ROADMAP RELIABILITY DEV SMOKE PASS"}: ${options.outcome}\n`);
+  process.stdout.write(
+    `${options.interactive ? "REVIEW PREVIEW CLOSED (automated verification not run)" : "ROADMAP RELIABILITY DEV SMOKE PASS"}: ${options.outcome}\n`,
+  );
   return outcome;
 }
 
 export async function finishRoadmapReviewPreview(client, options, waitUntilClosed) {
   const review = options.review === "plan" ? "plan" : "roadmap";
-  await waitFor("visible selected review", () => client.evaluate(`(() => {
+  await waitFor("visible selected review", () =>
+    client.evaluate(`(() => {
     const trigger = document.querySelector('[data-review-trigger=${review}]');
     const reader = document.querySelector('.review-dock-panel:not([hidden]) .review-content-scroller');
     return trigger?.getAttribute('aria-expanded') === 'true' && reader?.getBoundingClientRect().height > 0;
-  })()`));
+  })()`),
+  );
   await captureScreenshot(client, options.screenshot);
-  console.log(`${review.toUpperCase()} REVIEW READY: visible developer app; isolated sample data. Close the window to finish.`);
+  console.log(
+    `${review.toUpperCase()} REVIEW READY: visible developer app; isolated sample data. Close the window to finish.`,
+  );
   await waitUntilClosed();
   return {
     status: "preview-closed",
@@ -948,99 +1071,119 @@ export async function runRoadmapReliabilityDevSmoke(options) {
   let failureLogTail = "";
   return finalizeRoadmapReliabilitySmoke(options, {
     run: async () => {
-    child = spawn(
-      process.env.ComSpec ?? "cmd.exe",
-      ["/d", "/s", "/c", "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json"],
-      {
-        cwd: appDir,
-        env: environment,
-        windowsHide: true,
-        stdio: ["ignore", logFd, logFd],
-      },
-    );
-    await new Promise((resolveSpawn, rejectSpawn) => {
-      child.once("spawn", resolveSpawn);
-      child.once("error", rejectSpawn);
-    });
-    if (!Number.isInteger(child.pid)) throw new Error("Tauri dev did not expose a process id");
-    const unexpectedExit = new Promise((_, rejectExit) => {
-      child.once("exit", (code, signal) => {
-        let tail = "";
-        try {
-          tail = readFileSync(devLog, "utf8").slice(-4_000);
-        } catch {
-          tail = "";
-        }
-        rejectExit(
-          new Error(
-            `Tauri dev exited before fixture startup: code=${code} signal=${signal}\n${tail}`,
-          ),
-        );
+      child = spawn(
+        process.env.ComSpec ?? "cmd.exe",
+        ["/d", "/s", "/c", "pnpm exec tauri dev --config src-tauri/tauri.local.conf.json"],
+        {
+          cwd: appDir,
+          env: environment,
+          windowsHide: true,
+          stdio: ["ignore", logFd, logFd],
+        },
+      );
+      await new Promise((resolveSpawn, rejectSpawn) => {
+        child.once("spawn", resolveSpawn);
+        child.once("error", rejectSpawn);
       });
-    });
-    const listening = await Promise.race([
-      waitFor(
-        "fixture sidecar",
-        () => readAudit(auditFile).find((entry) => entry.action === "fixture-listening"),
-        { timeoutMs: 300_000 },
-      ),
-      unexpectedExit,
-    ]);
-    const sidecarPort = listening.port;
-    await fixtureFetch(sidecarPort, fixtureToken, "/fixture/seed", { method: "POST", body: "{}" });
-    client = await connectToDevWebview(cdpPort, waitFor, (candidate) =>
-      String(candidate.url).startsWith("http://localhost:1420"),
-    );
-    await client.send("Runtime.enable");
-    await client.send("Page.enable");
-    await client.send("Page.bringToFront");
-    await waitFor("developer app document", () =>
-      client.evaluate(
-        `location.origin === "http://localhost:1420" && document.readyState === "complete"`,
-      ),
-    );
-    const initialDocument = await waitFor("initial developer app body", () =>
-      client.evaluate(
-        `document.body?.childElementCount ? ({ paneCount: document.querySelectorAll(".agent-pane").length, text: document.body.innerText.slice(0, 500), buttons: [...document.querySelectorAll("button")].map((button) => button.textContent?.trim()).slice(0, 30), html: document.body.innerHTML.slice(0, 500) }) : null`,
-      ),
-    );
-    if (initialDocument.paneCount > 1) {
-      throw new Error(`Unexpected developer app DOM: ${JSON.stringify(initialDocument)}`);
-    }
-    if (options.interactive) {
-      await client.evaluate(`(() => {
+      if (!Number.isInteger(child.pid)) throw new Error("Tauri dev did not expose a process id");
+      const unexpectedExit = new Promise((_, rejectExit) => {
+        child.once("exit", (code, signal) => {
+          let tail = "";
+          try {
+            tail = readFileSync(devLog, "utf8").slice(-4_000);
+          } catch {
+            tail = "";
+          }
+          rejectExit(
+            new Error(
+              `Tauri dev exited before fixture startup: code=${code} signal=${signal}\n${tail}`,
+            ),
+          );
+        });
+      });
+      const listening = await Promise.race([
+        waitFor(
+          "fixture sidecar",
+          () => readAudit(auditFile).find((entry) => entry.action === "fixture-listening"),
+          { timeoutMs: 300_000 },
+        ),
+        unexpectedExit,
+      ]);
+      const sidecarPort = listening.port;
+      await fixtureFetch(sidecarPort, fixtureToken, "/fixture/seed", {
+        method: "POST",
+        body: "{}",
+      });
+      client = await connectToDevWebview(cdpPort, waitFor, (candidate) =>
+        String(candidate.url).startsWith("http://localhost:1420"),
+      );
+      await client.send("Runtime.enable");
+      await client.send("Page.enable");
+      await client.send("Page.bringToFront");
+      await waitFor("developer app document", () =>
+        client.evaluate(
+          `location.origin === "http://localhost:1420" && document.readyState === "complete"`,
+        ),
+      );
+      const initialDocument = await waitFor("initial developer app body", () =>
+        client.evaluate(
+          `document.body?.childElementCount ? ({ paneCount: document.querySelectorAll(".agent-pane").length, text: document.body.innerText.slice(0, 500), buttons: [...document.querySelectorAll("button")].map((button) => button.textContent?.trim()).slice(0, 30), html: document.body.innerHTML.slice(0, 500) }) : null`,
+        ),
+      );
+      if (initialDocument.paneCount > 1) {
+        throw new Error(`Unexpected developer app DOM: ${JSON.stringify(initialDocument)}`);
+      }
+      if (options.interactive) {
+        await client.evaluate(`(() => {
         localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({
           version: 9, root: { type: "leaf", paneId: "primary" }, focusedPaneId: "primary",
           panes: { primary: { kind: "agent", mode: "code", cwd: ${JSON.stringify(paths.project)}, sessionPath: null } }
         }));
         location.reload(); return true;
       })()`);
-      await waitFor("ready preview pane", () => client.evaluate("Boolean(document.querySelector('.agent-pane textarea.input:not(:disabled)'))"));
-      const sessionId = await waitFor("authenticated preview session", () => readAudit(auditFile).filter(entry => entry.action === "authenticated-session").at(-1)?.sessionId);
-      const review = options.review === "plan" ? "plan" : "roadmap";
-      await fixtureFetch(sidecarPort, fixtureToken, "/fixture/reviews", { method: "POST", body: JSON.stringify({ sessionId, interactive: true, review }) });
-      await waitFor("Review preview available", () => client.evaluate(`Boolean(document.querySelector('[data-review-trigger=${review}]'))`));
-      await client.evaluate(`document.querySelector('[data-review-trigger=${review}]').click(); document.title = '${review === "plan" ? "Plan" : "Roadmap"} review - isolated developer preview'; true`);
-      await client.send("Page.bringToFront");
-      observedIdentities = processTreeSnapshot(await readProcessTable(), child.pid).identities;
-      return finishRoadmapReviewPreview(client, options, async () => {
-        await new Promise(resolveClosed => {
-          const closed = () => {
-            child.removeListener("exit", closed);
-            process.stdin.removeListener("end", closed);
-            resolveClosed();
-          };
-          child.once("exit", closed);
-          process.stdin.once("end", closed);
-          process.stdin.resume();
+        await waitFor("ready preview pane", () =>
+          client.evaluate(
+            "Boolean(document.querySelector('.agent-pane textarea.input:not(:disabled)'))",
+          ),
+        );
+        const sessionId = await waitFor(
+          "authenticated preview session",
+          () =>
+            readAudit(auditFile)
+              .filter((entry) => entry.action === "authenticated-session")
+              .at(-1)?.sessionId,
+        );
+        const review = options.review === "plan" ? "plan" : "roadmap";
+        await fixtureFetch(sidecarPort, fixtureToken, "/fixture/reviews", {
+          method: "POST",
+          body: JSON.stringify({ sessionId, interactive: true, review }),
         });
-        process.stdin.pause();
-      });
-    }
-    await waitFor("initial workspace persistence", () =>
-      client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`),
-    );
-    await client.evaluate(`(() => {
+        await waitFor("Review preview available", () =>
+          client.evaluate(`Boolean(document.querySelector('[data-review-trigger=${review}]'))`),
+        );
+        await client.evaluate(
+          `document.querySelector('[data-review-trigger=${review}]').click(); document.title = '${review === "plan" ? "Plan" : "Roadmap"} review - isolated developer preview'; true`,
+        );
+        await client.send("Page.bringToFront");
+        observedIdentities = processTreeSnapshot(await readProcessTable(), child.pid).identities;
+        return finishRoadmapReviewPreview(client, options, async () => {
+          await new Promise((resolveClosed) => {
+            const closed = () => {
+              child.removeListener("exit", closed);
+              process.stdin.removeListener("end", closed);
+              resolveClosed();
+            };
+            child.once("exit", closed);
+            process.stdin.once("end", closed);
+            process.stdin.resume();
+          });
+          process.stdin.pause();
+        });
+      }
+      await waitFor("initial workspace persistence", () =>
+        client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`),
+      );
+      await client.evaluate(`(() => {
       const layout = {
         version: 9,
         root: { type: "split", direction: "horizontal", size: { type: "ratio", value: 50 }, first: { type: "leaf", paneId: "primary" }, second: { type: "leaf", paneId: "pane-b" } },
@@ -1054,30 +1197,30 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       location.reload();
       return true;
     })()`);
-    await waitFor("two rendered panes", () =>
-      client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
-    );
-    const paneSessions = await waitFor("two authenticated panes", () => {
-      const entries = readAudit(auditFile).filter(
-        (entry) => entry.action === "authenticated-session",
+      await waitFor("two rendered panes", () =>
+        client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
       );
-      return entries.length >= 2 ? entries.slice(-2).map((entry) => entry.sessionId) : null;
-    });
-    const [sessionA, sessionB] = paneSessions;
-    const seeded = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-    const bound = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/fixture/bind", {
-      method: "POST",
-      body: JSON.stringify({
-        version: 1,
-        action: "bind-current",
-        phaseId: fixturePhaseId,
-        expectedProjectKey: canonicalProjectKey(paths.project),
-        expectedRevision: seeded.revision,
-        operationId: "fixture-bind-a",
-      }),
-    });
-    if (bound.status !== "committed") throw new Error(`Pane A bind failed: ${bound.status}`);
-    await client.evaluate(`(() => {
+      const paneSessions = await waitFor("two authenticated panes", () => {
+        const entries = readAudit(auditFile).filter(
+          (entry) => entry.action === "authenticated-session",
+        );
+        return entries.length >= 2 ? entries.slice(-2).map((entry) => entry.sessionId) : null;
+      });
+      const [sessionA, sessionB] = paneSessions;
+      const seeded = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+      const bound = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/fixture/bind", {
+        method: "POST",
+        body: JSON.stringify({
+          version: 1,
+          action: "bind-current",
+          phaseId: fixturePhaseId,
+          expectedProjectKey: canonicalProjectKey(paths.project),
+          expectedRevision: seeded.revision,
+          operationId: "fixture-bind-a",
+        }),
+      });
+      if (bound.status !== "committed") throw new Error(`Pane A bind failed: ${bound.status}`);
+      await client.evaluate(`(() => {
       const key = "gg-workspace-layout-recursive:main";
       const layout = JSON.parse(localStorage.getItem(key));
       layout.panes.primary.sessionPath = ${JSON.stringify(sessionLink({ root }, sessionA).sessionPath)};
@@ -1086,182 +1229,198 @@ export async function runRoadmapReliabilityDevSmoke(options) {
       location.reload();
       return true;
     })()`);
-    await waitFor("restored panes", () =>
-      client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
-    );
-    await openFixturePhase(client, 1);
-    await client.evaluate(
-      clickByTextExpression("More", "document.querySelector('.notes-phase-detail')"),
-    );
-    const displayed = await waitFor("displayed Local Fork diagnostics", () =>
-      client.evaluate(`(() => {
+      await waitFor("restored panes", () =>
+        client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
+      );
+      await openFixturePhase(client, 1);
+      await client.evaluate(
+        clickByTextExpression("More", "document.querySelector('.notes-phase-detail')"),
+      );
+      const displayed = await waitFor("displayed Local Fork diagnostics", () =>
+        client.evaluate(`(() => {
         const section = document.querySelector('.notes-storage-diagnostics');
         if (!section || !section.textContent.includes(${JSON.stringify(localForkIdentity)})) return null;
         return section.textContent;
       })()`),
-    );
-    await client.evaluate(
-      clickByTextExpression("Overview", "document.querySelector('.notes-phase-detail')"),
-    );
-    await waitFor("phase writer action", () =>
-      client.evaluate(
-        `Boolean([...document.querySelectorAll('.notes-phase-detail button')].find((button) => button.textContent?.trim() === "Inspect phase writer"))`,
-      ),
-    );
-    await client.evaluate(
-      clickByTextExpression(
-        "Inspect phase writer",
-        "document.querySelector('.notes-phase-detail')",
-      ),
-    );
-    await waitFor("rebind confirmation", () =>
-      client.evaluate("Boolean(document.querySelector('[aria-label=\"Confirm phase rebind\"]'))"),
-    );
-    await client.evaluate(
-      clickByTextExpression(
-        "Confirm safe takeover",
-        "document.querySelector('.notes-phase-detail')",
-      ),
-    );
-    await waitFor("rebind completion", async () => {
-      const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-      return state.phase.session?.sessionId === sessionB && state.revision === bound.revision + 1;
-    });
-    const staleA = await sessionFetch(sidecarPort, fixtureToken, sessionA, "/fixture/diagnostics");
-    if (staleA.consistency !== "bound-to-other-session")
-      throw new Error("Pane A remained authoritative after rebind");
-    await waitFor("rebound Notes refresh", async () => {
-      const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-      return state.phase.session?.sessionId === sessionB && state.revision;
-    });
-    await client.evaluate("location.reload(); true");
-    await waitFor("reloaded rebound panes", () =>
-      client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
-    );
-    await openFixturePhase(client, 1);
-    const beforeDone = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-    const unrelatedBefore = beforeDone.phases.find((phase) => phase.id === "unrelated-phase");
-    const submit = (sessionId, request, expectedStatus) =>
-      fixtureFetch(
+      );
+      await client.evaluate(
+        clickByTextExpression("Overview", "document.querySelector('.notes-phase-detail')"),
+      );
+      await waitFor("phase writer action", () =>
+        client.evaluate(
+          `Boolean([...document.querySelectorAll('.notes-phase-detail button')].find((button) => button.textContent?.trim() === "Inspect phase writer"))`,
+        ),
+      );
+      await client.evaluate(
+        clickByTextExpression(
+          "Inspect phase writer",
+          "document.querySelector('.notes-phase-detail')",
+        ),
+      );
+      await waitFor("rebind confirmation", () =>
+        client.evaluate("Boolean(document.querySelector('[aria-label=\"Confirm phase rebind\"]'))"),
+      );
+      await client.evaluate(
+        clickByTextExpression(
+          "Confirm safe takeover",
+          "document.querySelector('.notes-phase-detail')",
+        ),
+      );
+      await waitFor("rebind completion", async () => {
+        const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+        return state.phase.session?.sessionId === sessionB && state.revision === bound.revision + 1;
+      });
+      const staleA = await sessionFetch(
         sidecarPort,
         fixtureToken,
-        "/fixture/status",
-        { method: "POST", body: JSON.stringify({ sessionId, request }) },
-        expectedStatus,
+        sessionA,
+        "/fixture/diagnostics",
       );
-    const competing = await submit(sessionA, fixtureDoneRequest(beforeDone), 409);
-    if (competing.result !== "phase-lease-lost")
-      throw new Error("Competing runner was not rejected");
-    const staleRequest = fixtureDoneRequest(beforeDone);
-    await fixtureFetch(sidecarPort, fixtureToken, "/fixture/advance", {
-      method: "POST",
-      body: "{}",
-    });
-    const stale = await submit(sessionB, staleRequest, 409);
-    if (stale.result !== "stale-revision") throw new Error("Stale status was not rejected");
-    const refreshed = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-    if (refreshed.phase.status !== "in-progress" || refreshed.statusUpdates !== 0) {
-      throw new Error("Rejected status update mutated the phase");
-    }
-    const committed = await submit(sessionB, fixtureDoneRequest(refreshed), 200);
-    if (committed.result !== "committed" || committed.statusOutcome !== "applied") {
-      throw new Error(`Immediate Done failed: ${JSON.stringify(committed)}`);
-    }
-    const doneVisible = `document.querySelector('#notes-phase-overview-${fixturePhaseId}')?.textContent === 'Done'`;
-    // Do not reload: this observation must come from the production host's notes_change.
-    await waitFor("immediate Done rendered from notes_change", () => client.evaluate(doneVisible));
-    await captureScreenshot(client, options.screenshot);
-    const finalState = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
-    if (
-      finalState.phase.status !== "done" ||
-      finalState.statusUpdates !== 1 ||
-      finalState.phases.length !== 2 ||
-      finalState.tasks.length !== 0 ||
-      JSON.stringify(finalState.sessions) !== JSON.stringify(beforeDone.sessions) ||
-      JSON.stringify(finalState.phases.find((phase) => phase.id === "unrelated-phase")) !==
-        JSON.stringify(unrelatedBefore) ||
-      finalState.phase.roadmapEvents.some((event) => event.type === "manual-completion-approval")
-    ) {
-      throw new Error("Immediate Done changed unrelated work or required manual approval");
-    }
-    await client.evaluate("location.reload(); true");
-    await waitFor("restarted panes", () =>
-      client.evaluate(`document.querySelectorAll('.agent-pane').length === 2`),
-    );
-    await openFixturePhase(client, 1);
-    await waitFor("Done preserved after restart/read", () => client.evaluate(doneVisible));
-    // Existing reliability scenarios finish first; reviews cannot alter their authority checks.
-    await client.evaluate("window.__reviewSmokeReload = true; location.reload(); true");
-    await waitFor("review fixture panes", () => client.evaluate("!window.__reviewSmokeReload && document.querySelectorAll('.agent-pane').length === 2 && [...document.querySelectorAll('.agent-pane textarea.input')].length === 2 && [...document.querySelectorAll('.agent-pane textarea.input')].every(input => !input.disabled)"));
-    await fixtureFetch(sidecarPort, fixtureToken, "/fixture/reviews", {
-      method: "POST", body: JSON.stringify({ sessionId: sessionA }),
-    });
-    await waitFor("both recovered review rows", () => client.evaluate("document.querySelectorAll('.agent-pane')[0]?.querySelectorAll('[data-review-trigger]').length === 2"));
-    const reviewEvidence = await measureReviewDockIsolation(client, {
-      capture: async (name) => {
-        const path = `${options.screenshot}.${name}.png`;
-        await captureScreenshot(client, path);
-        return path;
-      },
-    });
-    await captureScreenshot(client, `${options.screenshot}.reviews.png`);
-    reviewEvidence.screenshot = `${options.screenshot}.reviews.png`;
-    const audit = readAudit(auditFile);
-    const validation = validateRoadmapReliabilityAudit(audit);
-    const tree = processTreeSnapshot(await readProcessTable(), child.pid);
-    observedIdentities = tree.identities;
-    return {
-      status: "passed",
-      identity: options.identity,
-      project: canonicalProjectKey(paths.project),
-      diagnosticsDisplayed: displayed.includes(localForkIdentity),
-      reviewEvidence,
-      paneSessions: validation.sessions,
-      stalePaneConsistency: staleA.consistency,
-      competingRunnerRejected: competing.result === "phase-lease-lost",
-      staleStatusRejected: stale.result === "stale-revision",
-      statusUpdates: finalState.statusUpdates,
-      immediateDoneRendered: true,
-      webviewReloadPreserved: true,
-      unrelatedPhaseUnchanged: true,
-      fixtureAudit: audit,
-      finalSnapshot: finalState,
-      packagedRuntimeVerified: false,
-      installerVerified: false,
-      screenshot: options.screenshot,
-      fixturePids: observedIdentities.map(({ pid }) => pid),
-    };
+      if (staleA.consistency !== "bound-to-other-session")
+        throw new Error("Pane A remained authoritative after rebind");
+      await waitFor("rebound Notes refresh", async () => {
+        const state = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+        return state.phase.session?.sessionId === sessionB && state.revision;
+      });
+      await client.evaluate("location.reload(); true");
+      await waitFor("reloaded rebound panes", () =>
+        client.evaluate(`document.querySelectorAll(".agent-pane").length === 2`),
+      );
+      await openFixturePhase(client, 1);
+      const beforeDone = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+      const unrelatedBefore = beforeDone.phases.find((phase) => phase.id === "unrelated-phase");
+      const submit = (sessionId, request, expectedStatus) =>
+        fixtureFetch(
+          sidecarPort,
+          fixtureToken,
+          "/fixture/status",
+          { method: "POST", body: JSON.stringify({ sessionId, request }) },
+          expectedStatus,
+        );
+      const competing = await submit(sessionA, fixtureDoneRequest(beforeDone), 409);
+      if (competing.result !== "phase-lease-lost")
+        throw new Error("Competing runner was not rejected");
+      const staleRequest = fixtureDoneRequest(beforeDone);
+      await fixtureFetch(sidecarPort, fixtureToken, "/fixture/advance", {
+        method: "POST",
+        body: "{}",
+      });
+      const stale = await submit(sessionB, staleRequest, 409);
+      if (stale.result !== "stale-revision") throw new Error("Stale status was not rejected");
+      const refreshed = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+      if (refreshed.phase.status !== "in-progress" || refreshed.statusUpdates !== 0) {
+        throw new Error("Rejected status update mutated the phase");
+      }
+      const committed = await submit(sessionB, fixtureDoneRequest(refreshed), 200);
+      if (committed.result !== "committed" || committed.statusOutcome !== "applied") {
+        throw new Error(`Immediate Done failed: ${JSON.stringify(committed)}`);
+      }
+      const doneVisible = `document.querySelector('#notes-phase-overview-${fixturePhaseId}')?.textContent === 'Done'`;
+      // Do not reload: this observation must come from the production host's notes_change.
+      await waitFor("immediate Done rendered from notes_change", () =>
+        client.evaluate(doneVisible),
+      );
+      await captureScreenshot(client, options.screenshot);
+      const finalState = await fixtureFetch(sidecarPort, fixtureToken, "/fixture/state");
+      if (
+        finalState.phase.status !== "done" ||
+        finalState.statusUpdates !== 1 ||
+        finalState.phases.length !== 2 ||
+        finalState.tasks.length !== 0 ||
+        JSON.stringify(finalState.sessions) !== JSON.stringify(beforeDone.sessions) ||
+        JSON.stringify(finalState.phases.find((phase) => phase.id === "unrelated-phase")) !==
+          JSON.stringify(unrelatedBefore) ||
+        finalState.phase.roadmapEvents.some((event) => event.type === "manual-completion-approval")
+      ) {
+        throw new Error("Immediate Done changed unrelated work or required manual approval");
+      }
+      await client.evaluate("location.reload(); true");
+      await waitFor("restarted panes", () =>
+        client.evaluate(`document.querySelectorAll('.agent-pane').length === 2`),
+      );
+      await openFixturePhase(client, 1);
+      await waitFor("Done preserved after restart/read", () => client.evaluate(doneVisible));
+      // Existing reliability scenarios finish first; reviews cannot alter their authority checks.
+      await client.evaluate("window.__reviewSmokeReload = true; location.reload(); true");
+      await waitFor("review fixture panes", () =>
+        client.evaluate(
+          "!window.__reviewSmokeReload && document.querySelectorAll('.agent-pane').length === 2 && [...document.querySelectorAll('.agent-pane textarea.input')].length === 2 && [...document.querySelectorAll('.agent-pane textarea.input')].every(input => !input.disabled)",
+        ),
+      );
+      await fixtureFetch(sidecarPort, fixtureToken, "/fixture/reviews", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: sessionA }),
+      });
+      await waitFor("both recovered review rows", () =>
+        client.evaluate(
+          "document.querySelectorAll('.agent-pane')[0]?.querySelectorAll('[data-review-trigger]').length === 2",
+        ),
+      );
+      const reviewEvidence = await measureReviewDockIsolation(client, {
+        capture: async (name) => {
+          const path = `${options.screenshot}.${name}.png`;
+          await captureScreenshot(client, path);
+          return path;
+        },
+      });
+      await captureScreenshot(client, `${options.screenshot}.reviews.png`);
+      reviewEvidence.screenshot = `${options.screenshot}.reviews.png`;
+      const audit = readAudit(auditFile);
+      const validation = validateRoadmapReliabilityAudit(audit);
+      const tree = processTreeSnapshot(await readProcessTable(), child.pid);
+      observedIdentities = tree.identities;
+      return {
+        status: "passed",
+        identity: options.identity,
+        project: canonicalProjectKey(paths.project),
+        diagnosticsDisplayed: displayed.includes(localForkIdentity),
+        reviewEvidence,
+        paneSessions: validation.sessions,
+        stalePaneConsistency: staleA.consistency,
+        competingRunnerRejected: competing.result === "phase-lease-lost",
+        staleStatusRejected: stale.result === "stale-revision",
+        statusUpdates: finalState.statusUpdates,
+        immediateDoneRendered: true,
+        webviewReloadPreserved: true,
+        unrelatedPhaseUnchanged: true,
+        fixtureAudit: audit,
+        finalSnapshot: finalState,
+        packagedRuntimeVerified: false,
+        installerVerified: false,
+        screenshot: options.screenshot,
+        fixturePids: observedIdentities.map(({ pid }) => pid),
+      };
     },
     cleanup: async () => {
-    let cleanupFailure;
-    try {
-      client?.close();
-      if (Number.isInteger(child?.pid)) await terminateProcessTree(child.pid);
-      const survivors = observedIdentities.length
-        ? survivingProcessIds(observedIdentities, await readProcessTable())
-        : [];
-      if (survivors.length)
-        throw new Error(`Fixture processes survived cleanup: ${survivors.join(", ")}`);
-    } catch (cleanupError) {
-      cleanupFailure = cleanupError;
-    }
-    try {
-      closeSync(logFd);
-      failureAudit = readAudit(auditFile).slice(-40);
+      let cleanupFailure;
       try {
-        failureLogTail = readFileSync(devLog, "utf8").slice(-4_000);
-      } catch {
-        failureLogTail = "";
+        client?.close();
+        if (Number.isInteger(child?.pid)) await terminateProcessTree(child.pid);
+        const survivors = observedIdentities.length
+          ? survivingProcessIds(observedIdentities, await readProcessTable())
+          : [];
+        if (survivors.length)
+          throw new Error(`Fixture processes survived cleanup: ${survivors.join(", ")}`);
+      } catch (cleanupError) {
+        cleanupFailure = cleanupError;
       }
-    } catch (error) {
-      cleanupFailure ??= error;
-    }
-    try {
-      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    } catch (error) {
-      cleanupFailure ??= error;
-    }
-    if (cleanupFailure) throw cleanupFailure;
+      try {
+        closeSync(logFd);
+        failureAudit = readAudit(auditFile).slice(-40);
+        try {
+          failureLogTail = readFileSync(devLog, "utf8").slice(-4_000);
+        } catch {
+          failureLogTail = "";
+        }
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+      try {
+        rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+      if (cleanupFailure) throw cleanupFailure;
     },
     failureEvidence: () => ({ fixtureAudit: failureAudit, developerLogTail: failureLogTail }),
   });

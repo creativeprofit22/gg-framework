@@ -333,7 +333,15 @@ export const responses = {
   agent_usage: usage,
   app_auth_status: { providers: authProviders },
   // authStatus() also reads this native result; null makes it discard the whole provider list.
-  qwen_cloud_connection_status: { ok: true, status: { provider: "qwen-cloud", credential: "absent", verification: "not-tested", allowance: "unavailable-with-inference-key" } },
+  qwen_cloud_connection_status: {
+    ok: true,
+    status: {
+      provider: "qwen-cloud",
+      credential: "absent",
+      verification: "not-tested",
+      allowance: "unavailable-with-inference-key",
+    },
+  },
   app_settings_get: { projectsRoot: "/Users/demo/projects", configured: true },
   // Settings shows a load-failure alert when this reply is missing.
   azure_connection_status: {
@@ -412,8 +420,12 @@ export function initScript(payload) {
     window.__TAURI_INTERNALS__.unregisterCallback(entry.handler);
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener };
-  window.__ggListenerStats = () => ({ callbacks: callbacks.size, listeners: listeners.size,
-    events: eventHandlers.size, dispatch: [...eventHandlers.values()].reduce((sum, ids) => sum + ids.size, 0) });
+  window.__ggListenerStats = () => ({
+    callbacks: callbacks.size,
+    listeners: listeners.size,
+    events: eventHandlers.size,
+    dispatch: [...eventHandlers.values()].reduce((sum, ids) => sum + ids.size, 0),
+  });
   let nextId = 1;
   window.__TAURI_INTERNALS__ = {
     metadata: {

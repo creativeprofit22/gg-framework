@@ -39,7 +39,9 @@ try {
 
   // Hold the real production chunk to exercise the readable loading fallback.
   let release;
-  const held = new Promise((resolve) => { release = resolve; });
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
   await page.route(`**/${markdownFile}`, async (route) => {
     await held;
     await route.continue();
@@ -53,8 +55,12 @@ try {
   await page.locator(".markdown code .hljs-keyword").waitFor();
   assert.equal(requests.length, 1, "First content loads the renderer exactly once");
   assert.deepEqual(errors, []);
-  console.log("Production browser smoke: zero renderer requests on startup/empty chat; readable fallback, formatted text and code highlighting passed. Native IPC mocked; browser headless.");
+  console.log(
+    "Production browser smoke: zero renderer requests on startup/empty chat; readable fallback, formatted text and code highlighting passed. Native IPC mocked; browser headless.",
+  );
 } finally {
   await browser?.close();
-  await new Promise((resolve, reject) => server.httpServer.close((error) => error ? reject(error) : resolve()));
+  await new Promise((resolve, reject) =>
+    server.httpServer.close((error) => (error ? reject(error) : resolve())),
+  );
 }

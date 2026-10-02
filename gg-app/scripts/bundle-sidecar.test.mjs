@@ -348,8 +348,12 @@ async function createInstalledPruneFixture() {
   // serializing 1,000+ independent disk writes on Windows. Settle each bounded
   // batch before propagating an error so cleanup never races outstanding I/O.
   for (let offset = 0; offset < writes.length; offset += 16) {
-    const results = await Promise.allSettled(writes.slice(offset, offset + 16).map((write) => write()));
-    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    const results = await Promise.allSettled(
+      writes.slice(offset, offset + 16).map((write) => write()),
+    );
+    const errors = results
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
     if (errors.length) throw new AggregateError(errors, "Installed prune fixture writes failed");
   }
   return { nodeModules, copiedFiles };

@@ -21,6 +21,13 @@ import type { ProjectTask } from "./agent";
  * interaction state (selection, pending action, confirmation) lives in
  * `useTasksController`.
  */
+/**
+ * Where the task list came from: `idle` means the daemon delivered a list (an
+ * empty one is genuinely empty), `loading` means a fetch is in flight, and
+ * `error` means the last fetch failed so saved tasks may still exist.
+ */
+export type TasksLoadState = "idle" | "loading" | "error";
+
 interface Props {
   tasks: readonly ProjectTask[];
   /** True while the session is busy, including Autopilot review — disables run actions. */
@@ -29,6 +36,15 @@ interface Props {
   onRunAll: () => Promise<void> | void;
   onDelete: (id: string) => Promise<void> | void;
   onClose: () => void;
+  /**
+   * Empty-state action: drafts a request for the agent to add tasks into the
+   * composer. It must never create or run a task itself.
+   */
+  onDraftTasks?: () => void;
+  /** Defaults to `idle` so an empty list keeps the original empty state. */
+  loadState?: TasksLoadState;
+  /** Re-fetches the task list after a failed load. */
+  onRetryLoad?: () => void;
 }
 
 const UNKNOWN_STATUS_STYLE = { label: "unknown", color: theme.textMuted };
@@ -96,6 +112,9 @@ export function TasksModal({
   onRunAll,
   onDelete,
   onClose,
+  onDraftTasks,
+  loadState = "idle",
+  onRetryLoad,
 }: Props): React.ReactElement {
   const controller = useTasksController({ tasks, onRun, onRunAll, onDelete });
   const {
@@ -234,6 +253,57 @@ export function TasksModal({
     </div>
   );
 
+  // An empty list only means "no tasks" once the daemon actually returned it.
+  // While loading or after a failure, never offer to draft new tasks: saved
+  // ones may exist and the user would end up recreating them.
+  if (tasks.length === 0 && loadState === "loading") {
+    return (
+      <Modal title="Tasks" className="tasks-modal" onClose={onClose}>
+        <div
+          ref={emptyRef}
+          className="tasks-empty"
+          tabIndex={-1}
+          role="status"
+          style={{ color: theme.textMuted }}
+        >
+          Loading tasks…
+        </div>
+      </Modal>
+    );
+  }
+
+  if (tasks.length === 0 && loadState === "error") {
+    return (
+      <Modal title="Tasks" className="tasks-modal" onClose={onClose}>
+        <div
+          ref={emptyRef}
+          className="tasks-empty"
+          tabIndex={-1}
+          aria-labelledby="tasks-load-error-title"
+          role="group"
+        >
+          <h3
+            id="tasks-load-error-title"
+            className="tasks-empty-title"
+            style={{ color: theme.text }}
+          >
+            Couldn’t load tasks
+          </h3>
+          <p className="tasks-empty-text" role="alert" style={{ color: theme.textMuted }}>
+            Saved tasks may still exist. Try again once the session is ready.
+          </p>
+        </div>
+        {onRetryLoad && (
+          <div className="tasks-actions tasks-empty-actions">
+            <button className="btn btn-sm btn-primary" type="button" onClick={onRetryLoad}>
+              Try again
+            </button>
+          </div>
+        )}
+      </Modal>
+    );
+  }
+
   if (tasks.length === 0) {
     return (
       <Modal title="Tasks" className="tasks-modal" onClose={onClose}>
@@ -241,14 +311,30 @@ export function TasksModal({
           ref={emptyRef}
           className="tasks-empty"
           tabIndex={-1}
-          style={{ color: theme.textMuted }}
+          aria-labelledby="tasks-empty-title"
+          role="group"
         >
-          No tasks yet. Ask the agent to add tasks, then run them here.
+          <h3 id="tasks-empty-title" className="tasks-empty-title" style={{ color: theme.text }}>
+            No tasks yet
+          </h3>
+          <p className="tasks-empty-text" style={{ color: theme.textMuted }}>
+            Tasks are saved steps you can run one at a time. Ask the agent to break work into tasks.
+          </p>
         </div>
         {notice !== null && (
           <p className="tasks-notice" role="status" style={{ color: theme.textSecondary }}>
             {notice}
           </p>
+        )}
+        {onDraftTasks && (
+          <div className="tasks-actions tasks-empty-actions">
+            <span className="tasks-empty-note" style={{ color: theme.textMuted }}>
+              Fills the message box. Nothing is sent.
+            </span>
+            <button className="btn btn-sm btn-primary" type="button" onClick={onDraftTasks}>
+              Draft a task request
+            </button>
+          </div>
         )}
       </Modal>
     );

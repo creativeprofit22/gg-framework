@@ -17,6 +17,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type SetStateAction,
 } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -127,7 +128,7 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { isBackgroundTaskRunning } from "./background-task-status";
-import { TasksModal } from "./TasksModal";
+import { TasksModal, type TasksLoadState } from "./TasksModal";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import type {
   NotesPromptSaveResult,
@@ -139,6 +140,8 @@ import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
 import { MotionStarters } from "./MotionStarters";
+import { ComposerStarters } from "./ComposerStarters";
+import { CHAT_STARTERS, CODE_STARTERS, TASKS_DRAFT_PROMPT } from "./session-starters";
 import { ConfirmModal } from "./ConfirmModal";
 import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
 import { InitGitModal } from "./InitGitModal";
@@ -1054,7 +1057,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, [astraControlsBusy]);
   // Project task list (the agent's `tasks` tool store) + the Tasks modal.
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
-  const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
+  const [projectTasks, setProjectTasksState] = useState<ProjectTask[]>([]);
+  // Lets the modal tell "no tasks" apart from "still loading" or "failed to load".
+  const [tasksLoad, setTasksLoad] = useState<TasksLoadState>("idle");
+  // Any delivered list (fetched, pushed over SSE, or returned by a delete) is a
+  // successful load, so it also clears a pending or failed load state.
+  const setProjectTasks = useCallback((next: SetStateAction<ProjectTask[]>): void => {
+    setProjectTasksState(next);
+    setTasksLoad("idle");
+  }, []);
   const [showTasks, setShowTasks] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
   // Every window chooses a code or chat workspace before connecting. Mode stays
@@ -2415,6 +2426,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         setProjectTasks(projectTasks);
       } catch (error) {
         if (!isCurrent()) return;
+        setTasksLoad("error");
         toast(taskErrorMessage(error), "error");
       }
       // Hydrate the transcript when resuming an existing session — the webview
@@ -2587,6 +2599,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     listHistory,
     listModels,
     listTasks,
+    setProjectTasks,
     replacePlanReview,
     captureKenHydration,
     clearKenStream,
@@ -2674,10 +2687,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {
     setShowTasks(true);
+    setTasksLoad("loading");
     void listTasks()
       .then(setProjectTasks)
-      .catch((error) => toast(taskErrorMessage(error), "error"));
-  }, [listTasks]);
+      .catch((error: unknown) => {
+        setTasksLoad("error");
+        toast(taskErrorMessage(error), "error");
+      });
+  }, [listTasks, setProjectTasks]);
 
   // Run a single task: the sidecar opens a fresh session and streams progress
   // back (session_reset → task_start → run_start/…/run_end). Close the modal so
@@ -2721,7 +2738,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           toast(taskErrorMessage(error), "error");
           throw error;
         }),
-    [deleteTask],
+    [deleteTask, setProjectTasks],
   );
 
   // Pin Ken to a model (or null → clear the pin, follow GG Coder). The
@@ -2939,6 +2956,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const needsGitInit = state?.isGitRepo === false;
   // Default repo name = the project folder name.
   const defaultRepoName = (state?.cwd ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+
+  const showStarters =
+    hydrated &&
+    status === "ready" &&
+    items.length === 0 &&
+    !running &&
+    input.trim() === "" &&
+    attachments.length === 0;
 
   /** Put text in the composer with the caret at the end, ready to finish and send. */
   function fillComposer(text: string): void {
@@ -5086,11 +5111,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           opens (pushing the chat up) only while one is out. */}
       <CritterFloor groups={critterGroups} />
       <div className="liveregion">
-        {/* Motion's starting points sit just above the activity bar and go away
-            once the conversation has its first message. */}
-        {workspaceMode === "motion" && hydrated && items.length === 0 && !running && (
-          <MotionStarters onPick={fillComposer} />
-        )}
+        {/* Starting points sit just above the activity bar, only for an empty,
+            loaded, ready conversation. They fill the composer (never send) and
+            hide as soon as the user types or attaches something. */}
+        {showStarters &&
+          (workspaceMode === "motion" ? (
+            <MotionStarters onPick={fillComposer} />
+          ) : (
+            <ComposerStarters
+              starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
+              label="Ways to start"
+              onPick={fillComposer}
+            />
+          ))}
         {workspaceMode === "code" && kenRunning && (
           <KenActivityBar
             runStartTs={kenRunStartTs}
@@ -5834,11 +5867,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {workspaceMode === "code" && showTasks && (
         <TasksModal
           tasks={projectTasks}
+          loadState={tasksLoad}
+          onRetryLoad={openTasks}
           running={running || autopilotReviewing || newSessionBusy}
           onRun={handleRunTask}
           onRunAll={handleRunAllTasks}
           onDelete={handleDeleteTask}
           onClose={() => setShowTasks(false)}
+          onDraftTasks={() => {
+            // Draft only: close the list and hand the user an editable request.
+            // No task is created or run until they send it themselves.
+            // Unsent text is kept as the work to break down, never overwritten.
+            setShowTasks(false);
+            const existing = input.trim();
+            fillComposer(existing ? `${TASKS_DRAFT_PROMPT}${existing}` : TASKS_DRAFT_PROMPT);
+          }}
         />
       )}
     </div>

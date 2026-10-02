@@ -34,6 +34,8 @@ const MOTION_LINES = [
   "Tell me what to make. Let\u2019s make it move.",
 ] as const;
 
+const WAKE_HINT = "Pick a starting point below or type your own request.";
+
 const TYPE_MS = 55; // per-character type speed
 const HOLD_MS = 1400; // pause once a line finishes typing
 const ERASE_MS = 22; // per-character erase speed
@@ -242,6 +244,9 @@ export function WakeScreen({
         <span className="wake-line">{text}</span>
         <span className={`wake-cursor${done ? " wake-cursor-rest" : ""}`}>{"\u2588"}</span>
       </div>
+      {/* Static guidance (never typed or animated) so the next step is readable at once.
+          Motion keeps its own video ideas without an extra line. */}
+      {!motion && <p className="wake-hint">{WAKE_HINT}</p>}
     </div>
   );
 }

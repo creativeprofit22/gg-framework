@@ -19,6 +19,7 @@ import { Toaster } from "./Toaster";
 import { progressTransition } from "./test-fixtures/progress-transition";
 import { playSound } from "./sounds";
 import { MENTOR_HANDLE } from "./brand";
+import { MOTION_STARTERS } from "./motion-starters";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 import completedVerificationTask from "./test-fixtures/completed-verification-task.json";
@@ -323,6 +324,11 @@ const chatTarget: PaneSessionTarget = {
   chatAgent: "general",
   cwd: "/work",
   sessionPath: "/chat-session",
+};
+const motionTarget: PaneSessionTarget = {
+  mode: "motion",
+  cwd: "/work",
+  sessionPath: "/motion-session",
 };
 const roadmapDraft: RoadmapPhaseDraft = {
   id: "draft-research",
@@ -1724,6 +1730,163 @@ async function openTasksModal(pane: PaneAgentClient): Promise<void> {
   await screen.findByRole("dialog", { name: "Tasks" });
 }
 
+describe("empty session starting points", () => {
+  it("fills the composer from a starter without sending, and hides starters while typing", async () => {
+    const pane = client("empty-starters", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    const group = await screen.findByRole("group", { name: "Ways to start" });
+    expect(screen.getByText("Pick a starting point below or type your own request.")).toBeTruthy();
+    fireEvent.click(within(group).getByRole("button", { name: "Fix a bug" }));
+
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(input.value).toBe("Find and fix this bug: ");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    // A filled composer counts as typing: the starters step aside.
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(await screen.findByRole("group", { name: "Ways to start" })).toBeTruthy();
+    fireEvent.change(input, { target: { value: "my own request" } });
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("offers chat starters in a chat session", async () => {
+    const pane = client("empty-chat-starters", 1);
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), mode: "chat" });
+    render(<AgentPane client={pane} target={chatTarget} />);
+
+    const group = await screen.findByRole("group", { name: "Ways to start" });
+    expect(within(group).getByRole("button", { name: "Brainstorm ideas" })).toBeTruthy();
+    expect(within(group).queryByRole("button", { name: "Fix a bug" })).toBeNull();
+  });
+
+  it("offers video ideas in a motion session that fill the composer and hide while typing", async () => {
+    const pane = client("empty-motion-starters", 1);
+    vi.mocked(pane.getState).mockResolvedValue({ ...agentState("azure:gpt-test"), mode: "motion" });
+    render(<AgentPane client={pane} target={motionTarget} />);
+
+    const group = await screen.findByRole("group", { name: "Video ideas to start from" });
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+
+    const [first] = MOTION_STARTERS;
+    const firstButton = within(group).getAllByRole("button")[0];
+    if (!firstButton) throw new Error("expected a motion starter button");
+    expect(firstButton.textContent).toContain(first.label);
+    fireEvent.click(firstButton);
+
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(input.value).toBe(first.prompt);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "Video ideas to start from" })).toBeNull();
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(await screen.findByRole("group", { name: "Video ideas to start from" })).toBeTruthy();
+    fireEvent.change(input, { target: { value: "my own video" } });
+    expect(screen.queryByRole("group", { name: "Video ideas to start from" })).toBeNull();
+    fireEvent.change(input, { target: { value: "" } });
+    expect(await screen.findByRole("group", { name: "Video ideas to start from" })).toBeTruthy();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps starters hidden while history loads and for a non-empty conversation", async () => {
+    const pane = client("starters-history", 1);
+    const history = deferred<AgentModule.HistoryEntry[]>();
+    vi.mocked(pane.listHistory).mockReturnValue(history.promise);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+
+    await act(async () => history.resolve([{ role: "user", text: "Existing prompt" }]));
+    expect(await screen.findByText("Existing prompt")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+  });
+
+  it("shows starters once an empty history finishes loading", async () => {
+    const pane = client("starters-empty-history", 1);
+    const history = deferred<AgentModule.HistoryEntry[]>();
+    vi.mocked(pane.listHistory).mockReturnValue(history.promise);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    expect(screen.queryByRole("group", { name: "Ways to start" })).toBeNull();
+    await act(async () => history.resolve([]));
+    expect(await screen.findByRole("group", { name: "Ways to start" })).toBeTruthy();
+  });
+
+  it("drafts a task request from empty Tasks without creating, running or sending anything", async () => {
+    const pane = client("empty-tasks-draft", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Tasks" }));
+    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    expect(await within(dialog).findByText("No tasks yet")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Draft a task request" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(input.value).toBe("Break this work into project tasks I can run later: ");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.runTask).not.toHaveBeenCalled();
+    expect(pane.runAllTasks).not.toHaveBeenCalled();
+    expect(pane.deleteTask).not.toHaveBeenCalled();
+  });
+
+  it("keeps unsent composer text when drafting a task request from empty Tasks", async () => {
+    const pane = client("empty-tasks-draft-keep", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    const tasksButton = await screen.findByRole("button", { name: "Tasks" });
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "add login" } });
+    fireEvent.click(tasksButton);
+    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Draft a task request" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+      "Break this work into project tasks I can run later: add login",
+    );
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.runTask).not.toHaveBeenCalled();
+    expect(pane.runAllTasks).not.toHaveBeenCalled();
+    expect(pane.deleteTask).not.toHaveBeenCalled();
+  });
+
+  it("says the task list failed to load instead of showing an empty list", async () => {
+    const pane = client("empty-tasks-load-failure", 1);
+    vi.mocked(pane.listTasks).mockRejectedValue(new Error("session not ready"));
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Tasks" }));
+    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    expect(
+      await within(dialog).findByRole("heading", { name: /Couldn.t load tasks/u }),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("No tasks yet")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Draft a task request" })).toBeNull();
+    expect(nativeMocks.toast).toHaveBeenCalledWith("session not ready", "error");
+
+    // Retrying refetches; once the daemon answers, the genuine empty state appears.
+    vi.mocked(pane.listTasks).mockResolvedValue([]);
+    const calls = vi.mocked(pane.listTasks).mock.calls.length;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Try again" }));
+    expect(await within(dialog).findByText("No tasks yet")).toBeTruthy();
+    expect(vi.mocked(pane.listTasks).mock.calls.length).toBe(calls + 1);
+    expect(within(dialog).getByRole("button", { name: "Draft a task request" })).toBeTruthy();
+  });
+});
+
 describe("command refresh ordering (mocked native transport)", () => {
   it("does not apply a previous client's catalog after switching sessions", async () => {
     const oldPane = client("old-command-owner", 1);
@@ -3113,6 +3276,10 @@ describe("AgentPane lifecycle", () => {
     expect((await screen.findByText("◆ Supah Coder Local Fork · abc1234")).className).toBe(
       "footer-custom-build",
     );
+    // Footer dividers are decoration; screen readers must not announce the glyph.
+    const seps = document.querySelectorAll(".footer-sep");
+    expect(seps.length).toBeGreaterThan(0);
+    for (const sep of seps) expect(sep.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("presents the compatible general chat agent as Brainstorm", async () => {

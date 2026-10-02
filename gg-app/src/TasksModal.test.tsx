@@ -329,5 +329,76 @@ describe("TasksModal", () => {
 
     expect(screen.getByText(/No tasks yet/u)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Run all/u })).toBeNull();
+    // Without a draft handler there is no action to offer.
+    expect(screen.queryByRole("button", { name: "Draft a task request" })).toBeNull();
+  });
+
+  it("offers a draft action on the empty list that only drafts", () => {
+    const onDraftTasks = vi.fn();
+    const onRun = vi.fn();
+    const onRunAll = vi.fn();
+    const onDelete = vi.fn();
+    const onClose = vi.fn();
+    renderModal([], { onDraftTasks, onRun, onRunAll, onDelete, onClose });
+
+    expect(screen.getByRole("heading", { name: "No tasks yet" })).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Tasks are saved steps you can run one at a time. Ask the agent to break work into tasks.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("Fills the message box. Nothing is sent.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Draft a task request" }));
+
+    expect(onDraftTasks).toHaveBeenCalledTimes(1);
+    expect(onRun).not.toHaveBeenCalled();
+    expect(onRunAll).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not offer the draft action when tasks exist", () => {
+    renderModal([taskWithStatus("pending")], { onDraftTasks: vi.fn() });
+
+    expect(screen.queryByRole("button", { name: "Draft a task request" })).toBeNull();
+  });
+
+  it("keeps the empty state and draft action when the list loaded empty", () => {
+    renderModal([], { loadState: "idle", onDraftTasks: vi.fn(), onRetryLoad: vi.fn() });
+
+    expect(screen.getByRole("heading", { name: "No tasks yet" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Draft a task request" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("shows a neutral loading line, not the empty state, while the list loads", () => {
+    renderModal([], { loadState: "loading", onDraftTasks: vi.fn() });
+
+    expect(screen.getByRole("status").textContent).toBe("Loading tasks…");
+    expect(screen.queryByText(/No tasks yet/u)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Draft a task request" })).toBeNull();
+  });
+
+  it("reports a failed load with a retry instead of offering to draft tasks", () => {
+    const onRetryLoad = vi.fn();
+    const onDraftTasks = vi.fn();
+    renderModal([], { loadState: "error", onRetryLoad, onDraftTasks });
+
+    expect(screen.getByRole("heading", { name: /Couldn.t load tasks/u })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Saved tasks may still exist.");
+    expect(screen.queryByText(/No tasks yet/u)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Draft a task request" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(onRetryLoad).toHaveBeenCalledTimes(1);
+    expect(onDraftTasks).not.toHaveBeenCalled();
+  });
+
+  it("still shows saved tasks when a later reload fails", () => {
+    renderModal([taskWithStatus("pending")], { loadState: "error", onRetryLoad: vi.fn() });
+
+    expect(screen.getByRole("button", { name: `Inspect task: ${TITLE}` })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: /Couldn.t load tasks/u })).toBeNull();
   });
 });

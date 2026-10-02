@@ -3750,6 +3750,32 @@ select {
   line-height: 1.5;
   padding: 8px 2px;
 }
+.tasks-empty-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.tasks-empty-text {
+  margin: 0;
+}
+/* Empty Tasks action row: the note says what the button does, then the button. */
+.tasks-empty-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+}
+.tasks-empty-note {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tasks-empty-actions .btn {
+  min-height: 32px;
+}
+@media (pointer: coarse) {
+  .tasks-empty-actions .btn {
+    min-height: 44px;
+  }
+}
 .tasks-list {
   display: flex;
   flex-direction: column;
@@ -9236,6 +9262,8 @@ select {
 .wake-screen {
   position: relative;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
   align-items: center;
   justify-content: center;
   min-height: 100%;
@@ -9273,6 +9301,18 @@ select {
 .wake-cursor-rest {
   color: var(--secondary);
 }
+/* Static one-line guidance under the typed line: readable at once, never animated. */
+.wake-hint {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 0 var(--rail);
+  max-width: 64ch;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+  color: var(--text-secondary);
+}
 /* Motion's one-click starting points: a wrapping row just above the activity
    bar, aligned to the same rail as the rest of the live region. */
 .motion-starters {
@@ -9282,9 +9322,15 @@ select {
   padding: 8px var(--rail);
 }
 .motion-starter {
+  min-height: 32px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+@media (pointer: coarse) {
+  .motion-starter {
+    min-height: 44px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .wake-cursor {

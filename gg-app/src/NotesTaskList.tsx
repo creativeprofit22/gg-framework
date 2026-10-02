@@ -67,6 +67,7 @@ export function NotesTaskList({
           <input
             ref={addInputRef}
             id="notes-add-task"
+            placeholder="Describe a task, then press Enter"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />

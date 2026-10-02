@@ -3,12 +3,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [
-    [
-      "@kenkaiiii/gg-ai",
-      "@kenkaiiii/gg-agent",
-      "@kenkaiiii/gg-core",
-      "@kenkaiiii/ggcoder"
-    ]
+    ["@kenkaiiii/gg-ai", "@kenkaiiii/gg-agent", "@kenkaiiii/gg-core", "@kenkaiiii/ggcoder"]
   ],
   "linked": [],
   "access": "public",

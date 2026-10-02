@@ -40,6 +40,7 @@ GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runt
 - Desktop distribution sequence is framework builds → Node staging → sidecar bundling → bundled-runtime smoke → Tauri packaging. Windows CI additionally extracts and launches the MSI to verify the installed executable, visible window, runtime, and sidecar.
 - Public releases are tag-driven and ship Windows plus Apple Silicon macOS only. The tag must match `v<semver>`, point into `origin/main`, and have successful CI for that exact SHA.
 - Release preflight requires updater signing credentials on every platform and Apple signing/notarization credentials for macOS. macOS nested Node/native-addon binaries must be signed before Tauri assembles and notarizes the app.
+
 <!-- gg:init:end -->
 
 ## Verification status handoff

@@ -111,7 +111,9 @@ console.log(
 );
 
 if (failed) {
-  console.error("\nSize gate failed. Check growth or missing build artifacts; do not rebaseline to bypass a regression.");
+  console.error(
+    "\nSize gate failed. Check growth or missing build artifacts; do not rebaseline to bypass a regression.",
+  );
   process.exit(1);
 }
 

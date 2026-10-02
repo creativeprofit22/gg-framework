@@ -8,16 +8,16 @@ Keep the application rendering path, `main.tsx`, `AgentPane.tsx`, `App.css`, wor
 
 Modules under `gg-app/scripts/chat-design-preview/`:
 
-| Module | Responsibility |
-| --- | --- |
-| `vite-plugin.mjs` | Route only when Vite is serving and `GG_CHAT_DESIGN_PREVIEW=1`; serialize synthetic IPC before the real app entry |
-| `fixtures.mjs` | Compose inspected screenshot mocks, overriding progress with the pure backend snapshot; deterministic conversations, empty Roadmap drafts and Qwen defaults; no live session access |
-| `progress-fixtures.mjs` | Deterministic in-memory seeds and authoritative backend snapshots for normal, tier-boundary, real gold-effect and maximum-level scenarios; no progress storage |
-| `layouts.mjs` | Deterministic 1/2/3/5/6-pane and uneven layouts using the current exported schema |
-| `run.mjs` | Verify local server identity, use fresh owned browser contexts, restrict requests, capture evidence, close owned contexts |
-| `measurements.mjs` | Geometry, computed type, transcript/composer footprint, reading anchors, focus and draft observations |
-| `server-identity.mjs` | SHA-256 identity of the canonical application root, shared by the plugin and runner |
-| `preview.test.ts` | Opt-in, production exclusion, schema/default responses, variant allowlist and checkout-handshake tests |
+| Module                  | Responsibility                                                                                                                                                                      |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vite-plugin.mjs`       | Route only when Vite is serving and `GG_CHAT_DESIGN_PREVIEW=1`; serialize synthetic IPC before the real app entry                                                                   |
+| `fixtures.mjs`          | Compose inspected screenshot mocks, overriding progress with the pure backend snapshot; deterministic conversations, empty Roadmap drafts and Qwen defaults; no live session access |
+| `progress-fixtures.mjs` | Deterministic in-memory seeds and authoritative backend snapshots for normal, tier-boundary, real gold-effect and maximum-level scenarios; no progress storage                      |
+| `layouts.mjs`           | Deterministic 1/2/3/5/6-pane and uneven layouts using the current exported schema                                                                                                   |
+| `run.mjs`               | Verify local server identity, use fresh owned browser contexts, restrict requests, capture evidence, close owned contexts                                                           |
+| `measurements.mjs`      | Geometry, computed type, transcript/composer footprint, reading anchors, focus and draft observations                                                                               |
+| `server-identity.mjs`   | SHA-256 identity of the canonical application root, shared by the plugin and runner                                                                                                 |
+| `preview.test.ts`       | Opt-in, production exclusion, schema/default responses, variant allowlist and checkout-handshake tests                                                                              |
 
 Browser-only modules under `gg-app/src/dev/chat-design-preview/`:
 

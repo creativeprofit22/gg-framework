@@ -6,15 +6,15 @@ Status, 2026-09-27 UTC: **integrated app source with scoped Windows developer-na
 
 Settings → **Appearance and reading** applies and saves changes immediately. Only the project folder is saved explicitly, with **Save folder** beside its field; see [radio-settings-feedback.md](radio-settings-feedback.md#settings-instant-preferences-versus-the-saved-folder).
 
-| Control | Default | Alternative |
-| --- | --- | --- |
-| Theme | Dark | Light |
-| Prose size | 15 px | 16 px; code and compact UI retain their size |
-| Letter spacing | Current | Normal |
-| Paragraph spacing | Current | Roomier |
-| Wide-pane reading width | Full width | 74ch cap only when the individual pane is at least 900 CSS px wide |
-| Identity markers | Current | Small decorative shapes; no invented identity data |
-| Streamed words | Current reveal | Crisp reveal, without changing parsing or delivery |
+| Control                 | Default        | Alternative                                                        |
+| ----------------------- | -------------- | ------------------------------------------------------------------ |
+| Theme                   | Dark           | Light                                                              |
+| Prose size              | 15 px          | 16 px; code and compact UI retain their size                       |
+| Letter spacing          | Current        | Normal                                                             |
+| Paragraph spacing       | Current        | Roomier                                                            |
+| Wide-pane reading width | Full width     | 74ch cap only when the individual pane is at least 900 CSS px wide |
+| Identity markers        | Current        | Small decorative shapes; no invented identity data                 |
+| Streamed words          | Current reveal | Crisp reveal, without changing parsing or delivery                 |
 
 Reset appearance defaults affects only these controls. It does not reset projects, sessions, zoom, providers or Autopilot. The preview's Original/Reading comparison modes and charcoal-code experiment are not saved production options. The coding wake screen intentionally retains its dark terminal treatment; it is distinct from Home.
 
@@ -75,6 +75,7 @@ Task `23b2939d` adds `pnpm --filter gg-app smoke:appearance` to the Windows app 
 Failure upload explicitly allows only `.gg/eyes/out/appearance-native/fixture-*/result.json` and `fixture-*/*.png`. Hidden-file inclusion is required for `.gg`, but the whole directory, visible-session records, nested profiles and raw logs are not selected. The existing runtime tasks own native background readback (`baa9ad5d`), prebuild/readiness separation (`83055721`) and failure/cleanup evidence persistence (`8e69ec11`); this integration leaves those implementations untouched.
 
 Fresh local verification:
+
 - **19 release-CI tests passed**, including serial ordering, blocking failure propagation and exact artifact paths; **53 launcher/smoke tests passed**, including startup/cleanup failure cases. Execution `a9ce09b7-d74f-487c-96ae-865686b6baf1`.
 - The requested native smoke ran once and **passed**, execution `817166b5-2626-4a53-9402-0fe327f20011`. Cargo's finite incremental build completed in 1.90 seconds before readiness. Verdict, source hashes and four controlled PNGs: `.gg/eyes/out/appearance-native/fixture-1790006728675/`. Both actual native colors passed for main, project-1 and What's New; the SDK negative control remained effective. Saved reading settings, reading anchors, session/pane stability, synchronization and closure passed. Cleanup recorded 14 observed fixture processes and no survivors. A compatible existing normal-app Vite server was reused, not stopped.
 
@@ -84,19 +85,19 @@ Fresh local verification:
 
 Latest scoped receipts (host logs are `C:/Users/SPARTAN PC/.gg/foreground/<execution-id>.log`):
 
-| Check | Result / evidence |
-| --- | --- |
-| Final affected tests, including preview isolation and debug lifecycle | 85 passed across 11 files; `111ffbb6-6fa2-457b-b31c-b128121ddc12` |
-| Final debug-helper/launcher regression rerun | 10 passed after final socket teardown tightening; `40738808-e21d-4f83-a156-8e4a8f262b88`; subsequent native smoke and real review passed |
-| Standalone app typecheck | Passed; `cb3661dd-82db-417c-a649-72f5571aa4e6` |
-| App build | Passed; `69bacd07-7cdb-4ef0-b9c6-0c72a4969722`; existing config-loader/chunk warnings retained |
-| Unchanged frontend initial size gate | 822.4 KB / 826.0 KB; `3d8b8843-f3be-469e-a599-9b787cff2abd` |
-| Final permanent native smoke, including What's New closure | Passed; `8f51586d-9151-41e3-9d37-cff895eb5fa5`; `appearance-native/fixture-1789974806570/result.json` |
-| Visible real-daemon review | Passed scoped checks in 5.6 seconds after hang fix; `045023cb-ca5e-441d-b45e-39f1723e20a9`; `appearance-native/real-review-after-hang-fix.json` |
-| Light pane swaps / six panes | Passed; `pane-swaps-native/1789971606178/` |
-| Dark pane swaps | Passed unchanged rerun; `pane-swaps-native/1789971747477/`; retain failed narrow Enter run `1789971654861/` |
-| Unequal-width reading-anchor tests in both themes | Passed; `pane-reading-native/1789971793689/` and `1789971824161/` |
-| Supplemental canonical visuals and component checks | `appearance-native/final-geist-*.png`, `settings-checks.json`; browser component evidence, not native substitution |
+| Check                                                                 | Result / evidence                                                                                                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Final affected tests, including preview isolation and debug lifecycle | 85 passed across 11 files; `111ffbb6-6fa2-457b-b31c-b128121ddc12`                                                                               |
+| Final debug-helper/launcher regression rerun                          | 10 passed after final socket teardown tightening; `40738808-e21d-4f83-a156-8e4a8f262b88`; subsequent native smoke and real review passed        |
+| Standalone app typecheck                                              | Passed; `cb3661dd-82db-417c-a649-72f5571aa4e6`                                                                                                  |
+| App build                                                             | Passed; `69bacd07-7cdb-4ef0-b9c6-0c72a4969722`; existing config-loader/chunk warnings retained                                                  |
+| Unchanged frontend initial size gate                                  | 822.4 KB / 826.0 KB; `3d8b8843-f3be-469e-a599-9b787cff2abd`                                                                                     |
+| Final permanent native smoke, including What's New closure            | Passed; `8f51586d-9151-41e3-9d37-cff895eb5fa5`; `appearance-native/fixture-1789974806570/result.json`                                           |
+| Visible real-daemon review                                            | Passed scoped checks in 5.6 seconds after hang fix; `045023cb-ca5e-441d-b45e-39f1723e20a9`; `appearance-native/real-review-after-hang-fix.json` |
+| Light pane swaps / six panes                                          | Passed; `pane-swaps-native/1789971606178/`                                                                                                      |
+| Dark pane swaps                                                       | Passed unchanged rerun; `pane-swaps-native/1789971747477/`; retain failed narrow Enter run `1789971654861/`                                     |
+| Unequal-width reading-anchor tests in both themes                     | Passed; `pane-reading-native/1789971793689/` and `1789971824161/`                                                                               |
+| Supplemental canonical visuals and component checks                   | `appearance-native/final-geist-*.png`, `settings-checks.json`; browser component evidence, not native substitution                              |
 
 All relative evidence paths above live under ignored `.gg/eyes/out/`. They do not automatically accompany a clone. `appearance-native/baseline.md` and `source-manifest.json` distinguish the dirty source from HEAD. Earlier screenshots, failures and logs remain preserved.
 
@@ -139,15 +140,15 @@ Current reading/pane-swap comfort is satisfactory for the user as of 2026-09-21 
 
 Written while the source was uncommitted and not installed; the dated entries below keep that original wording. Update 2026-09-27: the changes are committed in `343d743f` and the installed v0.70.5 build contains them (see [Open items](#open-items) for what is still unverified there). Entries are in the order they happened, so an earlier "open" can be closed by a later entry.
 
-| Change | User-visible effect | Where |
-| --- | --- | --- |
-| Early theme script before first paint | Light no longer flashes dark on reload | `gg-app/public/appearance-boot.js`, `gg-app/index.html` |
-| Remembered window theme | New windows open with the saved theme's background and title bar | `gg-app/src-tauri/src/window_theme.rs`, `gg-app/src/appearance-native.ts` |
-| Reveal windows after first load | No dark frame when a window opens; windows appear ~0.6 s after request | `window_theme.rs`, window builder in `gg-app/src-tauri/src/lib.rs` |
-| Re-inked monochrome logos | OpenAI, xAI and Moonshot logos visible on Light provider tiles | `gg-app/src/provider-logos.ts`, `gg-app/src/LoginScreen.tsx`, `gg-app/src/appearance.css` |
-| Header glow clipped at the pane edge | No stray sideways scrollbar in Code panes | `.chat-head` in `gg-app/src/App.css` |
-| Home scrolls when too tall | Top and bottom rows reachable at the minimum window size | `.home` in `gg-app/src/App.css` |
-| Short review panes scroll the header vertically only | No sideways scrollbar inside the header when a review is open in a short pane | `@container review-pane` `.chat-head` in `gg-app/src/App.css` |
+| Change                                               | User-visible effect                                                           | Where                                                                                     |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Early theme script before first paint                | Light no longer flashes dark on reload                                        | `gg-app/public/appearance-boot.js`, `gg-app/index.html`                                   |
+| Remembered window theme                              | New windows open with the saved theme's background and title bar              | `gg-app/src-tauri/src/window_theme.rs`, `gg-app/src/appearance-native.ts`                 |
+| Reveal windows after first load                      | No dark frame when a window opens; windows appear ~0.6 s after request        | `window_theme.rs`, window builder in `gg-app/src-tauri/src/lib.rs`                        |
+| Re-inked monochrome logos                            | OpenAI, xAI and Moonshot logos visible on Light provider tiles                | `gg-app/src/provider-logos.ts`, `gg-app/src/LoginScreen.tsx`, `gg-app/src/appearance.css` |
+| Header glow clipped at the pane edge                 | No stray sideways scrollbar in Code panes                                     | `.chat-head` in `gg-app/src/App.css`                                                      |
+| Home scrolls when too tall                           | Top and bottom rows reachable at the minimum window size                      | `.home` in `gg-app/src/App.css`                                                           |
+| Short review panes scroll the header vertically only | No sideways scrollbar inside the header when a review is open in a short pane | `@container review-pane` `.chat-head` in `gg-app/src/App.css`                             |
 
 New or changed tests: `appearance-boot.test.ts`, `provider-logos.test.ts`, `appearance-native.test.ts`, `main.whatsnew.test.tsx`, `LoginScreen.test.tsx`, and Rust `window_theme` tests.
 

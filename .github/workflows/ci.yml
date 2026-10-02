@@ -304,8 +304,8 @@ jobs:
           TEMP: ${{ runner.temp }}/pane-swaps-dev-smoke
           TMP: ${{ runner.temp }}/pane-swaps-dev-smoke
           GG_PANE_SWAPS_EVIDENCE: ${{ runner.temp }}/pane-swaps-evidence
-          CARGO_NET_OFFLINE: 'true'
-          COREPACK_ENABLE_NETWORK: '0'
+          CARGO_NET_OFFLINE: "true"
+          COREPACK_ENABLE_NETWORK: "0"
         run: |
           set -euo pipefail
           mkdir -p "$TEMP" "$GG_PANE_SWAPS_EVIDENCE"
@@ -338,9 +338,9 @@ jobs:
         env:
           TEMP: ${{ runner.temp }}/appearance-dev-smoke
           TMP: ${{ runner.temp }}/appearance-dev-smoke
-          CARGO_NET_OFFLINE: 'true'
-          COREPACK_ENABLE_NETWORK: '0'
-          UIMAXXXING_EYES_NO_INSTALL: '1'
+          CARGO_NET_OFFLINE: "true"
+          COREPACK_ENABLE_NETWORK: "0"
+          UIMAXXXING_EYES_NO_INSTALL: "1"
         run: |
           set -euo pipefail
           mkdir -p "$TEMP"

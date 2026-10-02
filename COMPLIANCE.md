@@ -10,11 +10,11 @@ Public Bklit/Kokonut component discovery, supporting shadcn source, and Motion A
 
 ## Feature-specific register
 
-| ID | Concern | Evidence | Control / remaining limitation |
-| --- | --- | --- | --- |
-| UI-1 | Public source is not proof of production rights | CODE: registry attribution and dependency reporting | Preserve source notices; record hosted payload hashes separately from inventory revisions. Verify the applicable upstream license before distribution. |
-| UI-2 | Dependency licenses can differ from component licenses | CODE: adoption flags Iconists | Nonstandard/unknown dependency terms need independent review. This feature does not implement a full transitive license scanner or certify rights. |
-| UI-3 | Paid-library content | CODE: exact public registry URL allowlist | No Studio/Motion+ asset endpoints or installers are supported. Public registry contents still require review. |
+| ID   | Concern                                                | Evidence                                            | Control / remaining limitation                                                                                                                         |
+| ---- | ------------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| UI-1 | Public source is not proof of production rights        | CODE: registry attribution and dependency reporting | Preserve source notices; record hosted payload hashes separately from inventory revisions. Verify the applicable upstream license before distribution. |
+| UI-2 | Dependency licenses can differ from component licenses | CODE: adoption flags Iconists                       | Nonstandard/unknown dependency terms need independent review. This feature does not implement a full transitive license scanner or certify rights.     |
+| UI-3 | Paid-library content                                   | CODE: exact public registry URL allowlist           | No Studio/Motion+ asset endpoints or installers are supported. Public registry contents still require review.                                          |
 
 ## Implemented controls
 

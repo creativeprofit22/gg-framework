@@ -10,14 +10,14 @@ Authorization: explicit human ceiling selected 22 Sep — 6 runs / 120 requests 
 
 Per-case results (all on fresh Vite+React+TS+Tailwind4 fixtures, isolated HOME, brokered GLM 5.3):
 
-| Case | Time | Reqs | Tokens | Build | Typecheck | Hosted-source provenance |
-| --- | --- | --- | --- | --- | --- | --- |
-| bklit-shimmer (named) | 435s | 36 | 920,368 | pass | pass | 0.980 vs hosted `shimmering-text.json` |
-| kokonut-cardflip (named) | 240s | 18 | 466,268 | pass | pass | 0.984 vs hosted `card-flip.json` |
-| motion-outcome (outcome-led) | 124s | 9 | 141,345 | pass | pass | n/a — hand-built; `prefers-reduced-motion` honored, timers cleaned |
-| pricing-outcome (outcome-led) | 66s | 6 | 88,778 | pass | pass | n/a — hand-built with Tailwind, no discovery attempt observed |
-| kokonut-drawer (named) | 410s | 26 | 1,137,671 | pass | pass | 0.767 vs hosted `smooth-drawer.json` |
-| bklit-shimmer repeat | 260s | 26 | 555,575 | pass | pass | 0.980 (matches first run) |
+| Case                          | Time | Reqs | Tokens    | Build | Typecheck | Hosted-source provenance                                           |
+| ----------------------------- | ---- | ---- | --------- | ----- | --------- | ------------------------------------------------------------------ |
+| bklit-shimmer (named)         | 435s | 36   | 920,368   | pass  | pass      | 0.980 vs hosted `shimmering-text.json`                             |
+| kokonut-cardflip (named)      | 240s | 18   | 466,268   | pass  | pass      | 0.984 vs hosted `card-flip.json`                                   |
+| motion-outcome (outcome-led)  | 124s | 9    | 141,345   | pass  | pass      | n/a — hand-built; `prefers-reduced-motion` honored, timers cleaned |
+| pricing-outcome (outcome-led) | 66s  | 6    | 88,778    | pass  | pass      | n/a — hand-built with Tailwind, no discovery attempt observed      |
+| kokonut-drawer (named)        | 410s | 26   | 1,137,671 | pass  | pass      | 0.767 vs hosted `smooth-drawer.json`                               |
+| bklit-shimmer repeat          | 260s | 26   | 555,575   | pass  | pass      | 0.980 (matches first run)                                          |
 
 Findings:
 
@@ -39,17 +39,17 @@ Findings:
 
 ## Executed checks
 
-| Check | Result |
-| --- | --- |
-| `pnpm --filter @kenkaiiii/ggcoder test` | 266 files passed, 2 existing skipped; 3,212 tests passed, 17 existing skipped |
-| `pnpm check` | Passed across workspace |
-| `pnpm lint` | Passed, including desktop app |
-| `pnpm build` | Passed in workspace dependency order, including gg-ai → gg-agent → ggcoder |
-| `node --test bench/ui-library-real-flow/*.test.mjs` | 18 passed, zero skipped |
-| Historical catalog source-schema compatibility | All 115 stored dependency/entry payloads accepted; no observations rewritten |
-| Normal AgentSession discovery | Both tools advertised, promoted append-only; production Motion guidance executed offline |
-| Built-source sidecar smoke | Isolated HOME/project, no credentials: boot, authenticated local `/session` and `/state`, clean shutdown |
-| Mouse Effect Card production recipe | Exact equality with independently reviewed historical fix; notices, styling constants and entire consumer/callback body preserved; changed source hash rejected |
+| Check                                               | Result                                                                                                                                                          |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm --filter @kenkaiiii/ggcoder test`             | 266 files passed, 2 existing skipped; 3,212 tests passed, 17 existing skipped                                                                                   |
+| `pnpm check`                                        | Passed across workspace                                                                                                                                         |
+| `pnpm lint`                                         | Passed, including desktop app                                                                                                                                   |
+| `pnpm build`                                        | Passed in workspace dependency order, including gg-ai → gg-agent → ggcoder                                                                                      |
+| `node --test bench/ui-library-real-flow/*.test.mjs` | 18 passed, zero skipped                                                                                                                                         |
+| Historical catalog source-schema compatibility      | All 115 stored dependency/entry payloads accepted; no observations rewritten                                                                                    |
+| Normal AgentSession discovery                       | Both tools advertised, promoted append-only; production Motion guidance executed offline                                                                        |
+| Built-source sidecar smoke                          | Isolated HOME/project, no credentials: boot, authenticated local `/session` and `/state`, clean shutdown                                                        |
+| Mouse Effect Card production recipe                 | Exact equality with independently reviewed historical fix; notices, styling constants and entire consumer/callback body preserved; changed source hash rejected |
 
 The first full test run found the deferred hint block exceeded its existing character budget. Hints were shortened; the limit was not raised. Lint found a type-import style error, corrected before the final runs. No existing assertions were removed, skipped or weakened.
 

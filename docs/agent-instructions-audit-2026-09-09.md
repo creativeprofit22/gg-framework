@@ -42,23 +42,23 @@ Before blocks are exact current rendered wording, or explicitly identified curre
 
 ### Current source inventory
 
-| Surface | Files | Source LOC | Interpretation |
-|---|---:|---:|---|
-| Main system prompt builder | 1 | 586 | Text plus assembly, context loading, and limits |
-| Tool hints and cross-tool steering | 1 | 164 | Not the full tool schemas |
-| Skill discovery/catalog renderer | 1 | 193 | Loader and compact routing catalog |
-| Bundled skill entrypoints | 10 | 933 | `assets/skills/*/SKILL.md`, including metadata |
-| All bundled skill Markdown | 114 | 44,872 | Includes those 10 entrypoints; do not add both rows |
-| Language pack implementation | 2 | 324 | Pack content and override loader |
-| Bundled agent definitions | 1 | 278 | Specialist identities, methods, and tool lists |
-| Ken prompt builder | 1 | 396 | Separate mentor role; not ordinary coding instructions |
-| Chat-agent non-test TypeScript | 8 | 1,213 | Role-specific prompts plus implementation |
-| Ideal-review module | 1 | 287 | Review text, scoring, and coverage tracking |
-| Re-grounding module | 1 | 47 | Post-compaction reminder |
-| Independent-review module | 1 | 114 | Reviewer task and result protocol |
-| Async delegation policy | 1 | 33 | Model/thinking-dependent overlay |
-| This repository's `AGENTS.md` | 1 | 22 | Project commands and CI constraints |
-| This repository's `CLAUDE.md` | 1 | 47 | Architecture and workflow context |
+| Surface                            | Files | Source LOC | Interpretation                                         |
+| ---------------------------------- | ----: | ---------: | ------------------------------------------------------ |
+| Main system prompt builder         |     1 |        586 | Text plus assembly, context loading, and limits        |
+| Tool hints and cross-tool steering |     1 |        164 | Not the full tool schemas                              |
+| Skill discovery/catalog renderer   |     1 |        193 | Loader and compact routing catalog                     |
+| Bundled skill entrypoints          |    10 |        933 | `assets/skills/*/SKILL.md`, including metadata         |
+| All bundled skill Markdown         |   114 |     44,872 | Includes those 10 entrypoints; do not add both rows    |
+| Language pack implementation       |     2 |        324 | Pack content and override loader                       |
+| Bundled agent definitions          |     1 |        278 | Specialist identities, methods, and tool lists         |
+| Ken prompt builder                 |     1 |        396 | Separate mentor role; not ordinary coding instructions |
+| Chat-agent non-test TypeScript     |     8 |      1,213 | Role-specific prompts plus implementation              |
+| Ideal-review module                |     1 |        287 | Review text, scoring, and coverage tracking            |
+| Re-grounding module                |     1 |         47 | Post-compaction reminder                               |
+| Independent-review module          |     1 |        114 | Reviewer task and result protocol                      |
+| Async delegation policy            |     1 |         33 | Model/thinking-dependent overlay                       |
+| This repository's `AGENTS.md`      |     1 |         22 | Project commands and CI constraints                    |
+| This repository's `CLAUDE.md`      |     1 |         47 | Architecture and workflow context                      |
 
 **Do not interpret 44,872 lines as an always-loaded prompt.** Skills use discovery descriptions and on-demand bodies; reference documents are a separate layer. Deleting reference material to improve initial prompt size would target the wrong cost.
 
@@ -66,12 +66,12 @@ Before blocks are exact current rendered wording, or explicitly identified curre
 
 Existing tests ran against this checkout:
 
-| Test fixture | Characters | Instruction LOC | Sections |
-|---|---:|---:|---:|
-| Normal prompt | 9,114 | 81 | 6 |
-| Plan-mode prompt | 10,796 | 95 | 7 |
-| TypeScript + project context + tools + skill fixture | 13,524 | 127 | 10 |
-| Separate prompt-audit fixture | 13,203 | 127 | 10 |
+| Test fixture                                         | Characters | Instruction LOC | Sections |
+| ---------------------------------------------------- | ---------: | --------------: | -------: |
+| Normal prompt                                        |      9,114 |              81 |        6 |
+| Plan-mode prompt                                     |     10,796 |              95 |        7 |
+| TypeScript + project context + tools + skill fixture |     13,524 |             127 |       10 |
+| Separate prompt-audit fixture                        |     13,203 |             127 |       10 |
 
 These are **test fixtures**, not the exact prompt received by this desktop session. Dynamic paths, dates, settings, tool availability, and project content affect the real total.
 
@@ -407,29 +407,29 @@ Infer test boundaries from the requested behavior and existing interfaces. Ask o
 
 These numbers were computed from the paired text blocks, not estimated. All ten before blocks were checked against current source/rendered text. “Delta” means after minus before.
 
-| Proposal | Instruction LOC before → after | LOC delta | Words before → after | UTF-8 bytes before → after |
-|---|---:|---:|---:|---:|
-| P1 Communication | 19 → 9 | −10 | 358 → 121 | 2,136 → 796 |
-| P2 Corpus-present research | 1 → 5 | +4 | 120 → 91 | 837 → 670 |
-| P3 Ideal reminder | 1 → 5 | +4 | 227 → 83 | 1,503 → 593 |
-| P4 Verification | 1 → 1 | 0 | 24 → 38 | 164 → 253 |
-| P5 Test-drift warning | 1 → 1 | 0 | 29 → 30 | 146 → 210 |
-| P6 Corpus-absent fallback | 1 → 2 | +1 | 67 → 43 | 412 → 299 |
-| P7 Skill routing | 3 → 3 | 0 | 142 → 61 | 890 → 423 |
-| P8 Child reporting | 1 → 1 | 0 | 20 → 29 | 100 → 182 |
-| P9 TDD seam selection | 9 → 9 | 0 | 112 → 83 | 628 → 532 |
-| P10 TypeScript tooling | 1 → 2 | +1 | 42 → 49 | 351 → 409 |
-| **All ten paired artifacts, not a single prompt** | **38 → 38** | **0** | **1,141 → 628** | **7,167 → 4,367** |
+| Proposal                                          | Instruction LOC before → after | LOC delta | Words before → after | UTF-8 bytes before → after |
+| ------------------------------------------------- | -----------------------------: | --------: | -------------------: | -------------------------: |
+| P1 Communication                                  |                         19 → 9 |       −10 |            358 → 121 |                2,136 → 796 |
+| P2 Corpus-present research                        |                          1 → 5 |        +4 |             120 → 91 |                  837 → 670 |
+| P3 Ideal reminder                                 |                          1 → 5 |        +4 |             227 → 83 |                1,503 → 593 |
+| P4 Verification                                   |                          1 → 1 |         0 |              24 → 38 |                  164 → 253 |
+| P5 Test-drift warning                             |                          1 → 1 |         0 |              29 → 30 |                  146 → 210 |
+| P6 Corpus-absent fallback                         |                          1 → 2 |        +1 |              67 → 43 |                  412 → 299 |
+| P7 Skill routing                                  |                          3 → 3 |         0 |             142 → 61 |                  890 → 423 |
+| P8 Child reporting                                |                          1 → 1 |         0 |              20 → 29 |                  100 → 182 |
+| P9 TDD seam selection                             |                          9 → 9 |         0 |             112 → 83 |                  628 → 532 |
+| P10 TypeScript tooling                            |                          1 → 2 |        +1 |              42 → 49 |                  351 → 409 |
+| **All ten paired artifacts, not a single prompt** |                    **38 → 38** |     **0** |      **1,141 → 628** |          **7,167 → 4,367** |
 
 Across those ten candidate replacements: **45.0% fewer words and 39.1% fewer bytes, despite unchanged total physical lines.** Some lines deliberately grow to repair ambiguity. These are wording savings, not measured provider-token or performance gains.
 
 For comparable selected portions of a parent prompt with skills and the clickable question tool:
 
-| Selected portions only | Instruction LOC | Words | Bytes |
-|---|---:|---:|---:|
-| Common wording, P1 + P4 + P7 | 23 → 13 (−10) | 524 → 220 (−58.0%) | 3,190 → 1,472 (−53.9%) |
-| With corpus, add P2 | 24 → 18 (−6) | 644 → 311 (−51.7%) | 4,027 → 2,142 (−46.8%) |
-| Without corpus, add P6 instead | 24 → 15 (−9) | 591 → 263 (−55.5%) | 3,602 → 1,771 (−50.8%) |
+| Selected portions only         | Instruction LOC |              Words |                  Bytes |
+| ------------------------------ | --------------: | -----------------: | ---------------------: |
+| Common wording, P1 + P4 + P7   |   23 → 13 (−10) | 524 → 220 (−58.0%) | 3,190 → 1,472 (−53.9%) |
+| With corpus, add P2            |    24 → 18 (−6) | 644 → 311 (−51.7%) | 4,027 → 2,142 (−46.8%) |
+| Without corpus, add P6 instead |    24 → 15 (−9) | 591 → 263 (−55.5%) | 3,602 → 1,771 (−50.8%) |
 
 **These are not whole-prompt before/after totals.** P3/P5 are runtime follow-ups, P8 is a child contract, P9 is an on-demand skill, and P10 is conditional language guidance. Additional savings from deduplicating catalogs and removing repeated plan/review procedures are not counted. Added language delivery and shared child contracts can offset reductions, correctly.
 

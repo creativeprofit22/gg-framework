@@ -132,12 +132,12 @@ GG Coder desktop app ⭐
         └── @kenkaiiii/gg-core  ──► @kenkaiiii/gg-ai
 ```
 
-| Package                                                                  | What it does                                              |
-| ------------------------------------------------------------------------ | --------------------------------------------------------- |
-| [`@kenkaiiii/gg-ai`](packages/gg-ai/README.md)                           | One streaming API for every provider up there             |
-| [`@kenkaiiii/gg-agent`](packages/gg-agent/README.md)                     | Agent loop with multi-turn tool execution                 |
-| [`@kenkaiiii/gg-core`](https://www.npmjs.com/package/@kenkaiiii/gg-core) | Shared guts: model registry, OAuth, auth storage, paths   |
-| [`@kenkaiiii/ggcoder`](packages/ggcoder/README.md)                       | The CLI, plus the sidecar the desktop app runs            |
+| Package                                                                  | What it does                                            |
+| ------------------------------------------------------------------------ | ------------------------------------------------------- |
+| [`@kenkaiiii/gg-ai`](packages/gg-ai/README.md)                           | One streaming API for every provider up there           |
+| [`@kenkaiiii/gg-agent`](packages/gg-agent/README.md)                     | Agent loop with multi-turn tool execution               |
+| [`@kenkaiiii/gg-core`](https://www.npmjs.com/package/@kenkaiiii/gg-core) | Shared guts: model registry, OAuth, auth storage, paths |
+| [`@kenkaiiii/ggcoder`](packages/ggcoder/README.md)                       | The CLI, plus the sidecar the desktop app runs          |
 
 <details>
 <summary><strong>👨‍💻 Run it from source</strong></summary>

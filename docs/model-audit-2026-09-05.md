@@ -83,20 +83,20 @@ The findings and line references below describe the **pre-change** code. Origina
 
 ## Coverage and unresolved checks
 
-| Provider | Active entries reviewed | Result / qualification |
-| --- | ---: | --- |
-| Anthropic | 4 | No additional confirmed catalog discrepancy found. |
-| OpenAI | 4 | No additional confirmed catalog discrepancy found; Codex product limits remain distinct from public API limits. |
-| Sakana | 2 | Fugu Ultra max reasoning gap; output ceiling not independently proven. |
-| xAI | 2 | No additional confirmed catalog discrepancy found; subscription access not live-tested. |
-| Gemini | 4 | New Flash and Flash-Lite releases missing; actual OAuth availability unverified. |
-| Moonshot | 2 | Current K3/K2.7 entries present. Public K3 docs say always-reasoning, while code comments claim Off was empirically verified; reconcile before changing behavior. |
-| GLM | 2 | GLM-5.3-Flash has documented video capability, deliberately disabled in code pending transport verification. |
-| MiniMax | 1 | No additional confirmed discrepancy; output ceiling not independently proven. |
-| Xiaomi | 3 | No additional confirmed catalog discrepancy found. |
-| DeepSeek | 2 | Reasoning and cap-field gaps above. New `deepseek-v4-flash-vision-exp` is an optional experimental addition, not a mandatory replacement. |
-| OpenRouter | 1 | Qwen modalities understated; context/output numbers match live metadata. |
-| Hugging Face | 2 | Limits can vary by routed backend; a single fixed model limit is not sufficient proof for every backend. |
+| Provider     | Active entries reviewed | Result / qualification                                                                                                                                            |
+| ------------ | ----------------------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anthropic    |                       4 | No additional confirmed catalog discrepancy found.                                                                                                                |
+| OpenAI       |                       4 | No additional confirmed catalog discrepancy found; Codex product limits remain distinct from public API limits.                                                   |
+| Sakana       |                       2 | Fugu Ultra max reasoning gap; output ceiling not independently proven.                                                                                            |
+| xAI          |                       2 | No additional confirmed catalog discrepancy found; subscription access not live-tested.                                                                           |
+| Gemini       |                       4 | New Flash and Flash-Lite releases missing; actual OAuth availability unverified.                                                                                  |
+| Moonshot     |                       2 | Current K3/K2.7 entries present. Public K3 docs say always-reasoning, while code comments claim Off was empirically verified; reconcile before changing behavior. |
+| GLM          |                       2 | GLM-5.3-Flash has documented video capability, deliberately disabled in code pending transport verification.                                                      |
+| MiniMax      |                       1 | No additional confirmed discrepancy; output ceiling not independently proven.                                                                                     |
+| Xiaomi       |                       3 | No additional confirmed catalog discrepancy found.                                                                                                                |
+| DeepSeek     |                       2 | Reasoning and cap-field gaps above. New `deepseek-v4-flash-vision-exp` is an optional experimental addition, not a mandatory replacement.                         |
+| OpenRouter   |                       1 | Qwen modalities understated; context/output numbers match live metadata.                                                                                          |
+| Hugging Face |                       2 | Limits can vary by routed backend; a single fixed model limit is not sufficient proof for every backend.                                                          |
 
 Additional cautions:
 

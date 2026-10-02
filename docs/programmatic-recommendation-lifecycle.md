@@ -66,12 +66,12 @@ History writes acquire locks in **profile → history** order, then re-read and 
 
 Bounds:
 
-| Resource | Limit |
-| --- | ---: |
-| Candidates | 1,000 |
-| Assessments | 4,096 |
+| Resource                                              |  Limit |
+| ----------------------------------------------------- | -----: |
+| Candidates                                            |  1,000 |
+| Assessments                                           |  4,096 |
 | Total observation + decision + correspondence records | 16,384 |
-| Serialized UTF-8 document | 16 MiB |
+| Serialized UTF-8 document                             | 16 MiB |
 
 Individual observations retain advisory limits. Capacity refusal preserves the existing history and reports the current assessment unsaved. There is no age pruning, deletion, silent eviction, background retry or automatic provider/scanner rerun. Dismissed/completed records remain subject to the same retention. Export and pruning policy are outside this phase.
 

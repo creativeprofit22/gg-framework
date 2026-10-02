@@ -138,17 +138,17 @@ No dependencies were installed. Canonical capture initially hit Windows ESM path
 
 ### Current results and provenance
 
-| Check | Result / artifact | Host execution |
-| --- | --- | --- |
-| Type check | Passed after final candidate CSS | `316d87d3-81e1-48fb-a4bd-b60c1ef3b77f` |
-| Production build | Passed; existing warnings retained | `03d66b0b-5f93-4661-b09b-88901b1b560c` |
-| Targeted tests | 186 passed in eight files, including 15 preview tests | `0e8ab713-33f8-4b8a-85b8-e35083224470` |
-| Layout/viewport matrix | 33/33; `matrix-1789784665545.json` | `6a3a22b9-9355-42cf-a4bf-2afcd09aea99` |
-| Empty/activity/error/retry/special/completed states | 18/18; `states-1789784710790.json` | Same execution as matrix |
-| Additional narrow reflow and accessibility triage | `triage-1789785074088.json` | `e6d57d3b-0d0e-414a-adce-0818806ee4dd` |
-| Paragraph anchor during resize; all previous six-pane interactions | Passed for all three variants after final styling | `8dfe6818-023f-4e44-9541-fb2ee74ab5e5` |
-| Canonical probes | `probes-1789785197399/summary.json`; nonzero overall, detailed below | `74428fa4-2bdd-456f-8db6-06e7311c5f59` |
-| Production exclusion and syntax checks | 11 emitted text assets free of preview markers; ordinary entry unchanged; all new mjs syntax checks passed | `3665639b-a5bf-4e8c-a360-03de6bbce77c` |
+| Check                                                              | Result / artifact                                                                                          | Host execution                         |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| Type check                                                         | Passed after final candidate CSS                                                                           | `316d87d3-81e1-48fb-a4bd-b60c1ef3b77f` |
+| Production build                                                   | Passed; existing warnings retained                                                                         | `03d66b0b-5f93-4661-b09b-88901b1b560c` |
+| Targeted tests                                                     | 186 passed in eight files, including 15 preview tests                                                      | `0e8ab713-33f8-4b8a-85b8-e35083224470` |
+| Layout/viewport matrix                                             | 33/33; `matrix-1789784665545.json`                                                                         | `6a3a22b9-9355-42cf-a4bf-2afcd09aea99` |
+| Empty/activity/error/retry/special/completed states                | 18/18; `states-1789784710790.json`                                                                         | Same execution as matrix               |
+| Additional narrow reflow and accessibility triage                  | `triage-1789785074088.json`                                                                                | `e6d57d3b-0d0e-414a-adce-0818806ee4dd` |
+| Paragraph anchor during resize; all previous six-pane interactions | Passed for all three variants after final styling                                                          | `8dfe6818-023f-4e44-9541-fb2ee74ab5e5` |
+| Canonical probes                                                   | `probes-1789785197399/summary.json`; nonzero overall, detailed below                                       | `74428fa4-2bdd-456f-8db6-06e7311c5f59` |
+| Production exclusion and syntax checks                             | 11 emitted text assets free of preview markers; ordinary entry unchanged; all new mjs syntax checks passed | `3665639b-a5bf-4e8c-a360-03de6bbce77c` |
 
 Artifact paths above are relative to ignored `.gg/eyes/out/chat-workspace-preview/`. Check/build are separate foreground commands, not an installer rebuild. No new dependency, commit, release note, native change or Roadmap mutation was made.
 

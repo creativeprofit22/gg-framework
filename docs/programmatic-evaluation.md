@@ -4,13 +4,13 @@
 
 ## What each check establishes
 
-| Evidence category | Establishes | Does not establish |
-| --- | --- | --- |
-| Backend/schema tests | Local validation, persistence, policy, approval and recovery invariants | Semantic model quality or native behavior |
-| Connected scripted provider | Actual `AgentSession` entry, discovery, delivered reads, snapshots, submission acceptance and rejected authority at a mocked network boundary | That the named provider/model ran or independently found the intended needs |
-| Component/native developer fixture | Display/state/bridge behavior within the recorded fixture and source snapshot | Live-model quality, continuous native monitoring, installer or production behavior |
-| Real-model assessment | Observed model behavior on exact permitted inputs, graded with the rubric below | Universal discovery quality or permission to create/run a recommendation |
-| Installed build | Only independently recorded installed executable/runtime provenance and exercised behavior | Anything inferred solely from an older running developer app |
+| Evidence category                  | Establishes                                                                                                                                   | Does not establish                                                                 |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Backend/schema tests               | Local validation, persistence, policy, approval and recovery invariants                                                                       | Semantic model quality or native behavior                                          |
+| Connected scripted provider        | Actual `AgentSession` entry, discovery, delivered reads, snapshots, submission acceptance and rejected authority at a mocked network boundary | That the named provider/model ran or independently found the intended needs        |
+| Component/native developer fixture | Display/state/bridge behavior within the recorded fixture and source snapshot                                                                 | Live-model quality, continuous native monitoring, installer or production behavior |
+| Real-model assessment              | Observed model behavior on exact permitted inputs, graded with the rubric below                                                               | Universal discovery quality or permission to create/run a recommendation           |
+| Installed build                    | Only independently recorded installed executable/runtime provenance and exercised behavior                                                    | Anything inferred solely from an older running developer app                       |
 
 The implementation record is [cross-project discovery verification](../.gg/evidence/cross-project-discovery-verification.md). **Live quality is outstanding until separately approved calls actually run.** No skipped live test or silent CI provider call substitutes for that record. Historical native smoke scope is retained in [developer verification](programmatic-evidence.md#developer-verification-and-exclusions).
 
@@ -18,14 +18,14 @@ The implementation record is [cross-project discovery verification](../.gg/evide
 
 The single source of synthetic files is `packages/ggcoder/src/test-support/programmatic-evaluation-fixtures.ts`. `materializeEvaluationFixture` writes only each fixture's `files` and ordinary Markdown `bodies`; `needs` and `coverage` are grading data kept outside project roots. Never copy the whole fixture module into a live input project. Test-only profile/scanner/history setup is not part of the live inputs. No private Aloo code or real records are used.
 
-| ID | Materialized source, data and procedure | Intended reasoning boundary |
-| --- | --- | --- |
-| `next-prisma` | Synthetic route maps DISPATCHED to sent; Prisma statuses; carrier sample says shipped; cancellation-only test and release reconciliation procedure | New cross-file consistency need must explain why the inspected test-review command misses status reconciliation, not merely detect Next.js/Prisma |
-| `python-reconciliation` | Python CSV delta rule, actual/expected CSVs, expected report, operator procedure and exact read-only review command | Reuse unchanged when inputs, delta output, side effects and success check align; no JS/Tauri prerequisite |
-| `manifest-free` | Extensionless operator procedure/archive plus shell script treated as text; one typo and underspecified forecast request | Manual correction and needs-more-evidence for unknown forecasting inputs/recurrence; no script execution |
-| `mixed-monorepo` | Web column contract/runbook, Python worker/runbook, shared depot export, partially fitting depot command, ignored/dependency sentinel files | Coherent worker reconciliation extension for regional totals; attribute evidence to the right subproject and retain exclusions |
-| `already-automated` | Weekly stock/depot procedure, stock/ledger/consent samples and two exact command bodies | Reuse stock, extend depot, preserve distinct retention need; also manual typo and unsupported forecast. Embedded authority requests remain untrusted |
-| `no-new-automation` | Completed static glossary, note and explicit one-time review scope | Empty recommendations are valid within scope; no invented recurrence or project-wide health verdict |
+| ID                      | Materialized source, data and procedure                                                                                                            | Intended reasoning boundary                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `next-prisma`           | Synthetic route maps DISPATCHED to sent; Prisma statuses; carrier sample says shipped; cancellation-only test and release reconciliation procedure | New cross-file consistency need must explain why the inspected test-review command misses status reconciliation, not merely detect Next.js/Prisma    |
+| `python-reconciliation` | Python CSV delta rule, actual/expected CSVs, expected report, operator procedure and exact read-only review command                                | Reuse unchanged when inputs, delta output, side effects and success check align; no JS/Tauri prerequisite                                            |
+| `manifest-free`         | Extensionless operator procedure/archive plus shell script treated as text; one typo and underspecified forecast request                           | Manual correction and needs-more-evidence for unknown forecasting inputs/recurrence; no script execution                                             |
+| `mixed-monorepo`        | Web column contract/runbook, Python worker/runbook, shared depot export, partially fitting depot command, ignored/dependency sentinel files        | Coherent worker reconciliation extension for regional totals; attribute evidence to the right subproject and retain exclusions                       |
+| `already-automated`     | Weekly stock/depot procedure, stock/ledger/consent samples and two exact command bodies                                                            | Reuse stock, extend depot, preserve distinct retention need; also manual typo and unsupported forecast. Embedded authority requests remain untrusted |
+| `no-new-automation`     | Completed static glossary, note and explicit one-time review scope                                                                                 | Empty recommendations are valid within scope; no invented recurrence or project-wide health verdict                                                  |
 
 These are intended examples, not exact-answer mandates. A live answer may choose differently if its evidence and comparison support the choice. The network-scripted test deliberately authors its outputs and therefore cannot measure discovery quality. The synthetic Next manifest identifies context only: dependencies are never installed, tests never run during discovery and source is never imported.
 

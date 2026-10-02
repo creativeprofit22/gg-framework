@@ -10,16 +10,16 @@
 
 **Reuse map:** `appearance.ts` owns validated origin-local preferences and root application; `appearance.css` owns theme/reading roles; existing `theme.ts` exports resolve semantic aliases with valid alpha composition. `AppearanceSettings` uses labeled native selects and the existing modal focus/scroll model. `usePaneSwapViewState` captures/restores reading anchors and selections across preference reflow without remounting panes. `ActionMetal` uses its installed library's Light palette. `appearance-native.ts` serializes the existing window API setters; portals and What's New inherit root roles.
 
-| State | Contract / current evidence |
-| --- | --- |
-| Dark/default | Existing compact reading retained; scoped native checks passed |
-| Light/default or changed reading | Independent saved fields, same pane/session hosts; scoped native smoke passed |
-| Corrupt/denied storage | Validated defaults or session-only choice with visible warning; unit tests |
-| Other native window / What's New | Saved initialization and live same-origin updates; native review |
-| Reflow / unequal panes | Existing glyph/composer/selection restoration; native fixture tests |
-| Narrow / 200% / keyboard | Stacked new controls, modal scroll/focus retained; component and native evidence separately labeled |
-| Reduced motion / forced colors | Existing effect fallback and scoped controls checked; exhaustive coverage unverified |
-| OS cold start / install / macOS | Unverified; no flash-free or release claim |
+| State                            | Contract / current evidence                                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Dark/default                     | Existing compact reading retained; scoped native checks passed                                      |
+| Light/default or changed reading | Independent saved fields, same pane/session hosts; scoped native smoke passed                       |
+| Corrupt/denied storage           | Validated defaults or session-only choice with visible warning; unit tests                          |
+| Other native window / What's New | Saved initialization and live same-origin updates; native review                                    |
+| Reflow / unequal panes           | Existing glyph/composer/selection restoration; native fixture tests                                 |
+| Narrow / 200% / keyboard         | Stacked new controls, modal scroll/focus retained; component and native evidence separately labeled |
+| Reduced motion / forced colors   | Existing effect fallback and scoped controls checked; exhaustive coverage unverified                |
+| OS cold start / install / macOS  | Unverified; no flash-free or release claim                                                          |
 
 Implementation details, launch commands, measured contrast, retained test failures, state coverage and remaining acceptance gaps are in [native appearance](../docs/design/chat-workspace/native-appearance.md). The full accessibility/native acceptance matrix is not certified complete. Existing historical sections below remain scoped to their original work.
 

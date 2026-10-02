@@ -29,14 +29,14 @@ Status comes from the daemon and is pushed live over the `tasks_list` SSE event.
 
 `blocked` covers several different endings. The daemon records which one in the optional `lastOutcome: { reason, at }` field of `ProjectTask` (`gg-core`) when it finalizes a run, and clears it when a later run succeeds. It is informational only: it never changes `status` or run eligibility. The detail panel (not the list row) shows one muted sentence for it; records without the field, or with a reason this build does not know, show nothing.
 
-| Reason            | Recorded when (first match wins)                                         | Detail panel says                                                                          |
-| ----------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `cancelled`       | The run was cancelled                                                    | Last run stopped: it was cancelled.                                                        |
-| `plan-mode`       | The session was in plan mode at the end of the run                       | …the session was in plan mode, so the task was not carried out. Leave plan mode…            |
-| `plan-checkpoint` | A submitted plan awaits approval or revision                             | …a plan is waiting for your approval or revision… Resolve the plan before retrying.         |
-| `run-failed`      | The agent turn errored before review                                     | …the agent’s turn ended with an error.                                                     |
-| `review-failed`   | Autopilot review ended without clearing the work (HUMAN, capped, failed) | …Autopilot review did not clear the work.                                                  |
-| `queued-messages` | Review cleared, but user messages were queued during the run             | …messages were queued during the run. Send or cancel them before retrying.                 |
+| Reason            | Recorded when (first match wins)                                         | Detail panel says                                                                   |
+| ----------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `cancelled`       | The run was cancelled                                                    | Last run stopped: it was cancelled.                                                 |
+| `plan-mode`       | The session was in plan mode at the end of the run                       | …the session was in plan mode, so the task was not carried out. Leave plan mode…    |
+| `plan-checkpoint` | A submitted plan awaits approval or revision                             | …a plan is waiting for your approval or revision… Resolve the plan before retrying. |
+| `run-failed`      | The agent turn errored before review                                     | …the agent’s turn ended with an error.                                              |
+| `review-failed`   | Autopilot review ended without clearing the work (HUMAN, capped, failed) | …Autopilot review did not clear the work.                                           |
+| `queued-messages` | Review cleared, but user messages were queued during the run             | …messages were queued during the run. Send or cancel them before retrying.          |
 
 Every run — first, retry or repeat — opens a **fresh session** and streams into the transcript. `Run all (n)` counts and launches only `pending` and `blocked` tasks, sequentially, unchanged from before.
 

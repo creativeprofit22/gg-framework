@@ -9506,12 +9506,22 @@ select {
   justify-content: flex-end;
   row-gap: 6px;
   white-space: nowrap;
+  /* Room for the controls' hover pills, which bleed past their text by 3px
+     vertically and 6px horizontally (`padding: 3px 6px; margin: -3px -6px`).
+     The equal negative margin keeps every label where it was; without it the
+     edge pills overflow the cluster and are clipped where it hides overflow. */
+  padding: 3px 6px;
+  margin: -3px -6px;
 }
 .astra-control-group {
   display: inline-flex;
   align-items: center;
   gap: 12px;
   min-width: 0;
+  /* Horizontal pill allowance, as on `.footer-right`: the context picker and
+     Fast toggle sit at this group's edges. */
+  padding-inline: 6px;
+  margin-inline: -6px;
 }
 .astra-fast-toggle.active {
   color: var(--primary);

@@ -2025,16 +2025,6 @@ export async function importTranscript(
   }
 }
 
-/** Best-effort Anthropic prompt-cache prewarm before the user's next turn.
- *  Fire-and-forget; the sidecar gates on provider, history size and cache TTL. */
-export async function prewarmCache(): Promise<void> {
-  try {
-    await invoke("agent_prewarm");
-  } catch (e) {
-    await logError(`agent_prewarm failed: ${String(e)}`);
-  }
-}
-
 /** Cycle the reasoning/thinking level to the next supported value (or off). */
 export async function cycleThinking(): Promise<ThinkingState | null> {
   try {
@@ -3150,6 +3140,8 @@ export interface PaneAgentClient extends NotesClient {
     provider: SubscriptionUsageProvider,
   ): Promise<SubscriptionUsageProviderSnapshot>;
   enhancePrompt(text: string): Promise<EnhanceResult>;
+  /** Best-effort prompt-cache prewarm for this pane; never throws. */
+  prewarmCache(): Promise<void>;
   sendPrompt(
     text: string,
     attachments?: Attachment[],
@@ -3522,6 +3514,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     enhancePrompt: async (text) => {
       await ready();
       return requireEnhanceResult(await call<unknown>("agent_enhance_prompt", { text }));
+    },
+    prewarmCache: async () => {
+      try {
+        await call("agent_prewarm");
+      } catch (e) {
+        await logError(`agent_prewarm failed: ${String(e)}`);
+      }
     },
     sendPrompt: async (text, attachments = [], meta) => {
       try {

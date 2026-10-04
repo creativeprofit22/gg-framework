@@ -5005,10 +5005,11 @@ async fn agent_enhance_prompt(
 #[tauri::command]
 async fn agent_prewarm(
     webview: WebviewWindow,
+    pane_id: String,
     client: State<'_, reqwest::Client>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     client
         .post(format!("{}/prewarm", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)

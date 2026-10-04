@@ -918,6 +918,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [autopilotPending, setAutopilotPending] = useState<(() => boolean) | null>(null);
   const autopilotPendingRef = useRef<(() => boolean) | null>(null);
   const [running, setRunning] = useState(false);
+  // Last composer keystroke (0 = none since this pane opened). The first
+  // keystroke after opening or a >4 min idle pause prewarms the prompt cache.
+  const lastKeystrokeAtRef = useRef(0);
   const [hasFinishedRun, setHasFinishedRun] = useState(false);
   // Footer model pickers: hidden role descriptions announced with each control.
   const ggModelRoleId = useId();
@@ -5326,6 +5329,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               }}
               onChange={(event) => {
                 if (noInputSlashCommandRef.current) return;
+                const now = Date.now();
+                if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                  void client.prewarmCache();
+                }
+                lastKeystrokeAtRef.current = now;
                 setInput(event.target.value);
                 setSlashIndex(0);
                 setCaret(event.target.selectionStart ?? event.target.value.length);

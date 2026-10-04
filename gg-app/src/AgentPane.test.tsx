@@ -515,6 +515,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     deleteJiwa: vi.fn(),
     getSubscriptionUsage: vi.fn(),
     enhancePrompt: vi.fn(),
+    prewarmCache: vi.fn(async () => {}),
     sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
     commitContinuation: vi.fn(),
     prepareContinuationHandoff: vi.fn(async () => ({
@@ -1442,6 +1443,28 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("prewarms the prompt cache on the first keystroke and after a 4 minute pause", async () => {
+    const pane = client("prewarm-idle", 1);
+    await renderHydratedComposer(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    fireEvent.change(input, { target: { value: "a" } });
+    expect(pane.prewarmCache).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_000_000 + 4 * 60_000);
+    fireEvent.change(input, { target: { value: "ab" } });
+    expect(pane.prewarmCache).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_000_000 + 8 * 60_000 + 1);
+    fireEvent.change(input, { target: { value: "abc" } });
+    expect(pane.prewarmCache).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not prewarm the prompt cache while a run is active", async () => {
+    const pane = client("prewarm-running", 1);
+    await renderHydratedComposer(pane, true);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "follow-up" } });
+    expect(pane.prewarmCache).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(

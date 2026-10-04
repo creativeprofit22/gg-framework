@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSnapshot } from "../../packages/ggcoder/src/core/progress/ranks";
 import { createEmptyProgress } from "../../packages/ggcoder/src/core/progress/store";
 
-const { invoke, listeners } = vi.hoisted(() => ({
+const { invoke, listeners, logError } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  logError: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -17,7 +18,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     }),
   }),
 }));
-vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
+vi.mock("@tauri-apps/plugin-log", () => ({ error: logError, info: vi.fn() }));
 
 import {
   createPaneAgentClient,
@@ -297,6 +298,19 @@ describe("pane agent client", () => {
       ["agent_pane_status", { paneId: "right" }],
       ["agent_enhance_prompt", { paneId: "right", text: "  My draft\n  " }],
     ]);
+  });
+
+  it("prewarms the prompt cache for the owning pane", async () => {
+    await expect(createPaneAgentClient("right").prewarmCache()).resolves.toBeUndefined();
+    expect(invoke.mock.calls).toEqual([["agent_prewarm", { paneId: "right" }]]);
+  });
+
+  it("never throws when the pane prewarm fails", async () => {
+    logError.mockClear();
+    invoke.mockRejectedValueOnce(new Error("sidecar unavailable"));
+    await expect(createPaneAgentClient("right").prewarmCache()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("agent_prewarm", { paneId: "right" });
+    expect(logError).toHaveBeenCalledWith("agent_prewarm failed: Error: sidecar unavailable");
   });
 
   it("routes the current IPC surface with the complete pane argument matrix", async () => {

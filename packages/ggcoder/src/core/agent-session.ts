@@ -2777,12 +2777,13 @@ ${content}
    * post-compaction re-grounding. At most one loop-break/re-grounding per run.
    * Mirrors the TUI's getSteeringMessages ordering.
    */
-  private drainQueuedDiagnostics(deferUnverified = false): string | undefined {
+  private drainQueuedDiagnostics(): string | undefined {
     const evidence = this.verificationEvidenceLedger.snapshot().currentEvidence;
     // Suppress silence notices only after current, successful command evidence.
     // Real diagnostics remain visible; failed/stale/skipped checks never qualify.
+    // Unavailable results are held for the completion boundary, which drops them.
     const verified = evidence.length > 0 && evidence.every((entry) => entry.status === "passed");
-    return this.lspManager?.drainDiagnostics(!verified, { deferUnverified });
+    return this.lspManager?.drainDiagnostics(!verified, { deferUnverified: true });
   }
 
   private getHookSteeringMessages(): Message[] | null {
@@ -2814,7 +2815,7 @@ ${content}
     // it in the very next turn instead of discovering it at the pre-stop
     // completion gate — but it never displaces user steering, which rides out
     // in the same batch when both are pending.
-    const diagnosticText = this.drainQueuedDiagnostics(true);
+    const diagnosticText = this.drainQueuedDiagnostics();
     if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
     this.refreshHookArming();
     const notified = this.notifications.drain();
@@ -3183,10 +3184,12 @@ ${content}
     // Do not force an extra polling tool/turn merely to acknowledge a known exit.
 
     // Edits return immediately; only the completion boundary waits for remaining
-    // checks. Queued timeouts stay explicitly unverified, never a false all-clear.
+    // checks. Only real errors cost another turn: a timed-out or unavailable
+    // server proves nothing either way, and run status already reports
+    // unverified changes without making the model answer twice.
     await this.lspManager?.flushDiagnostics(this.opts.signal);
     if (this.opts.signal?.aborted) return null;
-    const diagnosticText = this.drainQueuedDiagnostics();
+    const diagnosticText = this.lspManager?.drainDiagnostics(false);
     if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
     this.refreshHookArming();
     const diagnosticMessages: Message[] = diagnosticText

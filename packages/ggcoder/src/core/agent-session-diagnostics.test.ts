@@ -97,7 +97,7 @@ describe("GG App session asynchronous diagnostics", () => {
     expect(internal.lspManager.getLatestOutcome("a.ts")?.kind).toBe("timeout");
   }, 30_000);
 
-  it("summarizes multiple file timeouts once at completion without a verification gate", async () => {
+  it("never spends a turn on diagnostics timeouts, between steps or at the finish", async () => {
     const hooks: unknown[] = [];
     const diagnostics: unknown[] = [];
     internal.eventBus.on("hook", (event) => hooks.push(event));
@@ -136,13 +136,11 @@ describe("GG App session asynchronous diagnostics", () => {
       }
       expect(hooks).toEqual([]);
       expect(diagnostics).toEqual([]);
-      const followUp = JSON.stringify(await internal.getHookFollowUpMessages());
-      expect(followUp).toContain("a.ts: diagnostics timeout; not verified");
-      expect(followUp).toContain("b.ts: diagnostics timeout; not verified");
-      expect(followUp).not.toContain("Verification gate:");
-      expect(hooks).toEqual([]);
-      expect(diagnostics).toHaveLength(1);
+      // A timed-out server proves nothing either way: it never costs the
+      // model another turn at the finish line.
       expect(await internal.getHookFollowUpMessages()).toBeNull();
+      expect(hooks).toEqual([]);
+      expect(diagnostics).toEqual([]);
     } finally {
       internal.lspManager.shutdownAll();
       pool.shutdownAll();

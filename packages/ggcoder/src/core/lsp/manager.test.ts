@@ -201,6 +201,20 @@ describe("LspManager", () => {
     expect(manager.getLatestOutcome(filePath)?.kind).toBe("server_missing");
   });
 
+  it("delivers a queued missing-server notice at the first deferred drain, once", async () => {
+    const manager = makeManager(fakeSpec([], { resolveCommand: () => null }));
+    const filePath = path.join(tmpDir, "queued.fake");
+
+    manager.queueDiagnosticsAfterWrite(filePath, "ERROR\n");
+    await manager.flushDiagnostics();
+
+    // The step-boundary drain must not hold install guidance until completion,
+    // where it would cost an extra model turn.
+    const steering = manager.drainDiagnostics(true, { deferUnverified: true });
+    expect(steering).toContain("queued.fake: the fake language server is not installed");
+    expect(manager.drainDiagnostics(false)).toBe("");
+  });
+
   it("records initialization failure separately", async () => {
     const manager = makeManager(fakeSpec(["--init-error"]));
     const outcome = await manager.diagnosticsAfterWriteDetailed(

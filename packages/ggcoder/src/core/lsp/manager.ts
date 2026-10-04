@@ -279,12 +279,15 @@ export class LspManager {
       // Keep unavailable results for one completion summary. Actual diagnostics
       // remain immediate, and successful independent verification can clear the
       // queued notice without relabelling the underlying timeout as clean.
+      // Install guidance is never deferred: holding it until completion would
+      // cost an extra model turn instead of riding the next steering batch.
       if (
         includeUnverified &&
         options.deferUnverified &&
         !(outcome.kind === "diagnostics" && outcome.formatted) &&
         outcome.kind !== "clean" &&
-        outcome.kind !== "unsupported"
+        outcome.kind !== "unsupported" &&
+        outcome.kind !== "server_missing"
       )
         continue;
       this.queuedDiagnostics.delete(file);
